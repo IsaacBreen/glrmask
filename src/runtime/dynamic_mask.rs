@@ -71,6 +71,9 @@ fn update_eos_mask(state: &ConstraintState<'_>, buf: &mut [u32]) {
     let Some(token_id) = state.constraint.eos_token_id else {
         return;
     };
+    if state.constraint.has_special_token_id(token_id) {
+        return;
+    }
     let word = token_id as usize / 32;
     let bit = token_id % 32;
     let Some(slot) = buf.get_mut(word) else {
@@ -79,6 +82,25 @@ fn update_eos_mask(state: &ConstraintState<'_>, buf: &mut [u32]) {
     *slot &= !(1u32 << bit);
     if state.is_complete() {
         *slot |= 1u32 << bit;
+    }
+}
+
+fn update_special_token_mask(state: &ConstraintState<'_>, buf: &mut [u32]) {
+    let mut previous_token_id = None;
+    for special in &state.constraint.special_token_terminals {
+        if previous_token_id == Some(special.token_id) {
+            continue;
+        }
+        previous_token_id = Some(special.token_id);
+        if super::commit::advance_special_token_paths(
+            state.constraint,
+            &state.state,
+            special.token_id,
+        )
+        .is_some_and(|gss| !gss.is_empty())
+        {
+            set_mask_bit(buf, special.token_id);
+        }
     }
 }
 
@@ -681,6 +703,7 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
         }
     }
 
+    update_special_token_mask(state, buf);
     update_eos_mask(state, buf);
     vocab.cache_mask(cache_key, buf);
     if let Some(total_started_at) = total_started_at {

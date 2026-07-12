@@ -62,6 +62,12 @@ pub enum Terminal {
     Pattern { id: TerminalID, pattern: String, utf8: bool },
     /// A pre-parsed regex expression.
     Expr { id: TerminalID, expr: Expr },
+    /// A terminal matched only by committing one exact LLM token id.
+    ///
+    /// Special-token terminals are outside the byte tokenizer language. The
+    /// token's vocabulary bytes, when present, do not match this terminal via
+    /// `commit_bytes` and cannot partially match it.
+    SpecialToken { id: TerminalID, token_id: u32 },
 }
 
 impl Rule {
@@ -77,6 +83,7 @@ impl Terminal {
             Terminal::Literal { id, .. } => *id,
             Terminal::Pattern { id, .. } => *id,
             Terminal::Expr { id, .. } => *id,
+            Terminal::SpecialToken { id, .. } => *id,
         }
     }
 
@@ -86,6 +93,7 @@ impl Terminal {
             Terminal::Literal { bytes, .. } => String::from_utf8_lossy(bytes).into_owned(),
             Terminal::Pattern { pattern, .. } => pattern.clone(),
             Terminal::Expr { expr, .. } => format!("{:?}", expr),
+            Terminal::SpecialToken { token_id, .. } => format!("@token({token_id})"),
         }
     }
 }

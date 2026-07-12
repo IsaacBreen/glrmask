@@ -122,3 +122,27 @@ fn legacy_v1_envelope_rejects_epsilon_payload() {
     };
     assert!(error.to_string().contains("epsilon lexer transitions"));
 }
+
+#[test]
+fn runtime_artifact_preserves_special_llm_token_terminals() {
+    let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())], None);
+    let compiled = Constraint::from_glrm_grammar(
+        r#"
+            start start;
+            nt start ::= "a" @token(100) "b";
+        "#,
+        &vocab,
+    )
+    .unwrap();
+    let artifact = RuntimeArtifact::from_runtime_payload_v3(compiled.save_runtime_payload_v3());
+    let runtime = RuntimeConstraint::from_artifact(artifact).unwrap();
+    assert_eq!(runtime.mask_len(), 4);
+
+    let mut session = runtime.start();
+    session.commit_token(0).unwrap();
+    let special_mask = mask(&session, runtime.mask_len());
+    assert_ne!(special_mask[100 / 32] & (1 << (100 % 32)), 0);
+    session.commit_token(100).unwrap();
+    session.commit_token(1).unwrap();
+    assert!(session.is_finished());
+}

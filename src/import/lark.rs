@@ -11,6 +11,7 @@ enum Token {
     Ident(String),
     Terminal(String),
     Literal(String),
+    SpecialToken(u32),
     Regex(String),
     LParen,
     RParen,
@@ -155,6 +156,35 @@ impl<'a> Lexer<'a> {
         n
     }
 
+    fn lex_special_token(&mut self) -> Result<Token, GlrMaskError> {
+        let prefix = b"token(";
+        if !self.input[self.pos..].starts_with(prefix) {
+            return Err(GlrMaskError::GrammarParse(
+                "expected @token(<token-id>)".into(),
+            ));
+        }
+        self.pos += prefix.len();
+        let mut token_id = 0u32;
+        let mut digits = 0usize;
+        while let Some(byte @ b'0'..=b'9') = self.peek() {
+            token_id = token_id
+                .checked_mul(10)
+                .and_then(|value| value.checked_add((byte - b'0') as u32))
+                .ok_or_else(|| {
+                    GlrMaskError::GrammarParse("special LLM token id does not fit in u32".into())
+                })?;
+            digits += 1;
+            self.pos += 1;
+        }
+        if digits == 0 || self.peek() != Some(b')') {
+            return Err(GlrMaskError::GrammarParse(
+                "expected @token(<token-id>)".into(),
+            ));
+        }
+        self.pos += 1;
+        Ok(Token::SpecialToken(token_id))
+    }
+
     fn tokenize(&mut self) -> Result<Vec<Token>, GlrMaskError> {
         let mut tokens = Vec::new();
         loop {
@@ -232,6 +262,10 @@ impl<'a> Lexer<'a> {
                 Some(b'.') => {
                     self.pos += 1;
                     tokens.push(Token::Dot);
+                }
+                Some(b'@') => {
+                    self.pos += 1;
+                    tokens.push(self.lex_special_token()?);
                 }
                 Some(b'~') => {
                     self.pos += 1;
@@ -634,6 +668,7 @@ fn expand_lark_expr(
                 visiting,
             )?, Quantifier::Range(*min, *max)),
         GrammarExpr::Literal(bytes) => GrammarExpr::Literal(bytes.clone()),
+        GrammarExpr::SpecialToken(token_id) => GrammarExpr::SpecialToken(*token_id),
         GrammarExpr::CharClass { def, negate, utf8 } => GrammarExpr::CharClass {
             def: def.clone(),
             negate: *negate,
@@ -1024,6 +1059,7 @@ impl Parser {
             Some(Token::Ident(_))
                 | Some(Token::Terminal(_))
                 | Some(Token::Literal(_))
+                | Some(Token::SpecialToken(_))
                 | Some(Token::Regex(_))
                 | Some(Token::LParen)
                 | Some(Token::LBracket)
@@ -1059,6 +1095,7 @@ impl Parser {
         match self.advance() {
             Some(Token::Ident(name)) | Some(Token::Terminal(name)) => Ok(GrammarExpr::Ref(name)),
             Some(Token::Literal(literal)) => self.parse_literal_or_range(literal),
+            Some(Token::SpecialToken(token_id)) => Ok(GrammarExpr::SpecialToken(token_id)),
             Some(Token::Regex(regex)) => Ok(GrammarExpr::RawRegex(regex)),
             Some(Token::Dot) => Ok(GrammarExpr::AnyByte),
             Some(Token::LParen) => {

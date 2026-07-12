@@ -77,6 +77,8 @@ pub enum GrammarExpr {
     },
     Quantified(Box<GrammarExpr>, Quantifier),
     Literal(Vec<u8>),
+    /// Match one exact LLM token id. This is not a byte-language expression.
+    SpecialToken(u32),
     CharClass { def: String, negate: bool, utf8: bool },
     RawRegex(String),
     LexerDfa(Arc<LexerDFA>),
@@ -211,7 +213,8 @@ impl NamedGrammar {
                 | GrammarExpr::CharClass { .. }
                 | GrammarExpr::RawRegex(_)
                 | GrammarExpr::LexerDfa(_)
-                | GrammarExpr::AnyByte => {}
+                | GrammarExpr::AnyByte
+                | GrammarExpr::SpecialToken(_) => {}
             }
         }
 
@@ -344,7 +347,7 @@ impl NamedGrammar {
                         collect_refs(symbol, out);
                     }
                 }
-                GrammarExpr::Epsilon | GrammarExpr::Literal(_)
+                GrammarExpr::Epsilon | GrammarExpr::Literal(_) | GrammarExpr::SpecialToken(_)
                 | GrammarExpr::CharClass { .. } | GrammarExpr::RawRegex(_)
                 | GrammarExpr::LexerDfa(_)
                 | GrammarExpr::AnyByte => {}
@@ -515,6 +518,9 @@ fn grammar_expr_to_lark_with_indent(
                 write!(out, "/*hex:{}*/", hex_str).unwrap();
             }
         }
+        GrammarExpr::SpecialToken(token_id) => {
+            write!(out, "@token({token_id})").unwrap();
+        }
         GrammarExpr::Quantified(inner, Quantifier::Optional) => {
             grammar_expr_to_lark_with_indent(inner, out, true, indent);
             out.push('?');
@@ -601,6 +607,7 @@ struct Lowerer<'a> {
     terminal_map: FxHashMap<String, TerminalID>,
     terminals: Vec<Terminal>,
     terminal_expr_hash_index: FxHashMap<u64, Vec<TerminalID>>,
+    special_terminal_ids: FxHashMap<u32, TerminalID>,
     nonterminal_ids: FxHashMap<String, NonterminalID>,
     next_nonterminal_id: NonterminalID,
     generated_nonterminal_counter: u32,
@@ -715,6 +722,7 @@ impl<'a> Lowerer<'a> {
             terminal_map: FxHashMap::default(),
             terminals: Vec::new(),
             terminal_expr_hash_index: FxHashMap::default(),
+            special_terminal_ids: FxHashMap::default(),
             nonterminal_ids: FxHashMap::default(),
             next_nonterminal_id: 0,
             generated_nonterminal_counter: 0,
@@ -898,6 +906,7 @@ impl<'a> Lowerer<'a> {
             })),
             GrammarExpr::Epsilon
             | GrammarExpr::Literal(_)
+            | GrammarExpr::SpecialToken(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::LexerDfa(_)
@@ -978,6 +987,9 @@ impl<'a> Lowerer<'a> {
                 let tid = self.terminal_id(&String::from_utf8_lossy(bytes), &pattern, false);
                 Ok(Some(Symbol::Terminal(tid)))
             }
+            GrammarExpr::SpecialToken(token_id) => Ok(Some(Symbol::Terminal(
+                self.special_terminal_id(&format!("@token({token_id})"), *token_id),
+            ))),
             GrammarExpr::Grouped(inner) => self.nonnullable_terminal_symbol(inner),
             GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
@@ -1069,6 +1081,7 @@ impl<'a> Lowerer<'a> {
                 self.nonnullable_terminal_symbol(expr)
             }
             GrammarExpr::Literal(_)
+            | GrammarExpr::SpecialToken(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::AnyByte
@@ -1134,6 +1147,7 @@ impl<'a> Lowerer<'a> {
                 }
             }
             GrammarExpr::Literal(_)
+            | GrammarExpr::SpecialToken(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::LexerDfa(_)
@@ -1230,6 +1244,19 @@ impl<'a> Lowerer<'a> {
                 utf8,
             });
         }
+        id
+    }
+
+    fn special_terminal_id(&mut self, name: &str, token_id: u32) -> TerminalID {
+        if let Some(&id) = self.special_terminal_ids.get(&token_id) {
+            self.terminal_ids_by_name.insert(name.to_string(), id);
+            return id;
+        }
+        let id = self.terminals.len() as TerminalID;
+        self.special_terminal_ids.insert(token_id, id);
+        self.terminal_names.insert(id, name.to_string());
+        self.terminal_ids_by_name.insert(name.to_string(), id);
+        self.terminals.push(Terminal::SpecialToken { id, token_id });
         id
     }
 
@@ -2044,6 +2071,9 @@ impl<'a> Lowerer<'a> {
                 let pattern = bytes.iter().map(|&b| regex_escape_byte(b)).collect::<String>();
                 Symbol::Terminal(self.terminal_id(&String::from_utf8_lossy(bytes), &pattern, false))
             }
+            GrammarExpr::SpecialToken(token_id) => Symbol::Terminal(
+                self.special_terminal_id(&format!("@token({token_id})"), *token_id),
+            ),
             GrammarExpr::CharClass { def, negate, utf8 } => {
                 let pattern = char_class_pattern(def, *negate);
                 Symbol::Terminal(self.terminal_id(&pattern, &pattern, *utf8))
@@ -2323,6 +2353,9 @@ pub(crate) fn resolved_named_terminal_exprs(
         .iter()
         .filter(|rule| rule.is_terminal && !rule.is_internal)
     {
+        if matches!(rule.expr, GrammarExpr::SpecialToken(_)) {
+            continue;
+        }
         let mut visiting = HashSet::from([rule.name.clone()]);
         let expr = grammar_expr_to_expr(
             &rule.expr,
@@ -2349,6 +2382,11 @@ fn grammar_expr_to_expr(
             return grammar_expr_to_expr(inner, terminal_bodies, terminal_expr_cache, visiting);
         }
         GrammarExpr::Literal(bytes) => Expr::U8Seq(bytes.clone()),
+        GrammarExpr::SpecialToken(token_id) => {
+            return Err(GlrMaskError::GrammarParse(format!(
+                "@token({token_id}) cannot be composed inside a byte terminal expression"
+            )));
+        }
         GrammarExpr::CharClass { def, negate, utf8 } => {
             let pattern = char_class_pattern(def, *negate);
             parse_regex(&pattern, *utf8)
@@ -2473,6 +2511,7 @@ fn collect_terminal_rule_refs<'a>(expr: &'a GrammarExpr, refs: &mut FxHashSet<&'
         }
         GrammarExpr::Epsilon
         | GrammarExpr::Literal(_)
+        | GrammarExpr::SpecialToken(_)
         | GrammarExpr::CharClass { .. }
         | GrammarExpr::RawRegex(_)
         | GrammarExpr::LexerDfa(_)
@@ -2504,6 +2543,7 @@ fn grammar_expr_is_nullable(
             *min == 0 || grammar_expr_is_nullable(expr, rule_nullable)
         }
         GrammarExpr::Literal(bytes) => bytes.is_empty(),
+        GrammarExpr::SpecialToken(_) => false,
         GrammarExpr::CharClass { def, negate, utf8 } => {
             parse_regex(&char_class_pattern(def, *negate), *utf8).is_nullable()
         }
@@ -2642,6 +2682,7 @@ fn validate_expr_nfa_placement(grammar: &NamedGrammar) -> Result<(), GlrMaskErro
             GrammarExpr::Ref(_)
             | GrammarExpr::Epsilon
             | GrammarExpr::Literal(_)
+            | GrammarExpr::SpecialToken(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::LexerDfa(_)
@@ -2894,6 +2935,24 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
         // Terminal rules: convert the entire body to a single Terminal::Expr.
         // Refs to other terminal rules are resolved via Expr::Shared.
         if rule.is_terminal {
+            if let GrammarExpr::SpecialToken(token_id) = &rule.expr {
+                if rule.is_internal {
+                    return Err(GlrMaskError::GrammarParse(format!(
+                        "internal terminal {} cannot be a special LLM token",
+                        rule.name
+                    )));
+                }
+                let lhs = lowerer.nonterminal_id(&rule.name);
+                let tid = lowerer.special_terminal_id(&rule.name, *token_id);
+                lowerer.rules.push(Rule {
+                    lhs,
+                    rhs: vec![Symbol::Terminal(tid)],
+                });
+                if let Some(rule_started_at) = rule_started_at {
+                    terminal_rule_ms += rule_started_at.elapsed().as_secs_f64() * 1000.0;
+                }
+                continue;
+            }
             let cached_expr = lowerer.terminal_expr_cache.get(&rule.name).cloned();
             let expr = if let Some(cached_expr) = cached_expr {
                 (*cached_expr).clone()
@@ -3015,6 +3074,15 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
     let ignore_terminal = grammar.ignore.as_ref().and_then(|ignore_name| {
         lowerer.terminal_ids_by_name.get(ignore_name).copied()
     });
+    if ignore_terminal.is_some_and(|ignore_id| {
+        lowerer.terminals.iter().any(|terminal| {
+            matches!(terminal, Terminal::SpecialToken { id, .. } if *id == ignore_id)
+        })
+    }) {
+        return Err(GlrMaskError::GrammarParse(
+            "a special LLM token terminal cannot be the ignore terminal".into(),
+        ));
+    }
     let mut lexer_partitions = BTreeMap::new();
     for (terminal_name, partition) in &grammar.lexer_partitions {
         let terminal_id = lowerer.terminal_ids_by_name.get(terminal_name).copied();

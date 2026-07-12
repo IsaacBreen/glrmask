@@ -1088,6 +1088,7 @@ impl<'a> Lowerer<'a> {
                 .any(Self::expr_contains_raw_regex),
             GrammarExpr::Epsilon
             | GrammarExpr::Literal(_)
+            | GrammarExpr::SpecialToken(_)
             | GrammarExpr::Ref(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::LexerDfa(_)

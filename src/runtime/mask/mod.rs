@@ -680,7 +680,15 @@ fn enqueue_parser_state_transition(
     );
 }
 
-fn update_eos_mask(buf: &mut [u32], eos_token_id: Option<u32>, is_complete: bool) {
+fn update_eos_mask(
+    buf: &mut [u32],
+    eos_token_id: Option<u32>,
+    is_complete: bool,
+    eos_is_special: bool,
+) {
+    if eos_is_special {
+        return;
+    }
     let Some(eos_token_id) = eos_token_id else {
         return;
     };
@@ -860,7 +868,14 @@ impl<'a> ConstraintState<'a> {
             self.constraint.or_internal_dense_to_buf(&merged, buf, buf_zeroed);
         }
 
-        update_eos_mask(buf, self.constraint.eos_token_id, self.is_complete());
+        update_eos_mask(
+            buf,
+            self.constraint.eos_token_id,
+            self.is_complete(),
+            self.constraint
+                .eos_token_id
+                .is_some_and(|token_id| self.constraint.has_special_token_id(token_id)),
+        );
 
         if direct_buf_dirty {
             self.store_mask_cache_reuse_dense(buf);
@@ -1306,7 +1321,14 @@ impl<'a> ConstraintState<'a> {
 
         if self.state.is_empty() || parser_dwa.states().is_empty() {
             buf.fill(0);
-            update_eos_mask(buf, self.constraint.eos_token_id, self.is_complete());
+            update_eos_mask(
+                buf,
+                self.constraint.eos_token_id,
+                self.is_complete(),
+                self.constraint
+                    .eos_token_id
+                    .is_some_and(|token_id| self.constraint.has_special_token_id(token_id)),
+            );
             self.store_mask_cache(buf, &[]);
             return total_start.map(|start| MaskProfile {
                 total_ns: elapsed_ns(start),
@@ -1641,11 +1663,21 @@ impl<'a> ConstraintState<'a> {
         // be fixed there. Hiding the mismatch with a second-pass filter is not
         // allowed. This note is intentional and must NEVER EVER be removed.
 
-        let eos_unchanged = reuse_existing_cache_dense
-            && eos_mask_bit(buf, self.constraint.eos_token_id) == self.is_complete();
+        let eos_is_special = self
+            .constraint
+            .eos_token_id
+            .is_some_and(|token_id| self.constraint.has_special_token_id(token_id));
+        let eos_unchanged = eos_is_special
+            || (reuse_existing_cache_dense
+                && eos_mask_bit(buf, self.constraint.eos_token_id) == self.is_complete());
         if !eos_unchanged {
             let eos_start = profile.as_ref().map(|_| Instant::now());
-            update_eos_mask(buf, self.constraint.eos_token_id, self.is_complete());
+            update_eos_mask(
+                buf,
+                self.constraint.eos_token_id,
+                self.is_complete(),
+                eos_is_special,
+            );
             if let (Some(profile), Some(start)) = (profile.as_mut(), eos_start) {
                 profile.finalize_eos_ns += elapsed_ns(start);
             }

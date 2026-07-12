@@ -35,6 +35,7 @@
 //! | `[class]/utf8`                 | UTF-8 character class                |
 //! | `.`                            | Any byte                             |
 //! | `eps`                          | Epsilon (empty string)               |
+//! | `@token(123)`                  | Exact LLM token id 123               |
 //! | `a b c`                        | Sequence                             |
 //! | `a \| b \| c`                  | Choice                               |
 //! | `e?`, `e*`, `e+`              | Optional / Repeat / RepeatOne        |
@@ -280,6 +281,7 @@ fn dump_nt_atom(expr: &GrammarExpr) -> String {
         GrammarExpr::Ref(name) => name.clone(),
         GrammarExpr::Grouped(inner) => format!("({})", dump_nt_expr(inner, false)),
         GrammarExpr::Literal(bytes) => format!("\"{}\"", escape_bytes_for_string(bytes)),
+        GrammarExpr::SpecialToken(token_id) => format!("@token({token_id})"),
         GrammarExpr::RawRegex(pat) => format!("/{}/", escape_regex_for_slash(pat)),
         GrammarExpr::CharClass { def, negate, utf8 } => {
             let inner = if *negate { format!("^{}", def) } else { def.clone() };
@@ -1101,7 +1103,7 @@ impl GlrmParser {
         match self.peek() {
             Tok::Ident(s) if s == "eps" => true,
             Tok::Ident(_) | Tok::StringLit(_) | Tok::RegexLit(_)
-            | Tok::CharClass(_, _) | Tok::Dot | Tok::LParen => true,
+            | Tok::CharClass(_, _) | Tok::Dot | Tok::LParen | Tok::At => true,
             _ => false,
         }
     }
@@ -1252,6 +1254,24 @@ impl GlrmParser {
                 self.advance();
                 Ok(GrammarExpr::AnyByte)
             }
+            Tok::At => {
+                self.advance();
+                match self.advance().clone() {
+                    Tok::Ident(keyword) if keyword == "token" => {}
+                    other => {
+                        return Err(err(&format!(
+                            "expected 'token' after '@' in expression, got {:?}",
+                            other
+                        )));
+                    }
+                }
+                self.consume(&Tok::LParen)?;
+                let token_id = self.expect_int()?;
+                let token_id = u32::try_from(token_id)
+                    .map_err(|_| err("special LLM token id does not fit in u32"))?;
+                self.consume(&Tok::RParen)?;
+                Ok(GrammarExpr::SpecialToken(token_id))
+            }
             Tok::LParen => {
                 self.advance();
                 let inner = self.parse_nt_expr(allow_raw_regex)?;
@@ -1391,6 +1411,22 @@ accept 1;
         assert!(dumped.contains("  accept 1;"), "{dumped}");
         assert!(dumped.contains("  0 -- \"a\" --> 1;"), "{dumped}");
         assert!(!dumped.contains("ExprNFA("), "{dumped}");
+    }
+
+    #[test]
+    fn special_llm_token_atom_roundtrips() {
+        let grammar = from_glrm(
+            r#"
+                start start;
+                t END ::= @token(128009);
+                nt start ::= "a" END @token(42);
+            "#,
+        )
+        .unwrap();
+        let dumped = to_glrm(&grammar);
+        assert!(dumped.contains("@token(128009)"), "{dumped}");
+        assert!(dumped.contains("@token(42)"), "{dumped}");
+        assert_eq!(from_glrm(&dumped).unwrap().rules, grammar.rules);
     }
 
     #[test]

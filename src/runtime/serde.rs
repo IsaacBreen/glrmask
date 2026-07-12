@@ -7,11 +7,80 @@ use crate::compiler::glr::table::GLRTable;
 use crate::ds::weight::Weight;
 use crate::grammar::flat::TerminalID;
 use crate::runtime::artifact::{empty_dense_words, PossibleMatchesByTerminal};
-use crate::runtime::Constraint;
+use crate::runtime::{Constraint, SpecialTokenTerminal};
 
 const CONSTRAINT_MAGIC: [u8; 8] = *b"GLRCONS\0";
-const CONSTRAINT_VERSION: u16 = 1;
+const LEGACY_CONSTRAINT_VERSION: u16 = 1;
+const CONSTRAINT_VERSION: u16 = 2;
 const CONSTRAINT_HEADER_LEN: usize = CONSTRAINT_MAGIC.len() + 2 + 8;
+
+/// Exact serialized field order of the historical direct-`Constraint` v1
+/// artifact. Keep this separate from the live runtime struct: bincode encodes
+/// structs positionally, so adding a field to `Constraint` is not compatible
+/// with old v1 bytes even when the field has `serde(default)`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ConstraintPayloadV1 {
+    parser_dwa: DWA,
+    parser_top_accept: BTreeMap<i32, Weight>,
+    table: GLRTable,
+    terminal_display_names: Vec<String>,
+    tokenizer: Tokenizer,
+    ignore_terminal: Option<TerminalID>,
+    possible_matches: PossibleMatchesByTerminal,
+    state_to_internal_tsid: Vec<u32>,
+    internal_tsid_to_states: Vec<Vec<u32>>,
+    original_token_to_internal: Vec<u32>,
+    internal_token_to_tokens: Vec<Vec<u32>>,
+    eos_token_id: Option<u32>,
+    token_bytes: Arc<BTreeMap<u32, Vec<u8>>>,
+    internal_token_bytes: BTreeMap<u32, Vec<u8>>,
+    word_group_sparse_total_entries: usize,
+}
+
+impl From<&Constraint> for ConstraintPayloadV1 {
+    fn from(constraint: &Constraint) -> Self {
+        Self {
+            parser_dwa: constraint.parser_dwa.clone(),
+            parser_top_accept: constraint.parser_top_accept.clone(),
+            table: constraint.table.clone(),
+            terminal_display_names: constraint.terminal_display_names.clone(),
+            tokenizer: constraint.tokenizer.clone(),
+            ignore_terminal: constraint.ignore_terminal,
+            possible_matches: constraint.possible_matches.clone(),
+            state_to_internal_tsid: constraint.state_to_internal_tsid.clone(),
+            internal_tsid_to_states: constraint.internal_tsid_to_states.clone(),
+            original_token_to_internal: constraint.original_token_to_internal.clone(),
+            internal_token_to_tokens: constraint.internal_token_to_tokens.clone(),
+            eos_token_id: constraint.eos_token_id,
+            token_bytes: Arc::clone(&constraint.token_bytes),
+            internal_token_bytes: constraint.internal_token_bytes.clone(),
+            word_group_sparse_total_entries: constraint.word_group_sparse_total_entries,
+        }
+    }
+}
+
+impl ConstraintPayloadV1 {
+    fn into_constraint(self) -> Constraint {
+        let mut constraint = RuntimePayloadV1 {
+            parser_dwa: self.parser_dwa,
+            table: self.table,
+            terminal_display_names: self.terminal_display_names,
+            tokenizer: self.tokenizer,
+            ignore_terminal: self.ignore_terminal,
+            possible_matches: self.possible_matches,
+            state_to_internal_tsid: self.state_to_internal_tsid,
+            internal_tsid_to_states: self.internal_tsid_to_states,
+            original_token_to_internal: self.original_token_to_internal,
+            internal_token_to_tokens: self.internal_token_to_tokens,
+            eos_token_id: self.eos_token_id,
+            token_bytes: self.token_bytes,
+            internal_token_bytes: self.internal_token_bytes,
+        }
+        .into_constraint_with_top_accept(self.parser_top_accept);
+        constraint.word_group_sparse_total_entries = self.word_group_sparse_total_entries;
+        constraint
+    }
+}
 
 /// Deliberate, execution-only persisted state for a compiled constraint.
 ///
@@ -42,6 +111,14 @@ struct RuntimePayloadV1 {
 struct RuntimePayloadV2 {
     v1: RuntimePayloadV1,
     parser_top_accept: BTreeMap<i32, Weight>,
+}
+
+/// V3 adds grammar-level special LLM token terminals without changing the V1
+/// or V2 bincode contracts.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct RuntimePayloadV3 {
+    v2: RuntimePayloadV2,
+    special_token_terminals: Vec<SpecialTokenTerminal>,
 }
 
 impl From<&Constraint> for RuntimePayloadV1 {
@@ -80,6 +157,7 @@ impl RuntimePayloadV1 {
             terminal_display_names: self.terminal_display_names,
             tokenizer: self.tokenizer,
             ignore_terminal: self.ignore_terminal,
+            special_token_terminals: Vec::new(),
             dynamic_mask_vocab: Default::default(),
             possible_matches: self.possible_matches,
             state_to_internal_tsid: self.state_to_internal_tsid,
@@ -145,6 +223,23 @@ impl RuntimePayloadV2 {
     }
 }
 
+impl From<&Constraint> for RuntimePayloadV3 {
+    fn from(constraint: &Constraint) -> Self {
+        Self {
+            v2: RuntimePayloadV2::from(constraint),
+            special_token_terminals: constraint.special_token_terminals.clone(),
+        }
+    }
+}
+
+impl RuntimePayloadV3 {
+    fn into_constraint(self) -> Constraint {
+        let mut constraint = self.v2.into_constraint();
+        constraint.special_token_terminals = self.special_token_terminals;
+        constraint
+    }
+}
+
 impl Constraint {
     /// Serialize the intentional v1 execution payload used by `glrmask-runtime`.
     /// Compiler-only data and derived runtime caches are deliberately absent.
@@ -182,6 +277,10 @@ impl Constraint {
     /// Serialize the intentional v2 execution payload, including the
     /// depth-one parser acceptance overlay.
     pub(crate) fn save_runtime_payload_v2(&self) -> Vec<u8> {
+        assert!(
+            self.special_token_terminals.is_empty(),
+            "runtime payload V2 cannot represent special LLM token terminals; use save_runtime_payload_v3"
+        );
         bincode::serialize(&RuntimePayloadV2::from(self))
             .expect("Runtime payload V2 serialization should succeed")
     }
@@ -189,6 +288,19 @@ impl Constraint {
     /// Load an intentional v2 execution payload and rebuild derived caches.
     pub(crate) fn load_runtime_payload_v2(bytes: &[u8]) -> crate::Result<Self> {
         let payload: RuntimePayloadV2 = bincode::deserialize(bytes)
+            .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
+        let mut constraint = payload.into_constraint();
+        constraint.rebuild_runtime_caches();
+        Ok(constraint)
+    }
+
+    pub(crate) fn save_runtime_payload_v3(&self) -> Vec<u8> {
+        bincode::serialize(&RuntimePayloadV3::from(self))
+            .expect("Runtime payload V3 serialization should succeed")
+    }
+
+    pub(crate) fn load_runtime_payload_v3(bytes: &[u8]) -> crate::Result<Self> {
+        let payload: RuntimePayloadV3 = bincode::deserialize(bytes)
             .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
         let mut constraint = payload.into_constraint();
         constraint.rebuild_runtime_caches();
@@ -206,14 +318,14 @@ impl Constraint {
     }
 
     pub fn load(bytes: &[u8]) -> crate::Result<Self> {
-        let payload = if bytes.starts_with(&CONSTRAINT_MAGIC) {
+        let (version, payload) = if bytes.starts_with(&CONSTRAINT_MAGIC) {
             if bytes.len() < CONSTRAINT_HEADER_LEN {
                 return Err(crate::GlrMaskError::Serialization(
                     "truncated constraint artifact header".to_owned(),
                 ));
             }
             let version = u16::from_le_bytes([bytes[8], bytes[9]]);
-            if version != CONSTRAINT_VERSION {
+            if !matches!(version, LEGACY_CONSTRAINT_VERSION | CONSTRAINT_VERSION) {
                 return Err(crate::GlrMaskError::Serialization(format!(
                     "unsupported constraint artifact version {version}",
                 )));
@@ -233,15 +345,21 @@ impl Constraint {
                     "invalid constraint artifact payload length".to_owned(),
                 ));
             }
-            &bytes[CONSTRAINT_HEADER_LEN..]
+            (version, &bytes[CONSTRAINT_HEADER_LEN..])
         } else {
             // Historical `Constraint::save` returned raw bincode. Keep one-way
             // compatibility while the envelope prevents old readers from
             // silently accepting epsilon-enabled artifacts.
-            bytes
+            (LEGACY_CONSTRAINT_VERSION, bytes)
         };
-        let mut constraint: Self = bincode::deserialize(payload)
-            .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
+        let mut constraint = if version == LEGACY_CONSTRAINT_VERSION {
+            let payload: ConstraintPayloadV1 = bincode::deserialize(payload)
+                .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
+            payload.into_constraint()
+        } else {
+            bincode::deserialize(payload)
+                .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?
+        };
         constraint.rebuild_runtime_caches();
         Ok(constraint)
     }
@@ -298,6 +416,30 @@ mod tests {
     }
 
     #[test]
+    fn runtime_payload_v3_preserves_special_token_terminals_and_v2_rejects_them() {
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                nt start ::= @token(100);
+            "#,
+            &Vocab::new(Vec::new(), None),
+        )
+        .unwrap();
+
+        assert!(
+            std::panic::catch_unwind(|| constraint.save_runtime_payload_v2()).is_err(),
+            "V2 must reject special-token metadata it cannot represent"
+        );
+        let bytes = constraint.save_runtime_payload_v3();
+        let loaded = Constraint::load_runtime_payload_v3(&bytes).unwrap();
+        assert_eq!(loaded.special_token_terminals, constraint.special_token_terminals);
+        assert_eq!(loaded.start().mask(), constraint.start().mask());
+        let mut state = loaded.start();
+        state.commit_token(100).unwrap();
+        assert!(state.is_finished());
+    }
+
+    #[test]
     fn constraint_envelope_roundtrip_and_legacy_raw_load() {
         let constraint = tiny_constraint();
         let saved = constraint.save();
@@ -315,11 +457,22 @@ mod tests {
             &Vocab::new(vec![(0, b"a".to_vec())], None),
         )
         .unwrap();
-        let legacy = bincode::serialize(&legacy_constraint).unwrap();
+        let legacy = bincode::serialize(&ConstraintPayloadV1::from(&legacy_constraint)).unwrap();
         assert!(!legacy.starts_with(&CONSTRAINT_MAGIC));
         let loaded_legacy = Constraint::load(&legacy).unwrap();
         assert_eq!(
             loaded_legacy.start().mask(),
+            legacy_constraint.start().mask(),
+        );
+
+        let mut enveloped_v1 = Vec::new();
+        enveloped_v1.extend_from_slice(&CONSTRAINT_MAGIC);
+        enveloped_v1.extend_from_slice(&LEGACY_CONSTRAINT_VERSION.to_le_bytes());
+        enveloped_v1.extend_from_slice(&(legacy.len() as u64).to_le_bytes());
+        enveloped_v1.extend_from_slice(&legacy);
+        let loaded_enveloped_v1 = Constraint::load(&enveloped_v1).unwrap();
+        assert_eq!(
+            loaded_enveloped_v1.start().mask(),
             legacy_constraint.start().mask(),
         );
     }

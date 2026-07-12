@@ -623,6 +623,7 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
                     empty_map,
                 )),
                 l2p: None,
+                special: None,
             },
             profile,
         );
@@ -687,8 +688,8 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
     let terminal_families = TerminalDwaFamilies {
         l1: l1_family.map(|(family, _)| family),
         l2p: l2p_family.map(|(family, _)| family),
+        special: None,
     };
-    debug_assert!(!terminal_families.is_empty());
     let merge_ms = family_merge_wall_ms;
 
     let post_merge_bookkeeping_started_at = Instant::now();

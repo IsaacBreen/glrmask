@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use once_cell::sync::Lazy;
+use range_set_blaze::RangeSetBlaze;
 
 use crate::Vocab;
 use crate::automata::lexer::compile::{
@@ -38,7 +39,7 @@ use crate::compiler::stages::id_map_and_terminal_dwa::types::{
     TerminalDwaFamilies,
     TerminalDwaPhaseProfile,
 };
-use crate::compiler::stages::equiv_types::ManyToOneIdMap;
+use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::compiler::stages::mapped_artifact::{
     MappedArtifact,
     WeightRefs,
@@ -57,7 +58,7 @@ use crate::compiler::stages::templates::compile_dfa::{
 use crate::ds::bitset::BitSet;
 use crate::ds::weight::Weight;
 use crate::grammar::flat::{GrammarDef, Terminal};
-use crate::runtime::{Constraint, DynamicMaskVocab};
+use crate::runtime::{Constraint, DynamicMaskVocab, SpecialTokenTerminal};
 use crate::DynamicConstraint;
 
 fn env_flag_enabled(name: &str) -> bool {
@@ -634,7 +635,80 @@ fn terminal_expr(terminal: &Terminal) -> Expr {
         Terminal::Literal { bytes, .. } => Expr::U8Seq(bytes.clone()),
         Terminal::Pattern { pattern, utf8, .. } => parse_regex(pattern, *utf8),
         Terminal::Expr { expr, .. } => expr.clone(),
+        Terminal::SpecialToken { .. } => Expr::Choice(Vec::new()),
     }
+}
+
+fn collect_special_token_terminals(grammar: &GrammarDef) -> Vec<SpecialTokenTerminal> {
+    let mut specials = grammar
+        .terminals
+        .iter()
+        .filter_map(|terminal| match terminal {
+            Terminal::SpecialToken { id, token_id } => Some(SpecialTokenTerminal {
+                terminal_id: *id,
+                token_id: *token_id,
+            }),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    specials.sort_unstable_by_key(|special| (special.token_id, special.terminal_id));
+    specials
+}
+
+fn build_special_token_terminal_family(
+    tokenizer: &Tokenizer,
+    specials: &[SpecialTokenTerminal],
+) -> Option<MappedArtifact<TerminalAutomaton>> {
+    if specials.is_empty() {
+        return None;
+    }
+
+    let mut token_ids = specials
+        .iter()
+        .map(|special| special.token_id)
+        .collect::<Vec<_>>();
+    token_ids.sort_unstable();
+    token_ids.dedup();
+
+    let max_token_id = *token_ids.last()? as usize;
+    let mut original_token_to_internal = vec![u32::MAX; max_token_id + 1];
+    for (internal, &token_id) in token_ids.iter().enumerate() {
+        original_token_to_internal[token_id as usize] = internal as u32;
+    }
+    let vocab_tokens = ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
+        original_token_to_internal,
+        token_ids,
+    );
+
+    let initial_state = tokenizer.initial_state();
+    let mut original_state_to_internal = vec![u32::MAX; tokenizer.num_states() as usize];
+    original_state_to_internal[initial_state as usize] = 0;
+    let tokenizer_states =
+        ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
+            original_state_to_internal,
+            vec![initial_state],
+        );
+    let id_map = InternalIdMap {
+        tokenizer_states,
+        vocab_tokens,
+    };
+
+    let mut dwa = DWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
+    let final_state = dwa.add_state();
+    dwa.set_final_weight(final_state, Weight::all());
+    for special in specials {
+        let internal_token = id_map.vocab_tokens.original_to_internal[special.token_id as usize];
+        let tokens = RangeSetBlaze::from_iter([internal_token..=internal_token]);
+        let weight = Weight::from_uniform(0..=0, tokens);
+        dwa.add_transition(
+            dwa.start_state(),
+            special.terminal_id as i32,
+            final_state,
+            weight,
+        );
+    }
+
+    Some(MappedArtifact::new(TerminalAutomaton::Dwa(dwa), id_map))
 }
 
 fn set_dense_bit(words: &mut [u64], token_id: u32) {
@@ -929,6 +1003,7 @@ fn build_and_merge_parser_dwa_families(
 ) -> MappedParserDwa {
     let collapse_immediate_acceptance = !tokenizer.has_epsilon_transitions();
     let l1_templates = templates.clone();
+    let special_templates = templates.clone();
     let (l1_parser, l2p_parser) = rayon::join(
         || {
             build_parser_dwa_for_terminal_family(
@@ -953,12 +1028,29 @@ fn build_and_merge_parser_dwa_families(
             )
         },
     );
-    let parser_dwas: Vec<MappedArtifact<DWA>> = l1_parser.into_iter().chain(l2p_parser).collect();
+    let special_parser = build_parser_dwa_for_terminal_family(
+        "special",
+        terminal_dwas.special.as_ref(),
+        table,
+        grammar,
+        special_templates,
+        vocab,
+        collapse_immediate_acceptance,
+    );
+    let parser_dwas: Vec<MappedArtifact<DWA>> = l1_parser
+        .into_iter()
+        .chain(l2p_parser)
+        .chain(special_parser)
+        .collect();
+    let max_token_id = terminal_dwas
+        .max_original_token_id()
+        .unwrap_or_else(|| vocab.max_token_id())
+        .max(vocab.max_token_id());
     let (mapped_dwa, top_accept) =
         crate::compiler::stages::id_map_and_terminal_dwa::merge::merge_mapped_parser_dwas_with_top_accept(
             parser_dwas,
             tokenizer.num_states() as usize,
-            vocab.max_token_id(),
+            max_token_id,
         );
     let (dwa, id_map) = mapped_dwa.into_parts();
     MappedArtifact::new((dwa, ParserTopAccept(top_accept)), id_map)
@@ -968,6 +1060,7 @@ fn build_and_merge_parser_dwa_families(
 struct TerminalFamilyLayout {
     has_l1: bool,
     has_l2p: bool,
+    has_special: bool,
 }
 
 fn reconcile_terminal_dwa_families(
@@ -976,6 +1069,7 @@ fn reconcile_terminal_dwa_families(
     let layout = TerminalFamilyLayout {
         has_l1: families.l1.is_some(),
         has_l2p: families.l2p.is_some(),
+        has_special: families.special.is_some(),
     };
     let mapped = MappedArtifact::reconcile_vec(families.into_vec());
     (mapped, layout)
@@ -996,11 +1090,16 @@ fn restore_terminal_dwa_families(
             .next()
             .expect("L2P terminal family missing after reconciliation")
     });
+    let special = layout.has_special.then(|| {
+        pieces
+            .next()
+            .expect("special-token terminal family missing after reconciliation")
+    });
     assert!(
         pieces.next().is_none(),
         "unexpected extra terminal family after reconciliation"
     );
-    TerminalDwaFamilies { l1, l2p }
+    TerminalDwaFamilies { l1, l2p, special }
 }
 
 fn terminal_family_interned_range_count(families: &TerminalDwaFamilies) -> usize {
@@ -1010,6 +1109,9 @@ fn terminal_family_interned_range_count(families: &TerminalDwaFamilies) -> usize
     }
     if let Some(l2p) = &families.l2p {
         weights.extend(l2p.artifact().weight_refs());
+    }
+    if let Some(special) = &families.special {
+        weights.extend(special.artifact().weight_refs());
     }
     count_interned_ranges_for_weights(weights).total_ranges()
 }
@@ -1024,6 +1126,9 @@ fn terminal_family_joint_interned_range_count<T: WeightRefs>(
     }
     if let Some(l2p) = &families.l2p {
         weights.extend(l2p.artifact().weight_refs());
+    }
+    if let Some(special) = &families.special {
+        weights.extend(special.artifact().weight_refs());
     }
     weights.extend(other.weight_refs());
     count_interned_ranges_for_weights(weights).total_ranges()
@@ -1189,7 +1294,7 @@ fn launch_terminal_dag_if_ready<'scope>(
             }
         });
         let terminal_dwa_started_ms = elapsed_ms(compile_started_at.clone());
-        let (terminal_dwas, terminal_phase_profile) =
+        let (mut terminal_dwas, mut terminal_phase_profile) =
             crate::compiler::stages::id_map_and_terminal_dwa::build_terminal_dwa_families_with_precomputed_global_max_length(
                 &tokenizer.tokenizer,
                 vocab,
@@ -1202,6 +1307,13 @@ fn launch_terminal_dag_if_ready<'scope>(
                 &flat_global.global_max_length_state_map,
                 Some(&classify.shared_classify_cache),
             );
+        let special_started_at = Instant::now();
+        let special_token_terminals = collect_special_token_terminals(prepared_grammar);
+        terminal_dwas.special = build_special_token_terminal_family(
+            &tokenizer.tokenizer,
+            &special_token_terminals,
+        );
+        terminal_phase_profile.terminal_dwa_ms += elapsed_ms(special_started_at);
         let terminal_dwa_finished_ms = elapsed_ms(compile_started_at.clone());
 
         parser_state
@@ -1877,6 +1989,7 @@ fn compile_prepared_with_profile_and_table_construction(
 
         let finalize_started_at = Instant::now();
         let token_bytes = std::sync::Arc::clone(&vocab.entries);
+        let special_token_terminals = collect_special_token_terminals(&prepared_grammar);
         let constraint = finalize_constraint(Constraint {
             parser_dwa,
             parser_top_accept,
@@ -1884,6 +1997,7 @@ fn compile_prepared_with_profile_and_table_construction(
             terminal_display_names: analyzed_grammar.terminal_display_names.clone(),
             tokenizer,
             ignore_terminal: prepared_grammar.ignore_terminal,
+            special_token_terminals,
             dynamic_mask_vocab: DynamicMaskVocab::from_compiler_artifacts(
                 runtime_dynamic_vocab.trie,
                 runtime_dynamic_vocab.token_aliases,
@@ -1987,6 +2101,7 @@ pub(crate) fn compile_dynamic_owned_with_table_construction(
             analyzed_grammar.terminal_display_names.clone(),
             tokenizer,
             prepared_grammar.ignore_terminal,
+            collect_special_token_terminals(&prepared_grammar),
             vocab,
         )
     })

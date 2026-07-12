@@ -16,6 +16,7 @@ fn is_terminal_name(name: &str) -> bool {
 enum Token {
     Ident(String),
     Literal(String),
+    SpecialToken(u32),
     CharClass { def: String, negate: bool },
     LParen,
     RParen,
@@ -171,6 +172,35 @@ impl<'a> Lexer<'a> {
         Token::Ident(self.lex_ident(first))
     }
 
+    fn lex_special_token(&mut self) -> Result<Token, GlrMaskError> {
+        let prefix = b"token(";
+        if !self.input[self.pos..].starts_with(prefix) {
+            return Err(GlrMaskError::GrammarParse(
+                "expected @token(<token-id>)".into(),
+            ));
+        }
+        self.pos += prefix.len();
+        let mut token_id = 0u32;
+        let mut digits = 0usize;
+        while let Some(byte @ b'0'..=b'9') = self.peek() {
+            token_id = token_id
+                .checked_mul(10)
+                .and_then(|value| value.checked_add((byte - b'0') as u32))
+                .ok_or_else(|| {
+                    GlrMaskError::GrammarParse("special LLM token id does not fit in u32".into())
+                })?;
+            digits += 1;
+            self.pos += 1;
+        }
+        if digits == 0 || self.peek() != Some(b')') {
+            return Err(GlrMaskError::GrammarParse(
+                "expected @token(<token-id>)".into(),
+            ));
+        }
+        self.pos += 1;
+        Ok(Token::SpecialToken(token_id))
+    }
+
     fn tokenize(&mut self) -> Result<Vec<Token>, GlrMaskError> {
         let mut tokens = Vec::new();
         while let Some(byte) = self.advance() {
@@ -185,6 +215,7 @@ impl<'a> Lexer<'a> {
                 b'+' => tokens.push(Token::Plus),
                 b'?' => tokens.push(Token::Question),
                 b'.' => tokens.push(Token::Dot),
+                b'@' => tokens.push(self.lex_special_token()?),
                 b':' => {
                     self.lex_separator();
                     tokens.push(Token::Separator);
@@ -340,6 +371,7 @@ impl Parser {
             self.peek(),
             Some(Token::Ident(_))
                 | Some(Token::Literal(_))
+                | Some(Token::SpecialToken(_))
                 | Some(Token::CharClass { .. })
                 | Some(Token::LParen)
                 | Some(Token::Dot)
@@ -368,6 +400,7 @@ impl Parser {
         match self.advance() {
             Some(Token::Ident(name)) => Ok(GrammarExpr::Ref(name)),
             Some(Token::Literal(literal)) => Ok(GrammarExpr::Literal(literal.into_bytes())),
+            Some(Token::SpecialToken(token_id)) => Ok(GrammarExpr::SpecialToken(token_id)),
             Some(Token::CharClass { def, negate }) => Ok(GrammarExpr::CharClass { def, negate, utf8: true }),
             Some(Token::Dot) => Ok(GrammarExpr::AnyByte),
             Some(Token::LParen) => self.parse_group(),

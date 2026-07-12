@@ -1,5 +1,6 @@
 use glrmask_runtime::{
     RuntimeArtifact, ARTIFACT_MAGIC, ARTIFACT_VERSION, LEGACY_ARTIFACT_VERSION,
+    V2_ARTIFACT_VERSION,
 };
 
 fn envelope(version: u16, payload_len: u64, payload: &[u8]) -> Vec<u8> {
@@ -20,6 +21,7 @@ fn rejects_obsolete_envelope_version() {
 #[test]
 fn accepts_legacy_envelope_version() {
     RuntimeArtifact::from_bytes(envelope(LEGACY_ARTIFACT_VERSION, 0, &[])).unwrap();
+    RuntimeArtifact::from_bytes(envelope(V2_ARTIFACT_VERSION, 0, &[])).unwrap();
 }
 
 #[test]

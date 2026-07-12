@@ -60,6 +60,21 @@ let restored = Constraint::load(&bytes).unwrap();
 assert_eq!(constraint.mask_len(), restored.mask_len());
 ```
 
+## Exact LLM Token IDs
+
+EBNF, Lark, and GLRM grammars can match an exact LLM token ID with
+`@token(<id>)`:
+
+```text
+start ::= "hello" @token(128009)
+```
+
+A special-token atom is matched only by `commit_token` with that exact token
+ID. Its vocabulary bytes, when present, do not match the atom through
+`commit_bytes` and cannot partially match it. Token IDs absent from the byte
+vocabulary are supported, and an EOS token explicitly used as `@token(...)` is
+controlled by the grammar like any other special token.
+
 ## State Helpers
 
 - `state.mask()` returns the packed token bitmask.

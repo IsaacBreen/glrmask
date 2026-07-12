@@ -130,6 +130,10 @@ fn remap_terminal_id(terminal: &Terminal, new_id: TerminalID) -> Terminal {
             id: new_id,
             expr: expr.clone(),
         },
+        Terminal::SpecialToken { token_id, .. } => Terminal::SpecialToken {
+            id: new_id,
+            token_id: *token_id,
+        },
     }
 }
 
@@ -138,6 +142,7 @@ fn terminal_is_nullable(terminal: &Terminal) -> bool {
         Terminal::Literal { bytes, .. } => bytes.is_empty(),
         Terminal::Pattern { pattern, utf8, .. } => parse_regex(pattern, *utf8).is_nullable(),
         Terminal::Expr { expr, .. } => expr.is_nullable(),
+        Terminal::SpecialToken { .. } => false,
     }
 }
 
@@ -154,6 +159,7 @@ enum TerminalIdentity {
     Literal { bytes: Vec<u8>, is_ignore: bool },
     Pattern { pattern: String, utf8: bool, is_ignore: bool },
     Expr { expr: Expr, is_ignore: bool },
+    SpecialToken { token_id: u32, is_ignore: bool },
 }
 
 fn terminal_identity(terminal: &Terminal, is_ignore: bool) -> TerminalIdentity {
@@ -169,6 +175,10 @@ fn terminal_identity(terminal: &Terminal, is_ignore: bool) -> TerminalIdentity {
         },
         Terminal::Expr { expr, .. } => TerminalIdentity::Expr {
             expr: expr.clone(),
+            is_ignore,
+        },
+        Terminal::SpecialToken { token_id, .. } => TerminalIdentity::SpecialToken {
+            token_id: *token_id,
             is_ignore,
         },
     }

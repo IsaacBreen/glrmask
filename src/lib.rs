@@ -83,7 +83,7 @@ pub mod __private {
         PerAdvanceEntry,
     };
 
-    use crate::{Constraint, ConstraintState, Vocab};
+    use crate::{Constraint, ConstraintState, DynamicConstraint, Vocab};
 
     pub type Result<T> = std::result::Result<T, Error>;
 
@@ -101,11 +101,14 @@ pub mod __private {
         fn load_runtime_payload_v1(bytes: &[u8]) -> Result<Self>;
         fn save_runtime_payload_v2(&self) -> Vec<u8>;
         fn load_runtime_payload_v2(bytes: &[u8]) -> Result<Self>;
+        fn save_runtime_payload_v3(&self) -> Vec<u8>;
+        fn load_runtime_payload_v3(bytes: &[u8]) -> Result<Self>;
         fn mask_game_internal_to_original(&self) -> &[Vec<u32>];
         fn mask_game_original_to_internal(&self) -> &[u32];
         fn num_parser_states(&self) -> u32;
         fn num_tokenizer_states(&self) -> usize;
         fn num_forced_minimized_tokenizer_states(&self) -> usize;
+        fn max_original_token_id(&self) -> Option<u32>;
         fn table_ambiguous_actions(&self) -> Vec<TableAmbiguity>;
         fn table_has_ambiguity(&self) -> bool;
         fn terminal_display_names(&self) -> &[String];
@@ -161,6 +164,14 @@ pub mod __private {
             Constraint::load_runtime_payload_v2(bytes)
         }
 
+        fn save_runtime_payload_v3(&self) -> Vec<u8> {
+            Constraint::save_runtime_payload_v3(self)
+        }
+
+        fn load_runtime_payload_v3(bytes: &[u8]) -> Result<Self> {
+            Constraint::load_runtime_payload_v3(bytes)
+        }
+
         fn mask_game_internal_to_original(&self) -> &[Vec<u32>] {
             Constraint::mask_game_internal_to_original(self)
         }
@@ -181,6 +192,10 @@ pub mod __private {
             Constraint::num_forced_minimized_tokenizer_states(self)
         }
 
+        fn max_original_token_id(&self) -> Option<u32> {
+            Constraint::max_original_token_id(self)
+        }
+
         fn table_ambiguous_actions(&self) -> Vec<TableAmbiguity> {
             Constraint::table_ambiguous_actions(self)
         }
@@ -195,6 +210,16 @@ pub mod __private {
 
         fn terminal_display_name(&self, terminal_id: u32) -> Option<&str> {
             Constraint::terminal_display_name(self, terminal_id)
+        }
+    }
+
+    pub trait DynamicConstraintExt {
+        fn max_original_token_id(&self) -> Option<u32>;
+    }
+
+    impl DynamicConstraintExt for DynamicConstraint {
+        fn max_original_token_id(&self) -> Option<u32> {
+            DynamicConstraint::max_original_token_id(self)
         }
     }
 

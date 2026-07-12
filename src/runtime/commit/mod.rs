@@ -217,9 +217,15 @@ fn format_token_bytes(token_bytes: &[u8]) -> String {
     format!("b\"{}\"", escaped)
 }
 
+fn format_optional_token_bytes(token_bytes: Option<&[u8]>) -> String {
+    token_bytes
+        .map(format_token_bytes)
+        .unwrap_or_else(|| "<no vocabulary bytes>".to_owned())
+}
+
 fn assert_mask_commit_equivalence(
     token_id: u32,
-    token_bytes: &[u8],
+    token_bytes: Option<&[u8]>,
     was_in_mask: Option<bool>,
     commit_succeeded: bool,
 ) {
@@ -230,10 +236,100 @@ fn assert_mask_commit_equivalence(
         commit_succeeded == was_in_mask,
         "commit/mask mismatch for token_id {} bytes {}: token_in_mask={} commit_succeeded={}",
         token_id,
-        format_token_bytes(token_bytes),
+        format_optional_token_bytes(token_bytes),
         was_in_mask,
         commit_succeeded,
     );
+}
+
+pub(super) fn advance_special_token_paths(
+    constraint: &Constraint,
+    state: &BTreeMap<u32, ParserGSS>,
+    token_id: u32,
+) -> Option<ParserGSS> {
+    let initial_state = constraint.tokenizer.initial_state();
+    let initial_gss = state.get(&initial_state)?;
+    let mut merged = None::<ParserGSS>;
+
+    for special in constraint
+        .special_token_terminals
+        .iter()
+        .filter(|special| special.token_id == token_id)
+    {
+        let pruned = prune_single_initial_state_for_terminal(
+            initial_gss.clone(),
+            initial_state,
+            special.terminal_id,
+            None,
+        );
+        if pruned.is_empty()
+            || !stack_may_advance_on(&constraint.table, &pruned, special.terminal_id)
+        {
+            continue;
+        }
+        let advanced = advance_parser_stacks(constraint, &pruned, special.terminal_id);
+        if advanced.is_empty() {
+            continue;
+        }
+        merged = Some(match merged.take() {
+            Some(existing) => existing.merge(&advanced),
+            None => advanced,
+        });
+    }
+
+    merged
+}
+
+fn merge_special_token_paths(
+    constraint: &Constraint,
+    state: &mut BTreeMap<u32, ParserGSS>,
+    special_paths: Option<ParserGSS>,
+) {
+    let Some(gss) = special_paths.filter(|gss| !gss.is_empty()) else {
+        return;
+    };
+    let initial_state = constraint.tokenizer.initial_state();
+    state
+        .entry(initial_state)
+        .and_modify(|existing| *existing = existing.merge(&gss))
+        .or_insert(gss);
+}
+
+fn finish_token_commit(state: &BTreeMap<u32, ParserGSS>) -> Result<(), String> {
+    if state.is_empty() {
+        Err("commit rejected: no valid parser states remain".to_owned())
+    } else {
+        Ok(())
+    }
+}
+
+fn commit_token_impl(
+    constraint: &Constraint,
+    state: &mut BTreeMap<u32, ParserGSS>,
+    buffers: &mut CommitBuffers,
+    token_id: u32,
+) -> Result<(), String> {
+    let bytes = token_bytes_for_id(constraint, token_id);
+    let has_special = constraint.has_special_token_id(token_id);
+    if bytes.is_none() && !has_special {
+        return Err(format!(
+            "commit_token: token_id {token_id} not in vocabulary or special-token terminals"
+        ));
+    }
+
+    let special_paths = has_special
+        .then(|| advance_special_token_paths(constraint, state, token_id))
+        .flatten();
+    if let Some(bytes) = bytes {
+        if commit_bytes_impl(constraint, state, bytes, buffers).is_err() {
+            state.clear();
+            buffers.clear_all();
+        }
+    } else {
+        state.clear();
+    }
+    merge_special_token_paths(constraint, state, special_paths);
+    finish_token_commit(state)
 }
 
 #[inline]
@@ -3267,26 +3363,24 @@ fn commit_bytes_impl(
 impl<'a> ConstraintState<'a> {
     /// Commit a sampled token, advancing the constraint state.
     ///
-    /// `token_id` must be a token that exists in the vocabulary the constraint
-    /// was built with.  Committing a token that is grammatically invalid (not
-    /// in the current mask) drives the constraint into a fail state — this is
-    /// normal and observable via an all-zero mask.
+    /// `token_id` must either exist in the vocabulary the constraint was built
+    /// with or be declared by a special-token terminal in the grammar.
+    /// Committing a token that is grammatically invalid (not in the current
+    /// mask) drives the constraint into a fail state — this is normal and
+    /// observable via an all-zero mask.
     ///
     /// # Errors
     ///
-    /// Returns an error if `token_id` is not present in the vocabulary at all.
+    /// Returns an error if `token_id` is neither present in the vocabulary nor
+    /// declared by a special-token terminal.
     pub fn commit_token(
         &mut self,
         token_id: u32,
     ) -> Result<(), String> {
         let constraint = self.constraint;
-        let bytes = token_bytes_for_id(constraint, token_id)
-            .ok_or_else(|| {
-                format!("commit_token: token_id {token_id} not in vocabulary")
-            })?;
+        let bytes = token_bytes_for_id(constraint, token_id);
         let was_in_mask = snapshot_mask_membership(self, token_id);
-        let result = commit_bytes_impl(constraint, &mut self.state, bytes, &mut self.buffers);
-        let result = clear_state_on_commit_error(&mut self.state, result);
+        let result = commit_token_impl(constraint, &mut self.state, &mut self.buffers, token_id);
         self.generation += 1;
         assert_mask_commit_equivalence(token_id, bytes, was_in_mask, result.is_ok());
         result
@@ -3294,8 +3388,7 @@ impl<'a> ConstraintState<'a> {
 
     pub(crate) fn commit_token_dynamic(&mut self, token_id: u32) -> Result<(), String> {
         let constraint = self.constraint;
-        let bytes = token_bytes_for_id(constraint, token_id)
-            .ok_or_else(|| format!("commit_token: token_id {token_id} not in vocabulary"))?;
+        let bytes = token_bytes_for_id(constraint, token_id);
         let was_in_mask = if commit_mask_assert_enabled() {
             let mut mask = vec![0u32; constraint.mask_len()];
             self.fill_mask_dynamic(&mut mask);
@@ -3303,8 +3396,7 @@ impl<'a> ConstraintState<'a> {
         } else {
             None
         };
-        let result = commit_bytes_impl(constraint, &mut self.state, bytes, &mut self.buffers);
-        let result = clear_state_on_commit_error(&mut self.state, result);
+        let result = commit_token_impl(constraint, &mut self.state, &mut self.buffers, token_id);
         self.generation += 1;
         assert_mask_commit_equivalence(token_id, bytes, was_in_mask, result.is_ok());
         result
@@ -3321,12 +3413,10 @@ impl<'a> ConstraintState<'a> {
         use std::time::Instant;
 
         let constraint = self.constraint;
-        let bytes = token_bytes_for_id(constraint, token_id)
-            .ok_or_else(|| format!("commit_token: token_id {token_id} not in vocabulary"))?;
+        let bytes = token_bytes_for_id(constraint, token_id);
         let was_in_mask = snapshot_mask_membership(self, token_id);
         let start = Instant::now();
-        let result = commit_bytes_impl(constraint, &mut self.state, bytes, &mut self.buffers);
-        let result = clear_state_on_commit_error(&mut self.state, result);
+        let result = commit_token_impl(constraint, &mut self.state, &mut self.buffers, token_id);
         let total_ns = start.elapsed().as_nanos() as u64;
         self.generation += 1;
         assert_mask_commit_equivalence(token_id, bytes, was_in_mask, result.is_ok());
@@ -3335,18 +3425,41 @@ impl<'a> ConstraintState<'a> {
 
     pub(crate) fn commit_token_profiled(&mut self, token_id: u32) -> Result<CommitProfile, String> {
         let constraint = self.constraint;
-        let bytes = token_bytes_for_id(constraint, token_id)
-            .ok_or_else(|| format!("commit_token: token_id {token_id} not in vocabulary"))?;
+        let bytes = token_bytes_for_id(constraint, token_id);
+        let has_special = constraint.has_special_token_id(token_id);
+        if bytes.is_none() && !has_special {
+            return Err(format!(
+                "commit_token: token_id {token_id} not in vocabulary or special-token terminals"
+            ));
+        }
         let was_in_mask = snapshot_mask_membership(self, token_id);
-        let result = commit_bytes_impl_profiled(
-            constraint,
-            &mut self.state,
-            bytes,
-            &mut self.buffers,
-            None,
-            true,
-        );
-        let result = clear_state_on_commit_error(&mut self.state, result);
+        let total_started_at = std::time::Instant::now();
+        let special_paths = has_special
+            .then(|| advance_special_token_paths(constraint, &self.state, token_id))
+            .flatten();
+        let mut profile = if let Some(bytes) = bytes {
+            match commit_bytes_impl_profiled(
+                constraint,
+                &mut self.state,
+                bytes,
+                &mut self.buffers,
+                None,
+                true,
+            ) {
+                Ok(profile) => profile,
+                Err(_) => {
+                    self.state.clear();
+                    self.buffers.clear_all();
+                    CommitProfile::default()
+                }
+            }
+        } else {
+            self.state.clear();
+            CommitProfile::default()
+        };
+        merge_special_token_paths(constraint, &mut self.state, special_paths);
+        profile.total_ns = total_started_at.elapsed().as_nanos() as u64;
+        let result = finish_token_commit(&self.state).map(|()| profile);
         self.generation += 1;
         assert_mask_commit_equivalence(token_id, bytes, was_in_mask, result.is_ok());
         result
@@ -3357,20 +3470,44 @@ impl<'a> ConstraintState<'a> {
         token_id: u32,
     ) -> Result<(Vec<PerAdvanceEntry>, Vec<(u32, Vec<Vec<u32>>)>, CommitProfile), String> {
         let constraint = self.constraint;
-        let bytes = token_bytes_for_id(constraint, token_id)
-            .ok_or_else(|| format!("commit_token: token_id {token_id} not in vocabulary"))?;
+        let bytes = token_bytes_for_id(constraint, token_id);
+        let has_special = constraint.has_special_token_id(token_id);
+        if bytes.is_none() && !has_special {
+            return Err(format!(
+                "commit_token: token_id {token_id} not in vocabulary or special-token terminals"
+            ));
+        }
         let was_in_mask = snapshot_mask_membership(self, token_id);
+        let total_started_at = std::time::Instant::now();
+        let special_paths = has_special
+            .then(|| advance_special_token_paths(constraint, &self.state, token_id))
+            .flatten();
         let mut advances = Vec::new();
-        let result = commit_bytes_impl_profiled(
-            constraint,
-            &mut self.state,
-            bytes,
-            &mut self.buffers,
-            Some(&mut advances),
-            profile_allow_fast_paths(),
-        );
-        let result = clear_state_on_commit_error(&mut self.state, result)
-            .map(|profile| (advances, final_stacks(&self.state), profile));
+        let mut profile = if let Some(bytes) = bytes {
+            match commit_bytes_impl_profiled(
+                constraint,
+                &mut self.state,
+                bytes,
+                &mut self.buffers,
+                Some(&mut advances),
+                profile_allow_fast_paths(),
+            ) {
+                Ok(profile) => profile,
+                Err(_) => {
+                    self.state.clear();
+                    self.buffers.clear_all();
+                    advances.clear();
+                    CommitProfile::default()
+                }
+            }
+        } else {
+            self.state.clear();
+            CommitProfile::default()
+        };
+        merge_special_token_paths(constraint, &mut self.state, special_paths);
+        profile.total_ns = total_started_at.elapsed().as_nanos() as u64;
+        let result = finish_token_commit(&self.state)
+            .map(|()| (advances, final_stacks(&self.state), profile));
         self.generation += 1;
         assert_mask_commit_equivalence(token_id, bytes, was_in_mask, result.is_ok());
         result

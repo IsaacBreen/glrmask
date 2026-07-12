@@ -24,7 +24,8 @@ pub use runtime::{Constraint, ConstraintState};
 /// incidental serde layout.
 pub const ARTIFACT_MAGIC: [u8; 8] = *b"GLRMASK\0";
 pub const LEGACY_ARTIFACT_VERSION: u16 = 2;
-pub const ARTIFACT_VERSION: u16 = 3;
+pub const V2_ARTIFACT_VERSION: u16 = 3;
+pub const ARTIFACT_VERSION: u16 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeArtifact {
@@ -33,7 +34,7 @@ pub struct RuntimeArtifact {
 
 impl RuntimeArtifact {
     pub fn from_compiled_constraint(constraint: &Constraint) -> Self {
-        Self::from_runtime_payload_v2(constraint.save_runtime_payload_v2())
+        Self::from_runtime_payload_v3(constraint.save_runtime_payload_v3())
     }
 
     /// Wrap bytes produced by `Constraint::save_runtime_payload_v1`.
@@ -46,6 +47,11 @@ impl RuntimeArtifact {
 
     /// Wrap bytes produced by `Constraint::save_runtime_payload_v2`.
     pub fn from_runtime_payload_v2(payload: Vec<u8>) -> Self {
+        Self::from_versioned_payload(V2_ARTIFACT_VERSION, payload)
+    }
+
+    /// Wrap bytes produced by `Constraint::save_runtime_payload_v3`.
+    pub fn from_runtime_payload_v3(payload: Vec<u8>) -> Self {
         Self::from_versioned_payload(ARTIFACT_VERSION, payload)
     }
 
@@ -66,7 +72,10 @@ impl RuntimeArtifact {
             return Err(GlrMaskError::Serialization("invalid glrmask runtime artifact magic".to_owned()));
         }
         let version = u16::from_le_bytes([bytes[8], bytes[9]]);
-        if !matches!(version, LEGACY_ARTIFACT_VERSION | ARTIFACT_VERSION) {
+        if !matches!(
+            version,
+            LEGACY_ARTIFACT_VERSION | V2_ARTIFACT_VERSION | ARTIFACT_VERSION
+        ) {
             return Err(GlrMaskError::Serialization(format!("unsupported glrmask runtime artifact version {version}")));
         }
         let length = usize::try_from(u64::from_le_bytes(
@@ -87,7 +96,8 @@ impl RuntimeArtifact {
         let version = u16::from_le_bytes([self.bytes[8], self.bytes[9]]);
         match version {
             LEGACY_ARTIFACT_VERSION => Constraint::load_runtime_payload_v1(&self.bytes[18..]),
-            ARTIFACT_VERSION => Constraint::load_runtime_payload_v2(&self.bytes[18..]),
+            V2_ARTIFACT_VERSION => Constraint::load_runtime_payload_v2(&self.bytes[18..]),
+            ARTIFACT_VERSION => Constraint::load_runtime_payload_v3(&self.bytes[18..]),
             _ => unreachable!("RuntimeArtifact::from_bytes validates the envelope version"),
         }
     }

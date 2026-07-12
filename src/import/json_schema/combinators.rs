@@ -1426,6 +1426,7 @@ fn llguidance_plain_open_object_subsumption_candidate(object: &ObjectSchema) -> 
 fn all_of_intersection_terminal_safe(expr: &GrammarExpr) -> bool {
     match expr {
         GrammarExpr::Literal(_)
+        | GrammarExpr::SpecialToken(_)
         | GrammarExpr::CharClass { .. }
         | GrammarExpr::RawRegex(_)
         | GrammarExpr::LexerDfa(_)
