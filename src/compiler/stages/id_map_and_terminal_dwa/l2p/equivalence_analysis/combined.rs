@@ -595,7 +595,84 @@ fn try_analyze_equivalences_with_token_position_partition(
     let exact_rep_confirmation_used = query_states.len() >= EXACT_REP_CONFIRMATION_MIN_STATES
         && dedup.representative_token_bytes.len() >= EXACT_REP_CONFIRMATION_MIN_TOKENS;
     let exact_started_at = Instant::now();
-    let state_representatives = if exact_rep_confirmation_used {
+    let shared_first_byte = bounded_analysis.as_ref().and_then(|_| {
+        let first = dedup
+            .representative_token_bytes
+            .first()
+            .and_then(|token| token.first())
+            .copied()?;
+        dedup
+            .representative_token_bytes
+            .iter()
+            .all(|token| token.len() > 1 && token.first().copied() == Some(first))
+            .then_some(first)
+    });
+    let state_representatives = if let Some(common_first) = shared_first_byte {
+        let mut prefix_targets = BTreeSet::<usize>::new();
+        let mut target_by_source = Vec::<u32>::with_capacity(query_states.len());
+        for &source in &query_states {
+            let target = tokenizer_view.dfa().trans(source, common_first as usize);
+            target_by_source.push(target);
+            if target != u32::MAX {
+                prefix_targets.insert(target as usize);
+            }
+        }
+        let prefix_targets = prefix_targets.into_iter().collect::<Vec<_>>();
+        let suffix_tokens = dedup
+            .representative_token_bytes
+            .iter()
+            .map(|token| &token[1..])
+            .collect::<Vec<_>>();
+        let prefix_target_representatives = if exact_rep_confirmation_used {
+            state_equivalence_analysis::find_state_equivalence_classes_ex_with_rep_confirmation_and_disallowed_and_shared_base_with_initial_finalizers(
+                    &tokenizer_view,
+                    &suffix_tokens,
+                    &prefix_targets,
+                    &normalized_disallowed_follows,
+                    None,
+                    None,
+                    Some(true),
+                    compatible_shared_base,
+                )
+        } else {
+            state_equivalence_analysis::find_state_equivalence_classes_with_disallowed_and_shared_base_with_initial_finalizers(
+                    &tokenizer_view,
+                    &suffix_tokens,
+                    &prefix_targets,
+                    &normalized_disallowed_follows,
+                    compatible_shared_base,
+                )
+        };
+        let behavior_for_target = prefix_targets
+            .iter()
+            .copied()
+            .zip(prefix_target_representatives)
+            .collect::<BTreeMap<_, _>>();
+        let mut representative_for_behavior = BTreeMap::<Option<usize>, usize>::new();
+        let behavior_by_source = target_by_source
+            .iter()
+            .map(|&target| {
+                (target != u32::MAX).then(|| behavior_for_target[&(target as usize)])
+            })
+            .collect::<Vec<_>>();
+        for (&source, &behavior) in query_states.iter().zip(&behavior_by_source) {
+            representative_for_behavior.entry(behavior).or_insert(source);
+        }
+        if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
+            eprintln!(
+                "[glrmask/profile][token_boundary_first_byte_factorization] partition={} first_byte={} source_states={} prefix_targets={} behavior_classes={}",
+                partition_label,
+                common_first,
+                query_states.len(),
+                prefix_targets.len(),
+                representative_for_behavior.len(),
+            );
+        }
+        behavior_by_source
+            .into_iter()
+            .map(|behavior| representative_for_behavior[&behavior])
+            .collect()
+    } else if exact_rep_confirmation_used {
         state_equivalence_analysis::find_state_equivalence_classes_ex_with_rep_confirmation_and_disallowed_and_shared_base(
             &tokenizer_view,
             &dedup.representative_token_bytes,
@@ -1939,6 +2016,66 @@ mod prepass_selection_tests {
             partition_from_representatives(&states, &reversed_state_reps),
         );
         assert_eq!(old_vocab, reversed_vocab);
+    }
+
+    #[test]
+    fn one_byte_common_prefix_factorization_matches_full_token_state_equivalence() {
+        let view = synthetic_view();
+        let tokens: Vec<&[u8]> = vec![b"aa", b"ab", b"aaa", b"abb"];
+        let suffix_tokens: Vec<&[u8]> = tokens.iter().map(|token| &token[1..]).collect();
+        let states: Vec<usize> = (0..view.dfa().states.len()).collect();
+        let normalized = normalize_disallowed_follows(2, &BTreeMap::new());
+
+        let full = state_equivalence_analysis::find_state_equivalence_classes_with_disallowed(
+            &view,
+            &tokens,
+            &states,
+            &normalized,
+        );
+
+        let mut prefix_targets = BTreeSet::<usize>::new();
+        let targets = states
+            .iter()
+            .map(|&source| view.dfa().trans(source, b'a' as usize))
+            .collect::<Vec<_>>();
+        for &target in &targets {
+            if target != u32::MAX {
+                prefix_targets.insert(target as usize);
+            }
+        }
+        let prefix_targets = prefix_targets.into_iter().collect::<Vec<_>>();
+        let target_representatives = state_equivalence_analysis::
+            find_state_equivalence_classes_with_disallowed_and_shared_base_with_initial_finalizers(
+                &view,
+                &suffix_tokens,
+                &prefix_targets,
+                &normalized,
+                None,
+            );
+        let behavior_for_target = prefix_targets
+            .iter()
+            .copied()
+            .zip(target_representatives)
+            .collect::<BTreeMap<_, _>>();
+        let behaviors = targets
+            .iter()
+            .map(|&target| {
+                (target != u32::MAX).then(|| behavior_for_target[&(target as usize)])
+            })
+            .collect::<Vec<_>>();
+        let mut representative_for_behavior = BTreeMap::<Option<usize>, usize>::new();
+        for (&source, &behavior) in states.iter().zip(&behaviors) {
+            representative_for_behavior.entry(behavior).or_insert(source);
+        }
+        let factored = behaviors
+            .into_iter()
+            .map(|behavior| representative_for_behavior[&behavior])
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            partition_from_representatives(&states, &full),
+            partition_from_representatives(&states, &factored),
+        );
     }
 
     #[test]

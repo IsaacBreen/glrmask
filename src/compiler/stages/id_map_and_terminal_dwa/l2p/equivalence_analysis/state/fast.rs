@@ -545,6 +545,35 @@ pub fn find_state_equivalence_classes_with_disallowed_and_shared_base<S: AsRef<[
     )
 }
 
+/// Exact common-prefix sibling of the ordinary shared-base entry point. The
+/// caller has already consumed one byte before each supplied start state, so
+/// finalizers on that state are matches at byte position zero for the remaining
+/// token suffix.
+pub(crate) fn find_state_equivalence_classes_with_disallowed_and_shared_base_with_initial_finalizers<
+    S: AsRef<[u8]> + Sync,
+>(
+    tokenizer: &TokenizerView,
+    tokens: &[S],
+    states: &[usize],
+    disallowed_follows: &[BitSet],
+    shared_base: Option<&SharedVocabDfaBase>,
+) -> Vec<usize> {
+    find_state_equivalence_classes_ex_inner(
+        tokenizer,
+        tokens,
+        states,
+        &[],
+        FollowRows::Dense(Some(disallowed_follows)),
+        None,
+        None,
+        None,
+        false,
+        shared_base,
+        false,
+        true,
+    )
+}
+
 /// Exact sibling of the dense follow-table entry point. It borrows only the
 /// non-empty grammar rows and derives the same follow-row contexts by bitset
 /// equality, avoiding a dense terminal-square normalization for tiny vocab
@@ -703,6 +732,37 @@ pub fn find_state_equivalence_classes_ex_with_rep_confirmation_and_disallowed_an
         shared_base,
         false,
         false,
+    )
+}
+
+/// Exact common-prefix sibling of the shared-base entry point. The caller has
+/// already consumed one byte before each supplied start state, so finalizers on
+/// that state are matches at byte position zero for the remaining token suffix.
+pub(crate) fn find_state_equivalence_classes_ex_with_rep_confirmation_and_disallowed_and_shared_base_with_initial_finalizers<
+    S: AsRef<[u8]> + Sync,
+>(
+    tokenizer: &TokenizerView,
+    tokens: &[S],
+    states: &[usize],
+    disallowed_follows: &[BitSet],
+    max_batches: Option<usize>,
+    batch_size: Option<usize>,
+    early_stop_override: Option<bool>,
+    shared_base: Option<&SharedVocabDfaBase>,
+) -> Vec<usize> {
+    find_state_equivalence_classes_ex_inner(
+        tokenizer,
+        tokens,
+        states,
+        &[],
+        FollowRows::Dense(Some(disallowed_follows)),
+        max_batches,
+        batch_size,
+        early_stop_override,
+        true,
+        shared_base,
+        false,
+        true,
     )
 }
 
