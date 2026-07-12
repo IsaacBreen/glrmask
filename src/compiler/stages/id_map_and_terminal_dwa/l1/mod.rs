@@ -104,6 +104,12 @@ fn index_l1_walk_profile<'a>(
 struct L1ExactProfileReuse {
     target_to_profile_id: FxHashMap<(u8, u32), u32>,
     walk_profiles_by_id: Vec<L1WalkProfile>,
+    /// Exact-profile representative aligned with each pre-isolation L1 TSID
+    /// for deterministic epsilon dispatch.
+    /// Structured epsilon dispatch may later split the synthetic initial state
+    /// into a new TSID, but every deterministic component state still maps
+    /// through one of these proved scalar profile representatives.
+    profile_representatives_by_internal: Arc<[u32]>,
     /// Exact whole-token behavior for every state retained as an L1 id-map
     /// representative. Entries are aligned with the non-empty first-byte
     /// buckets and use zero for an empty suffix profile.
@@ -1077,14 +1083,15 @@ fn build_l1_id_map<'a>(
     let mut max_length_representatives = equiv_mapping.clone();
     max_length_representatives.sort_unstable();
     max_length_representatives.dedup();
-    let (exact_mapping, exact_profile_reuse) = find_l1_exact_state_equivalence_by_token_signatures(
-        tokenizer,
-        order.as_ref(),
-        &max_length_representatives,
-        active_terminals,
-        flat_trans.as_ref(),
-        transitions_by_byte,
-    );
+    let (exact_mapping, mut exact_profile_reuse) =
+        find_l1_exact_state_equivalence_by_token_signatures(
+            tokenizer,
+            order.as_ref(),
+            &max_length_representatives,
+            active_terminals,
+            flat_trans.as_ref(),
+            transitions_by_byte,
+        );
     let exact_state_equiv_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
     let mut max_rep_to_exact_rep = FxHashMap::<usize, usize>::default();
     for (&max_rep, &exact_rep) in max_length_representatives.iter().zip(exact_mapping.iter()) {
@@ -1135,6 +1142,11 @@ fn build_l1_id_map<'a>(
     let token_ids_sorted = order.token_ids_sorted.to_vec();
     let token_identity_map_ms =
         token_sort_ms + token_map_started_at.elapsed().as_secs_f64() * 1000.0;
+    if tokenizer.has_deterministic_dispatch()
+        && let Some(reuse) = exact_profile_reuse.as_mut()
+    {
+        reuse.profile_representatives_by_internal = Arc::from(state_representatives.clone());
+    }
     let mut tokenizer_states = ManyToOneIdMap::from_original_to_internal_with_representatives(
         state_original_to_internal,
         state_representatives.len() as u32,
@@ -1145,11 +1157,6 @@ fn build_l1_id_map<'a>(
     }
     let state_to_rep = state_to_representative_vector(&tokenizer_states, num_dfa_states);
     let exact_reps = tokenizer_states.num_internal_ids() as usize;
-    let exact_profile_reuse = if tokenizer.has_deterministic_dispatch() {
-        None
-    } else {
-        exact_profile_reuse
-    };
 
     (
         InternalIdMap {
@@ -1629,6 +1636,7 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
         Some(L1ExactProfileReuse {
             target_to_profile_id,
             walk_profiles_by_id,
+            profile_representatives_by_internal: Arc::from([]),
             representative_profile_ids,
             // Exact-equivalence signature ids reserve zero for empty. The
             // direct DWA builder uses `u32::MAX` for empty and zero-based ids
@@ -2875,6 +2883,8 @@ fn build_l1_terminal_dwa(
 
     let state_seed_started_at = Instant::now();
     let mut states_to_initial_tsids = FxHashMap::<u32, Vec<u32>>::default();
+    let dispatch_profile_reuse = exact_profile_reuse
+        .filter(|_| tokenizer.has_deterministic_dispatch());
     for (internal_tsid, representative_state) in id_map
         .tokenizer_states
         .iter_representative_ids()
@@ -2885,17 +2895,44 @@ fn build_l1_terminal_dwa(
             && let Some(dispatch_roots) = tokenizer.deterministic_dispatch_roots()
         {
             for &dispatch_root in dispatch_roots {
+                let start_state = if let Some(reuse) = dispatch_profile_reuse {
+                    let root_internal = id_map.tokenizer_states.original_to_internal
+                        [dispatch_root as usize];
+                    assert_ne!(
+                        root_internal,
+                        u32::MAX,
+                        "deterministic dispatch root missing from L1 tokenizer-state map"
+                    );
+                    *reuse
+                        .profile_representatives_by_internal
+                        .get(root_internal as usize)
+                        .expect("dispatch root refers to post-isolation-only L1 TSID")
+                } else {
+                    dispatch_root
+                };
                 states_to_initial_tsids
-                    .entry(dispatch_root)
+                    .entry(start_state)
                     .or_default()
                     .push(internal_tsid as u32);
             }
             continue;
         }
+        let start_state = dispatch_profile_reuse.map_or(representative_state, |reuse| {
+            *reuse
+                .profile_representatives_by_internal
+                .get(internal_tsid)
+                .expect("ordinary structured-dispatch TSID missing pre-isolation profile representative")
+        });
         states_to_initial_tsids
-            .entry(representative_state)
+            .entry(start_state)
             .or_default()
             .push(internal_tsid as u32);
+    }
+    if dispatch_profile_reuse.is_some() {
+        for tsids in states_to_initial_tsids.values_mut() {
+            tsids.sort_unstable();
+            tsids.dedup();
+        }
     }
     let state_seed_ms = state_seed_started_at.elapsed().as_secs_f64() * 1000.0;
     let dead = u32::MAX;
@@ -3403,8 +3440,9 @@ fn build_l1_terminal_dwa(
     // interning vector. This avoids one FxHashMap allocation per TSID and the
     // intermediate Vec<Vec<_>>/flatten pass, while retaining the established
     // parallel and fallback paths unchanged.
-    let serial_exact_profile_collection =
-        exact_profile_reuse.is_some() && rayon::current_num_threads() == 1;
+    let serial_exact_profile_collection = exact_profile_reuse.is_some()
+        && rayon::current_num_threads() == 1
+        && !tokenizer.has_deterministic_dispatch();
     let mut all_entries: Vec<(u32, u32, LazyRanges<'_>)> = if serial_exact_profile_collection {
         let reuse = exact_profile_reuse.expect("missing exact L1 profile reuse");
         let profiles = indexed_reuse_profiles
@@ -4276,7 +4314,9 @@ mod packed_suffix_product_tests {
 
     use super::*;
     use crate::automata::lexer::ast::Expr;
-    use crate::automata::lexer::compile::build_regex;
+    use crate::automata::lexer::compile::{
+        build_regex, build_regex_partitioned_with_adaptive,
+    };
 
     #[test]
     fn packed_suffix_profiles_match_batched_profiles() {
@@ -4395,6 +4435,7 @@ mod packed_suffix_product_tests {
                 freeze_l1_walk_profile(&empty),
                 freeze_l1_walk_profile(&profile_one),
             ],
+            profile_representatives_by_internal: Arc::from([]),
             representative_profile_ids: FxHashMap::default(),
             direct_terminal_signatures: Arc::from([]),
             direct_state_to_terminal_signature: Arc::from([]),
@@ -4406,6 +4447,230 @@ mod packed_suffix_product_tests {
             .map(|(signature, ranges)| (*signature, ranges.as_ref().to_vec()))
             .collect();
         assert_eq!(grouped, vec![(0, vec![(2, 3), (7, 8)]), (1, vec![(4, 4)])]);
+    }
+
+    #[test]
+    fn deterministic_dispatch_exact_profile_reuse_matches_scalar_and_fallback() {
+        let expressions = vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"ab".to_vec()),
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Seq(b"b".to_vec())),
+                min: 1,
+                max: None,
+            },
+        ];
+        let tokenizer = build_regex_partitioned_with_adaptive(
+            &expressions,
+            &[0, 1, 2],
+            false,
+        )
+        .into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.clone().into_boxed_slice())),
+        );
+        assert!(tokenizer.has_deterministic_dispatch());
+
+        let vocab = Vocab::new(
+            vec![
+                (0, b"".to_vec()),
+                (1, b"a".to_vec()),
+                (2, b"ab".to_vec()),
+                (3, b"b".to_vec()),
+                (4, b"bb".to_vec()),
+                (5, b"x".to_vec()),
+            ],
+            None,
+        );
+        let active_terminals = vec![true; expressions.len()];
+        let flat_trans: Arc<[u32]> = build_flat_transition_table(&tokenizer).into();
+        let (id_map, order, _, _, exact_profile_reuse) = build_l1_id_map(
+            "test",
+            &tokenizer,
+            &vocab,
+            &active_terminals,
+            &flat_trans,
+            None,
+            None,
+        );
+        let exact_profile_reuse =
+            exact_profile_reuse.expect("structured dispatch must retain exact L1 profiles");
+
+        let mut optimized_id_map = id_map.clone();
+        let mut fallback_id_map = id_map;
+        let (optimized, _) = build_l1_terminal_dwa(
+            &tokenizer,
+            order.as_ref(),
+            &mut optimized_id_map,
+            expressions.len() as u32,
+            &active_terminals,
+            flat_trans.as_ref(),
+            Some(&exact_profile_reuse),
+        )
+        .expect("optimized L1 DWA");
+        let (fallback, _) = build_l1_terminal_dwa(
+            &tokenizer,
+            order.as_ref(),
+            &mut fallback_id_map,
+            expressions.len() as u32,
+            &active_terminals,
+            flat_trans.as_ref(),
+            None,
+        )
+        .expect("fallback L1 DWA");
+
+        for raw_state in 0..tokenizer.num_states() {
+            let optimized_tsid =
+                optimized_id_map.tokenizer_states.original_to_internal[raw_state as usize];
+            let fallback_tsid =
+                fallback_id_map.tokenizer_states.original_to_internal[raw_state as usize];
+            assert_ne!(optimized_tsid, u32::MAX, "raw_state={raw_state}");
+            assert_ne!(fallback_tsid, u32::MAX, "raw_state={raw_state}");
+
+            for (&token_id, bytes) in vocab.entries.iter() {
+                let optimized_token =
+                    optimized_id_map.vocab_tokens.original_to_internal[token_id as usize];
+                let fallback_token =
+                    fallback_id_map.vocab_tokens.original_to_internal[token_id as usize];
+                let end_states = tokenizer.execute_from_state_end_only(bytes, raw_state);
+
+                for terminal in 0..expressions.len() as u32 {
+                    let expected = end_states.iter().any(|&state| {
+                        collect_active_terminal_signature(
+                            &tokenizer,
+                            state,
+                            &active_terminals,
+                        )
+                        .contains(&terminal)
+                    });
+                    let optimized_actual = optimized
+                        .eval_word(&[terminal as i32])
+                        .tokens_for_tsid(optimized_tsid)
+                        .contains(optimized_token);
+                    let fallback_actual = fallback
+                        .eval_word(&[terminal as i32])
+                        .tokens_for_tsid(fallback_tsid)
+                        .contains(fallback_token);
+                    assert_eq!(
+                        fallback_actual, expected,
+                        "fallback raw_state={raw_state} token={token_id} bytes={bytes:?} terminal={terminal}"
+                    );
+                    assert_eq!(
+                        optimized_actual, expected,
+                        "optimized raw_state={raw_state} token={token_id} bytes={bytes:?} terminal={terminal}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn deterministic_dispatch_reuse_survives_initial_profile_class_isolation() {
+        let expressions = vec![
+            Expr::U8Seq(b"z".to_vec()),
+            Expr::U8Seq(b"q".to_vec()),
+        ];
+        let tokenizer = build_regex_partitioned_with_adaptive(
+            &expressions,
+            &[0, 1],
+            false,
+        )
+        .into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.clone().into_boxed_slice())),
+        );
+        assert!(tokenizer.has_deterministic_dispatch());
+
+        let vocab = Vocab::new(
+            vec![(0, b"".to_vec()), (1, b"a".to_vec())],
+            None,
+        );
+        let active_terminals = vec![true, false];
+        let flat_trans: Arc<[u32]> = build_flat_transition_table(&tokenizer).into();
+        let (id_map, order, _, _, exact_profile_reuse) = build_l1_id_map(
+            "test",
+            &tokenizer,
+            &vocab,
+            &active_terminals,
+            &flat_trans,
+            None,
+            None,
+        );
+        let exact_profile_reuse =
+            exact_profile_reuse.expect("structured dispatch must retain exact L1 profiles");
+        assert_eq!(
+            id_map.num_tsids() as usize,
+            exact_profile_reuse.profile_representatives_by_internal.len() + 1,
+            "the synthetic initial state must be split out of a pre-isolation exact profile class",
+        );
+        let initial_tsid =
+            id_map.tokenizer_states.original_to_internal[tokenizer.initial_state_id() as usize];
+        assert_eq!(
+            initial_tsid as usize,
+            exact_profile_reuse.profile_representatives_by_internal.len(),
+            "isolate_original must append the synthetic initial TSID without renaming existing exact classes",
+        );
+
+        let mut optimized_id_map = id_map.clone();
+        let mut fallback_id_map = id_map;
+        let (optimized, _) = build_l1_terminal_dwa(
+            &tokenizer,
+            order.as_ref(),
+            &mut optimized_id_map,
+            expressions.len() as u32,
+            &active_terminals,
+            flat_trans.as_ref(),
+            Some(&exact_profile_reuse),
+        )
+        .expect("optimized L1 DWA");
+        let (fallback, _) = build_l1_terminal_dwa(
+            &tokenizer,
+            order.as_ref(),
+            &mut fallback_id_map,
+            expressions.len() as u32,
+            &active_terminals,
+            flat_trans.as_ref(),
+            None,
+        )
+        .expect("fallback L1 DWA");
+
+        for raw_state in 0..tokenizer.num_states() {
+            let optimized_tsid =
+                optimized_id_map.tokenizer_states.original_to_internal[raw_state as usize];
+            let fallback_tsid =
+                fallback_id_map.tokenizer_states.original_to_internal[raw_state as usize];
+            for (&token_id, bytes) in vocab.entries.iter() {
+                let optimized_token =
+                    optimized_id_map.vocab_tokens.original_to_internal[token_id as usize];
+                let fallback_token =
+                    fallback_id_map.vocab_tokens.original_to_internal[token_id as usize];
+                let end_states = tokenizer.execute_from_state_end_only(bytes, raw_state);
+                let expected = end_states.iter().any(|&state| {
+                    collect_active_terminal_signature(
+                        &tokenizer,
+                        state,
+                        &active_terminals,
+                    )
+                    .contains(&0)
+                });
+                let optimized_actual = optimized
+                    .eval_word(&[0])
+                    .tokens_for_tsid(optimized_tsid)
+                    .contains(optimized_token);
+                let fallback_actual = fallback
+                    .eval_word(&[0])
+                    .tokens_for_tsid(fallback_tsid)
+                    .contains(fallback_token);
+                assert_eq!(
+                    optimized_actual, expected,
+                    "optimized raw_state={raw_state} token={token_id} bytes={bytes:?}",
+                );
+                assert_eq!(
+                    fallback_actual, expected,
+                    "fallback raw_state={raw_state} token={token_id} bytes={bytes:?}",
+                );
+            }
+        }
     }
 
     #[test]
