@@ -1931,7 +1931,10 @@ mod tests {
             &id_map,
             &tree.root,
             &mut possible_matches,
-            &visible_output_raw_labels(&partition, tokenizer.num_terminals() as usize),
+            &visible_output_raw_labels(
+                &partition,
+                &vec![true; tokenizer.num_terminals() as usize],
+            ),
             &modes,
         );
 
@@ -1986,7 +1989,10 @@ mod tests {
             &tokenizer,
             &tree,
             &id_map,
-            &visible_output_raw_labels(&partition, tokenizer.num_terminals() as usize),
+            &visible_output_raw_labels(
+                &partition,
+                &vec![true; tokenizer.num_terminals() as usize],
+            ),
             &modes,
         );
         super::super::terminal_dwa_equivalence::compare(&baseline, &compact)
