@@ -332,12 +332,19 @@ fn direct_refinement_work_is_no_larger(
 
 #[inline]
 fn l2p_nfa_relevant_powerset_view_enabled() -> bool {
+    // The complete relevant-byte powerset can be a useful opt-in when the
+    // bounded token-trajectory view would explode, but it is substantially
+    // larger on the common partitioned-schema shape. In BFCL p0 the exact
+    // results are identical while the full view makes byte-class and exact
+    // token analysis traverse ~19k configurations, taking the id-map from
+    // roughly 6 ms to 55-65 ms. Keep the bounded exact route as the default;
+    // callers can still force the full powerset with `=1`.
     std::env::var("GLRMASK_L2P_NFA_RELEVANT_POWERSET_VIEW")
         .map(|value| {
             let trimmed = value.trim();
             trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
         })
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 fn should_skip_max_length_for_partition(
