@@ -238,6 +238,29 @@ pub(crate) fn build_relevant_powerset_view(
                 "powerset states must be processed in interning order",
             );
             let config = configs[state as usize].clone();
+            if let [source] = config.as_ref() {
+                // Raw starts were all seeded before traversal, so the exact
+                // epsilon closure of every direct byte target is already
+                // interned in `raw_start_to_view`. A singleton powerset config
+                // is itself epsilon-closed, hence its byte successor is exactly
+                // the pre-interned closure of the one direct raw target. Avoid
+                // rebuilding that closure and hashing the same config again.
+                for (byte, raw_target) in tokenizer.transitions_from(*source) {
+                    if !relevant_bytes[byte as usize] {
+                        continue;
+                    }
+                    let target = raw_start_to_view[raw_target as usize];
+                    debug_assert_ne!(target, u32::MAX);
+                    edges.push((byte, target));
+                    if !queued[target as usize] {
+                        queued[target as usize] = true;
+                        worklist.push_back(target);
+                    }
+                }
+                edge_offsets.push(edges.len() as u32);
+                continue;
+            }
+
             byte_epoch = byte_epoch.wrapping_add(1);
             if byte_epoch == 0 {
                 byte_marks.fill(0);
