@@ -10,7 +10,7 @@ use crate::runtime::state::{ConstraintState, MaskCacheData};
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use self::profile::{
@@ -34,6 +34,54 @@ type DenseMaskGSS = LeveledGSS<u32, DenseMaskAcc>;
 const DELTA_SEED_MIN_SAVINGS: u64 = 2048;
 const MASK_SINGLE_PATH_DIRECT_MAX_DEPTH: u32 = 64;
 const MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_PATHS: usize = 8;
+
+fn dynamic_mask_equivalence_assert_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("GLRMASK_ASSERT_DYNAMIC_MASK_EQUIVALENCE")
+            .map(|value| {
+                let normalized = value.trim().to_ascii_lowercase();
+                matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(false)
+    })
+}
+
+fn assert_dynamic_mask_equivalence(state: &ConstraintState<'_>, static_mask: &[u32]) {
+    if !dynamic_mask_equivalence_assert_enabled() {
+        return;
+    }
+
+    let mut dynamic_mask = vec![0u32; state.constraint.mask_len()];
+    state.fill_mask_dynamic(&mut dynamic_mask);
+    if static_mask == dynamic_mask {
+        return;
+    }
+
+    let mut differing_token_ids = Vec::new();
+    let mut differing_count = 0usize;
+    for (word_index, (&static_word, &dynamic_word)) in
+        static_mask.iter().zip(&dynamic_mask).enumerate()
+    {
+        let mut differing_bits = static_word ^ dynamic_word;
+        while differing_bits != 0 {
+            let bit = differing_bits.trailing_zeros() as usize;
+            differing_count += 1;
+            if differing_token_ids.len() < 64 {
+                differing_token_ids.push(word_index * 32 + bit);
+            }
+            differing_bits &= differing_bits - 1;
+        }
+    }
+
+    panic!(
+        "dynamic/static mask mismatch at generation {}: differing_tokens={} first_differing_token_ids={:?} parser_state_keys={:?}",
+        state.generation,
+        differing_count,
+        differing_token_ids,
+        state.state.keys().copied().collect::<Vec<_>>(),
+    );
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct DenseTokenSetIntersectionKey {
@@ -1846,11 +1894,10 @@ impl<'a> ConstraintState<'a> {
     }
 
     pub fn fill_mask(&self, buf: &mut [u32]) {
-        if self.try_fill_mask_from_cache(buf) {
-            return;
+        if !self.try_fill_mask_from_cache(buf) {
+            self.fill_mask_uncached(buf);
         }
-
-        self.fill_mask_uncached(buf);
+        assert_dynamic_mask_equivalence(self, buf);
     }
 
     pub(crate) fn fill_mask_timed_ns(&self, buf: &mut [u32]) -> u64 {
