@@ -8929,8 +8929,13 @@ struct GroupCoordinateSignature {
 }
 
 struct GroupCoordinatePlan {
-    overrides: Vec<(u32, u32)>,
+    #[cfg(debug_assertions)]
+    reference_overrides: Vec<(u32, u32)>,
     signatures: Vec<GroupCoordinateSignature>,
+    // Final TSIDs are grouped by the exact `(ordinary coordinate, alternate
+    // coordinates)` signature that determines both their base and transported
+    // token sets for every lifted core weight.
+    final_tsids_by_signature: Vec<Box<[u32]>>,
     coordinates: Vec<u32>,
 }
 
@@ -9250,11 +9255,21 @@ impl PostDwaWeightLifter {
             }
         }
 
+        let mut final_tsids_by_signature = vec![Vec::<u32>::new(); signatures.len()];
+        for &(final_tsid, signature) in &overrides {
+            final_tsids_by_signature[signature as usize].push(final_tsid);
+        }
+
         self.group_coordinate_plans.insert(
             mode_indices.to_vec(),
             GroupCoordinatePlan {
-                overrides,
+                #[cfg(debug_assertions)]
+                reference_overrides: overrides,
                 signatures,
+                final_tsids_by_signature: final_tsids_by_signature
+                    .into_iter()
+                    .map(Vec::into_boxed_slice)
+                    .collect(),
                 coordinates,
             },
         );
@@ -9331,22 +9346,48 @@ impl PostDwaWeightLifter {
                     tokens
                 })
                 .collect();
-            plan.overrides
-                .iter()
-                .zip(base.shared_tokens_for_sorted_tsids(
-                    &plan
-                        .overrides
+            let mut overrides = Vec::<(u32, SharedTokenSet)>::new();
+            for (signature_index, signature) in plan.signatures.iter().enumerate() {
+                let tokens = &transformed_tokens[signature_index];
+                let base_tokens = &coordinate_tokens[signature.base_coordinate_index];
+                if Arc::ptr_eq(tokens, base_tokens) || tokens.as_ref() == base_tokens.as_ref() {
+                    continue;
+                }
+                overrides.extend(
+                    plan.final_tsids_by_signature[signature_index]
                         .iter()
-                        .map(|&(final_tsid, _)| final_tsid)
-                        .collect::<Vec<_>>(),
-                ))
-                .filter_map(|(&(final_tsid, signature), base_tokens)| {
-                    let tokens = &transformed_tokens[signature as usize];
-                    let differs = !Arc::ptr_eq(tokens, &base_tokens)
-                        && tokens.as_ref() != base_tokens.as_ref();
-                    differs.then(|| (final_tsid, Arc::clone(tokens)))
-                })
-                .collect::<Vec<_>>()
+                        .map(|&final_tsid| (final_tsid, Arc::clone(tokens))),
+                );
+            }
+            // `with_sparse_tsid_overrides_intersection` consumes a sparse TSID
+            // stream in ascending coordinate order. Grouping by signature above
+            // changes only construction order, so restore the plan's canonical
+            // final-TSID order before applying the exact same overrides.
+            overrides.sort_unstable_by_key(|&(final_tsid, _)| final_tsid);
+
+            #[cfg(debug_assertions)]
+            {
+                let reference = plan
+                    .reference_overrides
+                    .iter()
+                    .zip(base.shared_tokens_for_sorted_tsids(
+                        &plan
+                            .reference_overrides
+                            .iter()
+                            .map(|&(final_tsid, _)| final_tsid)
+                            .collect::<Vec<_>>(),
+                    ))
+                    .filter_map(|(&(final_tsid, signature), base_tokens)| {
+                        let tokens = &transformed_tokens[signature as usize];
+                        let differs = !Arc::ptr_eq(tokens, &base_tokens)
+                            && tokens.as_ref() != base_tokens.as_ref();
+                        differs.then(|| (final_tsid, Arc::clone(tokens)))
+                    })
+                    .collect::<Vec<_>>();
+                debug_assert_eq!(overrides, reference);
+            }
+
+            overrides
         };
         if let Some(started_at) = started_at {
             self.profile_signature_ms += started_at.elapsed().as_secs_f64() * 1000.0;
