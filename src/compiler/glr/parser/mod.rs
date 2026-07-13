@@ -3521,6 +3521,120 @@ mod tests {
         )
     }
 
+    fn assert_advance_matches_concrete_reference_case(
+        table: &GLRTable,
+        before: &ParserGSS,
+        token: u32,
+        case: &str,
+    ) {
+        let actual = advance_stacks(table, before, token);
+        let expected = advance_concrete_stacks_reference(table, before, token);
+        assert_eq!(
+            super::normalized_concrete_stacks(&actual),
+            super::normalized_concrete_stacks(&expected),
+            "{case}: before={:?}",
+            before.to_stacks(),
+        );
+    }
+
+    #[test]
+    fn generated_mixed_pop1_frontier_actions_match_concrete_reference() {
+        let token = 0;
+        let nt0 = 0;
+        let nt1 = 1;
+        let actions = vec![
+            None,
+            Some(Action::Shift(40, false)),
+            Some(Action::Shift(41, true)),
+            Some(Action::StackShifts(vec![StackShift {
+                pop: 0,
+                pushes: vec![42],
+            }])),
+            Some(Action::StackShifts(vec![StackShift {
+                pop: 1,
+                pushes: vec![43],
+            }])),
+            Some(Action::StackShifts(vec![StackShift {
+                pop: 1,
+                pushes: vec![44, 45],
+            }])),
+            Some(Action::StackShifts(vec![StackShift {
+                pop: 2,
+                pushes: vec![46],
+            }])),
+            Some(Action::StackShifts(vec![
+                StackShift {
+                    pop: 1,
+                    pushes: vec![47],
+                },
+                StackShift {
+                    pop: 2,
+                    pushes: vec![48],
+                },
+            ])),
+            Some(Action::Reduce(nt0, 1)),
+            Some(Action::Reduce(nt1, 1)),
+            Some(Action::Split {
+                shift: Some((49, false)),
+                reduces: vec![(nt0, 1)],
+                accept: false,
+            }),
+            Some(Action::Split {
+                shift: None,
+                reduces: vec![(nt0, 1), (nt1, 1)],
+                accept: false,
+            }),
+            Some(Action::GuardedStackShifts(vec![GuardedStackShift {
+                guards: vec![StackShiftGuard {
+                    pop: 1,
+                    states: vec![10],
+                }],
+                pop: 2,
+                pushes: vec![52],
+            }])),
+        ];
+
+        for (left_index, left_action) in actions.iter().enumerate() {
+            for (right_index, right_action) in actions.iter().enumerate() {
+                let mut action_rows = vec![Vec::new(); 64];
+                if let Some(action) = left_action {
+                    action_rows[20].push((token, action.clone()));
+                }
+                if let Some(action) = right_action {
+                    action_rows[21].push((token, action.clone()));
+                }
+                action_rows[30].push((token, Action::Shift(50, false)));
+                action_rows[31].push((
+                    token,
+                    Action::StackShifts(vec![StackShift {
+                        pop: 1,
+                        pushes: vec![51],
+                    }]),
+                ));
+                let action_refs: Vec<&[(u32, Action)]> =
+                    action_rows.iter().map(Vec::as_slice).collect();
+
+                let mut goto_rows = vec![Vec::new(); 64];
+                goto_rows[10].push((nt0, (30, false)));
+                goto_rows[10].push((nt1, (31, false)));
+                let goto_refs: Vec<&[(u32, (u32, bool))]> =
+                    goto_rows.iter().map(Vec::as_slice).collect();
+                let table = build_test_table(64, 1, &action_refs, &goto_refs);
+
+                let left_acc = TerminalsDisallowed::new().with_insert(60, 0);
+                let right_acc = TerminalsDisallowed::new().with_insert(61, 0);
+                let before = ParserGSS::from_stacks(&[
+                    (vec![0, 10, 20], left_acc),
+                    (vec![0, 10, 21], right_acc),
+                ]);
+                let case = format!(
+                    "left_index={left_index} left={left_action:?} right_index={right_index} right={right_action:?}",
+                );
+                assert_advance_matches_concrete_reference_case(&table, &before, token, &case);
+            }
+        }
+    }
+
     #[test]
     fn generated_top_action_advance_distributes_over_branched_floor_merge() {
         let token = 0;
