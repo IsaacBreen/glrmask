@@ -15,6 +15,7 @@ use rustc_hash::FxHashMap;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::pm_profile::{elapsed_ms, profile_summary_enabled, PossibleMatchesProfile};
+use crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::compat::TokenizerView;
 use crate::ds::u8set::U8Set;
 use crate::ds::vocab_prefix_tree::VocabPrefixTreeNode;
 use crate::grammar::flat::TerminalID;
@@ -522,7 +523,8 @@ struct ChildPendingData<'a> {
 
 fn build_node(
     node: &VocabPrefixTreeNode,
-    tokenizer: &Tokenizer,
+    num_states: usize,
+    num_terminals: usize,
     active_states: &[u32],
     matched_terminals: &[Box<[TerminalID]>],
     matched_terminal_masks: Option<&[u128]>,
@@ -582,7 +584,7 @@ fn build_node(
                     stamp_gen,
                     timings,
                     node_terminal_ids,
-                    tokenizer.num_states() as usize,
+                    num_states,
                     dense_segment_cache_min_entries,
                     false,
                 ));
@@ -604,7 +606,7 @@ fn build_node(
                 stamp_gen,
                 timings,
                 node_terminal_ids,
-                tokenizer.num_states() as usize,
+                num_states,
                 dense_segment_cache_min_entries,
                 true,
             ))
@@ -685,13 +687,13 @@ fn build_node(
                 let mut local_stamp_gen = 0u32;
                 let mut local_active_seen_gen = 0u32;
                 let stamp_alloc_started_at = Instant::now();
-                let mut local_terminal_stamps = vec![0u32; tokenizer.num_terminals() as usize];
-                let mut local_active_seen_stamps = vec![0u32; tokenizer.num_states() as usize];
-                let mut local_active_seen_positions = vec![0u32; tokenizer.num_states() as usize];
+                let mut local_terminal_stamps = vec![0u32; num_terminals];
+                let mut local_active_seen_stamps = vec![0u32; num_states];
+                let mut local_active_seen_positions = vec![0u32; num_states];
                 local_timings.parallel_stamp_alloc_ms += elapsed_ms(stamp_alloc_started_at);
 
                 let recursive_started_at = Instant::now();
-                let result = build_node(pending.child, tokenizer, &pending.child_active_states, matched_terminals, matched_terminal_masks, node_terminal_ids, empty_terminals_id, is_end, byte_transitions, self_loop_bytes, canonical_state, &mut local_terminal_sets, &mut local_segment_cache, &mut local_segment_outcome_tables, &mut local_timings, &mut local_stamp_gen, &mut local_terminal_stamps, &mut local_active_seen_gen, &mut local_active_seen_stamps, &mut local_active_seen_positions, 0, parallel_min_active, dense_segment_cache_min_entries, None, None);
+                let result = build_node(pending.child, num_states, num_terminals, &pending.child_active_states, matched_terminals, matched_terminal_masks, node_terminal_ids, empty_terminals_id, is_end, byte_transitions, self_loop_bytes, canonical_state, &mut local_terminal_sets, &mut local_segment_cache, &mut local_segment_outcome_tables, &mut local_timings, &mut local_stamp_gen, &mut local_terminal_stamps, &mut local_active_seen_gen, &mut local_active_seen_stamps, &mut local_active_seen_positions, 0, parallel_min_active, dense_segment_cache_min_entries, None, None);
                 local_timings.recursive_ms += elapsed_ms(recursive_started_at);
                 let child_class_project_started_at = Instant::now();
                 let child_class_ids = pending.descend_positions.iter().map(|&pos| if pos == u32::MAX { u32::MAX } else { result.classes[pos as usize] }).collect();
@@ -719,7 +721,7 @@ fn build_node(
                 (NodeClasses { classes: Vec::new(), class_maps: Vec::new() }, vec![u32::MAX; pending.descend_positions.len()])
             } else {
                 let recursive_started_at = Instant::now();
-                let result = build_node(pending.child, tokenizer, &pending.child_active_states, matched_terminals, matched_terminal_masks, node_terminal_ids, empty_terminals_id, is_end, byte_transitions, self_loop_bytes, canonical_state, terminal_sets, segment_cache, segment_outcome_tables, timings, stamp_gen, terminal_stamps, active_seen_gen, active_seen_stamps, active_seen_positions, parallel_depth.saturating_sub(1), parallel_min_active, dense_segment_cache_min_entries, serial_segment_cache.as_deref_mut(), pending.child_active_set_id);
+                let result = build_node(pending.child, num_states, num_terminals, &pending.child_active_states, matched_terminals, matched_terminal_masks, node_terminal_ids, empty_terminals_id, is_end, byte_transitions, self_loop_bytes, canonical_state, terminal_sets, segment_cache, segment_outcome_tables, timings, stamp_gen, terminal_stamps, active_seen_gen, active_seen_stamps, active_seen_positions, parallel_depth.saturating_sub(1), parallel_min_active, dense_segment_cache_min_entries, serial_segment_cache.as_deref_mut(), pending.child_active_set_id);
                 timings.recursive_ms += elapsed_ms(recursive_started_at);
                 let child_class_project_started_at = Instant::now();
                 let child_class_ids = pending.descend_positions.iter().map(|&pos| if pos == u32::MAX { u32::MAX } else { result.classes[pos as usize] }).collect();
@@ -987,59 +989,79 @@ fn build_node(
     NodeClasses { classes, class_maps }
 }
 
-pub(crate) fn collect_possible_matches_interval_trie_class_build_with_classes(
-    tokenizer: &Tokenizer,
+fn collect_possible_matches_interval_trie_class_build_precomputed(
     root: &VocabPrefixTreeNode,
     entries: &[u32],
     canonical_state: Option<&[u32]>,
+    num_states: usize,
+    num_terminals: usize,
+    matched_terminals: &[Box<[TerminalID]>],
+    is_end: &[bool],
+    byte_transitions: &[Vec<u32>],
+    self_loop_bytes: &[U8Set],
 ) -> (TrieClassBuildResult, PossibleMatchesProfile) {
-    let matched_terminals: Vec<Box<[TerminalID]>> = (0..tokenizer.num_states()).map(|state| tokenizer.matched_terminals_iter(state).collect::<Vec<_>>().into_boxed_slice()).collect();
-    let matched_terminal_masks: Option<Vec<u128>> = if tokenizer.num_terminals() <= 128 {
-        Some((0..tokenizer.num_states()).map(|state| {
-            let mut mask = 0u128;
-            for terminal in tokenizer.matched_terminals_iter(state) {
-                mask |= 1u128 << terminal;
-            }
-            mask
-        }).collect())
+    debug_assert_eq!(matched_terminals.len(), num_states);
+    debug_assert_eq!(is_end.len(), num_states);
+    debug_assert_eq!(self_loop_bytes.len(), num_states);
+    debug_assert_eq!(byte_transitions.len(), 256);
+    debug_assert!(byte_transitions.iter().all(|column| column.len() == num_states));
+
+    let matched_terminal_masks: Option<Vec<u128>> = if num_terminals <= 128 {
+        Some(
+            matched_terminals
+                .iter()
+                .map(|terminals| {
+                    let mut mask = 0u128;
+                    for &terminal in terminals.iter() {
+                        mask |= 1u128 << terminal;
+                    }
+                    mask
+                })
+                .collect(),
+        )
     } else {
         None
     };
-    let is_end: Vec<bool> = (0..tokenizer.num_states()).map(|state| tokenizer.is_end(state)).collect();
-    let mut byte_transitions = vec![vec![u32::MAX; tokenizer.num_states() as usize]; 256];
-    for state_idx in 0..tokenizer.num_states() as usize {
-        for (byte, target) in tokenizer.transitions_from(state_idx as u32) {
-            byte_transitions[byte as usize][state_idx] = target;
-        }
-    }
-    let self_loop_bytes: Vec<U8Set> = (0..tokenizer.num_states() as usize)
-        .map(|state_idx| tokenizer.self_loop_bytes(state_idx as u32))
-        .collect();
     let mut terminal_sets = TerminalSetInterner::default();
     let empty_terminals_id = terminal_sets.intern_slice(&[]);
     let node_terminal_ids: Vec<u32> = if let Some(matched_terminal_masks) = matched_terminal_masks.as_ref() {
-        matched_terminal_masks.iter().map(|&mask| terminal_sets.intern_mask(mask)).collect()
+        matched_terminal_masks
+            .iter()
+            .map(|&mask| terminal_sets.intern_mask(mask))
+            .collect()
     } else {
-        matched_terminals.iter().map(|terminals| terminal_sets.intern_slice(terminals)).collect()
+        matched_terminals
+            .iter()
+            .map(|terminals| terminal_sets.intern_slice(terminals))
+            .collect()
     };
-    let parallel_depth = std::env::var("GLRMASK_PM_ROOT_PARALLEL_DEPTH").ok().and_then(|v| v.parse::<u8>().ok()).unwrap_or(5);
+    let parallel_depth = std::env::var("GLRMASK_PM_ROOT_PARALLEL_DEPTH")
+        .ok()
+        .and_then(|v| v.parse::<u8>().ok())
+        .unwrap_or(5);
     let parallel_min_active = std::env::var("GLRMASK_PM_PARALLEL_MIN_ACTIVE_STATES")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(512);
     let dense_segment_cache_min_entries = dense_segment_cache_min_entries();
     if profile_summary_enabled() {
-        eprintln!("[glrmask/profile][trie_build_interval] root_parallel_children={} parallel_depth={} parallel_min_active_states={} dense_segment_cache_min_entries={}", root.children().len(), parallel_depth, parallel_min_active, dense_segment_cache_min_entries);
+        eprintln!(
+            "[glrmask/profile][trie_build_interval] root_parallel_children={} parallel_depth={} parallel_min_active_states={} dense_segment_cache_min_entries={}",
+            root.children().len(),
+            parallel_depth,
+            parallel_min_active,
+            dense_segment_cache_min_entries,
+        );
     }
     let root_started_at = Instant::now();
     let mut timings = BuildTimings::default();
     let mut segment_cache: FxHashMap<Vec<u8>, usize> = FxHashMap::default();
     let mut segment_outcome_tables = Vec::<SegmentOutcomeCache>::new();
     let mut stamp_gen = 0u32;
-    let mut terminal_stamps = vec![0u32; tokenizer.num_terminals() as usize];
+    let mut terminal_stamps = vec![0u32; num_terminals];
     let mut active_seen_gen = 0u32;
-    let mut active_seen_stamps = vec![0u32; tokenizer.num_states() as usize];
-    let mut active_seen_positions = vec![0u32; tokenizer.num_states() as usize];
+    let mut active_seen_stamps = vec![0u32; num_states];
+    let mut active_seen_positions = vec![0u32; num_states];
     let serial_segment_cache_enabled = rayon::current_num_threads() == 1
         && std::env::var_os("GLRMASK_DISABLE_PM_SEGMENT_VECTOR_CACHE").is_none();
     let mut serial_segment_cache =
@@ -1047,17 +1069,143 @@ pub(crate) fn collect_possible_matches_interval_trie_class_build_with_classes(
     let root_active_set_id = serial_segment_cache
         .as_mut()
         .map(|cache| cache.active_sets.intern(entries));
-    let root_result = build_node(root, tokenizer, entries, &matched_terminals, matched_terminal_masks.as_deref(), &node_terminal_ids, empty_terminals_id, &is_end, &byte_transitions, &self_loop_bytes, canonical_state, &mut terminal_sets, &mut segment_cache, &mut segment_outcome_tables, &mut timings, &mut stamp_gen, &mut terminal_stamps, &mut active_seen_gen, &mut active_seen_stamps, &mut active_seen_positions, parallel_depth, parallel_min_active, dense_segment_cache_min_entries, serial_segment_cache.as_mut(), root_active_set_id);
+    let root_result = build_node(
+        root,
+        num_states,
+        num_terminals,
+        entries,
+        matched_terminals,
+        matched_terminal_masks.as_deref(),
+        &node_terminal_ids,
+        empty_terminals_id,
+        is_end,
+        byte_transitions,
+        self_loop_bytes,
+        canonical_state,
+        &mut terminal_sets,
+        &mut segment_cache,
+        &mut segment_outcome_tables,
+        &mut timings,
+        &mut stamp_gen,
+        &mut terminal_stamps,
+        &mut active_seen_gen,
+        &mut active_seen_stamps,
+        &mut active_seen_positions,
+        parallel_depth,
+        parallel_min_active,
+        dense_segment_cache_min_entries,
+        serial_segment_cache.as_mut(),
+        root_active_set_id,
+    );
     let root_compute_ms = elapsed_ms(root_started_at);
     if profile_summary_enabled() {
         eprintln!("[glrmask/profile][trie_build_interval_timings] segment_table_ms={:.3} signature_hash_ms={:.3} map_materialize_ms={:.3} child_active_ms={:.3} recursive_ms={:.3} reachable_interval_ms={:.3} child_precompute_ms={:.3} parallel_terminal_sets_clone_ms={:.3} parallel_segment_cache_init_ms={:.3} parallel_stamp_alloc_ms={:.3} parallel_child_class_project_ms={:.3} serial_child_class_project_ms={:.3} parallel_children_built={} serial_children_built={} parallel_empty_children={} serial_empty_children={} classes_built={} nodes_built={} active_state_rows={} max_active_states={} child_edges={} max_children_per_node={} child_active_state_rows={} segment_calls={} segment_single_byte_calls={} segment_multi_byte_calls={} segment_states_requested={} segment_cache_hits={} segment_cache_misses={} segment_dense_promotions={} segment_vector_cache_hits={} segment_vector_cache_misses={} segment_vector_cached_states={} segment_dense_hits={} segment_dense_misses={} segment_sparse_hits={} segment_sparse_misses={} segment_bytes_scanned={} segment_terminal_iters={} segment_terminal_pushes={} segment_mask_accumulations={} signature_nodes={} signature_rows={} signature_child_pairs={} signature_bucket_probes={}", timings.segment_table_ms, timings.signature_hash_ms, timings.map_materialize_ms, timings.child_active_ms, timings.recursive_ms, timings.reachable_interval_ms, timings.child_precompute_ms, timings.parallel_terminal_sets_clone_ms, timings.parallel_segment_cache_init_ms, timings.parallel_stamp_alloc_ms, timings.parallel_child_class_project_ms, timings.serial_child_class_project_ms, timings.parallel_children_built, timings.serial_children_built, timings.parallel_empty_children, timings.serial_empty_children, timings.classes_built, timings.nodes_built, timings.active_state_rows, timings.max_active_states, timings.child_edges, timings.max_children_per_node, timings.child_active_state_rows, timings.segment_calls, timings.segment_single_byte_calls, timings.segment_multi_byte_calls, timings.segment_states_requested, timings.segment_cache_hits, timings.segment_cache_misses, timings.segment_dense_promotions, timings.segment_vector_cache_hits, timings.segment_vector_cache_misses, timings.segment_vector_cached_states, timings.segment_dense_hits, timings.segment_dense_misses, timings.segment_sparse_hits, timings.segment_sparse_misses, timings.segment_bytes_scanned, timings.segment_terminal_iters, timings.segment_terminal_pushes, timings.segment_mask_accumulations, timings.signature_nodes, timings.signature_rows, timings.signature_child_pairs, timings.signature_bucket_probes);
     }
-    let profile = PossibleMatchesProfile { cache_entries: root_result.class_maps.len(), root_compute_ms, ..Default::default() };
-    let mut state_classes = vec![u32::MAX; tokenizer.num_states() as usize];
+    let profile = PossibleMatchesProfile {
+        cache_entries: root_result.class_maps.len(),
+        root_compute_ms,
+        ..Default::default()
+    };
+    let mut state_classes = vec![u32::MAX; num_states];
     for (state_pos, &state) in entries.iter().enumerate() {
         if let Some(&class_id) = root_result.classes.get(state_pos) {
-            if let Some(slot) = state_classes.get_mut(state as usize) { *slot = class_id; }
+            if let Some(slot) = state_classes.get_mut(state as usize) {
+                *slot = class_id;
+            }
         }
     }
-    (TrieClassBuildResult { state_classes, class_maps: root_result.class_maps.iter().cloned().collect() }, profile)
+    (
+        TrieClassBuildResult {
+            state_classes,
+            class_maps: root_result.class_maps.iter().cloned().collect(),
+        },
+        profile,
+    )
+}
+
+pub(crate) fn collect_possible_matches_interval_trie_class_build_with_classes(
+    tokenizer: &Tokenizer,
+    root: &VocabPrefixTreeNode,
+    entries: &[u32],
+    canonical_state: Option<&[u32]>,
+) -> (TrieClassBuildResult, PossibleMatchesProfile) {
+    let num_states = tokenizer.num_states() as usize;
+    let num_terminals = tokenizer.num_terminals() as usize;
+    let matched_terminals: Vec<Box<[TerminalID]>> = (0..tokenizer.num_states())
+        .map(|state| {
+            tokenizer
+                .matched_terminals_iter(state)
+                .collect::<Vec<_>>()
+                .into_boxed_slice()
+        })
+        .collect();
+    let is_end: Vec<bool> = (0..tokenizer.num_states())
+        .map(|state| tokenizer.is_end(state))
+        .collect();
+    let mut byte_transitions = vec![vec![u32::MAX; num_states]; 256];
+    for state_idx in 0..num_states {
+        for (byte, target) in tokenizer.transitions_from(state_idx as u32) {
+            byte_transitions[byte as usize][state_idx] = target;
+        }
+    }
+    let self_loop_bytes: Vec<U8Set> = (0..num_states)
+        .map(|state_idx| tokenizer.self_loop_bytes(state_idx as u32))
+        .collect();
+    collect_possible_matches_interval_trie_class_build_precomputed(
+        root,
+        entries,
+        canonical_state,
+        num_states,
+        num_terminals,
+        &matched_terminals,
+        &is_end,
+        &byte_transitions,
+        &self_loop_bytes,
+    )
+}
+
+pub(crate) fn collect_possible_matches_interval_trie_class_build_for_flat_view(
+    tokenizer_view: &TokenizerView,
+    num_terminals: usize,
+    is_end: &[bool],
+    root: &VocabPrefixTreeNode,
+    entries: &[u32],
+    canonical_state: Option<&[u32]>,
+) -> (TrieClassBuildResult, PossibleMatchesProfile) {
+    let dfa = tokenizer_view.dfa();
+    let num_states = dfa.states.len();
+    let matched_terminals = dfa
+        .states
+        .iter()
+        .map(|state| {
+            state
+                .finalizers
+                .iter()
+                .map(|&terminal| terminal as TerminalID)
+                .collect::<Vec<_>>()
+                .into_boxed_slice()
+        })
+        .collect::<Vec<_>>();
+    let mut byte_transitions = vec![vec![u32::MAX; num_states]; 256];
+    for state in 0..num_states {
+        for byte in 0..256usize {
+            byte_transitions[byte][state] = dfa.trans(state, byte);
+        }
+    }
+    let self_loop_bytes = (0..num_states)
+        .map(|state| {
+            U8Set::from_predicate(|byte| dfa.trans(state, byte as usize) == state as u32)
+        })
+        .collect::<Vec<_>>();
+    collect_possible_matches_interval_trie_class_build_precomputed(
+        root,
+        entries,
+        canonical_state,
+        num_states,
+        num_terminals,
+        &matched_terminals,
+        is_end,
+        &byte_transitions,
+        &self_loop_bytes,
+    )
 }
