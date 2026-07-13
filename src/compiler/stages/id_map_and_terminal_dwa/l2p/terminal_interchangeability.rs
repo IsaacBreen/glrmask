@@ -8358,17 +8358,25 @@ pub(crate) fn transport_coordinate_quotient(
         let domain = &modes[group.domain_mode].scanner_state_for_original;
         let source_class_count = domain.innermost_source_class_count();
 
+        let mut all_modes_are_direct_quotients = true;
         let group_quotient_deviations: usize = group
             .modes
             .iter()
             .map(|&mode_index| {
-                modes[mode_index]
+                let deviations = modes[mode_index]
                     .scanner_state_for_original
-                    .quotient_deviations()
-                    .map_or(0, |deviations| deviations.len())
+                    .quotient_deviations();
+                all_modes_are_direct_quotients &= deviations.is_some();
+                deviations.map_or(0, |deviations| deviations.len())
             })
             .sum();
-        if group_quotient_deviations == 0 {
+        // Only a direct quotient with no deviations is known structurally to
+        // preserve the ordinary coordinate. `None` does not mean identity: it
+        // also covers composed, macro-quotient, and explicit transport maps.
+        // Treating those shapes as zero-deviation groups can erase a genuine
+        // transport signature component and merge raw states whose member-mode
+        // destinations land in different core coordinates.
+        if all_modes_are_direct_quotients && group_quotient_deviations == 0 {
             group_is_redundant[group_index] = true;
             continue;
         }
@@ -10221,6 +10229,57 @@ mod tests {
                         == canonical_quotient.original_to_internal[right],
                     expected_signatures[left] == expected_signatures[right],
                     "canonical target-only transport changed the quotient for states {left} and {right}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn transport_coordinate_quotient_observes_composed_mode_deviations() {
+        let ordinary = ManyToOneIdMap::from_original_to_internal_with_representatives(
+            vec![0, 0, 1, 1],
+            2,
+            vec![0, 2],
+        );
+        let class_for_original: Arc<[u32]> = vec![0, 1, 2, 3].into();
+        let representative_for_class: Arc<[u32]> = vec![0, 1, 2, 3].into();
+        let inner = Arc::new(TransportScannerStateMap::Quotient {
+            state_count: 4,
+            class_for_original: Arc::clone(&class_for_original),
+            representative_for_class: Arc::clone(&representative_for_class),
+            source_class_for_target_deviations: vec![(0, 1), (1, 0)].into_boxed_slice(),
+        });
+        let outer = Arc::new(TransportScannerStateMap::Quotient {
+            state_count: 4,
+            class_for_original,
+            representative_for_class,
+            source_class_for_target_deviations: vec![(0, 2), (2, 0)].into_boxed_slice(),
+        });
+        let composed = TransportScannerStateMap::compose(outer, inner);
+        let modes = vec![
+            TerminalNwaTransportMode::ordinary(4),
+            TerminalNwaTransportMode::member(composed.as_ref().clone(), 0, 1),
+        ];
+        let expected_signatures = (0..ordinary.original_to_internal.len())
+            .map(|source| {
+                modes
+                    .iter()
+                    .map(|mode| {
+                        ordinary.original_to_internal
+                            [mode.scanner_state_for_original.scanner_state(source as u32) as usize]
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        assert_ne!(expected_signatures[0], expected_signatures[1]);
+        let quotient = transport_coordinate_quotient(&ordinary, &modes);
+        for left in 0..expected_signatures.len() {
+            for right in 0..expected_signatures.len() {
+                assert_eq!(
+                    quotient.original_to_internal[left] == quotient.original_to_internal[right],
+                    expected_signatures[left] == expected_signatures[right],
+                    "composed transport signature quotient disagreed for states {left} and {right}",
                 );
             }
         }
