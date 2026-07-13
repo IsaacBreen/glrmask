@@ -2603,13 +2603,13 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         }
     }
 
-    /// Like `absorb_push` but assumes the caller has already verified that
-    /// both `self` and `base` are Interface variants with identical `acc`
-    /// values. This avoids an expensive O(n) annotation equality check.
+    /// Absorb `base.push(value)` into `self`, using an in-place Interface merge
+    /// when both sides carry the same accumulator annotation.
     ///
-    /// # Safety contract
-    /// Caller must guarantee that both `self` and `base` have Interface
-    /// inner variants with equal `acc` annotations.
+    /// The accumulator check is semantically required: inserting a lower child
+    /// into an Interface labels that child with the Interface's accumulator.
+    /// Different annotations must therefore use the ordinary GSS merge path to
+    /// preserve stack/accumulator correlation.
     pub fn absorb_push_same_acc(self, value: T, base: &Self) -> Self {
         if base.is_empty() {
             return self;
@@ -2617,10 +2617,19 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         if self.is_empty() {
             return base.push(value);
         }
-        if let Upper::Interface(base_iface) = &*base.inner {
-            return self.absorb_push_interface_inplace(value, base_iface);
+
+        let compatible_base = match (&*self.inner, &*base.inner) {
+            (Upper::Interface(self_iface), Upper::Interface(base_iface))
+                if self_iface.acc == base_iface.acc =>
+            {
+                Some(base_iface.clone())
+            }
+            _ => None,
+        };
+        if let Some(base_iface) = compatible_base {
+            return self.absorb_push_interface_inplace(value, &base_iface);
         }
-        // Fallback (shouldn't happen if caller's guarantee holds)
+
         self.merge(&base.push(value))
     }
 
@@ -2716,26 +2725,26 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         let child_node = base_iface.inner.clone();
 
         let inner_mut = Arc::make_mut(&mut self.inner);
-        if let Upper::Interface(self_iface_arc) = inner_mut {
-            let iface_mut = Arc::make_mut(self_iface_arc);
-            let lower_mut = Arc::make_mut(&mut iface_mut.inner);
-            // Always convert to General for in-place mutation
-            lower_mut.ensure_general();
-            match lower_mut {
-                Lower::General { children, max_depth, .. } => {
-                    insert_lower_child_shared(children, value, child_depth, child_node);
+        let Upper::Interface(self_iface_arc) = inner_mut else {
+            unreachable!("absorb_push_interface_inplace requires an Interface receiver");
+        };
+        let iface_mut = Arc::make_mut(self_iface_arc);
+        debug_assert!(iface_mut.acc == base_iface.acc);
+        let lower_mut = Arc::make_mut(&mut iface_mut.inner);
+        // Always convert to General for in-place mutation
+        lower_mut.ensure_general();
+        match lower_mut {
+            Lower::General { children, max_depth, .. } => {
+                insert_lower_child_shared(children, value, child_depth, child_node);
 
-                    if child_depth + 1 > *max_depth {
-                        *max_depth = child_depth + 1;
-                    }
+                if child_depth + 1 > *max_depth {
+                    *max_depth = child_depth + 1;
                 }
-                Lower::Segment(_) => unreachable!(),
             }
-
-            return self;
+            Lower::Segment(_) => unreachable!(),
         }
-        // Fallback
-        self.merge(&LeveledGSS { inner: Arc::new(Upper::Interface(base_iface.clone())) })
+
+        self
     }
 
     pub fn popn(&self, n: isize) -> Self {
@@ -4590,6 +4599,77 @@ mod tests {
         fn merge(&self, other: &Self) -> Self {
             Self(self.0.max(other.0))
         }
+    }
+
+    #[test]
+    fn isolate_top_value_preserves_branch_accumulator_correlation() {
+        let gss = LeveledGSS::from_stacks(&[
+            (vec![0_u32, 10, 20], TestAcc(1)),
+            (vec![0_u32, 10, 21], TestAcc(2)),
+        ]);
+
+        assert_eq!(
+            gss.isolate(Some(20)).to_stacks(),
+            vec![(vec![0_u32, 10, 20], TestAcc(1))],
+        );
+        assert_eq!(
+            gss.isolate(Some(21)).to_stacks(),
+            vec![(vec![0_u32, 10, 21], TestAcc(2))],
+        );
+    }
+
+    #[test]
+    fn branch_pure_shift_preserves_selected_accumulator_correlation() {
+        let gss = LeveledGSS::from_stacks(&[
+            (vec![0_u32, 10, 20], TestAcc(1)),
+            (vec![0_u32, 10, 21], TestAcc(2)),
+        ]);
+
+        assert_eq!(
+            gss.apply_top_pure_shifts([(20_u32, 40_u32, false)])
+                .to_stacks(),
+            vec![(vec![0_u32, 10, 20, 40], TestAcc(1))],
+        );
+    }
+
+    #[test]
+    fn merging_distinct_accumulator_branches_preserves_path_correlation() {
+        let left = LeveledGSS::from_single_stack(vec![0_u32, 10, 20, 40], TestAcc(1));
+        let right = LeveledGSS::from_single_stack(vec![0_u32, 46], TestAcc(2));
+        let merged = left.merge(&right);
+        let stacks = merged.to_stacks();
+
+        assert_eq!(stacks.len(), 2, "stacks={stacks:#?}");
+        assert!(stacks.contains(&(vec![0_u32, 10, 20, 40], TestAcc(1))));
+        assert!(stacks.contains(&(vec![0_u32, 46], TestAcc(2))));
+    }
+
+    #[test]
+    fn absorb_push_preserves_different_interface_accumulator_correlation() {
+        let shifted = LeveledGSS::from_single_stack(vec![0_u32, 46], TestAcc(2));
+        let base = LeveledGSS::from_single_stack(vec![0_u32, 10, 20], TestAcc(1));
+        let absorbed = shifted.absorb_push_same_acc(40, &base);
+        let stacks = absorbed.to_stacks();
+
+        assert_eq!(stacks.len(), 2, "stacks={stacks:#?}");
+        assert!(stacks.contains(&(vec![0_u32, 10, 20, 40], TestAcc(1))));
+        assert!(stacks.contains(&(vec![0_u32, 46], TestAcc(2))));
+    }
+
+    #[test]
+    fn absorb_push_preserves_push_when_receiver_is_branch() {
+        let shifted = LeveledGSS::from_stacks(&[
+            (vec![0_u32, 46], TestAcc(2)),
+            (vec![0_u32, 47], TestAcc(3)),
+        ]);
+        let base = LeveledGSS::from_single_stack(vec![0_u32, 10, 20], TestAcc(1));
+        let absorbed = shifted.absorb_push_same_acc(40, &base);
+        let stacks = absorbed.to_stacks();
+
+        assert_eq!(stacks.len(), 3, "stacks={stacks:#?}");
+        assert!(stacks.contains(&(vec![0_u32, 10, 20, 40], TestAcc(1))));
+        assert!(stacks.contains(&(vec![0_u32, 46], TestAcc(2))));
+        assert!(stacks.contains(&(vec![0_u32, 47], TestAcc(3))));
     }
 
     #[test]
