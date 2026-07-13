@@ -654,8 +654,10 @@ impl Constraint {
                 started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
             let started = profile.then(std::time::Instant::now);
             let weight_token_sets = self.weight_token_set_inventory();
-            let prebuilt_weight_caches = self
-                .compute_direct_sparse_weight_token_buf_masks(&weight_token_sets.final_sets);
+            let prebuilt_weight_caches = self.compute_direct_sparse_weight_token_buf_masks(
+                &weight_token_sets.final_sets,
+                &internal_token_buf_masks,
+            );
             let prebuilt_weight_sparse_ms =
                 started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
             let started = profile.then(std::time::Instant::now);
@@ -730,8 +732,10 @@ impl Constraint {
                         .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
                     let started = profile.then(std::time::Instant::now);
                     let weight_token_sets = self.weight_token_set_inventory();
-                    let prebuilt_weight_caches = self
-                        .compute_direct_sparse_weight_token_buf_masks(&weight_token_sets.final_sets);
+                    let prebuilt_weight_caches = self.compute_direct_sparse_weight_token_buf_masks(
+                        &weight_token_sets.final_sets,
+                        &internal_token_buf_masks,
+                    );
                     let prebuilt_weight_sparse_ms = started
                         .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
                     let started = profile.then(std::time::Instant::now);
@@ -1144,6 +1148,54 @@ impl Constraint {
         tokens.len() <= limit
     }
 
+    fn direct_sparse_work_prefix(
+        internal_token_buf_masks: &[InternalTokenBufMasks],
+        buf_words: usize,
+    ) -> Vec<u64> {
+        // Direct sparse replay scans each selected internal token and then ORs
+        // its image into the original-token mask. Internal cardinality alone is
+        // not a runtime-cost bound: one internal token can represent thousands
+        // of original LLM token IDs. Mirror or_internal_token_to_buf_fast's
+        // heavy-token choice and prefix-sum the worst-case replay work so a
+        // RangeSetBlaze can be costed by ranges rather than token-by-token.
+        let heavy_threshold = buf_words / 4;
+        let mut prefix = Vec::with_capacity(internal_token_buf_masks.len() + 1);
+        prefix.push(0u64);
+        for mask in internal_token_buf_masks {
+            let mask_work = if mask.len() > heavy_threshold {
+                buf_words as u64
+            } else {
+                mask.len() as u64
+            };
+            let next = prefix
+                .last()
+                .copied()
+                .unwrap_or_default()
+                .saturating_add(1)
+                .saturating_add(mask_work);
+            prefix.push(next);
+        }
+        prefix
+    }
+
+    fn direct_sparse_expanded_work(tokens: &RangeSetBlaze<u32>, work_prefix: &[u64]) -> u64 {
+        let n_internal = work_prefix.len().saturating_sub(1);
+        let mut work = 0u64;
+        for range in tokens.ranges() {
+            let start = (*range.start() as usize).min(n_internal);
+            let end_exclusive = (*range.end() as usize)
+                .saturating_add(1)
+                .min(n_internal);
+            if start >= end_exclusive {
+                continue;
+            }
+            work = work.saturating_add(
+                work_prefix[end_exclusive].saturating_sub(work_prefix[start]),
+            );
+        }
+        work
+    }
+
     #[inline(always)]
     pub(crate) fn or_weight_token_set_to_buf_if_contained(
         &self,
@@ -1316,23 +1368,29 @@ impl Constraint {
     /// Classify final-weight token sets for the direct runtime-intersection
     /// path. The runtime itself performs an exact intersection with the active
     /// dense state, so no final output buffer is needed for sets under its
-    /// fixed work cap.
+    /// fixed work cap. Bound both the internal-token scan and the worst-case
+    /// expanded output-mask work: token equivalence can make a small internal
+    /// set extremely expensive to replay into the original-token mask.
     fn compute_direct_sparse_weight_token_buf_masks(
         &self,
         final_token_sets: &[(usize, &Arc<RangeSetBlaze<u32>>) ],
+        internal_token_buf_masks: &[InternalTokenBufMasks],
     ) -> DirectSparseWeightBufCaches {
         let buf_words = self.mask_len();
         let direct_sparse = buf_words != 0
             && buf_words <= u16::MAX as usize
             && Self::direct_sparse_weight_buf_cache_enabled()
             && self.final_mask_mapping.internal_len() == 0;
-        let sparse_cost_limit = ((buf_words / 2).min(2048)) as u64;
+        let direct_token_limit = ((buf_words / 2).min(2048)) as u64;
+        let direct_work_limit = direct_token_limit;
+        let work_prefix = Self::direct_sparse_work_prefix(internal_token_buf_masks, buf_words);
 
         #[derive(Default)]
         struct SparseBatch {
             eligible: Vec<usize>,
             fallback: Vec<(usize, Arc<RangeSetBlaze<u32>>)>,
             small_cardinality: usize,
+            expanded_work_max: u64,
         }
 
         impl SparseBatch {
@@ -1340,16 +1398,24 @@ impl Constraint {
                 self.eligible.append(&mut other.eligible);
                 self.fallback.append(&mut other.fallback);
                 self.small_cardinality += other.small_cardinality;
+                self.expanded_work_max = self.expanded_work_max.max(other.expanded_work_max);
             }
         }
 
         let build_one = |batch: &mut SparseBatch,
                          &(key, token_set): &(usize, &Arc<RangeSetBlaze<u32>>)| {
             if direct_sparse
-                && Self::token_set_cardinality_at_most(token_set.as_ref(), sparse_cost_limit)
+                && Self::token_set_cardinality_at_most(token_set.as_ref(), direct_token_limit)
             {
                 batch.small_cardinality += 1;
-                batch.eligible.push(key);
+                let expanded_work =
+                    Self::direct_sparse_expanded_work(token_set.as_ref(), &work_prefix);
+                batch.expanded_work_max = batch.expanded_work_max.max(expanded_work);
+                if expanded_work <= direct_work_limit {
+                    batch.eligible.push(key);
+                } else {
+                    batch.fallback.push((key, Arc::clone(token_set)));
+                }
             } else {
                 batch.fallback.push((key, Arc::clone(token_set)));
             }
@@ -1377,11 +1443,22 @@ impl Constraint {
         if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
         {
+            let cardinality_fallback_sets = batch
+                .eligible
+                .len()
+                .saturating_add(batch.fallback.len())
+                .saturating_sub(batch.small_cardinality);
+            let expanded_work_fallback_sets = batch
+                .small_cardinality
+                .saturating_sub(batch.eligible.len());
             eprintln!(
-                "[glrmask/profile][runtime_direct_sparse] final_sets={} direct_sets={} fallback_sets={}",
+                "[glrmask/profile][runtime_direct_sparse] final_sets={} direct_sets={} fallback_sets={} cardinality_fallback_sets={} expanded_work_fallback_sets={} expanded_work_max={}",
                 batch.eligible.len() + batch.fallback.len(),
                 batch.eligible.len(),
                 batch.fallback.len(),
+                cardinality_fallback_sets,
+                expanded_work_fallback_sets,
+                batch.expanded_work_max,
             );
         }
         DirectSparseWeightBufCaches {
@@ -2657,6 +2734,38 @@ mod dense_internal_token_mask_tests {
         let internal_tokens = RangeSetBlaze::from_iter([63u32..=65, 190..=400]);
         let actual = Constraint::dense_words_from_internal_set_with_words(&internal_tokens, 3);
         assert_eq!(actual.as_ref(), &[1u64 << 63, 0b11, 1u64 << 62 | 1u64 << 63]);
+    }
+
+    #[test]
+    fn direct_sparse_expanded_work_counts_alias_expansion_and_heavy_tokens() {
+        let masks = vec![
+            vec![(0, 1)],
+            vec![(0, 1), (1, 1), (2, 1), (3, 1), (4, 1)],
+            vec![(0, 1), (1, 1)],
+            vec![(0, 1), (1, 1), (2, 1)],
+        ];
+        let work_prefix = Constraint::direct_sparse_work_prefix(&masks, 16);
+        let selected = RangeSetBlaze::from_iter([0u32..=1, 3..=3]);
+
+        // Each selected internal token costs one membership scan. Token 1 is
+        // heavy because 5 entries exceed 16 / 4, so runtime uses a 16-word
+        // dense OR for it instead of five sparse writes.
+        assert_eq!(
+            Constraint::direct_sparse_expanded_work(&selected, &work_prefix),
+            (1 + 1) + (1 + 16) + (1 + 3)
+        );
+    }
+
+    #[test]
+    fn direct_sparse_expanded_work_clamps_out_of_bounds_ranges() {
+        let masks = vec![vec![(0, 1)], vec![(1, 1), (2, 1)]];
+        let work_prefix = Constraint::direct_sparse_work_prefix(&masks, 16);
+        let selected = RangeSetBlaze::from_iter([1u32..=100]);
+
+        assert_eq!(
+            Constraint::direct_sparse_expanded_work(&selected, &work_prefix),
+            1 + 2
+        );
     }
 
     #[test]
