@@ -417,23 +417,16 @@ fn hash_trellis_node_from_positions(
     mix_tagged(hash, EDGE_COUNT_TAG, edge_count as u128)
 }
 
-fn build_strided_batches(total_tokens: usize, target_batch_size: usize) -> Vec<Vec<usize>> {
+fn build_contiguous_batches(total_tokens: usize, target_batch_size: usize) -> Vec<Vec<usize>> {
     if total_tokens == 0 {
         return Vec::new();
     }
 
-    let num_batches = total_tokens.div_ceil(target_batch_size.max(1));
-    let mut batches = Vec::with_capacity(num_batches);
-    for offset in 0..num_batches {
-        let mut batch = Vec::with_capacity(total_tokens.div_ceil(num_batches));
-        let mut idx = offset;
-        while idx < total_tokens {
-            batch.push(idx);
-            idx += num_batches;
-        }
-        batches.push(batch);
-    }
-    batches
+    let batch_size = target_batch_size.max(1);
+    (0..total_tokens)
+        .step_by(batch_size)
+        .map(|start| (start..(start + batch_size).min(total_tokens)).collect())
+        .collect()
 }
 
 fn build_start_state_suffix_nodes(
@@ -964,7 +957,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
             .unwrap_or(false)
     });
     let batch_size = custom_batch_size.unwrap_or(250);
-    let batches = build_strided_batches(total_tokens, batch_size);
+    let batches = build_contiguous_batches(total_tokens, batch_size);
 
     let needed_token_flags = if let Some(max) = max_batches {
         let mut flags = vec![false; total_tokens];
@@ -1043,6 +1036,23 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
         &follow_contexts,
         None,
     );
+    // Most state/token observations never see a terminal edge. In that case the
+    // observation depends only on the end state (or dead state), so precompute
+    // the hash once per DFA state instead of rebuilding the same empty-edge node
+    // for every token.
+    let no_edge_state_hashes: Vec<u128> = (0..num_dfa_states)
+        .map(|state| {
+            hash_trellis_node_from_positions(
+                Some(state),
+                &dead_positions,
+                &dead_active_bits,
+                0,
+                &future_group_hashes_by_context[0],
+                &follow_contexts,
+                None,
+            )
+        })
+        .collect();
 
     let mut group_ids: Vec<usize> = vec![0usize; states.len()];
     let mut group_sizes: Vec<usize> = vec![states.len()];
@@ -1248,7 +1258,15 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                                 }
                             }
 
-                            let token_hash = if dead_at_depth.is_some() {
+                            let has_active_edges = active_bits.iter().any(|&word| word != 0);
+                            let token_hash = if !has_active_edges {
+                                if dead_at_depth.is_some() {
+                                    fully_dead_token_hash
+                                } else {
+                                    let current = walk_frames.last().unwrap().state;
+                                    no_edge_state_hashes[current as usize]
+                                }
+                            } else if dead_at_depth.is_some() {
                                 hash_trellis_node_from_positions(
                                     None,
                                     positions,
