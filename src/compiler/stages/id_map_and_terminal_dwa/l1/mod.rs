@@ -12,6 +12,8 @@ use range_set_blaze::RangeSetBlaze;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
+use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
+
 /// Exact first-byte target profiles computed for L1 state equivalence.
 ///
 /// The L1 terminal-DWA builder needs the same whole-token walks *and* the same
@@ -854,6 +856,142 @@ fn build_l1_generic_nfa_id_map<'a>(
     )
 }
 
+const L1_NFA_UNKNOWN_CONFIG: u32 = u32::MAX - 1;
+const L1_NFA_DEAD_CONFIG: u32 = u32::MAX;
+
+struct L1NfaPowerset<'a> {
+    tokenizer: &'a Tokenizer,
+    active_terminals: &'a [bool],
+    configs: Vec<Box<[u32]>>,
+    config_ids: FxHashMap<Vec<u32>, u32>,
+    transitions: Vec<[u32; 256]>,
+    signatures: Vec<Box<[u32]>>,
+    transition_misses: usize,
+}
+
+impl<'a> L1NfaPowerset<'a> {
+    fn new(tokenizer: &'a Tokenizer, active_terminals: &'a [bool]) -> Self {
+        Self {
+            tokenizer,
+            active_terminals,
+            configs: Vec::new(),
+            config_ids: FxHashMap::default(),
+            transitions: Vec::new(),
+            signatures: Vec::new(),
+            transition_misses: 0,
+        }
+    }
+
+    fn intern(&mut self, mut states: Vec<u32>) -> u32 {
+        if states.is_empty() {
+            return L1_NFA_DEAD_CONFIG;
+        }
+        states.sort_unstable();
+        states.dedup();
+        if let Some(&config) = self.config_ids.get(&states) {
+            return config;
+        }
+
+        let config = self.configs.len() as u32;
+        let mut signature = Vec::<u32>::new();
+        for &state in &states {
+            signature.extend(collect_active_terminal_signature(
+                self.tokenizer,
+                state,
+                self.active_terminals,
+            ));
+        }
+        signature.sort_unstable();
+        signature.dedup();
+
+        self.config_ids.insert(states.clone(), config);
+        self.configs.push(states.into_boxed_slice());
+        self.transitions.push([L1_NFA_UNKNOWN_CONFIG; 256]);
+        self.signatures.push(signature.into_boxed_slice());
+        config
+    }
+
+    fn start_config(&mut self, raw_state: u32) -> u32 {
+        self.intern(
+            self.tokenizer
+                .execute_from_state_end_only(&[], raw_state)
+                .to_vec(),
+        )
+    }
+
+    #[inline]
+    fn step(&mut self, config: u32, byte: u8) -> u32 {
+        if config == L1_NFA_DEAD_CONFIG {
+            return L1_NFA_DEAD_CONFIG;
+        }
+        let cached = self.transitions[config as usize][byte as usize];
+        if cached != L1_NFA_UNKNOWN_CONFIG {
+            return cached;
+        }
+        self.transition_misses += 1;
+        let targets = self
+            .tokenizer
+            .step_all(&self.configs[config as usize], byte)
+            .to_vec();
+        let target = self.intern(targets);
+        self.transitions[config as usize][byte as usize] = target;
+        target
+    }
+
+    fn step_bytes(&mut self, mut config: u32, bytes: &[u8]) -> u32 {
+        for &byte in bytes {
+            config = self.step(config, byte);
+            if config == L1_NFA_DEAD_CONFIG {
+                break;
+            }
+        }
+        config
+    }
+
+    #[inline]
+    fn signature(&self, config: u32) -> &[u32] {
+        if config == L1_NFA_DEAD_CONFIG {
+            &[]
+        } else {
+            &self.signatures[config as usize]
+        }
+    }
+}
+
+fn collect_l1_nfa_profile_from_trie(
+    scanner: &mut L1NfaPowerset<'_>,
+    node: &VocabPrefixTreeNode,
+    config: u32,
+    token_aliases: &[Vec<u32>],
+    token_ranges_by_terminal: &mut FxHashMap<u32, Vec<(u32, u32)>>,
+    node_visits: &mut usize,
+) {
+    *node_visits += 1;
+    if node.has_token() {
+        for &terminal in scanner.signature(config) {
+            let ranges = token_ranges_by_terminal.entry(terminal).or_default();
+            for &token_id in &token_aliases[node.token_id()] {
+                append_token_id_range(ranges, token_id);
+            }
+        }
+    }
+
+    for (edge, child) in node.iter_children() {
+        let target = scanner.step_bytes(config, edge);
+        if target == L1_NFA_DEAD_CONFIG {
+            continue;
+        }
+        collect_l1_nfa_profile_from_trie(
+            scanner,
+            child,
+            target,
+            token_aliases,
+            token_ranges_by_terminal,
+            node_visits,
+        );
+    }
+}
+
 fn build_l1_generic_nfa_terminal_dwa(
     tokenizer: &Tokenizer,
     vocab_order: &L1IdentityVocabOrder,
@@ -861,51 +999,100 @@ fn build_l1_generic_nfa_terminal_dwa(
     num_terminals: u32,
     active_terminals: &[bool],
 ) -> Option<(DWA, L1TerminalBuildProfile)> {
-    let traversal_started_at = Instant::now();
     let tsids_before_merge = id_map.num_tsids() as usize;
     let mut deferred_by_terminal =
         (0..num_terminals).map(|_| Vec::<(u32, Arc<RangeSetBlaze<u32>>)>::new()).collect::<Vec<_>>();
 
+    let vocab_tree_started_at = Instant::now();
+    let mut tree_entries = Vec::<(usize, &[u8])>::new();
+    let mut token_aliases = Vec::<Vec<u32>>::new();
+    for (internal_token_id, (_, bytes)) in vocab_order.token_entries_sorted.iter().enumerate() {
+        if tree_entries
+            .last()
+            .is_some_and(|(_, previous_bytes)| *previous_bytes == bytes.as_ref())
+        {
+            token_aliases
+                .last_mut()
+                .expect("duplicate token bytes without an alias group")
+                .push(internal_token_id as u32);
+            continue;
+        }
+        let alias_group = token_aliases.len();
+        tree_entries.push((alias_group, bytes.as_ref()));
+        token_aliases.push(vec![internal_token_id as u32]);
+    }
+    debug_assert!(tree_entries.windows(2).all(|pair| pair[0].1 < pair[1].1));
+    let vocab_tree = VocabPrefixTree::build_presorted(&tree_entries);
+    let vocab_tree_build_ms = vocab_tree_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let state_seed_started_at = Instant::now();
+    let mut scanner = L1NfaPowerset::new(tokenizer, active_terminals);
+    let mut tsids_by_start_config = FxHashMap::<u32, Vec<u32>>::default();
     for (internal_tsid, raw_state) in id_map
         .tokenizer_states
         .iter_representative_ids()
         .enumerate()
     {
-        let mut token_ids_by_terminal = FxHashMap::<u32, Vec<u32>>::default();
-        for (internal_token_id, (_, bytes)) in
-            vocab_order.token_entries_sorted.iter().enumerate()
-        {
-            let end_states = tokenizer.execute_from_state_end_only(bytes, raw_state);
-            if end_states.is_empty() {
+        let start_config = scanner.start_config(raw_state);
+        if start_config != L1_NFA_DEAD_CONFIG {
+            tsids_by_start_config
+                .entry(start_config)
+                .or_default()
+                .push(internal_tsid as u32);
+        }
+    }
+    let state_seed_ms = state_seed_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let traversal_started_at = Instant::now();
+    let mut node_visits = 0usize;
+    let mut profiles_built = 0usize;
+    let mut profile_entries = 0usize;
+    for (start_config, tsids) in tsids_by_start_config {
+        let mut token_ranges_by_terminal = FxHashMap::<u32, Vec<(u32, u32)>>::default();
+        collect_l1_nfa_profile_from_trie(
+            &mut scanner,
+            &vocab_tree.root,
+            start_config,
+            &token_aliases,
+            &mut token_ranges_by_terminal,
+            &mut node_visits,
+        );
+        profiles_built += 1;
+        for (terminal, ranges) in token_ranges_by_terminal {
+            let token_set = shared_rangeset(
+                ranges
+                    .iter()
+                    .map(|&(start, end)| start..=end)
+                    .collect(),
+            );
+            if token_set.is_empty() {
                 continue;
             }
-            let mut active_signature = Vec::<u32>::new();
-            for &state in &end_states {
-                active_signature.extend(collect_active_terminal_signature(
-                    tokenizer,
-                    state,
-                    active_terminals,
-                ));
-            }
-            active_signature.sort_unstable();
-            active_signature.dedup();
-            for terminal in active_signature {
-                token_ids_by_terminal
-                    .entry(terminal)
-                    .or_default()
-                    .push(internal_token_id as u32);
-            }
-        }
-
-        for (terminal, token_ids) in token_ids_by_terminal {
-            let token_set = shared_rangeset(token_ids.into_iter().collect());
-            if !token_set.is_empty() {
+            profile_entries += tsids.len();
+            for &tsid in &tsids {
                 deferred_by_terminal[terminal as usize]
-                    .push((internal_tsid as u32, token_set));
+                    .push((tsid, Arc::clone(&token_set)));
             }
         }
     }
     let traversal_ms = traversal_started_at.elapsed().as_secs_f64() * 1000.0;
+    let token_set_intern_ms = 0.0;
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][l1_nfa_powerset_trie] raw_tsids={} start_configs={} configs={} transition_misses={} node_visits={} profile_entries={} unique_token_strings={} token_aliases={} tree_build_ms={:.3} state_seed_ms={:.3} traversal_ms={:.3}",
+            tsids_before_merge,
+            profiles_built,
+            scanner.configs.len(),
+            scanner.transition_misses,
+            node_visits,
+            profile_entries,
+            tree_entries.len(),
+            vocab_order.token_entries_sorted.len() - tree_entries.len(),
+            vocab_tree_build_ms,
+            state_seed_ms,
+            traversal_ms,
+        );
+    }
 
     let merge_started_at = Instant::now();
     let merge_report = merge_deferred_equivalent_tsids(id_map, &mut deferred_by_terminal);
@@ -936,9 +1123,9 @@ fn build_l1_generic_nfa_terminal_dwa(
         dwa,
         L1TerminalBuildProfile {
             internal_vocab_ms: 0.0,
-            vocab_tree_build_ms: 0.0,
-            state_seed_ms: 0.0,
-            token_set_intern_ms: 0.0,
+            vocab_tree_build_ms,
+            state_seed_ms,
+            token_set_intern_ms,
             tsid_profile_merge_ms: merge_ms,
             tsid_profile_merge_before: tsids_before_merge,
             tsid_profile_merge_after: merge_report.tsids_after,
@@ -4255,6 +4442,131 @@ struct L1TerminalBuildProfile {
 mod generic_nfa_tests {
     use super::*;
     use crate::automata::lexer::tokenizer::arbitrary_epsilon_l1_test_tokenizer;
+
+    fn build_scalar_generic_nfa_terminal_dwa(
+        tokenizer: &Tokenizer,
+        vocab_order: &L1IdentityVocabOrder,
+        id_map: &mut InternalIdMap,
+        num_terminals: u32,
+        active_terminals: &[bool],
+    ) -> DWA {
+        let mut deferred_by_terminal = (0..num_terminals)
+            .map(|_| Vec::<(u32, Arc<RangeSetBlaze<u32>>)>::new())
+            .collect::<Vec<_>>();
+
+        for (internal_tsid, raw_state) in id_map
+            .tokenizer_states
+            .iter_representative_ids()
+            .enumerate()
+        {
+            let mut token_ids_by_terminal = FxHashMap::<u32, Vec<u32>>::default();
+            for (internal_token_id, (_, bytes)) in
+                vocab_order.token_entries_sorted.iter().enumerate()
+            {
+                let end_states = tokenizer.execute_from_state_end_only(bytes, raw_state);
+                let mut active_signature = Vec::<u32>::new();
+                for &state in &end_states {
+                    active_signature.extend(collect_active_terminal_signature(
+                        tokenizer,
+                        state,
+                        active_terminals,
+                    ));
+                }
+                active_signature.sort_unstable();
+                active_signature.dedup();
+                for terminal in active_signature {
+                    token_ids_by_terminal
+                        .entry(terminal)
+                        .or_default()
+                        .push(internal_token_id as u32);
+                }
+            }
+
+            for (terminal, token_ids) in token_ids_by_terminal {
+                let token_set = shared_rangeset(token_ids.into_iter().collect());
+                if !token_set.is_empty() {
+                    deferred_by_terminal[terminal as usize]
+                        .push((internal_tsid as u32, token_set));
+                }
+            }
+        }
+
+        merge_deferred_equivalent_tsids(id_map, &mut deferred_by_terminal);
+        let mut dwa = DWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
+        let end_state = dwa.add_state();
+        dwa.set_final_weight(end_state, Weight::all());
+        for (terminal, entries) in deferred_by_terminal.into_iter().enumerate() {
+            let weight = Weight::from_per_tsid_shared(entries);
+            if !weight.is_empty() {
+                dwa.add_transition(dwa.start_state(), terminal as i32, end_state, weight);
+            }
+        }
+        dwa
+    }
+
+    #[test]
+    fn generic_epsilon_l1_powerset_trie_matches_scalar_reference() {
+        let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
+        let vocab = Vocab::new(
+            vec![
+                (0, b"".to_vec()),
+                (1, b"a".to_vec()),
+                (2, b"aa".to_vec()),
+                (3, b"aaa".to_vec()),
+                (4, b"ab".to_vec()),
+                (5, b"b".to_vec()),
+                (6, b"ba".to_vec()),
+                (7, b"bb".to_vec()),
+                (8, b"x".to_vec()),
+            ],
+            None,
+        );
+        let active = [true, true];
+        let (optimized_id_map, order, _, _, _) =
+            build_l1_generic_nfa_id_map(&tokenizer, &vocab, None);
+        let mut optimized_id_map = optimized_id_map;
+        let mut scalar_id_map = optimized_id_map.clone();
+        let (optimized, _) = build_l1_generic_nfa_terminal_dwa(
+            &tokenizer,
+            order.as_ref(),
+            &mut optimized_id_map,
+            2,
+            &active,
+        )
+        .expect("optimized generic epsilon L1 DWA");
+        let scalar = build_scalar_generic_nfa_terminal_dwa(
+            &tokenizer,
+            order.as_ref(),
+            &mut scalar_id_map,
+            2,
+            &active,
+        );
+
+        for raw_state in 0..tokenizer.num_states() {
+            let optimized_tsid =
+                optimized_id_map.tokenizer_states.original_to_internal[raw_state as usize];
+            let scalar_tsid = scalar_id_map.tokenizer_states.original_to_internal[raw_state as usize];
+            for (&token_id, bytes) in vocab.entries.iter() {
+                let optimized_token =
+                    optimized_id_map.vocab_tokens.original_to_internal[token_id as usize];
+                let scalar_token = scalar_id_map.vocab_tokens.original_to_internal[token_id as usize];
+                for terminal in 0..2u32 {
+                    let optimized_accepts = optimized
+                        .eval_word(&[terminal as i32])
+                        .tokens_for_tsid(optimized_tsid)
+                        .contains(optimized_token);
+                    let scalar_accepts = scalar
+                        .eval_word(&[terminal as i32])
+                        .tokens_for_tsid(scalar_tsid)
+                        .contains(scalar_token);
+                    assert_eq!(
+                        optimized_accepts, scalar_accepts,
+                        "raw_state={raw_state} token={token_id} bytes={bytes:?} terminal={terminal}",
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn generic_epsilon_l1_weights_match_exact_active_state_set_signatures() {
