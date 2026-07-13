@@ -847,27 +847,13 @@ fn build_l1_generic_nfa_exact_id_map<'a>(
         Some(active_terminals),
         None,
     );
-    let mut powerset_transitions = vec![u32::MAX; powerset_view.states.len() * 256];
-    for state in 0..powerset_view.states.len() {
-        let start = powerset_view.edge_offsets[state] as usize;
-        let end = powerset_view.edge_offsets[state + 1] as usize;
-        for &(byte, target) in &powerset_view.edges[start..end] {
-            powerset_transitions[state * 256 + byte as usize] = target;
-        }
-    }
-    let tokenizer_view = TokenizerView {
-        flat_dfa: FlatDfa {
-            states: powerset_view.states,
-            start_state: powerset_view.start_state,
-            transitions: Arc::from(powerset_transitions),
-        },
-    };
-    let view_build_ms = view_started_at.elapsed().as_secs_f64() * 1000.0;
     let view_states = powerset_view
         .raw_start_to_view
         .iter()
         .map(|&state| state as usize)
         .collect::<Vec<_>>();
+    let tokenizer_view = powerset_view.into_tokenizer_view();
+    let view_build_ms = view_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let terminal_signature_started_at = compile_profile_enabled().then(Instant::now);
     let (state_to_terminal_signature, terminal_signatures) =
