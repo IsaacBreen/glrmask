@@ -226,6 +226,9 @@ pub(crate) fn build_relevant_powerset_view(
             edge_offsets.push(edges.len() as u32);
         }
     } else {
+        let mut byte_marks = [0u32; 256];
+        let mut byte_epoch = 0u32;
+        let mut candidate_bytes = Vec::<u8>::new();
         while let Some(state) = worklist.pop_front() {
             assert_eq!(
                 state as usize + 1,
@@ -233,7 +236,25 @@ pub(crate) fn build_relevant_powerset_view(
                 "powerset states must be processed in interning order",
             );
             let config = configs[state as usize].clone();
-            for &byte in &bytes {
+            byte_epoch = byte_epoch.wrapping_add(1);
+            if byte_epoch == 0 {
+                byte_marks.fill(0);
+                byte_epoch = 1;
+            }
+            candidate_bytes.clear();
+            for &source in config.iter() {
+                for (byte, _) in tokenizer.transitions_from(source) {
+                    let byte_index = byte as usize;
+                    if relevant_bytes[byte_index] && byte_marks[byte_index] != byte_epoch {
+                        byte_marks[byte_index] = byte_epoch;
+                        candidate_bytes.push(byte);
+                    }
+                }
+            }
+            // Preserve ascending-byte expansion order so interned powerset-state
+            // ids remain stable while traversing only bytes live from this config.
+            candidate_bytes.sort_unstable();
+            for &byte in &candidate_bytes {
                 let targets = tokenizer.step_all(&config, byte);
                 if targets.is_empty() {
                     continue;
@@ -436,13 +457,21 @@ fn expand_trie_from_config(
     }
 }
 
-pub(crate) fn build_bounded_analysis_view(
+fn build_bounded_analysis_view_inner(
     tokenizer: &Tokenizer,
     raw_start_states: &[usize],
     tokens: &[&[u8]],
     active_groups: Option<&[bool]>,
+    combine_start_states: bool,
 ) -> BoundedAnalysisView {
-    build_bounded_analysis_view_impl(tokenizer, raw_start_states, tokens, active_groups, true)
+    build_bounded_analysis_view_impl(
+        tokenizer,
+        raw_start_states,
+        tokens,
+        active_groups,
+        combine_start_states,
+        true,
+    )
 }
 
 fn build_bounded_analysis_view_impl(
@@ -450,6 +479,7 @@ fn build_bounded_analysis_view_impl(
     raw_start_states: &[usize],
     tokens: &[&[u8]],
     active_groups: Option<&[bool]>,
+    combine_start_states: bool,
     factor_common_first_byte: bool,
 ) -> BoundedAnalysisView {
     let raw_state_count = tokenizer.num_states() as usize;
@@ -461,13 +491,29 @@ fn build_bounded_analysis_view_impl(
         .execute_from_state_end_only(&[], tokenizer.initial_state_id())
         .to_vec();
     let start_state = intern_config(start_closure, &mut config_ids, &mut configs);
-    for &raw_state in raw_start_states {
-        assert!(raw_state < raw_state_count, "invalid raw NFA analysis seed");
-        let closure = tokenizer
-            .execute_from_state_end_only(&[], raw_state as u32)
-            .to_vec();
+    if combine_start_states {
+        let mut closure = Vec::<u32>::new();
+        for &raw_state in raw_start_states {
+            assert!(raw_state < raw_state_count, "invalid raw NFA analysis seed");
+            closure.extend_from_slice(
+                &tokenizer.execute_from_state_end_only(&[], raw_state as u32),
+            );
+        }
+        closure.sort_unstable();
+        closure.dedup();
         let state = intern_config(closure, &mut config_ids, &mut configs);
-        raw_start_to_view[raw_state] = state;
+        for &raw_state in raw_start_states {
+            raw_start_to_view[raw_state] = state;
+        }
+    } else {
+        for &raw_state in raw_start_states {
+            assert!(raw_state < raw_state_count, "invalid raw NFA analysis seed");
+            let closure = tokenizer
+                .execute_from_state_end_only(&[], raw_state as u32)
+                .to_vec();
+            let state = intern_config(closure, &mut config_ids, &mut configs);
+            raw_start_to_view[raw_state] = state;
+        }
     }
 
     let mut transitions = vec![u32::MAX; configs.len() * 256];
@@ -563,6 +609,36 @@ fn build_bounded_analysis_view_impl(
         },
         raw_start_to_view,
     }
+}
+
+pub(crate) fn build_bounded_analysis_view(
+    tokenizer: &Tokenizer,
+    raw_start_states: &[usize],
+    tokens: &[&[u8]],
+    active_groups: Option<&[bool]>,
+) -> BoundedAnalysisView {
+    build_bounded_analysis_view_inner(
+        tokenizer,
+        raw_start_states,
+        tokens,
+        active_groups,
+        false,
+    )
+}
+
+pub(crate) fn build_bounded_analysis_view_from_combined_starts(
+    tokenizer: &Tokenizer,
+    raw_start_states: &[usize],
+    tokens: &[&[u8]],
+    active_groups: Option<&[bool]>,
+) -> BoundedAnalysisView {
+    build_bounded_analysis_view_inner(
+        tokenizer,
+        raw_start_states,
+        tokens,
+        active_groups,
+        true,
+    )
 }
 
 fn intern_config(
@@ -843,10 +919,22 @@ mod tests {
         let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
         let raw_start_states = (0..tokenizer.num_states() as usize).collect::<Vec<_>>();
         let tokens = [b"aa".as_slice(), b"ab".as_slice(), b"aab".as_slice()];
-        let factored =
-            build_bounded_analysis_view_impl(&tokenizer, &raw_start_states, &tokens, None, true);
-        let reference =
-            build_bounded_analysis_view_impl(&tokenizer, &raw_start_states, &tokens, None, false);
+        let factored = build_bounded_analysis_view_impl(
+            &tokenizer,
+            &raw_start_states,
+            &tokens,
+            None,
+            false,
+            true,
+        );
+        let reference = build_bounded_analysis_view_impl(
+            &tokenizer,
+            &raw_start_states,
+            &tokens,
+            None,
+            false,
+            false,
+        );
 
         for &raw_state in &raw_start_states {
             let factored_start = factored.view_state_for_raw_start(raw_state);
