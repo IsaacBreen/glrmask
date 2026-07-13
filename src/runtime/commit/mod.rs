@@ -168,19 +168,59 @@ fn token_bytes_for_id(constraint: &Constraint, token_id: u32) -> Option<&[u8]> {
         .or_else(|| constraint.token_bytes.get(&token_id).map(Vec::as_slice))
 }
 
-fn commit_mask_assert_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        if cfg!(debug_assertions) {
-            return true;
+const COMMIT_ASSERT_MASK_EQUIVALENCE: u8 = 1 << 0;
+const COMMIT_ASSERT_FAST_PATH_EQUIVALENCE: u8 = 1 << 1;
+
+fn commit_assertion_flags() -> u8 {
+    static FLAGS: OnceLock<u8> = OnceLock::new();
+    *FLAGS.get_or_init(|| {
+        let mut flags = 0;
+        if cfg!(debug_assertions)
+            || std::env::var("GLRMASK_ASSERT_COMMIT_TOKEN_MASK_EQUIVALENCE")
+                .map(|value| {
+                    let normalized = value.trim().to_ascii_lowercase();
+                    matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+                })
+                .unwrap_or(false)
+        {
+            flags |= COMMIT_ASSERT_MASK_EQUIVALENCE;
         }
-        std::env::var("GLRMASK_ASSERT_COMMIT_TOKEN_MASK_EQUIVALENCE")
+        if std::env::var("GLRMASK_ASSERT_COMMIT_FAST_PATH_EQUIVALENCE")
             .map(|value| {
                 let normalized = value.trim().to_ascii_lowercase();
                 matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
             })
             .unwrap_or(false)
+        {
+            flags |= COMMIT_ASSERT_FAST_PATH_EQUIVALENCE;
+        }
+        flags
     })
+}
+
+fn canonical_commit_state_for_equivalence_assert(
+    state: &BTreeMap<u32, ParserGSS>,
+) -> Vec<(u32, Vec<(Vec<u32>, Vec<(u32, Vec<u32>)>)>)> {
+    state
+        .iter()
+        .map(|(&tokenizer_state, gss)| {
+            let mut stacks = gss
+                .to_stacks()
+                .into_iter()
+                .map(|(stack, terminals_disallowed)| {
+                    let disallowed = terminals_disallowed
+                        .iter()
+                        .map(|(&state, terminals)| {
+                            (state, terminals.iter().copied().collect::<Vec<_>>())
+                        })
+                        .collect::<Vec<_>>();
+                    (stack, disallowed)
+                })
+                .collect::<Vec<_>>();
+            stacks.sort();
+            (tokenizer_state, stacks)
+        })
+        .collect()
 }
 
 fn profile_allow_fast_paths() -> bool {
@@ -198,8 +238,12 @@ fn token_in_mask(mask: &[u32], token_id: u32) -> bool {
     word_idx < mask.len() && ((mask[word_idx] >> bit_idx) & 1) != 0
 }
 
-fn snapshot_mask_membership(state: &ConstraintState<'_>, token_id: u32) -> Option<bool> {
-    if !commit_mask_assert_enabled() {
+fn snapshot_mask_membership(
+    state: &ConstraintState<'_>,
+    token_id: u32,
+    assertion_flags: u8,
+) -> Option<bool> {
+    if assertion_flags & COMMIT_ASSERT_MASK_EQUIVALENCE == 0 {
         return None;
     }
     let mut mask = vec![0u32; state.constraint.mask_len()];
@@ -223,23 +267,35 @@ fn format_optional_token_bytes(token_bytes: Option<&[u8]>) -> String {
         .unwrap_or_else(|| "<no vocabulary bytes>".to_owned())
 }
 
-fn assert_mask_commit_equivalence(
+#[inline]
+fn assert_commit_oracles(
+    constraint: &Constraint,
     token_id: u32,
     token_bytes: Option<&[u8]>,
     was_in_mask: Option<bool>,
+    fast_path_reference: Option<BTreeMap<u32, ParserGSS>>,
+    actual_state: &BTreeMap<u32, ParserGSS>,
     commit_succeeded: bool,
 ) {
-    let Some(was_in_mask) = was_in_mask else {
-        return;
-    };
-    assert!(
-        commit_succeeded == was_in_mask,
-        "commit/mask mismatch for token_id {} bytes {}: token_in_mask={} commit_succeeded={}",
-        token_id,
-        format_optional_token_bytes(token_bytes),
-        was_in_mask,
-        commit_succeeded,
-    );
+    if let Some(was_in_mask) = was_in_mask {
+        assert!(
+            commit_succeeded == was_in_mask,
+            "commit/mask mismatch for token_id {} bytes {}: token_in_mask={} commit_succeeded={}",
+            token_id,
+            format_optional_token_bytes(token_bytes),
+            was_in_mask,
+            commit_succeeded,
+        );
+    }
+    if let Some(reference_state) = fast_path_reference {
+        assert_commit_fast_path_equivalence(
+            constraint,
+            reference_state,
+            token_id,
+            actual_state,
+            commit_succeeded,
+        );
+    }
 }
 
 pub(super) fn advance_special_token_paths(
@@ -426,6 +482,69 @@ fn commit_token_impl(
     }
     merge_special_token_paths(constraint, state, special_paths);
     finish_token_commit(state)
+}
+
+#[cold]
+fn commit_token_no_fast_path_reference(
+    constraint: &Constraint,
+    state: &mut BTreeMap<u32, ParserGSS>,
+    token_id: u32,
+) -> Result<(), String> {
+    let bytes = token_bytes_for_id(constraint, token_id);
+    let has_special = constraint.has_special_token_id(token_id);
+    if bytes.is_none() && !has_special {
+        return Err(format!(
+            "commit_token: token_id {token_id} not in vocabulary or special-token terminals"
+        ));
+    }
+
+    let special_paths = has_special
+        .then(|| advance_special_token_paths(constraint, state, token_id))
+        .flatten();
+    if let Some(bytes) = bytes {
+        let mut buffers = CommitBuffers::default();
+        if commit_bytes_impl_profiled(
+            constraint,
+            state,
+            bytes,
+            &mut buffers,
+            None,
+            false,
+        )
+        .is_err()
+        {
+            state.clear();
+        }
+    } else {
+        state.clear();
+    }
+    merge_special_token_paths(constraint, state, special_paths);
+    finish_token_commit(state)
+}
+
+#[cold]
+fn assert_commit_fast_path_equivalence(
+    constraint: &Constraint,
+    mut reference_state: BTreeMap<u32, ParserGSS>,
+    token_id: u32,
+    actual_state: &BTreeMap<u32, ParserGSS>,
+    actual_succeeded: bool,
+) {
+    let reference_result =
+        commit_token_no_fast_path_reference(constraint, &mut reference_state, token_id);
+    assert_eq!(
+        actual_succeeded,
+        reference_result.is_ok(),
+        "commit fast-path result mismatch for token_id {token_id}: actual_succeeded={} reference={:?}",
+        actual_succeeded,
+        reference_result,
+    );
+    assert_eq!(
+        canonical_commit_state_for_equivalence_assert(actual_state),
+        canonical_commit_state_for_equivalence_assert(&reference_state),
+        "commit fast-path state mismatch for token_id {token_id} bytes {}",
+        format_optional_token_bytes(token_bytes_for_id(constraint, token_id)),
+    );
 }
 
 #[inline]
@@ -3492,17 +3611,29 @@ impl<'a> ConstraintState<'a> {
     ) -> Result<(), String> {
         let constraint = self.constraint;
         let bytes = token_bytes_for_id(constraint, token_id);
-        let was_in_mask = snapshot_mask_membership(self, token_id);
+        let assertion_flags = commit_assertion_flags();
+        let was_in_mask = snapshot_mask_membership(self, token_id, assertion_flags);
+        let equivalence_reference = (assertion_flags & COMMIT_ASSERT_FAST_PATH_EQUIVALENCE != 0)
+            .then(|| self.state.clone());
         let result = commit_token_impl(constraint, &mut self.state, &mut self.buffers, token_id);
         self.generation += 1;
-        assert_mask_commit_equivalence(token_id, bytes, was_in_mask, result.is_ok());
+        assert_commit_oracles(
+            constraint,
+            token_id,
+            bytes,
+            was_in_mask,
+            equivalence_reference,
+            &self.state,
+            result.is_ok(),
+        );
         result
     }
 
     pub(crate) fn commit_token_dynamic(&mut self, token_id: u32) -> Result<(), String> {
         let constraint = self.constraint;
         let bytes = token_bytes_for_id(constraint, token_id);
-        let was_in_mask = if commit_mask_assert_enabled() {
+        let assertion_flags = commit_assertion_flags();
+        let was_in_mask = if assertion_flags & COMMIT_ASSERT_MASK_EQUIVALENCE != 0 {
             let mut mask = vec![0u32; constraint.mask_len()];
             self.fill_mask_dynamic(&mut mask);
             Some(token_in_mask(&mask, token_id))
@@ -3511,7 +3642,15 @@ impl<'a> ConstraintState<'a> {
         };
         let result = commit_token_impl(constraint, &mut self.state, &mut self.buffers, token_id);
         self.generation += 1;
-        assert_mask_commit_equivalence(token_id, bytes, was_in_mask, result.is_ok());
+        assert_commit_oracles(
+            constraint,
+            token_id,
+            bytes,
+            was_in_mask,
+            None,
+            &self.state,
+            result.is_ok(),
+        );
         result
     }
 
@@ -3527,12 +3666,21 @@ impl<'a> ConstraintState<'a> {
 
         let constraint = self.constraint;
         let bytes = token_bytes_for_id(constraint, token_id);
-        let was_in_mask = snapshot_mask_membership(self, token_id);
+        let assertion_flags = commit_assertion_flags();
+        let was_in_mask = snapshot_mask_membership(self, token_id, assertion_flags);
         let start = Instant::now();
         let result = commit_token_impl(constraint, &mut self.state, &mut self.buffers, token_id);
         let total_ns = start.elapsed().as_nanos() as u64;
         self.generation += 1;
-        assert_mask_commit_equivalence(token_id, bytes, was_in_mask, result.is_ok());
+        assert_commit_oracles(
+            constraint,
+            token_id,
+            bytes,
+            was_in_mask,
+            None,
+            &self.state,
+            result.is_ok(),
+        );
         result.map(|()| total_ns)
     }
 
@@ -3545,7 +3693,8 @@ impl<'a> ConstraintState<'a> {
                 "commit_token: token_id {token_id} not in vocabulary or special-token terminals"
             ));
         }
-        let was_in_mask = snapshot_mask_membership(self, token_id);
+        let assertion_flags = commit_assertion_flags();
+        let was_in_mask = snapshot_mask_membership(self, token_id, assertion_flags);
         let total_started_at = std::time::Instant::now();
         let special = if has_special {
             advance_special_token_paths_profiled(constraint, &self.state, token_id, None)
@@ -3577,7 +3726,15 @@ impl<'a> ConstraintState<'a> {
         profile.total_ns = total_started_at.elapsed().as_nanos() as u64;
         let result = finish_token_commit(&self.state).map(|()| profile);
         self.generation += 1;
-        assert_mask_commit_equivalence(token_id, bytes, was_in_mask, result.is_ok());
+        assert_commit_oracles(
+            constraint,
+            token_id,
+            bytes,
+            was_in_mask,
+            None,
+            &self.state,
+            result.is_ok(),
+        );
         result
     }
 
@@ -3593,7 +3750,8 @@ impl<'a> ConstraintState<'a> {
                 "commit_token: token_id {token_id} not in vocabulary or special-token terminals"
             ));
         }
-        let was_in_mask = snapshot_mask_membership(self, token_id);
+        let assertion_flags = commit_assertion_flags();
+        let was_in_mask = snapshot_mask_membership(self, token_id, assertion_flags);
         let total_started_at = std::time::Instant::now();
         let mut advances = Vec::new();
         let special = if has_special {
@@ -3633,7 +3791,15 @@ impl<'a> ConstraintState<'a> {
         let result = finish_token_commit(&self.state)
             .map(|()| (advances, final_stacks(&self.state), profile));
         self.generation += 1;
-        assert_mask_commit_equivalence(token_id, bytes, was_in_mask, result.is_ok());
+        assert_commit_oracles(
+            constraint,
+            token_id,
+            bytes,
+            was_in_mask,
+            None,
+            &self.state,
+            result.is_ok(),
+        );
         result
     }
 
@@ -3663,26 +3829,7 @@ mod tests {
     fn canonical_commit_state(
         state: &BTreeMap<u32, ParserGSS>,
     ) -> CanonicalCommitState {
-        state
-            .iter()
-            .map(|(&tokenizer_state, gss)| {
-                let mut stacks = gss
-                    .to_stacks()
-                    .into_iter()
-                    .map(|(stack, terminals_disallowed)| {
-                        let disallowed = terminals_disallowed
-                            .iter()
-                            .map(|(&state, terminals)| {
-                                (state, terminals.iter().copied().collect::<Vec<_>>())
-                            })
-                            .collect::<Vec<_>>();
-                        (stack, disallowed)
-                    })
-                    .collect::<Vec<_>>();
-                stacks.sort();
-                (tokenizer_state, stacks)
-            })
-            .collect()
+        canonical_commit_state_for_equivalence_assert(state)
     }
 
     #[test]
