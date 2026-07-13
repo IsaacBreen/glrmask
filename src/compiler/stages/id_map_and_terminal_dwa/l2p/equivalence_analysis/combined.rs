@@ -330,21 +330,84 @@ fn direct_refinement_work_is_no_larger(
     direct_token_bytes <= max_token_len.saturating_mul(active_byte_count)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum L2pNfaAnalysisViewPolicy {
+    Adaptive,
+    Bounded,
+    Powerset,
+}
+
+impl L2pNfaAnalysisViewPolicy {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Adaptive => "adaptive",
+            Self::Bounded => "bounded",
+            Self::Powerset => "powerset",
+        }
+    }
+}
+
 #[inline]
-fn l2p_nfa_relevant_powerset_view_enabled() -> bool {
-    // The complete relevant-byte powerset can be a useful opt-in when the
-    // bounded token-trajectory view would explode, but it is substantially
-    // larger on the common partitioned-schema shape. In BFCL p0 the exact
-    // results are identical while the full view makes byte-class and exact
-    // token analysis traverse ~19k configurations, taking the id-map from
-    // roughly 6 ms to 55-65 ms. Keep the bounded exact route as the default;
-    // callers can still force the full powerset with `=1`.
-    std::env::var("GLRMASK_L2P_NFA_RELEVANT_POWERSET_VIEW")
-        .map(|value| {
-            let trimmed = value.trim();
-            trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
-        })
-        .unwrap_or(false)
+fn l2p_nfa_analysis_view_policy() -> L2pNfaAnalysisViewPolicy {
+    let Ok(value) = std::env::var("GLRMASK_L2P_NFA_RELEVANT_POWERSET_VIEW") else {
+        return L2pNfaAnalysisViewPolicy::Adaptive;
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "auto" | "adaptive" => L2pNfaAnalysisViewPolicy::Adaptive,
+        "" | "1" | "true" | "yes" | "on" | "powerset" => {
+            L2pNfaAnalysisViewPolicy::Powerset
+        }
+        "0" | "false" | "no" | "off" | "bounded" => L2pNfaAnalysisViewPolicy::Bounded,
+        other => panic!(
+            "invalid GLRMASK_L2P_NFA_RELEVANT_POWERSET_VIEW={other:?}; expected auto/adaptive, powerset/1/true/on, or bounded/0/false/off"
+        ),
+    }
+}
+
+#[inline]
+fn l2p_nfa_relevant_powerset_max_states() -> usize {
+    std::env::var("GLRMASK_L2P_NFA_RELEVANT_POWERSET_MAX_STATES")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or(8_192)
+}
+
+#[inline]
+fn l2p_nfa_relevant_powerset_min_bounded_pairs() -> usize {
+    std::env::var("GLRMASK_L2P_NFA_RELEVANT_POWERSET_MIN_BOUNDED_PAIRS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(500_000)
+}
+
+#[inline]
+fn should_probe_l2p_nfa_powerset(
+    policy: L2pNfaAnalysisViewPolicy,
+    bounded_pair_estimate: usize,
+    min_bounded_pairs: usize,
+) -> bool {
+    match policy {
+        L2pNfaAnalysisViewPolicy::Adaptive => bounded_pair_estimate >= min_bounded_pairs,
+        L2pNfaAnalysisViewPolicy::Bounded => false,
+        L2pNfaAnalysisViewPolicy::Powerset => true,
+    }
+}
+
+#[inline]
+fn should_use_l2p_nfa_powerset(
+    policy: L2pNfaAnalysisViewPolicy,
+    candidate_present: bool,
+    powerset_states: usize,
+    max_states: usize,
+) -> bool {
+    match policy {
+        L2pNfaAnalysisViewPolicy::Adaptive => {
+            candidate_present && powerset_states <= max_states
+        }
+        L2pNfaAnalysisViewPolicy::Bounded => false,
+        L2pNfaAnalysisViewPolicy::Powerset => true,
+    }
 }
 
 fn should_skip_max_length_for_partition(
@@ -1534,13 +1597,35 @@ fn analyze_equivalences_impl(
             .map(|&state| state as usize)
             .collect::<Vec<_>>();
         let analysis_view_started_at = Instant::now();
-        let (analysis_view_owned, raw_start_to_view) = if l2p_nfa_relevant_powerset_view_enabled() {
-            let powerset = build_relevant_powerset_view(
-                tokenizer,
-                &relevant_bytes,
-                active_groups,
-                None,
-            );
+        let analysis_view_policy = l2p_nfa_analysis_view_policy();
+        let powerset_max_states = l2p_nfa_relevant_powerset_max_states();
+        let powerset_min_bounded_pairs = l2p_nfa_relevant_powerset_min_bounded_pairs();
+        let bounded_pair_estimate = raw_pre_representatives
+            .len()
+            .saturating_mul(dedup.representative_token_bytes.len());
+        let should_probe_powerset = should_probe_l2p_nfa_powerset(
+            analysis_view_policy,
+            bounded_pair_estimate,
+            powerset_min_bounded_pairs,
+        );
+        let powerset_started_at = Instant::now();
+        let powerset_candidate = should_probe_powerset.then(|| {
+            build_relevant_powerset_view(tokenizer, &relevant_bytes, active_groups, None)
+        });
+        let powerset_build_ms = powerset_started_at.elapsed().as_secs_f64() * 1000.0;
+        let powerset_probed = powerset_candidate.is_some();
+        let powerset_states = powerset_candidate
+            .as_ref()
+            .map_or(0, |powerset| powerset.states.len());
+        let use_powerset = should_use_l2p_nfa_powerset(
+            analysis_view_policy,
+            powerset_probed,
+            powerset_states,
+            powerset_max_states,
+        );
+        let (analysis_view_owned, raw_start_to_view) = if use_powerset {
+            let powerset = powerset_candidate
+                .expect("powerset analysis policy must build a powerset candidate");
             let raw_start_to_view = Arc::clone(&powerset.raw_start_to_view);
             (powerset.into_tokenizer_view(), raw_start_to_view)
         } else {
@@ -1558,6 +1643,24 @@ fn analyze_equivalences_impl(
         };
         let analysis_view_build_ms =
             analysis_view_started_at.elapsed().as_secs_f64() * 1000.0;
+        if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+        {
+            eprintln!(
+                "[glrmask/profile][l2p_nfa_analysis_view] partition={} policy={} selected={} bounded_pair_estimate={} powerset_min_bounded_pairs={} powerset_probed={} powerset_states={} powerset_max_states={} powerset_build_ms={:.3} total_build_ms={:.3}",
+                partition_label,
+                analysis_view_policy.as_str(),
+                if use_powerset { "powerset" } else { "bounded" },
+                bounded_pair_estimate,
+                powerset_min_bounded_pairs,
+                powerset_probed,
+                powerset_states,
+                powerset_max_states,
+                powerset_build_ms,
+                analysis_view_build_ms,
+            );
+        }
         let analysis_view = &analysis_view_owned;
 
         let byte_class_started_at = Instant::now();
@@ -1966,6 +2069,68 @@ mod prepass_selection_tests {
     };
     use crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::shared::representative_tokens_for_vocab_classes;
     use std::sync::Arc;
+
+    #[test]
+    fn adaptive_nfa_view_skips_powerset_probe_below_bounded_work_threshold() {
+        assert!(!should_probe_l2p_nfa_powerset(
+            L2pNfaAnalysisViewPolicy::Adaptive,
+            499_999,
+            500_000,
+        ));
+        assert!(should_probe_l2p_nfa_powerset(
+            L2pNfaAnalysisViewPolicy::Adaptive,
+            500_000,
+            500_000,
+        ));
+    }
+
+    #[test]
+    fn adaptive_nfa_view_uses_only_small_probed_powersets() {
+        assert!(should_use_l2p_nfa_powerset(
+            L2pNfaAnalysisViewPolicy::Adaptive,
+            true,
+            8_192,
+            8_192,
+        ));
+        assert!(!should_use_l2p_nfa_powerset(
+            L2pNfaAnalysisViewPolicy::Adaptive,
+            true,
+            8_193,
+            8_192,
+        ));
+        assert!(!should_use_l2p_nfa_powerset(
+            L2pNfaAnalysisViewPolicy::Adaptive,
+            false,
+            0,
+            8_192,
+        ));
+    }
+
+    #[test]
+    fn forced_nfa_view_policies_override_adaptive_gates() {
+        assert!(!should_probe_l2p_nfa_powerset(
+            L2pNfaAnalysisViewPolicy::Bounded,
+            usize::MAX,
+            500_000,
+        ));
+        assert!(!should_use_l2p_nfa_powerset(
+            L2pNfaAnalysisViewPolicy::Bounded,
+            true,
+            1,
+            8_192,
+        ));
+        assert!(should_probe_l2p_nfa_powerset(
+            L2pNfaAnalysisViewPolicy::Powerset,
+            0,
+            500_000,
+        ));
+        assert!(should_use_l2p_nfa_powerset(
+            L2pNfaAnalysisViewPolicy::Powerset,
+            true,
+            usize::MAX,
+            8_192,
+        ));
+    }
 
     fn partition_from_representatives<T: Ord + Copy>(
         values: &[T],
