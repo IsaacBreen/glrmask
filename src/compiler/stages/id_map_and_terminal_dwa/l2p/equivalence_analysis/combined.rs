@@ -1,6 +1,6 @@
 use crate::automata::lexer::Lexer;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use crate::Vocab;
@@ -12,7 +12,9 @@ use super::state_equivalence::{
     build_state_map_from_subset_representatives, resolve_l2p_pipeline_config,
     run_state_equivalence_pipeline, StateEquivalenceScope,
 };
-use super::state_equivalence::nfa::build_bounded_analysis_view;
+use super::state_equivalence::nfa::{
+    build_bounded_analysis_view, build_relevant_powerset_view,
+};
 use crate::ds::bitset::BitSet;
 use super::compat::TokenizerView;
 use super::disallowed_follows::normalize_disallowed_follows;
@@ -329,6 +331,22 @@ fn direct_refinement_work_is_no_larger(
 }
 
 #[inline]
+fn l2p_nfa_relevant_powerset_view_enabled() -> bool {
+    // The complete relevant-byte powerset can be a useful opt-in when the
+    // bounded token-trajectory view would explode, but it is substantially
+    // larger on the common partitioned-schema shape. In BFCL p0 the exact
+    // results are identical while the full view makes byte-class and exact
+    // token analysis traverse ~19k configurations, taking the id-map from
+    // roughly 6 ms to 55-65 ms. Keep the bounded exact route as the default;
+    // callers can still force the full powerset with `=1`.
+    std::env::var("GLRMASK_L2P_NFA_RELEVANT_POWERSET_VIEW")
+        .map(|value| {
+            let trimmed = value.trim();
+            trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or(false)
+}
+
 fn should_skip_max_length_for_partition(
     partition_label: &str,
     initial_state_count: usize,
@@ -1516,15 +1534,31 @@ fn analyze_equivalences_impl(
             .map(|&state| state as usize)
             .collect::<Vec<_>>();
         let analysis_view_started_at = Instant::now();
-        let bounded = build_bounded_analysis_view(
-            tokenizer,
-            &raw_pre_representatives,
-            &dedup.representative_token_bytes,
-            active_groups,
-        );
+        let (analysis_view_owned, raw_start_to_view) = if l2p_nfa_relevant_powerset_view_enabled() {
+            let powerset = build_relevant_powerset_view(
+                tokenizer,
+                &relevant_bytes,
+                active_groups,
+                None,
+            );
+            let raw_start_to_view = Arc::clone(&powerset.raw_start_to_view);
+            (powerset.into_tokenizer_view(), raw_start_to_view)
+        } else {
+            let bounded = build_bounded_analysis_view(
+                tokenizer,
+                &raw_pre_representatives,
+                &dedup.representative_token_bytes,
+                active_groups,
+            );
+            let mut raw_start_to_view = vec![u32::MAX; tokenizer.num_states() as usize];
+            for &raw in &raw_pre_representatives {
+                raw_start_to_view[raw] = bounded.view_state_for_raw_start(raw) as u32;
+            }
+            (bounded.tokenizer_view, Arc::from(raw_start_to_view))
+        };
         let analysis_view_build_ms =
             analysis_view_started_at.elapsed().as_secs_f64() * 1000.0;
-        let analysis_view = &bounded.tokenizer_view;
+        let analysis_view = &analysis_view_owned;
 
         let byte_class_started_at = Instant::now();
         let byte_to_class = super::compat::compute_byte_classes(analysis_view.dfa());
@@ -1538,7 +1572,7 @@ fn analyze_equivalences_impl(
 
         let preclass_view_states = raw_pre_representatives
             .iter()
-            .map(|&raw| bounded.view_state_for_raw_start(raw))
+            .map(|&raw| raw_start_to_view[raw] as usize)
             .collect::<Vec<_>>();
         let mut query_view_states = preclass_view_states.clone();
         query_view_states.sort_unstable();
@@ -1594,7 +1628,7 @@ fn analyze_equivalences_impl(
         let mut final_view_states = tokenizer_states
             .representative_original_ids
             .iter()
-            .map(|&raw| bounded.view_state_for_raw_start(raw as usize))
+            .map(|&raw| raw_start_to_view[raw as usize] as usize)
             .collect::<Vec<_>>();
         final_view_states.sort_unstable();
         final_view_states.dedup();
