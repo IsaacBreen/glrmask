@@ -133,13 +133,31 @@ pub(crate) fn build_relevant_powerset_view(
             }
         }
     } else {
+        let mut byte_marks = [0u32; 256];
+        let mut byte_epoch = 0u32;
+        let mut candidate_bytes = Vec::<u8>::new();
         while let Some(state) = worklist.pop_front() {
             let config = configs[state as usize].clone();
-            for (byte, &relevant) in relevant_bytes.iter().enumerate() {
-                if !relevant {
-                    continue;
+            byte_epoch = byte_epoch.wrapping_add(1);
+            if byte_epoch == 0 {
+                byte_marks.fill(0);
+                byte_epoch = 1;
+            }
+            candidate_bytes.clear();
+            for &source in config.iter() {
+                for (byte, _) in tokenizer.transitions_from(source) {
+                    let byte_index = byte as usize;
+                    if relevant_bytes[byte_index] && byte_marks[byte_index] != byte_epoch {
+                        byte_marks[byte_index] = byte_epoch;
+                        candidate_bytes.push(byte);
+                    }
                 }
-                let targets = tokenizer.step_all(&config, byte as u8);
+            }
+            // Preserve the previous ascending-byte expansion order so interned
+            // powerset-state ids remain stable across the sparse traversal.
+            candidate_bytes.sort_unstable();
+            for &byte in &candidate_bytes {
+                let targets = tokenizer.step_all(&config, byte);
                 if targets.is_empty() {
                     continue;
                 }
@@ -148,7 +166,7 @@ pub(crate) fn build_relevant_powerset_view(
                     transitions.resize(configs.len() * 256, u32::MAX);
                     queued.resize(configs.len(), false);
                 }
-                transitions[state as usize * 256 + byte] = target;
+                transitions[state as usize * 256 + byte as usize] = target;
                 if !queued[target as usize] {
                     queued[target as usize] = true;
                     worklist.push_back(target);
