@@ -2105,9 +2105,14 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         I: IntoIterator<Item = (usize, &'a [T])>,
         T: 'a,
     {
-        if let Some(stack) = self.try_virtual_stack() {
+        let effects: SmallVec<[(usize, &'a [T]); 8]> = effects.into_iter().collect();
+
+        if let Some(stack) = self.try_virtual_stack()
+            && (!stack.has_hidden_floor_values()
+                || effects.iter().all(|(pop, _)| *pop <= stack.len()))
+        {
             let mut out: Option<Self> = None;
-            for (pop, pushes) in effects {
+            for &(pop, pushes) in &effects {
                 let mut branch = stack.clone();
                 if branch.pop(pop) != 0 {
                     continue;
