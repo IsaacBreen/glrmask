@@ -2075,6 +2075,177 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         res
     }
 
+    /// Visit concrete stacks in top-first order without materializing the full
+    /// stack set. Returns `false` as soon as more than `limit` paths are found.
+    ///
+    /// This is intended for bounded runtime fast paths which already reject
+    /// highly ambiguous GSSes. The traversal buffer stays inline for stack
+    /// depths up to 64.
+    pub(crate) fn for_each_stack_top_first_bounded(
+        &self,
+        limit: usize,
+        mut f: impl FnMut(&[T], &A),
+    ) -> bool {
+        fn emit<T, A, F>(
+            pref: &[T],
+            acc: &A,
+            limit: usize,
+            emitted: &mut usize,
+            f: &mut F,
+        ) -> bool
+        where
+            F: FnMut(&[T], &A),
+        {
+            if *emitted >= limit {
+                return false;
+            }
+            *emitted += 1;
+            f(pref, acc);
+            true
+        }
+
+        fn dfs_lower<T, A, F>(
+            lower: &Lower<T>,
+            pref: &mut SmallVec<[T; 64]>,
+            acc: &A,
+            limit: usize,
+            emitted: &mut usize,
+            f: &mut F,
+        ) -> bool
+        where
+            T: Clone + Eq + Hash,
+            A: Merge + Clone + Eq + Hash,
+            F: FnMut(&[T], &A),
+        {
+            if lower.empty() && !emit(pref, acc, limit, emitted, f) {
+                return false;
+            }
+            match lower {
+                Lower::Segment(seg) => {
+                    for value in seg.values.iter().rev() {
+                        pref.push(value.clone());
+                    }
+                    let complete =
+                        dfs_lower(&seg.next, pref, acc, limit, emitted, f);
+                    pref.truncate(pref.len() - seg.values.len());
+                    complete
+                }
+                Lower::General { children, .. } => {
+                    for (value, kids) in children.iter() {
+                        for child in kids.values() {
+                            pref.push(value.clone());
+                            let complete =
+                                dfs_lower(child, pref, acc, limit, emitted, f);
+                            pref.pop();
+                            if !complete {
+                                return false;
+                            }
+                        }
+                    }
+                    true
+                }
+            }
+        }
+
+        fn dfs_upper<T, A, F>(
+            upper: &Upper<T, A>,
+            pref: &mut SmallVec<[T; 64]>,
+            limit: usize,
+            emitted: &mut usize,
+            f: &mut F,
+        ) -> bool
+        where
+            T: Clone + Eq + Hash,
+            A: Merge + Clone + Eq + Hash,
+            F: FnMut(&[T], &A),
+        {
+            match upper {
+                Upper::Branch(branch) => {
+                    if let Some(acc) = &branch.empty
+                        && !emit(pref, acc, limit, emitted, f)
+                    {
+                        return false;
+                    }
+                    for (value, kids) in branch.children.iter() {
+                        for child in kids.values() {
+                            pref.push(value.clone());
+                            let complete = dfs_upper(child, pref, limit, emitted, f);
+                            pref.pop();
+                            if !complete {
+                                return false;
+                            }
+                        }
+                    }
+                    true
+                }
+                Upper::Interface(interface) => {
+                    if interface.inner.empty()
+                        && !emit(pref, &interface.acc, limit, emitted, f)
+                    {
+                        return false;
+                    }
+                    match &*interface.inner {
+                        Lower::Segment(seg) => {
+                            for value in seg.values.iter().rev() {
+                                pref.push(value.clone());
+                            }
+                            let complete = dfs_lower(
+                                &seg.next,
+                                pref,
+                                &interface.acc,
+                                limit,
+                                emitted,
+                                f,
+                            );
+                            pref.truncate(pref.len() - seg.values.len());
+                            complete
+                        }
+                        Lower::General { children, .. } => {
+                            for (value, kids) in children.iter() {
+                                for child in kids.values() {
+                                    pref.push(value.clone());
+                                    let complete = dfs_lower(
+                                        child,
+                                        pref,
+                                        &interface.acc,
+                                        limit,
+                                        emitted,
+                                        f,
+                                    );
+                                    pref.pop();
+                                    if !complete {
+                                        return false;
+                                    }
+                                }
+                            }
+                            true
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut pref = SmallVec::<[T; 64]>::new();
+        let mut emitted = 0usize;
+        dfs_upper(&self.inner, &mut pref, limit, &mut emitted, &mut f)
+    }
+
+    /// Compare the concrete stack/accumulator set represented by two GSSes,
+    /// independent of their internal sharing or node layout.
+    ///
+    /// This intentionally materializes stacks and is meant for validation and
+    /// diagnostics, not production hot paths. `PartialEq` remains structural.
+    pub(crate) fn semantically_eq(&self, other: &Self) -> bool {
+        if self == other {
+            return true;
+        }
+        let left = self.to_stacks();
+        let right = other.to_stacks();
+        left.len() == right.len()
+            && left.iter().all(|entry| right.contains(entry))
+            && right.iter().all(|entry| left.contains(entry))
+    }
+
     /// Apply a set of stack effects by materializing the single concrete stack.
     ///
     /// This is only a win for already-deterministic parser states that have a
@@ -4570,6 +4741,55 @@ mod tests {
         fn merge(&self, other: &Self) -> Self {
             Self(self.0.max(other.0))
         }
+    }
+
+    #[test]
+    fn semantic_equality_compares_stack_accumulator_sets() {
+        let left = LeveledGSS::merge_many([
+            LeveledGSS::from_single_stack(vec![0_u32, 1, 7], TestAcc(1)),
+            LeveledGSS::from_single_stack(vec![0_u32, 1, 9], TestAcc(2)),
+        ]);
+        let same = LeveledGSS::from_stacks(&[
+            (vec![0_u32, 1, 9], TestAcc(2)),
+            (vec![0_u32, 1, 7], TestAcc(1)),
+        ]);
+        let different_acc = LeveledGSS::from_stacks(&[
+            (vec![0_u32, 1, 9], TestAcc(3)),
+            (vec![0_u32, 1, 7], TestAcc(1)),
+        ]);
+
+        assert!(left.semantically_eq(&same));
+        assert!(same.semantically_eq(&left));
+        assert!(!left.semantically_eq(&different_acc));
+    }
+
+    #[test]
+    fn bounded_top_first_stack_traversal_matches_to_stacks() {
+        let gss = LeveledGSS::from_stacks(&[
+            (vec![0_u32, 1, 7], TestAcc(1)),
+            (vec![0_u32, 2, 8, 9], TestAcc(2)),
+            (vec![0_u32, 2, 8, 10], TestAcc(2)),
+        ]);
+        let expected = gss.to_stacks();
+        let mut actual = Vec::new();
+        assert!(gss.for_each_stack_top_first_bounded(3, |top_first, acc| {
+            let mut bottom_first = top_first.to_vec();
+            bottom_first.reverse();
+            actual.push((bottom_first, acc.clone()));
+        }));
+        assert_eq!(actual.len(), expected.len());
+        for entry in &expected {
+            assert!(actual.contains(entry));
+        }
+        for entry in &actual {
+            assert!(expected.contains(entry));
+        }
+
+        let mut visited = 0usize;
+        assert!(!gss.for_each_stack_top_first_bounded(2, |_, _| {
+            visited += 1;
+        }));
+        assert_eq!(visited, 2);
     }
 
     #[test]

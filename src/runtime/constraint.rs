@@ -2518,6 +2518,171 @@ impl Constraint {
         cost + self.internal_bits_buf_op_cost(wi, bits, buf_len)
     }
 
+    fn full_internal_word_run_buf_op_cost(
+        &self,
+        mut wi: usize,
+        end: usize,
+        buf_len: usize,
+    ) -> usize {
+        let run_len = end.saturating_sub(wi);
+        if run_len > 0
+            && end < self.word_group_prefix_buf_masks.len()
+            && Self::prefer_dense_buf_scan(
+                buf_len,
+                self.sparse_word_group_entries_in(wi, run_len),
+            )
+        {
+            return buf_len;
+        }
+
+        let mut cost = 0usize;
+        while wi < end {
+            let remaining = end - wi;
+            let block = if remaining >= 32
+                && self
+                    .giga_word_group_buf_masks
+                    .get(wi)
+                    .is_some_and(|dense| {
+                        Self::prefer_dense_buf_scan(
+                            dense.len(),
+                            self.sparse_word_group_entries_in(wi, 32),
+                        )
+                    })
+            {
+                Some((32, self.giga_word_group_buf_masks[wi].len()))
+            } else if remaining >= 16
+                && self
+                    .mega_word_group_buf_masks
+                    .get(wi)
+                    .is_some_and(|dense| {
+                        Self::prefer_dense_buf_scan(
+                            dense.len(),
+                            self.sparse_word_group_entries_in(wi, 16),
+                        )
+                    })
+            {
+                Some((16, self.mega_word_group_buf_masks[wi].len()))
+            } else if remaining >= 8
+                && self
+                    .super_word_group_buf_masks
+                    .get(wi)
+                    .is_some_and(|dense| {
+                        Self::prefer_dense_buf_scan(
+                            dense.len(),
+                            self.sparse_word_group_entries_in(wi, 8),
+                        )
+                    })
+            {
+                Some((8, self.super_word_group_buf_masks[wi].len()))
+            } else if remaining >= 4
+                && self
+                    .quad_word_group_buf_masks
+                    .get(wi)
+                    .is_some_and(|dense| {
+                        Self::prefer_dense_buf_scan(
+                            dense.len(),
+                            self.sparse_word_group_entries_in(wi, 4),
+                        )
+                    })
+            {
+                Some((4, self.quad_word_group_buf_masks[wi].len()))
+            } else if remaining >= 2
+                && self
+                    .pair_word_group_buf_masks
+                    .get(wi)
+                    .is_some_and(|dense| {
+                        Self::prefer_dense_buf_scan(
+                            dense.len(),
+                            self.sparse_word_group_entries_in(wi, 2),
+                        )
+                    })
+            {
+                Some((2, self.pair_word_group_buf_masks[wi].len()))
+            } else {
+                None
+            };
+
+            if let Some((block_len, dense_cost)) = block {
+                cost = cost.saturating_add(dense_cost);
+                wi += block_len;
+                continue;
+            }
+
+            if let Some(group_mask) = self.word_group_sparse_masks.get(wi) {
+                cost = cost.saturating_add(
+                    if Self::prefer_dense_buf_scan(buf_len, group_mask.len())
+                        && wi + 1 < self.word_group_prefix_buf_masks.len()
+                    {
+                        buf_len
+                    } else {
+                        group_mask.len()
+                    },
+                );
+            }
+            wi += 1;
+        }
+        cost
+    }
+
+    fn internal_dense_buf_replay_cost(
+        &self,
+        dense: &[u64],
+        n_internal: usize,
+        buf_len: usize,
+        complement: bool,
+    ) -> usize {
+        let mut cost = 0usize;
+        let mut wi = 0usize;
+        while wi < dense.len() && wi * 64 < n_internal {
+            let remaining = n_internal - wi * 64;
+            let valid_mask = if remaining >= 64 {
+                !0u64
+            } else {
+                (1u64 << remaining) - 1
+            };
+            let bits = if complement {
+                !dense[wi] & valid_mask
+            } else {
+                dense[wi] & valid_mask
+            };
+            if bits == 0 {
+                wi += 1;
+                continue;
+            }
+            if bits == valid_mask {
+                let run_start = wi;
+                wi += 1;
+                while wi < dense.len() && wi * 64 < n_internal {
+                    let remaining = n_internal - wi * 64;
+                    if remaining < 64
+                        || if complement {
+                            dense[wi] != 0
+                        } else {
+                            dense[wi] != !0u64
+                        }
+                    {
+                        break;
+                    }
+                    wi += 1;
+                }
+                cost = cost.saturating_add(self.full_internal_word_run_buf_op_cost(
+                    run_start,
+                    wi,
+                    buf_len,
+                ));
+                continue;
+            }
+            cost = cost.saturating_add(self.internal_bits_grouped_buf_op_cost(
+                wi,
+                bits,
+                valid_mask,
+                buf_len,
+            ));
+            wi += 1;
+        }
+        cost
+    }
+
     #[inline(always)]
     fn or_internal_token_to_buf_fast<const PROFILE: bool>(
         &self,
@@ -2698,6 +2863,66 @@ impl Constraint {
         }
     }
 
+    fn fill_internal_dense_complement_to_buf<const PROFILE: bool>(
+        &self,
+        dense: &[u64],
+        n_internal: usize,
+        buf: &mut [u32],
+        stats: &mut DenseToBufProfileStats,
+    ) {
+        copy_dense_buf(buf, &self.all_tokens_buf_mask);
+        let mut wi = 0usize;
+        while wi < dense.len() {
+            if wi * 64 >= n_internal {
+                break;
+            }
+            if PROFILE {
+                stats.dense_words_visited += 1;
+            }
+            let w = dense[wi];
+            let remaining = n_internal - wi * 64;
+            let valid_mask = if remaining >= 64 {
+                !0u64
+            } else {
+                (1u64 << remaining) - 1
+            };
+            let missing = !w & valid_mask;
+            if missing == 0 {
+                wi += 1;
+                continue;
+            }
+            if missing == valid_mask {
+                let run_start = wi;
+                wi += 1;
+                while wi < dense.len() && wi * 64 < n_internal {
+                    let remaining = n_internal - wi * 64;
+                    if remaining < 64 || dense[wi] != 0 {
+                        break;
+                    }
+                    if PROFILE {
+                        stats.dense_words_visited += 1;
+                    }
+                    wi += 1;
+                }
+                self.andnot_full_internal_word_run_from_buf::<PROFILE>(
+                    run_start,
+                    wi,
+                    buf,
+                    stats,
+                );
+                continue;
+            }
+            self.andnot_internal_bits_from_buf_grouped::<PROFILE>(
+                wi,
+                missing,
+                valid_mask,
+                buf,
+                stats,
+            );
+            wi += 1;
+        }
+    }
+
     /// Convert a merged internal token dense bitmap to the output buffer.
     /// Uses a contiguous flat entry array for cache-friendly sequential access,
     /// with word_group fast paths for fully-set 64-bit words and heavy token
@@ -2707,6 +2932,7 @@ impl Constraint {
         dense: &[u64],
         buf: &mut [u32],
         buf_zeroed: bool,
+        mut dirty_complement_scratch: Option<&mut Vec<u32>>,
     ) -> DenseToBufProfileStats {
         if self.final_mask_mapping.internal_len() > 0 {
             if PROFILE {
@@ -2752,60 +2978,50 @@ impl Constraint {
         let dense_complement_fast_path =
             n_set.saturating_mul(5) >= n_internal.saturating_mul(4) && n_missing <= 128;
 
+        let dirty_complement_fast_path = if !buf_zeroed
+            && dirty_complement_scratch.is_some()
+            && !all_mask.is_empty()
+        {
+            let selected_cost =
+                self.internal_dense_buf_replay_cost(dense, n_internal, buf_len, false);
+            let dense_pass_cost = buf_len.saturating_mul(2);
+            if selected_cost <= dense_pass_cost {
+                false
+            } else {
+                let missing_cost =
+                    self.internal_dense_buf_replay_cost(dense, n_internal, buf_len, true);
+                dense_pass_cost.saturating_add(missing_cost) < selected_cost
+            }
+        } else {
+            false
+        };
+
         // Complement conversion seeds ALL and then clears missing-token bits.
         // It is only an OR-equivalent conversion when `buf` is known zero;
         // otherwise the clears can erase bits produced by another parser path.
-        if buf_zeroed && !all_mask.is_empty() && dense_complement_fast_path {
+        if !all_mask.is_empty()
+            && ((buf_zeroed && dense_complement_fast_path)
+                || (!buf_zeroed && dirty_complement_fast_path))
+        {
             if PROFILE {
                 stats.complement_path_used = true;
             }
-            // Complement-sparse path: start from all_tokens, subtract missing tokens.
-            copy_dense_buf(buf, all_mask);
-            let mut wi = 0usize;
-            while wi < dense.len() {
-                if wi * 64 >= n_internal {
-                    break;
-                }
-                if PROFILE {
-                    stats.dense_words_visited += 1;
-                }
-                let w = dense[wi];
-                let remaining = n_internal - wi * 64;
-                let valid_mask = if remaining >= 64 { !0u64 } else { (1u64 << remaining) - 1 };
-                let missing = !w & valid_mask;
-                if missing == 0 {
-                    wi += 1;
-                    continue;
-                }
-                if missing == valid_mask {
-                    let run_start = wi;
-                    wi += 1;
-                    while wi < dense.len() && wi * 64 < n_internal {
-                        let remaining = n_internal - wi * 64;
-                        if remaining < 64 || dense[wi] != 0 {
-                            break;
-                        }
-                        if PROFILE {
-                            stats.dense_words_visited += 1;
-                        }
-                        wi += 1;
-                    }
-                    self.andnot_full_internal_word_run_from_buf::<PROFILE>(
-                        run_start,
-                        wi,
-                        buf,
-                        &mut stats,
-                    );
-                    continue;
-                }
-                self.andnot_internal_bits_from_buf_grouped::<PROFILE>(
-                    wi,
-                    missing,
-                    valid_mask,
+            if buf_zeroed {
+                self.fill_internal_dense_complement_to_buf::<PROFILE>(
+                    dense,
+                    n_internal,
                     buf,
                     &mut stats,
                 );
-                wi += 1;
+            } else if let Some(scratch) = dirty_complement_scratch.as_deref_mut() {
+                scratch.resize(buf.len(), 0);
+                self.fill_internal_dense_complement_to_buf::<PROFILE>(
+                    dense,
+                    n_internal,
+                    scratch,
+                    &mut stats,
+                );
+                or_dense_buf(buf, scratch);
             }
         } else {
             // Normal path: process sparse light tokens and dense heavy tokens.
@@ -2916,7 +3132,7 @@ impl Constraint {
         buf: &mut [u32],
         buf_zeroed: bool,
     ) -> DenseToBufProfileStats {
-        self.or_internal_dense_to_buf_impl::<true>(dense, buf, buf_zeroed)
+        self.or_internal_dense_to_buf_impl::<true>(dense, buf, buf_zeroed, None)
     }
 
     pub(crate) fn or_internal_dense_to_buf_fast(
@@ -2925,7 +3141,22 @@ impl Constraint {
         buf: &mut [u32],
         buf_zeroed: bool,
     ) {
-        let _ = self.or_internal_dense_to_buf_impl::<false>(dense, buf, buf_zeroed);
+        let _ = self.or_internal_dense_to_buf_impl::<false>(dense, buf, buf_zeroed, None);
+    }
+
+    pub(crate) fn or_internal_dense_to_buf_fast_with_scratch(
+        &self,
+        dense: &[u64],
+        buf: &mut [u32],
+        buf_zeroed: bool,
+        dirty_complement_scratch: &mut Vec<u32>,
+    ) {
+        let _ = self.or_internal_dense_to_buf_impl::<false>(
+            dense,
+            buf,
+            buf_zeroed,
+            Some(dirty_complement_scratch),
+        );
     }
 
     fn or_original_token_to_buf(&self, token_id: u32, buf: &mut [u32]) {
@@ -3114,7 +3345,87 @@ mod dense_internal_token_mask_tests {
                     "fast OR mismatch: selected={selected:#b} initial={initial:#06b} internal_to_original={:?}",
                     constraint.internal_token_to_tokens,
                 );
+
+                let mut scratch_fast = vec![0u32; constraint.mask_len()];
+                scratch_fast[0] = initial;
+                let mut dirty_complement_scratch = Vec::new();
+                constraint.or_internal_dense_to_buf_fast_with_scratch(
+                    &dense,
+                    &mut scratch_fast,
+                    buf_zeroed,
+                    &mut dirty_complement_scratch,
+                );
+                assert_eq!(
+                    scratch_fast[0],
+                    expected,
+                    "scratch fast OR mismatch: selected={selected:#b} initial={initial:#06b} internal_to_original={:?}",
+                    constraint.internal_token_to_tokens,
+                );
             }
         }
+    }
+
+    #[test]
+    fn dirty_dense_conversion_uses_scratch_complement_when_alias_replay_is_expensive() {
+        let mut entries = Vec::new();
+        for alias in 0u32..64 {
+            for byte_index in 0u32..64 {
+                entries.push((alias * 64 + byte_index, vec![(byte_index + 32) as u8]));
+            }
+        }
+        let vocab = Vocab::new(entries, None);
+        let mut grammar = String::from("start start;\n");
+        for byte_index in 0u32..64 {
+            let literal = serde_json::to_string(&((byte_index + 32) as u8 as char).to_string())
+                .unwrap();
+            grammar.push_str(&format!("t T{byte_index} ::= {literal};\n"));
+        }
+        grammar.push_str("nt start ::= ");
+        for byte_index in 0u32..64 {
+            if byte_index != 0 {
+                grammar.push_str(" | ");
+            }
+            grammar.push_str(&format!("T{byte_index} T{byte_index}"));
+        }
+        grammar.push_str(";\n");
+        let mut constraint = Constraint::from_glrm_grammar(
+            &grammar,
+            &vocab,
+        )
+        .unwrap();
+        constraint.final_mask_mapping = Default::default();
+
+        let n_internal = constraint.internal_token_to_tokens.len();
+        assert_eq!(n_internal, 64, "expected duplicate bytes to form 64 internal tokens");
+
+        let mut dense = vec![0u64; n_internal.div_ceil(64)];
+        for internal in 0..48 {
+            dense[internal / 64] |= 1u64 << (internal % 64);
+        }
+
+        let dirty_token = constraint.internal_token_to_tokens[63][0];
+        let dirty_word = dirty_token as usize / 32;
+        let dirty_bit = dirty_token as usize % 32;
+
+        let mut expected = vec![0u32; constraint.mask_len()];
+        expected[dirty_word] |= 1u32 << dirty_bit;
+        constraint.or_internal_dense_to_buf_fast(&dense, &mut expected, false);
+
+        let mut actual = vec![0u32; constraint.mask_len()];
+        actual[dirty_word] |= 1u32 << dirty_bit;
+        let mut scratch = Vec::new();
+        constraint.or_internal_dense_to_buf_fast_with_scratch(
+            &dense,
+            &mut actual,
+            false,
+            &mut scratch,
+        );
+
+        assert_eq!(actual, expected);
+        assert_eq!(
+            scratch.len(),
+            constraint.mask_len(),
+            "expected the replay-cost model to select dirty scratch complement conversion",
+        );
     }
 }

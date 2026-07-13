@@ -31,7 +31,7 @@ pub struct TokenizerMatch {
     pub end_state: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenizerExecResult {
     pub end_state: TokenizerStateSet,
     pub matches: Vec<TokenizerMatch>,
