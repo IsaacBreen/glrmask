@@ -83,6 +83,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
         vec![TerminalPathLength::TwoPlus; num_terminals as usize]
     } else {
         classify_terminal_path_lengths(
+            partition_label,
             tokenizer,
             vocab,
             token_path_disallowed_follows.as_ref(),

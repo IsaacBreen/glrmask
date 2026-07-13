@@ -1860,6 +1860,132 @@ fn group_pmv_legacy_enabled() -> bool {
         .unwrap_or(false)
 }
 
+fn nfa_powerset_collect_enabled() -> bool {
+    std::env::var("GLRMASK_PM_NFA_POWERSET_COLLECT")
+        .map(|value| {
+            let trimmed = value.trim();
+            trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or(true)
+}
+
+struct PossibleMatchPowersetView {
+    tokenizer_view: TokenizerView,
+    raw_start_to_view: Vec<u32>,
+    boundary_state: Vec<u32>,
+    is_end: Vec<bool>,
+}
+
+fn intern_possible_match_config(
+    mut config: Vec<u32>,
+    config_ids: &mut FxHashMap<Vec<u32>, u32>,
+    configs: &mut Vec<Box<[u32]>>,
+) -> Option<u32> {
+    config.sort_unstable();
+    config.dedup();
+    if config.is_empty() {
+        return None;
+    }
+    if let Some(&id) = config_ids.get(&config) {
+        return Some(id);
+    }
+    let id = configs.len() as u32;
+    config_ids.insert(config.clone(), id);
+    configs.push(config.into_boxed_slice());
+    Some(id)
+}
+
+fn build_possible_match_powerset_view(
+    tokenizer: &Tokenizer,
+    relevant_bytes: &[bool; 256],
+) -> PossibleMatchPowersetView {
+    let mut config_ids = FxHashMap::<Vec<u32>, u32>::default();
+    let mut configs = Vec::<Box<[u32]>>::new();
+    let raw_start_to_view = (0..tokenizer.num_states())
+        .map(|raw_state| {
+            intern_possible_match_config(
+                tokenizer
+                    .execute_from_state_end_only(&[], raw_state)
+                    .to_vec(),
+                &mut config_ids,
+                &mut configs,
+            )
+            .expect("epsilon closure of tokenizer state must be nonempty")
+        })
+        .collect::<Vec<_>>();
+
+    let active_bytes = relevant_bytes
+        .iter()
+        .enumerate()
+        .filter_map(|(byte, &active)| active.then_some(byte as u8))
+        .collect::<Vec<_>>();
+    let mut states = Vec::<FlatDfaState>::new();
+    let mut transition_rows = Vec::<Box<[u32; 256]>>::new();
+    let mut boundary_state = Vec::<u32>::new();
+    let mut is_end = Vec::<bool>::new();
+    let mut config_index = 0usize;
+    while config_index < configs.len() {
+        let config = configs[config_index].to_vec();
+        let mut finalizers = config
+            .iter()
+            .flat_map(|&raw_state| tokenizer.matched_terminals_iter(raw_state))
+            .map(|terminal| terminal as usize)
+            .collect::<Vec<_>>();
+        finalizers.sort_unstable();
+        finalizers.dedup();
+        states.push(FlatDfaState {
+            finalizers,
+            possible_future_group_ids: Vec::new(),
+        });
+
+        let live_config = config
+            .iter()
+            .copied()
+            .filter(|&raw_state| !tokenizer.is_end(raw_state))
+            .collect::<Vec<_>>();
+        is_end.push(live_config.is_empty());
+        boundary_state.push(
+            intern_possible_match_config(live_config, &mut config_ids, &mut configs)
+                .unwrap_or(u32::MAX),
+        );
+
+        let mut row = Box::new([u32::MAX; 256]);
+        for &byte in &active_bytes {
+            let target = tokenizer.step_all(&config, byte);
+            if let Some(target) = intern_possible_match_config(
+                target.to_vec(),
+                &mut config_ids,
+                &mut configs,
+            ) {
+                row[byte as usize] = target;
+            }
+        }
+        transition_rows.push(row);
+        config_index += 1;
+    }
+
+    let mut transitions = Vec::with_capacity(states.len() * 256);
+    for row in transition_rows {
+        transitions.extend_from_slice(row.as_ref());
+    }
+    debug_assert_eq!(states.len(), configs.len());
+    debug_assert_eq!(boundary_state.len(), states.len());
+    debug_assert_eq!(is_end.len(), states.len());
+
+    PossibleMatchPowersetView {
+        tokenizer_view: TokenizerView {
+            flat_dfa: FlatDfa {
+                states,
+                start_state: raw_start_to_view[tokenizer.start_state() as usize] as usize,
+                transitions: Arc::from(transitions),
+            },
+        },
+        raw_start_to_view,
+        boundary_state,
+        is_end,
+    }
+}
+
 fn sparse_root_collect_enabled() -> bool {
     std::env::var("GLRMASK_PM_SPARSE_ROOT_COLLECT")
         .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
@@ -2040,12 +2166,61 @@ fn compute_constraint_possible_matches_with_artifacts(
         .collect();
 
     let root_terminal_union = root_terminal_union_count(tokenizer, &trie_build_states);
+    let use_nfa_powerset_collect = tokenizer.has_epsilon_transitions()
+        && !structured_dispatch
+        && nfa_powerset_collect_enabled();
     let use_sparse_root_collect = (tokenizer.has_epsilon_transitions() && !structured_dispatch)
         || (sparse_root_collect_enabled()
             && trie_build_states.len() <= sparse_root_state_limit()
             && root_terminal_union <= sparse_root_terminal_limit());
 
-    let mut trie_class_result = if use_sparse_root_collect {
+    let mut trie_class_result = if use_nfa_powerset_collect {
+        let mut relevant_bytes = [false; 256];
+        for bytes in &ordered_vocab.ordered_token_bytes {
+            for &byte in bytes {
+                relevant_bytes[byte as usize] = true;
+            }
+        }
+        let view_started_at = Instant::now();
+        let powerset = build_possible_match_powerset_view(tokenizer, &relevant_bytes);
+        let view_build_ms = elapsed_ms(view_started_at);
+        let mut view_entries = trie_build_states
+            .iter()
+            .map(|&raw_state| powerset.raw_start_to_view[raw_state as usize])
+            .collect::<Vec<_>>();
+        view_entries.sort_unstable();
+        view_entries.dedup();
+        let (view_result, _) =
+            collector::collect_possible_matches_interval_trie_class_build_for_flat_view(
+                &powerset.tokenizer_view,
+                tokenizer.num_terminals() as usize,
+                &powerset.is_end,
+                &trie.root,
+                &view_entries,
+                Some(&powerset.boundary_state),
+            );
+        let mut state_classes = vec![u32::MAX; tokenizer.num_states() as usize];
+        for &raw_state in &trie_build_states {
+            let view_state = powerset.raw_start_to_view[raw_state as usize] as usize;
+            state_classes[raw_state as usize] = view_result.state_classes[view_state];
+        }
+        if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+        {
+            eprintln!(
+                "[glrmask/profile][trie_build_nfa_powerset] raw_states={} view_states={} root_view_states={} classes={} view_build_ms={:.3}",
+                trie_build_states.len(),
+                powerset.tokenizer_view.dfa().states.len(),
+                view_entries.len(),
+                view_result.class_maps.len(),
+                view_build_ms,
+            );
+        }
+        TrieClassBuildResult {
+            state_classes,
+            class_maps: view_result.class_maps,
+        }
+    } else if use_sparse_root_collect {
         if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
         {
@@ -2183,6 +2358,7 @@ pub(crate) fn prepare_vocab_for_possible_matches(vocab: &Vocab) {
 mod tests {
     use super::*;
     use crate::automata::lexer::ast::Expr;
+    use crate::automata::lexer::tokenizer::arbitrary_epsilon_l1_test_tokenizer;
     use crate::compiler::pipeline::build_tokenizer_from_exprs_partitioned_with_adaptive;
     use std::collections::BTreeSet;
 
@@ -2266,6 +2442,69 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn epsilon_powerset_interval_collector_matches_sparse_nfa_rows() {
+        let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
+        assert!(tokenizer.has_epsilon_transitions());
+        assert!(!tokenizer.has_deterministic_dispatch());
+
+        let vocab = Vocab::new(
+            vec![
+                (0, b"".to_vec()),
+                (1, b"a".to_vec()),
+                (2, b"aa".to_vec()),
+                (3, b"ab".to_vec()),
+                (4, b"b".to_vec()),
+                (5, b"ba".to_vec()),
+                (6, b"x".to_vec()),
+            ],
+            None,
+        );
+        let artifacts = get_ordered_vocab_trie_artifacts_for_vocab(&vocab).0;
+        let raw_states = (0..tokenizer.num_states()).collect::<Vec<_>>();
+        let sparse = collect_sparse_root_possible_matches(
+            &tokenizer,
+            &artifacts.trie.root,
+            &raw_states,
+            None,
+        );
+
+        let mut relevant_bytes = [false; 256];
+        for bytes in &artifacts.ordered_vocab.ordered_token_bytes {
+            for &byte in bytes {
+                relevant_bytes[byte as usize] = true;
+            }
+        }
+        let powerset = build_possible_match_powerset_view(&tokenizer, &relevant_bytes);
+        let mut view_entries = powerset.raw_start_to_view.clone();
+        view_entries.sort_unstable();
+        view_entries.dedup();
+        let (powerset_rows, _) =
+            collector::collect_possible_matches_interval_trie_class_build_for_flat_view(
+                &powerset.tokenizer_view,
+                tokenizer.num_terminals() as usize,
+                &powerset.is_end,
+                &artifacts.trie.root,
+                &view_entries,
+                Some(&powerset.boundary_state),
+            );
+        let sparse_expanded = expand_interval_class_maps(&sparse.class_maps);
+        let powerset_expanded = expand_interval_class_maps(&powerset_rows.class_maps);
+
+        for raw_state in raw_states {
+            let sparse_class = sparse.state_classes[raw_state as usize];
+            assert_ne!(sparse_class, u32::MAX, "raw_state={raw_state}");
+            let view_state = powerset.raw_start_to_view[raw_state as usize] as usize;
+            let powerset_class = powerset_rows.state_classes[view_state];
+            assert_ne!(powerset_class, u32::MAX, "raw_state={raw_state}");
+            assert_eq!(
+                sparse_expanded[sparse_class as usize].as_ref(),
+                powerset_expanded[powerset_class as usize].as_ref(),
+                "raw_state={raw_state} view_state={view_state}",
+            );
         }
     }
 
