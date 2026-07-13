@@ -621,6 +621,10 @@ struct Scratch {
     active_indices: Vec<usize>,
     match_positions: Vec<u32>,
     dirty_state_flags: Vec<u8>,
+    /// Bitset mirroring `dirty_state_flags` for sparse dirty-token signature correction.
+    dirty_state_bits: Vec<u64>,
+    /// Polynomial weight of each state position in the token signature fold.
+    completion_weights: Vec<u64>,
     /// Per-state multi-word dirty bitmask.  Layout: `[dirty_words * num_states]`
     /// where state `i`'s dirty mask occupies indices `[i*dirty_words .. (i+1)*dirty_words]`.
     dirty_group_masks: Vec<u64>,
@@ -654,6 +658,8 @@ static VOCAB_UNGROUPED_BATCH: Lazy<bool> =
     Lazy::new(|| env_flag_enabled("GLRMASK_VOCAB_UNGROUPED_BATCH"));
 static VOCAB_ROW_CERT_DIAG: Lazy<bool> =
     Lazy::new(|| env_flag_enabled("GLRMASK_VOCAB_EQUIV_ROW_CERT_DIAG"));
+static VOCAB_SPARSE_DIRTY_FINISH_DISABLED: Lazy<bool> =
+    Lazy::new(|| env_flag_enabled("GLRMASK_DISABLE_VOCAB_SPARSE_DIRTY_FINISH"));
 
 #[inline]
 fn new_hasher() -> AHasher {
@@ -938,6 +944,8 @@ impl Scratch {
             active_indices: Vec::new(),
             match_positions: vec![NONE; num_states * num_groups],
             dirty_state_flags: vec![0; num_states],
+            dirty_state_bits: vec![0; num_states.div_ceil(64)],
+            completion_weights: Vec::new(),
             dirty_group_masks: vec![0; num_states * dirty_words.max(1)],
             dirty_words,
             num_groups,
@@ -973,8 +981,31 @@ impl Scratch {
         self.current_states.resize(num_states, 0);
         self.match_positions.resize(num_states * num_groups, NONE);
         self.dirty_state_flags.resize(num_states, 0);
+        self.dirty_state_bits.resize(num_states.div_ceil(64), 0);
         self.dirty_group_masks
             .resize(num_states * dirty_words.max(1), 0);
+    }
+}
+
+#[inline(always)]
+fn set_dirty_state_bit(bits: &mut [u64], state_idx: usize) {
+    bits[state_idx / 64] |= 1u64 << (state_idx % 64);
+}
+
+#[inline(always)]
+fn clear_dirty_state_bit(bits: &mut [u64], state_idx: usize) {
+    bits[state_idx / 64] &= !(1u64 << (state_idx % 64));
+}
+
+fn ensure_completion_weights(scratch: &mut Scratch, num_states: usize) {
+    if scratch.completion_weights.len() == num_states {
+        return;
+    }
+    scratch.completion_weights.resize(num_states, 0);
+    let mut weight = 1u64;
+    for slot in scratch.completion_weights.iter_mut().rev() {
+        *slot = weight;
+        weight = weight.wrapping_mul(HASH_SEED1);
     }
 }
 
@@ -2197,6 +2228,7 @@ fn dfs_step(
                         log.dirty_state_flag_changes
                             .push((i, scratch.dirty_state_flags[i]));
                         scratch.dirty_state_flags[i] = 1;
+                        set_dirty_state_bit(&mut scratch.dirty_state_bits, i);
                     }
                     scratch.dirty_group_masks[flat_idx] |= 1u64 << bit;
                 }
@@ -2270,6 +2302,7 @@ fn dfs_step_profiled(
                         log.dirty_state_flag_changes
                             .push((i, scratch.dirty_state_flags[i]));
                         scratch.dirty_state_flags[i] = 1;
+                        set_dirty_state_bit(&mut scratch.dirty_state_bits, i);
                         step_stats.new_dirty_states += 1;
                     }
                     scratch.dirty_group_masks[flat_idx] |= 1u64 << bit;
@@ -2307,6 +2340,11 @@ fn dfs_undo_depth(scratch: &mut Scratch, log: &DepthChangeLog) {
     }
     for &(state_idx, old_flag) in log.dirty_state_flag_changes.iter().rev() {
         scratch.dirty_state_flags[state_idx] = old_flag;
+        if old_flag == 0 {
+            clear_dirty_state_bit(&mut scratch.dirty_state_bits, state_idx);
+        } else {
+            set_dirty_state_bit(&mut scratch.dirty_state_bits, state_idx);
+        }
     }
     for &(i, old_state) in log.state_changes.iter().rev() {
         scratch.current_states[i] = old_state;
@@ -2415,6 +2453,70 @@ fn finish_token_signature_no_cleanup(
     sig
 }
 
+/// Compute the clean completion fold with the 4-way fast path, then correct only
+/// state positions whose token path recorded terminal edges. This is algebraically
+/// identical to the full per-state fold because each correction is multiplied by
+/// the original state's polynomial position weight.
+fn finish_token_signature_sparse_dirty(
+    dfa: &Dfa,
+    num_initial_states: usize,
+    scratch: &Scratch,
+) -> u64 {
+    let num_groups = dfa.num_groups;
+    let dirty_words = scratch.dirty_words;
+    let dag = &scratch.dag_nodes;
+    let single_target_hash_pos = scratch.single_target_hash_pos;
+    let single_target_hash = scratch.single_target_hash;
+    let mut sig = finish_token_signature_clean(dfa, num_initial_states, scratch);
+    let state_words = num_initial_states.div_ceil(64);
+    for (word_idx, &dirty_word) in scratch.dirty_state_bits[..state_words].iter().enumerate() {
+        let mut bits = dirty_word;
+        while bits != 0 {
+            let bit = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            let i = word_idx * 64 + bit;
+            if i >= num_initial_states {
+                break;
+            }
+
+            let completion = dfa.completion(scratch.current_states[i]);
+            let base = i * num_groups;
+            let mask_base = i * dirty_words;
+            let mut h = new_hasher();
+            h.write_u64(completion);
+            for w in 0..dirty_words {
+                let mut dm = scratch.dirty_group_masks[mask_base + w];
+                while dm != 0 {
+                    let group_bit = dm.trailing_zeros() as usize;
+                    dm &= dm - 1;
+                    let gid = w * 64 + group_bit;
+                    if gid >= num_groups {
+                        break;
+                    }
+                    let pv = scratch.match_positions[base + gid];
+                    if pv != NONE && pv > 0 {
+                        h.write_u64(gid as u64);
+                        let target = pv as usize;
+                        let target_hash = if single_target_hash_pos == target {
+                            single_target_hash
+                        } else {
+                            dag.get(target)
+                                .and_then(|node| node.as_ref())
+                                .map_or(0, |node| node.hash)
+                        };
+                        h.write_u64(target_hash);
+                    }
+                }
+            }
+            let state_sig = h.finish();
+            let correction = state_sig.wrapping_sub(completion);
+            sig = sig.wrapping_add(correction.wrapping_mul(scratch.completion_weights[i]));
+        }
+    }
+
+    sig
+}
+
 /// Process a sorted chunk of tokens using DFS trie walk with prefix sharing.
 /// Tokens must be sorted by byte content. Returns (token_idx, signature) pairs.
 fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
@@ -2447,6 +2549,9 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
     for flag in scratch.dirty_state_flags[..batch_len].iter_mut() {
         *flag = 0;
     }
+    let dirty_state_words = batch_len.div_ceil(64);
+    scratch.dirty_state_bits[..dirty_state_words].fill(0);
+    ensure_completion_weights(scratch, batch_len);
     for i in 0..batch_len {
         if dfa.is_dead_end[scratch.current_states[i]] {
             scratch.current_states[i] = STATE_NONE;
@@ -2551,7 +2656,11 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
             }
 
             let finish_started_at = profile.then(Instant::now);
-            let signature = finish_token_signature_no_cleanup(dfa, batch_len, scratch);
+            let signature = if *VOCAB_SPARSE_DIRTY_FINISH_DISABLED {
+                finish_token_signature_no_cleanup(dfa, batch_len, scratch)
+            } else {
+                finish_token_signature_sparse_dirty(dfa, batch_len, scratch)
+            };
             stats.finish_signature_ms += elapsed_ms(finish_started_at);
             signature
         };
