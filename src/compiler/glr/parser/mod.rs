@@ -10,7 +10,7 @@ use super::table::{
     StackShiftGuard,
 };
 use crate::ds::bitset::BitSet;
-use crate::ds::leveled_gss::{LeveledGSS, VirtualStack};
+use crate::ds::leveled_gss::{LeveledGSS, Merge, VirtualStack};
 use crate::grammar::flat::TerminalID;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
@@ -50,6 +50,11 @@ fn env_flag_enabled(name: &str) -> bool {
 fn assert_row_presence_exact_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| env_flag_enabled("GLRMASK_ASSERT_ROW_PRESENCE_EXACT"))
+}
+
+fn assert_advance_distributivity_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled("GLRMASK_ASSERT_ADVANCE_DISTRIBUTIVITY"))
 }
 
 fn guarded_stack_to_stacks_fallback_disabled() -> bool {
@@ -173,13 +178,72 @@ impl AdvancedBranch {
 }
 
 pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> ParserGSS {
-    advance_stacks_core(table, stack.clone(), token)
+    let advanced = advance_stacks_core(table, stack.clone(), token);
+    assert_advance_distributes_over_concrete_paths(table, stack, token, &advanced);
+    advanced
 }
 
 /// Like `advance_stacks` but takes ownership of the GSS, avoiding an
 /// unnecessary Arc clone when the caller doesn't need the original.
 pub(crate) fn advance_stacks_owned(table: &GLRTable, stack: ParserGSS, token: TerminalID) -> ParserGSS {
-    advance_stacks_core(table, stack, token)
+    if assert_advance_distributivity_enabled() {
+        let before = stack.clone();
+        let advanced = advance_stacks_core(table, stack, token);
+        assert_advance_distributes_over_concrete_paths(table, &before, token, &advanced);
+        advanced
+    } else {
+        advance_stacks_core(table, stack, token)
+    }
+}
+
+fn normalized_concrete_stacks(
+    gss: &ParserGSS,
+) -> Vec<(Vec<u32>, TerminalsDisallowed)> {
+    let mut normalized: Vec<(Vec<u32>, TerminalsDisallowed)> = Vec::new();
+    for (stack, acc) in gss.to_stacks() {
+        if let Some((_, existing_acc)) = normalized
+            .iter_mut()
+            .find(|(existing_stack, _)| *existing_stack == stack)
+        {
+            *existing_acc = existing_acc.merge(&acc);
+        } else {
+            normalized.push((stack, acc));
+        }
+    }
+    normalized.sort_by(|left, right| left.0.cmp(&right.0));
+    normalized
+}
+
+fn assert_advance_distributes_over_concrete_paths(
+    table: &GLRTable,
+    before: &ParserGSS,
+    token: TerminalID,
+    actual: &ParserGSS,
+) {
+    if !assert_advance_distributivity_enabled() {
+        return;
+    }
+
+    let concrete_paths = before.to_stacks();
+    if concrete_paths.len() <= 1 {
+        return;
+    }
+
+    let mut expected = ParserGSS::empty();
+    for (stack, acc) in concrete_paths {
+        merge_into(
+            &mut expected,
+            advance_stacks_core(table, ParserGSS::from_single_stack(stack, acc), token),
+        );
+    }
+
+    assert_eq!(
+        normalized_concrete_stacks(actual),
+        normalized_concrete_stacks(&expected),
+        "parser advance is not distributive over GSS path union for terminal {token}: construction={:?} before={:?}",
+        table.construction,
+        normalized_concrete_stacks(before),
+    );
 }
 
 pub(crate) fn advance_stacks_profiled(
@@ -3072,6 +3136,203 @@ mod tests {
         actual_stacks.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(actual_stacks, expected_stacks);
         assert!(stack_may_advance_on(&table, &merged, token));
+    }
+
+    #[test]
+    fn stack_shift_advance_distributes_over_merged_branched_floor() {
+        let token = 0;
+        let mut action_rows = vec![Vec::new(); 75];
+        action_rows[74] = vec![(
+            token,
+            Action::StackShifts(vec![StackShift {
+                pop: 2,
+                pushes: vec![265],
+            }]),
+        )];
+        let action_refs: Vec<&[(u32, Action)]> =
+            action_rows.iter().map(Vec::as_slice).collect();
+        let goto_rows = vec![Vec::new(); 75];
+        let goto_refs: Vec<&[(u32, (u32, bool))]> =
+            goto_rows.iter().map(Vec::as_slice).collect();
+        let table = build_test_table(75, 1, &action_refs, &goto_refs);
+
+        let acc = TerminalsDisallowed::new();
+        let left = ParserGSS::from_single_stack(vec![0, 171, 74], acc.clone());
+        let right = ParserGSS::from_single_stack(vec![0, 323, 74], acc);
+        let merged = left.merge(&right);
+
+        let expected = advance_stacks(&table, &left, token)
+            .merge(&advance_stacks(&table, &right, token));
+        let actual = advance_stacks(&table, &merged, token);
+
+        let mut expected_stacks = expected.to_stacks();
+        let mut actual_stacks = actual.to_stacks();
+        expected_stacks.sort_by(|a, b| a.0.cmp(&b.0));
+        actual_stacks.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(actual_stacks, expected_stacks);
+    }
+
+    fn assert_advance_distributes_over_merge(
+        table: &GLRTable,
+        left: &ParserGSS,
+        right: &ParserGSS,
+        token: u32,
+        case: &str,
+    ) {
+        let merged = left.merge(right);
+        let expected = advance_stacks(table, left, token)
+            .merge(&advance_stacks(table, right, token));
+        let actual = advance_stacks(table, &merged, token);
+
+        let mut expected_stacks = expected.to_stacks();
+        let mut actual_stacks = actual.to_stacks();
+        expected_stacks.sort_by(|a, b| a.0.cmp(&b.0));
+        actual_stacks.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(actual_stacks, expected_stacks, "{case}");
+    }
+
+    fn branched_floor_pair(common_suffix_len: usize) -> (ParserGSS, ParserGSS) {
+        let suffix = [10_u32, 11, 12];
+        let mut left = vec![0, 1];
+        left.extend_from_slice(&suffix[..common_suffix_len]);
+        let mut right = vec![0, 2];
+        right.extend_from_slice(&suffix[..common_suffix_len]);
+        let acc = TerminalsDisallowed::new();
+        (
+            ParserGSS::from_single_stack(left, acc.clone()),
+            ParserGSS::from_single_stack(right, acc),
+        )
+    }
+
+    #[test]
+    fn generated_top_action_advance_distributes_over_branched_floor_merge() {
+        let token = 0;
+        for common_suffix_len in 1..=3 {
+            let (left, right) = branched_floor_pair(common_suffix_len);
+            let top = 9 + common_suffix_len as u32;
+            let mut actions = vec![
+                Action::Shift(40, false),
+                Action::Shift(40, true),
+            ];
+
+            for pop in 0..=common_suffix_len + 1 {
+                actions.push(Action::StackShifts(vec![StackShift {
+                    pop: pop as u32,
+                    pushes: vec![40],
+                }]));
+                actions.push(Action::StackShifts(vec![StackShift {
+                    pop: pop as u32,
+                    pushes: Vec::new(),
+                }]));
+            }
+            actions.push(Action::StackShifts(vec![
+                StackShift {
+                    pop: 0,
+                    pushes: vec![40],
+                },
+                StackShift {
+                    pop: common_suffix_len as u32 + 1,
+                    pushes: vec![41],
+                },
+            ]));
+            actions.push(Action::StackShifts(vec![
+                StackShift {
+                    pop: common_suffix_len as u32 + 1,
+                    pushes: vec![40],
+                },
+                StackShift {
+                    pop: 0,
+                    pushes: vec![41],
+                },
+            ]));
+            actions.push(Action::StackShifts(vec![
+                StackShift {
+                    pop: common_suffix_len as u32,
+                    pushes: vec![40, 42],
+                },
+                StackShift {
+                    pop: common_suffix_len as u32,
+                    pushes: vec![41, 42],
+                },
+            ]));
+
+            actions.push(Action::GuardedStackShifts(vec![
+                GuardedStackShift {
+                    guards: vec![StackShiftGuard {
+                        pop: common_suffix_len as u32,
+                        states: vec![1],
+                    }],
+                    pop: common_suffix_len as u32 + 1,
+                    pushes: vec![40],
+                },
+                GuardedStackShift {
+                    guards: vec![StackShiftGuard {
+                        pop: common_suffix_len as u32,
+                        states: vec![2],
+                    }],
+                    pop: common_suffix_len as u32 + 1,
+                    pushes: vec![41],
+                },
+            ]));
+
+            for (action_index, action) in actions.into_iter().enumerate() {
+                let mut action_rows = vec![Vec::new(); 64];
+                action_rows[top as usize] = vec![(token, action)];
+                let action_refs: Vec<&[(u32, Action)]> =
+                    action_rows.iter().map(Vec::as_slice).collect();
+                let goto_rows = vec![Vec::new(); 64];
+                let goto_refs: Vec<&[(u32, (u32, bool))]> =
+                    goto_rows.iter().map(Vec::as_slice).collect();
+                let table = build_test_table(64, 1, &action_refs, &goto_refs);
+                let case = format!(
+                    "common_suffix_len={common_suffix_len} action_index={action_index} action={:?}",
+                    table.action(top, token),
+                );
+                assert_advance_distributes_over_merge(&table, &left, &right, token, &case);
+            }
+        }
+    }
+
+    #[test]
+    fn generated_reduce_chain_advance_distributes_over_branched_floor_merge() {
+        let token = 0;
+        let nt = 0;
+        for common_suffix_len in 1..=3 {
+            let (left, right) = branched_floor_pair(common_suffix_len);
+            let top = 9 + common_suffix_len as u32;
+            for reduce_len in 1..=common_suffix_len {
+                for is_replace in [false, true] {
+                    let mut action_rows = vec![Vec::new(); 64];
+                    action_rows[top as usize] =
+                        vec![(token, Action::Reduce(nt, reduce_len as u32))];
+                    action_rows[50] = vec![(token, Action::Shift(60, false))];
+                    action_rows[51] = vec![(token, Action::Shift(60, false))];
+
+                    let left_stacks = left.to_stacks();
+                    let right_stacks = right.to_stacks();
+                    let left_values = &left_stacks[0].0;
+                    let right_values = &right_stacks[0].0;
+                    let left_goto_from = left_values[left_values.len() - reduce_len - 1];
+                    let right_goto_from = right_values[right_values.len() - reduce_len - 1];
+
+                    let mut goto_rows = vec![Vec::new(); 64];
+                    goto_rows[left_goto_from as usize].push((nt, (50, is_replace)));
+                    if right_goto_from != left_goto_from {
+                        goto_rows[right_goto_from as usize].push((nt, (51, is_replace)));
+                    }
+
+                    let action_refs: Vec<&[(u32, Action)]> =
+                        action_rows.iter().map(Vec::as_slice).collect();
+                    let goto_refs: Vec<&[(u32, (u32, bool))]> =
+                        goto_rows.iter().map(Vec::as_slice).collect();
+                    let table = build_test_table(64, 1, &action_refs, &goto_refs);
+                    let case = format!(
+                        "reduce common_suffix_len={common_suffix_len} reduce_len={reduce_len} is_replace={is_replace} left_goto={left_goto_from} right_goto={right_goto_from}",
+                    );
+                    assert_advance_distributes_over_merge(&table, &left, &right, token, &case);
+                }
+            }
+        }
     }
 
     #[test]

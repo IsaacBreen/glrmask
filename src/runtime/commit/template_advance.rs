@@ -178,6 +178,17 @@ fn advance_virtual_stack_single_path(
     let mut steps = 0usize;
 
     loop {
+        if matches!(phase, Phase::Pop | Phase::Read)
+            && stack.top().is_none()
+            && stack.has_hidden_floor_values()
+        {
+            // The visible Segment prefix has been exhausted, but the GSS floor
+            // still contains branch-specific parser states. Pop/read decisions
+            // depend on those states, so the single-prefix fast path is no
+            // longer exact. Return to the branch-aware template worklist.
+            return None;
+        }
+
         let mut choice = None;
         let mut choices = 0usize;
         let accepting;
@@ -302,5 +313,50 @@ fn advance_virtual_stack_single_path(
         if steps > max_steps {
             return None;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::advance_with_template;
+    use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
+    use crate::compiler::glr::accumulator::TerminalsDisallowed;
+    use crate::compiler::glr::parser::ParserGSS;
+    use crate::runtime::CommitTemplateDfas;
+
+    #[test]
+    fn template_advance_distributes_over_merged_branched_floor() {
+        let mut pop = UnweightedDfa::new();
+        let after_common = pop.add_state();
+        let after_left = pop.add_state();
+        let after_right = pop.add_state();
+        pop.add_transition(pop.start_state, 10, after_common);
+        pop.add_transition(after_common, 1, after_left);
+        pop.add_transition(after_common, 2, after_right);
+        pop.set_accepting(after_left, true);
+        pop.set_accepting(after_right, true);
+
+        let template = CommitTemplateDfas {
+            pop,
+            read: UnweightedDfa::default(),
+            push: UnweightedDfa::default(),
+            pop_to_read: vec![None; 4],
+            pop_to_push: vec![None; 4],
+            read_to_push: Vec::new(),
+        };
+        let acc = TerminalsDisallowed::new();
+        let left = ParserGSS::from_single_stack(vec![0, 1, 10], acc.clone());
+        let right = ParserGSS::from_single_stack(vec![0, 2, 10], acc);
+        let merged = left.merge(&right);
+
+        let expected = advance_with_template(&template, left)
+            .merge(&advance_with_template(&template, right));
+        let actual = advance_with_template(&template, merged);
+
+        let mut expected_stacks = expected.to_stacks();
+        let mut actual_stacks = actual.to_stacks();
+        expected_stacks.sort_by(|a, b| a.0.cmp(&b.0));
+        actual_stacks.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(actual_stacks, expected_stacks);
     }
 }
