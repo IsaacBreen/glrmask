@@ -760,16 +760,16 @@ let strict_reference = reference_terminal_expansion
                 representative_core_active_terminals,
             );
             #[cfg(debug_assertions)]
-            if !use_terminal_coloring && !reference_terminal_expansion {
+            if !use_terminal_coloring {
                 for state in nwa.states() {
                     for &label in state.transitions.keys() {
                         if label >= 0 {
                             debug_assert!(
-                                analysis_active_terminals
+                                representative_core_active_terminals
                                     .get(label as usize)
                                     .copied()
                                     .unwrap_or(false),
-                                "ordinary L2P core emitted inactive terminal {label} after active-terminal equivalence",
+                                "L2P representative core emitted terminal {label} outside its active output mask",
                             );
                         }
                     }
