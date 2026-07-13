@@ -3,6 +3,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use regex::escape as regex_escape;
 use serde_json::Value;
 
+use crate::automata::lexer::{Lexer, compile::build_regex};
+use crate::automata::lexer::ast::Expr;
 use crate::grammar::ast::resolved_named_terminal_exprs;
 use crate::grammar::expr_nfa::ExprNFA;
 use crate::grammar::named_simplify::simplify_named_grammar_expressions;
@@ -122,6 +124,7 @@ pub(crate) struct Lowerer<'a> {
     pub(crate) shared_string_exact_rules: BTreeMap<usize, String>,
     pub(crate) shared_string_upto_rules: BTreeMap<usize, String>,
     pub(crate) shared_string_upto_close_rules: BTreeMap<usize, String>,
+    pub(crate) shared_string_unbounded_rules: BTreeMap<(usize, bool, bool), String>,
     pub(crate) shared_string_exact_open_rules: BTreeMap<usize, String>,
     pub(crate) shared_string_upto_wrapped_rules: BTreeMap<usize, String>,
     pub(crate) shared_ap_literal_keys: BTreeSet<String>,
@@ -175,6 +178,7 @@ impl<'a> Lowerer<'a> {
             shared_string_exact_rules: BTreeMap::new(),
             shared_string_upto_rules: BTreeMap::new(),
             shared_string_upto_close_rules: BTreeMap::new(),
+            shared_string_unbounded_rules: BTreeMap::new(),
             shared_string_exact_open_rules: BTreeMap::new(),
             shared_string_upto_wrapped_rules: BTreeMap::new(),
             shared_ap_literal_keys,
@@ -213,6 +217,7 @@ impl<'a> Lowerer<'a> {
             shared_string_exact_rules: BTreeMap::new(),
             shared_string_upto_rules: BTreeMap::new(),
             shared_string_upto_close_rules: BTreeMap::new(),
+            shared_string_unbounded_rules: BTreeMap::new(),
             shared_string_exact_open_rules: BTreeMap::new(),
             shared_string_upto_wrapped_rules: BTreeMap::new(),
             shared_ap_literal_keys: self.shared_ap_literal_keys.clone(),
@@ -324,18 +329,26 @@ impl<'a> Lowerer<'a> {
             default_lexer_partition: None,
         };
         simplify_named_grammar_expressions(&mut grammar);
+        let resolved_terminals = resolved_named_terminal_exprs(&grammar)
+            .map_err(|error| SchemaImportError::new(error.to_string()))?;
         grammar.lexer_partitions = build_json_lexer_partition_classes(
             &grammar,
             &self.terminal_partition_classes,
-        )
-        .map_err(|error| SchemaImportError::new(error.to_string()))?;
+            &resolved_terminals,
+        );
+        let repeat_audit_started_at = profile_enabled.then(std::time::Instant::now);
+        emit_repeated_single_byte_terminal_warnings(&grammar, &resolved_terminals);
+        let repeat_audit_ms = repeat_audit_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
         let literals = grammar.emitted_anonymous_literals();
         grammar.set_literal_lexer_partition(JSON_LITERAL_LEXER_PARTITION, literals);
         if let Some(simplify_started_at) = simplify_started_at {
             eprintln!(
-                "[glrmask/profile][json_schema_lower_finish] root_lower_ms={:.3} simplify_ms={:.3} rules={}",
+                "[glrmask/profile][json_schema_lower_finish] root_lower_ms={:.3} simplify_ms={:.3} repeated_single_byte_terminal_audit_ms={:.3} rules={}",
                 root_lower_ms,
                 simplify_started_at.elapsed().as_secs_f64() * 1000.0,
+                repeat_audit_ms,
                 grammar.rules.len(),
             );
         }
@@ -1156,11 +1169,453 @@ impl<'a> Lowerer<'a> {
     }
 }
 
+const REPEATED_SINGLE_BYTE_MAX_WARNING_THRESHOLD: usize = 10;
+const PROBLEMATIC_REPEATED_BYTES: &[u8] =
+    b" \t\r\n!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RepeatedSingleByteTerminalHazard {
+    pub(crate) rule_name: String,
+    pub(crate) terminal_name: String,
+    pub(crate) quantifier: Quantifier,
+    pub(crate) alphanumeric_bytes: Vec<u8>,
+    pub(crate) problematic_bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+struct RepeatedTerminalSite {
+    rule_name: String,
+    terminal_name: String,
+    quantifier: Quantifier,
+}
+
+fn repetition_is_warning_candidate(quantifier: &Quantifier) -> bool {
+    match quantifier {
+        Quantifier::Optional => false,
+        Quantifier::ZeroPlus | Quantifier::OnePlus | Quantifier::Range(_, None) => true,
+        Quantifier::Range(_, Some(max)) => *max >= REPEATED_SINGLE_BYTE_MAX_WARNING_THRESHOLD,
+    }
+}
+
+fn direct_terminal_ref<'a>(
+    expr: &'a GrammarExpr,
+    terminal_names: &BTreeSet<&str>,
+) -> Option<&'a str> {
+    match expr {
+        GrammarExpr::Grouped(inner) => direct_terminal_ref(inner, terminal_names),
+        GrammarExpr::Ref(name) if terminal_names.contains(name.as_str()) => Some(name),
+        _ => None,
+    }
+}
+
+fn collect_repeated_terminal_sites(
+    rule_name: &str,
+    expr: &GrammarExpr,
+    terminal_names: &BTreeSet<&str>,
+    sites: &mut Vec<RepeatedTerminalSite>,
+) {
+    match expr {
+        GrammarExpr::Quantified(inner, quantifier) => {
+            if repetition_is_warning_candidate(quantifier)
+                && let Some(terminal_name) = direct_terminal_ref(inner, terminal_names)
+            {
+                sites.push(RepeatedTerminalSite {
+                    rule_name: rule_name.to_string(),
+                    terminal_name: terminal_name.to_string(),
+                    quantifier: quantifier.clone(),
+                });
+            }
+            collect_repeated_terminal_sites(rule_name, inner, terminal_names, sites);
+        }
+        GrammarExpr::Grouped(inner) => {
+            collect_repeated_terminal_sites(rule_name, inner, terminal_names, sites);
+        }
+        GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
+            for part in parts {
+                collect_repeated_terminal_sites(rule_name, part, terminal_names, sites);
+            }
+        }
+        GrammarExpr::Exclude { expr, exclude } => {
+            collect_repeated_terminal_sites(rule_name, expr, terminal_names, sites);
+            collect_repeated_terminal_sites(rule_name, exclude, terminal_names, sites);
+        }
+        GrammarExpr::Intersect { expr, intersect } => {
+            collect_repeated_terminal_sites(rule_name, expr, terminal_names, sites);
+            collect_repeated_terminal_sites(rule_name, intersect, terminal_names, sites);
+        }
+        GrammarExpr::SeparatedSequence {
+            items, separator, ..
+        } => {
+            collect_repeated_terminal_sites(rule_name, separator, terminal_names, sites);
+            for (item, quantifier) in items {
+                if let Some(quantifier) = quantifier
+                    && repetition_is_warning_candidate(quantifier)
+                    && let Some(terminal_name) = direct_terminal_ref(item, terminal_names)
+                {
+                    sites.push(RepeatedTerminalSite {
+                        rule_name: rule_name.to_string(),
+                        terminal_name: terminal_name.to_string(),
+                        quantifier: quantifier.clone(),
+                    });
+                }
+                collect_repeated_terminal_sites(rule_name, item, terminal_names, sites);
+            }
+        }
+        GrammarExpr::ExprNFA(expr_nfa) => {
+            for symbol in &expr_nfa.symbols {
+                collect_repeated_terminal_sites(rule_name, symbol, terminal_names, sites);
+            }
+        }
+        GrammarExpr::Epsilon
+        | GrammarExpr::Ref(_)
+        | GrammarExpr::Literal(_)
+        | GrammarExpr::SpecialToken(_)
+        | GrammarExpr::CharClass { .. }
+        | GrammarExpr::RawRegex(_)
+        | GrammarExpr::LexerDfa(_)
+        | GrammarExpr::AnyByte => {}
+    }
+}
+
+fn expr_max_byte_len(expr: &Expr) -> Option<usize> {
+    match expr {
+        Expr::U8Seq(bytes) => Some(bytes.len()),
+        Expr::U8Class(_) => Some(1),
+        Expr::Dfa(_) => None,
+        Expr::Intersect { expr, intersect } => match (
+            expr_max_byte_len(expr),
+            expr_max_byte_len(intersect),
+        ) {
+            (Some(left), Some(right)) => Some(left.min(right)),
+            (Some(bound), None) | (None, Some(bound)) => Some(bound),
+            (None, None) => None,
+        },
+        Expr::Seq(parts) => parts.iter().try_fold(0usize, |total, part| {
+            total.checked_add(expr_max_byte_len(part)?)
+        }),
+        Expr::Choice(options) => options
+            .iter()
+            .map(expr_max_byte_len)
+            .try_fold(0usize, |max_len, len| Some(max_len.max(len?))),
+        Expr::Exclude { expr, .. } => expr_max_byte_len(expr),
+        Expr::Repeat { expr, max, .. } => {
+            let inner = expr_max_byte_len(expr)?;
+            match max {
+                Some(max) => inner.checked_mul(*max),
+                None if inner == 0 => Some(0),
+                None => None,
+            }
+        }
+        Expr::Shared(inner) => expr_max_byte_len(inner),
+        Expr::Epsilon => Some(0),
+    }
+}
+
+fn expr_min_byte_len(expr: &Expr) -> usize {
+    match expr {
+        Expr::U8Seq(bytes) => bytes.len(),
+        Expr::U8Class(_) => 1,
+        Expr::Dfa(dfa) => dfa.min_match_byte_len().unwrap_or(0),
+        Expr::Intersect { expr, intersect } => {
+            expr_min_byte_len(expr).max(expr_min_byte_len(intersect))
+        }
+        Expr::Seq(parts) => parts
+            .iter()
+            .fold(0usize, |total, part| total.saturating_add(expr_min_byte_len(part))),
+        Expr::Choice(options) => options.iter().map(expr_min_byte_len).min().unwrap_or(0),
+        Expr::Exclude { expr, .. } => expr_min_byte_len(expr),
+        Expr::Repeat { expr, min, .. } => expr_min_byte_len(expr).saturating_mul(*min),
+        Expr::Shared(inner) => expr_min_byte_len(inner),
+        Expr::Epsilon => 0,
+    }
+}
+
+fn dedup_positions(mut positions: Vec<usize>) -> Vec<usize> {
+    positions.sort_unstable();
+    positions.dedup();
+    positions
+}
+
+fn expr_match_ends_small(expr: &Expr, input: &[u8], start: usize) -> Option<Vec<usize>> {
+    Some(match expr {
+        Expr::U8Seq(bytes) => input
+            .get(start..start.saturating_add(bytes.len()))
+            .filter(|slice| *slice == bytes.as_slice())
+            .map_or_else(Vec::new, |_| vec![start + bytes.len()]),
+        Expr::U8Class(bytes) => input
+            .get(start)
+            .filter(|byte| bytes.contains(**byte))
+            .map_or_else(Vec::new, |_| vec![start + 1]),
+        Expr::Dfa(_) => return None,
+        Expr::Intersect { expr, intersect } => {
+            let left = expr_match_ends_small(expr, input, start)?;
+            let right = expr_match_ends_small(intersect, input, start)?;
+            left.into_iter().filter(|end| right.contains(end)).collect()
+        }
+        Expr::Seq(parts) => {
+            let mut positions = vec![start];
+            for part in parts {
+                let mut next = Vec::new();
+                for position in positions {
+                    next.extend(expr_match_ends_small(part, input, position)?);
+                }
+                positions = dedup_positions(next);
+                if positions.is_empty() {
+                    break;
+                }
+            }
+            positions
+        }
+        Expr::Choice(options) => {
+            let mut positions = Vec::new();
+            for option in options {
+                positions.extend(expr_match_ends_small(option, input, start)?);
+            }
+            dedup_positions(positions)
+        }
+        Expr::Exclude { expr, exclude } => {
+            let included = expr_match_ends_small(expr, input, start)?;
+            let excluded = expr_match_ends_small(exclude, input, start)?;
+            included
+                .into_iter()
+                .filter(|end| !excluded.contains(end))
+                .collect()
+        }
+        Expr::Repeat { expr, min, max } => {
+            let inner_min = expr_min_byte_len(expr);
+            if inner_min == 0 && max.is_none() {
+                return None;
+            }
+            let input_remaining = input.len().saturating_sub(start);
+            let max_repetitions = match max {
+                Some(max) => *max,
+                None => input_remaining / inner_min,
+            };
+            let mut accepted = Vec::new();
+            let mut positions = vec![start];
+            if *min == 0 {
+                accepted.push(start);
+            }
+            for repetition in 1..=max_repetitions {
+                let mut next = Vec::new();
+                for position in positions {
+                    next.extend(expr_match_ends_small(expr, input, position)?);
+                }
+                positions = dedup_positions(next);
+                if positions.is_empty() {
+                    break;
+                }
+                if repetition >= *min {
+                    accepted.extend(positions.iter().copied());
+                }
+            }
+            dedup_positions(accepted)
+        }
+        Expr::Shared(inner) => return expr_match_ends_small(inner, input, start),
+        Expr::Epsilon => vec![start],
+    })
+}
+
+fn expr_matches_exact_small(expr: &Expr, input: &[u8]) -> Option<bool> {
+    Some(expr_match_ends_small(expr, input, 0)?.contains(&input.len()))
+}
+
+fn single_byte_only_repeated_byte_matches_small(expr: &Expr) -> Option<Vec<u8>> {
+    // Keep the always-on audit cheap. Generated JSON character terminals have a
+    // tiny finite byte width (UTF-8 scalar / JSON escape). Truly large or
+    // unbounded candidate terminals fall back to the exact DFA-orbit check.
+    let max_len = expr_max_byte_len(expr)?;
+    if max_len > 16 {
+        return None;
+    }
+
+    let mut matches = Vec::new();
+    let mut repeated = Vec::with_capacity(max_len.max(1));
+    for byte in 0u8..=u8::MAX {
+        repeated.clear();
+        repeated.push(byte);
+        if !expr_matches_exact_small(expr, &repeated)? {
+            continue;
+        }
+        let mut accepts_longer_repeat = false;
+        for _ in 2..=max_len {
+            repeated.push(byte);
+            if expr_matches_exact_small(expr, &repeated)? {
+                accepts_longer_repeat = true;
+                break;
+            }
+        }
+        if !accepts_longer_repeat {
+            matches.push(byte);
+        }
+    }
+    Some(matches)
+}
+
+fn single_byte_only_repeated_byte_matches(expr: &Expr) -> Vec<u8> {
+    if expr_min_byte_len(expr) != 1 {
+        return Vec::new();
+    }
+    if let Some(matches) = single_byte_only_repeated_byte_matches_small(expr) {
+        return matches;
+    }
+
+    let tokenizer = build_regex(std::slice::from_ref(expr)).into_tokenizer(1, None);
+    debug_assert!(!tokenizer.has_epsilon_transitions());
+    let start = tokenizer.initial_state();
+    let mut visit_epoch = vec![0u32; tokenizer.num_states() as usize];
+    let mut epoch = 0u32;
+    let mut matches = Vec::new();
+
+    for byte in 0u8..=u8::MAX {
+        let Some(mut state) = tokenizer.step(start, byte) else {
+            continue;
+        };
+        if !tokenizer.matched_terminal_bitset(state).contains(0) {
+            continue;
+        }
+
+        epoch = epoch.wrapping_add(1);
+        if epoch == 0 {
+            visit_epoch.fill(0);
+            epoch = 1;
+        }
+        visit_epoch[state as usize] = epoch;
+        let single_byte_only = loop {
+            let Some(next) = tokenizer.step(state, byte) else {
+                break true;
+            };
+            state = next;
+            if tokenizer.matched_terminal_bitset(state).contains(0) {
+                break false;
+            }
+            if visit_epoch[state as usize] == epoch {
+                break true;
+            }
+            visit_epoch[state as usize] = epoch;
+        };
+
+        if single_byte_only {
+            matches.push(byte);
+        }
+    }
+
+    matches
+}
+
+pub(crate) fn find_repeated_single_byte_terminal_hazards(
+    grammar: &NamedGrammar,
+    resolved_terminals: &BTreeMap<String, Expr>,
+) -> Vec<RepeatedSingleByteTerminalHazard> {
+    let terminal_names = grammar
+        .rules
+        .iter()
+        .filter(|rule| rule.is_terminal && !rule.is_internal)
+        .map(|rule| rule.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut sites = Vec::new();
+    for rule in grammar.rules.iter().filter(|rule| !rule.is_terminal) {
+        collect_repeated_terminal_sites(
+            &rule.name,
+            &rule.expr,
+            &terminal_names,
+            &mut sites,
+        );
+    }
+    if sites.is_empty() {
+        return Vec::new();
+    }
+
+    let candidate_names = sites
+        .iter()
+        .map(|site| site.terminal_name.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut dangerous_bytes_by_terminal = BTreeMap::<String, (Vec<u8>, Vec<u8>)>::new();
+    for terminal_name in candidate_names {
+        let Some(expr) = resolved_terminals.get(terminal_name) else {
+            continue;
+        };
+        let one_byte_only = single_byte_only_repeated_byte_matches(expr);
+        let alphanumeric_bytes = one_byte_only
+            .iter()
+            .copied()
+            .filter(u8::is_ascii_alphanumeric)
+            .collect::<Vec<_>>();
+        let problematic_bytes = one_byte_only
+            .iter()
+            .copied()
+            .filter(|byte| PROBLEMATIC_REPEATED_BYTES.contains(byte))
+            .collect::<Vec<_>>();
+        if alphanumeric_bytes.len() >= 10 || !problematic_bytes.is_empty() {
+            dangerous_bytes_by_terminal.insert(
+                terminal_name.to_string(),
+                (alphanumeric_bytes, problematic_bytes),
+            );
+        }
+    }
+
+    sites
+        .into_iter()
+        .filter_map(|site| {
+            let (alphanumeric_bytes, problematic_bytes) =
+                dangerous_bytes_by_terminal.get(&site.terminal_name)?;
+            Some(RepeatedSingleByteTerminalHazard {
+                rule_name: site.rule_name,
+                terminal_name: site.terminal_name,
+                quantifier: site.quantifier,
+                alphanumeric_bytes: alphanumeric_bytes.clone(),
+                problematic_bytes: problematic_bytes.clone(),
+            })
+        })
+        .collect()
+}
+
+fn format_warning_bytes(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| match *byte {
+            b'\t' => "\\t".to_string(),
+            b'\r' => "\\r".to_string(),
+            b'\n' => "\\n".to_string(),
+            0x20..=0x7e => (*byte as char).to_string(),
+            _ => format!("\\x{byte:02x}"),
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn quantifier_warning_text(quantifier: &Quantifier) -> String {
+    match quantifier {
+        Quantifier::Optional => "?".to_string(),
+        Quantifier::ZeroPlus => "*".to_string(),
+        Quantifier::OnePlus => "+".to_string(),
+        Quantifier::Range(min, Some(max)) => format!("{{{min},{max}}}"),
+        Quantifier::Range(min, None) => format!("{{{min},}}"),
+    }
+}
+
+fn emit_repeated_single_byte_terminal_warnings(
+    grammar: &NamedGrammar,
+    resolved_terminals: &BTreeMap<String, Expr>,
+) {
+    for hazard in find_repeated_single_byte_terminal_hazards(grammar, resolved_terminals) {
+        eprintln!(
+            "[glrmask/warn][json_schema_repeated_single_byte_terminal] nonterminal={:?} terminal={:?} repeat={} alphanumeric_single_byte_count={} alphanumeric_bytes={:?} problematic_bytes={:?} warning=\"repeating a single-byte-like terminal at grammar level can create pathological token-internal terminal paths; prefer a wider terminal or grammar-level chunking\"",
+            hazard.rule_name,
+            hazard.terminal_name,
+            quantifier_warning_text(&hazard.quantifier),
+            hazard.alphanumeric_bytes.len(),
+            format_warning_bytes(&hazard.alphanumeric_bytes),
+            format_warning_bytes(&hazard.problematic_bytes),
+        );
+    }
+}
+
 fn build_json_lexer_partition_classes(
     grammar: &NamedGrammar,
     terminal_partition_classes: &BTreeMap<String, JsonTerminalPartitionClass>,
-) -> crate::Result<BTreeMap<String, String>> {
-    let resolved_terminals = resolved_named_terminal_exprs(grammar)?;
+    resolved_terminals: &BTreeMap<String, Expr>,
+) -> BTreeMap<String, String> {
     let mut class_by_terminal_expr = HashMap::new();
 
     // Terminal lowering deduplicates equal resolved lexer expressions to one
@@ -1187,7 +1642,7 @@ fn build_json_lexer_partition_classes(
             .or_insert(class);
     }
 
-    Ok(grammar
+    grammar
         .rules
         .iter()
         .filter(|rule| rule.is_terminal && !rule.is_internal)
@@ -1202,7 +1657,7 @@ fn build_json_lexer_partition_classes(
             };
             (rule.name.clone(), partition.to_string())
         })
-        .collect())
+        .collect()
 }
 
 fn json_literal_satisfies_declared_types(value: &Value, types: Option<&[SchemaType]>) -> bool {

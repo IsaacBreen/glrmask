@@ -346,6 +346,10 @@ impl<'a> Lowerer<'a> {
             return Ok(r(JSON_STRING_RULE));
         }
 
+        if schema.min_length > 0 && schema.pattern.is_none() && schema.max_length.is_none() {
+            return Ok(self.lower_unbounded_string_expr(schema.min_length));
+        }
+
         if schema.pattern.is_none()
             && let Some(max_length) = schema.max_length
             && self.should_split_bounded_string(schema.min_length, max_length)
@@ -858,6 +862,64 @@ impl<'a> Lowerer<'a> {
         self.add_terminal_rule(&rule_name, seq(vec![upto, lit("\"")]));
         self.shared_string_upto_close_rules.insert(max, rule_name.clone());
         r(&rule_name)
+    }
+
+    fn string_char_unbounded_ref(
+        &mut self,
+        min: usize,
+        merge_open: bool,
+        merge_close: bool,
+    ) -> GrammarExpr {
+        debug_assert!(min > 0 || merge_open || merge_close);
+        let key = (min, merge_open, merge_close);
+        if let Some(rule_name) = self.shared_string_unbounded_rules.get(&key) {
+            return r(rule_name);
+        }
+        let suffix = match (merge_open, merge_close) {
+            (false, false) => "body",
+            (false, true) => "close",
+            (true, false) => "open",
+            (true, true) => "wrapped",
+        };
+        let rule_name = self.fresh_rule_name(&format!(
+            "json_string_char_unbounded_{min}_{suffix}"
+        ));
+        let mut parts = Vec::with_capacity(3);
+        if merge_open {
+            parts.push(lit("\""));
+        }
+        parts.push(GrammarExpr::Quantified(
+            Box::new(r(JSON_STRING_CHAR_RULE)),
+            Quantifier::Range(min, None),
+        ));
+        if merge_close {
+            parts.push(lit("\""));
+        }
+        self.add_terminal_rule(&rule_name, seq(parts));
+        self.shared_string_unbounded_rules
+            .insert(key, rule_name.clone());
+        r(&rule_name)
+    }
+
+    fn split_string_exact_open_expr(&mut self, count: usize) -> GrammarExpr {
+        let chunk = self.config.repeat_chunk_size.max(1);
+        if count <= chunk {
+            return self.string_char_exact_open_ref(count);
+        }
+
+        let full_chunks = count / chunk;
+        let remainder = count % chunk;
+        let mut parts = vec![self.string_char_exact_open_ref(chunk)];
+        if full_chunks > 1 {
+            parts.push(GrammarExpr::Quantified(
+                Box::new(self.string_char_exact_ref(chunk)),
+                Quantifier::Range(full_chunks - 1, Some(full_chunks - 1)),
+            ));
+        }
+        if remainder > 0 {
+            parts.push(self.string_char_exact_ref(remainder));
+        }
+        seq(parts)
     }
 
     fn string_char_exact_open_ref(&mut self, count: usize) -> GrammarExpr {
@@ -1795,15 +1857,55 @@ impl<'a> Lowerer<'a> {
         Ok(pattern_expr)
     }
 
+    fn lower_unbounded_string_expr(&mut self, min: usize) -> GrammarExpr {
+        let merging = self.config.value_merging.generic;
+        let chunk = self.config.repeat_chunk_size.max(1);
+        let mut parts = Vec::new();
+
+        if min <= chunk {
+            if !merging.merge_open {
+                parts.push(lit("\""));
+            }
+            if min == 0 && !merging.merge_open && !merging.merge_close {
+                parts.push(GrammarExpr::Quantified(
+                    Box::new(self.string_char_unbounded_ref(1, false, false)),
+                    Quantifier::Optional,
+                ));
+            } else {
+                parts.push(self.string_char_unbounded_ref(
+                    min,
+                    merging.merge_open,
+                    merging.merge_close,
+                ));
+            }
+            if !merging.merge_close {
+                parts.push(lit("\""));
+            }
+            return seq(parts);
+        }
+
+        if merging.merge_open {
+            parts.push(self.split_string_exact_open_expr(min));
+        } else {
+            parts.push(lit("\""));
+            parts.push(self.split_string_exact_expr(min));
+        }
+
+        if merging.merge_close {
+            parts.push(self.string_char_unbounded_ref(0, false, true));
+        } else {
+            parts.push(GrammarExpr::Quantified(
+                Box::new(self.string_char_unbounded_ref(1, false, false)),
+                Quantifier::Optional,
+            ));
+            parts.push(lit("\""));
+        }
+        seq(parts)
+    }
+
     fn string_body_for_length(&mut self, min: usize, max: Option<usize>) -> GrammarExpr {
-        let ch = self.string_char_exact_ref(1);
+        debug_assert!(max.is_some());
         match (min, max) {
-            (0, None) => GrammarExpr::Quantified(Box::new(ch), Quantifier::ZeroPlus),
-            (1, None) => GrammarExpr::Quantified(Box::new(ch), Quantifier::OnePlus),
-            (min, None) => seq(vec![
-                self.repeat_exact_string_char(min),
-                GrammarExpr::Quantified(Box::new(self.string_char_exact_ref(1)), Quantifier::ZeroPlus),
-            ]),
             (0, Some(0)) => GrammarExpr::Epsilon,
             (0, Some(max)) => self.string_char_upto_ref(max),
             (min, Some(max)) if min == max => self.repeat_exact_string_char(min),
@@ -1811,6 +1913,7 @@ impl<'a> Lowerer<'a> {
                 self.repeat_exact_string_char(min),
                 self.string_char_upto_ref(max - min),
             ]),
+            (_, None) => unreachable!("unbounded strings use lower_unbounded_string_expr"),
         }
     }
 
