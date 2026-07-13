@@ -396,7 +396,9 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // The pre-TI quotient and representative-core token-position partition are
     // two wrappers over the same C map. Build the positional analysis once.
     let (global_state_quotient, token_position_partition) =
-        if l2p_global_token_position_enabled() && matches!(partition_label, "p7" | "p8") {
+        if l2p_global_token_position_enabled()
+            && matches!(partition_label, "p1" | "p7" | "p8")
+        {
             match equivalence_analysis::state_equivalence::global_token_position::
                 compute_global_token_position_state_views(
                     tokenizer,
@@ -574,9 +576,7 @@ let strict_reference = reference_terminal_expansion
         .filter(|&&active| active)
         .count();
     let tokenizer_for_build = tokenizer;
-    // C is deliberately activated only on the structural-boundary partitions
-    // this experiment targets. P0/P1 retain their established raw route.
-    let token_position_partition_for_analysis = matches!(partition_label, "p7" | "p8")
+    let token_position_partition_for_analysis = matches!(partition_label, "p1" | "p7" | "p8")
         .then_some(token_position_partition.as_ref())
         .flatten();
     let equivalence_initial_state_map = initial_state_map;
