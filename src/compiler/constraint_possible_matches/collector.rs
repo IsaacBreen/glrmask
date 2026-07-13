@@ -843,31 +843,122 @@ fn build_node(
                     }
                 }
             } else {
-                let mut buckets: FxHashMap<u64, Vec<SignatureEntry>> = FxHashMap::default();
-                let mut next_class_id = 0u32;
-                for (state_pos, &state) in active_states.iter().enumerate() {
-                    let node_terms = if node.has_token() { node_terminal_ids[state as usize] } else { empty_terminals_id };
-                    let mut hash = mix_signature_word(0, node_terms);
-                    for child in &child_data { hash = mix_signature_word(hash, child.outcomes[state_pos].terminals_id); hash = mix_signature_word(hash, child.child_class_ids[state_pos]); }
-                    let bucket = buckets.entry(hash).or_default();
-                    let mut found = false;
-                    for entry in bucket.iter() {
-                        timings.signature_bucket_probes += 1;
-                        let rep_pos = entry.state_pos;
-                        let rep_state = active_states[rep_pos];
-                        let rep_node_terms = if node.has_token() { node_terminal_ids[rep_state as usize] } else { empty_terminals_id };
-                        if rep_node_terms != node_terms { continue; }
-                        if child_data.iter().all(|child| child.outcomes[rep_pos].terminals_id == child.outcomes[state_pos].terminals_id && child.child_class_ids[rep_pos] == child.child_class_ids[state_pos]) {
-                            classes[state_pos] = entry.class_id;
-                            found = true;
-                            break;
+                match child_data.len() {
+                    2 => {
+                        let mut by_sig: FxHashMap<[u32; 5], u32> = FxHashMap::default();
+                        let c0 = &child_data[0];
+                        let c1 = &child_data[1];
+                        for (state_pos, &state) in active_states.iter().enumerate() {
+                            let node_terms = if node.has_token() {
+                                node_terminal_ids[state as usize]
+                            } else {
+                                empty_terminals_id
+                            };
+                            let key = [
+                                node_terms,
+                                c0.outcomes[state_pos].terminals_id,
+                                c0.child_class_ids[state_pos],
+                                c1.outcomes[state_pos].terminals_id,
+                                c1.child_class_ids[state_pos],
+                            ];
+                            let class_id = *by_sig.entry(key).or_insert_with(|| {
+                                let id = representative_states.len() as u32;
+                                representative_states.push(state);
+                                representative_state_positions.push(state_pos);
+                                id
+                            });
+                            classes[state_pos] = class_id;
                         }
                     }
-                    if !found {
-                        let class_id = next_class_id; next_class_id += 1;
-                        classes[state_pos] = class_id;
-                        representative_states.push(state); representative_state_positions.push(state_pos);
-                        bucket.push(SignatureEntry { state_pos, class_id });
+                    3 => {
+                        let mut by_sig: FxHashMap<[u32; 7], u32> = FxHashMap::default();
+                        let c0 = &child_data[0];
+                        let c1 = &child_data[1];
+                        let c2 = &child_data[2];
+                        for (state_pos, &state) in active_states.iter().enumerate() {
+                            let node_terms = if node.has_token() {
+                                node_terminal_ids[state as usize]
+                            } else {
+                                empty_terminals_id
+                            };
+                            let key = [
+                                node_terms,
+                                c0.outcomes[state_pos].terminals_id,
+                                c0.child_class_ids[state_pos],
+                                c1.outcomes[state_pos].terminals_id,
+                                c1.child_class_ids[state_pos],
+                                c2.outcomes[state_pos].terminals_id,
+                                c2.child_class_ids[state_pos],
+                            ];
+                            let class_id = *by_sig.entry(key).or_insert_with(|| {
+                                let id = representative_states.len() as u32;
+                                representative_states.push(state);
+                                representative_state_positions.push(state_pos);
+                                id
+                            });
+                            classes[state_pos] = class_id;
+                        }
+                    }
+                    4 => {
+                        let mut by_sig: FxHashMap<[u32; 9], u32> = FxHashMap::default();
+                        let c0 = &child_data[0];
+                        let c1 = &child_data[1];
+                        let c2 = &child_data[2];
+                        let c3 = &child_data[3];
+                        for (state_pos, &state) in active_states.iter().enumerate() {
+                            let node_terms = if node.has_token() {
+                                node_terminal_ids[state as usize]
+                            } else {
+                                empty_terminals_id
+                            };
+                            let key = [
+                                node_terms,
+                                c0.outcomes[state_pos].terminals_id,
+                                c0.child_class_ids[state_pos],
+                                c1.outcomes[state_pos].terminals_id,
+                                c1.child_class_ids[state_pos],
+                                c2.outcomes[state_pos].terminals_id,
+                                c2.child_class_ids[state_pos],
+                                c3.outcomes[state_pos].terminals_id,
+                                c3.child_class_ids[state_pos],
+                            ];
+                            let class_id = *by_sig.entry(key).or_insert_with(|| {
+                                let id = representative_states.len() as u32;
+                                representative_states.push(state);
+                                representative_state_positions.push(state_pos);
+                                id
+                            });
+                            classes[state_pos] = class_id;
+                        }
+                    }
+                    _ => {
+                        let mut buckets: FxHashMap<u64, Vec<SignatureEntry>> = FxHashMap::default();
+                        let mut next_class_id = 0u32;
+                        for (state_pos, &state) in active_states.iter().enumerate() {
+                            let node_terms = if node.has_token() { node_terminal_ids[state as usize] } else { empty_terminals_id };
+                            let mut hash = mix_signature_word(0, node_terms);
+                            for child in &child_data { hash = mix_signature_word(hash, child.outcomes[state_pos].terminals_id); hash = mix_signature_word(hash, child.child_class_ids[state_pos]); }
+                            let bucket = buckets.entry(hash).or_default();
+                            let mut found = false;
+                            for entry in bucket.iter() {
+                                timings.signature_bucket_probes += 1;
+                                let rep_pos = entry.state_pos;
+                                let rep_state = active_states[rep_pos];
+                                let rep_node_terms = if node.has_token() { node_terminal_ids[rep_state as usize] } else { empty_terminals_id };
+                                if rep_node_terms != node_terms { continue; }
+                                if child_data.iter().all(|child| child.outcomes[rep_pos].terminals_id == child.outcomes[state_pos].terminals_id && child.child_class_ids[rep_pos] == child.child_class_ids[state_pos]) {
+                                    classes[state_pos] = entry.class_id;
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if !found {
+                                let class_id = next_class_id; next_class_id += 1;
+                                classes[state_pos] = class_id;
+                                representative_states.push(state); representative_state_positions.push(state_pos);
+                                bucket.push(SignatureEntry { state_pos, class_id });
+                            }
+                        }
                     }
                 }
             }
