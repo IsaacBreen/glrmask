@@ -7981,13 +7981,12 @@ pub(crate) fn partition_has_merges(partition: &BTreeMap<TerminalID, BTreeSet<Ter
 
 pub(crate) fn visible_output_raw_labels(
     partition: &BTreeMap<TerminalID, BTreeSet<TerminalID>>,
-    terminal_count: usize,
+    active_terminals: &[bool],
 ) -> Vec<bool> {
-    // The partition contains only TI-active terminals. Terminals outside it
-    // were never compressed and must remain ordinary visible outputs. Start
-    // from the full raw alphabet, then hide only actual nonrepresentative
-    // partition members.
-    let mut visible = vec![true; terminal_count];
+    // TI narrows the L2P-active alphabet; it must never reactivate terminals
+    // owned by another terminal family. Start from the caller's L2P mask, then
+    // hide only nonrepresentative TI members. Expansion restores those members.
+    let mut visible = active_terminals.to_vec();
     for (&representative, members) in partition {
         for &member in members {
             if member != representative {
@@ -10087,7 +10086,10 @@ mod tests {
         ]);
         assert_partition_invariants(&partition, &active);
         assert_eq!(active_terminals_for_partition(&partition, active.len()), [true, false, false, true, false]);
-        assert_eq!(visible_output_raw_labels(&partition, active.len()), [true, true, false, true, true]);
+        assert_eq!(
+            visible_output_raw_labels(&partition, &active),
+            [true, false, false, true, false]
+        );
     }
 
     #[test]

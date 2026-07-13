@@ -522,7 +522,7 @@ let strict_reference = reference_terminal_expansion
             terminal_partition
                 .as_ref()
                 .expect("active TI transport must retain its partition"),
-            grammar.num_terminals as usize,
+            active_terminals,
         )
     });
     // Equivalence and terminal-DWA construction must observe the same terminal
