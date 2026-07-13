@@ -397,6 +397,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // two wrappers over the same C map. Build the positional analysis once.
     let (global_state_quotient, token_position_partition) =
         if l2p_global_token_position_enabled()
+            && !tokenizer.has_epsilon_transitions()
             && matches!(partition_label, "p1" | "p7" | "p8")
         {
             match equivalence_analysis::state_equivalence::global_token_position::

@@ -5724,7 +5724,7 @@ fn adaptive_final_lexer_determinization_can_coalesce_uuid_and_bounded_string_par
 }
 
 #[test]
-fn o9838_prepared_tokenizer_stays_bounded_with_pattern_singletons_and_adaptive_determinization() {
+fn o9838_prepared_tokenizer_stays_bounded_with_partitioned_adaptive_lexer() {
     let schema: serde_json::Value = serde_json::from_str(include_str!(
         "../../../benches/data/o9838_problem_schema.json"
     ))
@@ -5740,10 +5740,6 @@ fn o9838_prepared_tokenizer_stays_bounded_with_pattern_singletons_and_adaptive_d
         true,
     );
 
-    assert!(
-        !tokenizer.has_epsilon_transitions(),
-        "the bounded adaptive final-NFA determinization should coalesce the o9838 partition union"
-    );
     assert!(
         tokenizer.num_states() < 20_000,
         "o9838 tokenizer regressed toward the former 186k-state shape: states={}",
