@@ -470,11 +470,11 @@ fn parser_state_label(label: i32, num_parser_states: u32) -> Option<u32> {
 }
 
 fn top_row_action_is_unconditionally_applicable(_action: &Action) -> bool {
-    // These actions originate from a precise LR(1)/IELR lookahead row. Guarded
-    // stack shifts are a lowered representation of that row's already-valid
-    // action, not a weaker admission predicate. Their guards select the exact
-    // stack effect; they do not make the terminal cease to be admissible from
-    // the row's top state.
+    // RowPresenceExact actions originate from a parser row whose terminal
+    // domain is an exact admission set. Guarded stack shifts are a lowered
+    // representation of that row's already-valid action, not a weaker
+    // admission predicate. Their guards select the exact stack effect; they do
+    // not make the terminal cease to be admissible from the row's top state.
     true
 }
 

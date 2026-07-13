@@ -429,6 +429,39 @@ fn build_contiguous_batches(total_tokens: usize, target_batch_size: usize) -> Ve
         .collect()
 }
 
+const DISCOVERY_SAMPLE_SIZE: usize = 125;
+const DISCOVERY_MIN_TOKENS: usize = 4_096;
+const DISCOVERY_MIN_STATES: usize = 512;
+
+fn discovery_sample_size(total_tokens: usize, num_states: usize) -> usize {
+    if let Ok(value) = std::env::var("STATE_EQUIV_DISCOVERY_SAMPLE_SIZE") {
+        return value.trim().parse::<usize>().unwrap_or(0);
+    }
+    if total_tokens >= DISCOVERY_MIN_TOKENS && num_states >= DISCOVERY_MIN_STATES {
+        DISCOVERY_SAMPLE_SIZE
+    } else {
+        0
+    }
+}
+
+fn build_discovery_sample(sorted_tokens: &[&[u8]], sample_size: usize) -> Vec<usize> {
+    let total_tokens = sorted_tokens.len();
+    let sample_size = sample_size.min(total_tokens);
+    if sample_size == 0 || sample_size == total_tokens {
+        return Vec::new();
+    }
+
+    (0..sample_size)
+        .map(|sample_index| {
+            let start = sample_index * total_tokens / sample_size;
+            let end = ((sample_index + 1) * total_tokens / sample_size).max(start + 1);
+            (start..end)
+                .max_by_key(|&token_index| (sorted_tokens[token_index].len(), token_index))
+                .expect("nonempty discovery stratum")
+        })
+        .collect()
+}
+
 fn build_start_state_suffix_nodes(
     token: &[u8],
     tokenizer_start: usize,
@@ -958,6 +991,21 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
     });
     let batch_size = custom_batch_size.unwrap_or(250);
     let batches = build_contiguous_batches(total_tokens, batch_size);
+    // A small lexically stratified discovery pass refines classes before the
+    // complete contiguous walk. Choosing the longest token in each stratum finds
+    // deep behavioral differences early while retaining sorted-token locality.
+    // The complete pass still covers every token and is the only pass counted
+    // toward exact-coverage/early-stop accounting. Refinement is monotone, so
+    // replaying sampled tokens is safe.
+    let discovery_sample = max_batches
+        .is_none()
+        .then(|| {
+            build_discovery_sample(
+                &sorted_tokens,
+                discovery_sample_size(total_tokens, states.len()),
+            )
+        })
+        .unwrap_or_default();
 
     let needed_token_flags = if let Some(max) = max_batches {
         let mut flags = vec![false; total_tokens];
@@ -1064,13 +1112,20 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
     let mut tokens_tested = 0usize;
     let mut batches_processed = 0usize;
     let batch_scratch_pool = StateBatchScratchPool::default();
-    for batch_indices in &batches {
+    let mut batch_sequence: Vec<(&[usize], bool)> = Vec::with_capacity(batches.len() + 1);
+    if !discovery_sample.is_empty() {
+        batch_sequence.push((discovery_sample.as_slice(), false));
+    }
+    batch_sequence.extend(batches.iter().map(|batch| (batch.as_slice(), true)));
+    for (batch_indices, counts_toward_coverage) in batch_sequence {
         if active_indices.is_empty() {
             break;
         }
-        if let Some(max) = max_batches {
-            if batches_processed >= max {
-                break;
+        if counts_toward_coverage {
+            if let Some(max) = max_batches {
+                if batches_processed >= max {
+                    break;
+                }
             }
         }
 
@@ -1078,7 +1133,9 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
         if batch_len == 0 {
             continue;
         }
-        tokens_tested += batch_len;
+        if counts_toward_coverage {
+            tokens_tested += batch_len;
+        }
 
         let mut batch_tokens: Vec<&[u8]> = Vec::with_capacity(batch_len);
         let mut batch_lcp_with_prev = Vec::with_capacity(batch_len);
@@ -1299,7 +1356,9 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
             )
             .collect();
 
-        batches_processed += 1;
+        if counts_toward_coverage {
+            batches_processed += 1;
+        }
         let previous_active_indices = std::mem::take(&mut active_indices);
         let all_active = previous_active_indices.len() == states.len();
 
@@ -1448,6 +1507,31 @@ pub fn mapping_to_equivalence_classes(
 #[cfg(test)]
 mod state_batch_scratch_pool_tests {
     use super::*;
+
+    #[test]
+    fn discovery_sample_chooses_longest_token_per_lexical_stratum() {
+        let tokens: Vec<&[u8]> = vec![
+            b"a",
+            b"aa",
+            b"aaaa",
+            b"b",
+            b"bbbbbb",
+            b"bb",
+            b"c",
+            b"cccc",
+            b"cc",
+        ];
+
+        assert_eq!(build_discovery_sample(&tokens, 3), vec![2, 4, 7]);
+    }
+
+    #[test]
+    fn discovery_sample_is_empty_when_it_would_replay_the_full_vocabulary() {
+        let tokens: Vec<&[u8]> = vec![b"a", b"b", b"c"];
+        assert!(build_discovery_sample(&tokens, 0).is_empty());
+        assert!(build_discovery_sample(&tokens, tokens.len()).is_empty());
+        assert!(build_discovery_sample(&tokens, tokens.len() + 10).is_empty());
+    }
 
     #[test]
     fn recycled_scratch_can_be_scrubbed_before_next_walk() {
