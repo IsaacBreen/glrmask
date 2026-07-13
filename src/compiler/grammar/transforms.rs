@@ -236,6 +236,25 @@ pub(crate) fn compact_unused_terminals(grammar: &mut GrammarDef) {
     grammar.lexer_partitions = remap_lexer_partitions(&grammar.lexer_partitions, &remap);
 }
 
+fn remap_lexer_partitions(
+    lexer_partitions: &BTreeMap<TerminalID, String>,
+    remap: &BTreeMap<TerminalID, TerminalID>,
+) -> BTreeMap<TerminalID, String> {
+    let mut remapped = BTreeMap::new();
+    for (old_id, partition) in lexer_partitions {
+        let Some(&new_id) = remap.get(old_id) else {
+            continue;
+        };
+        if let Some(previous) = remapped.insert(new_id, partition.clone()) {
+            assert_eq!(
+                previous, *partition,
+                "terminal compaction merged terminals from distinct lexer partitions {previous:?} and {partition:?}",
+            );
+        }
+    }
+    remapped
+}
+
 fn remap_terminal_names(
     terminal_names: &BTreeMap<TerminalID, String>,
     remap: &BTreeMap<TerminalID, TerminalID>,
@@ -244,25 +263,6 @@ fn remap_terminal_names(
         .iter()
         .filter_map(|(old_id, name)| remap.get(old_id).map(|new_id| (*new_id, name.clone())))
         .collect()
-}
-
-fn remap_lexer_partitions(
-    lexer_partitions: &BTreeMap<TerminalID, String>,
-    remap: &BTreeMap<TerminalID, TerminalID>,
-) -> BTreeMap<TerminalID, String> {
-    let mut remapped = BTreeMap::new();
-    for (&old_id, partition) in lexer_partitions {
-        let Some(&new_id) = remap.get(&old_id) else {
-            continue;
-        };
-        if let Some(previous) = remapped.insert(new_id, partition.clone()) {
-            assert_eq!(
-                previous, *partition,
-                "compacting equivalent terminals merged conflicting lexer partitions",
-            );
-        }
-    }
-    remapped
 }
 
 struct SingleUseInlineIndexes {
@@ -1038,52 +1038,6 @@ mod tests {
         Symbol::Terminal(id)
     }
 
-    #[test]
-    fn compact_unused_terminals_remaps_lexer_partitions() {
-        let mut grammar = GrammarDef {
-            rules: vec![Rule {
-                lhs: 0,
-                rhs: vec![t(1), t(3)],
-            }],
-            start: 0,
-            terminals: vec![
-                Terminal::Literal {
-                    id: 0,
-                    bytes: b"unused".to_vec(),
-                },
-                Terminal::Literal {
-                    id: 1,
-                    bytes: b"literal".to_vec(),
-                },
-                Terminal::Literal {
-                    id: 2,
-                    bytes: b"also-unused".to_vec(),
-                },
-                Terminal::Literal {
-                    id: 3,
-                    bytes: b"other".to_vec(),
-                },
-            ],
-            lexer_partitions: BTreeMap::from([
-                (0, "unused_partition".to_string()),
-                (1, "json_literals".to_string()),
-                (3, "json_other".to_string()),
-            ]),
-            ..GrammarDef::default()
-        };
-
-        compact_unused_terminals(&mut grammar);
-
-        assert_eq!(grammar.rules[0].rhs, vec![t(0), t(1)]);
-        assert_eq!(
-            grammar.lexer_partitions,
-            BTreeMap::from([
-                (0, "json_literals".to_string()),
-                (1, "json_other".to_string()),
-            ]),
-        );
-    }
-
     fn remove_cyclic_inline_candidates_reference(
         inline_candidates: &mut BTreeMap<NonterminalID, (usize, Vec<Symbol>)>,
     ) {
@@ -1127,6 +1081,51 @@ mod tests {
         for nt in cyclic {
             inline_candidates.remove(&nt);
         }
+    }
+
+    #[test]
+    fn compact_unused_terminals_remaps_lexer_partitions_with_terminal_ids() {
+        let mut grammar = GrammarDef {
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![t(1), t(3)],
+            }],
+            start: 0,
+            terminals: vec![
+                Terminal::Literal {
+                    id: 0,
+                    bytes: b"unused-zero".to_vec(),
+                },
+                Terminal::Literal {
+                    id: 1,
+                    bytes: b"first".to_vec(),
+                },
+                Terminal::Literal {
+                    id: 2,
+                    bytes: b"unused-middle".to_vec(),
+                },
+                Terminal::Literal {
+                    id: 3,
+                    bytes: b"second".to_vec(),
+                },
+            ],
+            lexer_partitions: BTreeMap::from([
+                (1, "literal-family".to_string()),
+                (3, "other-family".to_string()),
+            ]),
+            ..GrammarDef::default()
+        };
+
+        compact_unused_terminals(&mut grammar);
+
+        assert_eq!(grammar.rules[0].rhs, vec![t(0), t(1)]);
+        assert_eq!(
+            grammar.lexer_partitions,
+            BTreeMap::from([
+                (0, "literal-family".to_string()),
+                (1, "other-family".to_string()),
+            ]),
+        );
     }
 
     #[test]
