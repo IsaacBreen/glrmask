@@ -14,7 +14,7 @@ use crate::ds::leveled_gss::{LeveledGSS, Merge, VirtualStack};
 use crate::grammar::flat::TerminalID;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::OnceLock;
 
 mod profile;
@@ -37,6 +37,8 @@ type FloorCrossShift = (u32, u32, bool);
 const SINGLE_CONCRETE_STACK_EFFECT_MAX_DEPTH: usize = 64;
 const GUARDED_STACK_TO_STACKS_MAX_DEPTH: usize = 64;
 const SMALL_REDUCE_FANOUT_COLLAPSE_MAX_BRANCHES: usize = 8;
+const ADVANCE_ASSERT_DISTRIBUTIVITY: u8 = 1 << 0;
+const ADVANCE_ASSERT_FAST_PATH_EQUIVALENCE: u8 = 1 << 1;
 
 fn env_flag_enabled(name: &str) -> bool {
     std::env::var(name)
@@ -52,9 +54,18 @@ fn assert_row_presence_exact_enabled() -> bool {
     *ENABLED.get_or_init(|| env_flag_enabled("GLRMASK_ASSERT_ROW_PRESENCE_EXACT"))
 }
 
-fn assert_advance_distributivity_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_flag_enabled("GLRMASK_ASSERT_ADVANCE_DISTRIBUTIVITY"))
+fn advance_assertion_flags() -> u8 {
+    static FLAGS: OnceLock<u8> = OnceLock::new();
+    *FLAGS.get_or_init(|| {
+        let mut flags = 0;
+        if env_flag_enabled("GLRMASK_ASSERT_ADVANCE_DISTRIBUTIVITY") {
+            flags |= ADVANCE_ASSERT_DISTRIBUTIVITY;
+        }
+        if env_flag_enabled("GLRMASK_ASSERT_ADVANCE_FAST_PATH_EQUIVALENCE") {
+            flags |= ADVANCE_ASSERT_FAST_PATH_EQUIVALENCE;
+        }
+        flags
+    })
 }
 
 fn guarded_stack_to_stacks_fallback_disabled() -> bool {
@@ -179,17 +190,24 @@ impl AdvancedBranch {
 
 pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> ParserGSS {
     let advanced = advance_stacks_core(table, stack.clone(), token);
-    assert_advance_distributes_over_concrete_paths(table, stack, token, &advanced);
+    assert_advance_oracles(
+        advance_assertion_flags(),
+        table,
+        stack,
+        token,
+        &advanced,
+    );
     advanced
 }
 
 /// Like `advance_stacks` but takes ownership of the GSS, avoiding an
 /// unnecessary Arc clone when the caller doesn't need the original.
 pub(crate) fn advance_stacks_owned(table: &GLRTable, stack: ParserGSS, token: TerminalID) -> ParserGSS {
-    if assert_advance_distributivity_enabled() {
+    let assertion_flags = advance_assertion_flags();
+    if assertion_flags != 0 {
         let before = stack.clone();
         let advanced = advance_stacks_core(table, stack, token);
-        assert_advance_distributes_over_concrete_paths(table, &before, token, &advanced);
+        assert_advance_oracles(assertion_flags, table, &before, token, &advanced);
         advanced
     } else {
         advance_stacks_core(table, stack, token)
@@ -214,16 +232,210 @@ fn normalized_concrete_stacks(
     normalized
 }
 
+fn merge_concrete_path_accumulator(
+    paths: &mut BTreeMap<Vec<u32>, TerminalsDisallowed>,
+    stack: Vec<u32>,
+    acc: TerminalsDisallowed,
+) -> bool {
+    if let Some(existing) = paths.get_mut(&stack) {
+        let merged = existing.merge(&acc);
+        if *existing == merged {
+            return false;
+        }
+        *existing = merged;
+        true
+    } else {
+        paths.insert(stack, acc);
+        true
+    }
+}
+
+fn apply_concrete_stack_effect(
+    stack: &[u32],
+    pop: usize,
+    pushes: &[u32],
+) -> Option<Vec<u32>> {
+    // An empty concrete parser stack is still a live GSS path. Stack effects
+    // are atomic and may therefore pop the final state before pushing a new
+    // sequence. Only an actual underflow kills the effect.
+    if pop > stack.len() {
+        return None;
+    }
+    let mut next = stack[..stack.len() - pop].to_vec();
+    next.extend_from_slice(pushes);
+    Some(next)
+}
+
+fn concrete_stack_satisfies_guards(stack: &[u32], guards: &[StackShiftGuard]) -> bool {
+    guards.iter().all(|guard| {
+        let pop = guard.pop as usize;
+        pop < stack.len()
+            && guard
+                .states
+                .binary_search(&stack[stack.len() - 1 - pop])
+                .is_ok()
+    })
+}
+
+fn enqueue_concrete_reduction(
+    table: &GLRTable,
+    stack: &[u32],
+    acc: &TerminalsDisallowed,
+    nt: u32,
+    rhs_len: usize,
+    closure: &mut BTreeMap<Vec<u32>, TerminalsDisallowed>,
+    queue: &mut VecDeque<Vec<u32>>,
+) {
+    if rhs_len >= stack.len() {
+        return;
+    }
+    let mut base = stack[..stack.len() - rhs_len].to_vec();
+    let goto_from = *base.last().expect("reduction preserves a parser state");
+    let Some((target, is_replace)) = table.goto_target(goto_from, nt) else {
+        return;
+    };
+    if is_replace {
+        let Some(next) = apply_concrete_stack_effect(&base, 1, &[target]) else {
+            return;
+        };
+        base = next;
+    } else {
+        base.push(target);
+    }
+    if merge_concrete_path_accumulator(closure, base.clone(), acc.clone()) {
+        queue.push_back(base);
+    }
+}
+
+fn advance_concrete_stacks_reference(
+    table: &GLRTable,
+    before: &ParserGSS,
+    token: TerminalID,
+) -> ParserGSS {
+    let mut closure = BTreeMap::<Vec<u32>, TerminalsDisallowed>::new();
+    let mut queue = VecDeque::<Vec<u32>>::new();
+    for (stack, acc) in before.to_stacks() {
+        if merge_concrete_path_accumulator(&mut closure, stack.clone(), acc) {
+            queue.push_back(stack);
+        }
+    }
+
+    let mut shifted = BTreeMap::<Vec<u32>, TerminalsDisallowed>::new();
+    while let Some(stack) = queue.pop_front() {
+        let Some(acc) = closure.get(&stack).cloned() else {
+            continue;
+        };
+        let Some(&state) = stack.last() else {
+            continue;
+        };
+        let Some(action) = table.action(state, token) else {
+            continue;
+        };
+
+        match action {
+            Action::Shift(target, is_replace) => {
+                let pop = usize::from(*is_replace);
+                if let Some(next) = apply_concrete_stack_effect(&stack, pop, &[*target]) {
+                    merge_concrete_path_accumulator(&mut shifted, next, acc);
+                }
+            }
+            Action::StackShifts(shifts) => {
+                for shift in shifts {
+                    if let Some(next) = apply_concrete_stack_effect(
+                        &stack,
+                        shift.pop as usize,
+                        &shift.pushes,
+                    ) {
+                        merge_concrete_path_accumulator(&mut shifted, next, acc.clone());
+                    }
+                }
+            }
+            Action::GuardedStackShifts(shifts) => {
+                for shift in shifts {
+                    if concrete_stack_satisfies_guards(&stack, &shift.guards)
+                        && let Some(next) = apply_concrete_stack_effect(
+                            &stack,
+                            shift.pop as usize,
+                            &shift.pushes,
+                        )
+                    {
+                        merge_concrete_path_accumulator(&mut shifted, next, acc.clone());
+                    }
+                }
+            }
+            Action::Reduce(nt, rhs_len) => enqueue_concrete_reduction(
+                table,
+                &stack,
+                &acc,
+                *nt,
+                *rhs_len as usize,
+                &mut closure,
+                &mut queue,
+            ),
+            Action::Split {
+                shift,
+                reduces,
+                accept: _,
+            } => {
+                if let Some((target, is_replace)) = shift {
+                    let is_replace = *is_replace
+                        && !table.forwarded_shifts.contains(&(state, token));
+                    if let Some(next) = apply_concrete_stack_effect(
+                        &stack,
+                        usize::from(is_replace),
+                        &[*target],
+                    ) {
+                        merge_concrete_path_accumulator(&mut shifted, next, acc.clone());
+                    }
+                }
+                for &(nt, rhs_len) in reduces {
+                    enqueue_concrete_reduction(
+                        table,
+                        &stack,
+                        &acc,
+                        nt,
+                        rhs_len as usize,
+                        &mut closure,
+                        &mut queue,
+                    );
+                }
+            }
+            Action::Accept => {}
+        }
+    }
+
+    if shifted.is_empty() {
+        ParserGSS::empty()
+    } else {
+        let stacks = shifted.into_iter().collect::<Vec<_>>();
+        ParserGSS::from_stacks(&stacks)
+    }
+}
+
+#[cold]
+fn assert_advance_matches_concrete_reference(
+    table: &GLRTable,
+    before: &ParserGSS,
+    token: TerminalID,
+    actual: &ParserGSS,
+) {
+    let expected = advance_concrete_stacks_reference(table, before, token);
+    assert_eq!(
+        normalized_concrete_stacks(actual),
+        normalized_concrete_stacks(&expected),
+        "parser fast-path advance mismatch for terminal {token}: construction={:?} before={:?}",
+        table.construction,
+        normalized_concrete_stacks(before),
+    );
+}
+
+#[cold]
 fn assert_advance_distributes_over_concrete_paths(
     table: &GLRTable,
     before: &ParserGSS,
     token: TerminalID,
     actual: &ParserGSS,
 ) {
-    if !assert_advance_distributivity_enabled() {
-        return;
-    }
-
     let concrete_paths = before.to_stacks();
     if concrete_paths.len() <= 1 {
         return;
@@ -246,7 +458,39 @@ fn assert_advance_distributes_over_concrete_paths(
     );
 }
 
+#[inline]
+fn assert_advance_oracles(
+    assertion_flags: u8,
+    table: &GLRTable,
+    before: &ParserGSS,
+    token: TerminalID,
+    actual: &ParserGSS,
+) {
+    if assertion_flags & ADVANCE_ASSERT_FAST_PATH_EQUIVALENCE != 0 {
+        assert_advance_matches_concrete_reference(table, before, token, actual);
+    }
+    if assertion_flags & ADVANCE_ASSERT_DISTRIBUTIVITY != 0 {
+        assert_advance_distributes_over_concrete_paths(table, before, token, actual);
+    }
+}
+
 pub(crate) fn advance_stacks_profiled(
+    table: &GLRTable,
+    stack: &ParserGSS,
+    token: TerminalID,
+) -> (ParserGSS, AdvanceProfile) {
+    let (advanced, profile) = advance_stacks_profiled_core(table, stack, token);
+    assert_advance_oracles(
+        advance_assertion_flags(),
+        table,
+        stack,
+        token,
+        &advanced,
+    );
+    (advanced, profile)
+}
+
+fn advance_stacks_profiled_core(
     table: &GLRTable,
     stack: &ParserGSS,
     token: TerminalID,
@@ -2832,6 +3076,7 @@ fn stack_may_apply_guarded_shifts(stack: &ParserGSS, shifts: &[GuardedStackShift
 mod tests {
     use super::{
         ParserGSS,
+        advance_concrete_stacks_reference,
         advance_stacks,
         apply_guarded_stack_shifts_to_vstack,
         stack_may_advance_on,
@@ -2845,6 +3090,74 @@ mod tests {
         Action, AdmissionPolicy, GLRTable, GuardedStackShift, StackShift, StackShiftGuard,
     };
     use crate::ds::bitset::BitSet;
+    use crate::ds::leveled_gss::Merge;
+
+    #[test]
+    fn concrete_advance_reference_applies_whole_stack_effect_atomically() {
+        let token = 0;
+        let table = build_test_table(
+            2,
+            1,
+            &[
+                &[],
+                &[(
+                    token,
+                    Action::StackShifts(vec![StackShift {
+                        pop: 2,
+                        pushes: vec![7],
+                    }]),
+                )],
+            ],
+            &[&[], &[]],
+        );
+        let before = ParserGSS::from_single_stack(
+            vec![0, 1],
+            TerminalsDisallowed::new(),
+        );
+        let expected = ParserGSS::from_single_stack(
+            vec![7],
+            TerminalsDisallowed::new(),
+        );
+
+        assert_eq!(
+            advance_concrete_stacks_reference(&table, &before, token),
+            expected,
+        );
+    }
+
+    #[test]
+    fn concrete_advance_reference_merges_accumulators_at_reduce_closure_join() {
+        let token = 0;
+        let nt = 0;
+        let table = build_test_table(
+            6,
+            1,
+            &[
+                &[],
+                &[],
+                &[(token, Action::Reduce(nt, 1))],
+                &[(token, Action::Reduce(nt, 1))],
+                &[(token, Action::Shift(5, false))],
+                &[],
+            ],
+            &[&[(nt, (4, false))], &[], &[], &[], &[], &[]],
+        );
+        let left_acc = TerminalsDisallowed::new().with_insert(10, 20);
+        let right_acc = TerminalsDisallowed::new().with_insert(11, 21);
+        let before = ParserGSS::from_stacks(&[
+            (vec![0, 2], left_acc.clone()),
+            (vec![0, 3], right_acc.clone()),
+        ]);
+        let expected = ParserGSS::from_single_stack(
+            vec![0, 4, 5],
+            left_acc.merge(&right_acc),
+        );
+
+        assert_eq!(
+            advance_concrete_stacks_reference(&table, &before, token),
+            expected,
+        );
+    }
 
     #[test]
     fn advance_stacks_matches_reduce_fanout_collapse_fast_path() {
@@ -3183,12 +3496,16 @@ mod tests {
         let expected = advance_stacks(table, left, token)
             .merge(&advance_stacks(table, right, token));
         let actual = advance_stacks(table, &merged, token);
+        let concrete_reference = advance_concrete_stacks_reference(table, &merged, token);
 
         let mut expected_stacks = expected.to_stacks();
         let mut actual_stacks = actual.to_stacks();
+        let mut reference_stacks = concrete_reference.to_stacks();
         expected_stacks.sort_by(|a, b| a.0.cmp(&b.0));
         actual_stacks.sort_by(|a, b| a.0.cmp(&b.0));
+        reference_stacks.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(actual_stacks, expected_stacks, "{case}");
+        assert_eq!(actual_stacks, reference_stacks, "{case}");
     }
 
     fn branched_floor_pair(common_suffix_len: usize) -> (ParserGSS, ParserGSS) {
