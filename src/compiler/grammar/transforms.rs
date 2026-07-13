@@ -233,6 +233,7 @@ pub(crate) fn compact_unused_terminals(grammar: &mut GrammarDef) {
     grammar.terminals = compacted;
     grammar.ignore_terminal = grammar.ignore_terminal.and_then(|old_id| remap.get(&old_id).copied());
     grammar.terminal_names = remap_terminal_names(&grammar.terminal_names, &remap);
+    grammar.lexer_partitions = remap_lexer_partitions(&grammar.lexer_partitions, &remap);
 }
 
 fn remap_terminal_names(
@@ -243,6 +244,25 @@ fn remap_terminal_names(
         .iter()
         .filter_map(|(old_id, name)| remap.get(old_id).map(|new_id| (*new_id, name.clone())))
         .collect()
+}
+
+fn remap_lexer_partitions(
+    lexer_partitions: &BTreeMap<TerminalID, String>,
+    remap: &BTreeMap<TerminalID, TerminalID>,
+) -> BTreeMap<TerminalID, String> {
+    let mut remapped = BTreeMap::new();
+    for (&old_id, partition) in lexer_partitions {
+        let Some(&new_id) = remap.get(&old_id) else {
+            continue;
+        };
+        if let Some(previous) = remapped.insert(new_id, partition.clone()) {
+            assert_eq!(
+                previous, *partition,
+                "compacting equivalent terminals merged conflicting lexer partitions",
+            );
+        }
+    }
+    remapped
 }
 
 struct SingleUseInlineIndexes {
@@ -1016,6 +1036,52 @@ mod tests {
 
     fn t(id: TerminalID) -> Symbol {
         Symbol::Terminal(id)
+    }
+
+    #[test]
+    fn compact_unused_terminals_remaps_lexer_partitions() {
+        let mut grammar = GrammarDef {
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![t(1), t(3)],
+            }],
+            start: 0,
+            terminals: vec![
+                Terminal::Literal {
+                    id: 0,
+                    bytes: b"unused".to_vec(),
+                },
+                Terminal::Literal {
+                    id: 1,
+                    bytes: b"literal".to_vec(),
+                },
+                Terminal::Literal {
+                    id: 2,
+                    bytes: b"also-unused".to_vec(),
+                },
+                Terminal::Literal {
+                    id: 3,
+                    bytes: b"other".to_vec(),
+                },
+            ],
+            lexer_partitions: BTreeMap::from([
+                (0, "unused_partition".to_string()),
+                (1, "json_literals".to_string()),
+                (3, "json_other".to_string()),
+            ]),
+            ..GrammarDef::default()
+        };
+
+        compact_unused_terminals(&mut grammar);
+
+        assert_eq!(grammar.rules[0].rhs, vec![t(0), t(1)]);
+        assert_eq!(
+            grammar.lexer_partitions,
+            BTreeMap::from([
+                (0, "json_literals".to_string()),
+                (1, "json_other".to_string()),
+            ]),
+        );
     }
 
     fn remove_cyclic_inline_candidates_reference(
