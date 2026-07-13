@@ -865,7 +865,8 @@ impl<'a> ConstraintState<'a> {
 
         if merged.iter().any(|&word| word != 0) {
             let buf_zeroed = !direct_buf_dirty;
-            self.constraint.or_internal_dense_to_buf(&merged, buf, buf_zeroed);
+            self.constraint
+                .or_internal_dense_to_buf_fast(&merged, buf, buf_zeroed);
         }
 
         update_eos_mask(
