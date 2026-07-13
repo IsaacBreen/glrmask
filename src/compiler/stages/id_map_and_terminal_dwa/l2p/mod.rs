@@ -525,6 +525,15 @@ let strict_reference = reference_terminal_expansion
             grammar.num_terminals as usize,
         )
     });
+    // Equivalence and terminal-DWA construction must observe the same terminal
+    // alphabet. `None` means "all terminals" to the NWA builder; using it on
+    // the ordinary non-TI path after analyzing only `analysis_active_terminals`
+    // can reintroduce inactive terminals from quotient representatives and make
+    // the weighted language unsound. TI has a broader explicit output mask
+    // because only true nonrepresentative class members are hidden there.
+    let representative_core_active_terminals = representative_core_output_labels
+        .as_deref()
+        .unwrap_or(&analysis_active_terminals);
     let coalesced_disallowed_follows_started_at = ti_profile_timing.then(Instant::now);
     let coalesced_disallowed_follows = reference_terminal_expansion.then(|| {
         coalesced_disallowed_follows(
@@ -736,8 +745,24 @@ let strict_reference = reference_terminal_expansion
                 &roots,
                 &mut pm_computer,
                 flat_trans.map(AsRef::as_ref),
-                representative_core_output_labels.as_deref(),
+                representative_core_active_terminals,
             );
+            #[cfg(debug_assertions)]
+            if !use_terminal_coloring && !reference_terminal_expansion {
+                for state in nwa.states() {
+                    for &label in state.transitions.keys() {
+                        if label >= 0 {
+                            debug_assert!(
+                                analysis_active_terminals
+                                    .get(label as usize)
+                                    .copied()
+                                    .unwrap_or(false),
+                                "ordinary L2P core emitted inactive terminal {label} after active-terminal equivalence",
+                            );
+                        }
+                    }
+                }
+            }
             let trie_build_ms = trie_build_started_at.elapsed().as_secs_f64() * 1000.0;
 
             let always_allowed_ms = 0.0;

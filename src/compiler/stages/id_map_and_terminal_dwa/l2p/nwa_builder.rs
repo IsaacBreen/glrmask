@@ -1399,7 +1399,7 @@ pub(crate) fn build_nwa_via_trie_walk<'a>(
     roots: &NodesByTokenizerState,
     possible_matches: &mut PossibleMatchesComputer<'a>,
     shared_flat_transitions: Option<&'a [u32]>,
-    active_terminals: Option<&[bool]>,
+    active_terminals: &[bool],
 ) -> TerminalDwaBuildProfile {
     let num_tokenizer_states = tokenizer.num_states() as usize;
     let mut initial_source_states = vec![false; nwa.states().len()];
@@ -1419,7 +1419,7 @@ pub(crate) fn build_nwa_via_trie_walk<'a>(
         initial_source_states,
         use_terminal_coloring,
         None,
-        active_terminals.map(|a| a.to_vec()),
+        Some(active_terminals.to_vec()),
         num_tokenizer_states,
         shared_flat_transitions,
     );
