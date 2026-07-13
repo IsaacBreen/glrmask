@@ -27,7 +27,7 @@ use crate::compiler::glr::table::{GLRTable, GlrTableConstruction};
 use crate::compiler::grammar::transforms::prepare_grammar_transforms_only;
 use crate::compiler::stages::id_map_and_terminal_dwa::classify::{
     SharedClassifyCache,
-    classify_terminal_path_lengths,
+    prewarm_shared_classify_cache,
 };
 use crate::compiler::stages::id_map_and_terminal_dwa::grammar_helpers::{
     compute_ever_allowed_follows,
@@ -1404,12 +1404,10 @@ fn launch_classify_dag_if_ready<'scope>(
         let shared_classify_cache = SharedClassifyCache::new();
         let classify_started_ms = elapsed_ms(compile_started_at.clone());
         let classify_started_at = Instant::now();
-        let _terminal_path_lengths = classify_terminal_path_lengths(
+        prewarm_shared_classify_cache(
             &tokenizer.tokenizer,
-            vocab,
-            &token_path_disallowed_follows,
             analysis.analyzed_grammar.num_terminals,
-            Some(&shared_classify_cache),
+            &shared_classify_cache,
         );
         let classify_ms = elapsed_ms(classify_started_at);
         let classify_finished_ms = elapsed_ms(compile_started_at.clone());
