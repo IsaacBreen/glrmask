@@ -1,5 +1,5 @@
 use crate::automata::lexer::Lexer;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -392,6 +392,39 @@ pub(crate) fn build_tokenizer(grammar: &GrammarDef) -> Tokenizer {
         );
     }
     let partition_ids = lexer_partition_ids(grammar);
+    if profile_detail {
+        let mut partition_terminals = BTreeMap::<u32, Vec<(u32, &str, &str)>>::new();
+        for (terminal, &partition_id) in partition_ids.iter().enumerate() {
+            let terminal_id = terminal as u32;
+            let partition_name = grammar
+                .lexer_partitions
+                .get(&terminal_id)
+                .map(String::as_str)
+                .unwrap_or("<default>");
+            partition_terminals.entry(partition_id).or_default().push((
+                terminal_id,
+                partition_name,
+                terminal_labels[terminal].as_str(),
+            ));
+        }
+        for (partition_id, terminals) in partition_terminals {
+            let partition_names = terminals
+                .iter()
+                .map(|(_, partition_name, _)| *partition_name)
+                .collect::<BTreeSet<_>>();
+            let labels = terminals
+                .iter()
+                .map(|(terminal, _, label)| format!("{terminal}:{label}"))
+                .collect::<Vec<_>>();
+            eprintln!(
+                "[glrmask/profile][tokenizer] lexer_partition id={} names={:?} terminals={} labels=[{}]",
+                partition_id,
+                partition_names,
+                terminals.len(),
+                labels.join(", "),
+            );
+        }
+    }
     build_tokenizer_from_exprs_partitioned(&exprs, Some(&terminal_labels), &partition_ids)
 }
 

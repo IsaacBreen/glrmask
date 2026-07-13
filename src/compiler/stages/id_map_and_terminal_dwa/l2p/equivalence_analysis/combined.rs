@@ -401,6 +401,29 @@ fn compose_raw_quotient_state_map(
     pre_state_map: &ManyToOneIdMap,
     final_representative_for_preclass: &[usize],
 ) -> ManyToOneIdMap {
+    compose_raw_quotient_state_map_impl(
+        pre_state_map,
+        final_representative_for_preclass,
+        None,
+    )
+}
+
+fn compose_raw_quotient_state_map_preserving_directional_representatives(
+    pre_state_map: &ManyToOneIdMap,
+    final_representative_for_preclass: &[usize],
+) -> ManyToOneIdMap {
+    compose_raw_quotient_state_map_impl(
+        pre_state_map,
+        final_representative_for_preclass,
+        Some(&pre_state_map.representative_original_ids),
+    )
+}
+
+fn compose_raw_quotient_state_map_impl(
+    pre_state_map: &ManyToOneIdMap,
+    final_representative_for_preclass: &[usize],
+    representative_original_for_final_key: Option<&[u32]>,
+) -> ManyToOneIdMap {
     assert_eq!(
         pre_state_map.internal_to_originals.len(),
         final_representative_for_preclass.len(),
@@ -424,7 +447,10 @@ fn compose_raw_quotient_state_map(
             let next = internal_to_originals.len() as u32;
             final_key_to_internal[final_key] = next;
             internal_to_originals.push(Vec::new());
-            representative_original_ids.push(raw_state as u32);
+            representative_original_ids.push(
+                representative_original_for_final_key
+                    .map_or(raw_state as u32, |representatives| representatives[final_key]),
+            );
             next
         } else {
             final_key_to_internal[final_key]
@@ -718,7 +744,16 @@ fn try_analyze_equivalences_with_token_position_partition(
                 first_seed_class_for_analysis[&exact_analysis_state]
             })
             .collect::<Vec<_>>();
-        compose_raw_quotient_state_map(seed, &final_seed_class_representatives)
+        // C is directional: each seed representative extends every member's
+        // positional observations. Exact powerset refinement may merge C seed
+        // classes, but the resulting class must retain the chosen C
+        // representative. Picking the first raw member, as ordinary
+        // equivalence composition does, can replace the representative with a
+        // strictly less-defined member and lose terminal-NWA behavior.
+        compose_raw_quotient_state_map_preserving_directional_representatives(
+            seed,
+            &final_seed_class_representatives,
+        )
     } else {
         build_state_map_from_subset_representatives(
             &seed_states,
@@ -2076,6 +2111,24 @@ mod prepass_selection_tests {
             partition_from_representatives(&states, &full),
             partition_from_representatives(&states, &factored),
         );
+    }
+
+    #[test]
+    fn directional_quotient_composition_retains_preclass_representative() {
+        let directional = ManyToOneIdMap {
+            original_to_internal: vec![0, 1, 0, 1],
+            internal_to_originals: vec![vec![0, 2], vec![1, 3]],
+            representative_original_ids: vec![2, 3],
+        };
+
+        let composed = compose_raw_quotient_state_map_preserving_directional_representatives(
+            &directional,
+            &[1, 1],
+        );
+
+        assert_eq!(composed.original_to_internal, vec![0, 0, 0, 0]);
+        assert_eq!(composed.internal_to_originals, vec![vec![0, 1, 2, 3]]);
+        assert_eq!(composed.representative_original_ids, vec![3]);
     }
 
     #[test]

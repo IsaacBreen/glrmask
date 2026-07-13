@@ -1183,6 +1183,11 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                     let state = states[state_idx] as u32;
                     let mut hash_delta: u128 = 0;
                     let state_ct_base = (state as usize) * num_bc;
+                    let has_seed_initial_finalizers = seed_initial_finalizers
+                        && dfa_finalizers[state as usize].iter().any(|&gid| {
+                            gid < num_groups
+                                && (skip_groups.is_empty() || !skip_groups[gid])
+                        });
 
                     let mut live_ranges: Vec<(usize, usize)> = Vec::new();
 
@@ -1196,7 +1201,10 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                             continue;
                         }
 
-                        if compact_transitions[state_ct_base + byte_to_class[byte] as usize] == NONE_STATE {
+                        if compact_transitions[state_ct_base + byte_to_class[byte] as usize]
+                            == NONE_STATE
+                            && !has_seed_initial_finalizers
+                        {
                             let weight_sum =
                                 batch_weight_prefix[range_end].wrapping_sub(batch_weight_prefix[range_start]);
                             hash_delta = hash_delta
@@ -1507,6 +1515,8 @@ pub fn mapping_to_equivalence_classes(
 #[cfg(test)]
 mod state_batch_scratch_pool_tests {
     use super::*;
+    use super::super::super::compat::{FlatDfa, FlatDfaState, TokenizerView};
+    use std::sync::Arc;
 
     #[test]
     fn discovery_sample_chooses_longest_token_per_lexical_stratum() {
@@ -1555,5 +1565,62 @@ mod state_batch_scratch_pool_tests {
             assert!(scratch.positions.iter().all(|&position| position == -1));
             assert!(scratch.active_bits.iter().all(|&word| word == 0));
         }
+    }
+
+    #[test]
+    fn initial_finalizers_survive_dead_suffix_first_byte_fast_path() {
+        let state_count = 5usize;
+        let mut transitions = vec![u32::MAX; state_count * 256];
+        transitions[b't' as usize] = 3;
+        let view = TokenizerView {
+            flat_dfa: FlatDfa {
+                start_state: 0,
+                transitions: Arc::from(transitions),
+                states: vec![
+                    FlatDfaState {
+                        finalizers: vec![],
+                        possible_future_group_ids: vec![1],
+                    },
+                    FlatDfaState {
+                        finalizers: vec![0],
+                        possible_future_group_ids: vec![],
+                    },
+                    FlatDfaState {
+                        finalizers: vec![],
+                        possible_future_group_ids: vec![],
+                    },
+                    FlatDfaState {
+                        finalizers: vec![],
+                        possible_future_group_ids: vec![1],
+                    },
+                    FlatDfaState {
+                        finalizers: vec![],
+                        possible_future_group_ids: vec![],
+                    },
+                ],
+            },
+        };
+        let states = [1usize, 2usize];
+        let tokens = [b"t".as_slice()];
+        let normalized = vec![BitSet::new(2), BitSet::new(2)];
+
+        let without_initial = find_state_equivalence_classes_with_disallowed_and_shared_base(
+            &view,
+            &tokens,
+            &states,
+            &normalized,
+            None,
+        );
+        assert_eq!(without_initial, vec![1, 1]);
+
+        let with_initial =
+            find_state_equivalence_classes_with_disallowed_and_shared_base_with_initial_finalizers(
+                &view,
+                &tokens,
+                &states,
+                &normalized,
+                None,
+            );
+        assert_eq!(with_initial, vec![1, 2]);
     }
 }

@@ -397,7 +397,6 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // two wrappers over the same C map. Build the positional analysis once.
     let (global_state_quotient, token_position_partition) =
         if l2p_global_token_position_enabled()
-            && !tokenizer.has_epsilon_transitions()
             && matches!(partition_label, "p1" | "p7" | "p8")
         {
             match equivalence_analysis::state_equivalence::global_token_position::
@@ -558,6 +557,31 @@ let strict_reference = reference_terminal_expansion
     let ti_coalesced_disallowed_follows_ms = coalesced_disallowed_follows_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
+    if std::env::var("GLRMASK_DUMP_TI_CLASSES")
+        .ok()
+        .is_some_and(|requested| requested == "1" || requested == partition_label)
+    {
+        if let Some(partition) = terminal_partition.as_ref() {
+            for (&representative, members) in partition {
+                let member_exprs = members
+                    .iter()
+                    .map(|&member| {
+                        format!(
+                            "{}:{:?}",
+                            member,
+                            tokenizer.terminal_expr(member),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                eprintln!(
+                    "[glrmask/dump][ti_class] partition={} representative={} members=[{}]",
+                    partition_label,
+                    representative,
+                    member_exprs.join(", "),
+                );
+            }
+        }
+    }
     if std::env::var("GLRMASK_PROFILE_L2P_EXIT_AFTER_TI_DISCOVERY")
         .ok()
         .as_deref()
