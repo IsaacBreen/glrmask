@@ -5694,6 +5694,8 @@ fn recognized_formats_are_pattern_singletons_before_adaptive_determinization() {
 
 #[test]
 fn adaptive_final_lexer_determinization_can_coalesce_uuid_and_bounded_string_partitions() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _depth = EnvVarGuard::set("GLRMASK_ADAPTIVE_LEXER_MAX_DEPTH", "full");
     let schema = json!({
         "type": "object",
         "properties": {
@@ -5725,6 +5727,8 @@ fn adaptive_final_lexer_determinization_can_coalesce_uuid_and_bounded_string_par
 
 #[test]
 fn o9838_prepared_tokenizer_stays_bounded_with_pattern_singletons_and_adaptive_determinization() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _depth = EnvVarGuard::set("GLRMASK_ADAPTIVE_LEXER_MAX_DEPTH", "full");
     let schema: serde_json::Value = serde_json::from_str(include_str!(
         "../../../benches/data/o9838_problem_schema.json"
     ))
@@ -8712,5 +8716,3 @@ fn unbounded_string_length_lowering_respects_generic_quote_merge_policy() {
         assert!(!accepts(br#"{"value": "///////////////////"}"#));
     }
 }
-
-
