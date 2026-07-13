@@ -233,6 +233,44 @@ pub(crate) fn compact_unused_terminals(grammar: &mut GrammarDef) {
     grammar.terminals = compacted;
     grammar.ignore_terminal = grammar.ignore_terminal.and_then(|old_id| remap.get(&old_id).copied());
     grammar.terminal_names = remap_terminal_names(&grammar.terminal_names, &remap);
+    grammar.lexer_partitions = remap_lexer_partitions(&grammar.lexer_partitions, &remap);
+}
+
+fn remap_lexer_partitions(
+    lexer_partitions: &BTreeMap<TerminalID, String>,
+    remap: &BTreeMap<TerminalID, TerminalID>,
+) -> BTreeMap<TerminalID, String> {
+    let mut partitions_by_terminal = BTreeMap::<TerminalID, BTreeSet<String>>::new();
+    for (old_id, partition) in lexer_partitions {
+        if let Some(&new_id) = remap.get(old_id) {
+            partitions_by_terminal
+                .entry(new_id)
+                .or_default()
+                .insert(partition.clone());
+        }
+    }
+
+    partitions_by_terminal
+        .into_iter()
+        .map(|(terminal, partitions)| {
+            let partition = if partitions.len() == 1 {
+                partitions.into_iter().next().unwrap()
+            } else {
+                // Identical terminal languages may have been emitted through
+                // aliases carrying different lexer-group policies. After the
+                // terminal IDs merge, assigning the survivor to either source
+                // group would silently defeat the other policy. Use the exact
+                // set of source partition names as a stable composite key so
+                // terminals with the same provenance still group together but
+                // remain isolated from either coarse source partition.
+                format!(
+                    "__merged_lexer_partitions:{:?}",
+                    partitions.into_iter().collect::<Vec<_>>()
+                )
+            };
+            (terminal, partition)
+        })
+        .collect()
 }
 
 fn remap_terminal_names(
@@ -1061,6 +1099,79 @@ mod tests {
         for nt in cyclic {
             inline_candidates.remove(&nt);
         }
+    }
+
+
+    #[test]
+    fn compact_unused_terminals_remaps_merged_lexer_partitions() {
+        let expr = crate::automata::regex::Expr::U8Seq(b"same".to_vec());
+        let mut grammar = GrammarDef {
+            rules: vec![
+                Rule { lhs: 0, rhs: vec![t(0)] },
+                Rule { lhs: 0, rhs: vec![t(1)] },
+                Rule { lhs: 0, rhs: vec![t(2)] },
+            ],
+            start: 0,
+            terminals: vec![
+                Terminal::Expr { id: 0, expr: expr.clone() },
+                Terminal::Expr { id: 1, expr: expr.clone() },
+                Terminal::Literal { id: 2, bytes: b"other".to_vec() },
+            ],
+            nonterminal_names: BTreeMap::new(),
+            terminal_names: BTreeMap::from([
+                (0, "ordinary_alias".to_string()),
+                (1, "pattern_alias".to_string()),
+                (2, "other".to_string()),
+            ]),
+            ignore_terminal: None,
+            lexer_partitions: BTreeMap::from([
+                (0, "json_other".to_string()),
+                (1, "json_pattern_pattern_alias".to_string()),
+                (2, "json_literals".to_string()),
+            ]),
+        };
+
+        compact_unused_terminals(&mut grammar);
+
+        assert_eq!(grammar.terminals.len(), 2);
+        assert_eq!(grammar.rules[0].rhs, vec![t(0)]);
+        assert_eq!(grammar.rules[1].rhs, vec![t(0)]);
+        let merged_partition = &grammar.lexer_partitions[&0];
+        assert!(merged_partition.contains("json_other"), "{merged_partition}");
+        assert!(
+            merged_partition.contains("json_pattern_pattern_alias"),
+            "{merged_partition}",
+        );
+        assert_ne!(merged_partition, "json_other");
+        assert_ne!(merged_partition, "json_pattern_pattern_alias");
+        assert_eq!(grammar.lexer_partitions[&1], "json_literals");
+    }
+
+    #[test]
+    fn compact_unused_terminals_keeps_explicit_partition_from_partitioned_alias() {
+        let expr = crate::automata::regex::Expr::U8Seq(b"same".to_vec());
+        let mut grammar = GrammarDef {
+            rules: vec![
+                Rule { lhs: 0, rhs: vec![t(0)] },
+                Rule { lhs: 0, rhs: vec![t(1)] },
+            ],
+            start: 0,
+            terminals: vec![
+                Terminal::Expr { id: 0, expr: expr.clone() },
+                Terminal::Expr { id: 1, expr },
+            ],
+            nonterminal_names: BTreeMap::new(),
+            terminal_names: BTreeMap::new(),
+            ignore_terminal: None,
+            lexer_partitions: BTreeMap::from([
+                (1, "json_pattern_isolated".to_string()),
+            ]),
+        };
+
+        compact_unused_terminals(&mut grammar);
+
+        assert_eq!(grammar.terminals.len(), 1);
+        assert_eq!(grammar.lexer_partitions[&0], "json_pattern_isolated");
     }
 
     #[test]

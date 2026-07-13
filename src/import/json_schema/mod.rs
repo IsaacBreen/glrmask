@@ -30,7 +30,7 @@ use self::config::JsonSchemaConfig;
 use self::load::{load_document_with_features, scan_document_features};
 use self::lower::lower_document;
 
-const JSON_PATTERN_SINGLETONS_DEFAULT: bool = true;
+const JSON_PATTERN_SINGLETONS_DEFAULT: bool = false;
 
 fn json_pattern_singletons_enabled() -> bool {
     match env::var("GLRMASK_JSON_PATTERN_SINGLETONS") {
@@ -178,7 +178,7 @@ mod lexer_partition_policy_tests {
 
     #[test]
     fn final_pattern_singletons_follow_resolved_terminal_identity() {
-        assert!(JSON_PATTERN_SINGLETONS_DEFAULT);
+        assert!(!JSON_PATTERN_SINGLETONS_DEFAULT);
         let mut grammar = NamedGrammar {
             rules: vec![
                 terminal("A", GrammarExpr::RawRegex("[a-z]+".to_string())),
