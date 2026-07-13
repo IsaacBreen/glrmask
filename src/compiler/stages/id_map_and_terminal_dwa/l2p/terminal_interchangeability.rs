@@ -23,7 +23,10 @@ use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use smallvec::SmallVec;
 use super::nwa_builder::{TerminalNwaTransportMode, TransportScannerStateMap};
-use super::equivalence_analysis::state_equivalence::nfa::build_relevant_powerset_view;
+use super::equivalence_analysis::state_equivalence::nfa::{
+    RefinementDepth, build_relevant_powerset_view,
+    compute_state_map_from_prebuilt_sparse_powerset,
+};
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::lexer::Lexer;
 use crate::automata::weighted::dwa::{DWAState, DWA};
@@ -371,6 +374,10 @@ struct RestrictedTopology {
         Arc<[Box<[TerminalID]>]>,
         Arc<[Box<[TerminalID]>]>,
     )>,
+    /// Exact members of each powerset configuration. Only raw-coordinate NFA
+    /// configurations may be reused by raw-state equivalence refinement.
+    nfa_configurations: Option<Arc<[Box<[u32]>]>>,
+    nfa_configurations_use_raw_states: bool,
     real_state_count: usize,
     initial_state: usize,
     max_outdegree: usize,
@@ -497,6 +504,8 @@ impl RestrictedTopology {
             raw_representative_by_state,
             state_for_raw,
             nfa_output_rows: None,
+            nfa_configurations: None,
+            nfa_configurations_use_raw_states: false,
             real_state_count,
             initial_state,
             max_outdegree,
@@ -516,6 +525,7 @@ impl RestrictedTopology {
         );
         let raw_state_count = tokenizer.num_states() as usize;
         let real_state_count = view.states.len();
+        let nfa_configurations = Arc::clone(&view.configurations);
         let mut edge_offsets = view.edge_offsets;
         let mut reverse_predecessors = vec![Vec::<u32>::new(); real_state_count];
         let mut observed_destinations = vec![false; real_state_count + 1];
@@ -573,6 +583,8 @@ impl RestrictedTopology {
             raw_representative_by_state: Some(raw_representative_by_state.into()),
             state_for_raw: Some(Arc::clone(&view.raw_start_to_view)),
             nfa_output_rows: Some((finalizers.into(), future.into())),
+            nfa_configurations: Some(nfa_configurations),
+            nfa_configurations_use_raw_states: global_state_quotient.is_none(),
             real_state_count,
             initial_state: view.start_state,
             max_outdegree,
@@ -1341,6 +1353,30 @@ impl TiDiscoveryContext {
             ids.push(id);
         }
         Some((ids, representatives))
+    }
+
+    pub(crate) fn reusable_nfa_restricted_observation_state_map(
+        &self,
+        tokenizer: &Tokenizer,
+        initial_state_map: Option<&ManyToOneIdMap>,
+    ) -> Option<ManyToOneIdMap> {
+        if !tokenizer.has_epsilon_transitions() || !self.topology.nfa_configurations_use_raw_states {
+            return None;
+        }
+        let raw_start_to_view = self.topology.state_for_raw.as_deref()?;
+        let configurations = self.topology.nfa_configurations.as_deref()?;
+        let output_seed = self.output_projection_seed.borrow();
+        let output_class_by_config = output_seed.as_ref()?.output_pair_by_state.as_ref();
+        Some(compute_state_map_from_prebuilt_sparse_powerset(
+            tokenizer,
+            initial_state_map,
+            RefinementDepth::Stable,
+            raw_start_to_view,
+            configurations,
+            output_class_by_config,
+            &self.topology.edge_offsets,
+            &self.topology.edges,
+        ))
     }
 
 }
@@ -10473,6 +10509,8 @@ mod tests {
             raw_representative_by_state: Some(Arc::from([0, u32::MAX])),
             state_for_raw: Some(Arc::from([0])),
             nfa_output_rows: None,
+            nfa_configurations: None,
+            nfa_configurations_use_raw_states: false,
             real_state_count: 2,
             initial_state: 0,
             max_outdegree: 0,
