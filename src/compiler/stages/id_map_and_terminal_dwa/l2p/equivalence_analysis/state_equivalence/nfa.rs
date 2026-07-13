@@ -815,8 +815,21 @@ pub(crate) fn compute_state_map_from_prebuilt_sparse_powerset(
     };
     let mut class_set_by_config = vec![0u32; configurations.len()];
     for _ in 0..round_limit {
-        let mut class_set_ids = FxHashMap::<SmallVec<[u32; 4]>, u32>::default();
+        // Preserve singleton class-set IDs directly. Nearly every powerset
+        // configuration in large epsilon lexers is a singleton closure, so
+        // allocating, sorting, and hashing a SmallVec for each one is pure
+        // overhead. Composite configurations can themselves collapse to a
+        // singleton class set after refinement; map those to the same direct ID
+        // so equality remains exactly identical to generic set interning.
+        let singleton_id_limit = classes.iter().copied().max().map_or(0, |class| class + 1);
+        let mut composite_class_set_ids =
+            FxHashMap::<SmallVec<[u32; 4]>, u32>::default();
         for (config_id, config) in configurations.iter().enumerate() {
+            if let [raw] = config.as_ref() {
+                class_set_by_config[config_id] = classes[raw_to_candidate[*raw as usize]];
+                continue;
+            }
+
             let mut class_set = SmallVec::<[u32; 4]>::new();
             class_set.extend(
                 config
@@ -825,24 +838,52 @@ pub(crate) fn compute_state_map_from_prebuilt_sparse_powerset(
             );
             class_set.sort_unstable();
             class_set.dedup();
-            let next = class_set_ids.len() as u32;
-            class_set_by_config[config_id] = *class_set_ids.entry(class_set).or_insert(next);
+            class_set_by_config[config_id] = if let [class] = class_set.as_slice() {
+                *class
+            } else {
+                let next = singleton_id_limit + composite_class_set_ids.len() as u32;
+                *composite_class_set_ids.entry(class_set).or_insert(next)
+            };
         }
-
-        let mut signatures = FxHashMap::<SmallVec<[u32; 8]>, u32>::default();
+        let mut zero_edge_signatures = FxHashMap::<u32, u32>::default();
+        let mut one_edge_signatures = FxHashMap::<(u32, u8, u32), u32>::default();
+        let mut larger_signatures = FxHashMap::<SmallVec<[u32; 8]>, u32>::default();
+        let mut next_class = 0u32;
         let mut next_classes = vec![0u32; num_candidates];
         for candidate in 0..num_candidates {
             let config = start_configs[candidate] as usize;
-            let mut signature = SmallVec::<[u32; 8]>::new();
-            signature.push(classes[candidate]);
             let edge_start = edge_offsets[config] as usize;
             let edge_end = edge_offsets[config + 1] as usize;
-            for &(byte, target) in &edges[edge_start..edge_end] {
-                signature.push(byte as u32 + 1);
-                signature.push(class_set_by_config[target as usize] + 1);
-            }
-            let next = signatures.len() as u32;
-            next_classes[candidate] = *signatures.entry(signature).or_insert(next);
+            let candidate_class = classes[candidate];
+            next_classes[candidate] = match edge_end - edge_start {
+                0 => *zero_edge_signatures.entry(candidate_class).or_insert_with(|| {
+                    let class = next_class;
+                    next_class += 1;
+                    class
+                }),
+                1 => {
+                    let (byte, target) = edges[edge_start];
+                    let key = (candidate_class, byte, class_set_by_config[target as usize]);
+                    *one_edge_signatures.entry(key).or_insert_with(|| {
+                        let class = next_class;
+                        next_class += 1;
+                        class
+                    })
+                }
+                _ => {
+                    let mut signature = SmallVec::<[u32; 8]>::new();
+                    signature.push(candidate_class);
+                    for &(byte, target) in &edges[edge_start..edge_end] {
+                        signature.push(byte as u32 + 1);
+                        signature.push(class_set_by_config[target as usize] + 1);
+                    }
+                    *larger_signatures.entry(signature).or_insert_with(|| {
+                        let class = next_class;
+                        next_class += 1;
+                        class
+                    })
+                }
+            };
         }
         let stable = same_partition(&classes, &next_classes);
         classes = next_classes;
