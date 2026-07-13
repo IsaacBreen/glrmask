@@ -40,6 +40,7 @@ pub(crate) struct PossibleMatchesComputer<'a> {
     reachable_cache: FxHashMap<usize, Rc<RangeSetBlaze<u32>>>,
     self_loop_bytes: FxHashMap<u32, U8Set>,
     flat_transitions: Vec<Option<Box<[u32; 256]>>>,
+    scalar_deterministic_scan: bool,
 }
 
 impl<'a> PossibleMatchesComputer<'a> {
@@ -58,6 +59,8 @@ impl<'a> PossibleMatchesComputer<'a> {
             reachable_cache: FxHashMap::default(),
             self_loop_bytes: FxHashMap::default(),
             flat_transitions: vec![None; tokenizer.num_states() as usize],
+            scalar_deterministic_scan: !tokenizer.has_epsilon_transitions()
+                || tokenizer.has_deterministic_dispatch(),
         }
     }
 
@@ -87,9 +90,7 @@ impl<'a> PossibleMatchesComputer<'a> {
         node: &VocabPrefixTreeNode,
         tokenizer_state: u32,
     ) -> bool {
-        if self.tokenizer.has_epsilon_transitions()
-            && !self.tokenizer.has_deterministic_dispatch()
-        {
+        if !self.scalar_deterministic_scan {
             return false;
         }
         let self_loop_bytes = self
@@ -145,8 +146,7 @@ impl<'a> PossibleMatchesComputer<'a> {
 
             for &byte in segment_bytes {
                 current_states = if current_states.len() == 1
-                    && (!self.tokenizer.has_epsilon_transitions()
-                        || self.tokenizer.has_deterministic_dispatch())
+                    && self.scalar_deterministic_scan
                 {
                     match self.fast_step(current_states[0], byte) {
                         Some(next) => SmallVec::from_buf([next]),

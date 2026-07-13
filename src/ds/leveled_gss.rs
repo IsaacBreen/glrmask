@@ -1677,6 +1677,21 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> VirtualStack<T, A> {
         self.values.len() + self.next.segments_len() + if self.pending_top.is_some() { 1 } else { 0 }
     }
 
+    /// Whether the non-segment floor below this virtual stack still contains
+    /// one or more stack values. A virtual stack only materializes the linear
+    /// Segment prefix above that floor; guarded operations that need to inspect
+    /// deeper values must fall back to the branch-aware GSS representation.
+    #[inline]
+    pub(crate) fn has_hidden_floor_values(&self) -> bool {
+        let mut next = &self.next;
+        loop {
+            match &**next {
+                Lower::Segment(segment) => next = &segment.next,
+                Lower::General { children, .. } => return !children.is_empty(),
+            }
+        }
+    }
+
     /// Materialize the virtual stack back into a GSS.
     pub fn into_gss(mut self) -> LeveledGSS<T, A> {
         self.flush_pending();
@@ -2261,9 +2276,14 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         I: IntoIterator<Item = (usize, &'a [T])>,
         T: 'a,
     {
-        if let Some(stack) = self.try_virtual_stack() {
+        let effects: SmallVec<[(usize, &'a [T]); 8]> = effects.into_iter().collect();
+
+        if let Some(stack) = self.try_virtual_stack()
+            && (!stack.has_hidden_floor_values()
+                || effects.iter().all(|(pop, _)| *pop <= stack.len()))
+        {
             let mut out: Option<Self> = None;
-            for (pop, pushes) in effects {
+            for &(pop, pushes) in &effects {
                 let mut branch = stack.clone();
                 if branch.pop(pop) != 0 {
                     continue;

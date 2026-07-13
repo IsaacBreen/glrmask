@@ -30,6 +30,26 @@ pub(crate) struct RelevantPowersetView {
     pub(crate) configurations: Arc<[Box<[u32]>]>,
 }
 
+impl RelevantPowersetView {
+    pub(crate) fn into_tokenizer_view(self) -> TokenizerView {
+        let mut transitions = vec![u32::MAX; self.states.len() * 256];
+        for state in 0..self.states.len() {
+            let start = self.edge_offsets[state] as usize;
+            let end = self.edge_offsets[state + 1] as usize;
+            for &(byte, target) in &self.edges[start..end] {
+                transitions[state * 256 + byte as usize] = target;
+            }
+        }
+        TokenizerView {
+            flat_dfa: FlatDfa {
+                states: self.states,
+                start_state: self.start_state,
+                transitions: Arc::from(transitions),
+            },
+        }
+    }
+}
+
 enum RepresentativeClosure {
     Singleton(u32),
     Multi(Box<[u32]>),
@@ -238,6 +258,29 @@ pub(crate) fn build_relevant_powerset_view(
                 "powerset states must be processed in interning order",
             );
             let config = configs[state as usize].clone();
+            if let [source] = config.as_ref() {
+                // Raw starts were all seeded before traversal, so the exact
+                // epsilon closure of every direct byte target is already
+                // interned in `raw_start_to_view`. A singleton powerset config
+                // is itself epsilon-closed, hence its byte successor is exactly
+                // the pre-interned closure of the one direct raw target. Avoid
+                // rebuilding that closure and hashing the same config again.
+                for (byte, raw_target) in tokenizer.transitions_from(*source) {
+                    if !relevant_bytes[byte as usize] {
+                        continue;
+                    }
+                    let target = raw_start_to_view[raw_target as usize];
+                    debug_assert_ne!(target, u32::MAX);
+                    edges.push((byte, target));
+                    if !queued[target as usize] {
+                        queued[target as usize] = true;
+                        worklist.push_back(target);
+                    }
+                }
+                edge_offsets.push(edges.len() as u32);
+                continue;
+            }
+
             byte_epoch = byte_epoch.wrapping_add(1);
             if byte_epoch == 0 {
                 byte_marks.fill(0);
@@ -815,8 +858,21 @@ pub(crate) fn compute_state_map_from_prebuilt_sparse_powerset(
     };
     let mut class_set_by_config = vec![0u32; configurations.len()];
     for _ in 0..round_limit {
-        let mut class_set_ids = FxHashMap::<SmallVec<[u32; 4]>, u32>::default();
+        // Preserve singleton class-set IDs directly. Nearly every powerset
+        // configuration in large epsilon lexers is a singleton closure, so
+        // allocating, sorting, and hashing a SmallVec for each one is pure
+        // overhead. Composite configurations can themselves collapse to a
+        // singleton class set after refinement; map those to the same direct ID
+        // so equality remains exactly identical to generic set interning.
+        let singleton_id_limit = classes.iter().copied().max().map_or(0, |class| class + 1);
+        let mut composite_class_set_ids =
+            FxHashMap::<SmallVec<[u32; 4]>, u32>::default();
         for (config_id, config) in configurations.iter().enumerate() {
+            if let [raw] = config.as_ref() {
+                class_set_by_config[config_id] = classes[raw_to_candidate[*raw as usize]];
+                continue;
+            }
+
             let mut class_set = SmallVec::<[u32; 4]>::new();
             class_set.extend(
                 config
@@ -825,24 +881,52 @@ pub(crate) fn compute_state_map_from_prebuilt_sparse_powerset(
             );
             class_set.sort_unstable();
             class_set.dedup();
-            let next = class_set_ids.len() as u32;
-            class_set_by_config[config_id] = *class_set_ids.entry(class_set).or_insert(next);
+            class_set_by_config[config_id] = if let [class] = class_set.as_slice() {
+                *class
+            } else {
+                let next = singleton_id_limit + composite_class_set_ids.len() as u32;
+                *composite_class_set_ids.entry(class_set).or_insert(next)
+            };
         }
-
-        let mut signatures = FxHashMap::<SmallVec<[u32; 8]>, u32>::default();
+        let mut zero_edge_signatures = FxHashMap::<u32, u32>::default();
+        let mut one_edge_signatures = FxHashMap::<(u32, u8, u32), u32>::default();
+        let mut larger_signatures = FxHashMap::<SmallVec<[u32; 8]>, u32>::default();
+        let mut next_class = 0u32;
         let mut next_classes = vec![0u32; num_candidates];
         for candidate in 0..num_candidates {
             let config = start_configs[candidate] as usize;
-            let mut signature = SmallVec::<[u32; 8]>::new();
-            signature.push(classes[candidate]);
             let edge_start = edge_offsets[config] as usize;
             let edge_end = edge_offsets[config + 1] as usize;
-            for &(byte, target) in &edges[edge_start..edge_end] {
-                signature.push(byte as u32 + 1);
-                signature.push(class_set_by_config[target as usize] + 1);
-            }
-            let next = signatures.len() as u32;
-            next_classes[candidate] = *signatures.entry(signature).or_insert(next);
+            let candidate_class = classes[candidate];
+            next_classes[candidate] = match edge_end - edge_start {
+                0 => *zero_edge_signatures.entry(candidate_class).or_insert_with(|| {
+                    let class = next_class;
+                    next_class += 1;
+                    class
+                }),
+                1 => {
+                    let (byte, target) = edges[edge_start];
+                    let key = (candidate_class, byte, class_set_by_config[target as usize]);
+                    *one_edge_signatures.entry(key).or_insert_with(|| {
+                        let class = next_class;
+                        next_class += 1;
+                        class
+                    })
+                }
+                _ => {
+                    let mut signature = SmallVec::<[u32; 8]>::new();
+                    signature.push(candidate_class);
+                    for &(byte, target) in &edges[edge_start..edge_end] {
+                        signature.push(byte as u32 + 1);
+                        signature.push(class_set_by_config[target as usize] + 1);
+                    }
+                    *larger_signatures.entry(signature).or_insert_with(|| {
+                        let class = next_class;
+                        next_class += 1;
+                        class
+                    })
+                }
+            };
         }
         let stable = same_partition(&classes, &next_classes);
         classes = next_classes;
@@ -966,12 +1050,12 @@ mod tests {
     use super::*;
     use crate::automata::lexer::tokenizer::arbitrary_epsilon_l1_test_tokenizer;
 
-    fn bounded_view_trace(
-        view: &BoundedAnalysisView,
+    fn view_trace(
+        view: &TokenizerView,
         start_state: usize,
         token: &[u8],
     ) -> Vec<(Vec<usize>, Vec<usize>, bool)> {
-        let dfa = view.tokenizer_view.dfa();
+        let dfa = view.dfa();
         let mut state = start_state;
         let mut trace = vec![(
             dfa.states[state].finalizers.clone(),
@@ -1021,8 +1105,8 @@ mod tests {
             let reference_start = reference.view_state_for_raw_start(raw_state);
             for token in tokens {
                 assert_eq!(
-                    bounded_view_trace(&factored, factored_start, token),
-                    bounded_view_trace(&reference, reference_start, token),
+                    view_trace(&factored.tokenizer_view, factored_start, token),
+                    view_trace(&reference.tokenizer_view, reference_start, token),
                 );
             }
         }
@@ -1030,16 +1114,64 @@ mod tests {
         for token in tokens {
             for offset in 0..token.len() {
                 assert_eq!(
-                    bounded_view_trace(
-                        &factored,
+                    view_trace(
+                        &factored.tokenizer_view,
                         factored.tokenizer_view.dfa().start_state,
                         &token[offset..],
                     ),
-                    bounded_view_trace(
-                        &reference,
+                    view_trace(
+                        &reference.tokenizer_view,
                         reference.tokenizer_view.dfa().start_state,
                         &token[offset..],
                     ),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn relevant_powerset_view_preserves_bounded_token_trajectories() {
+        let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
+        let raw_start_states = (0..tokenizer.num_states() as usize).collect::<Vec<_>>();
+        let tokens = [
+            b"".as_slice(),
+            b"a".as_slice(),
+            b"b".as_slice(),
+            b"aa".as_slice(),
+            b"ab".as_slice(),
+            b"ba".as_slice(),
+            b"aab".as_slice(),
+        ];
+        let active_groups = [true, true];
+        let bounded = build_bounded_analysis_view(
+            &tokenizer,
+            &raw_start_states,
+            &tokens,
+            Some(&active_groups),
+        );
+        let mut relevant_bytes = [false; 256];
+        for token in tokens {
+            for &byte in token {
+                relevant_bytes[byte as usize] = true;
+            }
+        }
+        let powerset = build_relevant_powerset_view(
+            &tokenizer,
+            &relevant_bytes,
+            Some(&active_groups),
+            None,
+        );
+        let raw_start_to_powerset = Arc::clone(&powerset.raw_start_to_view);
+        let powerset = powerset.into_tokenizer_view();
+
+        for &raw_state in &raw_start_states {
+            let bounded_start = bounded.view_state_for_raw_start(raw_state);
+            let powerset_start = raw_start_to_powerset[raw_state] as usize;
+            for token in tokens {
+                assert_eq!(
+                    view_trace(&bounded.tokenizer_view, bounded_start, token),
+                    view_trace(&powerset, powerset_start, token),
+                    "raw_state={raw_state} token={token:?}",
                 );
             }
         }

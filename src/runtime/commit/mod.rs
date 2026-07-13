@@ -870,6 +870,44 @@ fn apply_single_top_action_fast(
     }
 }
 
+fn try_apply_action_to_carried_virtual_stack(
+    stack: &mut crate::ds::leveled_gss::VirtualStack<u32, TerminalsDisallowed>,
+    action: &Action,
+) -> bool {
+    match action {
+        Action::Shift(target, is_replace) => {
+            if *is_replace {
+                stack.replace_top(*target)
+            } else {
+                stack.push(*target);
+                true
+            }
+        }
+        Action::StackShifts(shifts) => {
+            let [shift] = shifts.as_slice() else {
+                return false;
+            };
+            let mut candidate = stack.clone();
+            if candidate.pop(shift.pop as usize) != 0 {
+                return false;
+            }
+            for &target in &shift.pushes {
+                candidate.push(target);
+            }
+            if candidate.top().is_none() {
+                // The next parser/top-row decision requires a concrete top
+                // state. If the visible prefix has been exhausted, continuing
+                // to carry this virtual stack would make the stale materialized
+                // GSS an invalid proxy for the current parser frontier.
+                return false;
+            }
+            *stack = candidate;
+            true
+        }
+        _ => false,
+    }
+}
+
 fn apply_single_path_reduce_chain_fast(
     table: &GLRTable,
     gss: &ParserGSS,
@@ -1709,29 +1747,8 @@ fn commit_bytes_direct_linear_fast_path(
                 if !template_advance_available(constraint, step.terminal)
                     && let Some(stack) = carried_stack.as_mut()
                 {
-                    match action {
-                        Action::Shift(target, is_replace) => {
-                            if *is_replace {
-                                if stack.replace_top(*target) {
-                                    shifted_carried_stack = true;
-                                }
-                            } else {
-                                stack.push(*target);
-                                shifted_carried_stack = true;
-                            }
-                        }
-                        Action::StackShifts(shifts) => {
-                            if let [shift] = shifts.as_slice()
-                                && stack.pop(shift.pop as usize) == 0
-                            {
-                                for &target in &shift.pushes {
-                                    stack.push(target);
-                                }
-                                shifted_carried_stack = true;
-                            }
-                        }
-                        _ => {}
-                    }
+                    shifted_carried_stack =
+                        try_apply_action_to_carried_virtual_stack(stack, action);
                 }
                 if let (Some(profile), Some(start)) = (profile.as_deref_mut(), apply_action_start) {
                     carried_apply_elapsed_ns = start.elapsed().as_nanos() as u64;
@@ -3698,6 +3715,59 @@ mod tests {
                 (tokenizer_state, stacks)
             })
             .collect()
+    }
+
+    #[test]
+    fn carried_virtual_stack_stops_when_stack_effect_exposes_branched_floor() {
+        let acc = TerminalsDisallowed::new();
+        let left = ParserGSS::from_single_stack(vec![0, 1, 10], acc.clone());
+        let right = ParserGSS::from_single_stack(vec![0, 2, 10], acc);
+        let merged = left.merge(&right);
+
+        let mut exhausted = merged
+            .try_virtual_stack()
+            .expect("merged common top should form a virtual stack");
+        assert!(!try_apply_action_to_carried_virtual_stack(
+            &mut exhausted,
+            &Action::StackShifts(vec![crate::compiler::glr::table::StackShift {
+                pop: 1,
+                pushes: Vec::new(),
+            }]),
+        ));
+        assert_eq!(exhausted.top(), Some(&10));
+
+        let mut restored_common_top = merged
+            .try_virtual_stack()
+            .expect("merged common top should form a virtual stack");
+        assert!(try_apply_action_to_carried_virtual_stack(
+            &mut restored_common_top,
+            &Action::StackShifts(vec![crate::compiler::glr::table::StackShift {
+                pop: 1,
+                pushes: vec![40],
+            }]),
+        ));
+        assert_eq!(restored_common_top.top(), Some(&40));
+        let mut stacks = restored_common_top.into_gss().to_stacks();
+        stacks.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(
+            stacks.into_iter().map(|(stack, _)| stack).collect::<Vec<_>>(),
+            vec![vec![0, 1, 40], vec![0, 2, 40]],
+        );
+
+        let mut emptied = ParserGSS::from_single_stack(
+            vec![10],
+            TerminalsDisallowed::new(),
+        )
+        .try_virtual_stack()
+        .expect("single stack should form a virtual stack");
+        assert!(!try_apply_action_to_carried_virtual_stack(
+            &mut emptied,
+            &Action::StackShifts(vec![crate::compiler::glr::table::StackShift {
+                pop: 1,
+                pushes: Vec::new(),
+            }]),
+        ));
+        assert_eq!(emptied.top(), Some(&10));
     }
 
     #[test]

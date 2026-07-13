@@ -211,6 +211,8 @@ struct SupportPartitionSeed {
     quotient: Arc<SupportQuotient>,
 }
 
+type SupportDeviationMap = SmallVec<[(u32, u32); 8]>;
+
 /// Exact round-local active output alphabet retained for projection into the
 /// next monotone active mask. Output-pair projection commutes with removing
 /// inactive terminal labels, so remapping distinct pairs is enough; raw states
@@ -3122,11 +3124,79 @@ impl InterchangeabilityDfa {
     /// candidate: `support_transposition_interchange_map` proves the complete
     /// local automorphism before returning it, otherwise discovery falls back
     /// to the ordinary exact checker.
+    fn support_transposition_deviations_from_supports(
+        left_support: &[(u32, u8)],
+        right_support: &[(u32, u8)],
+    ) -> Option<SupportDeviationMap> {
+        // The old implementation filtered and rescanned both sorted support
+        // lists once per mask.  Compute the same three sorted set differences
+        // in one merge.  A class cancels only when both its class and mask are
+        // identical; equal classes with different masks remain unmatched in
+        // their respective mask buckets, exactly as in the filtered scans.
+        let mut left_only: [SmallVec<[u32; 8]>; 3] = std::array::from_fn(|_| SmallVec::new());
+        let mut right_only: [SmallVec<[u32; 8]>; 3] =
+            std::array::from_fn(|_| SmallVec::new());
+        let mut left_index = 0usize;
+        let mut right_index = 0usize;
+        while left_index < left_support.len() || right_index < right_support.len() {
+            match (left_support.get(left_index), right_support.get(right_index)) {
+                (Some(&(left_class, left_mask)), Some(&(right_class, right_mask)))
+                    if left_class == right_class =>
+                {
+                    if left_mask != right_mask {
+                        left_only[(left_mask - 1) as usize].push(left_class);
+                        right_only[(right_mask - 1) as usize].push(right_class);
+                    }
+                    left_index += 1;
+                    right_index += 1;
+                }
+                (Some(&(left_class, left_mask)), Some(&(right_class, _)))
+                    if left_class < right_class =>
+                {
+                    left_only[(left_mask - 1) as usize].push(left_class);
+                    left_index += 1;
+                }
+                (Some(_), Some(&(right_class, right_mask))) => {
+                    right_only[(right_mask - 1) as usize].push(right_class);
+                    right_index += 1;
+                }
+                (Some(&(left_class, left_mask)), None) => {
+                    left_only[(left_mask - 1) as usize].push(left_class);
+                    left_index += 1;
+                }
+                (None, Some(&(right_class, right_mask))) => {
+                    right_only[(right_mask - 1) as usize].push(right_class);
+                    right_index += 1;
+                }
+                (None, None) => break,
+            }
+        }
+
+        let mut deviations = SupportDeviationMap::new();
+        for mask_index in 0..3 {
+            if left_only[mask_index].len() != right_only[mask_index].len() {
+                return None;
+            }
+            for (&left_class, &right_class) in left_only[mask_index]
+                .iter()
+                .zip(&right_only[mask_index])
+            {
+                deviations.push((left_class, right_class));
+                deviations.push((right_class, left_class));
+            }
+        }
+        deviations.sort_unstable_by_key(|&(source, _)| source);
+        deviations
+            .windows(2)
+            .all(|pair| pair[0].0 != pair[1].0)
+            .then_some(deviations)
+    }
+
     fn support_transposition_deviations(
         &mut self,
         left: TerminalID,
         right: TerminalID,
-    ) -> Option<Vec<(u32, u32)>> {
+    ) -> Option<SupportDeviationMap> {
         let profile_timing = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
         let started_at = profile_timing.then(Instant::now);
         self.ensure_terminal_quotient_output_support(left);
@@ -3137,56 +3207,10 @@ impl InterchangeabilityDfa {
             .expect("terminal quotient output supports initialized");
         let left_support = supports.get(left as usize)?.as_ref()?;
         let right_support = supports.get(right as usize)?.as_ref()?;
-        let mut deviations = Vec::with_capacity(left_support.len() + right_support.len());
-        for mask in 1..=3u8 {
-            let mut left_only = SmallVec::<[u32; 8]>::new();
-            let mut right_only = SmallVec::<[u32; 8]>::new();
-            let mut left_index = 0usize;
-            let mut right_index = 0usize;
-            loop {
-                while left_index < left_support.len() && left_support[left_index].1 != mask {
-                    left_index += 1;
-                }
-                while right_index < right_support.len() && right_support[right_index].1 != mask {
-                    right_index += 1;
-                }
-                match (left_support.get(left_index), right_support.get(right_index)) {
-                    (Some(&(left_class, _)), Some(&(right_class, _))) if left_class == right_class => {
-                        left_index += 1;
-                        right_index += 1;
-                    }
-                    (Some(&(left_class, _)), Some(&(right_class, _))) if left_class < right_class => {
-                        left_only.push(left_class);
-                        left_index += 1;
-                    }
-                    (Some(_), Some(&(right_class, _))) => {
-                        right_only.push(right_class);
-                        right_index += 1;
-                    }
-                    (Some(&(left_class, _)), None) => {
-                        left_only.push(left_class);
-                        left_index += 1;
-                    }
-                    (None, Some(&(right_class, _))) => {
-                        right_only.push(right_class);
-                        right_index += 1;
-                    }
-                    (None, None) => break,
-                }
-            }
-            if left_only.len() != right_only.len() {
-                return None;
-            }
-            for (left_class, right_class) in left_only.into_iter().zip(right_only) {
-                deviations.push((left_class, right_class));
-                deviations.push((right_class, left_class));
-            }
-        }
-        deviations.sort_unstable_by_key(|&(source, _)| source);
-        let result = deviations
-            .windows(2)
-            .all(|pair| pair[0].0 != pair[1].0)
-            .then_some(deviations);
+        let result = Self::support_transposition_deviations_from_supports(
+            left_support,
+            right_support,
+        );
         if let Some(started_at) = started_at {
             self.support_transposition_template_ns += started_at.elapsed().as_nanos() as u64;
         }
@@ -3383,7 +3407,7 @@ impl InterchangeabilityDfa {
         assignment: &mut [usize],
         used_targets: &mut [bool],
         search_nodes: &mut usize,
-    ) -> Option<Vec<(u32, u32)>> {
+    ) -> Option<SupportDeviationMap> {
         const MAX_SEARCH_NODES: usize = 50_000;
         if *search_nodes >= MAX_SEARCH_NODES {
             return None;
@@ -3397,7 +3421,7 @@ impl InterchangeabilityDfa {
                     (source_class != target_class)
                         .then_some((source_class as u32, target_class as u32))
                 })
-                .collect::<Vec<_>>();
+                .collect::<SupportDeviationMap>();
             deviations.sort_unstable_by_key(|&(source, _)| source);
             return self
                 .support_deviations_are_valid(
@@ -3448,7 +3472,7 @@ impl InterchangeabilityDfa {
         &mut self,
         left: TerminalID,
         right: TerminalID,
-    ) -> Option<Vec<(u32, u32)>> {
+    ) -> Option<SupportDeviationMap> {
         self.ensure_terminal_quotient_output_support(left);
         self.ensure_terminal_quotient_output_support(right);
         let supports = self
@@ -3471,12 +3495,16 @@ impl InterchangeabilityDfa {
         right: TerminalID,
         left_support: &[(u32, u8)],
         right_support: &[(u32, u8)],
-    ) -> Option<Vec<(u32, u32)>> {
+    ) -> Option<SupportDeviationMap> {
         let quotient = self
             .support_quotient
             .as_ref()
             .expect("support quotient initialized");
-        let cone_classes = self.support_quotient_affected_cone_small(quotient, left, right);
+        let cone_classes = Self::support_quotient_affected_cone_from_supports_small(
+            quotient,
+            left_support,
+            right_support,
+        );
         if cone_classes.len() > 12 {
             return None;
         }
@@ -3558,16 +3586,38 @@ impl InterchangeabilityDfa {
         &mut self,
         left: TerminalID,
         right: TerminalID,
-        deviations: Vec<(u32, u32)>,
+        deviations: SupportDeviationMap,
     ) -> Option<InterchangeMap> {
         let quotient = self
             .support_quotient
             .as_ref()
             .expect("support quotient initialized");
+        let supports = self
+            .terminal_quotient_output_supports
+            .as_ref()
+            .expect("terminal quotient output supports initialized");
+        let left_support = supports[left as usize]
+            .as_ref()
+            .expect("left terminal support initialized");
+        let right_support = supports[right as usize]
+            .as_ref()
+            .expect("right terminal support initialized");
         let profile_timing = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
         let cone_started_at = profile_timing.then(Instant::now);
-        let cone_classes =
-            self.support_quotient_affected_cone_small(quotient, left, right);
+        let cone_classes = Self::support_quotient_affected_cone_from_supports_small(
+            quotient,
+            left_support,
+            right_support,
+        );
+        debug_assert!({
+            let mut raw = self
+                .support_quotient_affected_cone_small(quotient, left, right)
+                .into_vec();
+            let mut cached = cone_classes.clone().into_vec();
+            raw.sort_unstable();
+            cached.sort_unstable();
+            raw == cached
+        });
         if let Some(started_at) = cone_started_at {
             self.support_transposition_cone_ns += started_at.elapsed().as_nanos() as u64;
         }
@@ -3880,6 +3930,63 @@ impl InterchangeabilityDfa {
         }
     }
 
+    /// Evaluate one exact identity-refinement round on a stable quotient from
+    /// an earlier, larger active terminal alphabet. Projecting terminal labels
+    /// away preserves that quotient as a congruence, so every current-round
+    /// signature is constant on each old class. Iterating old classes in their
+    /// canonical first-state order preserves the raw-state builder's class ids
+    /// and representatives exactly; only the final class vector is lifted.
+    fn canonical_identity_round_from_support_seed(
+        &self,
+        previous: &[u32],
+        seed: &SupportPartitionSeed,
+    ) -> CanonicalRound {
+        debug_assert_eq!(previous.len(), self.state_count());
+        debug_assert_eq!(seed.quotient.class_for_state.len(), self.state_count());
+        debug_assert!(seed
+            .quotient
+            .representative_by_class
+            .windows(2)
+            .all(|pair| pair[0] < pair[1]));
+
+        let mut representative_by_class = Vec::<u32>::new();
+        let mut classes_by_signature_hash =
+            FxHashMap::<u64, SmallVec<[u32; 1]>>::default();
+        let mut class_for_old =
+            Vec::<u32>::with_capacity(seed.quotient.representative_by_class.len());
+        for &state in seed.quotient.representative_by_class.iter() {
+            let state = state as usize;
+            let hash = self.canonical_identity_signature_hash(state, previous);
+            let existing = classes_by_signature_hash.get(&hash).and_then(|candidates| {
+                candidates.iter().copied().find(|&class| {
+                    self.canonical_identity_signatures_equal(
+                        state,
+                        representative_by_class[class as usize] as usize,
+                        previous,
+                    )
+                })
+            });
+            let class = existing.unwrap_or_else(|| {
+                let class = representative_by_class.len() as u32;
+                representative_by_class.push(state as u32);
+                classes_by_signature_hash.entry(hash).or_default().push(class);
+                class
+            });
+            class_for_old.push(class);
+        }
+        let classes = seed
+            .quotient
+            .class_for_state
+            .iter()
+            .map(|&old_class| class_for_old[old_class as usize])
+            .collect();
+        CanonicalRound {
+            classes,
+            representative_by_class,
+            classes_by_signature_hash,
+        }
+    }
+
     /// Exact incremental variant of [`Self::canonical_identity_round`].
     ///
     /// The full recompute rehashes every state each round. In Moore
@@ -4066,12 +4173,18 @@ impl InterchangeabilityDfa {
                 None
             };
             let mut cached_hashes = std::mem::take(&mut self.canonical_identity_cached_hashes);
-            let next = self.canonical_identity_round_incremental(
-                &previous,
-                prev_prev.as_deref(),
-                &mut cached_hashes,
-                true,
-            );
+            let next = self
+                .support_partition_seed
+                .as_ref()
+                .map(|seed| self.canonical_identity_round_from_support_seed(&previous, seed))
+                .unwrap_or_else(|| {
+                    self.canonical_identity_round_incremental(
+                        &previous,
+                        prev_prev.as_deref(),
+                        &mut cached_hashes,
+                        true,
+                    )
+                });
             self.canonical_identity_cached_hashes = cached_hashes;
             if cfg!(debug_assertions) {
                 // The incremental refinement must be byte-for-byte identical to
@@ -4511,6 +4624,32 @@ impl InterchangeabilityDfa {
                         cone.push(class);
                     }
                 }
+            }
+        }
+        let mut next = 0usize;
+        while next < cone.len() {
+            let class = cone[next];
+            next += 1;
+            for &predecessor in &quotient.reverse_predecessors[class] {
+                let predecessor = predecessor as usize;
+                if !cone.contains(&predecessor) {
+                    cone.push(predecessor);
+                }
+            }
+        }
+        cone
+    }
+
+    fn support_quotient_affected_cone_from_supports_small(
+        quotient: &SupportQuotient,
+        left_support: &[(u32, u8)],
+        right_support: &[(u32, u8)],
+    ) -> SmallVec<[usize; 16]> {
+        let mut cone = SmallVec::<[usize; 16]>::new();
+        for &(class, _) in left_support.iter().chain(right_support) {
+            let class = class as usize;
+            if !cone.contains(&class) {
+                cone.push(class);
             }
         }
         let mut next = 0usize;
@@ -6543,59 +6682,10 @@ impl InterchangeabilityDfa {
         &self,
         left: TerminalID,
         right: TerminalID,
-    ) -> Option<Vec<(u32, u32)>> {
+    ) -> Option<SupportDeviationMap> {
         let left_support = self.terminal_support_parallel(left);
         let right_support = self.terminal_support_parallel(right);
-        let mut deviations = Vec::with_capacity(left_support.len() + right_support.len());
-        for mask in 1..=3u8 {
-            let mut left_only = SmallVec::<[u32; 8]>::new();
-            let mut right_only = SmallVec::<[u32; 8]>::new();
-            let mut left_index = 0usize;
-            let mut right_index = 0usize;
-            loop {
-                while left_index < left_support.len() && left_support[left_index].1 != mask {
-                    left_index += 1;
-                }
-                while right_index < right_support.len() && right_support[right_index].1 != mask {
-                    right_index += 1;
-                }
-                match (left_support.get(left_index), right_support.get(right_index)) {
-                    (Some(&(left_class, _)), Some(&(right_class, _))) if left_class == right_class => {
-                        left_index += 1;
-                        right_index += 1;
-                    }
-                    (Some(&(left_class, _)), Some(&(right_class, _))) if left_class < right_class => {
-                        left_only.push(left_class);
-                        left_index += 1;
-                    }
-                    (Some(_), Some(&(right_class, _))) => {
-                        right_only.push(right_class);
-                        right_index += 1;
-                    }
-                    (Some(&(left_class, _)), None) => {
-                        left_only.push(left_class);
-                        left_index += 1;
-                    }
-                    (None, Some(&(right_class, _))) => {
-                        right_only.push(right_class);
-                        right_index += 1;
-                    }
-                    (None, None) => break,
-                }
-            }
-            if left_only.len() != right_only.len() {
-                return None;
-            }
-            for (left_class, right_class) in left_only.into_iter().zip(right_only) {
-                deviations.push((left_class, right_class));
-                deviations.push((right_class, left_class));
-            }
-        }
-        deviations.sort_unstable_by_key(|&(source, _)| source);
-        deviations
-            .windows(2)
-            .all(|pair| pair[0].0 != pair[1].0)
-            .then_some(deviations)
+        Self::support_transposition_deviations_from_supports(left_support, right_support)
     }
 
     /// `&self` + scratch mirror of
@@ -6604,13 +6694,28 @@ impl InterchangeabilityDfa {
         &self,
         left: TerminalID,
         right: TerminalID,
-        deviations: Vec<(u32, u32)>,
+        deviations: SupportDeviationMap,
     ) -> Option<InterchangeMap> {
         let quotient = self
             .support_quotient
             .as_ref()
             .expect("support quotient pre-built");
-        let cone_classes = self.support_quotient_affected_cone_small(quotient, left, right);
+        let left_support = self.terminal_support_parallel(left);
+        let right_support = self.terminal_support_parallel(right);
+        let cone_classes = Self::support_quotient_affected_cone_from_supports_small(
+            quotient,
+            left_support,
+            right_support,
+        );
+        debug_assert!({
+            let mut raw = self
+                .support_quotient_affected_cone_small(quotient, left, right)
+                .into_vec();
+            let mut cached = cone_classes.clone().into_vec();
+            raw.sort_unstable();
+            cached.sort_unstable();
+            raw == cached
+        });
         debug_assert!(deviations.iter().all(|&(source, target)| {
             (source as usize) < quotient.representative_by_class.len()
                 && (target as usize) < quotient.representative_by_class.len()
@@ -6684,7 +6789,7 @@ impl InterchangeabilityDfa {
                 state_count: quotient.scanner_state_count,
                 class_for_original: Arc::clone(&quotient.scanner_class_for_original),
                 representative_for_class: Arc::clone(&quotient.scanner_representative_for_class),
-                source_class_for_target_deviations: deviations.into_boxed_slice(),
+                source_class_for_target_deviations: deviations.into_vec().into_boxed_slice(),
             },
         })
     }
@@ -8017,13 +8122,12 @@ pub(crate) fn partition_has_merges(partition: &BTreeMap<TerminalID, BTreeSet<Ter
 
 pub(crate) fn visible_output_raw_labels(
     partition: &BTreeMap<TerminalID, BTreeSet<TerminalID>>,
-    terminal_count: usize,
+    active_terminals: &[bool],
 ) -> Vec<bool> {
-    // The partition contains only TI-active terminals. Terminals outside it
-    // were never compressed and must remain ordinary visible outputs. Start
-    // from the full raw alphabet, then hide only actual nonrepresentative
-    // partition members.
-    let mut visible = vec![true; terminal_count];
+    // TI narrows the L2P-active alphabet; it must never reactivate terminals
+    // owned by another terminal family. Start from the caller's L2P mask, then
+    // hide only nonrepresentative TI members. Expansion restores those members.
+    let mut visible = active_terminals.to_vec();
     for (&representative, members) in partition {
         for &member in members {
             if member != representative {
@@ -8395,17 +8499,25 @@ pub(crate) fn transport_coordinate_quotient(
         let domain = &modes[group.domain_mode].scanner_state_for_original;
         let source_class_count = domain.innermost_source_class_count();
 
+        let mut all_modes_are_direct_quotients = true;
         let group_quotient_deviations: usize = group
             .modes
             .iter()
             .map(|&mode_index| {
-                modes[mode_index]
+                let deviations = modes[mode_index]
                     .scanner_state_for_original
-                    .quotient_deviations()
-                    .map_or(0, |deviations| deviations.len())
+                    .quotient_deviations();
+                all_modes_are_direct_quotients &= deviations.is_some();
+                deviations.map_or(0, |deviations| deviations.len())
             })
             .sum();
-        if group_quotient_deviations == 0 {
+        // Only a direct quotient with no deviations is known structurally to
+        // preserve the ordinary coordinate. `None` does not mean identity: it
+        // also covers composed, macro-quotient, and explicit transport maps.
+        // Treating those shapes as zero-deviation groups can erase a genuine
+        // transport signature component and merge raw states whose member-mode
+        // destinations land in different core coordinates.
+        if all_modes_are_direct_quotients && group_quotient_deviations == 0 {
             group_is_redundant[group_index] = true;
             continue;
         }
@@ -10123,7 +10235,10 @@ mod tests {
         ]);
         assert_partition_invariants(&partition, &active);
         assert_eq!(active_terminals_for_partition(&partition, active.len()), [true, false, false, true, false]);
-        assert_eq!(visible_output_raw_labels(&partition, active.len()), [true, true, false, true, true]);
+        assert_eq!(
+            visible_output_raw_labels(&partition, &active),
+            [true, false, false, true, false]
+        );
     }
 
     #[test]
@@ -10255,6 +10370,57 @@ mod tests {
                         == canonical_quotient.original_to_internal[right],
                     expected_signatures[left] == expected_signatures[right],
                     "canonical target-only transport changed the quotient for states {left} and {right}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn transport_coordinate_quotient_observes_composed_mode_deviations() {
+        let ordinary = ManyToOneIdMap::from_original_to_internal_with_representatives(
+            vec![0, 0, 1, 1],
+            2,
+            vec![0, 2],
+        );
+        let class_for_original: Arc<[u32]> = vec![0, 1, 2, 3].into();
+        let representative_for_class: Arc<[u32]> = vec![0, 1, 2, 3].into();
+        let inner = Arc::new(TransportScannerStateMap::Quotient {
+            state_count: 4,
+            class_for_original: Arc::clone(&class_for_original),
+            representative_for_class: Arc::clone(&representative_for_class),
+            source_class_for_target_deviations: vec![(0, 1), (1, 0)].into_boxed_slice(),
+        });
+        let outer = Arc::new(TransportScannerStateMap::Quotient {
+            state_count: 4,
+            class_for_original,
+            representative_for_class,
+            source_class_for_target_deviations: vec![(0, 2), (2, 0)].into_boxed_slice(),
+        });
+        let composed = TransportScannerStateMap::compose(outer, inner);
+        let modes = vec![
+            TerminalNwaTransportMode::ordinary(4),
+            TerminalNwaTransportMode::member(composed.as_ref().clone(), 0, 1),
+        ];
+        let expected_signatures = (0..ordinary.original_to_internal.len())
+            .map(|source| {
+                modes
+                    .iter()
+                    .map(|mode| {
+                        ordinary.original_to_internal
+                            [mode.scanner_state_for_original.scanner_state(source as u32) as usize]
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        assert_ne!(expected_signatures[0], expected_signatures[1]);
+        let quotient = transport_coordinate_quotient(&ordinary, &modes);
+        for left in 0..expected_signatures.len() {
+            for right in 0..expected_signatures.len() {
+                assert_eq!(
+                    quotient.original_to_internal[left] == quotient.original_to_internal[right],
+                    expected_signatures[left] == expected_signatures[right],
+                    "composed transport signature quotient disagreed for states {left} and {right}",
                 );
             }
         }
@@ -10794,6 +10960,71 @@ mod tests {
                 assert_eq!(canonical.interchange_map(left, right), reference.reference_interchange_map(left, right), "canonical refinement disagreed with hash reference for {left} <-> {right}");
             }
         }
+    }
+
+    #[test]
+    fn canonical_identity_rounds_from_fine_support_seed_match_raw_rounds_exactly() {
+        let tokenizer = tokenizer(vec![
+            Expr::U8Seq(b"same".to_vec()),
+            Expr::U8Seq(b"same".to_vec()),
+            Expr::U8Seq(b"sample".to_vec()),
+            Expr::U8Seq(b"simple".to_vec()),
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"ab".to_vec()),
+            Expr::U8Seq(b"b".to_vec()),
+            Expr::U8Seq(b"ba".to_vec()),
+        ]);
+        let topology = Arc::new(RestrictedTopology::new(&tokenizer, &[true; 256]));
+        let raw = Arc::new(TiRawDiscoveryData::new(&tokenizer, &topology, None));
+        let all_active = vec![true; 8];
+        let mut seed_dfa = InterchangeabilityDfa::from_raw_discovery_data(
+            &all_active,
+            Arc::clone(&topology),
+            Arc::clone(&raw),
+            None,
+            None,
+        );
+        seed_dfa.ensure_support_quotient();
+        let seed = SupportPartitionSeed {
+            active_terminals: all_active.into(),
+            quotient: Arc::clone(
+                seed_dfa
+                    .support_quotient
+                    .as_ref()
+                    .expect("support quotient initialized"),
+            ),
+        };
+        let current_active = [true, true, false, false, true, false, true, false];
+        let dfa = InterchangeabilityDfa::from_raw_discovery_data(
+            &current_active,
+            topology,
+            raw,
+            Some(seed.clone()),
+            None,
+        );
+
+        let mut previous = vec![0u32; dfa.state_count()];
+        for round in 1..=dfa.state_count() * 2 {
+            let raw_round = dfa.canonical_identity_round(&previous);
+            let seeded = dfa.canonical_identity_round_from_support_seed(&previous, &seed);
+            assert_eq!(seeded.classes, raw_round.classes, "round {round}");
+            assert_eq!(
+                seeded.representative_by_class,
+                raw_round.representative_by_class,
+                "round {round}",
+            );
+            assert_eq!(
+                seeded.classes_by_signature_hash,
+                raw_round.classes_by_signature_hash,
+                "round {round}",
+            );
+            let stable = same_equality_partition_u32(&previous, &raw_round.classes);
+            previous = raw_round.classes;
+            if stable {
+                return;
+            }
+        }
+        panic!("identity refinement did not stabilize");
     }
 
     #[test]

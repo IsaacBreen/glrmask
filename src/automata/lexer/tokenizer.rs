@@ -165,6 +165,10 @@ impl Tokenizer {
         self.dfa.has_epsilon_transitions()
     }
 
+    pub(crate) fn terminal_expr(&self, terminal: TerminalID) -> Option<&Expr> {
+        self.exprs.as_deref()?.get(terminal as usize)
+    }
+
     pub(crate) fn initial_epsilon_branch_count(&self) -> usize {
         self.dfa
             .states()

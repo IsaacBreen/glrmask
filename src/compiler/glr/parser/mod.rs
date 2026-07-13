@@ -10,7 +10,7 @@ use super::table::{
     StackShiftGuard,
 };
 use crate::ds::bitset::BitSet;
-use crate::ds::leveled_gss::{LeveledGSS, VirtualStack};
+use crate::ds::leveled_gss::{LeveledGSS, Merge, VirtualStack};
 use crate::grammar::flat::TerminalID;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
@@ -45,6 +45,16 @@ fn env_flag_enabled(name: &str) -> bool {
             matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
         })
         .unwrap_or(false)
+}
+
+fn assert_row_presence_exact_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled("GLRMASK_ASSERT_ROW_PRESENCE_EXACT"))
+}
+
+fn assert_advance_distributivity_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled("GLRMASK_ASSERT_ADVANCE_DISTRIBUTIVITY"))
 }
 
 fn guarded_stack_to_stacks_fallback_disabled() -> bool {
@@ -168,13 +178,72 @@ impl AdvancedBranch {
 }
 
 pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> ParserGSS {
-    advance_stacks_core(table, stack.clone(), token)
+    let advanced = advance_stacks_core(table, stack.clone(), token);
+    assert_advance_distributes_over_concrete_paths(table, stack, token, &advanced);
+    advanced
 }
 
 /// Like `advance_stacks` but takes ownership of the GSS, avoiding an
 /// unnecessary Arc clone when the caller doesn't need the original.
 pub(crate) fn advance_stacks_owned(table: &GLRTable, stack: ParserGSS, token: TerminalID) -> ParserGSS {
-    advance_stacks_core(table, stack, token)
+    if assert_advance_distributivity_enabled() {
+        let before = stack.clone();
+        let advanced = advance_stacks_core(table, stack, token);
+        assert_advance_distributes_over_concrete_paths(table, &before, token, &advanced);
+        advanced
+    } else {
+        advance_stacks_core(table, stack, token)
+    }
+}
+
+fn normalized_concrete_stacks(
+    gss: &ParserGSS,
+) -> Vec<(Vec<u32>, TerminalsDisallowed)> {
+    let mut normalized: Vec<(Vec<u32>, TerminalsDisallowed)> = Vec::new();
+    for (stack, acc) in gss.to_stacks() {
+        if let Some((_, existing_acc)) = normalized
+            .iter_mut()
+            .find(|(existing_stack, _)| *existing_stack == stack)
+        {
+            *existing_acc = existing_acc.merge(&acc);
+        } else {
+            normalized.push((stack, acc));
+        }
+    }
+    normalized.sort_by(|left, right| left.0.cmp(&right.0));
+    normalized
+}
+
+fn assert_advance_distributes_over_concrete_paths(
+    table: &GLRTable,
+    before: &ParserGSS,
+    token: TerminalID,
+    actual: &ParserGSS,
+) {
+    if !assert_advance_distributivity_enabled() {
+        return;
+    }
+
+    let concrete_paths = before.to_stacks();
+    if concrete_paths.len() <= 1 {
+        return;
+    }
+
+    let mut expected = ParserGSS::empty();
+    for (stack, acc) in concrete_paths {
+        merge_into(
+            &mut expected,
+            advance_stacks_core(table, ParserGSS::from_single_stack(stack, acc), token),
+        );
+    }
+
+    assert_eq!(
+        normalized_concrete_stacks(actual),
+        normalized_concrete_stacks(&expected),
+        "parser advance is not distributive over GSS path union for terminal {token}: construction={:?} before={:?}",
+        table.construction,
+        normalized_concrete_stacks(before),
+    );
 }
 
 pub(crate) fn advance_stacks_profiled(
@@ -1094,12 +1163,63 @@ fn apply_stack_shifts(gss: ParserGSS, shifts: &[StackShift]) -> ParserGSS {
     out
 }
 
+fn guarded_stack_shifts_are_decidable_from_vstack(
+    stack: &VirtualStack<u32, TerminalsDisallowed>,
+    shifts: &[GuardedStackShift],
+) -> bool {
+    if !stack.has_hidden_floor_values() {
+        return true;
+    }
+
+    let visible_len = stack.len();
+    for shift in shifts {
+        let mut ruled_out = false;
+        for guard in &shift.guards {
+            let pop = guard.pop as usize;
+            if pop >= visible_len {
+                // This still-live shift needs a branch-specific value from the
+                // hidden floor. The virtual prefix cannot decide the guard.
+                return false;
+            }
+            let state = stack
+                .top_after_popping(pop)
+                .expect("guard depth lies within visible virtual-stack prefix");
+            if guard.states.binary_search(state).is_err() {
+                ruled_out = true;
+                break;
+            }
+        }
+
+        if !ruled_out && shift.pop as usize > visible_len {
+            // The guards are satisfied by the visible prefix, but applying the
+            // effect would pop through the branched floor.
+            return false;
+        }
+    }
+
+    true
+}
+
+fn apply_guarded_stack_shifts_from_vstack(
+    stack: VirtualStack<u32, TerminalsDisallowed>,
+    shifts: &[GuardedStackShift],
+    index: Option<&GuardedShiftCellIndex>,
+) -> ParserGSS {
+    if guarded_stack_shifts_are_decidable_from_vstack(&stack, shifts) {
+        apply_guarded_stack_shifts_to_vstack(&stack, shifts, index)
+    } else {
+        apply_guarded_stack_shifts(stack.into_gss(), shifts, index)
+    }
+}
+
 pub(crate) fn apply_guarded_stack_shifts_fast(
     gss: &ParserGSS,
     shifts: &[GuardedStackShift],
     index: Option<&GuardedShiftCellIndex>,
 ) -> Option<ParserGSS> {
-    if let Some(stack) = gss.try_virtual_stack() {
+    if let Some(stack) = gss.try_virtual_stack()
+        && guarded_stack_shifts_are_decidable_from_vstack(&stack, shifts)
+    {
         return Some(apply_guarded_stack_shifts_to_vstack(&stack, shifts, index));
     }
 
@@ -1486,8 +1606,8 @@ fn advance_deterministically_from_vstack_raw(
             }
             Some(Action::GuardedStackShifts(shifts)) => {
                 return (
-                    AdvancedBranch::Gss(apply_guarded_stack_shifts_to_vstack(
-                        &stack,
+                    AdvancedBranch::Gss(apply_guarded_stack_shifts_from_vstack(
+                        stack,
                         shifts,
                         table.guarded_shift_index(state, token),
                     )),
@@ -1704,8 +1824,8 @@ fn advance_deterministically_profiled(
                 return true;
             }
             Some(Action::GuardedStackShifts(shifts)) => {
-                *gss = apply_guarded_stack_shifts_to_vstack(
-                    &stack,
+                *gss = apply_guarded_stack_shifts_from_vstack(
+                    stack,
                     shifts,
                     table.guarded_shift_index(state, token),
                 );
@@ -1941,8 +2061,8 @@ fn advance_nondeterministically_profiled(
                 Action::GuardedStackShifts(shifts) => {
                     profile.n_nondet_merges += 1;
                     let branch = if let Some(stack) = isolated.try_virtual_stack() {
-                        apply_guarded_stack_shifts_to_vstack(
-                            &stack,
+                        apply_guarded_stack_shifts_from_vstack(
+                            stack,
                             shifts,
                             table.guarded_shift_index(state, token),
                         )
@@ -2091,8 +2211,8 @@ fn advance_nondeterministically(
                 }
                 Action::GuardedStackShifts(shifts) => {
                     let branch = if let Some(stack) = isolated.try_virtual_stack() {
-                        apply_guarded_stack_shifts_to_vstack(
-                            &stack,
+                        apply_guarded_stack_shifts_from_vstack(
+                            stack,
                             shifts,
                             table.guarded_shift_index(state, token),
                         )
@@ -2250,8 +2370,8 @@ fn advance_deterministically(
                 return true;
             }
             Some(Action::GuardedStackShifts(shifts)) => {
-                *gss = apply_guarded_stack_shifts_to_vstack(
-                    &stack,
+                *gss = apply_guarded_stack_shifts_from_vstack(
+                    stack,
                     shifts,
                     table.guarded_shift_index(state, token),
                 );
@@ -2282,13 +2402,10 @@ fn advance_deterministically(
 /// advance on the given terminal. Returns `false` if no current parser path can
 /// advance.
 ///
-/// Ordinary actions (for example shifts and reduces) are applicable from the top
-/// state/action row. In particular, LR(1) reduce lookaheads are precise: if the
-/// row has a reduce action for this terminal, that reduce is a valid parser
-/// transition for the lookahead under the table invariants; it does not require
-/// an additional lower-stack guard check here. `GuardedStackShifts` also have
-/// lower-stack predicates, so they must evaluate their guards against the current
-/// GSS before this predicate can return `true`.
+/// For `RowPresenceExact`, `advance` was captured from the precise parser row
+/// before stack-effect lowering. Guarded stack shifts therefore select the exact
+/// execution effect; they do not weaken admission. `ExactSimulation` tables use
+/// reduction/guard simulation instead.
 ///
 /// TODO: Rename this eventually, e.g. to `stack_can_advance_on`. The current
 /// `may_advance` name sounds like a speculative approximation, but this is an
@@ -2298,24 +2415,21 @@ pub(crate) fn stack_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: T
         return exact_admission_may_advance_on(table, stack, token);
     }
 
-    for state in stack.peek_values() {
-        if !table.advance_row_allows(state, token) {
-            continue;
-        }
-
-        match table.action(state, token) {
-            Some(Action::GuardedStackShifts(shifts)) => {
-                let guarded_stack = stack.isolate(Some(state));
-                if stack_may_apply_guarded_shifts(&guarded_stack, shifts) {
-                    return true;
-                }
-            }
-            Some(_) => return true,
-            None => {}
-        }
+    let admitted = stack
+        .peek_values()
+        .into_iter()
+        .any(|state| table.advance_row_allows(state, token));
+    if assert_row_presence_exact_enabled() {
+        let simulated = exact_admission_may_advance_on(table, stack, token);
+        assert_eq!(
+            admitted,
+            simulated,
+            "RowPresenceExact mismatch for terminal {token}: construction={:?} stacks={:?}",
+            table.construction,
+            stack.to_stacks(),
+        );
     }
-
-    false
+    admitted
 }
 
 fn exact_admission_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> bool {
@@ -2695,7 +2809,9 @@ fn exact_admission_enqueue_frontier(
 }
 
 fn stack_may_apply_guarded_shifts(stack: &ParserGSS, shifts: &[GuardedStackShift]) -> bool {
-    if let Some(virtual_stack) = stack.try_virtual_stack() {
+    if let Some(virtual_stack) = stack.try_virtual_stack()
+        && !virtual_stack.has_hidden_floor_values()
+    {
         return shifts
             .iter()
             .any(|shift| virtual_stack_may_apply_guarded_shift(&virtual_stack, shift));
@@ -2906,6 +3022,42 @@ mod tests {
     #[test]
     fn may_advance_rechecks_guarded_stack_shifts_against_concrete_stack() {
         let token = 0;
+        let mut table = build_test_table(
+            3,
+            1,
+            &[
+                &[],
+                &[],
+                &[(
+                    token,
+                    Action::GuardedStackShifts(vec![GuardedStackShift {
+                        guards: vec![StackShiftGuard {
+                            pop: 1,
+                            states: vec![0],
+                        }],
+                        pop: 2,
+                        pushes: vec![7],
+                    }]),
+                )],
+            ],
+            &[&[], &[], &[]],
+        );
+        table.admission_policy = AdmissionPolicy::ExactSimulation;
+
+        let stack = ParserGSS::from_single_stack(vec![1, 2], TerminalsDisallowed::new());
+
+        assert!(table.advance_row_allows(2, token));
+        assert!(advance_stacks(&table, &stack, token).is_empty());
+        assert!(!stack_may_advance_on(&table, &stack, token));
+
+        let mut terminals = BitSet::new(1);
+        terminals.set(token as usize);
+        assert!(!stack_may_advance_on_any(&table, &stack, &terminals));
+    }
+
+    #[test]
+    fn row_presence_admission_does_not_recheck_lowered_guarded_effects() {
+        let token = 0;
         let table = build_test_table(
             3,
             1,
@@ -2926,16 +3078,261 @@ mod tests {
             ],
             &[&[], &[], &[]],
         );
-
         let stack = ParserGSS::from_single_stack(vec![1, 2], TerminalsDisallowed::new());
 
+        assert_eq!(table.admission_policy, AdmissionPolicy::RowPresenceExact);
         assert!(table.advance_row_allows(2, token));
-        assert!(advance_stacks(&table, &stack, token).is_empty());
-        assert!(!stack_may_advance_on(&table, &stack, token));
+        assert!(stack_may_advance_on(&table, &stack, token));
 
         let mut terminals = BitSet::new(1);
         terminals.set(token as usize);
-        assert!(!stack_may_advance_on_any(&table, &stack, &terminals));
+        assert!(stack_may_advance_on_any(&table, &stack, &terminals));
+    }
+
+    #[test]
+    fn guarded_stack_shift_advance_distributes_over_merged_branched_floor() {
+        let token = 0;
+        let mut action_rows = vec![Vec::new(); 329];
+        action_rows[74] = vec![(
+            token,
+            Action::GuardedStackShifts(vec![
+                GuardedStackShift {
+                    guards: vec![StackShiftGuard {
+                        pop: 1,
+                        states: vec![171],
+                    }],
+                    pop: 2,
+                    pushes: vec![213, 265],
+                },
+                GuardedStackShift {
+                    guards: vec![StackShiftGuard {
+                        pop: 1,
+                        states: vec![323],
+                    }],
+                    pop: 2,
+                    pushes: vec![328, 370],
+                },
+            ]),
+        )];
+        let action_refs: Vec<&[(u32, Action)]> =
+            action_rows.iter().map(Vec::as_slice).collect();
+        let goto_rows = vec![Vec::new(); 329];
+        let goto_refs: Vec<&[(u32, (u32, bool))]> =
+            goto_rows.iter().map(Vec::as_slice).collect();
+        let table = build_test_table(329, 1, &action_refs, &goto_refs);
+
+        let acc = TerminalsDisallowed::new();
+        let left = ParserGSS::from_single_stack(vec![0, 171, 74], acc.clone());
+        let right = ParserGSS::from_single_stack(vec![0, 323, 74], acc);
+        let merged = left.merge(&right);
+
+        let expected = advance_stacks(&table, &left, token)
+            .merge(&advance_stacks(&table, &right, token));
+        let actual = advance_stacks(&table, &merged, token);
+
+        let mut expected_stacks = expected.to_stacks();
+        let mut actual_stacks = actual.to_stacks();
+        expected_stacks.sort_by(|a, b| a.0.cmp(&b.0));
+        actual_stacks.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(actual_stacks, expected_stacks);
+        assert!(stack_may_advance_on(&table, &merged, token));
+    }
+
+    #[test]
+    fn stack_shift_advance_distributes_over_merged_branched_floor() {
+        let token = 0;
+        let mut action_rows = vec![Vec::new(); 75];
+        action_rows[74] = vec![(
+            token,
+            Action::StackShifts(vec![StackShift {
+                pop: 2,
+                pushes: vec![265],
+            }]),
+        )];
+        let action_refs: Vec<&[(u32, Action)]> =
+            action_rows.iter().map(Vec::as_slice).collect();
+        let goto_rows = vec![Vec::new(); 75];
+        let goto_refs: Vec<&[(u32, (u32, bool))]> =
+            goto_rows.iter().map(Vec::as_slice).collect();
+        let table = build_test_table(75, 1, &action_refs, &goto_refs);
+
+        let acc = TerminalsDisallowed::new();
+        let left = ParserGSS::from_single_stack(vec![0, 171, 74], acc.clone());
+        let right = ParserGSS::from_single_stack(vec![0, 323, 74], acc);
+        let merged = left.merge(&right);
+
+        let expected = advance_stacks(&table, &left, token)
+            .merge(&advance_stacks(&table, &right, token));
+        let actual = advance_stacks(&table, &merged, token);
+
+        let mut expected_stacks = expected.to_stacks();
+        let mut actual_stacks = actual.to_stacks();
+        expected_stacks.sort_by(|a, b| a.0.cmp(&b.0));
+        actual_stacks.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(actual_stacks, expected_stacks);
+    }
+
+    fn assert_advance_distributes_over_merge(
+        table: &GLRTable,
+        left: &ParserGSS,
+        right: &ParserGSS,
+        token: u32,
+        case: &str,
+    ) {
+        let merged = left.merge(right);
+        let expected = advance_stacks(table, left, token)
+            .merge(&advance_stacks(table, right, token));
+        let actual = advance_stacks(table, &merged, token);
+
+        let mut expected_stacks = expected.to_stacks();
+        let mut actual_stacks = actual.to_stacks();
+        expected_stacks.sort_by(|a, b| a.0.cmp(&b.0));
+        actual_stacks.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(actual_stacks, expected_stacks, "{case}");
+    }
+
+    fn branched_floor_pair(common_suffix_len: usize) -> (ParserGSS, ParserGSS) {
+        let suffix = [10_u32, 11, 12];
+        let mut left = vec![0, 1];
+        left.extend_from_slice(&suffix[..common_suffix_len]);
+        let mut right = vec![0, 2];
+        right.extend_from_slice(&suffix[..common_suffix_len]);
+        let acc = TerminalsDisallowed::new();
+        (
+            ParserGSS::from_single_stack(left, acc.clone()),
+            ParserGSS::from_single_stack(right, acc),
+        )
+    }
+
+    #[test]
+    fn generated_top_action_advance_distributes_over_branched_floor_merge() {
+        let token = 0;
+        for common_suffix_len in 1..=3 {
+            let (left, right) = branched_floor_pair(common_suffix_len);
+            let top = 9 + common_suffix_len as u32;
+            let mut actions = vec![
+                Action::Shift(40, false),
+                Action::Shift(40, true),
+            ];
+
+            for pop in 0..=common_suffix_len + 1 {
+                actions.push(Action::StackShifts(vec![StackShift {
+                    pop: pop as u32,
+                    pushes: vec![40],
+                }]));
+                actions.push(Action::StackShifts(vec![StackShift {
+                    pop: pop as u32,
+                    pushes: Vec::new(),
+                }]));
+            }
+            actions.push(Action::StackShifts(vec![
+                StackShift {
+                    pop: 0,
+                    pushes: vec![40],
+                },
+                StackShift {
+                    pop: common_suffix_len as u32 + 1,
+                    pushes: vec![41],
+                },
+            ]));
+            actions.push(Action::StackShifts(vec![
+                StackShift {
+                    pop: common_suffix_len as u32 + 1,
+                    pushes: vec![40],
+                },
+                StackShift {
+                    pop: 0,
+                    pushes: vec![41],
+                },
+            ]));
+            actions.push(Action::StackShifts(vec![
+                StackShift {
+                    pop: common_suffix_len as u32,
+                    pushes: vec![40, 42],
+                },
+                StackShift {
+                    pop: common_suffix_len as u32,
+                    pushes: vec![41, 42],
+                },
+            ]));
+
+            actions.push(Action::GuardedStackShifts(vec![
+                GuardedStackShift {
+                    guards: vec![StackShiftGuard {
+                        pop: common_suffix_len as u32,
+                        states: vec![1],
+                    }],
+                    pop: common_suffix_len as u32 + 1,
+                    pushes: vec![40],
+                },
+                GuardedStackShift {
+                    guards: vec![StackShiftGuard {
+                        pop: common_suffix_len as u32,
+                        states: vec![2],
+                    }],
+                    pop: common_suffix_len as u32 + 1,
+                    pushes: vec![41],
+                },
+            ]));
+
+            for (action_index, action) in actions.into_iter().enumerate() {
+                let mut action_rows = vec![Vec::new(); 64];
+                action_rows[top as usize] = vec![(token, action)];
+                let action_refs: Vec<&[(u32, Action)]> =
+                    action_rows.iter().map(Vec::as_slice).collect();
+                let goto_rows = vec![Vec::new(); 64];
+                let goto_refs: Vec<&[(u32, (u32, bool))]> =
+                    goto_rows.iter().map(Vec::as_slice).collect();
+                let table = build_test_table(64, 1, &action_refs, &goto_refs);
+                let case = format!(
+                    "common_suffix_len={common_suffix_len} action_index={action_index} action={:?}",
+                    table.action(top, token),
+                );
+                assert_advance_distributes_over_merge(&table, &left, &right, token, &case);
+            }
+        }
+    }
+
+    #[test]
+    fn generated_reduce_chain_advance_distributes_over_branched_floor_merge() {
+        let token = 0;
+        let nt = 0;
+        for common_suffix_len in 1..=3 {
+            let (left, right) = branched_floor_pair(common_suffix_len);
+            let top = 9 + common_suffix_len as u32;
+            for reduce_len in 1..=common_suffix_len {
+                for is_replace in [false, true] {
+                    let mut action_rows = vec![Vec::new(); 64];
+                    action_rows[top as usize] =
+                        vec![(token, Action::Reduce(nt, reduce_len as u32))];
+                    action_rows[50] = vec![(token, Action::Shift(60, false))];
+                    action_rows[51] = vec![(token, Action::Shift(60, false))];
+
+                    let left_stacks = left.to_stacks();
+                    let right_stacks = right.to_stacks();
+                    let left_values = &left_stacks[0].0;
+                    let right_values = &right_stacks[0].0;
+                    let left_goto_from = left_values[left_values.len() - reduce_len - 1];
+                    let right_goto_from = right_values[right_values.len() - reduce_len - 1];
+
+                    let mut goto_rows = vec![Vec::new(); 64];
+                    goto_rows[left_goto_from as usize].push((nt, (50, is_replace)));
+                    if right_goto_from != left_goto_from {
+                        goto_rows[right_goto_from as usize].push((nt, (51, is_replace)));
+                    }
+
+                    let action_refs: Vec<&[(u32, Action)]> =
+                        action_rows.iter().map(Vec::as_slice).collect();
+                    let goto_refs: Vec<&[(u32, (u32, bool))]> =
+                        goto_rows.iter().map(Vec::as_slice).collect();
+                    let table = build_test_table(64, 1, &action_refs, &goto_refs);
+                    let case = format!(
+                        "reduce common_suffix_len={common_suffix_len} reduce_len={reduce_len} is_replace={is_replace} left_goto={left_goto_from} right_goto={right_goto_from}",
+                    );
+                    assert_advance_distributes_over_merge(&table, &left, &right, token, &case);
+                }
+            }
+        }
     }
 
     #[test]
@@ -3287,13 +3684,10 @@ mod tests {
 /// advance on one of the given terminals. Returns `false` if no current parser
 /// path can advance on any of them.
 ///
-/// Ordinary actions are applicable from the top state/action row. In particular,
-/// LR(1) reduce lookaheads are precise: if a row has a reduce action for one of
-/// these terminals, that reduce is a valid parser transition for that lookahead
-/// under the table invariants; it does not require an additional lower-stack
-/// guard check here. `GuardedStackShifts` also have lower-stack predicates, so
-/// they must evaluate their guards against the current GSS before this predicate
-/// can return `true`.
+/// For `RowPresenceExact`, `advance` was captured from the precise parser row
+/// before stack-effect lowering. Guarded stack shifts therefore select the exact
+/// execution effect; they do not weaken admission. `ExactSimulation` tables use
+/// reduction/guard simulation instead.
 ///
 /// TODO: Rename this eventually, e.g. to `stack_can_advance_on_any`. The current
 /// `may_advance` name sounds like a speculative approximation, but this is an
@@ -3307,72 +3701,22 @@ pub(crate) fn stack_may_advance_on_any(
         return exact_admission_may_advance_on_any(table, stack, terminals);
     }
 
-    let top_states = stack.peek_values();
-    let mut guarded_terminals = SmallVec::<[TerminalID; 8]>::new();
-
-    for state in top_states {
-        if !table.advance_row_intersects(state, terminals) {
-            continue;
-        }
-
-        if let Some(row) = table.action.get(state as usize)
-            && row.len() < terminals.len()
-        {
-            for (terminal, action) in row {
-                let bit = if terminal == EOF {
-                    table.num_terminals as usize
-                } else {
-                    terminal as usize
-                };
-                if bit > table.num_terminals as usize {
-                    continue;
-                };
-                if !terminals.contains(bit) || !table.advance_row_allows(state, terminal) {
-                    continue;
-                }
-
-                match action {
-                    Action::GuardedStackShifts(_) => {
-                        if !guarded_terminals.contains(&terminal) {
-                            guarded_terminals.push(terminal);
-                        }
-                    }
-                    _ => return true,
-                }
-            }
-            continue;
-        }
-
-        for bit in 0..terminals.len() {
-            if !terminals.contains(bit) {
-                continue;
-            }
-
-            let terminal = if bit == table.num_terminals as usize {
-                EOF
-            } else {
-                bit as TerminalID
-            };
-
-            if !table.advance_row_allows(state, terminal) {
-                continue;
-            }
-
-            match table.action(state, terminal) {
-                Some(Action::GuardedStackShifts(_)) => {
-                    if !guarded_terminals.contains(&terminal) {
-                        guarded_terminals.push(terminal);
-                    }
-                }
-                Some(_) => return true,
-                None => {}
-            }
-        }
-    }
-
-    guarded_terminals
+    let admitted = stack
+        .peek_values()
         .into_iter()
-        .any(|terminal| stack_may_advance_on(table, stack, terminal))
+        .any(|state| table.advance_row_intersects(state, terminals));
+    if assert_row_presence_exact_enabled() {
+        let simulated = exact_admission_may_advance_on_any(table, stack, terminals);
+        assert_eq!(
+            admitted,
+            simulated,
+            "RowPresenceExact mismatch for terminal set {:?}: construction={:?} stacks={:?}",
+            terminals.iter_ones().collect::<Vec<_>>(),
+            table.construction,
+            stack.to_stacks(),
+        );
+    }
+    admitted
 }
 
 pub(crate) fn stacks_finished(table: &GLRTable, stack: &ParserGSS) -> bool {

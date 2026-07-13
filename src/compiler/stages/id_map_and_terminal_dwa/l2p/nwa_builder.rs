@@ -57,6 +57,7 @@ struct NfaTrieScanCache<'tok> {
     match_end_states: Vec<SmallVec<[u32; 1]>>,
     touched_terminals: Vec<TerminalID>,
     match_stamp: u32,
+    strict_reference: bool,
 }
 
 impl<'tok> NfaTrieScanCache<'tok> {
@@ -75,6 +76,10 @@ impl<'tok> NfaTrieScanCache<'tok> {
             match_end_states: (0..terminal_count).map(|_| SmallVec::new()).collect(),
             touched_terminals: Vec::new(),
             match_stamp: 0,
+            strict_reference: std::env::var_os(
+                "GLRMASK_L2P_NWA_NFA_SCAN_STRICT_REFERENCE",
+            )
+            .is_some(),
         }
     }
 
@@ -242,7 +247,7 @@ impl<'tok> NfaTrieScanCache<'tok> {
             SmallVec::new()
         };
 
-        if std::env::var_os("GLRMASK_L2P_NWA_NFA_SCAN_STRICT_REFERENCE").is_some() {
+        if self.strict_reference {
             let mut reference = self.tokenizer.execute_from_state(input, start);
             reference.matches.retain(|matched| {
                 self.active_terminals.as_ref().is_none_or(|active| {
@@ -365,6 +370,8 @@ pub(crate) struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     shared_flat_transitions: Option<&'tok [u32]>,
     self_loop_subtree_skip_enabled: bool,
     profile_timing: bool,
+    has_epsilon_transitions: bool,
+    dfa_scan_strict_reference: bool,
 }
 
 #[derive(Default)]
@@ -389,8 +396,8 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         num_tokenizer_states: usize,
         shared_flat_transitions: Option<&'tok [u32]>,
     ) -> Self {
-        let nfa_scan_cache = tokenizer
-            .has_epsilon_transitions()
+        let has_epsilon_transitions = tokenizer.has_epsilon_transitions();
+        let nfa_scan_cache = has_epsilon_transitions
             .then(|| NfaTrieScanCache::new(tokenizer, active_terminals.clone()));
         Self {
             tokenizer,
@@ -426,6 +433,11 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             )
             .is_some(),
             profile_timing: std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some(),
+            has_epsilon_transitions,
+            dfa_scan_strict_reference: std::env::var_os(
+                "GLRMASK_L2P_NWA_DFA_SCAN_STRICT_REFERENCE",
+            )
+            .is_some(),
         }
     }
 
@@ -741,8 +753,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         node: &VocabPrefixTreeNode,
         tokenizer_state: TokenizerState,
     ) -> bool {
-        if self.tokenizer.has_epsilon_transitions()
-            && !self.tokenizer.has_deterministic_dispatch()
+        if self.has_epsilon_transitions && !self.tokenizer.has_deterministic_dispatch()
         {
             return false;
         }
@@ -965,8 +976,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         id_map: &InternalIdMap,
     ) {
         assert!(
-            !self.tokenizer.has_epsilon_transitions()
-                || self.tokenizer.has_deterministic_dispatch(),
+            !self.has_epsilon_transitions || self.tokenizer.has_deterministic_dispatch(),
             "L1 flat-state construction requires scalar deterministic scan roots",
         );
         // Pre-populate flat transition tables for ALL tokenizer states.
@@ -1143,7 +1153,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             for (tokenizer_state, source_nodes) in nodes_at_offset {
                 let remaining = &segment_bytes[offset..];
                 let execute_started_at = self.profile_timing.then(std::time::Instant::now);
-                let end_states = if self.tokenizer.has_epsilon_transitions() {
+                let end_states = if self.has_epsilon_transitions {
                     self.nfa_scan_cache
                         .as_mut()
                         .expect("epsilon tokenizer must initialize NFA trie scan cache")
@@ -1186,7 +1196,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                         SmallVec::new()
                     };
 
-                    if std::env::var_os("GLRMASK_L2P_NWA_DFA_SCAN_STRICT_REFERENCE").is_some() {
+                    if self.dfa_scan_strict_reference {
                         let mut reference = self
                             .tokenizer
                             .execute_from_state(remaining, tokenizer_state);
@@ -1244,7 +1254,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
 
                     if next_offset == segment_bytes.len()
                         && child_node.has_token()
-                        && ((self.tokenizer.has_epsilon_transitions()
+                        && ((self.has_epsilon_transitions
                             && !self.tokenizer.has_deterministic_dispatch())
                             || !end_states.iter().copied().any(|s| {
                                 self.possible_future_terminals_for_state(s)
@@ -1399,7 +1409,7 @@ pub(crate) fn build_nwa_via_trie_walk<'a>(
     roots: &NodesByTokenizerState,
     possible_matches: &mut PossibleMatchesComputer<'a>,
     shared_flat_transitions: Option<&'a [u32]>,
-    active_terminals: Option<&[bool]>,
+    active_terminals: &[bool],
 ) -> TerminalDwaBuildProfile {
     let num_tokenizer_states = tokenizer.num_states() as usize;
     let mut initial_source_states = vec![false; nwa.states().len()];
@@ -1419,7 +1429,7 @@ pub(crate) fn build_nwa_via_trie_walk<'a>(
         initial_source_states,
         use_terminal_coloring,
         None,
-        active_terminals.map(|a| a.to_vec()),
+        Some(active_terminals.to_vec()),
         num_tokenizer_states,
         shared_flat_transitions,
     );
@@ -1931,7 +1941,10 @@ mod tests {
             &id_map,
             &tree.root,
             &mut possible_matches,
-            &visible_output_raw_labels(&partition, tokenizer.num_terminals() as usize),
+            &visible_output_raw_labels(
+                &partition,
+                &vec![true; tokenizer.num_terminals() as usize],
+            ),
             &modes,
         );
 
@@ -1986,7 +1999,10 @@ mod tests {
             &tokenizer,
             &tree,
             &id_map,
-            &visible_output_raw_labels(&partition, tokenizer.num_terminals() as usize),
+            &visible_output_raw_labels(
+                &partition,
+                &vec![true; tokenizer.num_terminals() as usize],
+            ),
             &modes,
         );
         super::super::terminal_dwa_equivalence::compare(&baseline, &compact)

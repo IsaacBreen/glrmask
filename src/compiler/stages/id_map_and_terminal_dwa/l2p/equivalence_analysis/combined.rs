@@ -1,6 +1,6 @@
 use crate::automata::lexer::Lexer;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use crate::Vocab;
@@ -12,7 +12,9 @@ use super::state_equivalence::{
     build_state_map_from_subset_representatives, resolve_l2p_pipeline_config,
     run_state_equivalence_pipeline, StateEquivalenceScope,
 };
-use super::state_equivalence::nfa::build_bounded_analysis_view;
+use super::state_equivalence::nfa::{
+    build_bounded_analysis_view, build_relevant_powerset_view,
+};
 use crate::ds::bitset::BitSet;
 use super::compat::TokenizerView;
 use super::disallowed_follows::normalize_disallowed_follows;
@@ -329,6 +331,22 @@ fn direct_refinement_work_is_no_larger(
 }
 
 #[inline]
+fn l2p_nfa_relevant_powerset_view_enabled() -> bool {
+    // The complete relevant-byte powerset can be a useful opt-in when the
+    // bounded token-trajectory view would explode, but it is substantially
+    // larger on the common partitioned-schema shape. In BFCL p0 the exact
+    // results are identical while the full view makes byte-class and exact
+    // token analysis traverse ~19k configurations, taking the id-map from
+    // roughly 6 ms to 55-65 ms. Keep the bounded exact route as the default;
+    // callers can still force the full powerset with `=1`.
+    std::env::var("GLRMASK_L2P_NFA_RELEVANT_POWERSET_VIEW")
+        .map(|value| {
+            let trimmed = value.trim();
+            trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or(false)
+}
+
 fn should_skip_max_length_for_partition(
     partition_label: &str,
     initial_state_count: usize,
@@ -401,6 +419,29 @@ fn compose_raw_quotient_state_map(
     pre_state_map: &ManyToOneIdMap,
     final_representative_for_preclass: &[usize],
 ) -> ManyToOneIdMap {
+    compose_raw_quotient_state_map_impl(
+        pre_state_map,
+        final_representative_for_preclass,
+        None,
+    )
+}
+
+fn compose_raw_quotient_state_map_preserving_directional_representatives(
+    pre_state_map: &ManyToOneIdMap,
+    final_representative_for_preclass: &[usize],
+) -> ManyToOneIdMap {
+    compose_raw_quotient_state_map_impl(
+        pre_state_map,
+        final_representative_for_preclass,
+        Some(&pre_state_map.representative_original_ids),
+    )
+}
+
+fn compose_raw_quotient_state_map_impl(
+    pre_state_map: &ManyToOneIdMap,
+    final_representative_for_preclass: &[usize],
+    representative_original_for_final_key: Option<&[u32]>,
+) -> ManyToOneIdMap {
     assert_eq!(
         pre_state_map.internal_to_originals.len(),
         final_representative_for_preclass.len(),
@@ -424,7 +465,10 @@ fn compose_raw_quotient_state_map(
             let next = internal_to_originals.len() as u32;
             final_key_to_internal[final_key] = next;
             internal_to_originals.push(Vec::new());
-            representative_original_ids.push(raw_state as u32);
+            representative_original_ids.push(
+                representative_original_for_final_key
+                    .map_or(raw_state as u32, |representatives| representatives[final_key]),
+            );
             next
         } else {
             final_key_to_internal[final_key]
@@ -718,7 +762,16 @@ fn try_analyze_equivalences_with_token_position_partition(
                 first_seed_class_for_analysis[&exact_analysis_state]
             })
             .collect::<Vec<_>>();
-        compose_raw_quotient_state_map(seed, &final_seed_class_representatives)
+        // C is directional: each seed representative extends every member's
+        // positional observations. Exact powerset refinement may merge C seed
+        // classes, but the resulting class must retain the chosen C
+        // representative. Picking the first raw member, as ordinary
+        // equivalence composition does, can replace the representative with a
+        // strictly less-defined member and lose terminal-NWA behavior.
+        compose_raw_quotient_state_map_preserving_directional_representatives(
+            seed,
+            &final_seed_class_representatives,
+        )
     } else {
         build_state_map_from_subset_representatives(
             &seed_states,
@@ -1481,15 +1534,31 @@ fn analyze_equivalences_impl(
             .map(|&state| state as usize)
             .collect::<Vec<_>>();
         let analysis_view_started_at = Instant::now();
-        let bounded = build_bounded_analysis_view(
-            tokenizer,
-            &raw_pre_representatives,
-            &dedup.representative_token_bytes,
-            active_groups,
-        );
+        let (analysis_view_owned, raw_start_to_view) = if l2p_nfa_relevant_powerset_view_enabled() {
+            let powerset = build_relevant_powerset_view(
+                tokenizer,
+                &relevant_bytes,
+                active_groups,
+                None,
+            );
+            let raw_start_to_view = Arc::clone(&powerset.raw_start_to_view);
+            (powerset.into_tokenizer_view(), raw_start_to_view)
+        } else {
+            let bounded = build_bounded_analysis_view(
+                tokenizer,
+                &raw_pre_representatives,
+                &dedup.representative_token_bytes,
+                active_groups,
+            );
+            let mut raw_start_to_view = vec![u32::MAX; tokenizer.num_states() as usize];
+            for &raw in &raw_pre_representatives {
+                raw_start_to_view[raw] = bounded.view_state_for_raw_start(raw) as u32;
+            }
+            (bounded.tokenizer_view, Arc::from(raw_start_to_view))
+        };
         let analysis_view_build_ms =
             analysis_view_started_at.elapsed().as_secs_f64() * 1000.0;
-        let analysis_view = &bounded.tokenizer_view;
+        let analysis_view = &analysis_view_owned;
 
         let byte_class_started_at = Instant::now();
         let byte_to_class = super::compat::compute_byte_classes(analysis_view.dfa());
@@ -1503,7 +1572,7 @@ fn analyze_equivalences_impl(
 
         let preclass_view_states = raw_pre_representatives
             .iter()
-            .map(|&raw| bounded.view_state_for_raw_start(raw))
+            .map(|&raw| raw_start_to_view[raw] as usize)
             .collect::<Vec<_>>();
         let mut query_view_states = preclass_view_states.clone();
         query_view_states.sort_unstable();
@@ -1559,7 +1628,7 @@ fn analyze_equivalences_impl(
         let mut final_view_states = tokenizer_states
             .representative_original_ids
             .iter()
-            .map(|&raw| bounded.view_state_for_raw_start(raw as usize))
+            .map(|&raw| raw_start_to_view[raw as usize] as usize)
             .collect::<Vec<_>>();
         final_view_states.sort_unstable();
         final_view_states.dedup();
@@ -2076,6 +2145,24 @@ mod prepass_selection_tests {
             partition_from_representatives(&states, &full),
             partition_from_representatives(&states, &factored),
         );
+    }
+
+    #[test]
+    fn directional_quotient_composition_retains_preclass_representative() {
+        let directional = ManyToOneIdMap {
+            original_to_internal: vec![0, 1, 0, 1],
+            internal_to_originals: vec![vec![0, 2], vec![1, 3]],
+            representative_original_ids: vec![2, 3],
+        };
+
+        let composed = compose_raw_quotient_state_map_preserving_directional_representatives(
+            &directional,
+            &[1, 1],
+        );
+
+        assert_eq!(composed.original_to_internal, vec![0, 0, 0, 0]);
+        assert_eq!(composed.internal_to_originals, vec![vec![0, 1, 2, 3]]);
+        assert_eq!(composed.representative_original_ids, vec![3]);
     }
 
     #[test]

@@ -12,6 +12,8 @@ use range_set_blaze::RangeSetBlaze;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
+use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
+
 /// Exact first-byte target profiles computed for L1 state equivalence.
 ///
 /// The L1 terminal-DWA builder needs the same whole-token walks *and* the same
@@ -515,7 +517,9 @@ use crate::ds::weight::{shared_rangeset, Weight};
 use crate::grammar::flat::TerminalID;
 use crate::Vocab;
 
-use super::l2p::equivalence_analysis::compat::{compute_byte_classes, TokenizerView};
+use super::l2p::equivalence_analysis::compat::{
+    compute_byte_classes, FlatDfa, TokenizerView,
+};
 use super::types::{compile_profile_enabled, TerminalColoring, TerminalDwaPhaseProfile};
 
 fn l1_exact_profile_reuse_enabled() -> bool {
@@ -528,6 +532,14 @@ fn l1_exact_profile_reuse_enabled() -> bool {
             })
             .unwrap_or(true)
     })
+}
+
+fn l1_remaining_horizon_quotients_enabled(state_count: usize, vocab_count: usize) -> bool {
+    // Building every finite-depth quotient costs O(k * states * byte_classes).
+    // Use it only when the state/token product is large enough that shrinking
+    // the packed suffix product reliably repays that fixed refinement cost.
+    state_count.saturating_mul(vocab_count) >= 100_000_000
+        && std::env::var_os("GLRMASK_DISABLE_L1_REMAINING_HORIZON_QUOTIENTS").is_none()
 }
 
 fn l1_sequential_group_assembly_enabled() -> bool {
@@ -644,8 +656,10 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
     let total_started_at = Instant::now();
     let id_map_started_at = Instant::now();
     let (mut id_map, vocab_order, _state_to_rep, id_map_profile, exact_profile_reuse) =
-        if generic_epsilon_nfa {
-            build_l1_generic_nfa_id_map(tokenizer, vocab, initial_state_map)
+        if generic_epsilon_nfa && l1_generic_nfa_exact_profiles_enabled() {
+            build_l1_generic_nfa_exact_id_map(tokenizer, vocab, active_terminals)
+        } else if generic_epsilon_nfa {
+            build_l1_generic_nfa_fallback_id_map(tokenizer, vocab, initial_state_map)
         } else {
             build_l1_id_map(
                 partition_label,
@@ -661,7 +675,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
 
     let num_terminals = grammar.num_terminals as u32;
     let dwa_started_at = Instant::now();
-    let (dwa, terminal_profile) = if generic_epsilon_nfa {
+    let (dwa, terminal_profile) = if generic_epsilon_nfa && exact_profile_reuse.is_none() {
         build_l1_generic_nfa_terminal_dwa(
             tokenizer,
             vocab_order.as_ref(),
@@ -790,7 +804,166 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
     })
 }
 
-fn build_l1_generic_nfa_id_map<'a>(
+fn l1_generic_nfa_exact_profiles_enabled() -> bool {
+    std::env::var("GLRMASK_L1_GENERIC_NFA_EXACT_PROFILES")
+        .map(|value| {
+            let trimmed = value.trim();
+            trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or(true)
+}
+
+fn build_l1_generic_nfa_exact_id_map<'a>(
+    tokenizer: &Tokenizer,
+    vocab: &'a Vocab,
+    active_terminals: &[bool],
+) -> (
+    InternalIdMap,
+    Arc<L1IdentityVocabOrder>,
+    Vec<u32>,
+    L1IdMapProfile,
+    Option<L1ExactProfileReuse>,
+) {
+    let num_states = tokenizer.num_states() as usize;
+    let (vocab_tokens, vocab_order, token_identity_map_ms) = build_l1_identity_vocab_map(vocab);
+    let token_entries = vocab_order.token_entries_sorted.as_ref();
+    let token_len_stats = token_length_stats_from_entries(token_entries);
+    let max_token_len = token_entries
+        .iter()
+        .map(|(_, bytes)| bytes.len())
+        .max()
+        .unwrap_or(0);
+    let raw_states = (0..num_states).collect::<Vec<_>>();
+    let mut relevant_bytes = [false; 256];
+    for (_, bytes) in token_entries {
+        for &byte in bytes.iter() {
+            relevant_bytes[byte as usize] = true;
+        }
+    }
+
+    let state_equiv_started_at = Instant::now();
+    let view_started_at = Instant::now();
+    let powerset_view = super::l2p::equivalence_analysis::state_equivalence::nfa::build_relevant_powerset_view(
+        tokenizer,
+        &relevant_bytes,
+        Some(active_terminals),
+        None,
+    );
+    let view_states = powerset_view
+        .raw_start_to_view
+        .iter()
+        .map(|&state| state as usize)
+        .collect::<Vec<_>>();
+    let tokenizer_view = powerset_view.into_tokenizer_view();
+    let view_build_ms = view_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let terminal_signature_started_at = compile_profile_enabled().then(Instant::now);
+    let (state_to_terminal_signature, terminal_signatures) =
+        build_l1_flat_state_to_terminal_signatures(tokenizer_view.dfa());
+    let terminal_signature_ms = terminal_signature_started_at.map_or(0.0, |started| {
+        started.elapsed().as_secs_f64() * 1000.0
+    });
+    let exact_started_at = Instant::now();
+    let (exact_mapping, exact_profile_reuse) =
+        find_l1_exact_state_equivalence_by_flat_signatures(
+            vocab_order.as_ref(),
+            &view_states,
+            state_to_terminal_signature,
+            terminal_signatures,
+            &tokenizer_view,
+            None,
+            terminal_signature_ms,
+        );
+    let exact_state_equiv_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
+    assert_eq!(exact_mapping.len(), num_states);
+    let mut exact_profile_reuse =
+        exact_profile_reuse.expect("generic epsilon L1 exact analysis must retain profiles");
+
+    let mut exact_rep_to_internal = FxHashMap::<usize, u32>::default();
+    let mut original_to_internal = vec![u32::MAX; num_states];
+    let mut raw_representatives = Vec::<u32>::new();
+    for (raw_state, &exact_rep) in exact_mapping.iter().enumerate() {
+        let internal = *exact_rep_to_internal.entry(exact_rep).or_insert_with(|| {
+            let internal = raw_representatives.len() as u32;
+            raw_representatives.push(raw_state as u32);
+            internal
+        });
+        original_to_internal[raw_state] = internal;
+    }
+    let mut tokenizer_states = ManyToOneIdMap::from_original_to_internal_with_representatives(
+        original_to_internal,
+        raw_representatives.len() as u32,
+        raw_representatives,
+    );
+    tokenizer_states.isolate_original(tokenizer.initial_state_id());
+
+    // The packed proof runs in powerset-view coordinates. Transport only the
+    // proved profile objects back to raw token-boundary representatives; raw
+    // state IDs remain the externally visible TSID coordinate.
+    let view_profile_ids = std::mem::take(&mut exact_profile_reuse.representative_profile_ids);
+    let view_direct_signatures = Arc::clone(&exact_profile_reuse.direct_state_to_terminal_signature);
+    let mut raw_profile_ids = FxHashMap::<u32, Arc<[u32]>>::default();
+    for raw_representative in tokenizer_states.iter_representative_ids() {
+        let exact_rep = exact_mapping[raw_representative as usize] as u32;
+        let profile_ids = view_profile_ids
+            .get(&exact_rep)
+            .unwrap_or_else(|| panic!("missing generic L1 exact profile for view state {exact_rep}"));
+        raw_profile_ids.insert(raw_representative, Arc::clone(profile_ids));
+    }
+    let raw_direct_signatures = raw_states
+        .iter()
+        .map(|&raw_state| {
+            let view_state = view_states[raw_state];
+            view_direct_signatures[view_state]
+        })
+        .collect::<Vec<_>>();
+    exact_profile_reuse.representative_profile_ids = raw_profile_ids;
+    exact_profile_reuse.direct_state_to_terminal_signature = raw_direct_signatures.into();
+    exact_profile_reuse.profile_representatives_by_internal = Arc::from([]);
+
+    let exact_reps = tokenizer_states.num_internal_ids() as usize;
+    let state_to_rep = state_to_representative_vector(&tokenizer_states, num_states);
+    let state_equiv_ms = state_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][l1_generic_nfa_exact] raw_states={} view_states={} view_build_ms={:.3} exact_ms={:.3} exact_reps={} total_ms={:.3}",
+            num_states,
+            tokenizer_view.dfa().states.len(),
+            view_build_ms,
+            exact_state_equiv_ms,
+            exact_reps,
+            state_equiv_ms,
+        );
+    }
+
+    (
+        InternalIdMap {
+            tokenizer_states,
+            vocab_tokens,
+        },
+        vocab_order,
+        state_to_rep,
+        L1IdMapProfile {
+            initial_states_considered: num_states,
+            max_length_skipped: true,
+            max_token_len,
+            token_len_gt_4: token_len_stats.gt_4,
+            token_len_gt_8: token_len_stats.gt_8,
+            token_len_gt_16: token_len_stats.gt_16,
+            token_len_gt_32: token_len_stats.gt_32,
+            token_len_gt_64: token_len_stats.gt_64,
+            state_equiv_ms,
+            max_length_state_equiv_ms: 0.0,
+            exact_state_equiv_ms,
+            max_length_reps: num_states,
+            exact_reps,
+            token_identity_map_ms,
+        },
+        Some(exact_profile_reuse),
+    )
+}
+
+fn build_l1_generic_nfa_fallback_id_map<'a>(
     tokenizer: &Tokenizer,
     vocab: &'a Vocab,
     initial_state_map: Option<&ManyToOneIdMap>,
@@ -854,6 +1027,142 @@ fn build_l1_generic_nfa_id_map<'a>(
     )
 }
 
+const L1_NFA_UNKNOWN_CONFIG: u32 = u32::MAX - 1;
+const L1_NFA_DEAD_CONFIG: u32 = u32::MAX;
+
+struct L1NfaPowerset<'a> {
+    tokenizer: &'a Tokenizer,
+    active_terminals: &'a [bool],
+    configs: Vec<Box<[u32]>>,
+    config_ids: FxHashMap<Vec<u32>, u32>,
+    transitions: Vec<[u32; 256]>,
+    signatures: Vec<Box<[u32]>>,
+    transition_misses: usize,
+}
+
+impl<'a> L1NfaPowerset<'a> {
+    fn new(tokenizer: &'a Tokenizer, active_terminals: &'a [bool]) -> Self {
+        Self {
+            tokenizer,
+            active_terminals,
+            configs: Vec::new(),
+            config_ids: FxHashMap::default(),
+            transitions: Vec::new(),
+            signatures: Vec::new(),
+            transition_misses: 0,
+        }
+    }
+
+    fn intern(&mut self, mut states: Vec<u32>) -> u32 {
+        if states.is_empty() {
+            return L1_NFA_DEAD_CONFIG;
+        }
+        states.sort_unstable();
+        states.dedup();
+        if let Some(&config) = self.config_ids.get(&states) {
+            return config;
+        }
+
+        let config = self.configs.len() as u32;
+        let mut signature = Vec::<u32>::new();
+        for &state in &states {
+            signature.extend(collect_active_terminal_signature(
+                self.tokenizer,
+                state,
+                self.active_terminals,
+            ));
+        }
+        signature.sort_unstable();
+        signature.dedup();
+
+        self.config_ids.insert(states.clone(), config);
+        self.configs.push(states.into_boxed_slice());
+        self.transitions.push([L1_NFA_UNKNOWN_CONFIG; 256]);
+        self.signatures.push(signature.into_boxed_slice());
+        config
+    }
+
+    fn start_config(&mut self, raw_state: u32) -> u32 {
+        self.intern(
+            self.tokenizer
+                .execute_from_state_end_only(&[], raw_state)
+                .to_vec(),
+        )
+    }
+
+    #[inline]
+    fn step(&mut self, config: u32, byte: u8) -> u32 {
+        if config == L1_NFA_DEAD_CONFIG {
+            return L1_NFA_DEAD_CONFIG;
+        }
+        let cached = self.transitions[config as usize][byte as usize];
+        if cached != L1_NFA_UNKNOWN_CONFIG {
+            return cached;
+        }
+        self.transition_misses += 1;
+        let targets = self
+            .tokenizer
+            .step_all(&self.configs[config as usize], byte)
+            .to_vec();
+        let target = self.intern(targets);
+        self.transitions[config as usize][byte as usize] = target;
+        target
+    }
+
+    fn step_bytes(&mut self, mut config: u32, bytes: &[u8]) -> u32 {
+        for &byte in bytes {
+            config = self.step(config, byte);
+            if config == L1_NFA_DEAD_CONFIG {
+                break;
+            }
+        }
+        config
+    }
+
+    #[inline]
+    fn signature(&self, config: u32) -> &[u32] {
+        if config == L1_NFA_DEAD_CONFIG {
+            &[]
+        } else {
+            &self.signatures[config as usize]
+        }
+    }
+}
+
+fn collect_l1_nfa_profile_from_trie(
+    scanner: &mut L1NfaPowerset<'_>,
+    node: &VocabPrefixTreeNode,
+    config: u32,
+    token_aliases: &[Vec<u32>],
+    token_ranges_by_terminal: &mut FxHashMap<u32, Vec<(u32, u32)>>,
+    node_visits: &mut usize,
+) {
+    *node_visits += 1;
+    if node.has_token() {
+        for &terminal in scanner.signature(config) {
+            let ranges = token_ranges_by_terminal.entry(terminal).or_default();
+            for &token_id in &token_aliases[node.token_id()] {
+                append_token_id_range(ranges, token_id);
+            }
+        }
+    }
+
+    for (edge, child) in node.iter_children() {
+        let target = scanner.step_bytes(config, edge);
+        if target == L1_NFA_DEAD_CONFIG {
+            continue;
+        }
+        collect_l1_nfa_profile_from_trie(
+            scanner,
+            child,
+            target,
+            token_aliases,
+            token_ranges_by_terminal,
+            node_visits,
+        );
+    }
+}
+
 fn build_l1_generic_nfa_terminal_dwa(
     tokenizer: &Tokenizer,
     vocab_order: &L1IdentityVocabOrder,
@@ -861,51 +1170,100 @@ fn build_l1_generic_nfa_terminal_dwa(
     num_terminals: u32,
     active_terminals: &[bool],
 ) -> Option<(DWA, L1TerminalBuildProfile)> {
-    let traversal_started_at = Instant::now();
     let tsids_before_merge = id_map.num_tsids() as usize;
     let mut deferred_by_terminal =
         (0..num_terminals).map(|_| Vec::<(u32, Arc<RangeSetBlaze<u32>>)>::new()).collect::<Vec<_>>();
 
+    let vocab_tree_started_at = Instant::now();
+    let mut tree_entries = Vec::<(usize, &[u8])>::new();
+    let mut token_aliases = Vec::<Vec<u32>>::new();
+    for (internal_token_id, (_, bytes)) in vocab_order.token_entries_sorted.iter().enumerate() {
+        if tree_entries
+            .last()
+            .is_some_and(|(_, previous_bytes)| *previous_bytes == bytes.as_ref())
+        {
+            token_aliases
+                .last_mut()
+                .expect("duplicate token bytes without an alias group")
+                .push(internal_token_id as u32);
+            continue;
+        }
+        let alias_group = token_aliases.len();
+        tree_entries.push((alias_group, bytes.as_ref()));
+        token_aliases.push(vec![internal_token_id as u32]);
+    }
+    debug_assert!(tree_entries.windows(2).all(|pair| pair[0].1 < pair[1].1));
+    let vocab_tree = VocabPrefixTree::build_presorted(&tree_entries);
+    let vocab_tree_build_ms = vocab_tree_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let state_seed_started_at = Instant::now();
+    let mut scanner = L1NfaPowerset::new(tokenizer, active_terminals);
+    let mut tsids_by_start_config = FxHashMap::<u32, Vec<u32>>::default();
     for (internal_tsid, raw_state) in id_map
         .tokenizer_states
         .iter_representative_ids()
         .enumerate()
     {
-        let mut token_ids_by_terminal = FxHashMap::<u32, Vec<u32>>::default();
-        for (internal_token_id, (_, bytes)) in
-            vocab_order.token_entries_sorted.iter().enumerate()
-        {
-            let end_states = tokenizer.execute_from_state_end_only(bytes, raw_state);
-            if end_states.is_empty() {
+        let start_config = scanner.start_config(raw_state);
+        if start_config != L1_NFA_DEAD_CONFIG {
+            tsids_by_start_config
+                .entry(start_config)
+                .or_default()
+                .push(internal_tsid as u32);
+        }
+    }
+    let state_seed_ms = state_seed_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let traversal_started_at = Instant::now();
+    let mut node_visits = 0usize;
+    let mut profiles_built = 0usize;
+    let mut profile_entries = 0usize;
+    for (start_config, tsids) in tsids_by_start_config {
+        let mut token_ranges_by_terminal = FxHashMap::<u32, Vec<(u32, u32)>>::default();
+        collect_l1_nfa_profile_from_trie(
+            &mut scanner,
+            &vocab_tree.root,
+            start_config,
+            &token_aliases,
+            &mut token_ranges_by_terminal,
+            &mut node_visits,
+        );
+        profiles_built += 1;
+        for (terminal, ranges) in token_ranges_by_terminal {
+            let token_set = shared_rangeset(
+                ranges
+                    .iter()
+                    .map(|&(start, end)| start..=end)
+                    .collect(),
+            );
+            if token_set.is_empty() {
                 continue;
             }
-            let mut active_signature = Vec::<u32>::new();
-            for &state in &end_states {
-                active_signature.extend(collect_active_terminal_signature(
-                    tokenizer,
-                    state,
-                    active_terminals,
-                ));
-            }
-            active_signature.sort_unstable();
-            active_signature.dedup();
-            for terminal in active_signature {
-                token_ids_by_terminal
-                    .entry(terminal)
-                    .or_default()
-                    .push(internal_token_id as u32);
-            }
-        }
-
-        for (terminal, token_ids) in token_ids_by_terminal {
-            let token_set = shared_rangeset(token_ids.into_iter().collect());
-            if !token_set.is_empty() {
+            profile_entries += tsids.len();
+            for &tsid in &tsids {
                 deferred_by_terminal[terminal as usize]
-                    .push((internal_tsid as u32, token_set));
+                    .push((tsid, Arc::clone(&token_set)));
             }
         }
     }
     let traversal_ms = traversal_started_at.elapsed().as_secs_f64() * 1000.0;
+    let token_set_intern_ms = 0.0;
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][l1_nfa_powerset_trie] raw_tsids={} start_configs={} configs={} transition_misses={} node_visits={} profile_entries={} unique_token_strings={} token_aliases={} tree_build_ms={:.3} state_seed_ms={:.3} traversal_ms={:.3}",
+            tsids_before_merge,
+            profiles_built,
+            scanner.configs.len(),
+            scanner.transition_misses,
+            node_visits,
+            profile_entries,
+            tree_entries.len(),
+            vocab_order.token_entries_sorted.len() - tree_entries.len(),
+            vocab_tree_build_ms,
+            state_seed_ms,
+            traversal_ms,
+        );
+    }
 
     let merge_started_at = Instant::now();
     let merge_report = merge_deferred_equivalent_tsids(id_map, &mut deferred_by_terminal);
@@ -936,9 +1294,9 @@ fn build_l1_generic_nfa_terminal_dwa(
         dwa,
         L1TerminalBuildProfile {
             internal_vocab_ms: 0.0,
-            vocab_tree_build_ms: 0.0,
-            state_seed_ms: 0.0,
-            token_set_intern_ms: 0.0,
+            vocab_tree_build_ms,
+            state_seed_ms,
+            token_set_intern_ms,
             tsid_profile_merge_ms: merge_ms,
             tsid_profile_merge_before: tsids_before_merge,
             tsid_profile_merge_after: merge_report.tsids_after,
@@ -1036,8 +1394,10 @@ fn build_l1_id_map<'a>(
         .map(|(_, bytes)| bytes.len())
         .max()
         .unwrap_or(0);
-    let max_length_skipped =
-        should_skip_max_length_for_partition(partition_label, states.len(), projected_by_global);
+    let use_remaining_horizon_quotients =
+        l1_remaining_horizon_quotients_enabled(states.len(), token_id_bytes.len());
+    let max_length_skipped = use_remaining_horizon_quotients
+        || should_skip_max_length_for_partition(partition_label, states.len(), projected_by_global);
     let state_equiv_started_at = Instant::now();
     let mut view_ms = 0.0;
     let equiv_mapping = if max_length_skipped {
@@ -1282,18 +1642,29 @@ fn token_length_stats_from_entries(tokens: &[(u32, Arc<[u8]>)]) -> TokenLengthSt
 }
 
 #[inline]
+fn l1_canonicalize_target(target: u32, canonical_state: Option<&[u32]>) -> u32 {
+    if target == u32::MAX {
+        target
+    } else {
+        canonical_state.map_or(target, |map| map[target as usize])
+    }
+}
+
+#[inline]
 fn l1_transition(
     flat_trans: &[u32],
     transitions_by_byte: Option<&[u32]>,
     num_tokenizer_states: usize,
     state: u32,
     byte: usize,
+    canonical_state: Option<&[u32]>,
 ) -> u32 {
-    if let Some(transitions_by_byte) = transitions_by_byte {
+    let target = if let Some(transitions_by_byte) = transitions_by_byte {
         transitions_by_byte[byte * num_tokenizer_states + state as usize]
     } else {
         flat_trans[state as usize * 256 + byte]
-    }
+    };
+    l1_canonicalize_target(target, canonical_state)
 }
 
 fn find_l1_exact_state_equivalence_by_token_signatures(
@@ -1303,6 +1674,34 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
     active_terminals: &[bool],
     flat_trans: &[u32],
     transitions_by_byte: Option<&[u32]>,
+) -> (Vec<usize>, Option<L1ExactProfileReuse>) {
+    let terminal_signature_started_at = compile_profile_enabled().then(Instant::now);
+    let _ = flat_trans;
+    let tokenizer_view = TokenizerView::new_filtered(tokenizer, active_terminals);
+    let (state_to_terminal_signature, terminal_signatures) =
+        build_l1_flat_state_to_terminal_signatures(tokenizer_view.dfa());
+    let terminal_signature_ms = terminal_signature_started_at.map_or(0.0, |started| {
+        started.elapsed().as_secs_f64() * 1000.0
+    });
+    find_l1_exact_state_equivalence_by_flat_signatures(
+        vocab_order,
+        states,
+        state_to_terminal_signature,
+        terminal_signatures,
+        &tokenizer_view,
+        transitions_by_byte,
+        terminal_signature_ms,
+    )
+}
+
+fn find_l1_exact_state_equivalence_by_flat_signatures(
+    vocab_order: &L1IdentityVocabOrder,
+    states: &[usize],
+    state_to_terminal_signature: Vec<u32>,
+    terminal_signatures: Vec<Vec<u32>>,
+    tokenizer_view: &TokenizerView,
+    transitions_by_byte: Option<&[u32]>,
+    terminal_signature_ms: f64,
 ) -> (Vec<usize>, Option<L1ExactProfileReuse>) {
     if states.len() <= 1 {
         return (states.to_vec(), None);
@@ -1319,15 +1718,65 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
     // then classify a start state by the small vector of profile IDs reached by
     // its first-byte transitions.
     let sorted_entries = vocab_order.token_entries_sorted.as_ref();
-    let terminal_signature_started_at = profile_enabled.then(Instant::now);
-    let (state_to_terminal_signature, terminal_signatures) =
-        build_l1_state_to_terminal_signatures(tokenizer, active_terminals);
-    let terminal_signature_ms = terminal_signature_started_at.map_or(0.0, |started| {
-        started.elapsed().as_secs_f64() * 1000.0
-    });
     let token_buckets = &vocab_order.token_buckets;
     let dead = u32::MAX;
-    let num_tokenizer_states = tokenizer.num_states() as usize;
+    let dfa = tokenizer_view.dfa();
+    let flat_trans = dfa.transitions.as_ref();
+    let num_tokenizer_states = dfa.states.len();
+    debug_assert_eq!(state_to_terminal_signature.len(), num_tokenizer_states);
+
+    let mut suffix_horizon_by_first_byte = [0usize; 256];
+    let mut max_token_len = 0usize;
+    let mut relevant_bytes = [false; 256];
+    for (byte, token_ids) in token_buckets.token_indices_by_first_byte.iter().enumerate() {
+        for &token_id in token_ids {
+            let bytes = sorted_entries[token_id].1.as_ref();
+            max_token_len = max_token_len.max(bytes.len());
+            suffix_horizon_by_first_byte[byte] =
+                suffix_horizon_by_first_byte[byte].max(bytes.len().saturating_sub(1));
+            for &token_byte in bytes {
+                relevant_bytes[token_byte as usize] = true;
+            }
+        }
+    }
+    for &token_id in &token_buckets.empty_token_indices {
+        let bytes = sorted_entries[token_id].1.as_ref();
+        max_token_len = max_token_len.max(bytes.len());
+    }
+
+    let use_remaining_horizon_quotients =
+        l1_remaining_horizon_quotients_enabled(states.len(), sorted_entries.len());
+    let horizon_maps = use_remaining_horizon_quotients.then(|| {
+        let byte_to_class = compute_byte_classes(tokenizer_view.dfa());
+        super::l2p::equivalence_analysis::state::max_length::find_canonical_state_maps_by_depth_from_labels(
+            tokenizer_view,
+            max_token_len,
+            &state_to_terminal_signature,
+            Some(&relevant_bytes),
+            Some(&byte_to_class),
+        )
+    });
+    if profile_enabled
+        && let Some(horizon_maps) = horizon_maps.as_ref()
+    {
+        let depths = [0usize, 1, 2, 3, 4, 8, 16, 32, 63, 64];
+        let counts = depths
+            .iter()
+            .filter(|&&depth| depth < horizon_maps.len())
+            .map(|&depth| {
+                let mut reps = rustc_hash::FxHashSet::default();
+                reps.extend(horizon_maps[depth].iter().copied());
+                format!("{}:{}", depth, reps.len())
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        eprintln!(
+            "[glrmask/profile][l1_terminal_horizon_quotients] states={} max_token_len={} depth_reps={}",
+            num_tokenizer_states,
+            max_token_len,
+            counts,
+        );
+    }
 
     let nonempty_first_bytes: Vec<usize> = token_buckets
         .token_indices_by_first_byte
@@ -1347,6 +1796,9 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
     let mut target_seen = vec![0u64; target_words];
     let mut unique_targets: Vec<(u8, u32)> = Vec::new();
     for &byte in &nonempty_first_bytes {
+        let canonical_state = horizon_maps
+            .as_ref()
+            .map(|maps| maps[suffix_horizon_by_first_byte[byte]].as_ref());
         for &state in states {
             let target = l1_transition(
                 flat_trans,
@@ -1354,6 +1806,7 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
                 num_tokenizer_states,
                 state as u32,
                 byte,
+                canonical_state,
             );
             if target != dead {
                 target_seen[target as usize >> 6] |= 1u64 << (target & 63);
@@ -1403,6 +1856,8 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
             flat_trans,
             transitions_by_byte,
             num_tokenizer_states,
+            horizon_maps.as_deref(),
+            suffix_horizon_by_first_byte[byte_idx],
         )
     };
     let target_profile_batches: Vec<Vec<((u8, u32), Arc<[(u32, u32, u32)]>)>> =
@@ -1518,13 +1973,19 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
         let tile_end = (tile_start + FILL_TILE).min(num_states_in);
         for (slot, &byte) in nonempty_first_bytes.iter().enumerate() {
             let col = sig_cols + slot;
+            let canonical_state = horizon_maps
+                .as_ref()
+                .map(|maps| maps[suffix_horizon_by_first_byte[byte]].as_ref());
             for &(target, profile_id) in &slot_targets[slot] {
                 profile_col[target as usize] = profile_id;
             }
             if let Some(transitions_by_byte) = transitions_by_byte {
                 let tbase = byte * num_tokenizer_states;
                 for i in tile_start..tile_end {
-                    let target = transitions_by_byte[tbase + states[i]];
+                    let target = l1_canonicalize_target(
+                        transitions_by_byte[tbase + states[i]],
+                        canonical_state,
+                    );
                     keys[i * row_width + col] = if target == dead {
                         0
                     } else {
@@ -1533,7 +1994,10 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
                 }
             } else {
                 for i in tile_start..tile_end {
-                    let target = flat_trans[states[i] * 256 + byte];
+                    let target = l1_canonicalize_target(
+                        flat_trans[states[i] * 256 + byte],
+                        canonical_state,
+                    );
                     keys[i * row_width + col] = if target == dead {
                         0
                     } else {
@@ -2087,6 +2551,8 @@ fn l1_bucket_suffix_signature_profiles_packed(
     flat_trans: &[u32],
     transitions_by_byte: Option<&[u32]>,
     num_lexer_states: usize,
+    horizon_maps: Option<&[Arc<[u32]>]>,
+    suffix_horizon: usize,
 ) -> Vec<((u8, u32), Arc<[(u32, u32, u32)]>)> {
     let profiling = compile_profile_enabled();
     let total_started_at = profiling.then(Instant::now);
@@ -2138,6 +2604,8 @@ fn l1_bucket_suffix_signature_profiles_packed(
             }
         }
         if !first_suffix_bytes.is_empty() {
+            let canonical_state = horizon_maps
+                .map(|maps| maps[suffix_horizon.saturating_sub(1)].as_ref());
             let mut fp_groups = FxHashMap::<Vec<u32>, Vec<u32>>::default();
             for &target in &walk_targets {
                 let fp: Vec<u32> = first_suffix_bytes
@@ -2149,6 +2617,7 @@ fn l1_bucket_suffix_signature_profiles_packed(
                             num_lexer_states,
                             target,
                             byte as usize,
+                            canonical_state,
                         )
                     })
                     .collect();
@@ -2178,6 +2647,18 @@ fn l1_bucket_suffix_signature_profiles_packed(
 
     let trie_started_at = profiling.then(Instant::now);
     let trie = L1PackedSuffixTrie::build(sorted_entries, token_ids, suffix_lcps);
+    let mut remaining_horizon_by_node = vec![0usize; trie.nodes.len()];
+    for node_index in (0..trie.nodes.len()).rev() {
+        let node = trie.nodes[node_index];
+        let mut remaining_horizon = 0usize;
+        for edge_offset in 0..node.edge_len as usize {
+            let child = trie.edges[node.first_edge as usize + edge_offset].child as usize;
+            remaining_horizon =
+                remaining_horizon.max(1 + remaining_horizon_by_node[child]);
+        }
+        remaining_horizon_by_node[node_index] = remaining_horizon;
+    }
+    debug_assert_eq!(remaining_horizon_by_node[0], suffix_horizon);
     let trie_ms = trie_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     let propagate_started_at = profiling.then(Instant::now);
     let mut data = vec![L1PackedProductNodeData::default(); trie.nodes.len()];
@@ -2202,6 +2683,8 @@ fn l1_bucket_suffix_signature_profiles_packed(
             let edge_index = node.first_edge as usize + edge_offset;
             let edge = trie.edges[edge_index];
             let child = edge.child as usize;
+            let canonical_state = horizon_maps
+                .map(|maps| maps[remaining_horizon_by_node[child]].as_ref());
             edge_data[edge_index].map_start = transition_maps.len() as u32;
             let child_start = states.len() as u32;
             if parent_len == 1 {
@@ -2211,6 +2694,7 @@ fn l1_bucket_suffix_signature_profiles_packed(
                     num_lexer_states,
                     states[parent_start],
                     edge.byte as usize,
+                    canonical_state,
                 );
                 if next == dead {
                     transition_maps.push(L1_NONE);
@@ -2225,6 +2709,7 @@ fn l1_bucket_suffix_signature_profiles_packed(
                     num_lexer_states,
                     states[parent_start],
                     edge.byte as usize,
+                    canonical_state,
                 );
                 let second = l1_transition(
                     flat_trans,
@@ -2232,6 +2717,7 @@ fn l1_bucket_suffix_signature_profiles_packed(
                     num_lexer_states,
                     states[parent_start + 1],
                     edge.byte as usize,
+                    canonical_state,
                 );
                 let first_index = if first == dead {
                     L1_NONE
@@ -2264,6 +2750,7 @@ fn l1_bucket_suffix_signature_profiles_packed(
                         num_lexer_states,
                         state,
                         edge.byte as usize,
+                        canonical_state,
                     );
                     if next == dead {
                         transition_maps.push(L1_NONE);
@@ -2787,6 +3274,38 @@ fn build_l1_state_to_terminal_signatures(
 
     (state_to_terminal_signature, terminal_signatures)
 }
+
+fn build_l1_flat_state_to_terminal_signatures(
+    dfa: &FlatDfa,
+) -> (Vec<u32>, Vec<Vec<u32>>) {
+    let mut signature_to_id = FxHashMap::<Vec<u32>, u32>::default();
+    signature_to_id.insert(Vec::new(), 0);
+    let mut terminal_signatures = vec![Vec::new()];
+    let mut state_to_terminal_signature = vec![0u32; dfa.states.len()];
+
+    for (state, metadata) in dfa.states.iter().enumerate() {
+        let mut signature = metadata
+            .finalizers
+            .iter()
+            .chain(&metadata.possible_future_group_ids)
+            .map(|&terminal| terminal as u32)
+            .collect::<Vec<_>>();
+        signature.sort_unstable();
+        signature.dedup();
+        let signature_id = if let Some(&id) = signature_to_id.get(&signature) {
+            id
+        } else {
+            let id = terminal_signatures.len() as u32;
+            signature_to_id.insert(signature.clone(), id);
+            terminal_signatures.push(signature);
+            id
+        };
+        state_to_terminal_signature[state] = signature_id;
+    }
+
+    (state_to_terminal_signature, terminal_signatures)
+}
+
 
 fn l1_token_signature_profile_for_state(
     start_state: u32,
@@ -4256,6 +4775,131 @@ mod generic_nfa_tests {
     use super::*;
     use crate::automata::lexer::tokenizer::arbitrary_epsilon_l1_test_tokenizer;
 
+    fn build_scalar_generic_nfa_terminal_dwa(
+        tokenizer: &Tokenizer,
+        vocab_order: &L1IdentityVocabOrder,
+        id_map: &mut InternalIdMap,
+        num_terminals: u32,
+        active_terminals: &[bool],
+    ) -> DWA {
+        let mut deferred_by_terminal = (0..num_terminals)
+            .map(|_| Vec::<(u32, Arc<RangeSetBlaze<u32>>)>::new())
+            .collect::<Vec<_>>();
+
+        for (internal_tsid, raw_state) in id_map
+            .tokenizer_states
+            .iter_representative_ids()
+            .enumerate()
+        {
+            let mut token_ids_by_terminal = FxHashMap::<u32, Vec<u32>>::default();
+            for (internal_token_id, (_, bytes)) in
+                vocab_order.token_entries_sorted.iter().enumerate()
+            {
+                let end_states = tokenizer.execute_from_state_end_only(bytes, raw_state);
+                let mut active_signature = Vec::<u32>::new();
+                for &state in &end_states {
+                    active_signature.extend(collect_active_terminal_signature(
+                        tokenizer,
+                        state,
+                        active_terminals,
+                    ));
+                }
+                active_signature.sort_unstable();
+                active_signature.dedup();
+                for terminal in active_signature {
+                    token_ids_by_terminal
+                        .entry(terminal)
+                        .or_default()
+                        .push(internal_token_id as u32);
+                }
+            }
+
+            for (terminal, token_ids) in token_ids_by_terminal {
+                let token_set = shared_rangeset(token_ids.into_iter().collect());
+                if !token_set.is_empty() {
+                    deferred_by_terminal[terminal as usize]
+                        .push((internal_tsid as u32, token_set));
+                }
+            }
+        }
+
+        merge_deferred_equivalent_tsids(id_map, &mut deferred_by_terminal);
+        let mut dwa = DWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
+        let end_state = dwa.add_state();
+        dwa.set_final_weight(end_state, Weight::all());
+        for (terminal, entries) in deferred_by_terminal.into_iter().enumerate() {
+            let weight = Weight::from_per_tsid_shared(entries);
+            if !weight.is_empty() {
+                dwa.add_transition(dwa.start_state(), terminal as i32, end_state, weight);
+            }
+        }
+        dwa
+    }
+
+    #[test]
+    fn generic_epsilon_l1_powerset_trie_matches_scalar_reference() {
+        let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
+        let vocab = Vocab::new(
+            vec![
+                (0, b"".to_vec()),
+                (1, b"a".to_vec()),
+                (2, b"aa".to_vec()),
+                (3, b"aaa".to_vec()),
+                (4, b"ab".to_vec()),
+                (5, b"b".to_vec()),
+                (6, b"ba".to_vec()),
+                (7, b"bb".to_vec()),
+                (8, b"x".to_vec()),
+            ],
+            None,
+        );
+        let active = [true, true];
+        let (optimized_id_map, order, _, _, _) =
+            build_l1_generic_nfa_fallback_id_map(&tokenizer, &vocab, None);
+        let mut optimized_id_map = optimized_id_map;
+        let mut scalar_id_map = optimized_id_map.clone();
+        let (optimized, _) = build_l1_generic_nfa_terminal_dwa(
+            &tokenizer,
+            order.as_ref(),
+            &mut optimized_id_map,
+            2,
+            &active,
+        )
+        .expect("optimized generic epsilon L1 DWA");
+        let scalar = build_scalar_generic_nfa_terminal_dwa(
+            &tokenizer,
+            order.as_ref(),
+            &mut scalar_id_map,
+            2,
+            &active,
+        );
+
+        for raw_state in 0..tokenizer.num_states() {
+            let optimized_tsid =
+                optimized_id_map.tokenizer_states.original_to_internal[raw_state as usize];
+            let scalar_tsid = scalar_id_map.tokenizer_states.original_to_internal[raw_state as usize];
+            for (&token_id, bytes) in vocab.entries.iter() {
+                let optimized_token =
+                    optimized_id_map.vocab_tokens.original_to_internal[token_id as usize];
+                let scalar_token = scalar_id_map.vocab_tokens.original_to_internal[token_id as usize];
+                for terminal in 0..2u32 {
+                    let optimized_accepts = optimized
+                        .eval_word(&[terminal as i32])
+                        .tokens_for_tsid(optimized_tsid)
+                        .contains(optimized_token);
+                    let scalar_accepts = scalar
+                        .eval_word(&[terminal as i32])
+                        .tokens_for_tsid(scalar_tsid)
+                        .contains(scalar_token);
+                    assert_eq!(
+                        optimized_accepts, scalar_accepts,
+                        "raw_state={raw_state} token={token_id} bytes={bytes:?} terminal={terminal}",
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn generic_epsilon_l1_weights_match_exact_active_state_set_signatures() {
         let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
@@ -4269,36 +4913,65 @@ mod generic_nfa_tests {
             None,
         );
         let active = [true, true];
-        let (mut id_map, order, _, _, _) =
-            build_l1_generic_nfa_id_map(&tokenizer, &vocab, None);
-        let (dwa, _) = build_l1_generic_nfa_terminal_dwa(
+
+        let (mut fallback_id_map, fallback_order, _, _, _) =
+            build_l1_generic_nfa_fallback_id_map(&tokenizer, &vocab, None);
+        let (fallback_dwa, _) = build_l1_generic_nfa_terminal_dwa(
             &tokenizer,
-            order.as_ref(),
-            &mut id_map,
+            fallback_order.as_ref(),
+            &mut fallback_id_map,
             2,
             &active,
         )
-        .expect("generic epsilon L1 fixture must produce a terminal DWA");
+        .expect("generic epsilon L1 fallback fixture must produce a terminal DWA");
+
+        let (mut exact_id_map, exact_order, _, _, exact_reuse) =
+            build_l1_generic_nfa_exact_id_map(&tokenizer, &vocab, &active);
+        let flat_trans = build_flat_transition_table(&tokenizer);
+        let (exact_dwa, _) = build_l1_terminal_dwa(
+            &tokenizer,
+            exact_order.as_ref(),
+            &mut exact_id_map,
+            2,
+            &active,
+            flat_trans.as_ref(),
+            exact_reuse.as_ref(),
+        )
+        .expect("generic epsilon L1 exact fixture must produce a terminal DWA");
 
         for raw_state in 0..tokenizer.num_states() {
-            let tsid = id_map.tokenizer_states.original_to_internal[raw_state as usize];
-            assert_ne!(tsid, u32::MAX, "raw_state={raw_state}");
+            let fallback_tsid =
+                fallback_id_map.tokenizer_states.original_to_internal[raw_state as usize];
+            let exact_tsid = exact_id_map.tokenizer_states.original_to_internal[raw_state as usize];
+            assert_ne!(fallback_tsid, u32::MAX, "fallback raw_state={raw_state}");
+            assert_ne!(exact_tsid, u32::MAX, "exact raw_state={raw_state}");
             for (&token_id, bytes) in vocab.entries.iter() {
-                let internal_token = id_map.vocab_tokens.original_to_internal[token_id as usize];
-                assert_ne!(internal_token, u32::MAX, "token={token_id}");
+                let fallback_token =
+                    fallback_id_map.vocab_tokens.original_to_internal[token_id as usize];
+                let exact_token = exact_id_map.vocab_tokens.original_to_internal[token_id as usize];
+                assert_ne!(fallback_token, u32::MAX, "fallback token={token_id}");
+                assert_ne!(exact_token, u32::MAX, "exact token={token_id}");
                 let end_states = tokenizer.execute_from_state_end_only(bytes, raw_state);
                 for terminal in 0..2u32 {
                     let expected = end_states.iter().any(|&state| {
                         collect_active_terminal_signature(&tokenizer, state, &active)
                             .contains(&terminal)
                     });
-                    let actual = dwa
+                    let fallback_actual = fallback_dwa
                         .eval_word(&[terminal as i32])
-                        .tokens_for_tsid(tsid)
-                        .contains(internal_token);
+                        .tokens_for_tsid(fallback_tsid)
+                        .contains(fallback_token);
+                    let exact_actual = exact_dwa
+                        .eval_word(&[terminal as i32])
+                        .tokens_for_tsid(exact_tsid)
+                        .contains(exact_token);
                     assert_eq!(
-                        actual, expected,
-                        "raw_state={raw_state} token={token_id} bytes={bytes:?} terminal={terminal}",
+                        fallback_actual, expected,
+                        "fallback raw_state={raw_state} token={token_id} bytes={bytes:?} terminal={terminal}",
+                    );
+                    assert_eq!(
+                        exact_actual, expected,
+                        "exact raw_state={raw_state} token={token_id} bytes={bytes:?} terminal={terminal}",
                     );
                 }
             }
@@ -4350,6 +5023,26 @@ mod packed_suffix_product_tests {
             build_l1_state_to_terminal_signatures(&tokenizer, &active_terminals);
         let flat_trans = build_flat_transition_table(&tokenizer);
         let targets: Vec<u32> = (0..tokenizer.num_states()).collect();
+        let mut relevant_bytes = [false; 256];
+        let max_token_len = sorted_entries
+            .iter()
+            .map(|(_, bytes)| {
+                for &byte in bytes.iter() {
+                    relevant_bytes[byte as usize] = true;
+                }
+                bytes.len()
+            })
+            .max()
+            .unwrap_or(0);
+        let tokenizer_view = TokenizerView::new_filtered(&tokenizer, &active_terminals);
+        let byte_to_class = compute_byte_classes(tokenizer_view.dfa());
+        let horizon_maps = super::super::l2p::equivalence_analysis::state::max_length::find_canonical_state_maps_by_depth_from_labels(
+            &tokenizer_view,
+            max_token_len,
+            &state_to_terminal_signature,
+            Some(&relevant_bytes),
+            Some(&byte_to_class),
+        );
 
         for first_byte in 0..256usize {
             let token_ids = &buckets.token_indices_by_first_byte[first_byte];
@@ -4368,6 +5061,11 @@ mod packed_suffix_product_tests {
                   &state_to_terminal_signature,
                   &flat_trans,
             );
+            let suffix_horizon = token_ids
+                .iter()
+                .map(|&token_id| sorted_entries[token_id].1.len().saturating_sub(1))
+                .max()
+                .unwrap_or(0);
             let mut actual = l1_bucket_suffix_signature_profiles_packed(
                 first_byte as u8,
                 &targets,
@@ -4377,18 +5075,45 @@ mod packed_suffix_product_tests {
                 &buckets.suffix_subtree_bytes[first_byte],
                 &buckets.suffix_first_bytes_by_bucket[first_byte],
                 buckets.has_empty_suffix_by_bucket[first_byte],
-                  &state_to_terminal_signature,
-                  &flat_trans,
-                  None,
-                  tokenizer.num_states() as usize,
+                &state_to_terminal_signature,
+                &flat_trans,
+                None,
+                tokenizer.num_states() as usize,
+                None,
+                suffix_horizon,
+            );
+            let mut quotient_actual = l1_bucket_suffix_signature_profiles_packed(
+                first_byte as u8,
+                &targets,
+                &sorted_entries,
+                token_ids,
+                &buckets.suffix_lcps_by_first_byte[first_byte],
+                &buckets.suffix_subtree_bytes[first_byte],
+                &buckets.suffix_first_bytes_by_bucket[first_byte],
+                buckets.has_empty_suffix_by_bucket[first_byte],
+                &state_to_terminal_signature,
+                &flat_trans,
+                None,
+                tokenizer.num_states() as usize,
+                Some(&horizon_maps),
+                suffix_horizon,
             );
             expected.sort_unstable_by_key(|(key, _)| *key);
             actual.sort_unstable_by_key(|(key, _)| *key);
+            quotient_actual.sort_unstable_by_key(|(key, _)| *key);
             let actual: Vec<((u8, u32), Vec<(u32, u32, u32)>)> = actual
                 .into_iter()
                 .map(|(key, profile)| (key, profile.as_ref().to_vec()))
                 .collect();
-            assert_eq!(actual, expected, "first byte {first_byte}");
+            let quotient_actual: Vec<((u8, u32), Vec<(u32, u32, u32)>)> = quotient_actual
+                .into_iter()
+                .map(|(key, profile)| (key, profile.as_ref().to_vec()))
+                .collect();
+            assert_eq!(actual, expected, "raw packed first byte {first_byte}");
+            assert_eq!(
+                quotient_actual, expected,
+                "quotiented packed first byte {first_byte}",
+            );
         }
     }
 

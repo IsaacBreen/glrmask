@@ -6,7 +6,7 @@
 
 use rayon::prelude::*;
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use super::super::compat::{FlatDfa, TokenizerView};
 
@@ -529,6 +529,93 @@ fn build_subset_mapping(states: &[usize], blocks: &[u32]) -> Vec<usize> {
     }
 
     mapping
+}
+
+fn build_full_canonical_mapping(blocks: &[u32], block_count: usize) -> Arc<[u32]> {
+    let mut representative_by_block = vec![u32::MAX; block_count];
+    let mut mapping = vec![u32::MAX; blocks.len()];
+    for (state, &block) in blocks.iter().enumerate() {
+        let slot = &mut representative_by_block[block as usize];
+        if *slot == u32::MAX {
+            *slot = state as u32;
+        }
+        mapping[state] = *slot;
+    }
+    mapping.into()
+}
+
+/// Exact finite-depth Moore quotients for caller-supplied state observations.
+///
+/// Entry `d` maps every DFA state to the smallest representative with the same
+/// observation after every active-byte string of length at most `d`.  The
+/// supplied labels are the depth-zero observations.  This is useful when a
+/// caller needs a family of progressively coarser quotients as its remaining
+/// input horizon shrinks.
+pub(crate) fn find_canonical_state_maps_by_depth_from_labels(
+    tokenizer: &TokenizerView,
+    k: usize,
+    label_ids: &[u32],
+    relevant_bytes: Option<&[bool; 256]>,
+    byte_to_class: Option<&[u8; 256]>,
+) -> Vec<Arc<[u32]>> {
+    let dfa = tokenizer.dfa();
+    let n = dfa.states.len();
+    assert_eq!(label_ids.len(), n);
+    if n == 0 {
+        return vec![Arc::from([])];
+    }
+
+    let active_bytes = active_byte_representatives(relevant_bytes, byte_to_class);
+    let mut block_count = label_ids.iter().copied().max().map_or(0usize, |id| id as usize + 1);
+    let mut blocks = label_ids.to_vec();
+    let mut maps = Vec::with_capacity(k + 1);
+    maps.push(build_full_canonical_mapping(&blocks, block_count));
+
+    if block_count == n || active_bytes.is_empty() {
+        while maps.len() <= k {
+            maps.push(Arc::clone(maps.last().expect("depth-zero canonical map")));
+        }
+        return maps;
+    }
+
+    let active_targets = build_active_transition_table(dfa, &active_bytes);
+    let width = 1 + active_bytes.len();
+    let mut signatures = vec![0u32; n * width];
+    let mut row_hashes = vec![0u64; n];
+    let mut order: Vec<usize> = (0..n).collect();
+    let mode = refine_mode();
+
+    for _depth in 1..=k {
+        let use_sorted = match mode {
+            RefineMode::Sorted => true,
+            RefineMode::Interned => false,
+            RefineMode::Auto => auto_prefers_sorted_refinement(true, n, active_bytes.len()),
+        };
+        let (next_blocks, next_count) = if use_sorted {
+            refine_once_sorted(
+                &active_targets,
+                label_ids,
+                &blocks,
+                &mut signatures,
+                &mut row_hashes,
+                &mut order,
+            )
+        } else {
+            refine_once_interned(label_ids, &blocks, &active_targets, &mut row_hashes)
+        };
+        let stable = same_partition(&blocks, block_count, &next_blocks, next_count);
+        blocks = next_blocks;
+        block_count = next_count;
+        maps.push(build_full_canonical_mapping(&blocks, block_count));
+        if stable || block_count == n {
+            while maps.len() <= k {
+                maps.push(Arc::clone(maps.last().expect("stable canonical map")));
+            }
+            break;
+        }
+    }
+
+    maps
 }
 
 pub(crate) fn find_state_equivalence_classes_kbounded(
