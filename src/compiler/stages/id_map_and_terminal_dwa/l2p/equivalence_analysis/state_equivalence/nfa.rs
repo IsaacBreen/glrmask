@@ -1,4 +1,5 @@
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -26,6 +27,7 @@ pub(crate) struct RelevantPowersetView {
     pub(crate) edge_offsets: Vec<u32>,
     pub(crate) edges: Vec<(u8, u32)>,
     pub(crate) raw_start_to_view: Arc<[u32]>,
+    pub(crate) configurations: Arc<[Box<[u32]>]>,
 }
 
 enum RepresentativeClosure {
@@ -341,6 +343,7 @@ pub(crate) fn build_relevant_powerset_view(
         edge_offsets,
         edges,
         raw_start_to_view: Arc::from(raw_start_to_view),
+        configurations: Arc::from(configs),
     }
 }
 
@@ -779,6 +782,83 @@ fn build_state_map(
     }
 }
 
+pub(crate) fn compute_state_map_from_prebuilt_sparse_powerset(
+    tokenizer: &Tokenizer,
+    initial_state_map: Option<&ManyToOneIdMap>,
+    depth: RefinementDepth,
+    raw_start_to_view: &[u32],
+    configurations: &[Box<[u32]>],
+    output_class_by_config: &[u32],
+    edge_offsets: &[u32],
+    edges: &[(u8, u32)],
+) -> ManyToOneIdMap {
+    let num_states = tokenizer.num_states() as usize;
+    assert_eq!(raw_start_to_view.len(), num_states);
+    assert!(output_class_by_config.len() >= configurations.len());
+    assert!(edge_offsets.len() > configurations.len());
+
+    let (candidate_members, candidate_representatives, raw_to_candidate) =
+        candidate_partition(num_states, initial_state_map);
+    let num_candidates = candidate_representatives.len();
+    let start_configs = candidate_representatives
+        .iter()
+        .map(|&state| raw_start_to_view[state])
+        .collect::<Vec<_>>();
+    let mut classes = start_configs
+        .iter()
+        .map(|&config| output_class_by_config[config as usize])
+        .collect::<Vec<_>>();
+
+    let round_limit = match depth {
+        RefinementDepth::Stable => num_candidates,
+        RefinementDepth::Bounded(rounds) => rounds,
+    };
+    let mut class_set_by_config = vec![0u32; configurations.len()];
+    for _ in 0..round_limit {
+        let mut class_set_ids = FxHashMap::<SmallVec<[u32; 4]>, u32>::default();
+        for (config_id, config) in configurations.iter().enumerate() {
+            let mut class_set = SmallVec::<[u32; 4]>::new();
+            class_set.extend(
+                config
+                    .iter()
+                    .map(|&raw| classes[raw_to_candidate[raw as usize]]),
+            );
+            class_set.sort_unstable();
+            class_set.dedup();
+            let next = class_set_ids.len() as u32;
+            class_set_by_config[config_id] = *class_set_ids.entry(class_set).or_insert(next);
+        }
+
+        let mut signatures = FxHashMap::<SmallVec<[u32; 8]>, u32>::default();
+        let mut next_classes = vec![0u32; num_candidates];
+        for candidate in 0..num_candidates {
+            let config = start_configs[candidate] as usize;
+            let mut signature = SmallVec::<[u32; 8]>::new();
+            signature.push(classes[candidate]);
+            let edge_start = edge_offsets[config] as usize;
+            let edge_end = edge_offsets[config + 1] as usize;
+            for &(byte, target) in &edges[edge_start..edge_end] {
+                signature.push(byte as u32 + 1);
+                signature.push(class_set_by_config[target as usize] + 1);
+            }
+            let next = signatures.len() as u32;
+            next_classes[candidate] = *signatures.entry(signature).or_insert(next);
+        }
+        let stable = same_partition(&classes, &next_classes);
+        classes = next_classes;
+        if stable {
+            break;
+        }
+    }
+
+    build_state_map(
+        &candidate_members,
+        &candidate_representatives,
+        &classes,
+        num_states,
+    )
+}
+
 pub(crate) fn compute_state_map(
     tokenizer: &Tokenizer,
     relevant_bytes: &[bool; 256],
@@ -1006,6 +1086,47 @@ mod tests {
         assert!(same_partition(
             &direct.original_to_internal,
             &from_identity.original_to_internal,
+        ));
+    }
+
+    #[test]
+    fn prebuilt_sparse_powerset_refinement_matches_fresh_nfa_refinement() {
+        let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
+        let mut relevant = [false; 256];
+        relevant[b'a' as usize] = true;
+        relevant[b'b' as usize] = true;
+        let direct = compute_state_map(
+            &tokenizer,
+            &relevant,
+            None,
+            None,
+            RefinementDepth::Stable,
+        );
+        let view = build_relevant_powerset_view(&tokenizer, &relevant, None, None);
+        let mut output_ids = FxHashMap::<Vec<u64>, u32>::default();
+        let output_class_by_config = view
+            .configurations
+            .iter()
+            .map(|config| {
+                let observation = observation_words(&tokenizer, config, None);
+                let next = output_ids.len() as u32;
+                *output_ids.entry(observation).or_insert(next)
+            })
+            .collect::<Vec<_>>();
+        let reused = compute_state_map_from_prebuilt_sparse_powerset(
+            &tokenizer,
+            None,
+            RefinementDepth::Stable,
+            &view.raw_start_to_view,
+            &view.configurations,
+            &output_class_by_config,
+            &view.edge_offsets,
+            &view.edges,
+        );
+
+        assert!(same_partition(
+            &direct.original_to_internal,
+            &reused.original_to_internal,
         ));
     }
 }

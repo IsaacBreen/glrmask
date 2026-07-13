@@ -438,6 +438,8 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         ti_round_count,
         ti_additional_merged_members,
         ti_raw_observations,
+        ti_restricted_observation_seed,
+        ti_restricted_observation_seed_ms,
     ) =
         if l2p_terminal_interchangeability_enabled_for_partition(partition_label) {
             let mut active = active_terminals.to_vec();
@@ -484,6 +486,12 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             let additional_merged_members = first_round_class_count
                 .unwrap_or(classes.len())
                 .saturating_sub(classes.len());
+            let restricted_observation_seed_started_at = ti_profile_timing.then(Instant::now);
+            let restricted_observation_seed = discovery_context
+                .reusable_nfa_restricted_observation_state_map(tokenizer, initial_state_map);
+            let restricted_observation_seed_ms = restricted_observation_seed_started_at
+                .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+                .unwrap_or(0.0);
             let raw_observations = discovery_context
                 .final_raw_observation_ids(tokenizer.num_states() as usize);
             (
@@ -492,9 +500,11 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                 round_count,
                 additional_merged_members,
                 raw_observations,
+                restricted_observation_seed,
+                restricted_observation_seed_ms,
             )
         } else {
-            (None, None, 0, 0, None)
+            (None, None, 0, 0, None, None, 0.0)
         };
     let ti_discovery_ms = ti_discovery_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
@@ -579,7 +589,9 @@ let strict_reference = reference_terminal_expansion
     let token_position_partition_for_analysis = matches!(partition_label, "p1" | "p7" | "p8")
         .then_some(token_position_partition.as_ref())
         .flatten();
-    let equivalence_initial_state_map = initial_state_map;
+    let equivalence_initial_state_map = ti_restricted_observation_seed
+        .as_ref()
+        .or(initial_state_map);
 
     // ---- Step 1: Equivalence analysis (raw tokenizer state IDs) ----
     let id_map_started_at = Instant::now();
@@ -1045,7 +1057,7 @@ let strict_reference = reference_terminal_expansion
             ti_post_dwa_total_ms,
         );
         eprintln!(
-            "[glrmask/profile][terminal_interchangeability_plan] partition={} ti_active={} strict_reference={} rounds={} classes={} additional_merged_members={} discovery_ms={:.3} transport_modes_ms={:.3} coalesced_disallowed_follows_ms={:.3} canonicalize_transport_modes_ms={:.3} transport_coordinate_quotient_ms={:.3}",
+            "[glrmask/profile][terminal_interchangeability_plan] partition={} ti_active={} strict_reference={} rounds={} classes={} additional_merged_members={} discovery_ms={:.3} restricted_observation_seed_ms={:.3} transport_modes_ms={:.3} coalesced_disallowed_follows_ms={:.3} canonicalize_transport_modes_ms={:.3} transport_coordinate_quotient_ms={:.3}",
             partition_label,
             reference_terminal_expansion,
             strict_reference,
@@ -1053,6 +1065,7 @@ let strict_reference = reference_terminal_expansion
             terminal_partition.as_ref().map_or(0, |partition| partition.len()),
             ti_additional_merged_members,
             ti_discovery_ms,
+            ti_restricted_observation_seed_ms,
             ti_transport_modes_ms,
             ti_coalesced_disallowed_follows_ms,
             ti_canonicalize_transport_modes_ms,
