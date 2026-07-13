@@ -1677,6 +1677,21 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> VirtualStack<T, A> {
         self.values.len() + self.next.segments_len() + if self.pending_top.is_some() { 1 } else { 0 }
     }
 
+    /// Whether the non-segment floor below this virtual stack still contains
+    /// one or more stack values. A virtual stack only materializes the linear
+    /// Segment prefix above that floor; guarded operations that need to inspect
+    /// deeper values must fall back to the branch-aware GSS representation.
+    #[inline]
+    pub(crate) fn has_hidden_floor_values(&self) -> bool {
+        let mut next = &self.next;
+        loop {
+            match &**next {
+                Lower::Segment(segment) => next = &segment.next,
+                Lower::General { children, .. } => return !children.is_empty(),
+            }
+        }
+    }
+
     /// Materialize the virtual stack back into a GSS.
     pub fn into_gss(mut self) -> LeveledGSS<T, A> {
         self.flush_pending();
