@@ -47,6 +47,11 @@ fn env_flag_enabled(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn assert_row_presence_exact_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled("GLRMASK_ASSERT_ROW_PRESENCE_EXACT"))
+}
+
 fn guarded_stack_to_stacks_fallback_disabled() -> bool {
     static DISABLED: OnceLock<bool> = OnceLock::new();
     *DISABLED.get_or_init(|| env_flag_enabled("GLRMASK_DISABLE_GUARDED_STACK_TO_STACKS_FALLBACK"))
@@ -2346,10 +2351,21 @@ pub(crate) fn stack_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: T
         return exact_admission_may_advance_on(table, stack, token);
     }
 
-    stack
+    let admitted = stack
         .peek_values()
         .into_iter()
-        .any(|state| table.advance_row_allows(state, token))
+        .any(|state| table.advance_row_allows(state, token));
+    if assert_row_presence_exact_enabled() {
+        let simulated = exact_admission_may_advance_on(table, stack, token);
+        assert_eq!(
+            admitted,
+            simulated,
+            "RowPresenceExact mismatch for terminal {token}: construction={:?} stacks={:?}",
+            table.construction,
+            stack.to_stacks(),
+        );
+    }
+    admitted
 }
 
 fn exact_admission_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> bool {
@@ -3424,10 +3440,22 @@ pub(crate) fn stack_may_advance_on_any(
         return exact_admission_may_advance_on_any(table, stack, terminals);
     }
 
-    stack
+    let admitted = stack
         .peek_values()
         .into_iter()
-        .any(|state| table.advance_row_intersects(state, terminals))
+        .any(|state| table.advance_row_intersects(state, terminals));
+    if assert_row_presence_exact_enabled() {
+        let simulated = exact_admission_may_advance_on_any(table, stack, terminals);
+        assert_eq!(
+            admitted,
+            simulated,
+            "RowPresenceExact mismatch for terminal set {:?}: construction={:?} stacks={:?}",
+            terminals.iter_ones().collect::<Vec<_>>(),
+            table.construction,
+            stack.to_stacks(),
+        );
+    }
+    admitted
 }
 
 pub(crate) fn stacks_finished(table: &GLRTable, stack: &ParserGSS) -> bool {
