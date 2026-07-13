@@ -57,15 +57,6 @@ fn template_advance_enabled() -> bool {
         .get_or_init(|| std::env::var_os("GLRMASK_DISABLE_TEMPLATE_DFA_ADVANCE").is_none())
 }
 
-#[inline]
-fn template_advance_available(constraint: &Constraint, terminal: u32) -> bool {
-    template_advance_enabled()
-        && constraint
-            .template_dfas_by_terminal
-            .get(terminal as usize)
-            .is_some_and(Option::is_some)
-}
-
 fn validate_template_advance_enabled() -> bool {
     *VALIDATE_TEMPLATE_ADVANCE_ENABLED
         .get_or_init(|| std::env::var_os("GLRMASK_VALIDATE_TEMPLATE_DFA_ADVANCE").is_some())
@@ -1099,7 +1090,7 @@ fn commit_bytes_fast_path(
 
     // Ultra-fast path: single Interface, empty accs, no end_state, pure shift.
     // Inlines the entire advance + prune + fuse to avoid all function call overhead.
-    if all_accs_empty && !template_advance_available(constraint, terminal) {
+    if all_accs_empty && !template_advance_enabled() {
         if let Some(top_state) = gss.single_exclusive_top_value() {
             if let Some(action) = constraint.table.action(top_state, terminal) {
                 if let Some(shifted) =
@@ -1159,7 +1150,7 @@ fn commit_bytes_fast_path(
 
     // The terminal and tokenizer end-state continuations are independent.
     // Preserve either branch if it produces viable parser state.
-    let advanced = if !template_advance_available(constraint, terminal)
+    let advanced = if !template_advance_enabled()
         && let Some(top_state) = pruned_gss.single_exclusive_top_value()
         && let Some(action) = constraint.table.action(top_state, terminal)
         && let Some(advanced) = apply_single_top_action_fast(
@@ -1262,7 +1253,7 @@ fn commit_bytes_full_width_fast_path(
         };
 
         if let Some(terminal) = terminal {
-            let advanced = if !template_advance_available(constraint, terminal)
+            let advanced = if !template_advance_enabled()
                 && let Some(top_state) = pruned_gss.single_exclusive_top_value()
                 && let Some(action) = constraint.table.action(top_state, terminal)
                 && let Some(advanced) =
@@ -1413,7 +1404,7 @@ fn commit_bytes_small_queue_fast_path(
                       continue;
                   }
 
-                  let advanced = if !template_advance_available(constraint, matched.terminal_id)
+                  let advanced = if !template_advance_enabled()
                       && let Some(top_state) = gss_at_offset.single_exclusive_top_value()
                       && let Some(action) = constraint.table.action(top_state, matched.terminal_id)
                       && let Some(advanced) = apply_single_top_action_fast(
@@ -1744,7 +1735,7 @@ fn commit_bytes_direct_linear_fast_path(
             }
             if let Some(action) = carried_action {
                 let apply_action_start = profile.as_ref().map(|_| std::time::Instant::now());
-                if !template_advance_available(constraint, step.terminal)
+                if !template_advance_enabled()
                     && let Some(stack) = carried_stack.as_mut()
                 {
                     shifted_carried_stack =
@@ -1785,7 +1776,7 @@ fn commit_bytes_direct_linear_fast_path(
                 }
             }
             let advance_start = profile.as_ref().map(|_| std::time::Instant::now());
-            let advanced = if !template_advance_available(constraint, step.terminal)
+            let advanced = if !template_advance_enabled()
                 && let Some(top_state) = gss.single_exclusive_top_value()
                 && let Some(action) = constraint.table.action(top_state, step.terminal)
                 && let Some(advanced) =
@@ -1970,7 +1961,7 @@ fn commit_bytes_fast_path_profiled(
     let all_accs_empty = no_end_state
         && gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty());
 
-    if all_accs_empty && !template_advance_available(constraint, terminal) {
+    if all_accs_empty && !template_advance_enabled() {
         if let Some(top_state) = gss.single_exclusive_top_value() {
             if let Some(Action::Shift(target, is_replace)) = constraint.table.action(top_state, terminal) {
                 let advance_start = Instant::now();
@@ -2017,7 +2008,7 @@ fn commit_bytes_fast_path_profiled(
                 profile.fast_path_tokenizer_exec_ns = profile.exec_ns;
                 return Some(Ok(()));
             }
-            if !template_advance_available(constraint, terminal)
+            if !template_advance_enabled()
                 && let Some(Action::StackShifts(shifts)) = constraint.table.action(top_state, terminal)
             {
                 let advance_start = Instant::now();
@@ -2825,7 +2816,7 @@ fn commit_bytes_linear_fast_path(
 
         if !ignored {
             let mut shifted_carried_stack = false;
-            if !template_advance_available(constraint, terminal)
+            if !template_advance_enabled()
                 && let Some(stack) = carried_stack.as_mut()
                 && let Some(top_state) = stack.top().copied()
                 && let Some(Action::Shift(target, is_replace)) = constraint.table.action(top_state, terminal)
@@ -2876,7 +2867,7 @@ fn commit_bytes_linear_fast_path(
                 gss = stack.into_gss();
             }
 
-            let fast_advanced = if !template_advance_available(constraint, terminal)
+            let fast_advanced = if !template_advance_enabled()
                 && let Some(top_state) = gss.single_exclusive_top_value()
                 && let Some(action) = constraint.table.action(top_state, terminal)
             {
@@ -3024,7 +3015,7 @@ fn commit_bytes_linear_fast_path_profiled(
 
         if !ignored {
             let fast_start = Instant::now();
-            let fast_advanced = if !template_advance_available(constraint, terminal)
+            let fast_advanced = if !template_advance_enabled()
                 && let Some(top_state) = gss.single_exclusive_top_value()
                 && let Some(action) = constraint.table.action(top_state, terminal)
                 && let Some(advanced) =
