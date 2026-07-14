@@ -27,11 +27,18 @@ use super::shared::{
     tokenizer_group_count,
 };
 use super::state::fast as state_equivalence_analysis;
+use super::vocab::common_atom as common_atom_preclass;
 use super::vocab::fast as vocab_equivalence_analysis;
 
 // Rebuilding the selected terminal languages is a fixed-cost semantic
 // prequotient. Restrict it to vocabularies large enough to amortize that build.
 const ACTIVE_LANGUAGE_BYTE_DEDUP_MIN_TOKENS: usize = 50_000;
+
+fn common_atom_preclass_strict_reference_enabled(partition_label: &str) -> bool {
+    std::env::var("GLRMASK_L2P_COMMON_ATOM_PRECLASS_STRICT_REFERENCE")
+        .ok()
+        .is_some_and(|value| value == "1" || value == partition_label)
+}
 
 fn deduplicate_tokens_by_byte_class<'a, S: AsRef<[u8]>>(
     tokens: &'a [S],
@@ -1909,7 +1916,73 @@ fn analyze_equivalences_impl(
         }
         let (precomputed_vocab, state_tokens, vocab_equiv_ms) = if vocab_first {
             let vocab_equiv_started_at = Instant::now();
-            let precomputed_vocab =
+            let precomputed_vocab = if let Some(preclasses) =
+                common_atom_preclass::try_find_common_atom_preclasses(
+                    tokenizer,
+                    active_groups,
+                    &dedup.representative_token_bytes,
+                )
+            {
+                let representative_tokens =
+                    preclasses.representative_tokens(&dedup.representative_token_bytes);
+                let exact_started_at = Instant::now();
+                let (representative_classes, build_ms) =
+                    vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter_profiled(
+                        analysis_view,
+                        &representative_tokens,
+                        &query_view_states,
+                        effective_disallowed,
+                        Some(&byte_to_class),
+                        None,
+                        None,
+                        None,
+                    );
+                let exact_scan_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
+                let classes = preclasses.expand_exact_classes(&representative_classes);
+                if common_atom_preclass_strict_reference_enabled(partition_label) {
+                    let strict_started_at = Instant::now();
+                    let (strict_classes, _) =
+                        vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter_profiled(
+                            analysis_view,
+                            &dedup.representative_token_bytes,
+                            &query_view_states,
+                            effective_disallowed,
+                            Some(&byte_to_class),
+                            None,
+                            None,
+                            None,
+                        );
+                    assert_eq!(
+                        classes, strict_classes,
+                        "common-atom vocabulary preclasses changed exact classes in {partition_label}",
+                    );
+                    eprintln!(
+                        "[glrmask/profile][l2p_vocab_preclass_strict_reference] partition={} full_exact_classes={} compare_ms={:.3} differs=false",
+                        partition_label,
+                        strict_classes.len(),
+                        strict_started_at.elapsed().as_secs_f64() * 1000.0,
+                    );
+                }
+                if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some()
+                    || std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+                    || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+                {
+                    eprintln!(
+                        "[glrmask/profile][l2p_vocab_preclass] partition={} kind=common_atom active_terminals={} atom_states={} tokens={} preclasses={} final_exact_classes={} build_ms={:.3} classify_ms={:.3} exact_scan_ms={:.3} exact_dfa_build_ms={:.3}",
+                        partition_label,
+                        preclasses.active_terminals,
+                        preclasses.atom_states,
+                        dedup.representative_token_bytes.len(),
+                        preclasses.len(),
+                        classes.len(),
+                        preclasses.build_ms,
+                        preclasses.classify_ms,
+                        exact_scan_ms,
+                        build_ms,
+                    );
+                }
+                (classes, build_ms)
+            } else {
                 vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter_profiled(
                     analysis_view,
                     &dedup.representative_token_bytes,
@@ -1919,7 +1992,8 @@ fn analyze_equivalences_impl(
                     None,
                     None,
                     None,
-                );
+                )
+            };
             let vocab_equiv_ms = vocab_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
             let state_tokens = representative_tokens_for_vocab_classes(
                 &precomputed_vocab.0,

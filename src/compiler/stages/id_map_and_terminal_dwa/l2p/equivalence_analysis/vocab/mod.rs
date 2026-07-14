@@ -4,3 +4,4 @@
 //! sibling modules under `equivalence_analysis`.
 
 pub mod fast;
+pub(crate) mod common_atom;
