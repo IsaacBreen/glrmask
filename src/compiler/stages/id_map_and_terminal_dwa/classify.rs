@@ -4,7 +4,7 @@ use crate::automata::lexer::compile::build_regex;
 use crate::automata::lexer::Lexer;
 use rustc_hash::FxHashMap;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::ds::bitset::BitSet;
@@ -40,6 +40,66 @@ pub struct SharedClassifyBytesets {
     representative_future_terminal_by_state: Vec<u32>,
     words_per_terminal_set: usize,
     active_route_setup_cache: Mutex<HashMap<(BitSet, usize), Arc<ActiveL2pRouteSetup>>>,
+    candidate_terminal_path_dfa_cache:
+        Mutex<HashMap<BitSet, Arc<OnceLock<Arc<CandidateTerminalPathDfa>>>>>,
+}
+
+struct CandidateTerminalPathDfa {
+    candidate_ids: Arc<[usize]>,
+    tokenizer: Arc<Tokenizer>,
+    flat_trans: Arc<[u32]>,
+    finalizer_masks: Arc<[u64]>,
+    future_masks: Arc<[u64]>,
+    words_per_mask: usize,
+}
+
+impl CandidateTerminalPathDfa {
+    fn build(tokenizer: &Tokenizer, candidates: &BitSet) -> Self {
+        let candidate_ids = candidates.iter().collect::<Vec<_>>();
+        let exprs = Arc::<[crate::automata::lexer::ast::Expr]>::from(
+            candidate_ids
+                .iter()
+                .map(|&terminal| {
+                    tokenizer
+                        .terminal_expr(terminal as u32)
+                        .unwrap_or_else(|| {
+                            panic!("missing terminal expression for terminal {terminal}")
+                        })
+                        .clone()
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        let candidate_tokenizer = Arc::new(build_regex(exprs.as_ref()).into_tokenizer(
+            candidate_ids.len() as u32,
+            Some(Arc::clone(&exprs)),
+        ));
+        let words_per_mask = candidate_ids.len().div_ceil(64);
+        let state_count = candidate_tokenizer.num_states() as usize;
+        let flat_trans: Arc<[u32]> =
+            super::l1::build_flat_transition_table(&candidate_tokenizer).into();
+        let mut finalizer_masks = vec![0u64; state_count * words_per_mask];
+        let mut future_masks = vec![0u64; state_count * words_per_mask];
+        for state in 0..state_count {
+            let base = state * words_per_mask;
+            finalizer_masks[base..base + words_per_mask].copy_from_slice(
+                &candidate_tokenizer.matched_terminal_bitset(state as u32).words()
+                    [..words_per_mask],
+            );
+            future_masks[base..base + words_per_mask].copy_from_slice(
+                &candidate_tokenizer.possible_future_terminals(state as u32).words()
+                    [..words_per_mask],
+            );
+        }
+        Self {
+            candidate_ids: candidate_ids.into(),
+            tokenizer: candidate_tokenizer,
+            flat_trans,
+            finalizer_masks: finalizer_masks.into(),
+            future_masks: future_masks.into(),
+            words_per_mask,
+        }
+    }
 }
 
 impl SharedClassifyBytesets {
@@ -58,6 +118,24 @@ impl SharedClassifyBytesets {
                     Arc::clone(&self.future_states_by_terminal),
                 )
             })
+    }
+
+    fn candidate_terminal_path_dfa(
+        &self,
+        tokenizer: &Tokenizer,
+        candidates: &BitSet,
+    ) -> Arc<CandidateTerminalPathDfa> {
+        let slot = {
+            let mut cache = self.candidate_terminal_path_dfa_cache.lock().unwrap();
+            Arc::clone(
+                cache
+                    .entry(candidates.clone())
+                    .or_insert_with(|| Arc::new(OnceLock::new())),
+            )
+        };
+        Arc::clone(
+            slot.get_or_init(|| Arc::new(CandidateTerminalPathDfa::build(tokenizer, candidates))),
+        )
     }
 }
 
@@ -474,6 +552,8 @@ impl SharedClassifyBytesets {
             representative_future_terminal_by_state,
             words_per_terminal_set,
             active_route_setup_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+            candidate_terminal_path_dfa_cache:
+                std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 }
@@ -732,6 +812,7 @@ pub(crate) fn classify_terminal_path_lengths(
             vocab,
             disallowed_follows,
             &heuristic_two_plus,
+            bytesets,
         )
     };
     if std::env::var_os("GLRMASK_TERMINAL_PATH_STRICT_REFERENCE").is_some() {
@@ -2044,31 +2125,20 @@ fn exact_terminal_path_two_plus_candidate_dfa(
     vocab: &Vocab,
     disallowed_follows: &BTreeMap<u32, BitSet>,
     candidates: &BitSet,
+    shared_bytesets: &SharedClassifyBytesets,
 ) -> ExactTerminalPathTwoPlus {
     let total_started_at = std::time::Instant::now();
-    let candidate_ids = candidates.iter().collect::<Vec<_>>();
-    if candidate_ids.is_empty() {
+    if candidates.is_empty() {
         return ExactTerminalPathTwoPlus {
             two_plus: BitSet::new(candidates.len()),
             witnesses: vec![None; candidates.len()],
         };
     }
     let compile_started_at = std::time::Instant::now();
-    let exprs = Arc::<[crate::automata::lexer::ast::Expr]>::from(candidate_ids
-        .iter()
-        .map(|&terminal| {
-            tokenizer
-                .terminal_expr(terminal as u32)
-                .unwrap_or_else(|| panic!("missing terminal expression for terminal {terminal}"))
-                .clone()
-        })
-        .collect::<Vec<_>>()
-        .into_boxed_slice());
-    let candidate_tokenizer = build_regex(exprs.as_ref()).into_tokenizer(
-        candidate_ids.len() as u32,
-        Some(Arc::clone(&exprs)),
-    );
+    let candidate_dfa = shared_bytesets.candidate_terminal_path_dfa(tokenizer, candidates);
     let compile_ms = compile_started_at.elapsed().as_secs_f64() * 1000.0;
+    let candidate_ids = candidate_dfa.candidate_ids.as_ref();
+    let candidate_tokenizer = candidate_dfa.tokenizer.as_ref();
 
     let mut local_disallowed = BTreeMap::<u32, BitSet>::new();
     for (local_1, &terminal_1) in candidate_ids.iter().enumerate() {
@@ -2087,7 +2157,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
     }
     let analyze_started_at = std::time::Instant::now();
     let candidate_count = candidate_ids.len();
-    let words_per_mask = candidate_count.div_ceil(64);
+    let words_per_mask = candidate_dfa.words_per_mask;
     let total_splits = vocab
         .entries
         .values()
@@ -2117,21 +2187,9 @@ fn exact_terminal_path_two_plus_candidate_dfa(
     let prefix_ms = prefix_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let suffix_started_at = std::time::Instant::now();
-    let state_count = candidate_tokenizer.num_states() as usize;
-    let flat_trans = super::l1::build_flat_transition_table(&candidate_tokenizer);
-    let mut finalizer_masks = vec![0u64; state_count * words_per_mask];
-    let mut future_masks = vec![0u64; state_count * words_per_mask];
-    for state in 0..state_count {
-        let base = state * words_per_mask;
-        finalizer_masks[base..base + words_per_mask].copy_from_slice(
-            &candidate_tokenizer.matched_terminal_bitset(state as u32).words()
-                [..words_per_mask],
-        );
-        future_masks[base..base + words_per_mask].copy_from_slice(
-            &candidate_tokenizer.possible_future_terminals(state as u32).words()
-                [..words_per_mask],
-        );
-    }
+    let flat_trans = candidate_dfa.flat_trans.as_ref();
+    let finalizer_masks = candidate_dfa.finalizer_masks.as_ref();
+    let future_masks = candidate_dfa.future_masks.as_ref();
     let mut suffix_viable_masks = vec![0u64; total_splits * words_per_mask];
     let reset_state = candidate_tokenizer.initial_state_id();
     if words_per_mask == 1 {
@@ -3500,6 +3558,7 @@ mod tests {
             representative_future_terminal_by_state: Vec::new(),
             words_per_terminal_set: 0,
             active_route_setup_cache: Mutex::new(HashMap::new()),
+            candidate_terminal_path_dfa_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -3734,6 +3793,7 @@ mod tests {
             &vocab,
             &disallowed,
             &active,
+            &bytesets,
         );
         let reference = exact_terminal_path_two_plus(
             &tokenizer,
@@ -3782,6 +3842,7 @@ mod tests {
             &vocab,
             &disallowed,
             &active,
+            &bytesets,
         );
         let reference = exact_terminal_path_two_plus(
             &tokenizer,

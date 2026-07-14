@@ -491,12 +491,15 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                 .as_ref()
                 .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
                 .unwrap_or(0.0);
-            let restricted_observation_seed_started_at = ti_profile_timing.then(Instant::now);
-            let restricted_observation_seed = discovery_context
-                .reusable_nfa_restricted_observation_state_map(tokenizer, initial_state_map);
-            let restricted_observation_seed_ms = restricted_observation_seed_started_at
-                .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
-                .unwrap_or(0.0);
+            // TI discovery and the ordinary L2P equivalence pipeline both have
+            // exact restricted-observation refinements. Building a second
+            // stable NFA state map here is only an optional pre-seed; the
+            // pipeline still performs its own exact refinement afterwards.
+            // On large epsilon-NFA partitions that duplicate fixed-point pass
+            // can dominate the entire build, so leave the pipeline to compute
+            // the quotient once in the representation it is about to consume.
+            let restricted_observation_seed = None;
+            let restricted_observation_seed_ms = 0.0;
             let raw_observations = discovery_context
                 .final_raw_observation_ids(tokenizer.num_states() as usize);
             (
