@@ -829,8 +829,16 @@ impl Constraint {
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         self.dynamic_mask_vocab = dynamic_mask_vocab;
         let continuation_partitions_started_at = profile.then(std::time::Instant::now);
-        self.dynamic_mask_vocab
-            .prebuild_continuation_partitions(&self.tokenizer, self.mask_len());
+        let prebuild_dynamic_continuations = std::env::var("GLRMASK_PREBUILD_DYNAMIC_CONTINUATION_PARTITIONS")
+            .map(|value| {
+                let normalized = value.trim().to_ascii_lowercase();
+                !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
+            })
+            .unwrap_or(false);
+        if prebuild_dynamic_continuations {
+            self.dynamic_mask_vocab
+                .prebuild_continuation_partitions(&self.tokenizer, self.mask_len());
+        }
         let continuation_partitions_ms = continuation_partitions_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         self.internal_token_buf_masks = internal_token_buf_masks;
