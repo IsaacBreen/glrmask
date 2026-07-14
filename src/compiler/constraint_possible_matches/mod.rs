@@ -26,6 +26,7 @@ use crate::ds::weight::{shared_rangeset, Weight};
 use crate::grammar::flat::TerminalID;
 use crate::vocab::VocabDerivedArtifact;
 use crate::Vocab;
+use crate::runtime::{DynamicMaskTrie, DynamicMaskVocab};
 
 pub(crate) mod collector;
 
@@ -64,6 +65,14 @@ pub(crate) struct RuntimeDynamicMaskVocabArtifacts {
     pub(crate) trie: Arc<VocabPrefixTree>,
     pub(crate) token_aliases: Arc<Vec<Vec<u32>>>,
 }
+
+#[derive(Debug, Clone)]
+struct PreparedDynamicMaskVocabArtifacts {
+    trie: Arc<DynamicMaskTrie>,
+    token_aliases: Arc<Vec<Vec<u32>>>,
+}
+
+impl VocabDerivedArtifact for PreparedDynamicMaskVocabArtifacts {}
 
 #[derive(Debug, Clone)]
 struct OrderedVocab {
@@ -2199,6 +2208,33 @@ fn runtime_dynamic_vocab_artifacts(
         trie: Arc::clone(&artifacts.trie),
         token_aliases: Arc::clone(&artifacts.ordered_vocab.ordered_to_originals),
     }
+}
+
+pub(crate) fn runtime_dynamic_vocab_artifacts_for_vocab(
+    vocab: &Vocab,
+) -> RuntimeDynamicMaskVocabArtifacts {
+    let (artifacts, profile) = get_ordered_vocab_trie_artifacts_for_vocab(vocab);
+    emit_ordered_vocab_cache_profile(profile);
+    runtime_dynamic_vocab_artifacts(&artifacts)
+}
+
+pub(crate) fn prepared_dynamic_mask_vocab_for_vocab(vocab: &Vocab) -> DynamicMaskVocab {
+    if let Some(prepared) = vocab.vocab_derived_cache_get::<PreparedDynamicMaskVocabArtifacts>() {
+        return DynamicMaskVocab::from_prebuilt_ordered(
+            Arc::clone(&prepared.trie),
+            Arc::clone(&prepared.token_aliases),
+        );
+    }
+    let source = runtime_dynamic_vocab_artifacts_for_vocab(vocab);
+    let prepared = Arc::new(PreparedDynamicMaskVocabArtifacts {
+        trie: Arc::new(DynamicMaskTrie::from_vocab_prefix_tree(source.trie.as_ref())),
+        token_aliases: source.token_aliases,
+    });
+    vocab.vocab_derived_cache_set(Arc::clone(&prepared));
+    DynamicMaskVocab::from_prebuilt_ordered(
+        Arc::clone(&prepared.trie),
+        Arc::clone(&prepared.token_aliases),
+    )
 }
 
 fn compute_constraint_possible_matches_with_artifacts(

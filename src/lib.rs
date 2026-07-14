@@ -36,6 +36,10 @@ pub(crate) fn prepare_vocab_for_compile(vocab: &Vocab) {
     compiler::compile::prepare_vocab_for_compile(vocab);
 }
 
+pub(crate) fn prepare_dynamic_vocab_for_compile(vocab: &Vocab) {
+    compiler::compile::prepare_dynamic_vocab_for_compile(vocab);
+}
+
 /// Build (and, if configured, start the keepalive for) the terminal
 /// interchangeability certification thread pool ahead of first use.
 ///
@@ -298,11 +302,16 @@ pub mod __private {
 
     pub trait VocabExt {
         fn prepare_for_compile(&self);
+        fn prepare_for_dynamic_compile(&self);
     }
 
     impl VocabExt for Vocab {
         fn prepare_for_compile(&self) {
             crate::prepare_vocab_for_compile(self);
+        }
+
+        fn prepare_for_dynamic_compile(&self) {
+            crate::prepare_dynamic_vocab_for_compile(self);
         }
     }
 }

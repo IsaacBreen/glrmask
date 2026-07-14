@@ -286,11 +286,14 @@ impl Constraint {
 
     pub(crate) fn rebuild_dynamic_runtime_caches(&mut self) {
         self.table.rebuild_guarded_shift_index();
-        if !self.dynamic_mask_vocab.is_initialized() {
+        if !self.dynamic_mask_vocab.is_initialized()
+            && !self.dynamic_mask_vocab.materialize_pending_source()
+        {
             self.dynamic_mask_vocab = self.build_dynamic_mask_vocab();
         }
-        self.dynamic_mask_vocab
-            .prebuild_continuation_partitions(&self.tokenizer, self.mask_len());
+        // DynamicConstraint can traverse the vocabulary trie exactly without
+        // eagerly prebuilding continuation partitions. Those partitions are an
+        // optional runtime acceleration, not a correctness requirement.
         self.tokenizer_fast_transitions = self.compute_tokenizer_fast_transitions();
     }
 

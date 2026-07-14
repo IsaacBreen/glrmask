@@ -2097,10 +2097,12 @@ pub(crate) fn compile_dynamic_owned_with_table_construction(
     default_table_construction: GlrTableConstruction,
 ) -> DynamicConstraint {
     let prepared_grammar = prepare_grammar_transforms_only(grammar);
+    let dynamic_mask_vocab = cpm::prepared_dynamic_mask_vocab_for_vocab(vocab);
     run_with_compile_thread_pool(|| {
         let analyzed_grammar = AnalyzedGrammar::from_grammar_def(&prepared_grammar);
         if let Err(message) = analyzed_grammar.check_table_build_normal_form() {
-            panic!("[glrmask] grammar precondition violations:\n{}", message);
+            panic!("[glrmask] grammar precondition violations:
+{}", message);
         }
 
         let (tokenizer, table) = rayon::join(
@@ -2124,6 +2126,7 @@ pub(crate) fn compile_dynamic_owned_with_table_construction(
             prepared_grammar.ignore_terminal,
             collect_special_token_terminals(&prepared_grammar),
             vocab,
+            dynamic_mask_vocab,
         )
     })
 }

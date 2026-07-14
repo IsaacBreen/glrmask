@@ -1148,6 +1148,7 @@ fn add_internal_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     internal.add_function(wrap_pyfunction!(clear_stale_weights, &internal)?)?;
     internal.add_function(wrap_pyfunction!(clear_weight_op_caches, &internal)?)?;
     internal.add_function(wrap_pyfunction!(prepare_vocab_for_compile, &internal)?)?;
+    internal.add_function(wrap_pyfunction!(prepare_dynamic_vocab_for_compile, &internal)?)?;
     internal.add_function(wrap_pyfunction!(compile_grammar_def_json, &internal)?)?;
     internal.add_function(wrap_pyfunction!(dump_json_schema_grammar_glrm, &internal)?)?;
     internal.add_function(wrap_pyfunction!(save_runtime_artifact, &internal)?)?;
@@ -1204,6 +1205,11 @@ fn clear_weight_op_caches() {
 #[pyfunction]
 fn prepare_vocab_for_compile(vocab: &PyVocab) {
     vocab.inner.prepare_for_compile();
+}
+
+#[pyfunction]
+fn prepare_dynamic_vocab_for_compile(vocab: &PyVocab) {
+    vocab.inner.prepare_for_dynamic_compile();
 }
 
 #[pyfunction]

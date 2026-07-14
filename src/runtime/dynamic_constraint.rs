@@ -47,8 +47,9 @@ impl DynamicConstraint {
         ignore_terminal: Option<TerminalID>,
         special_token_terminals: Vec<SpecialTokenTerminal>,
         vocab: &Vocab,
+        dynamic_mask_vocab: DynamicMaskVocab,
     ) -> Self {
-        Self::from_payload_v2(DynamicConstraintPayloadV2 {
+        Self::from_payload_v2_with_dynamic_vocab(DynamicConstraintPayloadV2 {
             v1: DynamicConstraintPayloadV1 {
                 table,
                 terminal_display_names,
@@ -58,7 +59,7 @@ impl DynamicConstraint {
                 token_bytes: Arc::clone(&vocab.entries),
             },
             special_token_terminals,
-        })
+        }, dynamic_mask_vocab)
     }
 
     fn from_payload_v1(payload: DynamicConstraintPayloadV1) -> Self {
@@ -69,6 +70,13 @@ impl DynamicConstraint {
     }
 
     fn from_payload_v2(payload: DynamicConstraintPayloadV2) -> Self {
+        Self::from_payload_v2_with_dynamic_vocab(payload, DynamicMaskVocab::default())
+    }
+
+    fn from_payload_v2_with_dynamic_vocab(
+        payload: DynamicConstraintPayloadV2,
+        dynamic_mask_vocab: DynamicMaskVocab,
+    ) -> Self {
         let DynamicConstraintPayloadV2 {
             v1: payload,
             special_token_terminals,
@@ -90,7 +98,7 @@ impl DynamicConstraint {
             tokenizer: payload.tokenizer,
             ignore_terminal: payload.ignore_terminal,
             special_token_terminals,
-            dynamic_mask_vocab: DynamicMaskVocab::default(),
+            dynamic_mask_vocab,
             possible_matches: BTreeMap::new(),
             state_to_internal_tsid: Vec::new(),
             internal_tsid_to_states: Vec::new(),
