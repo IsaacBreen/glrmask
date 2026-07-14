@@ -1860,19 +1860,23 @@ fn group_pmv_legacy_enabled() -> bool {
         .unwrap_or(false)
 }
 
-const PM_NFA_POWERSET_DEFAULT_MAX_STATES: usize = 4_096;
+const PM_NFA_POWERSET_DEFAULT_MAX_STATES: usize = 12_000;
+const PM_NFA_POWERSET_NARROW_MAX_STATES: usize = 32_768;
+const PM_NFA_POWERSET_NARROW_MAX_TERMINALS: usize = 256;
 
-fn nfa_powerset_collect_default(state_count: usize) -> bool {
+fn nfa_powerset_collect_default(state_count: usize, root_terminal_union: usize) -> bool {
     state_count <= PM_NFA_POWERSET_DEFAULT_MAX_STATES
+        || (state_count <= PM_NFA_POWERSET_NARROW_MAX_STATES
+            && root_terminal_union <= PM_NFA_POWERSET_NARROW_MAX_TERMINALS)
 }
 
-fn nfa_powerset_collect_enabled(state_count: usize) -> bool {
+fn nfa_powerset_collect_enabled(state_count: usize, root_terminal_union: usize) -> bool {
     std::env::var("GLRMASK_PM_NFA_POWERSET_COLLECT")
         .map(|value| {
             let trimmed = value.trim();
             trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
         })
-        .unwrap_or_else(|_| nfa_powerset_collect_default(state_count))
+        .unwrap_or_else(|_| nfa_powerset_collect_default(state_count, root_terminal_union))
 }
 
 struct PossibleMatchPowersetView {
@@ -2224,7 +2228,7 @@ fn compute_constraint_possible_matches_with_artifacts(
     let root_terminal_union = root_terminal_union_count(tokenizer, &trie_build_states);
     let use_nfa_powerset_collect = tokenizer.has_epsilon_transitions()
         && !structured_dispatch
-        && nfa_powerset_collect_enabled(tokenizer.num_states() as usize);
+        && nfa_powerset_collect_enabled(tokenizer.num_states() as usize, root_terminal_union);
     let use_sparse_root_collect = (tokenizer.has_epsilon_transitions() && !structured_dispatch)
         || (sparse_root_collect_enabled()
             && trie_build_states.len() <= sparse_root_state_limit()
@@ -2503,10 +2507,20 @@ mod tests {
 
     #[test]
     fn epsilon_nfa_possible_match_collector_defaults_by_state_scale() {
-        assert!(nfa_powerset_collect_default(914));
-        assert!(nfa_powerset_collect_default(PM_NFA_POWERSET_DEFAULT_MAX_STATES));
-        assert!(!nfa_powerset_collect_default(PM_NFA_POWERSET_DEFAULT_MAX_STATES + 1));
-        assert!(!nfa_powerset_collect_default(18_943));
+        assert!(nfa_powerset_collect_default(914, 1_707));
+        assert!(nfa_powerset_collect_default(8_108, 1_000));
+        assert!(nfa_powerset_collect_default(10_355, 1_000));
+        assert!(nfa_powerset_collect_default(
+            PM_NFA_POWERSET_DEFAULT_MAX_STATES,
+            usize::MAX,
+        ));
+        assert!(!nfa_powerset_collect_default(18_943, 1_707));
+        assert!(nfa_powerset_collect_default(26_965, 192));
+        assert!(!nfa_powerset_collect_default(
+            PM_NFA_POWERSET_NARROW_MAX_STATES + 1,
+            192,
+        ));
+        assert!(!nfa_powerset_collect_default(26_965, 1_707));
     }
 
     #[test]
