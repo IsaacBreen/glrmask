@@ -34,6 +34,7 @@ pub(crate) struct RawRestrictedObservationResult {
 struct RawObservationIds {
     ids: Vec<u32>,
     representatives: Vec<u32>,
+    active_language: Vec<bool>,
 }
 
 /// Intern visible terminal observations already normalized in the shared
@@ -414,10 +415,12 @@ fn raw_target_label_ids(tokenizer: &Tokenizer, active_groups: &[bool]) -> RawObs
     let mut ids = vec![0u32; tokenizer.num_states() as usize];
     let mut buckets = FxHashMap::<u64, Vec<(Vec<u64>, u32)>>::default();
     let mut representatives = Vec::<u32>::new();
+    let mut active_language = Vec::with_capacity(tokenizer.num_states() as usize);
     let mut key = Vec::with_capacity(16);
     let mut next_id = 0u32;
     for state in 0..tokenizer.num_states() {
         visible_observation_key(tokenizer, state, &active_words, &mut key);
+        active_language.push(key.len() > 1);
         let hash = hash_visible_observation_key(&key);
         let bucket = buckets.entry(hash).or_default();
         if let Some((_, id)) = bucket.iter().find(|(representative, _)| representative == &key) {
@@ -472,7 +475,24 @@ fn raw_target_label_ids(tokenizer: &Tokenizer, active_groups: &[bool]) -> RawObs
     RawObservationIds {
         ids,
         representatives,
+        active_language,
     }
+}
+
+fn raw_active_language_states(tokenizer: &Tokenizer, active_groups: &[bool]) -> Vec<bool> {
+    (0..tokenizer.num_states())
+        .map(|state| {
+            tokenizer
+                .matched_terminals_iter(state)
+                .chain(tokenizer.possible_future_terminals_iter(state))
+                .any(|terminal| {
+                    active_groups
+                        .get(terminal as usize)
+                        .copied()
+                        .unwrap_or(false)
+                })
+        })
+        .collect()
 }
 
 enum ExactSignatureBucket {
@@ -492,18 +512,22 @@ fn build_raw_relevant_edges(
     transitions: &[u32],
     num_states: usize,
     active_bytes: &[u8],
+    active_language: &[bool],
 ) -> RawRelevantEdges {
+    assert_eq!(active_language.len(), num_states);
     let mut offsets = Vec::with_capacity(num_states + 1);
     let mut bytes = Vec::new();
     let mut targets = Vec::new();
     offsets.push(0);
     for state in 0..num_states {
-        let base = state * 256;
-        for &byte in active_bytes {
-            let target = transitions[base + byte as usize];
-            if target != u32::MAX {
-                bytes.push(byte);
-                targets.push(target);
+        if active_language[state] {
+            let base = state * 256;
+            for &byte in active_bytes {
+                let target = transitions[base + byte as usize];
+                if target != u32::MAX && active_language[target as usize] {
+                    bytes.push(byte);
+                    targets.push(target);
+                }
             }
         }
         offsets.push(bytes.len() as u32);
@@ -720,7 +744,19 @@ fn raw_map_is_relevant_byte_congruent(
     target_labels: &[u32],
     transitions: &[u32],
     active_bytes: &[u8],
+    active_language: &[bool],
 ) -> bool {
+    let projected_class = |source: usize, byte: u8| {
+        if !active_language[source] {
+            return u32::MAX;
+        }
+        let target = transitions[source * 256 + byte as usize];
+        if target == u32::MAX || !active_language[target as usize] {
+            u32::MAX
+        } else {
+            state_map.original_to_internal[target as usize]
+        }
+    };
     for (internal, members) in state_map.internal_to_originals.iter().enumerate() {
         let representative = state_map.representative_original_ids[internal] as usize;
         if representative >= target_labels.len()
@@ -728,7 +764,6 @@ fn raw_map_is_relevant_byte_congruent(
         {
             return false;
         }
-        let representative_base = representative * 256;
         for &raw in members {
             let raw = raw as usize;
             if target_labels[raw] != target_labels[representative]
@@ -736,13 +771,8 @@ fn raw_map_is_relevant_byte_congruent(
             {
                 return false;
             }
-            let raw_base = raw * 256;
             for &byte in active_bytes {
-                let representative_target = transitions[representative_base + byte as usize];
-                let raw_target = transitions[raw_base + byte as usize];
-                let representative_class = if representative_target == u32::MAX { u32::MAX } else { state_map.original_to_internal[representative_target as usize] };
-                let raw_class = if raw_target == u32::MAX { u32::MAX } else { state_map.original_to_internal[raw_target as usize] };
-                if representative_class != raw_class {
+                if projected_class(representative, byte) != projected_class(raw, byte) {
                     return false;
                 }
             }
@@ -777,6 +807,7 @@ pub(crate) fn compute_state_map_raw(
         Some((ids, representatives)) if ids.len() == num_states => RawObservationIds {
             ids: ids.to_vec(),
             representatives: representatives.to_vec(),
+            active_language: raw_active_language_states(tokenizer, active_groups),
         },
         _ => raw_target_label_ids(tokenizer, active_groups),
     };
@@ -789,7 +820,12 @@ pub(crate) fn compute_state_map_raw(
         .copied()
         .max()
         .map_or(0usize, |id| id as usize + 1);
-    let edges = build_raw_relevant_edges(transitions, num_states, &active_bytes);
+    let edges = build_raw_relevant_edges(
+        transitions,
+        num_states,
+        &active_bytes,
+        &observations.active_language,
+    );
     // Hopcroft is the default for the large raw-coordinate case. The
     // signature fixed point remains available as a diagnostic reference.
     if std::env::var_os("GLRMASK_RAW_RESTRICTED_SIGNATURE_REFINE").is_none() {
@@ -801,6 +837,7 @@ pub(crate) fn compute_state_map_raw(
             &target_labels,
             transitions,
             &active_bytes,
+            &observations.active_language,
         ));
         return Some(RawRestrictedObservationResult {
             state_map,
@@ -875,6 +912,7 @@ pub(crate) fn compute_state_map_raw(
                 &target_labels,
                 transitions,
                 &active_bytes,
+                &observations.active_language,
             ));
             return Some(RawRestrictedObservationResult {
                 state_map,

@@ -1668,14 +1668,25 @@ fn l1_transition(
     flat_trans: &[u32],
     transitions_by_byte: Option<&[u32]>,
     num_tokenizer_states: usize,
+    active_language: Option<&[bool]>,
     state: u32,
     byte: usize,
     canonical_state: Option<&[u32]>,
 ) -> u32 {
+    if active_language.is_some_and(|active| !active[state as usize]) {
+        return u32::MAX;
+    }
     let target = if let Some(transitions_by_byte) = transitions_by_byte {
         transitions_by_byte[byte * num_tokenizer_states + state as usize]
     } else {
         flat_trans[state as usize * 256 + byte]
+    };
+    let target = if target != u32::MAX
+        && active_language.is_some_and(|active| !active[target as usize])
+    {
+        u32::MAX
+    } else {
+        target
     };
     l1_canonicalize_target(target, canonical_state)
 }
@@ -1737,6 +1748,13 @@ fn find_l1_exact_state_equivalence_by_flat_signatures(
     let dead = u32::MAX;
     let dfa = tokenizer_view.dfa();
     let flat_trans = dfa.transitions.as_ref();
+    let active_language = dfa
+        .states
+        .iter()
+        .map(|state| {
+            !state.finalizers.is_empty() || !state.possible_future_group_ids.is_empty()
+        })
+        .collect::<Vec<_>>();
     let num_tokenizer_states = dfa.states.len();
     debug_assert_eq!(state_to_terminal_signature.len(), num_tokenizer_states);
 
@@ -1819,6 +1837,7 @@ fn find_l1_exact_state_equivalence_by_flat_signatures(
                 flat_trans,
                 transitions_by_byte,
                 num_tokenizer_states,
+                Some(&active_language),
                 state as u32,
                 byte,
                 canonical_state,
@@ -1886,6 +1905,7 @@ fn find_l1_exact_state_equivalence_by_flat_signatures(
                         flat_trans,
                         transitions_by_byte,
                         num_tokenizer_states,
+                        Some(&active_language),
                         horizon_maps.as_deref(),
                         suffix_horizon_by_first_byte[byte_idx],
                         Some(&trie),
@@ -1925,6 +1945,7 @@ fn find_l1_exact_state_equivalence_by_flat_signatures(
                 flat_trans,
                 transitions_by_byte,
                 num_tokenizer_states,
+                Some(&active_language),
                 horizon_maps.as_deref(),
                 suffix_horizon_by_first_byte[byte_idx],
                 None,
@@ -2050,31 +2071,21 @@ fn find_l1_exact_state_equivalence_by_flat_signatures(
             for &(target, profile_id) in &slot_targets[slot] {
                 profile_col[target as usize] = profile_id;
             }
-            if let Some(transitions_by_byte) = transitions_by_byte {
-                let tbase = byte * num_tokenizer_states;
-                for i in tile_start..tile_end {
-                    let target = l1_canonicalize_target(
-                        transitions_by_byte[tbase + states[i]],
-                        canonical_state,
-                    );
-                    keys[i * row_width + col] = if target == dead {
-                        0
-                    } else {
-                        profile_col[target as usize]
-                    };
-                }
-            } else {
-                for i in tile_start..tile_end {
-                    let target = l1_canonicalize_target(
-                        flat_trans[states[i] * 256 + byte],
-                        canonical_state,
-                    );
-                    keys[i * row_width + col] = if target == dead {
-                        0
-                    } else {
-                        profile_col[target as usize]
-                    };
-                }
+            for i in tile_start..tile_end {
+                let target = l1_transition(
+                    flat_trans,
+                    transitions_by_byte,
+                    num_tokenizer_states,
+                    Some(&active_language),
+                    states[i] as u32,
+                    byte,
+                    canonical_state,
+                );
+                keys[i * row_width + col] = if target == dead {
+                    0
+                } else {
+                    profile_col[target as usize]
+                };
             }
             for &(target, _) in &slot_targets[slot] {
                 profile_col[target as usize] = 0;
@@ -2622,6 +2633,7 @@ fn l1_bucket_suffix_signature_profiles_packed(
     flat_trans: &[u32],
     transitions_by_byte: Option<&[u32]>,
     num_lexer_states: usize,
+    active_language: Option<&[bool]>,
     horizon_maps: Option<&[Arc<[u32]>]>,
     suffix_horizon: usize,
     prebuilt_trie: Option<&L1PackedSuffixTrie>,
@@ -2687,6 +2699,7 @@ fn l1_bucket_suffix_signature_profiles_packed(
                             flat_trans,
                             transitions_by_byte,
                             num_lexer_states,
+                            active_language,
                             target,
                             byte as usize,
                             canonical_state,
@@ -2770,6 +2783,7 @@ fn l1_bucket_suffix_signature_profiles_packed(
                     flat_trans,
                     transitions_by_byte,
                     num_lexer_states,
+                    active_language,
                     states[parent_start],
                     edge.byte as usize,
                     canonical_state,
@@ -2785,6 +2799,7 @@ fn l1_bucket_suffix_signature_profiles_packed(
                     flat_trans,
                     transitions_by_byte,
                     num_lexer_states,
+                    active_language,
                     states[parent_start],
                     edge.byte as usize,
                     canonical_state,
@@ -2793,6 +2808,7 @@ fn l1_bucket_suffix_signature_profiles_packed(
                     flat_trans,
                     transitions_by_byte,
                     num_lexer_states,
+                    active_language,
                     states[parent_start + 1],
                     edge.byte as usize,
                     canonical_state,
@@ -2826,6 +2842,7 @@ fn l1_bucket_suffix_signature_profiles_packed(
                         flat_trans,
                         transitions_by_byte,
                         num_lexer_states,
+                        active_language,
                         state,
                         edge.byte as usize,
                         canonical_state,
@@ -5271,6 +5288,7 @@ mod packed_suffix_product_tests {
                 None,
                 tokenizer.num_states() as usize,
                 None,
+                None,
                 suffix_horizon,
                 None,
             );
@@ -5287,6 +5305,7 @@ mod packed_suffix_product_tests {
                 &flat_trans,
                 None,
                 tokenizer.num_states() as usize,
+                None,
                 Some(&horizon_maps),
                 suffix_horizon,
                 None,

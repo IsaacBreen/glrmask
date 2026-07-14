@@ -8,6 +8,7 @@ pub(crate) struct JsonSchemaConfig {
     pub(crate) llguidance_compat: bool,
     pub(crate) coerce_one_of_to_any_of: bool,
     pub(crate) repeat_chunk_size: usize,
+    pub(crate) string_repeat_chunk_size: usize,
     pub(crate) terminalize_bounded_string_max: usize,
     pub(crate) preserve_pattern_max_length: bool,
     pub(crate) pattern_max_length_complexity_limit: usize,
@@ -47,6 +48,11 @@ impl Default for JsonSchemaConfig {
             // experiment looked attractive locally but is not the importer
             // default. This warning itself should never be removed in the future.
             repeat_chunk_size: 50,
+            // Keep bounded-string chunking independent from array/generic repeat
+            // chunking. A 64-byte tokenizer token can span three 50-character
+            // chunks when it starts part-way through the first one; using 64 for
+            // string chunks removes that avoidable terminal-path depth.
+            string_repeat_chunk_size: 64,
             // Sticky: do not change this default to tune TBM. Broader bounded
             // string terminalization can look attractive on individual schemas
             // but creates severe build fallout. This warning itself should
@@ -83,6 +89,11 @@ impl JsonSchemaConfig {
         config.repeat_chunk_size = read_usize("GLRMASK_JSON_SCHEMA_REPEAT_CHUNK")
             .unwrap_or(config.repeat_chunk_size)
             .max(1);
+        config.string_repeat_chunk_size = read_usize(
+            "GLRMASK_JSON_SCHEMA_STRING_REPEAT_CHUNK",
+        )
+        .unwrap_or(config.string_repeat_chunk_size)
+        .max(1);
         config.terminalize_bounded_string_max = read_usize(
             "GLRMASK_JSON_SCHEMA_TERMINALIZE_BOUNDED_STRING_MAX",
         )
