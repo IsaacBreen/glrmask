@@ -1952,6 +1952,11 @@ struct InterchangeabilityDfa {
     /// scratch, used to propose a tiny support-transposition witness before
     /// falling back to exact refinement.
     terminal_quotient_output_supports: Option<Vec<Option<Arc<[(u32, u8)]>>>>,
+    /// Reused sequential scratch for building one terminal's support over the
+    /// support quotient. A class is touched at most once, avoiding the old
+    /// duplicate-heavy push-and-sort path over raw predecessor occurrences.
+    terminal_support_mask_scratch: Vec<u8>,
+    terminal_support_touched_scratch: Vec<u32>,
     /// Thread-safe on-demand mirror of `terminal_quotient_output_supports` used
     /// only by the parallel certification path. Each terminal's support is
     /// pure given the (pre-built) global support quotient and immutable
@@ -2453,6 +2458,8 @@ impl InterchangeabilityDfa {
             support_quotient,
             canonical_quotient: None,
             terminal_quotient_output_supports,
+            terminal_support_mask_scratch: Vec::new(),
+            terminal_support_touched_scratch: Vec::new(),
             parallel_terminal_supports: OnceLock::new(),
             quotient_certified: 0,
             support_transposition_certified: 0,
@@ -3106,28 +3113,46 @@ impl InterchangeabilityDfa {
                 .expect("support quotient initialized")
                 .class_for_state,
         );
-        let mut support = Vec::<(u32, u8)>::new();
+        let class_count = self
+            .support_quotient
+            .as_ref()
+            .expect("support quotient initialized")
+            .representative_by_class
+            .len();
+        if self.terminal_support_mask_scratch.len() != class_count {
+            self.terminal_support_mask_scratch.resize(class_count, 0);
+            self.terminal_support_touched_scratch.clear();
+        }
+        debug_assert!(self
+            .terminal_support_touched_scratch
+            .iter()
+            .all(|&class| self.terminal_support_mask_scratch[class as usize] == 0));
         for (destinations, mask) in [
             (&self.finalizer_states_by_terminal[terminal], 1u8),
             (&self.future_finalizer_states_by_terminal[terminal], 2u8),
         ] {
             for &destination in destinations {
                 for &source in &self.reverse_predecessors[destination as usize] {
-                    support.push((class_for_state[source as usize], mask));
+                    let class = class_for_state[source as usize] as usize;
+                    let class_mask = &mut self.terminal_support_mask_scratch[class];
+                    if *class_mask == 0 {
+                        self.terminal_support_touched_scratch.push(class as u32);
+                    }
+                    *class_mask |= mask;
                 }
             }
         }
-        support.sort_unstable_by_key(|&(class, _)| class);
-        let mut write = 0usize;
-        for read in 0..support.len() {
-            if write > 0 && support[write - 1].0 == support[read].0 {
-                support[write - 1].1 |= support[read].1;
-            } else {
-                support[write] = support[read];
-                write += 1;
-            }
+        self.terminal_support_touched_scratch.sort_unstable();
+        let mut support = Vec::<(u32, u8)>::with_capacity(
+            self.terminal_support_touched_scratch.len(),
+        );
+        for class in self.terminal_support_touched_scratch.drain(..) {
+            let mask = std::mem::replace(
+                &mut self.terminal_support_mask_scratch[class as usize],
+                0,
+            );
+            support.push((class, mask));
         }
-        support.truncate(write);
         let supports = self.terminal_quotient_output_supports.get_or_insert_with(|| {
             vec![None; self.finalizer_states_by_terminal.len()]
         });
