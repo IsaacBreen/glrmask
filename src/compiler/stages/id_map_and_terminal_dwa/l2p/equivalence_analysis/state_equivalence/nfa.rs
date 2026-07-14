@@ -962,6 +962,7 @@ pub(crate) fn compute_state_map(
     let (candidate_members, candidate_representatives, raw_to_candidate) =
         candidate_partition(num_states, initial_state_map);
     let num_candidates = candidate_representatives.len();
+    let singleton_closures = tokenizer.all_singleton_epsilon_closures();
 
     let mut config_ids = FxHashMap::<Vec<u32>, u32>::default();
     let mut configs = Vec::<Box<[u32]>>::new();
@@ -969,9 +970,7 @@ pub(crate) fn compute_state_map(
         .iter()
         .map(|&state| {
             intern_config(
-                tokenizer
-                    .execute_from_state_end_only(&[], state as u32)
-                    .to_vec(),
+                singleton_closures[state].to_vec(),
                 &mut config_ids,
                 &mut configs,
             )
@@ -991,13 +990,40 @@ pub(crate) fn compute_state_map(
     }
 
     let mut target_configs = vec![u32::MAX; num_candidates * active_bytes.len()];
+    let mut target_marks = vec![0u32; num_states];
+    let mut target_generation = 0u32;
+    let mut target_config = Vec::<u32>::new();
     for candidate in 0..num_candidates {
         let source = configs[start_configs[candidate] as usize].to_vec();
         for (slot, &byte) in active_bytes.iter().enumerate() {
-            let target = tokenizer.step_all(&source, byte);
-            if !target.is_empty() {
+            target_generation = target_generation.wrapping_add(1);
+            if target_generation == 0 {
+                target_marks.fill(0);
+                target_generation = 1;
+            }
+            target_config.clear();
+            // Every source config is already epsilon-closed.  Consume the byte
+            // from each member and union cached singleton closures of the raw
+            // targets.  This is exactly `step_all` without re-closing the
+            // source, allocating a per-call seen vector, or sorting an
+            // intermediate direct-target list.
+            for &source_state in &source {
+                let raw_target = tokenizer.get_transition(source_state, byte);
+                if raw_target == u32::MAX {
+                    continue;
+                }
+                for &reachable in singleton_closures[raw_target as usize].iter() {
+                    let mark = &mut target_marks[reachable as usize];
+                    if *mark != target_generation {
+                        *mark = target_generation;
+                        target_config.push(reachable);
+                    }
+                }
+            }
+            if !target_config.is_empty() {
+                target_config.sort_unstable();
                 target_configs[candidate * active_bytes.len() + slot] =
-                    intern_config(target.to_vec(), &mut config_ids, &mut configs);
+                    intern_config(target_config.clone(), &mut config_ids, &mut configs);
             }
         }
     }

@@ -1387,6 +1387,7 @@ impl Regex {
             dfa: self.dfa,
             num_terminals,
             exprs,
+            singleton_epsilon_closures: std::sync::OnceLock::new(),
         }
     }
 
@@ -3121,6 +3122,7 @@ mod tests {
             dfa: regex.dfa,
             num_terminals: 1,
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
+            singleton_epsilon_closures: std::sync::OnceLock::new(),
         };
         let exec = tokenizer.execute_from_state(input, tokenizer.initial_state());
         exec.matches
@@ -3586,6 +3588,7 @@ mod tests {
             dfa: regex.dfa,
             num_terminals: 1,
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
+            singleton_epsilon_closures: std::sync::OnceLock::new(),
         };
 
         for len in [1usize, 2, 15] {
@@ -3621,6 +3624,7 @@ mod tests {
             dfa: regex.dfa,
             num_terminals: 2,
             exprs: Some(Arc::from(vec![space, exact_repeat].into_boxed_slice())),
+            singleton_epsilon_closures: std::sync::OnceLock::new(),
         };
 
         for len in [1usize, 2, 15] {
@@ -3656,6 +3660,7 @@ mod tests {
             dfa: regex.dfa,
             num_terminals: 2,
             exprs: Some(Arc::from(vec![space, exact_repeat].into_boxed_slice())),
+            singleton_epsilon_closures: std::sync::OnceLock::new(),
         };
 
         for len in [1usize, 2, 31] {
@@ -3713,6 +3718,7 @@ mod tests {
             dfa: regex.dfa,
             num_terminals: exprs.len() as u32,
             exprs: Some(Arc::from(exprs.into_boxed_slice())),
+            singleton_epsilon_closures: std::sync::OnceLock::new(),
         };
 
         for len in [1usize, 2, 15] {
@@ -3757,6 +3763,7 @@ mod tests {
             dfa,
             num_terminals: 1,
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
+            singleton_epsilon_closures: std::sync::OnceLock::new(),
         };
 
         for len in [0usize, 1, 31, 32] {
@@ -3811,6 +3818,7 @@ mod tests {
             dfa,
             num_terminals: 1,
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
+            singleton_epsilon_closures: std::sync::OnceLock::new(),
         };
 
         for input in [b"\"a".as_slice(), b"\"aa", b"\"a a", b"\"aa  aaa"] {
@@ -3954,6 +3962,7 @@ mod tests {
             dfa: regex.dfa,
             num_terminals: 1,
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
+            singleton_epsilon_closures: std::sync::OnceLock::new(),
         };
 
         for input in [b"\"".as_slice(), b"\"a", b"\"a a", b"\"a  a"] {

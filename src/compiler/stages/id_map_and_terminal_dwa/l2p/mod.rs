@@ -176,6 +176,7 @@ pub(crate) fn p8_first_byte_factorization_allowed() -> bool {
 
 fn l2p_global_token_position_enabled() -> bool {
     GLOBAL_TOKEN_POSITION_SUPPRESS_DEPTH.with(|depth| depth.get() == 0)
+        && !l2p_env_enabled("GLRMASK_DISABLE_L2P_GLOBAL_TOKEN_POSITION")
 }
 
 fn l2p_global_token_position_strict_reference_enabled() -> bool {
@@ -396,9 +397,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // The pre-TI quotient and representative-core token-position partition are
     // two wrappers over the same C map. Build the positional analysis once.
     let (global_state_quotient, token_position_partition) =
-        if l2p_global_token_position_enabled()
-            && matches!(partition_label, "p1" | "p7" | "p8")
-        {
+        if l2p_global_token_position_enabled() && matches!(partition_label, "p7" | "p8") {
             match equivalence_analysis::state_equivalence::global_token_position::
                 compute_global_token_position_state_views(
                     tokenizer,
@@ -436,6 +435,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         terminal_partition,
         ti_transport_witness_rounds,
         ti_round_count,
+        ti_discovery_ms,
         ti_additional_merged_members,
         ti_raw_observations,
         ti_restricted_observation_seed,
@@ -486,6 +486,10 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             let additional_merged_members = first_round_class_count
                 .unwrap_or(classes.len())
                 .saturating_sub(classes.len());
+            let discovery_ms = ti_discovery_started_at
+                .as_ref()
+                .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+                .unwrap_or(0.0);
             let restricted_observation_seed_started_at = ti_profile_timing.then(Instant::now);
             let restricted_observation_seed = discovery_context
                 .reusable_nfa_restricted_observation_state_map(tokenizer, initial_state_map);
@@ -498,17 +502,15 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                 Some(classes),
                 Some(transport_witness_rounds),
                 round_count,
+                discovery_ms,
                 additional_merged_members,
                 raw_observations,
                 restricted_observation_seed,
                 restricted_observation_seed_ms,
             )
         } else {
-            (None, None, 0, 0, None, None, 0.0)
+            (None, None, 0, 0.0, 0, None, None, 0.0)
         };
-    let ti_discovery_ms = ti_discovery_started_at
-        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
-        .unwrap_or(0.0);
     let reference_terminal_expansion = terminal_partition
         .as_ref()
         .is_some_and(|partition| partition_has_merges(partition));
