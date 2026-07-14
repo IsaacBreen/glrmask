@@ -147,6 +147,10 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
         && has_split_l1
         && tokenizer.has_epsilon_transitions()
         && !tokenizer.has_deterministic_dispatch()
+        && super::l1::l1_generic_nfa_token_bounded_view_enabled(
+            tokenizer.num_states() as usize,
+            vocab.entries.len(),
+        )
     {
         let raw_states = (0..tokenizer.num_states() as usize).collect::<Vec<_>>();
         let tokens = vocab

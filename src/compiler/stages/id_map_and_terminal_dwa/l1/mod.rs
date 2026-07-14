@@ -823,6 +823,22 @@ fn l1_generic_nfa_exact_profiles_enabled() -> bool {
         .unwrap_or(true)
 }
 
+const L1_GENERIC_NFA_TOKEN_BOUNDED_MAX_STATE_VOCAB_PAIRS: usize = 350_000_000;
+
+pub(crate) fn l1_generic_nfa_token_bounded_view_enabled(
+    state_count: usize,
+    vocab_count: usize,
+) -> bool {
+    // The token-bounded topology is exact and dramatically cheaper than
+    // arbitrary relevant-byte closure when the real token language barely
+    // creates any virtual epsilon-closure configurations. Its construction can
+    // nevertheless approach the raw-start × token-trie product on large lexer
+    // and vocabulary combinations. Keep the bounded route in its profitable
+    // regime and use the older exact relevant-powerset proof above that budget.
+    state_count.saturating_mul(vocab_count)
+        <= L1_GENERIC_NFA_TOKEN_BOUNDED_MAX_STATE_VOCAB_PAIRS
+}
+
 
 fn build_l1_generic_nfa_exact_id_map<'a>(
     tokenizer: &Tokenizer,
@@ -851,25 +867,52 @@ fn build_l1_generic_nfa_exact_id_map<'a>(
 
     let state_equiv_started_at = Instant::now();
     let view_started_at = Instant::now();
-    let bounded = if let Some(topology) = shared_topology {
-        topology.materialize(tokenizer, Some(active_terminals))
-    } else {
-        let tokens = token_entries
+    let use_token_bounded_view =
+        l1_generic_nfa_token_bounded_view_enabled(num_states, token_entries.len());
+    let (view_states, tokenizer_view, analysis_view) = if use_token_bounded_view {
+        let bounded = if let Some(topology) = shared_topology {
+            topology.materialize(tokenizer, Some(active_terminals))
+        } else {
+            let tokens = token_entries
+                .iter()
+                .map(|(_, bytes)| bytes.as_ref())
+                .collect::<Vec<_>>();
+            super::l2p::equivalence_analysis::state_equivalence::nfa::build_token_bounded_analysis_view(
+                tokenizer,
+                &raw_states,
+                &tokens,
+                Some(active_terminals),
+            )
+        };
+        let view_states = raw_states
             .iter()
-            .map(|(_, bytes)| bytes.as_ref())
+            .map(|&raw_state| bounded.view_state_for_raw_start(raw_state))
             .collect::<Vec<_>>();
-        super::l2p::equivalence_analysis::state_equivalence::nfa::build_token_bounded_analysis_view(
+        (view_states, bounded.tokenizer_view, "token_bounded")
+    } else {
+        let mut relevant_bytes = [false; 256];
+        for (_, bytes) in token_entries {
+            for &byte in bytes.iter() {
+                relevant_bytes[byte as usize] = true;
+            }
+        }
+        let powerset_view = super::l2p::equivalence_analysis::state_equivalence::nfa::build_relevant_powerset_view(
             tokenizer,
-            &raw_states,
-            &tokens,
+            &relevant_bytes,
             Some(active_terminals),
+            None,
+        );
+        let view_states = powerset_view
+            .raw_start_to_view
+            .iter()
+            .map(|&state| state as usize)
+            .collect::<Vec<_>>();
+        (
+            view_states,
+            powerset_view.into_tokenizer_view(),
+            "relevant_powerset",
         )
     };
-    let view_states = raw_states
-        .iter()
-        .map(|&raw_state| bounded.view_state_for_raw_start(raw_state))
-        .collect::<Vec<_>>();
-    let tokenizer_view = bounded.tokenizer_view;
     let view_build_ms = view_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let terminal_signature_started_at = compile_profile_enabled().then(Instant::now);
@@ -939,7 +982,8 @@ fn build_l1_generic_nfa_exact_id_map<'a>(
     let state_equiv_ms = state_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
     if compile_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][l1_generic_nfa_exact] raw_states={} view_states={} view_build_ms={:.3} exact_ms={:.3} exact_reps={} total_ms={:.3}",
+            "[glrmask/profile][l1_generic_nfa_exact] analysis_view={} raw_states={} view_states={} view_build_ms={:.3} exact_ms={:.3} exact_reps={} total_ms={:.3}",
+            analysis_view,
             num_states,
             tokenizer_view.dfa().states.len(),
             view_build_ms,
@@ -4869,6 +4913,17 @@ struct L1TerminalBuildProfile {
 mod generic_nfa_tests {
     use super::*;
     use crate::automata::lexer::tokenizer::arbitrary_epsilon_l1_test_tokenizer;
+
+    #[test]
+    fn token_bounded_view_respects_construction_budget() {
+        // The depth-1 workload that motivated the bounded topology remains in
+        // the fast regime, while larger raw-state/vocab products fall back to
+        // the exact relevant-powerset proof instead of eagerly expanding a
+        // prohibitively large token topology.
+        assert!(l1_generic_nfa_token_bounded_view_enabled(18_943, 15_264));
+        assert!(!l1_generic_nfa_token_bounded_view_enabled(26_965, 15_264));
+        assert!(!l1_generic_nfa_token_bounded_view_enabled(26_965, 82_270));
+    }
 
     fn build_scalar_generic_nfa_terminal_dwa(
         tokenizer: &Tokenizer,
