@@ -1143,6 +1143,45 @@ fn llguidance_allof_child_required_prefix_rejects_optional_anyof_key_first() {
         67,
         b"d",
     ));
+    assert!(schema_mask_allows_token_after_prefix(
+        &schema,
+        br#"{"children": [{"match": "x", "devices": {}, "platforms"#,
+        68,
+        b"\":",
+    ));
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"{"children": [{"match": "x", "devices": {}, "platforms": ["Windows"]}]}"#,
+    ));
+}
+
+#[test]
+fn llguidance_unconstrained_object_anyof_keeps_generic_key_language() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let schema = json!({
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "class": {"enum": ["A"]}
+                },
+                "required": ["class"]
+            },
+            {
+                "type": "object",
+                "properties": {}
+            }
+        ]
+    });
+
+    assert!(!schema_mask_allows_token_after_prefix(
+        &schema,
+        br#"{""#,
+        69,
+        br#"\/"#,
+    ));
+    assert!(schema_accepts_bytes(&schema, br#"{"plain": 1}"#));
 }
 
 #[test]

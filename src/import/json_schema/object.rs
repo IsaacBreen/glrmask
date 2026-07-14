@@ -2479,10 +2479,24 @@ impl<'a> Lowerer<'a> {
                     id
                 };
 
-                let key_symbol = self.lower_additional_key_colon(
-                    &excluded_fixed_keys,
-                    &variant.pattern_keys,
-                )?;
+                // Match llguidance's gen_json_object() distinction exactly:
+                // with no fixed or pattern names, an open object uses
+                // json_simple_string() for its key; once any names are taken,
+                // the additional-property path uses CHAR_REGEX minus those
+                // names.  The fused anyOf representation must retain that
+                // per-variant distinction instead of treating every broad tail
+                // as an additional-property key path.
+                let key_symbol = if self.llguidance_compat_enabled()
+                    && excluded_fixed_keys.is_empty()
+                    && variant.pattern_keys.is_empty()
+                {
+                    seq(vec![r(json_key_string_rule()), self.key_separator_expr()])
+                } else {
+                    self.lower_additional_key_colon(
+                        &excluded_fixed_keys,
+                        &variant.pattern_keys,
+                    )?
+                };
                 for key_path in Self::split_key_colon_symbol_paths(key_symbol) {
                     let mut symbols = Vec::new();
                     if state.has_content {
