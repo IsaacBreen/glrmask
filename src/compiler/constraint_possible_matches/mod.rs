@@ -1860,13 +1860,19 @@ fn group_pmv_legacy_enabled() -> bool {
         .unwrap_or(false)
 }
 
-fn nfa_powerset_collect_enabled() -> bool {
+const PM_NFA_POWERSET_DEFAULT_MAX_STATES: usize = 4_096;
+
+fn nfa_powerset_collect_default(state_count: usize) -> bool {
+    state_count <= PM_NFA_POWERSET_DEFAULT_MAX_STATES
+}
+
+fn nfa_powerset_collect_enabled(state_count: usize) -> bool {
     std::env::var("GLRMASK_PM_NFA_POWERSET_COLLECT")
         .map(|value| {
             let trimmed = value.trim();
             trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
         })
-        .unwrap_or(true)
+        .unwrap_or_else(|_| nfa_powerset_collect_default(state_count))
 }
 
 struct PossibleMatchPowersetView {
@@ -2218,7 +2224,7 @@ fn compute_constraint_possible_matches_with_artifacts(
     let root_terminal_union = root_terminal_union_count(tokenizer, &trie_build_states);
     let use_nfa_powerset_collect = tokenizer.has_epsilon_transitions()
         && !structured_dispatch
-        && nfa_powerset_collect_enabled();
+        && nfa_powerset_collect_enabled(tokenizer.num_states() as usize);
     let use_sparse_root_collect = (tokenizer.has_epsilon_transitions() && !structured_dispatch)
         || (sparse_root_collect_enabled()
             && trie_build_states.len() <= sparse_root_state_limit()
@@ -2493,6 +2499,14 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn epsilon_nfa_possible_match_collector_defaults_by_state_scale() {
+        assert!(nfa_powerset_collect_default(914));
+        assert!(nfa_powerset_collect_default(PM_NFA_POWERSET_DEFAULT_MAX_STATES));
+        assert!(!nfa_powerset_collect_default(PM_NFA_POWERSET_DEFAULT_MAX_STATES + 1));
+        assert!(!nfa_powerset_collect_default(18_943));
     }
 
     #[test]
