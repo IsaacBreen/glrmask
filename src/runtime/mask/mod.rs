@@ -33,7 +33,21 @@ type DenseMaskGSS = LeveledGSS<u32, DenseMaskAcc>;
 
 const DELTA_SEED_MIN_SAVINGS: u64 = 2048;
 const MASK_SINGLE_PATH_DIRECT_MAX_DEPTH: u32 = 64;
-const MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_PATHS: usize = 8;
+const MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_PATHS: usize = 16;
+const MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_STACK_VALUES: usize = 128;
+
+fn single_path_direct_stack_work_within_budget(
+    stack_lengths: impl IntoIterator<Item = usize>,
+) -> bool {
+    let mut total = 0usize;
+    for len in stack_lengths {
+        total = total.saturating_add(len);
+        if total > MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_STACK_VALUES {
+            return false;
+        }
+    }
+    true
+}
 
 fn dynamic_mask_equivalence_assert_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -466,7 +480,12 @@ impl DenseMaskAcc {
 
 #[cfg(test)]
 mod tests {
-    use super::{DenseMaskAcc, DenseTokenMaskCache};
+    use super::{
+        single_path_direct_stack_work_within_budget,
+        DenseMaskAcc,
+        DenseTokenMaskCache,
+        MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_STACK_VALUES,
+    };
     use range_set_blaze::RangeSetBlaze;
     use rustc_hash::FxHashMap;
     use std::sync::Arc;
@@ -517,6 +536,18 @@ mod tests {
 
         assert!(!Arc::ptr_eq(&intersected, &dense));
         assert_eq!(&*intersected, &[0b0011_u64, 0b0000]);
+    }
+
+    #[test]
+    fn single_path_direct_stack_work_budget_accepts_shallow_ambiguity() {
+        assert!(single_path_direct_stack_work_within_budget([8; 10]));
+        assert!(single_path_direct_stack_work_within_budget([
+            MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_STACK_VALUES
+        ]));
+        assert!(!single_path_direct_stack_work_within_budget([
+            MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_STACK_VALUES,
+            1,
+        ]));
     }
 }
 
@@ -772,7 +803,9 @@ impl<'a> ConstraintState<'a> {
             return false;
         }
 
-        if self.state.is_empty() || self.state.len() > 4 {
+        if self.state.is_empty()
+            || self.state.len() > MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_PATHS
+        {
             return false;
         }
 
@@ -788,30 +821,31 @@ impl<'a> ConstraintState<'a> {
                 continue;
             }
 
-            // TODO: Add a direct `try_virtual_stack()` mask path and remove
-            // this `to_stacks()` fallback entirely. Once mask generation can
-            // consume virtual stacks without materializing concrete paths,
-            // reassess whether the broader single-path fast paths are still
-            // pulling their weight; `try_virtual_stack()` should cover most
-            // of the cases that justify special handling.
             if mask_single_path_to_stacks_fallback_disabled() {
                 return false;
             }
-            if gss.path_count_at_most(MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_PATHS + 1)
-                > MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_PATHS
-            {
+            let remaining = MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_PATHS.saturating_sub(paths.len());
+            let complete = gss.for_each_stack_top_first_bounded(
+                remaining,
+                |stack_top_first, terminals_disallowed| {
+                    let mut path_stack = SmallVec::<[u32; 16]>::new();
+                    path_stack.extend(stack_top_first.iter().copied());
+                    paths.push((
+                        original_tokenizer_state,
+                        terminals_disallowed.clone(),
+                        path_stack,
+                    ));
+                },
+            );
+            if !complete {
                 return false;
             }
-            for (stack_bottom_first, terminals_disallowed) in gss.to_stacks() {
-                stack.clear();
-                stack.extend(stack_bottom_first.iter().rev().copied());
-                paths.push((original_tokenizer_state, terminals_disallowed, stack.clone()));
-                if paths.len() > MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_PATHS {
-                    return false;
-                }
-            }
         }
-
+        if !single_path_direct_stack_work_within_budget(
+            paths.iter().map(|(_, _, stack)| stack.len()),
+        ) {
+            return false;
+        }
         let parser_dwa = self.constraint.parser_dwa();
         if parser_dwa.states().is_empty() {
             return false;
@@ -821,19 +855,23 @@ impl<'a> ConstraintState<'a> {
 
         let precomputed = &self.constraint.weight_token_dense_masks;
         let dense_words = self.constraint.internal_token_dense_words;
-        let mut merged = {
+        let (mut merged, mut output_scratch) = {
             let mut scratch = self.mask_scratch.lock().unwrap();
-            std::mem::take(&mut scratch.merged_dense)
+            (
+                std::mem::take(&mut scratch.merged_dense),
+                std::mem::take(&mut scratch.output_buf),
+            )
         };
         merged.clear();
         merged.resize(dense_words, 0);
         let mut used_direct_final = false;
         let mut direct_buf_dirty = false;
 
-        let restore_scratch = |merged: Vec<u64>| {
+        let restore_scratch = |merged: Vec<u64>, output_scratch: Vec<u32>| {
             let mut scratch = self.mask_scratch.lock().unwrap();
             scratch.merged_dense = merged;
             scratch.chain_merged_dense.clear();
+            scratch.output_buf = output_scratch;
         };
 
         for (original_tokenizer_state, terminals_disallowed, stack) in paths {
@@ -907,13 +945,18 @@ impl<'a> ConstraintState<'a> {
         }
 
         if !used_direct_final && !self.is_complete() {
-            restore_scratch(merged);
+            restore_scratch(merged, output_scratch);
             return false;
         }
 
         if merged.iter().any(|&word| word != 0) {
             let buf_zeroed = !direct_buf_dirty;
-            self.constraint.or_internal_dense_to_buf(&merged, buf, buf_zeroed);
+            self.constraint.or_internal_dense_to_buf_fast_with_scratch(
+                &merged,
+                buf,
+                buf_zeroed,
+                &mut output_scratch,
+            );
         }
 
         update_eos_mask(
@@ -931,7 +974,7 @@ impl<'a> ConstraintState<'a> {
             self.store_mask_cache(buf, &merged);
         }
 
-        restore_scratch(merged);
+        restore_scratch(merged, output_scratch);
         true
     }
 
