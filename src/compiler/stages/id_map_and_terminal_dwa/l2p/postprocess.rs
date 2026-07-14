@@ -267,6 +267,49 @@ fn topological_order(nwa: &NWA) -> Vec<usize> {
     order
 }
 
+pub(crate) fn max_structural_label_depth_to_final(nwa: &NWA) -> Option<usize> {
+    let order = topological_order(nwa);
+    if order.len() != nwa.states().len() {
+        return None;
+    }
+
+    let mut depth_to_final = vec![None::<usize>; nwa.states().len()];
+    for state_id in order.into_iter().rev() {
+        let state = &nwa.states()[state_id];
+        let mut best = state
+            .final_weight
+            .as_ref()
+            .is_some_and(|weight| !weight.is_empty())
+            .then_some(0usize);
+
+        for (target, weight) in &state.epsilons {
+            if weight.is_empty() {
+                continue;
+            }
+            if let Some(target_depth) = depth_to_final[*target as usize] {
+                best = Some(best.map_or(target_depth, |current| current.max(target_depth)));
+            }
+        }
+        for targets in state.transitions.values() {
+            for (target, weight) in targets {
+                if weight.is_empty() {
+                    continue;
+                }
+                if let Some(target_depth) = depth_to_final[*target as usize] {
+                    let candidate = target_depth + 1;
+                    best = Some(best.map_or(candidate, |current| current.max(candidate)));
+                }
+            }
+        }
+        depth_to_final[state_id] = best;
+    }
+
+    nwa.start_states()
+        .iter()
+        .filter_map(|state| depth_to_final[*state as usize])
+        .max()
+}
+
 fn compute_coreachable_nwa(nwa: &NWA) -> Vec<bool> {
     if nwa.states().is_empty() {
         return Vec::new();

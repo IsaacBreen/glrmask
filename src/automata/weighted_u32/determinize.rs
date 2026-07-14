@@ -2,7 +2,7 @@
 //!
 //! Cyclic inputs are rejected and must be handled by the caller.
 
-use std::collections::{VecDeque, hash_map::Entry as HashMapEntry};
+use std::collections::{BTreeMap, VecDeque, hash_map::Entry as HashMapEntry};
 use std::time::Instant;
 use std::sync::Arc;
 
@@ -194,6 +194,229 @@ fn seed_start_subset(nwa: &NWA) -> FxHashMap<u32, Weight> {
         union_state_weight(&mut start_subset, state_id, Weight::all());
     }
     start_subset
+}
+
+/// Exact determinization for an NWA whose structural accepted language has
+/// labelled depth at most two.
+///
+/// Rather than constructing residual subsets, evaluate the accepted weight of
+/// every word of length 0, 1, or 2 directly. The resulting prefix DWA stores
+/// the exact one-label word weight as the depth-1 final weight, and the union
+/// of all accepted words below a first label on its start edge. Two-label word
+/// weights live on the second edge into one shared all-final leaf.
+///
+/// The caller must establish the structural depth bound. This function keeps
+/// an acyclicity check because the reverse language DP requires a DAG.
+pub fn determinize_depth2(nwa: &NWA) -> Result<DWA, GlrMaskError> {
+    if !nwa.is_acyclic() {
+        return Err(GlrMaskError::Compilation(
+            "depth-2 weighted determinization supports only acyclic NWAs".into(),
+        ));
+    }
+
+    let profile = determinize_profile_enabled();
+    let total_started_at = profile.then(Instant::now);
+    type Word = SmallVec<[i32; 2]>;
+
+    fn union_word_weight(language: &mut BTreeMap<Word, Weight>, word: Word, add: Weight) {
+        if add.is_empty() {
+            return;
+        }
+        match language.entry(word) {
+            std::collections::btree_map::Entry::Occupied(mut occupied) => {
+                *occupied.get_mut() = occupied.get().union(&add);
+            }
+            std::collections::btree_map::Entry::Vacant(vacant) => {
+                vacant.insert(add);
+            }
+        }
+    }
+
+    let mut in_degree = vec![0u32; nwa.states().len()];
+    for state in nwa.states() {
+        for (dst, _) in &state.epsilons {
+            in_degree[*dst as usize] += 1;
+        }
+        for targets in state.transitions.values() {
+            for (dst, _) in targets {
+                in_degree[*dst as usize] += 1;
+            }
+        }
+    }
+    let mut queue = VecDeque::new();
+    for (state_id, degree) in in_degree.iter().enumerate() {
+        if *degree == 0 {
+            queue.push_back(state_id);
+        }
+    }
+    let mut topo_order = Vec::with_capacity(nwa.states().len());
+    while let Some(state_id) = queue.pop_front() {
+        topo_order.push(state_id);
+        let state = &nwa.states()[state_id];
+        for (dst, _) in &state.epsilons {
+            in_degree[*dst as usize] -= 1;
+            if in_degree[*dst as usize] == 0 {
+                queue.push_back(*dst as usize);
+            }
+        }
+        for targets in state.transitions.values() {
+            for (dst, _) in targets {
+                in_degree[*dst as usize] -= 1;
+                if in_degree[*dst as usize] == 0 {
+                    queue.push_back(*dst as usize);
+                }
+            }
+        }
+    }
+    debug_assert_eq!(topo_order.len(), nwa.states().len());
+
+    let dp_started_at = profile.then(Instant::now);
+    let mut languages = vec![BTreeMap::<Word, Weight>::new(); nwa.states().len()];
+    let mut weight_cache = ScopedWeightOpCache::default();
+    let mut dp_word_contributions = 0usize;
+    let mut max_state_words = 0usize;
+    for state_id in topo_order.into_iter().rev() {
+        let state = &nwa.states()[state_id];
+        let mut contributions = BTreeMap::<Word, SmallVec<[Weight; 4]>>::new();
+        if let Some(final_weight) = &state.final_weight {
+            contributions
+                .entry(Word::new())
+                .or_default()
+                .push(final_weight.clone());
+        }
+        for (dst, edge_weight) in &state.epsilons {
+            for (word, suffix_weight) in &languages[*dst as usize] {
+                dp_word_contributions += 1;
+                let contribution = weight_cache.intersection(edge_weight, suffix_weight);
+                if !contribution.is_empty() {
+                    contributions
+                        .entry(word.clone())
+                        .or_default()
+                        .push(contribution);
+                }
+            }
+        }
+        for (&label, targets) in &state.transitions {
+            for (dst, edge_weight) in targets {
+                for (suffix, suffix_weight) in &languages[*dst as usize] {
+                    if suffix.len() >= 2 {
+                        let contribution = weight_cache.intersection(edge_weight, suffix_weight);
+                        if !contribution.is_empty() {
+                            return Err(GlrMaskError::Compilation(
+                                "depth-2 determinization received an accepted path deeper than two labels".into(),
+                            ));
+                        }
+                        continue;
+                    }
+                    dp_word_contributions += 1;
+                    let contribution = weight_cache.intersection(edge_weight, suffix_weight);
+                    if contribution.is_empty() {
+                        continue;
+                    }
+                    let mut word = Word::with_capacity(suffix.len() + 1);
+                    word.push(label);
+                    word.extend_from_slice(suffix);
+                    contributions.entry(word).or_default().push(contribution);
+                }
+            }
+        }
+        let language = contributions
+            .into_iter()
+            .filter_map(|(word, weights)| {
+                let weight = Weight::union_all(weights.iter());
+                (!weight.is_empty()).then_some((word, weight))
+            })
+            .collect::<BTreeMap<_, _>>();
+        max_state_words = max_state_words.max(language.len());
+        languages[state_id] = language;
+    }
+    let dp_ms = dp_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+
+    let start_merge_started_at = profile.then(Instant::now);
+    let mut accepted = BTreeMap::<Word, Weight>::new();
+    for &start_state in nwa.start_states() {
+        for (word, weight) in &languages[start_state as usize] {
+            union_word_weight(&mut accepted, word.clone(), weight.clone());
+        }
+    }
+    let start_merge_ms = start_merge_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+
+    let accepted_word_count = accepted.len();
+    let build_started_at = profile.then(Instant::now);
+    let mut by_first = BTreeMap::<i32, (Weight, BTreeMap<i32, Weight>)>::new();
+    let mut empty_weight = Weight::empty();
+    for (word, weight) in accepted {
+        match word.as_slice() {
+            [] => empty_weight = empty_weight.union(&weight),
+            [first] => {
+                let entry = by_first
+                    .entry(*first)
+                    .or_insert_with(|| (Weight::empty(), BTreeMap::new()));
+                entry.0 = entry.0.union(&weight);
+            }
+            [first, second] => {
+                let entry = by_first
+                    .entry(*first)
+                    .or_insert_with(|| (Weight::empty(), BTreeMap::new()));
+                entry
+                    .1
+                    .entry(*second)
+                    .and_modify(|existing| *existing = existing.union(&weight))
+                    .or_insert(weight);
+            }
+            _ => unreachable!("depth-2 language contains an overlong word"),
+        }
+    }
+
+    let mut dwa = DWA::new(0, 0);
+    if !empty_weight.is_empty() {
+        dwa.set_final_weight(dwa.start_state(), empty_weight);
+    }
+    let mut shared_leaf = None::<u32>;
+    for (first_label, (first_final, second_words)) in by_first {
+        let prefix_weight = Weight::union_all(
+            std::iter::once(&first_final).chain(second_words.values()),
+        );
+        let first_state = dwa.add_state();
+        dwa.add_transition(dwa.start_state(), first_label, first_state, prefix_weight);
+        if !first_final.is_empty() {
+            dwa.set_final_weight(first_state, first_final);
+        }
+        if !second_words.is_empty() {
+            let leaf = *shared_leaf.get_or_insert_with(|| {
+                let state = dwa.add_state();
+                dwa.set_final_weight(state, Weight::all());
+                state
+            });
+            for (second_label, word_weight) in second_words {
+                dwa.add_transition(first_state, second_label, leaf, word_weight);
+            }
+        }
+    }
+    let build_ms = build_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+
+    if let Some(total_started_at) = total_started_at {
+        eprintln!(
+            "[glrmask/profile][determinize_depth2] nwa_states={} dp_word_contributions={} max_state_words={} accepted_words={} intersection_cache_entries={} dp_ms={:.3} start_merge_ms={:.3} build_ms={:.3} total_ms={:.3}",
+            nwa.states().len(),
+            dp_word_contributions,
+            max_state_words,
+            accepted_word_count,
+            weight_cache.intersection_entry_count(),
+            dp_ms,
+            start_merge_ms,
+            build_ms,
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+
+    Ok(dwa)
 }
 
 /// Aggregate direct epsilon-free point-entry contributions without repeatedly
@@ -1002,6 +1225,46 @@ mod tests {
         assert_eq!(find_difference(&grouped, &generic).unwrap(), None);
         assert_eq!(fast.eval_word(&[7]), tokens([0, 1]));
     }
+
+    #[test]
+    fn depth2_language_dp_matches_generic_with_epsilon_paths() {
+        let mut nwa = NWA::new(1, 4);
+        let start = nwa.add_state();
+        let left = nwa.add_state();
+        let right = nwa.add_state();
+        let middle = nwa.add_state();
+        let accept = nwa.add_state();
+        nwa.set_start_states(vec![start]);
+
+        nwa.add_epsilon(start, left, tokens([0, 1, 2]));
+        nwa.add_epsilon(start, right, tokens([1, 2, 3]));
+        nwa.add_transition(left, 7, middle, tokens([0, 1]));
+        nwa.add_transition(right, 7, middle, tokens([2, 3]));
+        nwa.set_final_weight(middle, tokens([0, 2]));
+        nwa.add_transition(middle, 8, accept, tokens([1, 2, 3]));
+        nwa.set_final_weight(accept, tokens([1, 2]));
+
+        let depth2 = determinize_depth2(&nwa).unwrap();
+        let generic = determinize(&nwa).unwrap();
+        assert_eq!(find_difference(&depth2, &generic).unwrap(), None);
+        assert_eq!(depth2.eval_word(&[7]), tokens([0, 2]));
+        assert_eq!(depth2.eval_word(&[7, 8]), tokens([1, 2]));
+    }
+
+    #[test]
+    fn depth2_language_dp_rejects_accepted_three_label_path() {
+        let mut nwa = NWA::new(1, 1);
+        let states: Vec<u32> = (0..4).map(|_| nwa.add_state()).collect();
+        nwa.set_start_states(vec![states[0]]);
+        nwa.add_transition(states[0], 1, states[1], tokens([0]));
+        nwa.add_transition(states[1], 2, states[2], tokens([0]));
+        nwa.add_transition(states[2], 3, states[3], tokens([0]));
+        nwa.set_final_weight(states[3], tokens([0]));
+
+        let error = determinize_depth2(&nwa).unwrap_err();
+        assert!(error.to_string().contains("deeper than two labels"), "{error}");
+    }
+
     #[test]
     fn determinize_batches_many_repeated_destinations_exactly() {
         let mut nwa = NWA::new(1, 7);
