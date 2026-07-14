@@ -839,6 +839,12 @@ fn l1_generic_nfa_exact_profiles_enabled() -> bool {
 
 const L1_GENERIC_NFA_TOKEN_BOUNDED_MAX_STATE_VOCAB_PAIRS: usize = 350_000_000;
 const L1_GENERIC_NFA_TOKEN_BOUNDED_MAX_VOCAB: usize = 20_000;
+const L1_GENERIC_NFA_TOKEN_BOUNDED_LARGE_WORK_BUDGET:
+    super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisWorkBudget =
+    super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisWorkBudget {
+        max_configurations: 64_000,
+        max_trie_visits: 1_000_000,
+    };
 
 pub(crate) fn l1_generic_nfa_token_bounded_view_enabled(
     state_count: usize,
@@ -855,6 +861,105 @@ pub(crate) fn l1_generic_nfa_token_bounded_view_enabled(
             <= L1_GENERIC_NFA_TOKEN_BOUNDED_MAX_STATE_VOCAB_PAIRS
 }
 
+
+fn build_l1_generic_nfa_analysis_view(
+    tokenizer: &Tokenizer,
+    raw_states: &[usize],
+    token_entries: &[(u32, Arc<[u8]>)],
+    active_terminals: &[bool],
+    shared_topology: Option<
+        &super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTopology,
+    >,
+    large_work_budget: super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisWorkBudget,
+) -> (Vec<usize>, TokenizerView, &'static str) {
+    let use_unbudgeted_token_bounded_view =
+        l1_generic_nfa_token_bounded_view_enabled(raw_states.len(), token_entries.len());
+    let bounded_view = if use_unbudgeted_token_bounded_view {
+        let bounded = if let Some(topology) = shared_topology {
+            topology.materialize(tokenizer, Some(active_terminals))
+        } else {
+            let tokens = token_entries
+                .iter()
+                .map(|(_, bytes)| bytes.as_ref())
+                .collect::<Vec<_>>();
+            super::l2p::equivalence_analysis::state_equivalence::nfa::build_token_bounded_analysis_view_projected(
+                tokenizer,
+                raw_states,
+                &tokens,
+                active_terminals,
+            )
+        };
+        Some((bounded, "token_bounded"))
+    } else {
+        let tokens = token_entries
+            .iter()
+            .map(|(_, bytes)| bytes.as_ref())
+            .collect::<Vec<_>>();
+        match super::l2p::equivalence_analysis::state_equivalence::nfa::try_build_token_bounded_analysis_view_projected(
+            tokenizer,
+            raw_states,
+            &tokens,
+            active_terminals,
+            large_work_budget,
+        ) {
+            Ok((bounded, work)) => {
+                if compile_profile_enabled() {
+                    eprintln!(
+                        "[glrmask/profile][l1_token_bounded_budget] outcome=complete raw_states={} vocab_tokens={} configurations={} trie_visits={}",
+                        raw_states.len(),
+                        token_entries.len(),
+                        work.configurations,
+                        work.trie_visits,
+                    );
+                }
+                Some((bounded, "token_bounded_budgeted"))
+            }
+            Err(work) => {
+                if compile_profile_enabled() {
+                    eprintln!(
+                        "[glrmask/profile][l1_token_bounded_budget] outcome=aborted raw_states={} vocab_tokens={} configurations={} trie_visits={}",
+                        raw_states.len(),
+                        token_entries.len(),
+                        work.configurations,
+                        work.trie_visits,
+                    );
+                }
+                None
+            }
+        }
+    };
+
+    if let Some((bounded, analysis_view)) = bounded_view {
+        let view_states = raw_states
+            .iter()
+            .map(|&raw_state| bounded.view_state_for_raw_start(raw_state))
+            .collect::<Vec<_>>();
+        return (view_states, bounded.tokenizer_view, analysis_view);
+    }
+
+    let mut relevant_bytes = [false; 256];
+    for (_, bytes) in token_entries {
+        for &byte in bytes.iter() {
+            relevant_bytes[byte as usize] = true;
+        }
+    }
+    let powerset_view = super::l2p::equivalence_analysis::state_equivalence::nfa::build_relevant_powerset_view(
+        tokenizer,
+        &relevant_bytes,
+        Some(active_terminals),
+        None,
+    );
+    let view_states = powerset_view
+        .raw_start_to_view
+        .iter()
+        .map(|&state| state as usize)
+        .collect::<Vec<_>>();
+    (
+        view_states,
+        powerset_view.into_tokenizer_view(),
+        "relevant_powerset",
+    )
+}
 
 fn build_l1_generic_nfa_exact_id_map<'a>(
     tokenizer: &Tokenizer,
@@ -883,52 +988,14 @@ fn build_l1_generic_nfa_exact_id_map<'a>(
 
     let state_equiv_started_at = Instant::now();
     let view_started_at = Instant::now();
-    let use_token_bounded_view =
-        l1_generic_nfa_token_bounded_view_enabled(num_states, token_entries.len());
-    let (view_states, tokenizer_view, analysis_view) = if use_token_bounded_view {
-        let bounded = if let Some(topology) = shared_topology {
-            topology.materialize(tokenizer, Some(active_terminals))
-        } else {
-            let tokens = token_entries
-                .iter()
-                .map(|(_, bytes)| bytes.as_ref())
-                .collect::<Vec<_>>();
-            super::l2p::equivalence_analysis::state_equivalence::nfa::build_token_bounded_analysis_view_projected(
-                tokenizer,
-                &raw_states,
-                &tokens,
-                active_terminals,
-            )
-        };
-        let view_states = raw_states
-            .iter()
-            .map(|&raw_state| bounded.view_state_for_raw_start(raw_state))
-            .collect::<Vec<_>>();
-        (view_states, bounded.tokenizer_view, "token_bounded")
-    } else {
-        let mut relevant_bytes = [false; 256];
-        for (_, bytes) in token_entries {
-            for &byte in bytes.iter() {
-                relevant_bytes[byte as usize] = true;
-            }
-        }
-        let powerset_view = super::l2p::equivalence_analysis::state_equivalence::nfa::build_relevant_powerset_view(
-            tokenizer,
-            &relevant_bytes,
-            Some(active_terminals),
-            None,
-        );
-        let view_states = powerset_view
-            .raw_start_to_view
-            .iter()
-            .map(|&state| state as usize)
-            .collect::<Vec<_>>();
-        (
-            view_states,
-            powerset_view.into_tokenizer_view(),
-            "relevant_powerset",
-        )
-    };
+    let (view_states, tokenizer_view, analysis_view) = build_l1_generic_nfa_analysis_view(
+        tokenizer,
+        &raw_states,
+        token_entries,
+        active_terminals,
+        shared_topology,
+        L1_GENERIC_NFA_TOKEN_BOUNDED_LARGE_WORK_BUDGET,
+    );
     let view_build_ms = view_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let terminal_signature_started_at = compile_profile_enabled().then(Instant::now);
@@ -4982,6 +5049,34 @@ struct L1TerminalBuildProfile {
 mod generic_nfa_tests {
     use super::*;
     use crate::automata::lexer::tokenizer::arbitrary_epsilon_l1_test_tokenizer;
+
+    #[test]
+    fn large_token_bounded_budget_abort_falls_back_to_relevant_powerset() {
+        let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
+        let raw_states = (0..tokenizer.num_states() as usize).collect::<Vec<_>>();
+        let token = Arc::<[u8]>::from(b"a".as_slice());
+        let token_entries = (0..=L1_GENERIC_NFA_TOKEN_BOUNDED_MAX_VOCAB as u32)
+            .map(|token_id| (token_id, Arc::clone(&token)))
+            .collect::<Vec<_>>();
+        let active = [true, true];
+
+        assert!(!l1_generic_nfa_token_bounded_view_enabled(
+            raw_states.len(),
+            token_entries.len(),
+        ));
+        let (_, _, analysis_view) = build_l1_generic_nfa_analysis_view(
+            &tokenizer,
+            &raw_states,
+            &token_entries,
+            &active,
+            None,
+            super::super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisWorkBudget {
+                max_configurations: usize::MAX,
+                max_trie_visits: 0,
+            },
+        );
+        assert_eq!(analysis_view, "relevant_powerset");
+    }
 
     #[test]
     fn token_bounded_view_respects_construction_budget() {
