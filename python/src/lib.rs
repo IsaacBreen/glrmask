@@ -44,8 +44,10 @@ self_cell!(
 );
 
 impl OwnedState {
-    fn from_arc(arc: Arc<glrmask::Constraint>) -> Self {
-        OwnedState::new(arc, |arc_ref| arc_ref.start())
+    fn from_arc_with_rollback(arc: Arc<glrmask::Constraint>, max_rollback_tokens: usize) -> Self {
+        OwnedState::new(arc, move |arc_ref| {
+            arc_ref.start_with_rollback(max_rollback_tokens)
+        })
     }
 }
 
@@ -548,9 +550,13 @@ impl PyConstraint {
         Self::from_constraint_result(glrmask::Constraint::load(data), vocab)
     }
 
-    fn start(&self) -> PyConstraintState {
+    #[pyo3(signature = (max_rollback_tokens=0))]
+    fn start(&self, max_rollback_tokens: usize) -> PyConstraintState {
         PyConstraintState {
-            inner: OwnedState::from_arc(self.inner.clone()),
+            inner: OwnedState::from_arc_with_rollback(
+                self.inner.clone(),
+                max_rollback_tokens,
+            ),
             max_token: self.max_token,
         }
     }
@@ -730,6 +736,20 @@ impl PyConstraintState {
     fn commit_tokens(&mut self, token_ids: Vec<u32>) -> PyResult<()> {
         self.inner
             .with_dependent_mut(|_owner, state| string_result(state.commit_tokens(&token_ids)))
+    }
+
+    fn validate_tokens(&self, token_ids: Vec<u32>) -> Vec<u32> {
+        self.inner
+            .with_dependent(|_owner, state| state.validate_tokens(&token_ids))
+    }
+
+    fn rollback(&mut self, num_tokens: usize) -> PyResult<()> {
+        self.inner
+            .with_dependent_mut(|_owner, state| string_result(state.rollback(num_tokens)))
+    }
+
+    fn is_failed(&self) -> bool {
+        self.inner.with_dependent(|_owner, state| state.is_failed())
     }
 
     fn commit_bytes(&mut self, data: &[u8]) -> PyResult<()> {

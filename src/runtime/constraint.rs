@@ -2026,6 +2026,15 @@ impl Constraint {
     }
 
     pub fn start(&self) -> ConstraintState<'_> {
+        self.start_with_rollback(0)
+    }
+
+    /// Start a state with bounded token rollback history.
+    ///
+    /// `max_rollback_tokens == 0` is equivalent to `start()` and retains no
+    /// history. Positive values retain at most that many pre-commit semantic
+    /// snapshots, making rollback cost independent of the generated prefix.
+    pub fn start_with_rollback(&self, max_rollback_tokens: usize) -> ConstraintState<'_> {
         let state = self.initial_state_map();
         let state = ConstraintState {
             constraint: self,
@@ -2034,6 +2043,8 @@ impl Constraint {
             generation: 0,
             mask_cache: Mutex::new(None),
             mask_scratch: Mutex::new(Default::default()),
+            rollback_capacity: max_rollback_tokens,
+            rollback_history: Default::default(),
         };
         state.prefill_mask_cache();
         state
@@ -2047,6 +2058,8 @@ impl Constraint {
             generation: 0,
             mask_cache: Mutex::new(None),
             mask_scratch: Mutex::new(Default::default()),
+            rollback_capacity: 0,
+            rollback_history: Default::default(),
         }
     }
 
