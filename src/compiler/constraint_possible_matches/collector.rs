@@ -317,6 +317,58 @@ fn normalize_interval_map(map: &mut IntervalPossibleMatchMap) {
     *map = merged;
 }
 
+#[derive(Default)]
+struct IntervalMapBuilder {
+    group_index: FxHashMap<Vec<TerminalID>, usize>,
+    groups: IntervalPossibleMatchMap,
+}
+
+impl IntervalMapBuilder {
+    #[inline]
+    fn append_ranges(&mut self, terminals: &[TerminalID], ranges: &[TokenRange]) {
+        if terminals.is_empty() || ranges.is_empty() {
+            return;
+        }
+        let group_index = if let Some(&index) = self.group_index.get(terminals) {
+            index
+        } else {
+            let key = terminals.to_vec();
+            let index = self.groups.len();
+            self.group_index.insert(key.clone(), index);
+            self.groups.push(TerminalRangeGroup {
+                terminals: key.into_boxed_slice(),
+                ranges: Vec::new(),
+            });
+            index
+        };
+        let destination = &mut self.groups[group_index].ranges;
+        for &(start, end) in ranges {
+            if start > end {
+                continue;
+            }
+            if let Some(current) = destination.last_mut()
+                && start <= current.1.saturating_add(1)
+            {
+                current.1 = current.1.max(end);
+            } else {
+                destination.push((start, end));
+            }
+        }
+    }
+
+    #[inline]
+    fn append_range(&mut self, terminals: &[TerminalID], range: TokenRange) {
+        self.append_ranges(terminals, std::slice::from_ref(&range));
+    }
+
+    fn finish(mut self) -> IntervalPossibleMatchMap {
+        self.groups.retain(|entry| !entry.ranges.is_empty());
+        self.groups
+            .sort_unstable_by(|left, right| left.terminals.as_ref().cmp(right.terminals.as_ref()));
+        self.groups
+    }
+}
+
 fn reachable_ranges(node: &VocabPrefixTreeNode) -> Box<[TokenRange]> {
     let mut ranges = Vec::new();
     for range in node.reachable_token_ids().ranges() {
@@ -692,8 +744,21 @@ fn build_node(
                 let mut local_active_seen_positions = vec![0u32; num_states];
                 local_timings.parallel_stamp_alloc_ms += elapsed_ms(stamp_alloc_started_at);
 
+                // This fork owns the entire child subtree and processes it
+                // serially (`parallel_depth = 0`).  Re-enable the vector cache
+                // locally: repeated `(radix segment, active-state set)` pairs
+                // inside one subtree are immutable and require no cross-worker
+                // synchronization.  Previously every fork discarded this
+                // cache merely because the outer collector was parallel.
+                let mut local_vector_cache = SerialSegmentVectorCache::default();
+                let local_active_set_id = Some(
+                    local_vector_cache
+                        .active_sets
+                        .intern(&pending.child_active_states),
+                );
+
                 let recursive_started_at = Instant::now();
-                let result = build_node(pending.child, num_states, num_terminals, &pending.child_active_states, matched_terminals, matched_terminal_masks, node_terminal_ids, empty_terminals_id, is_end, byte_transitions, self_loop_bytes, canonical_state, &mut local_terminal_sets, &mut local_segment_cache, &mut local_segment_outcome_tables, &mut local_timings, &mut local_stamp_gen, &mut local_terminal_stamps, &mut local_active_seen_gen, &mut local_active_seen_stamps, &mut local_active_seen_positions, 0, parallel_min_active, dense_segment_cache_min_entries, None, None);
+                let result = build_node(pending.child, num_states, num_terminals, &pending.child_active_states, matched_terminals, matched_terminal_masks, node_terminal_ids, empty_terminals_id, is_end, byte_transitions, self_loop_bytes, canonical_state, &mut local_terminal_sets, &mut local_segment_cache, &mut local_segment_outcome_tables, &mut local_timings, &mut local_stamp_gen, &mut local_terminal_stamps, &mut local_active_seen_gen, &mut local_active_seen_stamps, &mut local_active_seen_positions, 0, parallel_min_active, dense_segment_cache_min_entries, Some(&mut local_vector_cache), local_active_set_id);
                 local_timings.recursive_ms += elapsed_ms(recursive_started_at);
                 let child_class_project_started_at = Instant::now();
                 let child_class_ids = pending.descend_positions.iter().map(|&pos| if pos == u32::MAX { u32::MAX } else { result.classes[pos as usize] }).collect();
@@ -972,18 +1037,27 @@ fn build_node(
     let map_started_at = Instant::now();
     let mut class_maps = Vec::with_capacity(representative_states.len());
     for (&state, &state_pos) in representative_states.iter().zip(representative_state_positions.iter()) {
-        let mut result = IntervalPossibleMatchMap::default();
+        let mut result = IntervalMapBuilder::default();
         if node.has_token() {
             let token_id = node.token_id() as u32;
-            append_range(&mut result, terminal_sets.get(node_terminal_ids[state as usize]), (token_id, token_id));
+            result.append_range(
+                terminal_sets.get(node_terminal_ids[state as usize]),
+                (token_id, token_id),
+            );
         }
         for child in &child_data {
-            append_ranges(&mut result, terminal_sets.get(child.outcomes[state_pos].terminals_id), &child.reachable);
+            result.append_ranges(
+                terminal_sets.get(child.outcomes[state_pos].terminals_id),
+                &child.reachable,
+            );
             let child_class_id = child.child_class_ids[state_pos];
-            if child_class_id != u32::MAX { merge_interval_maps(&mut result, child.result.class_maps[child_class_id as usize].as_ref()); }
+            if child_class_id != u32::MAX {
+                for entry in child.result.class_maps[child_class_id as usize].iter() {
+                    result.append_ranges(entry.terminals.as_ref(), &entry.ranges);
+                }
+            }
         }
-        normalize_interval_map(&mut result);
-        class_maps.push(Arc::new(result));
+        class_maps.push(Arc::new(result.finish()));
     }
     timings.map_materialize_ms += elapsed_ms(map_started_at);
     NodeClasses { classes, class_maps }
@@ -1038,7 +1112,7 @@ fn collect_possible_matches_interval_trie_class_build_precomputed(
     let parallel_depth = std::env::var("GLRMASK_PM_ROOT_PARALLEL_DEPTH")
         .ok()
         .and_then(|v| v.parse::<u8>().ok())
-        .unwrap_or(5);
+        .unwrap_or(4);
     let parallel_min_active = std::env::var("GLRMASK_PM_PARALLEL_MIN_ACTIVE_STATES")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())

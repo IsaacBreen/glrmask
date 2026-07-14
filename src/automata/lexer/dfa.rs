@@ -447,6 +447,76 @@ impl DFA {
         closure
     }
 
+    /// Compute every singleton epsilon closure in one pass.
+    ///
+    /// Lexer partition unions and bounded adaptive frontiers produce an
+    /// acyclic epsilon graph.  For that common case, reverse-topological
+    /// dynamic programming reuses each target closure instead of allocating a
+    /// fresh `seen` vector and walking the same tails once per source state.
+    /// Persisted/debug automata may contain epsilon cycles; retain the exact
+    /// scalar closure as a defensive fallback when Kahn's order detects one.
+    pub(super) fn all_singleton_epsilon_closures(&self) -> Vec<Box<[u32]>> {
+        let state_count = self.states.len();
+        let mut indegree = vec![0usize; state_count];
+        for state in &self.states {
+            for &target in &state.epsilon_transitions {
+                indegree[target as usize] += 1;
+            }
+        }
+        let mut queue = std::collections::VecDeque::<u32>::new();
+        for (state, &degree) in indegree.iter().enumerate() {
+            if degree == 0 {
+                queue.push_back(state as u32);
+            }
+        }
+        let mut topo = Vec::with_capacity(state_count);
+        while let Some(state) = queue.pop_front() {
+            topo.push(state);
+            for &target in &self.states[state as usize].epsilon_transitions {
+                let degree = &mut indegree[target as usize];
+                *degree -= 1;
+                if *degree == 0 {
+                    queue.push_back(target);
+                }
+            }
+        }
+        if topo.len() != state_count {
+            return (0..state_count)
+                .map(|state| {
+                    self.epsilon_closure(&[state as u32])
+                        .into_vec()
+                        .into_boxed_slice()
+                })
+                .collect();
+        }
+
+        let mut closures = vec![Box::<[u32]>::default(); state_count];
+        let mut marks = vec![0u32; state_count];
+        let mut generation = 0u32;
+        for &state in topo.iter().rev() {
+            generation = generation.wrapping_add(1);
+            if generation == 0 {
+                marks.fill(0);
+                generation = 1;
+            }
+            let mut closure = Vec::<u32>::new();
+            marks[state as usize] = generation;
+            closure.push(state);
+            for &target in &self.states[state as usize].epsilon_transitions {
+                for &reachable in closures[target as usize].iter() {
+                    let slot = &mut marks[reachable as usize];
+                    if *slot != generation {
+                        *slot = generation;
+                        closure.push(reachable);
+                    }
+                }
+            }
+            closure.sort_unstable();
+            closures[state as usize] = closure.into_boxed_slice();
+        }
+        closures
+    }
+
     pub(super) fn step_all(&self, states: &[u32], byte: u8) -> SmallVec<[u32; 1]> {
         if states.len() == 1 {
             let state = states[0];
