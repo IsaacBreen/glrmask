@@ -25,7 +25,8 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
-use crate::automata::weighted::determinize::determinize;
+use crate::automata::weighted::determinize::{determinize, determinize_depth2};
+use crate::automata::weighted::equivalence::find_difference;
 use crate::automata::weighted::minimize::{
     PointwiseClassOrder, minimize_owned, minimize_owned_with_pointwise_class_order,
 };
@@ -57,7 +58,7 @@ use terminal_interchangeability::{
 };
 use postprocess::{
     apply_disallowed_follow_constraints, canonicalize_acyclic_nwa, collapse_always_allowed,
-    prune_non_coreachable_states,
+    max_structural_label_depth_to_final, prune_non_coreachable_states,
 };
 
 fn l2p_timing_profile_enabled() -> bool {
@@ -836,8 +837,26 @@ let strict_reference = reference_terminal_expansion
             let canonicalize_ms = canonicalize_started_at.elapsed().as_secs_f64() * 1000.0;
             let nwa_states_after_canonicalize = nwa.states().len();
 
+            let structural_depth = max_structural_label_depth_to_final(&nwa);
             let determinize_started_at = Instant::now();
-            let det = determinize(&nwa).expect("L2+ terminal NWA determinization failed");
+            let use_depth2 = structural_depth.is_some_and(|depth| depth <= 2);
+            let det = if use_depth2 {
+                let depth2 = determinize_depth2(&nwa)
+                    .expect("depth-2 terminal NWA determinization failed");
+                if std::env::var_os("GLRMASK_ASSERT_L2P_DEPTH2_DETERMINIZE").is_some() {
+                    let reference =
+                        determinize(&nwa).expect("L2+ terminal NWA determinization failed");
+                    assert_eq!(
+                        find_difference(&depth2, &reference)
+                            .expect("depth-2 terminal DWA equivalence check failed"),
+                        None,
+                        "depth-2 terminal DWA differs from generic determinization",
+                    );
+                }
+                depth2
+            } else {
+                determinize(&nwa).expect("L2+ terminal NWA determinization failed")
+            };
             let determinize_ms = determinize_started_at.elapsed().as_secs_f64() * 1000.0;
 
             let minimize_started_at = Instant::now();
