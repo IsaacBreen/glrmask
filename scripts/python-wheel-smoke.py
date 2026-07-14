@@ -1,0 +1,27 @@
+#!/usr/bin/env python3
+"""Minimal public Python API smoke test for an installed glrmask wheel/sdist."""
+
+import glrmask
+
+vocab = glrmask.Vocab.from_dict(
+    {
+        b"hello": 0,
+        b" ": 1,
+        b"world": 2,
+    }
+)
+constraint = glrmask.Constraint.from_ebnf(
+    'start ::= "hello" " " "world"',
+    vocab,
+)
+state = constraint.start()
+
+assert state.mask().tolist() == [True, False, False]
+state.commit_token(0)
+assert state.mask().tolist() == [False, True, False]
+state.commit_token(1)
+assert state.mask().tolist() == [False, False, True]
+state.commit_token(2)
+assert state.is_finished()
+
+print("public Python API smoke test passed")
