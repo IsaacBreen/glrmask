@@ -840,6 +840,24 @@ impl TokenBoundedAnalysisTopology {
         self.configurations.len()
     }
 
+    /// Materialize a topology that was already constructed with the same
+    /// active-language projection. Re-projecting such a topology would be
+    /// exact but wastefully scan and rebuild its full dense transition table.
+    fn materialize_already_projected(
+        &self,
+        tokenizer: &Tokenizer,
+        active_groups: &[bool],
+    ) -> BoundedAnalysisView {
+        materialize_bounded_analysis_view(
+            tokenizer,
+            Some(active_groups),
+            &self.configurations,
+            self.start_state,
+            Arc::clone(&self.transitions),
+            self.raw_start_to_view.to_vec(),
+        )
+    }
+
     pub(crate) fn materialize(
         &self,
         tokenizer: &Tokenizer,
@@ -1242,7 +1260,7 @@ pub(crate) fn build_token_bounded_analysis_view_projected(
     )
     .expect("unbounded token analysis topology build")
     .0
-    .materialize(tokenizer, Some(active_groups))
+    .materialize_already_projected(tokenizer, active_groups)
 }
 
 pub(crate) fn try_build_token_bounded_analysis_view_projected(
@@ -1262,7 +1280,10 @@ pub(crate) fn try_build_token_bounded_analysis_view_projected(
         Some(active_groups),
         Some(budget),
     )?;
-    Ok((topology.materialize(tokenizer, Some(active_groups)), work))
+    Ok((
+        topology.materialize_already_projected(tokenizer, active_groups),
+        work,
+    ))
 }
 
 pub(crate) fn build_token_bounded_analysis_view(
@@ -1868,6 +1889,45 @@ mod tests {
         assert_ne!(dfa.trans(dfa.start_state, b'a' as usize), u32::MAX);
         assert_eq!(dfa.trans(dfa.start_state, b'x' as usize), u32::MAX);
         assert_eq!(dfa.trans(dfa.start_state, b'y' as usize), u32::MAX);
+    }
+
+    #[test]
+    fn already_projected_token_topology_materialization_matches_reprojection() {
+        let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
+        let raw_start_states = (0..tokenizer.num_states() as usize).collect::<Vec<_>>();
+        let tokens = [
+            b"a".as_slice(),
+            b"aa".as_slice(),
+            b"ab".as_slice(),
+            b"ba".as_slice(),
+            b"bb".as_slice(),
+        ];
+        let active_groups = [true, false];
+        let topology = build_bounded_analysis_topology_impl(
+            &tokenizer,
+            &raw_start_states,
+            &tokens,
+            false,
+            true,
+            false,
+            Some(&active_groups),
+            None,
+        )
+        .expect("projected topology build")
+        .0;
+        let direct = topology.materialize_already_projected(&tokenizer, &active_groups);
+        let reprojected = topology.materialize(&tokenizer, Some(&active_groups));
+
+        for &raw_state in &raw_start_states {
+            let direct_start = direct.view_state_for_raw_start(raw_state);
+            let reprojected_start = reprojected.view_state_for_raw_start(raw_state);
+            for token in tokens {
+                assert_eq!(
+                    view_trace(&direct.tokenizer_view, direct_start, token),
+                    view_trace(&reprojected.tokenizer_view, reprojected_start, token),
+                );
+            }
+        }
     }
 
     #[test]
