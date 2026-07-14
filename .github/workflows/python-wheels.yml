@@ -1,0 +1,187 @@
+name: Python wheels
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/python-wheels.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "glrmask-runtime/**"
+      - "python/**"
+      - "scripts/check-python-wheel-set.py"
+      - "scripts/python-artifact-smoke.py"
+      - "scripts/python-wheel-smoke.py"
+      - "src/**"
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: python-wheels-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  wheels:
+    name: ${{ matrix.platform.id }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+        platform:
+          - id: manylinux-x86_64
+            runner: ubuntu-24.04
+            target: x86_64
+            python-arch: x64
+            linux: true
+            container: quay.io/pypa/manylinux2014_x86_64:latest
+          - id: manylinux-aarch64
+            runner: ubuntu-24.04-arm
+            target: aarch64
+            python-arch: arm64
+            linux: true
+            container: quay.io/pypa/manylinux2014_aarch64:latest
+          - id: macos-x86_64
+            runner: macos-15-intel
+            target: x86_64
+            python-arch: x64
+            linux: false
+          - id: macos-arm64
+            runner: macos-15
+            target: aarch64
+            python-arch: arm64
+            linux: false
+          - id: windows-x86_64
+            runner: windows-latest
+            target: x64
+            python-arch: x64
+            linux: false
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          architecture: ${{ matrix.platform.python-arch }}
+
+      - name: Build manylinux wheel
+        if: ${{ matrix.platform.linux }}
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          maturin-version: v1.14.1
+          target: ${{ matrix.platform.target }}
+          manylinux: "2014"
+          container: ${{ matrix.platform.container }}
+          args: >-
+            --release
+            --locked
+            --out dist
+            -i python${{ matrix.python-version }}
+            --compatibility pypi
+            --manifest-path python/Cargo.toml
+
+      - name: Build native wheel
+        if: ${{ !matrix.platform.linux }}
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          maturin-version: v1.14.1
+          target: ${{ matrix.platform.target }}
+          args: >-
+            --release
+            --locked
+            --compatibility pypi
+            --out dist
+            --interpreter python
+            --manifest-path python/Cargo.toml
+
+      - name: Validate wheel metadata
+        run: |
+          python -m pip install --upgrade pip twine
+          python -m twine check dist/*
+
+      - name: Clean-install and smoke-test wheel
+        run: python scripts/python-artifact-smoke.py dist --kind wheel
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: wheel-${{ matrix.platform.id }}-py${{ matrix.python-version }}
+          path: dist/*.whl
+          if-no-files-found: error
+          retention-days: 14
+
+  sdist:
+    name: Source distribution
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          maturin-version: v1.14.1
+          command: sdist
+          args: --out dist --manifest-path python/Cargo.toml
+
+      - name: Validate sdist metadata
+        run: |
+          python -m pip install --upgrade pip twine
+          python -m twine check dist/*
+
+      - name: Clean-install and smoke-test sdist
+        run: python scripts/python-artifact-smoke.py dist --kind sdist
+
+      - name: Upload sdist artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: python-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  validate-artifact-set:
+    name: Validate complete artifact set
+    runs-on: ubuntu-24.04
+    needs: [wheels, sdist]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Download wheel artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: wheel-*
+          path: dist
+          merge-multiple: true
+
+      - name: Download sdist artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: python-sdist
+          path: dist
+
+      - name: Validate complete release-shaped artifact set
+        run: |
+          python -m pip install --upgrade pip twine packaging
+          python -m twine check dist/*
+          python scripts/check-python-wheel-set.py dist
+
+      - name: Upload combined validated artifact set
+        uses: actions/upload-artifact@v6
+        with:
+          name: python-release-artifacts
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
