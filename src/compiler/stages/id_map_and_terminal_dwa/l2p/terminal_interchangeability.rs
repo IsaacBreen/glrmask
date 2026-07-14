@@ -3124,6 +3124,81 @@ impl InterchangeabilityDfa {
         }
     }
 
+    /// Materialize quotient output supports for a batch of terminals in one
+    /// pass over quotient representative rows.  The lazy single-terminal path
+    /// starts from raw destination states and repeatedly walks raw reverse
+    /// predecessors before deduplicating them back to quotient classes.  For a
+    /// candidate family that revisits dozens or hundreds of terminals, that
+    /// repeats the same projection work many times.
+    ///
+    /// Stable quotient classes have identical labelled successor behaviour, so
+    /// one representative row per class is exact.  Scanning those rows once
+    /// directly produces the same `(source_class, final/future mask)` supports.
+    fn prebuild_terminal_quotient_output_supports(&mut self, candidates: &[TerminalID]) {
+        if candidates.is_empty() {
+            return;
+        }
+        self.ensure_support_quotient();
+        let terminal_count = self.finalizer_states_by_terminal.len();
+        let supports = self
+            .terminal_quotient_output_supports
+            .get_or_insert_with(|| vec![None; terminal_count]);
+        let missing = candidates
+            .iter()
+            .copied()
+            .filter(|&terminal| supports[terminal as usize].is_none())
+            .collect::<Vec<_>>();
+        if missing.is_empty() {
+            return;
+        }
+
+        let profile_timing = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
+        let started_at = profile_timing.then(Instant::now);
+        let mut candidate_mask = vec![false; terminal_count];
+        for &terminal in &missing {
+            candidate_mask[terminal as usize] = true;
+        }
+        let mut built = (0..terminal_count)
+            .map(|_| Vec::<(u32, u8)>::new())
+            .collect::<Vec<_>>();
+        let quotient = self
+            .support_quotient
+            .as_ref()
+            .expect("support quotient initialized");
+        for (class, &representative) in quotient.representative_by_class.iter().enumerate() {
+            let class = class as u32;
+            for &(_, destination) in self.topology.edges_from(representative as usize) {
+                let pair = &self.output_pairs[self.output_pair_by_state[destination as usize] as usize];
+                for (terminals, mask) in [(&pair.finalizers.0, 1u8), (&pair.future_finalizers.0, 2u8)] {
+                    for terminal in terminals.iter().copied() {
+                        if !candidate_mask
+                            .get(terminal as usize)
+                            .copied()
+                            .unwrap_or(false)
+                        {
+                            continue;
+                        }
+                        let support = &mut built[terminal as usize];
+                        if let Some((last_class, last_mask)) = support.last_mut()
+                            && *last_class == class
+                        {
+                            *last_mask |= mask;
+                        } else {
+                            support.push((class, mask));
+                        }
+                    }
+                }
+            }
+        }
+        for terminal in missing {
+            supports[terminal as usize] = Some(std::mem::take(&mut built[terminal as usize]));
+        }
+        if let Some(started_at) = started_at {
+            self.support_transposition_support_setup_ns +=
+                started_at.elapsed().as_nanos() as u64;
+        }
+    }
+
     /// Propose the quotient action of swapping two terminal labels by pairing
     /// their terminal-specific observable support tracks.  It is only a
     /// candidate: `support_transposition_interchange_map` proves the complete
@@ -6613,6 +6688,14 @@ impl InterchangeabilityDfa {
     /// support. Idempotent and pure given the pre-built global support
     /// quotient, so racing workers converge on identical contents.
     fn terminal_support_parallel(&self, terminal: TerminalID) -> &[(u32, u8)] {
+        if let Some(support) = self
+            .terminal_quotient_output_supports
+            .as_ref()
+            .and_then(|supports| supports.get(terminal as usize))
+            .and_then(Option::as_ref)
+        {
+            return support;
+        }
         let slots = self
             .parallel_terminal_supports
             .get()
@@ -7595,6 +7678,85 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
         let mut petal_batch_grouping_ns = 0u64;
         let mut petal_batch_certificate_ns = 0u64;
         let mut petal_batch_map_ns = 0u64;
+        // Large rooted candidate groups are often already exact symmetric
+        // petal families.  Try the whole-group certificate directly before
+        // doing either per-terminal generic-form classification or pairwise
+        // pivot certification.  This is especially important for generic NFA
+        // topologies, where literal families can contain hundreds of terminals
+        // but each terminal moves only a tiny, disjoint quotient petal.
+        let direct_batch_min_terminals = std::env::var(
+            "GLRMASK_TI_DIRECT_BATCH_MIN_TERMINALS",
+        )
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(64);
+        let candidate_groups = if petal_batch_enabled
+            && candidate_groups
+                .iter()
+                .any(|group| group.len() >= direct_batch_min_terminals)
+        {
+            dfa.ensure_support_quotient();
+            let quotient = dfa
+                .support_quotient
+                .as_ref()
+                .expect("support quotient initialized for direct petal batching");
+            let mut residual_groups = Vec::<Vec<TerminalID>>::new();
+            for group in candidate_groups {
+                if group.len() < direct_batch_min_terminals {
+                    residual_groups.push(group);
+                    continue;
+                }
+                let certificate_started_at = Instant::now();
+                let Some(canonical_orders) =
+                    dfa.support_petal_batch_certificate(quotient, &group)
+                else {
+                    petal_batch_certificate_ns +=
+                        certificate_started_at.elapsed().as_nanos() as u64;
+                    residual_groups.push(group);
+                    continue;
+                };
+                petal_batch_certificate_ns +=
+                    certificate_started_at.elapsed().as_nanos() as u64;
+                let map_started_at = Instant::now();
+                let Some(maps) = dfa.support_petal_batch_maps(
+                    quotient,
+                    &group,
+                    &canonical_orders,
+                ) else {
+                    petal_batch_map_ns += map_started_at.elapsed().as_nanos() as u64;
+                    residual_groups.push(group);
+                    continue;
+                };
+                petal_batch_map_ns += map_started_at.elapsed().as_nanos() as u64;
+                let representative = group[0];
+                petal_batch_groups += 1;
+                petal_batch_members += group.len() - 1;
+                support_transposition_checks += group.len() - 1;
+                accepted_representative_members += group.len() - 1;
+                for (&terminal, map) in group[1..].iter().zip(maps) {
+                    result
+                        .get_mut(&representative)
+                        .expect("TI direct batch representative must retain its singleton partition entry")
+                        .insert(terminal);
+                    let removed = result.remove(&terminal);
+                    debug_assert!(
+                        removed.is_some(),
+                        "TI direct batch member must retain its singleton partition entry"
+                    );
+                    let replaced = accepted_maps.insert(
+                        (representative, terminal),
+                        Arc::new(map.scanner_state_map()),
+                    );
+                    debug_assert!(
+                        replaced.is_none(),
+                        "TI direct batch must accept each pair once"
+                    );
+                }
+            }
+            residual_groups
+        } else {
+            candidate_groups
+        };
         let candidate_groups = if petal_batch_enabled
             && dfa.topology.raw_representative_by_state.is_none()
         {
@@ -7739,6 +7901,13 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
         } else {
             candidate_groups
         };
+
+        let support_candidates = candidate_groups
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        dfa.prebuild_terminal_quotient_output_supports(&support_candidates);
 
         // Accepted terminal swaps are automorphisms. Therefore (a b) and
         // (b c) imply (a c) by conjugation, so interchangeability is an
