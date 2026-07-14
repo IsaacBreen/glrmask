@@ -1947,6 +1947,8 @@ struct InterchangeabilityDfa {
     /// scratch, used to propose a tiny support-transposition witness before
     /// falling back to exact refinement.
     terminal_quotient_output_supports: Option<Vec<Option<Vec<(u32, u8)>>>>,
+    support_cone_marks: Vec<u32>,
+    support_cone_mark_epoch: u32,
     /// Thread-safe on-demand mirror of `terminal_quotient_output_supports` used
     /// only by the parallel certification path. Each terminal's support is
     /// pure given the (pre-built) global support quotient and immutable
@@ -2440,6 +2442,8 @@ impl InterchangeabilityDfa {
             support_quotient,
             canonical_quotient: None,
             terminal_quotient_output_supports: None,
+            support_cone_marks: Vec::new(),
+            support_cone_mark_epoch: 0,
             parallel_terminal_supports: OnceLock::new(),
             quotient_certified: 0,
             support_transposition_certified: 0,
@@ -3684,10 +3688,12 @@ impl InterchangeabilityDfa {
             .expect("right terminal support initialized");
         let profile_timing = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
         let cone_started_at = profile_timing.then(Instant::now);
-        let cone_classes = Self::support_quotient_affected_cone_from_supports_small(
+        let cone_classes = Self::support_quotient_affected_cone_from_supports_marked(
             quotient,
             left_support,
             right_support,
+            &mut self.support_cone_marks,
+            &mut self.support_cone_mark_epoch,
         );
         debug_assert!({
             let mut raw = self
@@ -4739,6 +4745,47 @@ impl InterchangeabilityDfa {
             for &predecessor in &quotient.reverse_predecessors[class] {
                 let predecessor = predecessor as usize;
                 if !cone.contains(&predecessor) {
+                    cone.push(predecessor);
+                }
+            }
+        }
+        cone
+    }
+
+    fn support_quotient_affected_cone_from_supports_marked(
+        quotient: &SupportQuotient,
+        left_support: &[(u32, u8)],
+        right_support: &[(u32, u8)],
+        marks: &mut Vec<u32>,
+        mark_epoch: &mut u32,
+    ) -> SmallVec<[usize; 16]> {
+        let class_count = quotient.representative_by_class.len();
+        if marks.len() != class_count {
+            marks.resize(class_count, 0);
+            *mark_epoch = 0;
+        }
+        *mark_epoch = mark_epoch.wrapping_add(1);
+        if *mark_epoch == 0 {
+            marks.fill(0);
+            *mark_epoch = 1;
+        }
+        let epoch = *mark_epoch;
+        let mut cone = SmallVec::<[usize; 16]>::new();
+        for &(class, _) in left_support.iter().chain(right_support) {
+            let class = class as usize;
+            if marks[class] != epoch {
+                marks[class] = epoch;
+                cone.push(class);
+            }
+        }
+        let mut next = 0usize;
+        while next < cone.len() {
+            let class = cone[next];
+            next += 1;
+            for &predecessor in &quotient.reverse_predecessors[class] {
+                let predecessor = predecessor as usize;
+                if marks[predecessor] != epoch {
+                    marks[predecessor] = epoch;
                     cone.push(predecessor);
                 }
             }
