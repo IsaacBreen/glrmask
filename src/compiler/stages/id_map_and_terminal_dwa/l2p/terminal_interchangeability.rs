@@ -6167,70 +6167,247 @@ impl InterchangeabilityDfa {
         accepted
     }
 
-    /// Collision-free exact refinement. This deliberately recomputes every
-    /// raw restricted state each round: an earlier incremental cone shortcut
-    /// was not a sufficient proof of cross-side partition stabilization.
-    fn canonical_interchange_map(&mut self, left: TerminalID, right: TerminalID) -> Option<InterchangeMap> {
-        if let Some(map) = self.canonical_quotient_interchange_map(left, right) {
-            return Some(map);
-        }
-        let pair_started_at = Instant::now();
-        let profile_pair = std::env::var_os("GLRMASK_PROFILE_L2P_TI_CANONICAL_PAIRS").is_some();
-        let stable_round = self.ensure_canonical_identity_stable_round();
+    /// Exact paired refinement over the disjoint union of the identity and
+    /// relabelled restricted scanners.
+    ///
+    /// Canonical round one already contains every frozen destination-output
+    /// observation. After that, the synchronous characterization recurrence is
+    /// ordinary deterministic partition refinement: a block may split only by
+    /// the destination block reached for one enabled byte. Running the same
+    /// byte-labelled Hopcroft refinement used by the support quotient on both
+    /// tagged copies therefore computes the exact combined fixed point without
+    /// propagating one byte of a long bounded chain per global Moore round.
+    fn canonical_paired_hopcroft_interchange_map(
+        &mut self,
+        left: TerminalID,
+        right: TerminalID,
+    ) -> Option<InterchangeMap> {
+        self.ensure_canonical_identity_round(1);
+        let state_count = self.state_count();
+        let combined_state_count = state_count * 2;
+        let dead_state = self.dead_state();
+
+        let identity_round_one = &self.canonical_rounds[1];
+        let identity_seed = &self.canonical_rounds[0].classes;
         let mut outputs = SwappedOutputIds::new(
             &self.output_pairs,
             &self.output_pair_lookup,
             left as usize,
             right as usize,
         );
-        let mut swapped_previous = self.canonical_rounds[0].classes.clone();
-        for round in 1..=stable_round {
-            let identity_previous = &self.canonical_rounds[round - 1].classes;
-            let identity = &self.canonical_rounds[round];
-            let swapped_next = self.canonical_swapped_round(
-                &swapped_previous,
-                identity_previous,
-                identity,
-                &mut outputs,
-            );
-            if !rooted_class_set_still_possible_u32(
-                &identity.classes,
-                &swapped_next,
-                self.topology.initial_state,
-                self.topology.real_state_count,
-            ) {
-                if profile_pair {
-                    eprintln!(
-                        "[glrmask/profile][terminal_interchangeability] canonical_pair={}<>{} outcome=class_set_mismatch round={} elapsed_ms={:.3}",
-                        left,
-                        right,
-                        round,
-                        pair_started_at.elapsed().as_secs_f64() * 1000.0,
-                    );
-                }
-                return None;
-            }
-            if same_equality_partition_pair_u32(
-                identity_previous,
-                &swapped_previous,
-                &identity.classes,
-                &swapped_next,
-            ) {
-                if profile_pair {
-                    eprintln!(
-                        "[glrmask/profile][terminal_interchangeability] canonical_pair={}<>{} outcome=stable round={} elapsed_ms={:.3}",
-                        left,
-                        right,
-                        round,
-                        pair_started_at.elapsed().as_secs_f64() * 1000.0,
-                    );
-                }
-                return self.interchange_map_from_classes(&identity.classes, &swapped_next);
-            }
-            swapped_previous = swapped_next;
-        }
+        let swapped_round_one = self.canonical_swapped_round(
+            identity_seed,
+            identity_seed,
+            identity_round_one,
+            &mut outputs,
+        );
         drop(outputs);
-        self.reference_interchange_map(left, right)
+
+        let mut class_for_state = Vec::with_capacity(combined_state_count);
+        class_for_state.extend_from_slice(&identity_round_one.classes);
+        class_for_state.extend_from_slice(&swapped_round_one);
+        let initial_class_count = class_for_state
+            .iter()
+            .copied()
+            .max()
+            .map_or(0, |class| class as usize + 1);
+        let mut members_by_class = vec![Vec::<u32>::new(); initial_class_count];
+        for (state, &class) in class_for_state.iter().enumerate() {
+            members_by_class[class as usize].push(state as u32);
+        }
+        let dead_class = class_for_state[dead_state] as usize;
+        debug_assert_eq!(
+            class_for_state[dead_state],
+            class_for_state[state_count + dead_state],
+            "identity and swapped synthetic dead states must share round-one output behavior",
+        );
+
+        // Flat reverse-edge CSR over the two tagged copies. Missing enabled-byte
+        // transitions go to the copy-local synthetic dead state. As in the
+        // identity Hopcroft pass, explicit non-dead preimages are sufficient:
+        // for each byte the dead preimage is their complement.
+        let mut reverse_counts = vec![0usize; combined_state_count];
+        let mut edge_count = 0usize;
+        for side in 0..2 {
+            let base = side * state_count;
+            for source in 0..state_count {
+                for &(_, destination) in self.topology.edges_from(source) {
+                    reverse_counts[base + destination as usize] += 1;
+                    edge_count += 1;
+                }
+            }
+        }
+        let mut reverse_offsets = Vec::with_capacity(combined_state_count + 1);
+        reverse_offsets.push(0usize);
+        for &count in &reverse_counts {
+            reverse_offsets.push(reverse_offsets.last().copied().unwrap() + count);
+        }
+        let mut next_offset = reverse_offsets[..combined_state_count].to_vec();
+        let mut reverse_edges = vec![(0u8, 0u32); edge_count];
+        for side in 0..2 {
+            let base = side * state_count;
+            for source in 0..state_count {
+                for &(byte, destination) in self.topology.edges_from(source) {
+                    let destination = base + destination as usize;
+                    let offset = &mut next_offset[destination];
+                    reverse_edges[*offset] = (byte, (base + source) as u32);
+                    *offset += 1;
+                }
+            }
+        }
+
+        let mut queue = VecDeque::<usize>::new();
+        let mut queued = vec![false; initial_class_count];
+        for class in 0..initial_class_count {
+            if class != dead_class {
+                queue.push_back(class);
+                queued[class] = true;
+            }
+        }
+        let mut incoming_by_byte = (0..256)
+            .map(|_| Vec::<u32>::new())
+            .collect::<Vec<_>>();
+        let mut touched_bytes = Vec::<u8>::new();
+        let mut source_marks = vec![0u32; combined_state_count];
+        let mut mark_epoch = 0u32;
+        let mut class_counts = vec![0usize; initial_class_count];
+        let mut touched_classes = Vec::<usize>::new();
+
+        while let Some(splitter) = queue.pop_front() {
+            queued[splitter] = false;
+            if members_by_class[splitter].is_empty() {
+                continue;
+            }
+            touched_bytes.clear();
+            for &destination in &members_by_class[splitter] {
+                let destination = destination as usize;
+                for &(byte, source) in
+                    &reverse_edges[reverse_offsets[destination]..reverse_offsets[destination + 1]]
+                {
+                    let bucket = &mut incoming_by_byte[byte as usize];
+                    if bucket.is_empty() {
+                        touched_bytes.push(byte);
+                    }
+                    bucket.push(source);
+                }
+            }
+
+            for &byte in &touched_bytes {
+                let sources = &incoming_by_byte[byte as usize];
+                mark_epoch = mark_epoch.wrapping_add(1);
+                if mark_epoch == 0 {
+                    source_marks.fill(0);
+                    mark_epoch = 1;
+                }
+                touched_classes.clear();
+                for &source in sources {
+                    let source = source as usize;
+                    if source_marks[source] == mark_epoch {
+                        continue;
+                    }
+                    source_marks[source] = mark_epoch;
+                    let class = class_for_state[source] as usize;
+                    if class_counts[class] == 0 {
+                        touched_classes.push(class);
+                    }
+                    class_counts[class] += 1;
+                }
+
+                for &class in &touched_classes {
+                    let marked_count = class_counts[class];
+                    class_counts[class] = 0;
+                    let class_len = members_by_class[class].len();
+                    if marked_count == 0 || marked_count == class_len {
+                        continue;
+                    }
+                    let old_members = std::mem::take(&mut members_by_class[class]);
+                    let mut marked = Vec::with_capacity(marked_count);
+                    let mut unmarked = Vec::with_capacity(class_len - marked_count);
+                    for state in old_members {
+                        if source_marks[state as usize] == mark_epoch {
+                            marked.push(state);
+                        } else {
+                            unmarked.push(state);
+                        }
+                    }
+
+                    let contains_dead_marked = marked.binary_search(&(dead_state as u32)).is_ok();
+                    let contains_dead_unmarked =
+                        unmarked.binary_search(&(dead_state as u32)).is_ok();
+                    let was_queued = queued[class];
+                    let (retained, moved) = if contains_dead_marked {
+                        (marked, unmarked)
+                    } else if contains_dead_unmarked {
+                        (unmarked, marked)
+                    } else if was_queued || marked.len() >= unmarked.len() {
+                        (marked, unmarked)
+                    } else {
+                        (unmarked, marked)
+                    };
+                    members_by_class[class] = retained;
+                    for &state in &members_by_class[class] {
+                        class_for_state[state as usize] = class as u32;
+                    }
+                    let new_class = members_by_class.len();
+                    for &state in &moved {
+                        class_for_state[state as usize] = new_class as u32;
+                    }
+                    members_by_class.push(moved);
+                    queued.push(false);
+                    class_counts.push(0);
+
+                    if was_queued {
+                        if new_class != dead_class {
+                            queued[new_class] = true;
+                            queue.push_back(new_class);
+                        }
+                    } else if class == dead_class {
+                        queued[new_class] = true;
+                        queue.push_back(new_class);
+                    } else {
+                        queued[new_class] = true;
+                        queue.push_back(new_class);
+                    }
+                }
+                incoming_by_byte[byte as usize].clear();
+            }
+        }
+
+        let mut canonical_for_class = vec![u32::MAX; members_by_class.len()];
+        let mut canonical_classes = Vec::with_capacity(combined_state_count);
+        let mut next_canonical = 0u32;
+        for state in 0..combined_state_count {
+            let class = class_for_state[state] as usize;
+            let canonical = if canonical_for_class[class] == u32::MAX {
+                let canonical = next_canonical;
+                next_canonical += 1;
+                canonical_for_class[class] = canonical;
+                canonical
+            } else {
+                canonical_for_class[class]
+            };
+            canonical_classes.push(canonical);
+        }
+        debug_assert_eq!(
+            canonical_classes[dead_state],
+            canonical_classes[state_count + dead_state],
+            "paired Hopcroft refinement split equivalent synthetic dead states",
+        );
+
+        let (identity_classes, swapped_classes) = canonical_classes.split_at(state_count);
+        self.interchange_map_from_classes(identity_classes, swapped_classes)
+    }
+
+    /// Collision-free exact refinement. The paired Hopcroft pass computes the
+    /// same shared identity/relabelled characterization fixed point as the
+    /// synchronous Moore reference, but avoids a depth-proportional number of
+    /// full-state rounds on long bounded lexer chains.
+    fn canonical_interchange_map(
+        &mut self,
+        left: TerminalID,
+        right: TerminalID,
+    ) -> Option<InterchangeMap> {
+        self.canonical_paired_hopcroft_interchange_map(left, right)
     }
 
     fn canonical_identity_map(&mut self) -> InterchangeMap {
@@ -10958,6 +11135,80 @@ mod tests {
                 let mut canonical = InterchangeabilityDfa::new(&tokenizer, &active, &[true; 256]);
                 let mut reference = InterchangeabilityDfa::new(&tokenizer, &active, &[true; 256]);
                 assert_eq!(canonical.interchange_map(left, right), reference.reference_interchange_map(left, right), "canonical refinement disagreed with hash reference for {left} <-> {right}");
+            }
+        }
+    }
+
+    #[test]
+    fn canonical_paired_hopcroft_matches_hash_reference_for_mixed_long_shapes() {
+        let fixtures = vec![
+            vec![
+                Expr::U8Seq(b"same".to_vec()),
+                Expr::U8Seq(b"same".to_vec()),
+                Expr::U8Seq(b"sample".to_vec()),
+                Expr::U8Seq(b"simple".to_vec()),
+                Expr::U8Seq(b"a".to_vec()),
+                Expr::U8Seq(b"ab".to_vec()),
+                Expr::U8Seq(b"b".to_vec()),
+                Expr::U8Seq(b"ba".to_vec()),
+            ],
+            vec![
+                Expr::Repeat {
+                    expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+                    min: 1,
+                    max: Some(255),
+                },
+                Expr::Repeat {
+                    expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+                    min: 1,
+                    max: Some(251),
+                },
+                Expr::Repeat {
+                    expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+                    min: 0,
+                    max: Some(255),
+                },
+                Expr::U8Seq(b"b".to_vec()),
+            ],
+            vec![
+                Expr::Seq(vec![
+                    Expr::U8Seq(b"a".to_vec()),
+                    Expr::Repeat {
+                        expr: Box::new(Expr::U8Seq(b"aaaa".to_vec())),
+                        min: 0,
+                        max: None,
+                    },
+                ]),
+                Expr::Seq(vec![
+                    Expr::U8Seq(b"aaa".to_vec()),
+                    Expr::Repeat {
+                        expr: Box::new(Expr::U8Seq(b"aaaa".to_vec())),
+                        min: 0,
+                        max: None,
+                    },
+                ]),
+                Expr::U8Seq(b"aaaaa".to_vec()),
+                Expr::U8Seq(b"c".to_vec()),
+            ],
+        ];
+
+        for expressions in fixtures {
+            let tokenizer = tokenizer(expressions);
+            let active = vec![true; tokenizer.num_terminals() as usize];
+            for left in 0..active.len() as TerminalID {
+                for right in left + 1..active.len() as TerminalID {
+                    let mut paired =
+                        InterchangeabilityDfa::new(&tokenizer, &active, &[true; 256]);
+                    let paired_result =
+                        paired.canonical_paired_hopcroft_interchange_map(left, right);
+                    let mut reference =
+                        InterchangeabilityDfa::new(&tokenizer, &active, &[true; 256]);
+                    let reference_result = reference.reference_interchange_map(left, right);
+                    assert_eq!(
+                        paired_result, reference_result,
+                        "paired Hopcroft disagreed with hash reference for {left}<>{right}",
+                    );
+                }
             }
         }
     }
