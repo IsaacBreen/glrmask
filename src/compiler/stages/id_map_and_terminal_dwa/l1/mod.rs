@@ -536,11 +536,14 @@ fn l1_exact_profile_reuse_enabled() -> bool {
 
 fn l1_remaining_horizon_quotients_enabled(state_count: usize, vocab_count: usize) -> bool {
     // Building every finite-depth quotient costs O(k * states * byte_classes).
-    // Moderate vocabularies can have a large state×token product while their
-    // direct packed suffix profiles are already cheap (BFCL p1 is the canonical
-    // case). Keep the prepass for genuinely large vocab buckets such as the
-    // 82k-token p2/O9961 path where suffix-product contraction repays it.
-    vocab_count >= 50_000 && state_count.saturating_mul(vocab_count) >= 100_000_000
+    // The 82k-token O9961 p2 path repays that prepass with a ~3k-state scanner,
+    // but 10k-19k-state epsilon-NFA cases spend hundreds of milliseconds
+    // building 65 quotient layers even though their direct suffix profiles take
+    // only tens of milliseconds.  Keep the optimization in the small-scanner
+    // regime where measured contraction can amortize the dynamic program.
+    state_count <= 5_000
+        && vocab_count >= 50_000
+        && state_count.saturating_mul(vocab_count) >= 100_000_000
         && std::env::var_os("GLRMASK_DISABLE_L1_REMAINING_HORIZON_QUOTIENTS").is_none()
 }
 
