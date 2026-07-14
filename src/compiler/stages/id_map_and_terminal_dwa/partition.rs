@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
-use crate::automata::lexer::Lexer;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 use crate::compiler::stages::id_map_and_terminal_dwa::classify::{
@@ -143,28 +142,6 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
             .and_then(|cache| cache.get())
             .map(|bytesets| bytesets.transitions_by_byte())
     }).flatten();
-    let shared_l1_generic_nfa_topology = if has_l1
-        && has_split_l1
-        && tokenizer.has_epsilon_transitions()
-        && !tokenizer.has_deterministic_dispatch()
-    {
-        let raw_states = (0..tokenizer.num_states() as usize).collect::<Vec<_>>();
-        let tokens = vocab
-            .entries
-            .values()
-            .map(|bytes| bytes.as_ref())
-            .collect::<Vec<_>>();
-        Some(
-            super::l2p::equivalence_analysis::state_equivalence::nfa::build_token_bounded_analysis_topology(
-                tokenizer,
-                &raw_states,
-                &tokens,
-            ),
-        )
-    } else {
-        None
-    };
-
     let routing_ms = routing_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // Build L1 and L2+ terminal DWAs in parallel. L2+ terminals get an
@@ -189,7 +166,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                     flat_trans,
                     l1_transitions_by_byte,
                     initial_state_map,
-                    shared_l1_generic_nfa_topology.as_ref(),
+                    None,
                 );
                 (result, started_at.elapsed().as_secs_f64() * 1000.0)
             } else {
@@ -294,7 +271,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                                 flat_trans,
                                 l1_transitions_by_byte,
                                 initial_state_map,
-                                shared_l1_generic_nfa_topology.as_ref(),
+                                None,
                             );
                             (result, started_at.elapsed().as_secs_f64() * 1000.0)
                         }

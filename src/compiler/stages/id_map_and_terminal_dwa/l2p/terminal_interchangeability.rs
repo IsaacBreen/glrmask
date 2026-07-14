@@ -7020,6 +7020,19 @@ impl InterchangeabilityDfa {
                 used_cached_closed,
             };
         }
+        if !self.exact_pair_fallback_enabled() {
+            let support =
+                self.support_transposition_interchange_map_scratch(representative, terminal);
+            return MemberResult {
+                verdict: match support {
+                    Some(map) => MemberVerdict::AcceptSupport(map),
+                    None => MemberVerdict::NeedsExact,
+                },
+                memo_update: None,
+                closed_update,
+                used_cached_closed,
+            };
+        }
         let mut memo_update = None;
         let first_round_possible = match memo_snapshot.get(&memo_key).copied() {
             Some(value) => value,
@@ -7599,8 +7612,8 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                 "GLRMASK_TI_PARALLEL_PETAL_MIN_TERMINALS",
             )
             .ok()
-            .and_then(|value| value.trim().parse::<usize>().ok())
-            .unwrap_or(64);
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .unwrap_or(64);
             for candidate_group in candidate_groups {
                 let grouping_started_at = Instant::now();
                 let mut membership = vec![false; active_terminals.len()];
@@ -7830,6 +7843,7 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                     let members: Vec<TerminalID> = unresolved[1..].to_vec();
                     let mut next_unresolved =
                         Vec::with_capacity(unresolved.len().saturating_sub(1));
+                    let mut accepted_this_pivot = 0usize;
                     for (terminal, member_result) in members.into_iter().zip(results) {
                         let map = match member_result.verdict {
                             MemberVerdict::RejectOutputPair => {
@@ -7860,6 +7874,7 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                             }
                         };
                         if let Some(map) = map {
+                            accepted_this_pivot += 1;
                             accepted_representative_members += 1;
                             result
                                 .get_mut(&representative)
@@ -7875,6 +7890,149 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                         } else {
                             next_unresolved.push(terminal);
                         }
+                    }
+
+                    // A failed pivot in a moderate candidate group is the
+                    // pathological case for sequential pivoting: if the group
+                    // contains mostly singletons, we otherwise pay one
+                    // fork/join (or one serial scan) per remaining pivot and
+                    // eventually certify nearly every unordered pair. When the
+                    // exact fallback is unavailable, every pair verdict is a
+                    // pure independent support/output certificate. Evaluate all
+                    // remaining pairs in one hot-pool batch, then replay the
+                    // same pivot algorithm from the completed matrix. This
+                    // preserves the exact partition and the exact
+                    // representative-to-member maps that sequential pivoting
+                    // would retain; it only changes scheduling.
+                    let all_pairs_batch_min = std::env::var(
+                        "GLRMASK_TI_ALL_PAIRS_BATCH_MIN",
+                    )
+                    .ok()
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .unwrap_or(16);
+                    let all_pairs_batch_max = std::env::var(
+                        "GLRMASK_TI_ALL_PAIRS_BATCH_MAX",
+                    )
+                    .ok()
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .unwrap_or(96);
+                    if accepted_this_pivot == 0
+                        && !dfa.exact_pair_fallback_enabled()
+                        && (all_pairs_batch_min..=all_pairs_batch_max)
+                            .contains(&next_unresolved.len())
+                    {
+                        let batch_members = next_unresolved;
+                        let batch_len = batch_members.len();
+                        let mut affected_sources_by_member =
+                            Vec::<Vec<u32>>::with_capacity(batch_len);
+                        for &terminal in &batch_members {
+                            let mut sources = Vec::new();
+                            dfa.representative_affected_sources(terminal, &mut sources);
+                            affected_sources_by_member.push(sources);
+                        }
+                        let pair_indices = (0..batch_len)
+                            .flat_map(|left| {
+                                (left + 1..batch_len).map(move |right| (left, right))
+                            })
+                            .collect::<Vec<_>>();
+                        let dfa_ref = &dfa;
+                        let memo_snapshot_ref = &memo_snapshot;
+                        let closed_snapshot_ref = &closed_snapshot;
+                        let pair_results = pair_indices
+                            .par_iter()
+                            .map_init(
+                                || CertScratch::new(dfa_ref),
+                                |scratch, &(left, right)| {
+                                    dfa_ref.certify_member(
+                                        scratch,
+                                        batch_members[left],
+                                        &affected_sources_by_member[left],
+                                        batch_members[right],
+                                        memo_snapshot_ref,
+                                        closed_snapshot_ref,
+                                    )
+                                },
+                            )
+                            .collect::<Vec<_>>();
+                        let mut pair_maps = (0..batch_len * batch_len)
+                            .map(|_| None::<InterchangeMap>)
+                            .collect::<Vec<_>>();
+                        for ((left, right), member_result) in
+                            pair_indices.into_iter().zip(pair_results)
+                        {
+                            if let Some(update) = member_result.memo_update {
+                                memo_additions.push(update);
+                            }
+                            if let Some(update) = member_result.closed_update {
+                                closed_additions.push(update);
+                            }
+                            if member_result.used_cached_closed {
+                                output_pair_cached_closed += 1;
+                            }
+                            let map = match member_result.verdict {
+                                MemberVerdict::RejectOutputPair => {
+                                    output_pair_rejections += 1;
+                                    None
+                                }
+                                MemberVerdict::RejectFirstRound => {
+                                    first_round_rejections += 1;
+                                    None
+                                }
+                                MemberVerdict::AcceptIdentity(map) => {
+                                    output_invariant_checks += 1;
+                                    Some(map)
+                                }
+                                MemberVerdict::AcceptSupport(map) => {
+                                    support_transposition_checks += 1;
+                                    Some(map)
+                                }
+                                MemberVerdict::NeedsExact => {
+                                    support_transposition_checks += 1;
+                                    exact_fallback_skips += 1;
+                                    None
+                                }
+                            };
+                            pair_maps[left * batch_len + right] = map;
+                        }
+
+                        let mut remaining = (0..batch_len).collect::<Vec<_>>();
+                        while !remaining.is_empty() {
+                            let representative_index = remaining[0];
+                            let representative = batch_members[representative_index];
+                            let mut next_remaining =
+                                Vec::with_capacity(remaining.len().saturating_sub(1));
+                            for &member_index in &remaining[1..] {
+                                let map = pair_maps
+                                    [representative_index * batch_len + member_index]
+                                    .take();
+                                if let Some(map) = map {
+                                    let terminal = batch_members[member_index];
+                                    accepted_representative_members += 1;
+                                    result
+                                        .get_mut(&representative)
+                                        .expect("TI batch replay representative must retain its singleton partition entry")
+                                        .insert(terminal);
+                                    let removed = result.remove(&terminal);
+                                    debug_assert!(
+                                        removed.is_some(),
+                                        "TI batch replay member must retain its singleton partition entry"
+                                    );
+                                    let replaced = accepted_maps.insert(
+                                        (representative, terminal),
+                                        Arc::new(map.scanner_state_map()),
+                                    );
+                                    debug_assert!(
+                                        replaced.is_none(),
+                                        "TI batch replay must accept each retained pair once"
+                                    );
+                                } else {
+                                    next_remaining.push(member_index);
+                                }
+                            }
+                            remaining = next_remaining;
+                        }
+                        unresolved.clear();
+                        continue;
                     }
                     unresolved = next_unresolved;
                 }
@@ -7944,6 +8102,18 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                     let map = if preserves_frozen_outputs {
                         output_invariant_checks += 1;
                         Some(dfa.canonical_identity_map())
+                    } else if !dfa.exact_pair_fallback_enabled() {
+                        support_transposition_checks += 1;
+                        let support_transposition_started_at = profile_timing.then(Instant::now);
+                        let support_map =
+                            dfa.support_transposition_interchange_map(representative, terminal);
+                        if let Some(started_at) = support_transposition_started_at {
+                            support_transposition_ns += started_at.elapsed().as_nanos() as u64;
+                        }
+                        if support_map.is_none() {
+                            exact_fallback_skips += 1;
+                        }
+                        support_map
                     } else {
                         let first_round_started_at = profile_timing.then(Instant::now);
                         let first_round_possible = match first_round_memo.get(&memo_key).copied() {

@@ -854,15 +854,16 @@ fn build_l1_generic_nfa_exact_id_map<'a>(
     let bounded = if let Some(topology) = shared_topology {
         topology.materialize(tokenizer, Some(active_terminals))
     } else {
-        let tokens = token_entries
-            .iter()
-            .map(|(_, bytes)| bytes.as_ref())
-            .collect::<Vec<_>>();
-        super::l2p::equivalence_analysis::state_equivalence::nfa::build_token_bounded_analysis_view(
+        let mut relevant_bytes = [false; 256];
+        for (_, bytes) in token_entries {
+            for &byte in bytes.as_ref() {
+                relevant_bytes[byte as usize] = true;
+            }
+        }
+        super::l2p::equivalence_analysis::state_equivalence::nfa::build_relevant_powerset_analysis_view(
             tokenizer,
-            &raw_states,
-            &tokens,
-            Some(active_terminals),
+            &relevant_bytes,
+            active_terminals,
         )
     };
     let view_states = raw_states
@@ -887,7 +888,7 @@ fn build_l1_generic_nfa_exact_id_map<'a>(
             terminal_signatures,
             &tokenizer_view,
             None,
-            false,
+            true,
             terminal_signature_ms,
         );
     let exact_state_equiv_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
