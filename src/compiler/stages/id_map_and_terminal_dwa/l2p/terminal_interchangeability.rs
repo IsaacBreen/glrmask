@@ -3688,30 +3688,22 @@ impl InterchangeabilityDfa {
             .expect("right terminal support initialized");
         let profile_timing = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
         let cone_started_at = profile_timing.then(Instant::now);
-        let cone_classes = Self::support_quotient_affected_cone_from_supports_marked(
+        let affected_rows = Self::support_quotient_affected_rows_from_supports_marked(
             quotient,
             left_support,
             right_support,
+            &deviations,
             &mut self.support_cone_marks,
             &mut self.support_cone_mark_epoch,
         );
-        debug_assert!({
-            let mut raw = self
-                .support_quotient_affected_cone_small(quotient, left, right)
-                .into_vec();
-            let mut cached = cone_classes.clone().into_vec();
-            raw.sort_unstable();
-            cached.sort_unstable();
-            raw == cached
-        });
         if let Some(started_at) = cone_started_at {
             self.support_transposition_cone_ns += started_at.elapsed().as_nanos() as u64;
         }
         debug_assert!(deviations.iter().all(|&(source, target)| {
             (source as usize) < quotient.representative_by_class.len()
                 && (target as usize) < quotient.representative_by_class.len()
-                && cone_classes.contains(&(source as usize))
-                && cone_classes.contains(&(target as usize))
+                && affected_rows.contains(&(source as usize))
+                && affected_rows.contains(&(target as usize))
         }));
         let root_class = quotient.class_for_state[self.topology.initial_state] as usize;
         if Self::mapped_support_class(&deviations, root_class) != root_class as u32 {
@@ -3719,13 +3711,28 @@ impl InterchangeabilityDfa {
             return None;
         }
         let verify_started_at = profile_timing.then(Instant::now);
-        if !self.support_deviations_are_valid(
+        let valid = self.support_deviations_are_valid(
             quotient,
             left,
             right,
-            &cone_classes,
+            &affected_rows,
             &deviations,
-        ) {
+        );
+        debug_assert!({
+            let full_cone = Self::support_quotient_affected_cone_from_supports_small(
+                quotient,
+                left_support,
+                right_support,
+            );
+            self.support_deviations_are_valid(
+                quotient,
+                left,
+                right,
+                &full_cone,
+                &deviations,
+            ) == valid
+        });
+        if !valid {
             self.support_transposition_signature_rejected += 1;
             if let Some(started_at) = verify_started_at {
                 self.support_transposition_verify_ns += started_at.elapsed().as_nanos() as u64;
@@ -4791,6 +4798,59 @@ impl InterchangeabilityDfa {
             }
         }
         cone
+    }
+
+    /// Exact set of quotient rows whose local automorphism equation can change
+    /// under a proposed sparse class permutation and terminal-label swap.
+    ///
+    /// A fixed class whose outgoing destinations are all fixed and whose
+    /// destination outputs mention neither swapped terminal has an identical
+    /// row on both sides of the automorphism equation, regardless of changes
+    /// deeper in the graph. Therefore verification needs only:
+    ///
+    /// * rows whose destination outputs mention either swapped terminal;
+    /// * moved classes themselves; and
+    /// * direct predecessors of moved classes.
+    ///
+    /// The old transitive reverse cone is sufficient but much larger.
+    fn support_quotient_affected_rows_from_supports_marked(
+        quotient: &SupportQuotient,
+        left_support: &[(u32, u8)],
+        right_support: &[(u32, u8)],
+        deviations: &[(u32, u32)],
+        marks: &mut Vec<u32>,
+        mark_epoch: &mut u32,
+    ) -> SmallVec<[usize; 16]> {
+        let class_count = quotient.representative_by_class.len();
+        if marks.len() != class_count {
+            marks.resize(class_count, 0);
+            *mark_epoch = 0;
+        }
+        *mark_epoch = mark_epoch.wrapping_add(1);
+        if *mark_epoch == 0 {
+            marks.fill(0);
+            *mark_epoch = 1;
+        }
+        let epoch = *mark_epoch;
+        let mut rows = SmallVec::<[usize; 16]>::new();
+        let mut add = |class: usize| {
+            if marks[class] != epoch {
+                marks[class] = epoch;
+                rows.push(class);
+            }
+        };
+        for &(class, _) in left_support.iter().chain(right_support) {
+            add(class as usize);
+        }
+        for &(source, target) in deviations {
+            for class in [source as usize, target as usize] {
+                add(class);
+                for &predecessor in &quotient.reverse_predecessors[class] {
+                    add(predecessor as usize);
+                }
+            }
+        }
+        rows
     }
 
     fn support_quotient_terminal_cone(
