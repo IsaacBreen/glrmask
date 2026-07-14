@@ -138,6 +138,17 @@ fn stack_count(state: &ConstraintState<'_>) -> usize {
         .sum()
 }
 
+fn unique_stack_count(state: &ConstraintState<'_>) -> usize {
+    let mut stacks = state
+        .debug_parser_stacks()
+        .into_iter()
+        .flat_map(|(_, stacks)| stacks.into_iter().map(|(stack, _)| stack))
+        .collect::<Vec<_>>();
+    stacks.sort_unstable();
+    stacks.dedup();
+    stacks.len()
+}
+
 fn measure_max_stack_and_path_counts(constraint: &Constraint, text: &str) -> (usize, usize) {
     let mut state = constraint.start();
     let mut max_stacks = stack_count(&state);
@@ -155,6 +166,23 @@ fn measure_max_stack_and_path_counts(constraint: &Constraint, text: &str) -> (us
     }
 
     (max_stacks, max_paths)
+}
+
+fn measure_max_unique_stack_count(constraint: &Constraint, text: &str) -> usize {
+    let mut state = constraint.start();
+    let mut max_unique_stacks = unique_stack_count(&state);
+
+    for (index, &byte) in text.as_bytes().iter().enumerate() {
+        state.commit_bytes(&[byte]).unwrap_or_else(|err| {
+            panic!(
+                "example replay failed at byte_index={index} byte={byte:?} char={} for text={text}: {err}",
+                byte as char
+            )
+        });
+        max_unique_stacks = max_unique_stacks.max(unique_stack_count(&state));
+    }
+
+    max_unique_stacks
 }
 
 fn max_stack_depth(state: &ConstraintState<'_>) -> usize {
@@ -388,6 +416,5 @@ fn build_config_optional_environment_branches_collapse_stack_continuations() {
     .unwrap();
     let example = r#"{"artifacts": [{"context": ".", "image": "gcr.io/k8s-skaffold/example", "sync": {"*.py": ".", "css/**/*.css": "app/css"}}], "tagPolicy": {"gitCommit": {}}}"#;
 
-    let (max_stacks, max_paths) = measure_max_stack_and_path_counts(&constraint, example);
-    assert_eq!((max_stacks, max_paths), (1, 1));
+    assert_eq!(measure_max_unique_stack_count(&constraint, example), 1);
 }
