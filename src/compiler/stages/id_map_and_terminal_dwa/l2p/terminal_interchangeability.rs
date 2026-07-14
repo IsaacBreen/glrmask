@@ -8965,7 +8965,7 @@ struct GroupCoordinatePlan {
     // Final TSIDs are grouped by the exact `(ordinary coordinate, alternate
     // coordinates)` signature that determines both their base and transported
     // token sets for every lifted core weight.
-    final_tsids_by_signature: Vec<Box<[u32]>>,
+    final_tsid_runs_by_signature: Vec<Box<[(u32, u32)]>>,
     coordinates: Vec<u32>,
 }
 
@@ -9289,6 +9289,22 @@ impl PostDwaWeightLifter {
         for &(final_tsid, signature) in &overrides {
             final_tsids_by_signature[signature as usize].push(final_tsid);
         }
+        let final_tsid_runs_by_signature = final_tsids_by_signature
+            .into_iter()
+            .map(|final_tsids| {
+                let mut runs = Vec::<(u32, u32)>::new();
+                for final_tsid in final_tsids {
+                    if let Some((_, end)) = runs.last_mut()
+                        && end.checked_add(1) == Some(final_tsid)
+                    {
+                        *end = final_tsid;
+                    } else {
+                        runs.push((final_tsid, final_tsid));
+                    }
+                }
+                runs.into_boxed_slice()
+            })
+            .collect();
 
         self.group_coordinate_plans.insert(
             mode_indices.to_vec(),
@@ -9296,10 +9312,7 @@ impl PostDwaWeightLifter {
                 #[cfg(debug_assertions)]
                 reference_overrides: overrides,
                 signatures,
-                final_tsids_by_signature: final_tsids_by_signature
-                    .into_iter()
-                    .map(Vec::into_boxed_slice)
-                    .collect(),
+                final_tsid_runs_by_signature,
                 coordinates,
             },
         );
@@ -9376,7 +9389,7 @@ impl PostDwaWeightLifter {
                     tokens
                 })
                 .collect();
-            let mut overrides = Vec::<(u32, SharedTokenSet)>::new();
+            let mut overrides = Vec::<(u32, u32, SharedTokenSet)>::new();
             for (signature_index, signature) in plan.signatures.iter().enumerate() {
                 let tokens = &transformed_tokens[signature_index];
                 let base_tokens = &coordinate_tokens[signature.base_coordinate_index];
@@ -9384,16 +9397,16 @@ impl PostDwaWeightLifter {
                     continue;
                 }
                 overrides.extend(
-                    plan.final_tsids_by_signature[signature_index]
+                    plan.final_tsid_runs_by_signature[signature_index]
                         .iter()
-                        .map(|&final_tsid| (final_tsid, Arc::clone(tokens))),
+                        .map(|&(start, end)| (start, end, Arc::clone(tokens))),
                 );
             }
-            // `with_sparse_tsid_overrides_intersection` consumes a sparse TSID
-            // stream in ascending coordinate order. Grouping by signature above
-            // changes only construction order, so restore the plan's canonical
-            // final-TSID order before applying the exact same overrides.
-            overrides.sort_unstable_by_key(|&(final_tsid, _)| final_tsid);
+            // The ranged sparse-override helper consumes a TSID stream in
+            // ascending coordinate order. Grouping by signature above changes
+            // only construction order, so restore canonical final-TSID order
+            // before applying the exact same overrides.
+            overrides.sort_unstable_by_key(|&(start, _, _)| start);
 
             #[cfg(debug_assertions)]
             {
@@ -9414,7 +9427,15 @@ impl PostDwaWeightLifter {
                         differs.then(|| (final_tsid, Arc::clone(tokens)))
                     })
                     .collect::<Vec<_>>();
-                debug_assert_eq!(overrides, reference);
+                let expanded = overrides
+                    .iter()
+                    .flat_map(|(start, end, tokens)| {
+                        (*start..=*end).map(move |final_tsid| {
+                            (final_tsid, Arc::clone(tokens))
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                debug_assert_eq!(expanded, reference);
             }
 
             overrides
@@ -9424,7 +9445,8 @@ impl PostDwaWeightLifter {
         }
 
         let started_at = profile_timing.then(Instant::now);
-        let lifted = base.with_sparse_tsid_overrides_intersection(&overrides, entry_domain);
+        let lifted =
+            base.with_sparse_tsid_range_overrides_intersection(&overrides, entry_domain);
         if let Some(started_at) = started_at {
             self.profile_apply_ms += started_at.elapsed().as_secs_f64() * 1000.0;
         }
