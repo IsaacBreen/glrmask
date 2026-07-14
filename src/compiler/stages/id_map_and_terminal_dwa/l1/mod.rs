@@ -932,7 +932,7 @@ fn build_l1_generic_nfa_exact_id_map<'a>(
             terminal_signatures,
             &tokenizer_view,
             None,
-            true,
+            false,
             terminal_signature_ms,
         );
     let exact_state_equiv_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
