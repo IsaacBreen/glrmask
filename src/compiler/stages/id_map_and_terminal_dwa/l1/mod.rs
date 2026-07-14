@@ -824,7 +824,7 @@ fn l1_generic_nfa_exact_profiles_enabled() -> bool {
 }
 
 const L1_GENERIC_NFA_TOKEN_BOUNDED_MAX_STATE_VOCAB_PAIRS: usize = 350_000_000;
-const L1_GENERIC_NFA_TOKEN_BOUNDED_MAX_VOCAB: usize = 50_000;
+const L1_GENERIC_NFA_TOKEN_BOUNDED_MAX_VOCAB: usize = 20_000;
 
 pub(crate) fn l1_generic_nfa_token_bounded_view_enabled(
     state_count: usize,
@@ -4926,6 +4926,7 @@ mod generic_nfa_tests {
         assert!(!l1_generic_nfa_token_bounded_view_enabled(26_965, 15_264));
         assert!(!l1_generic_nfa_token_bounded_view_enabled(26_965, 82_270));
         assert!(!l1_generic_nfa_token_bounded_view_enabled(3_343, 82_270));
+        assert!(!l1_generic_nfa_token_bounded_view_enabled(3_343, 21_310));
     }
 
     fn build_scalar_generic_nfa_terminal_dwa(
