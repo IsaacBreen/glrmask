@@ -13,7 +13,8 @@ use super::state_equivalence::{
     run_state_equivalence_pipeline, StateEquivalenceScope,
 };
 use super::state_equivalence::nfa::{
-    build_bounded_analysis_view, build_relevant_powerset_view,
+    PrebuiltSparsePowersetRefinement, build_bounded_analysis_view,
+    build_relevant_powerset_view, powerset_output_class_ids,
 };
 use crate::ds::bitset::BitSet;
 use super::compat::{TokenizerView, compute_active_terminal_language_byte_classes};
@@ -56,6 +57,20 @@ fn deduplicate_tokens_by_byte_class<'a, S: AsRef<[u8]>>(
         representative_token_bytes,
         original_to_repr,
     }
+}
+
+fn representative_byte_mask(
+    relevant_bytes: &[bool; 256],
+    byte_to_class: Option<&[u8; 256]>,
+) -> [bool; 256] {
+    let mut representative_bytes = [false; 256];
+    for byte in super::state_equivalence::max_length::active_byte_representatives(
+        Some(relevant_bytes),
+        byte_to_class,
+    ) {
+        representative_bytes[byte as usize] = true;
+    }
+    representative_bytes
 }
 
 fn build_state_map(
@@ -1708,6 +1723,80 @@ fn analyze_equivalences_impl(
             max_token_len,
             active_byte_count,
         );
+        let analysis_view_policy = l2p_nfa_analysis_view_policy();
+        let powerset_max_states = l2p_nfa_relevant_powerset_max_states();
+        let powerset_min_bounded_pairs = l2p_nfa_relevant_powerset_min_bounded_pairs();
+        let prepass_pair_estimate = prepared
+            .initial_states
+            .len()
+            .saturating_mul(dedup.representative_token_bytes.len());
+        let should_probe_prepass_powerset = should_probe_l2p_nfa_powerset(
+            analysis_view_policy,
+            prepass_pair_estimate,
+            powerset_min_bounded_pairs,
+        );
+        let prepass_relevant_bytes = representative_byte_mask(
+            &relevant_bytes,
+            active_language_byte_classes.as_ref(),
+        );
+        let prepass_powerset_started_at = Instant::now();
+        let prepass_powerset_candidate = should_probe_prepass_powerset.then(|| {
+            build_relevant_powerset_view(
+                tokenizer,
+                &prepass_relevant_bytes,
+                active_groups,
+                None,
+            )
+        });
+        let prepass_powerset_build_ms =
+            prepass_powerset_started_at.elapsed().as_secs_f64() * 1000.0;
+        let prepass_powerset_states = prepass_powerset_candidate
+            .as_ref()
+            .map_or(0, |powerset| powerset.states.len());
+        let use_prebuilt_nfa_refinement = should_use_l2p_nfa_powerset(
+            analysis_view_policy,
+            prepass_powerset_candidate.is_some(),
+            prepass_powerset_states,
+            powerset_max_states,
+        );
+        let prepass_output_classes = use_prebuilt_nfa_refinement
+            .then(|| {
+                prepass_powerset_candidate
+                    .as_ref()
+                    .map(powerset_output_class_ids)
+            })
+            .flatten();
+        let prebuilt_nfa_refinement = prepass_powerset_candidate
+            .as_ref()
+            .zip(prepass_output_classes.as_ref())
+            .map(|(powerset, output_class_by_config)| PrebuiltSparsePowersetRefinement {
+                raw_start_to_view: powerset.raw_start_to_view.as_ref(),
+                configurations: powerset.configurations.as_ref(),
+                output_class_by_config,
+                edge_offsets: &powerset.edge_offsets,
+                edges: &powerset.edges,
+            });
+        if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+        {
+            eprintln!(
+                "[glrmask/profile][l2p_nfa_prepass_view] partition={} policy={} selected={} active_bytes={} pair_estimate={} powerset_states={} powerset_max_states={} build_ms={:.3}",
+                partition_label,
+                analysis_view_policy.as_str(),
+                if prebuilt_nfa_refinement.is_some() {
+                    "projected_sparse_powerset"
+                } else {
+                    "direct_nfa"
+                },
+                prepass_relevant_bytes.iter().filter(|&&active| active).count(),
+                prepass_pair_estimate,
+                prepass_powerset_states,
+                powerset_max_states,
+                prepass_powerset_build_ms,
+            );
+        }
+
         let pipeline_config = resolve_l2p_pipeline_config(!max_length_skipped);
         let (tokenizer_states, pipeline_profile) = run_state_equivalence_pipeline(
             tokenizer,
@@ -1716,6 +1805,7 @@ fn analyze_equivalences_impl(
             active_groups,
             StateEquivalenceScope::L2p,
             &pipeline_config,
+            prebuilt_nfa_refinement.as_ref(),
             None,
             None,
         );
@@ -1726,9 +1816,6 @@ fn analyze_equivalences_impl(
             .map(|&state| state as usize)
             .collect::<Vec<_>>();
         let analysis_view_started_at = Instant::now();
-        let analysis_view_policy = l2p_nfa_analysis_view_policy();
-        let powerset_max_states = l2p_nfa_relevant_powerset_max_states();
-        let powerset_min_bounded_pairs = l2p_nfa_relevant_powerset_min_bounded_pairs();
         let bounded_pair_estimate = raw_pre_representatives
             .len()
             .saturating_mul(dedup.representative_token_bytes.len());
@@ -2082,6 +2169,7 @@ fn analyze_equivalences_impl(
         active_groups,
         StateEquivalenceScope::L2p,
         &pipeline_config,
+        None,
         Some(&tokenizer_view),
         Some(&byte_to_class),
     );

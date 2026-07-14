@@ -30,6 +30,50 @@ pub(crate) struct RelevantPowersetView {
     pub(crate) configurations: Arc<[Box<[u32]>]>,
 }
 
+pub(crate) struct PrebuiltSparsePowersetRefinement<'a> {
+    pub(crate) raw_start_to_view: &'a [u32],
+    pub(crate) configurations: &'a [Box<[u32]>],
+    pub(crate) output_class_by_config: &'a [u32],
+    pub(crate) edge_offsets: &'a [u32],
+    pub(crate) edges: &'a [(u8, u32)],
+}
+
+impl PrebuiltSparsePowersetRefinement<'_> {
+    pub(crate) fn compute_state_map(
+        &self,
+        tokenizer: &Tokenizer,
+        initial_state_map: Option<&ManyToOneIdMap>,
+        depth: RefinementDepth,
+    ) -> ManyToOneIdMap {
+        compute_state_map_from_prebuilt_sparse_powerset(
+            tokenizer,
+            initial_state_map,
+            depth,
+            self.raw_start_to_view,
+            self.configurations,
+            self.output_class_by_config,
+            None,
+            self.edge_offsets,
+            self.edges,
+        )
+    }
+}
+
+pub(crate) fn powerset_output_class_ids(view: &RelevantPowersetView) -> Vec<u32> {
+    let mut output_ids = FxHashMap::<(Vec<usize>, Vec<usize>), u32>::default();
+    view.states
+        .iter()
+        .map(|state| {
+            let key = (
+                state.finalizers.clone(),
+                state.possible_future_group_ids.clone(),
+            );
+            let next = output_ids.len() as u32;
+            *output_ids.entry(key).or_insert(next)
+        })
+        .collect()
+}
+
 impl RelevantPowersetView {
     pub(crate) fn into_tokenizer_view(self) -> TokenizerView {
         let mut transitions = vec![u32::MAX; self.states.len() * 256];
@@ -1015,14 +1059,20 @@ pub(crate) fn compute_state_map_from_prebuilt_sparse_powerset(
             }
 
             let mut class_set = SmallVec::<[u32; 4]>::new();
-            class_set.extend(
-                config
-                    .iter()
-                    .filter(|&&raw| {
-                        raw_active_language.is_none_or(|active| active[raw as usize])
-                    })
-                    .map(|&raw| classes[raw_to_candidate[raw as usize]]),
-            );
+            if let Some(active_language) = raw_active_language {
+                class_set.extend(
+                    config
+                        .iter()
+                        .filter(|&&raw| active_language[raw as usize])
+                        .map(|&raw| classes[raw_to_candidate[raw as usize]]),
+                );
+            } else {
+                class_set.extend(
+                    config
+                        .iter()
+                        .map(|&raw| classes[raw_to_candidate[raw as usize]]),
+                );
+            }
             class_set.sort_unstable();
             class_set.dedup();
             class_set_by_config[config_id] = if let [class] = class_set.as_slice() {
@@ -1042,45 +1092,80 @@ pub(crate) fn compute_state_map_from_prebuilt_sparse_powerset(
             let edge_start = edge_offsets[config] as usize;
             let edge_end = edge_offsets[config + 1] as usize;
             let candidate_class = classes[candidate];
-            let mut projected_edges = SmallVec::<[(u8, u32); 8]>::new();
-            if !projected_empty[config] {
-                projected_edges.extend(
-                    edges[edge_start..edge_end]
-                        .iter()
-                        .copied()
-                        .filter(|&(_, target)| !projected_empty[target as usize]),
-                );
-            }
-            next_classes[candidate] = match projected_edges.as_slice() {
-                [] => *zero_edge_signatures.entry(candidate_class).or_insert_with(|| {
-                    let class = next_class;
-                    next_class += 1;
-                    class
-                }),
-                [(byte, target)] => {
-                    let key = (
-                        candidate_class,
-                        *byte,
-                        class_set_by_config[*target as usize],
-                    );
-                    *one_edge_signatures.entry(key).or_insert_with(|| {
+            next_classes[candidate] = if raw_active_language.is_none() {
+                match &edges[edge_start..edge_end] {
+                    [] => *zero_edge_signatures.entry(candidate_class).or_insert_with(|| {
                         let class = next_class;
                         next_class += 1;
                         class
-                    })
-                }
-                projected_edges => {
-                    let mut signature = SmallVec::<[u32; 8]>::new();
-                    signature.push(candidate_class);
-                    for &(byte, target) in projected_edges {
-                        signature.push(byte as u32 + 1);
-                        signature.push(class_set_by_config[target as usize] + 1);
+                    }),
+                    [(byte, target)] => {
+                        let key = (
+                            candidate_class,
+                            *byte,
+                            class_set_by_config[*target as usize],
+                        );
+                        *one_edge_signatures.entry(key).or_insert_with(|| {
+                            let class = next_class;
+                            next_class += 1;
+                            class
+                        })
                     }
-                    *larger_signatures.entry(signature).or_insert_with(|| {
+                    direct_edges => {
+                        let mut signature = SmallVec::<[u32; 8]>::new();
+                        signature.push(candidate_class);
+                        for &(byte, target) in direct_edges {
+                            signature.push(byte as u32 + 1);
+                            signature.push(class_set_by_config[target as usize] + 1);
+                        }
+                        *larger_signatures.entry(signature).or_insert_with(|| {
+                            let class = next_class;
+                            next_class += 1;
+                            class
+                        })
+                    }
+                }
+            } else {
+                let mut projected_edges = SmallVec::<[(u8, u32); 8]>::new();
+                if !projected_empty[config] {
+                    projected_edges.extend(
+                        edges[edge_start..edge_end]
+                            .iter()
+                            .copied()
+                            .filter(|&(_, target)| !projected_empty[target as usize]),
+                    );
+                }
+                match projected_edges.as_slice() {
+                    [] => *zero_edge_signatures.entry(candidate_class).or_insert_with(|| {
                         let class = next_class;
                         next_class += 1;
                         class
-                    })
+                    }),
+                    [(byte, target)] => {
+                        let key = (
+                            candidate_class,
+                            *byte,
+                            class_set_by_config[*target as usize],
+                        );
+                        *one_edge_signatures.entry(key).or_insert_with(|| {
+                            let class = next_class;
+                            next_class += 1;
+                            class
+                        })
+                    }
+                    projected_edges => {
+                        let mut signature = SmallVec::<[u32; 8]>::new();
+                        signature.push(candidate_class);
+                        for &(byte, target) in projected_edges {
+                            signature.push(byte as u32 + 1);
+                            signature.push(class_set_by_config[target as usize] + 1);
+                        }
+                        *larger_signatures.entry(signature).or_insert_with(|| {
+                            let class = next_class;
+                            next_class += 1;
+                            class
+                        })
+                    }
                 }
             };
         }

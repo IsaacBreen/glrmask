@@ -32,6 +32,10 @@ pub(crate) struct MaxLengthStatistic {
 }
 
 impl MaxLengthStatistic {
+    pub(crate) fn max_token_len(&self) -> usize {
+        self.max_token_len
+    }
+
     pub(crate) fn relevant_byte_count(&self) -> usize {
         self.relevant_bytes.iter().filter(|&&active| active).count()
     }
