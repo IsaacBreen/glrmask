@@ -807,7 +807,7 @@ impl<'a> Lowerer<'a> {
         if max <= self.config.terminalize_bounded_string_max.max(64) {
             return false;
         }
-        let chunk = self.config.repeat_chunk_size.max(1);
+        let chunk = self.config.string_repeat_chunk_size.max(1);
         min > chunk || max > chunk
     }
 
@@ -902,7 +902,7 @@ impl<'a> Lowerer<'a> {
     }
 
     fn split_string_exact_open_expr(&mut self, count: usize) -> GrammarExpr {
-        let chunk = self.config.repeat_chunk_size.max(1);
+        let chunk = self.config.string_repeat_chunk_size.max(1);
         if count <= chunk {
             return self.string_char_exact_open_ref(count);
         }
@@ -950,7 +950,7 @@ impl<'a> Lowerer<'a> {
     }
 
     fn split_string_exact_expr(&mut self, count: usize) -> GrammarExpr {
-        let chunk = self.config.repeat_chunk_size.max(1);
+        let chunk = self.config.string_repeat_chunk_size.max(1);
         if count <= chunk {
             return self.string_char_exact_ref(count);
         }
@@ -965,7 +965,7 @@ impl<'a> Lowerer<'a> {
     }
 
     fn split_string_upto_close_expr(&mut self, max: usize) -> GrammarExpr {
-        let chunk = self.config.repeat_chunk_size.max(1);
+        let chunk = self.config.string_repeat_chunk_size.max(1);
         if max <= chunk {
             return self.string_char_upto_close_ref(max);
         }
@@ -986,7 +986,7 @@ impl<'a> Lowerer<'a> {
 
     fn lower_split_bounded_string(&mut self, min: usize, max: usize) -> GrammarExpr {
         let expr = self.split_bounded_string_terminal_expr(min, max);
-        let chunk = self.config.repeat_chunk_size.max(1);
+        let chunk = self.config.string_repeat_chunk_size.max(1);
         let should_wrap = max >= 10_000 || (max / chunk) > 2;
 
         if !should_wrap {
@@ -999,7 +999,7 @@ impl<'a> Lowerer<'a> {
     }
 
     fn split_bounded_string_terminal_expr(&mut self, min: usize, max: usize) -> GrammarExpr {
-        let chunk = self.config.repeat_chunk_size.max(1);
+        let chunk = self.config.string_repeat_chunk_size.max(1);
         let should_wrap = max >= 10_000 || (max / chunk) > 2;
         if should_wrap && min == 0 && max > chunk {
             let full_chunks = max / chunk;
@@ -1859,7 +1859,7 @@ impl<'a> Lowerer<'a> {
 
     fn lower_unbounded_string_expr(&mut self, min: usize) -> GrammarExpr {
         let merging = self.config.value_merging.generic;
-        let chunk = self.config.repeat_chunk_size.max(1);
+        let chunk = self.config.string_repeat_chunk_size.max(1);
         let mut parts = Vec::new();
 
         if min <= chunk {
@@ -1921,7 +1921,7 @@ impl<'a> Lowerer<'a> {
         if count == 0 {
             return GrammarExpr::Epsilon;
         }
-        let chunk = self.config.repeat_chunk_size.max(1);
+        let chunk = self.config.string_repeat_chunk_size.max(1);
         if count <= chunk {
             return self.string_char_exact_ref(count);
         }

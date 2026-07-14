@@ -3282,7 +3282,28 @@ fn medium_bounded_string_uses_split_chunk_rules_by_default() {
     );
 
     let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("json_string_char_exact_50"), "{glrm}");
+    assert!(glrm.contains("json_string_char_exact_64"), "{glrm}");
+    lower(&grammar).unwrap();
+}
+
+#[test]
+fn generic_repeat_chunk_env_does_not_change_string_chunking() {
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _generic_chunk = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_REPEAT_CHUNK", "17");
+    let _string_chunk = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_STRING_REPEAT_CHUNK");
+    let _terminalize_guard = EnvVarGuard::unset(
+        "GLRMASK_JSON_SCHEMA_TERMINALIZE_BOUNDED_STRING_MAX",
+    );
+
+    let schema = json!({
+        "type": "string",
+        "maxLength": 1024
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("json_string_char_exact_64"), "{glrm}");
+    assert!(!glrm.contains("json_string_char_exact_17"), "{glrm}");
     lower(&grammar).unwrap();
 }
 
@@ -3859,8 +3880,8 @@ fn split_bounded_string_chunks_do_not_overlap_at_boundary() {
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("json_string_char_upto_close_49"), "{glrm}");
-    assert!(!glrm.contains("json_string_char_upto_close_50"), "{glrm}");
+    assert!(glrm.contains("json_string_char_upto_close_63"), "{glrm}");
+    assert!(!glrm.contains("json_string_char_upto_close_64"), "{glrm}");
     lower(&grammar).unwrap();
 }
 
@@ -3882,9 +3903,9 @@ fn very_large_bounded_string_still_uses_split_chunk_rules() {
     );
 
     let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("json_string_char_exact_50"), "{glrm}");
-    assert!(glrm.contains("json_string_char_exact_open_50"), "{glrm}");
-    assert!(glrm.contains("json_string_char_upto_wrapped_50"), "{glrm}");
+    assert!(glrm.contains("json_string_char_exact_64"), "{glrm}");
+    assert!(glrm.contains("json_string_char_exact_open_64"), "{glrm}");
+    assert!(glrm.contains("json_string_char_upto_wrapped_64"), "{glrm}");
     lower(&grammar).unwrap();
 }
 
@@ -8637,8 +8658,12 @@ fn large_unbounded_min_length_uses_existing_exact_chunking_then_unbounded_close_
     let hazards = find_repeated_single_byte_terminal_hazards(&grammar, &resolved);
 
     assert!(hazards.is_empty(), "hazards: {hazards:#?}\n{glrm}");
-    assert!(glrm.contains("json_string_char_exact_50_"), "{glrm}");
-    assert!(glrm.contains("{20} json_string_char_unbounded_0_close_"), "{glrm}");
+    assert!(glrm.contains("json_string_char_exact_64_"), "{glrm}");
+    assert!(
+        glrm.contains("{15} json_string_char_exact_40_"),
+        "{glrm}"
+    );
+    assert!(glrm.contains("json_string_char_unbounded_0_close_"), "{glrm}");
     assert!(!glrm.contains("json_string_char_exact_1_1*"), "{glrm}");
     assert!(!glrm.contains("JSON_STRING_CHAR{1000,}"), "{glrm}");
 }
