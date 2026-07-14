@@ -7050,6 +7050,26 @@ impl InterchangeabilityDfa {
         }
     }
 
+    /// Pairwise exact refinement is a correctness-preserving *merge finder*,
+    /// not a correctness requirement.  Every path before it is a positive
+    /// certificate or a sound rejection filter; treating an uncertified pair
+    /// as non-interchangeable can only miss an optimization.
+    ///
+    /// The raw/canonical pair refinement is intentionally retained for small
+    /// discovery automata and for explicit reference runs.  On large lexer
+    /// products its cost is quadratic in candidate pairs times tens of Moore
+    /// rounds, while the support certificates already find the useful literal
+    /// classes.  Keep production discovery bounded by a deterministic state
+    /// threshold instead of a wall-clock budget.
+    fn exact_pair_fallback_enabled(&self) -> bool {
+        if let Ok(value) = std::env::var("GLRMASK_TI_EXACT_PAIR_FALLBACK") {
+            let value = value.trim();
+            return value.is_empty() || value == "1" || value.eq_ignore_ascii_case("true");
+        }
+        self.state_count() <= 1024
+    }
+
+
     fn characterize_pair(&mut self, left: TerminalID, right: TerminalID) -> PairCharacterization {
         let state_count = self.state_count();
         let swap = Some((left as usize, right as usize));
@@ -7508,6 +7528,7 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
         let mut first_round_rejections = 0usize;
         let mut support_transposition_checks = 0usize;
         let mut direct_exact_checks = 0usize;
+        let mut exact_fallback_skips = 0usize;
         let mut accepted_representative_members = 0usize;
         let mut output_pair_filter_ns = 0u64;
         let mut frozen_output_ns = 0u64;
@@ -7824,8 +7845,13 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                             }
                             MemberVerdict::NeedsExact => {
                                 support_transposition_checks += 1;
-                                direct_exact_checks += 1;
-                                dfa.interchange_map(representative, terminal)
+                                if dfa.exact_pair_fallback_enabled() {
+                                    direct_exact_checks += 1;
+                                    dfa.interchange_map(representative, terminal)
+                                } else {
+                                    exact_fallback_skips += 1;
+                                    None
+                                }
                             }
                         };
                         if let Some(map) = map {
@@ -7944,6 +7970,9 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                             }
                             if let Some(support_map) = support_map {
                                 Some(support_map)
+                            } else if !dfa.exact_pair_fallback_enabled() {
+                                exact_fallback_skips += 1;
+                                None
                             } else {
                                 direct_exact_checks += 1;
                                 let exact_map_started_at = profile_timing.then(Instant::now);
@@ -8162,7 +8191,7 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
 
         if profile_timing {
             eprintln!(
-                "[glrmask/profile][terminal_interchangeability] output_pair_rejections={} output_pair_cached_closed={} output_invariant_checks={} first_round_rejections={} support_transposition_checks={} petal_batch_groups={} petal_batch_members={} petal_batch_grouping_ms={:.3} petal_batch_certificate_ms={:.3} petal_batch_map_ms={:.3} support_transposition_certified={} support_transposition_no_template={} support_transposition_outside_cone={} support_transposition_root_rejected={} support_transposition_signature_rejected={} direct_exact_checks={} output_pair_filter_ms={:.3} frozen_output_ms={:.3} first_round_ms={:.3} support_transposition_ms={:.3} support_setup_ms={:.3} support_quotient_build_ms={:.3} support_template_ms={:.3} support_cone_ms={:.3} support_verify_ms={:.3} exact_map_ms={:.3} accepted_map_storage_ms={:.3} quotient_certified={} sparse_quotient_certified={} sparse_cone_avg={:.1} sparse_cone_max={} sparse_cone_ms={:.3} sparse_refinement_ms={:.3} sparse_map_ms={:.3} accepted_representative_members={} total_ms={:.3}",
+                "[glrmask/profile][terminal_interchangeability] output_pair_rejections={} output_pair_cached_closed={} output_invariant_checks={} first_round_rejections={} support_transposition_checks={} petal_batch_groups={} petal_batch_members={} petal_batch_grouping_ms={:.3} petal_batch_certificate_ms={:.3} petal_batch_map_ms={:.3} support_transposition_certified={} support_transposition_no_template={} support_transposition_outside_cone={} support_transposition_root_rejected={} support_transposition_signature_rejected={} direct_exact_checks={} exact_fallback_skips={} output_pair_filter_ms={:.3} frozen_output_ms={:.3} first_round_ms={:.3} support_transposition_ms={:.3} support_setup_ms={:.3} support_quotient_build_ms={:.3} support_template_ms={:.3} support_cone_ms={:.3} support_verify_ms={:.3} exact_map_ms={:.3} accepted_map_storage_ms={:.3} quotient_certified={} sparse_quotient_certified={} sparse_cone_avg={:.1} sparse_cone_max={} sparse_cone_ms={:.3} sparse_refinement_ms={:.3} sparse_map_ms={:.3} accepted_representative_members={} total_ms={:.3}",
                 output_pair_rejections,
                 output_pair_cached_closed,
                 output_invariant_checks,
@@ -8179,6 +8208,7 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                 dfa.support_transposition_root_rejected,
                 dfa.support_transposition_signature_rejected,
                 direct_exact_checks,
+                exact_fallback_skips,
                 output_pair_filter_ns as f64 / 1_000_000.0,
                 frozen_output_ns as f64 / 1_000_000.0,
                 first_round_ns as f64 / 1_000_000.0,
@@ -9106,8 +9136,13 @@ struct GroupCoordinateSignature {
 }
 
 struct GroupCoordinatePlan {
-    overrides: Vec<(u32, u32)>,
+    #[cfg(debug_assertions)]
+    reference_overrides: Vec<(u32, u32)>,
     signatures: Vec<GroupCoordinateSignature>,
+    // Final TSIDs are grouped by the exact `(ordinary coordinate, alternate
+    // coordinates)` signature that determines both their base and transported
+    // token sets for every lifted core weight.
+    final_tsid_runs_by_signature: Vec<Box<[(u32, u32)]>>,
     coordinates: Vec<u32>,
 }
 
@@ -9427,11 +9462,34 @@ impl PostDwaWeightLifter {
             }
         }
 
+        let mut final_tsids_by_signature = vec![Vec::<u32>::new(); signatures.len()];
+        for &(final_tsid, signature) in &overrides {
+            final_tsids_by_signature[signature as usize].push(final_tsid);
+        }
+        let final_tsid_runs_by_signature = final_tsids_by_signature
+            .into_iter()
+            .map(|final_tsids| {
+                let mut runs = Vec::<(u32, u32)>::new();
+                for final_tsid in final_tsids {
+                    if let Some((_, end)) = runs.last_mut()
+                        && end.checked_add(1) == Some(final_tsid)
+                    {
+                        *end = final_tsid;
+                    } else {
+                        runs.push((final_tsid, final_tsid));
+                    }
+                }
+                runs.into_boxed_slice()
+            })
+            .collect();
+
         self.group_coordinate_plans.insert(
             mode_indices.to_vec(),
             GroupCoordinatePlan {
-                overrides,
+                #[cfg(debug_assertions)]
+                reference_overrides: overrides,
                 signatures,
+                final_tsid_runs_by_signature,
                 coordinates,
             },
         );
@@ -9508,29 +9566,64 @@ impl PostDwaWeightLifter {
                     tokens
                 })
                 .collect();
-            plan.overrides
-                .iter()
-                .zip(base.shared_tokens_for_sorted_tsids(
-                    &plan
-                        .overrides
+            let mut overrides = Vec::<(u32, u32, SharedTokenSet)>::new();
+            for (signature_index, signature) in plan.signatures.iter().enumerate() {
+                let tokens = &transformed_tokens[signature_index];
+                let base_tokens = &coordinate_tokens[signature.base_coordinate_index];
+                if Arc::ptr_eq(tokens, base_tokens) || tokens.as_ref() == base_tokens.as_ref() {
+                    continue;
+                }
+                overrides.extend(
+                    plan.final_tsid_runs_by_signature[signature_index]
                         .iter()
-                        .map(|&(final_tsid, _)| final_tsid)
-                        .collect::<Vec<_>>(),
-                ))
-                .filter_map(|(&(final_tsid, signature), base_tokens)| {
-                    let tokens = &transformed_tokens[signature as usize];
-                    let differs = !Arc::ptr_eq(tokens, &base_tokens)
-                        && tokens.as_ref() != base_tokens.as_ref();
-                    differs.then(|| (final_tsid, Arc::clone(tokens)))
-                })
-                .collect::<Vec<_>>()
+                        .map(|&(start, end)| (start, end, Arc::clone(tokens))),
+                );
+            }
+            // The ranged sparse-override helper consumes a TSID stream in
+            // ascending coordinate order. Grouping by signature above changes
+            // only construction order, so restore canonical final-TSID order
+            // before applying the exact same overrides.
+            overrides.sort_unstable_by_key(|&(start, _, _)| start);
+
+            #[cfg(debug_assertions)]
+            {
+                let reference = plan
+                    .reference_overrides
+                    .iter()
+                    .zip(base.shared_tokens_for_sorted_tsids(
+                        &plan
+                            .reference_overrides
+                            .iter()
+                            .map(|&(final_tsid, _)| final_tsid)
+                            .collect::<Vec<_>>(),
+                    ))
+                    .filter_map(|(&(final_tsid, signature), base_tokens)| {
+                        let tokens = &transformed_tokens[signature as usize];
+                        let differs = !Arc::ptr_eq(tokens, &base_tokens)
+                            && tokens.as_ref() != base_tokens.as_ref();
+                        differs.then(|| (final_tsid, Arc::clone(tokens)))
+                    })
+                    .collect::<Vec<_>>();
+                let expanded = overrides
+                    .iter()
+                    .flat_map(|(start, end, tokens)| {
+                        (*start..=*end).map(move |final_tsid| {
+                            (final_tsid, Arc::clone(tokens))
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                debug_assert_eq!(expanded, reference);
+            }
+
+            overrides
         };
         if let Some(started_at) = started_at {
             self.profile_signature_ms += started_at.elapsed().as_secs_f64() * 1000.0;
         }
 
         let started_at = profile_timing.then(Instant::now);
-        let lifted = base.with_sparse_tsid_overrides_intersection(&overrides, entry_domain);
+        let lifted =
+            base.with_sparse_tsid_range_overrides_intersection(&overrides, entry_domain);
         if let Some(started_at) = started_at {
             self.profile_apply_ms += started_at.elapsed().as_secs_f64() * 1000.0;
         }

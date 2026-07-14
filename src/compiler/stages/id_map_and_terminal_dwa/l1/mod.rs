@@ -1843,22 +1843,78 @@ fn find_l1_exact_state_equivalence_by_flat_signatures(
         .collect();
     let build_byte_profiles = |(byte, targets): &(u8, Vec<u32>)| {
         let byte_idx = *byte as usize;
-        l1_bucket_suffix_signature_profiles_packed(
-            *byte,
-            targets,
-            sorted_entries,
-            &token_buckets.token_indices_by_first_byte[byte_idx],
-            &token_buckets.suffix_lcps_by_first_byte[byte_idx],
-            &token_buckets.suffix_subtree_bytes[byte_idx],
-            &token_buckets.suffix_first_bytes_by_bucket[byte_idx],
-            token_buckets.has_empty_suffix_by_bucket[byte_idx],
-            &state_to_terminal_signature,
-            flat_trans,
-            transitions_by_byte,
-            num_tokenizer_states,
-            horizon_maps.as_deref(),
-            suffix_horizon_by_first_byte[byte_idx],
-        )
+        let token_ids = &token_buckets.token_indices_by_first_byte[byte_idx];
+        let suffix_lcps = &token_buckets.suffix_lcps_by_first_byte[byte_idx];
+        if token_ids.len() >= 10_000 && targets.len() >= 32 && rayon::current_num_threads() > 1 {
+            let trie = L1PackedSuffixTrie::build(sorted_entries, token_ids, suffix_lcps);
+            let chunk_count = std::env::var("GLRMASK_L1_LARGE_BUCKET_CHUNKS")
+                .ok()
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .filter(|&value| value > 0)
+                .unwrap_or(2)
+                .min(rayon::current_num_threads())
+                .min(targets.len());
+            let chunk_size = targets.len().div_ceil(chunk_count);
+            let mut chunked_profiles: Vec<((u8, u32), Arc<[(u32, u32, u32)]>)> = targets
+                .par_chunks(chunk_size.max(1))
+                .map(|target_chunk| {
+                    l1_bucket_suffix_signature_profiles_packed(
+                        *byte,
+                        target_chunk,
+                        sorted_entries,
+                        token_ids,
+                        suffix_lcps,
+                        &token_buckets.suffix_subtree_bytes[byte_idx],
+                        &token_buckets.suffix_first_bytes_by_bucket[byte_idx],
+                        token_buckets.has_empty_suffix_by_bucket[byte_idx],
+                        &state_to_terminal_signature,
+                        flat_trans,
+                        transitions_by_byte,
+                        num_tokenizer_states,
+                        horizon_maps.as_deref(),
+                        suffix_horizon_by_first_byte[byte_idx],
+                        Some(&trie),
+                    )
+                })
+                .flatten()
+                .collect();
+            // The packed builder interns equal behaviors only within one target
+            // batch.  Chunking a large bucket for latency must not turn equal
+            // cross-chunk profiles into distinct pointer identities, because
+            // the outer exact-equivalence pass deliberately uses canonical Arc
+            // identity as its O(1) profile key.
+            let mut canonical_profiles =
+                FxHashMap::<Arc<[(u32, u32, u32)]>, Arc<[(u32, u32, u32)]>>::default();
+            for (_, profile) in &mut chunked_profiles {
+                if profile.is_empty() {
+                    continue;
+                }
+                if let Some(canonical) = canonical_profiles.get(profile) {
+                    *profile = Arc::clone(canonical);
+                } else {
+                    canonical_profiles.insert(Arc::clone(profile), Arc::clone(profile));
+                }
+            }
+            chunked_profiles
+        } else {
+            l1_bucket_suffix_signature_profiles_packed(
+                *byte,
+                targets,
+                sorted_entries,
+                token_ids,
+                suffix_lcps,
+                &token_buckets.suffix_subtree_bytes[byte_idx],
+                &token_buckets.suffix_first_bytes_by_bucket[byte_idx],
+                token_buckets.has_empty_suffix_by_bucket[byte_idx],
+                &state_to_terminal_signature,
+                flat_trans,
+                transitions_by_byte,
+                num_tokenizer_states,
+                horizon_maps.as_deref(),
+                suffix_horizon_by_first_byte[byte_idx],
+                None,
+            )
+        }
     };
     let target_profile_batches: Vec<Vec<((u8, u32), Arc<[(u32, u32, u32)]>)>> =
         if rayon::current_num_threads() == 1 {
@@ -2553,6 +2609,7 @@ fn l1_bucket_suffix_signature_profiles_packed(
     num_lexer_states: usize,
     horizon_maps: Option<&[Arc<[u32]>]>,
     suffix_horizon: usize,
+    prebuilt_trie: Option<&L1PackedSuffixTrie>,
 ) -> Vec<((u8, u32), Arc<[(u32, u32, u32)]>)> {
     let profiling = compile_profile_enabled();
     let total_started_at = profiling.then(Instant::now);
@@ -2646,7 +2703,13 @@ fn l1_bucket_suffix_signature_profiles_packed(
     }
 
     let trie_started_at = profiling.then(Instant::now);
-    let trie = L1PackedSuffixTrie::build(sorted_entries, token_ids, suffix_lcps);
+    let owned_trie;
+    let trie = if let Some(trie) = prebuilt_trie {
+        trie
+    } else {
+        owned_trie = L1PackedSuffixTrie::build(sorted_entries, token_ids, suffix_lcps);
+        &owned_trie
+    };
     let mut remaining_horizon_by_node = vec![0usize; trie.nodes.len()];
     for node_index in (0..trie.nodes.len()).rev() {
         let node = trie.nodes[node_index];
@@ -5081,6 +5144,7 @@ mod packed_suffix_product_tests {
                 tokenizer.num_states() as usize,
                 None,
                 suffix_horizon,
+                None,
             );
             let mut quotient_actual = l1_bucket_suffix_signature_profiles_packed(
                 first_byte as u8,
@@ -5097,6 +5161,7 @@ mod packed_suffix_product_tests {
                 tokenizer.num_states() as usize,
                 Some(&horizon_maps),
                 suffix_horizon,
+                None,
             );
             expected.sort_unstable_by_key(|(key, _)| *key);
             actual.sort_unstable_by_key(|(key, _)| *key);

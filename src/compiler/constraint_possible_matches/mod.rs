@@ -1899,14 +1899,13 @@ fn build_possible_match_powerset_view(
     tokenizer: &Tokenizer,
     relevant_bytes: &[bool; 256],
 ) -> PossibleMatchPowersetView {
+    let singleton_closures = tokenizer.all_singleton_epsilon_closures();
     let mut config_ids = FxHashMap::<Vec<u32>, u32>::default();
     let mut configs = Vec::<Box<[u32]>>::new();
     let raw_start_to_view = (0..tokenizer.num_states())
         .map(|raw_state| {
             intern_possible_match_config(
-                tokenizer
-                    .execute_from_state_end_only(&[], raw_state)
-                    .to_vec(),
+                singleton_closures[raw_state as usize].to_vec(),
                 &mut config_ids,
                 &mut configs,
             )
@@ -1923,6 +1922,9 @@ fn build_possible_match_powerset_view(
     let mut transition_rows = Vec::<Box<[u32; 256]>>::new();
     let mut boundary_state = Vec::<u32>::new();
     let mut is_end = Vec::<bool>::new();
+    let mut target_marks = vec![0u32; tokenizer.num_states() as usize];
+    let mut target_generation = 0u32;
+    let mut target_config = Vec::<u32>::new();
     let mut config_index = 0usize;
     while config_index < configs.len() {
         let config = configs[config_index].to_vec();
@@ -1951,9 +1953,36 @@ fn build_possible_match_powerset_view(
 
         let mut row = Box::new([u32::MAX; 256]);
         for &byte in &active_bytes {
-            let target = tokenizer.step_all(&config, byte);
+            target_generation = target_generation.wrapping_add(1);
+            if target_generation == 0 {
+                target_marks.fill(0);
+                target_generation = 1;
+            }
+            target_config.clear();
+            // `config` may be a boundary projection with accepting/end states
+            // removed, so close every source before consuming the byte.  Each
+            // direct target is then closed by unioning its cached singleton
+            // closure.  This is exactly `step_all(config, byte)` without two
+            // repeated graph walks, per-call seen-vector allocations, or an
+            // intermediate target sort/dedup.
+            for &source in &config {
+                for &closed_source in singleton_closures[source as usize].iter() {
+                    let target = tokenizer.get_transition(closed_source, byte);
+                    if target == u32::MAX {
+                        continue;
+                    }
+                    for &reachable in singleton_closures[target as usize].iter() {
+                        let mark = &mut target_marks[reachable as usize];
+                        if *mark != target_generation {
+                            *mark = target_generation;
+                            target_config.push(reachable);
+                        }
+                    }
+                }
+            }
+            target_config.sort_unstable();
             if let Some(target) = intern_possible_match_config(
-                target.to_vec(),
+                target_config.clone(),
                 &mut config_ids,
                 &mut configs,
             ) {

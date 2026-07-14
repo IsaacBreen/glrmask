@@ -1,7 +1,7 @@
 //! Runtime-facing tokenizer API built on top of the lexer DFA.
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -22,6 +22,12 @@ pub struct Tokenizer {
     /// compile-time simplification for active-terminal rebuilds.
     #[serde(default, skip)]
     pub(super) exprs: Option<Arc<[Expr]>>,
+    /// Derived epsilon closures are shared by compile-time analyses.  A
+    /// partitioned lexer is queried by many concurrent compiler lanes; without
+    /// this cache each lane independently walks the same epsilon DAG for every
+    /// raw state.
+    #[serde(default, skip)]
+    pub(super) singleton_epsilon_closures: OnceLock<Arc<[Box<[u32]>]>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,6 +156,7 @@ impl Tokenizer {
             dfa,
             num_terminals,
             exprs,
+            singleton_epsilon_closures: OnceLock::new(),
         }
     }
 
@@ -259,6 +266,7 @@ impl Tokenizer {
     /// the set.  After this call the tokenizer no longer reports those
     /// terminals as matched at state 0.
     pub fn isolate_start_state_and_drain_nullable_terminals(&mut self) -> BTreeSet<TerminalID> {
+        self.singleton_epsilon_closures = OnceLock::new();
         let start = self.start_state();
         let initial_closure = self.dfa.epsilon_closure(&[start]);
         let mut nullable = BTreeSet::new();
@@ -360,6 +368,12 @@ impl Tokenizer {
             .into_iter()
             .flat_map(|state| self.matched_terminals_iter(state))
             .collect()
+    }
+
+    pub(crate) fn all_singleton_epsilon_closures(&self) -> Arc<[Box<[u32]>]> {
+        Arc::clone(self.singleton_epsilon_closures.get_or_init(|| {
+            Arc::from(self.dfa.all_singleton_epsilon_closures())
+        }))
     }
 
     fn matched_terminals_iter(
