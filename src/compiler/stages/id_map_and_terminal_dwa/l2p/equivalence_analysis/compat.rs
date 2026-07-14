@@ -183,6 +183,79 @@ pub(crate) fn compute_byte_classes(dfa: &FlatDfa) -> [u8; 256] {
     byte_classes_from_column_hashes(&dfa.transitions, dfa.states.len(), &column_hashes)
 }
 
+
+/// Exact byte congruence of the selected terminal languages.
+///
+/// The shared lexer can retain inactive product/component coordinates even
+/// after its output labels are filtered. Recompile the active expressions as
+/// independent deterministic components and compare byte transition columns
+/// across all of their residual states. Two bytes in one class therefore have
+/// identical action from every residual of every active terminal language.
+/// Replacing one by the other preserves active-terminal match positions and
+/// residuals; grammar follow constraints only filter terminal labels later.
+pub(crate) fn compute_active_terminal_language_byte_classes(
+    tokenizer: &Tokenizer,
+    active_groups: &[bool],
+) -> Option<[u8; 256]> {
+    let active_exprs = active_groups
+        .iter()
+        .enumerate()
+        .filter_map(|(terminal, &active)| active.then_some(terminal as u32))
+        .map(|terminal| tokenizer.terminal_expr(terminal).cloned())
+        .collect::<Option<Vec<_>>>()?;
+    if active_exprs.is_empty() {
+        return Some([0u8; 256]);
+    }
+    let partitions = (0..active_exprs.len() as u32).collect::<Vec<_>>();
+    let regex = crate::automata::lexer::compile::build_regex_partitioned_with_adaptive(
+        &active_exprs,
+        &partitions,
+        false,
+    );
+    let terminal_count = active_exprs.len() as u32;
+    let active_tokenizer = regex.into_tokenizer(
+        terminal_count,
+        Some(Arc::from(active_exprs.into_boxed_slice())),
+    );
+    let active_view = TokenizerView::new(&active_tokenizer);
+    Some(compute_byte_classes(active_view.dfa()))
+}
+
+
+#[inline]
+fn state_has_active_language(state: &FlatDfaState) -> bool {
+    !state.finalizers.is_empty() || !state.possible_future_group_ids.is_empty()
+}
+
+/// Erase topology whose target language is empty under already-filtered state
+/// metadata. Missing edges and edges into an active-dead state are the same
+/// transition in the active-terminal language. Rows of active-dead sources are
+/// empty for the same reason.
+fn project_filtered_transition_topology(
+    states: &[FlatDfaState],
+    transitions: &[u32],
+) -> Arc<[u32]> {
+    assert_eq!(transitions.len(), states.len() * 256);
+    let active_language = states
+        .iter()
+        .map(state_has_active_language)
+        .collect::<Vec<_>>();
+    let mut projected = transitions.to_vec();
+    for source in 0..states.len() {
+        let row = &mut projected[source * 256..(source + 1) * 256];
+        if !active_language[source] {
+            row.fill(u32::MAX);
+            continue;
+        }
+        for target in row {
+            if *target != u32::MAX && !active_language[*target as usize] {
+                *target = u32::MAX;
+            }
+        }
+    }
+    Arc::from(projected)
+}
+
 impl FlatDfa {
     /// Get the transition target for a given state and byte.
     #[inline]
@@ -224,7 +297,9 @@ impl FlatDfa {
         }
     }
 
-    /// Build a FlatDfa filtering finalizers and futures to only active groups.
+    /// Build a DFA view of the active-terminal language. Besides filtering
+    /// finalizers/futures, transitions from or into states with empty active
+    /// language are canonicalized to dead.
     pub fn from_tokenizer_filtered(tokenizer: &Tokenizer, active_groups: &[bool]) -> Self {
         let start_state = tokenizer.start_state() as usize;
         let num_states = tokenizer.num_states() as usize;
@@ -251,10 +326,11 @@ impl FlatDfa {
             })
             .collect();
 
+        let transitions = project_filtered_transition_topology(&states, &transitions);
         FlatDfa {
             states,
             start_state,
-            transitions: Arc::from(transitions),
+            transitions,
         }
     }
 
@@ -279,8 +355,8 @@ impl FlatDfa {
         FlatDfa { states, start_state, transitions: Arc::clone(flat_trans) }
     }
 
-    /// Build a FlatDfa using a pre-built flat transition table, sharing the
-    /// transition data via Arc. Only finalizers/futures are allocated per partition.
+    /// Build an active-terminal DFA view from a shared raw transition table.
+    /// The raw table is projected to dead for active-dead sources and targets.
     pub fn from_flat_trans_filtered(
         flat_trans: &Arc<[u32]>,
         tokenizer: &Tokenizer,
@@ -303,7 +379,12 @@ impl FlatDfa {
                 }
             })
             .collect();
-        FlatDfa { states, start_state, transitions: Arc::clone(flat_trans) }
+        let transitions = project_filtered_transition_topology(&states, flat_trans);
+        FlatDfa {
+            states,
+            start_state,
+            transitions,
+        }
     }
 
 }
@@ -342,8 +423,8 @@ impl TokenizerView {
         }
     }
 
-    /// Build a filtered view using a pre-built shared flat transition table.
-    /// Shares transition data via Arc — zero-copy per partition.
+    /// Build an active-terminal view using a pre-built shared raw transition
+    /// table. The projected transition table is owned by this view.
     pub fn new_filtered_from_flat_trans(
         flat_trans: &Arc<[u32]>,
         tokenizer: &Tokenizer,
@@ -407,6 +488,7 @@ impl TokenizerView {
                 };
             }
         }
+        let transitions = project_filtered_transition_topology(&states, &transitions);
         let start_state = state_map.original_to_internal[tokenizer.start_state() as usize];
         assert_ne!(start_state, u32::MAX, "quotient start state must be mapped");
         (
@@ -414,7 +496,7 @@ impl TokenizerView {
                 flat_dfa: FlatDfa {
                     states,
                     start_state: start_state as usize,
-                    transitions: Arc::from(transitions),
+                    transitions,
                 },
             },
             filter_started_at
@@ -479,6 +561,7 @@ impl TokenizerView {
                 };
             }
         }
+        let transitions = project_filtered_transition_topology(&states, &transitions);
         let start_state = state_map.original_to_internal[tokenizer.start_state() as usize];
         assert_ne!(start_state, u32::MAX, "quotient start state must be mapped");
         (
@@ -486,7 +569,7 @@ impl TokenizerView {
                 flat_dfa: FlatDfa {
                     states,
                     start_state: start_state as usize,
-                    transitions: Arc::from(transitions),
+                    transitions,
                 },
             },
             started_at
@@ -550,10 +633,15 @@ impl TokenizerView {
         if start_state == u32::MAX {
             return None;
         }
+        let active_dead_classes = states
+            .iter()
+            .map(|state| !state_has_active_language(state))
+            .collect::<Vec<_>>();
         let base = super::vocab::fast::SharedVocabDfaBase::build_from_raw_quotient_for_relevant_bytes(
             flat_trans,
             state_map,
             relevant_bytes,
+            Some(&active_dead_classes),
         )?;
         Some((
             Self {
@@ -659,13 +747,14 @@ impl TokenizerView {
                 };
             }
         }
+        let transitions = project_filtered_transition_topology(&states, &transitions);
         let start_state = state_map.original_to_internal[dfa.start_state];
         assert_ne!(start_state, u32::MAX, "quotient start state must be mapped");
         Self {
             flat_dfa: FlatDfa {
                 states,
                 start_state: start_state as usize,
-                transitions: Arc::from(transitions),
+                transitions,
             },
         }
     }
@@ -676,6 +765,46 @@ impl TokenizerView {
 #[cfg(test)]
 mod sparse_transition_cache_tests {
     use super::*;
+
+    #[test]
+    fn filtered_byte_classes_ignore_inactive_only_transition_topology() {
+        use crate::automata::lexer::ast::Expr;
+        use crate::automata::lexer::compile::build_regex_monolithic as build_regex;
+
+        fn tokenizer(expressions: Vec<Expr>) -> Tokenizer {
+            let terminal_count = expressions.len() as u32;
+            build_regex(&expressions).into_tokenizer(
+                terminal_count,
+                Some(Arc::from(expressions.into_boxed_slice())),
+            )
+        }
+
+        fn same_partition(left: &[u8; 256], right: &[u8; 256]) -> bool {
+            (0..256).all(|a| {
+                (0..256).all(|b| (left[a] == left[b]) == (right[a] == right[b]))
+            })
+        }
+
+        let with_inactive = tokenizer(vec![
+            Expr::U8Seq(b"ab".to_vec()),
+            Expr::U8Seq(b"xq".to_vec()),
+            Expr::U8Seq(b"yrr".to_vec()),
+        ]);
+        let active_only = tokenizer(vec![Expr::U8Seq(b"ab".to_vec())]);
+
+        let filtered = TokenizerView::new_filtered(&with_inactive, &[true, false, false]);
+        let reference = TokenizerView::new(&active_only);
+        let filtered_classes = compute_byte_classes(filtered.dfa());
+        let reference_classes = compute_byte_classes(reference.dfa());
+
+        assert_eq!(filtered.dfa().trans(filtered.dfa().start_state, b'x' as usize), u32::MAX);
+        assert_eq!(filtered.dfa().trans(filtered.dfa().start_state, b'y' as usize), u32::MAX);
+        assert_eq!(filtered_classes[b'x' as usize], filtered_classes[b'y' as usize]);
+        assert!(
+            same_partition(&filtered_classes, &reference_classes),
+            "inactive-only lexer topology changed the active-language byte congruence",
+        );
+    }
 
     #[test]
     fn sparse_column_hashes_preserve_exact_byte_classes() {

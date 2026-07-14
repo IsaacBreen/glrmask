@@ -24,8 +24,8 @@ use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use smallvec::SmallVec;
 use super::nwa_builder::{TerminalNwaTransportMode, TransportScannerStateMap};
 use super::equivalence_analysis::state_equivalence::nfa::{
-    RefinementDepth, build_relevant_powerset_view,
-    compute_state_map_from_prebuilt_sparse_powerset,
+    RefinementDepth, build_relevant_powerset_view, compute_state_map_from_prebuilt_sparse_powerset,
+    raw_active_language_states,
 };
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::lexer::Lexer;
@@ -1365,21 +1365,26 @@ impl TiDiscoveryContext {
         if !tokenizer.has_epsilon_transitions() || !self.topology.nfa_configurations_use_raw_states {
             return None;
         }
-        let raw_start_to_view = self.topology.state_for_raw.as_deref()?;
-        let configurations = self.topology.nfa_configurations.as_deref()?;
-        let output_seed = self.output_projection_seed.borrow();
-        let output_class_by_config = output_seed.as_ref()?.output_pair_by_state.as_ref();
+        let seed = self.output_projection_seed.borrow();
+        let seed = seed.as_ref()?;
+        let configurations = self.topology.nfa_configurations.as_ref()?;
+        let active_language = raw_active_language_states(
+            tokenizer,
+            Some(seed.active_terminals.as_ref()),
+        )?;
         Some(compute_state_map_from_prebuilt_sparse_powerset(
             tokenizer,
             initial_state_map,
             RefinementDepth::Stable,
-            raw_start_to_view,
-            configurations,
-            output_class_by_config,
-            &self.topology.edge_offsets,
+            self.topology.state_for_raw.as_ref()?.as_ref(),
+            configurations.as_ref(),
+            seed.output_pair_by_state.as_ref(),
+            Some(&active_language),
+            &self.topology.edge_offsets[..self.topology.real_state_count + 1],
             &self.topology.edges,
         ))
     }
+
 
 }
 

@@ -73,24 +73,78 @@ impl RepresentativeClosure {
     }
 }
 
+pub(crate) fn raw_active_language_states(
+    tokenizer: &Tokenizer,
+    active_groups: Option<&[bool]>,
+) -> Option<Vec<bool>> {
+    let active_groups = active_groups?;
+    Some(
+        (0..tokenizer.num_states())
+            .map(|state| {
+                tokenizer
+                    .matched_terminals_iter(state)
+                    .chain(tokenizer.possible_future_terminals_iter(state))
+                    .any(|group| {
+                        active_groups
+                            .get(group as usize)
+                            .copied()
+                            .unwrap_or(false)
+                    })
+            })
+            .collect(),
+    )
+}
+
+fn project_raw_config(mut states: Vec<u32>, active_language: Option<&[bool]>) -> Vec<u32> {
+    if let Some(active_language) = active_language {
+        states.retain(|&state| active_language[state as usize]);
+    }
+    states.sort_unstable();
+    states.dedup();
+    states
+}
+
+fn mapped_class_active_language(
+    state_map: &ManyToOneIdMap,
+    raw_active_language: Option<&[bool]>,
+) -> Option<Vec<bool>> {
+    raw_active_language.map(|raw_active_language| {
+        state_map
+            .internal_to_originals
+            .iter()
+            .map(|members| {
+                let active = members
+                    .iter()
+                    .any(|&raw| raw_active_language[raw as usize]);
+                debug_assert!(
+                    members
+                        .iter()
+                        .all(|&raw| raw_active_language[raw as usize] == active),
+                    "mapped powerset seed mixed active-live and active-dead scanner states",
+                );
+                active
+            })
+            .collect()
+    })
+}
+
 fn intern_mapped_target_config(
     targets: &[u32],
     state_map: &ManyToOneIdMap,
+    class_active_language: Option<&[bool]>,
     config_ids: &mut FxHashMap<Vec<u32>, u32>,
     configs: &mut Vec<Box<[u32]>>,
 ) -> u32 {
-    debug_assert!(!targets.is_empty());
     let mut target_config = targets
         .iter()
         .map(|&raw_state| state_map.original_to_internal[raw_state as usize])
+        .filter(|&class| {
+            class_active_language.is_none_or(|active| active[class as usize])
+        })
         .collect::<Vec<_>>();
     target_config.sort_unstable();
     target_config.dedup();
-    if target_config.len() == 1 {
-        target_config[0]
-    } else {
-        intern_config(target_config, config_ids, configs)
-    }
+    intern_config(target_config, config_ids, configs)
 }
 
 impl BoundedAnalysisView {
@@ -119,18 +173,54 @@ pub(crate) fn build_relevant_powerset_view(
                 && (class as usize) < state_map.representative_original_ids.len()
         }));
     }
+
+    // Project epsilon configurations themselves, not only their visible output
+    // metadata. A raw component with no active finalizer and no active future
+    // terminal has empty active language, so retaining it in a mixed powerset
+    // configuration would let inactive-only topology distinguish successors.
+    let raw_active_language = raw_active_language_states(tokenizer, active_groups);
+    let class_active_language = state_map.and_then(|state_map| {
+        mapped_class_active_language(state_map, raw_active_language.as_deref())
+    });
+
     let (mut config_ids, mut configs, raw_start_to_view, mut worklist, mut queued) =
         if let Some(state_map) = state_map {
             let class_count = state_map.representative_original_ids.len();
-            let configs = (0..class_count as u32)
-                .map(|class| vec![class].into_boxed_slice())
+            let mut config_ids = FxHashMap::<Vec<u32>, u32>::default();
+            let mut configs = Vec::<Box<[u32]>>::new();
+            let mut class_to_view = vec![u32::MAX; class_count];
+            let mut worklist = VecDeque::<u32>::new();
+            let mut queued = Vec::<bool>::new();
+            for class in 0..class_count as u32 {
+                let config = if class_active_language
+                    .as_deref()
+                    .is_none_or(|active| active[class as usize])
+                {
+                    vec![class]
+                } else {
+                    Vec::new()
+                };
+                let state = intern_config(config, &mut config_ids, &mut configs);
+                class_to_view[class as usize] = state;
+                if queued.len() < configs.len() {
+                    queued.resize(configs.len(), false);
+                }
+                if !queued[state as usize] {
+                    queued[state as usize] = true;
+                    worklist.push_back(state);
+                }
+            }
+            let raw_start_to_view = state_map
+                .original_to_internal
+                .iter()
+                .map(|&class| class_to_view[class as usize])
                 .collect::<Vec<_>>();
             (
-                FxHashMap::<Vec<u32>, u32>::default(),
+                config_ids,
                 configs,
-                state_map.original_to_internal.clone(),
-                (0..class_count as u32).collect::<VecDeque<_>>(),
-                vec![true; class_count],
+                raw_start_to_view,
+                worklist,
+                queued,
             )
         } else {
             let mut config_ids = FxHashMap::<Vec<u32>, u32>::default();
@@ -139,9 +229,12 @@ pub(crate) fn build_relevant_powerset_view(
             let mut worklist = VecDeque::<u32>::new();
             let mut queued = Vec::<bool>::new();
             for raw_state in 0..raw_state_count {
-                let closure = tokenizer
-                    .execute_from_state_end_only(&[], raw_state as u32)
-                    .to_vec();
+                let closure = project_raw_config(
+                    tokenizer
+                        .execute_from_state_end_only(&[], raw_state as u32)
+                        .to_vec(),
+                    raw_active_language.as_deref(),
+                );
                 let state = intern_config(closure, &mut config_ids, &mut configs);
                 raw_start_to_view[raw_state] = state;
                 if queued.len() < configs.len() {
@@ -207,11 +300,17 @@ pub(crate) fn build_relevant_powerset_view(
                     let target = intern_mapped_target_config(
                         &targets,
                         state_map,
+                        class_active_language.as_deref(),
                         &mut config_ids,
                         &mut configs,
                     );
                     if queued.len() < configs.len() {
                         queued.resize(configs.len(), false);
+                    }
+                    // The canonical empty projected configuration is the
+                    // implicit dead target, exactly like an absent edge.
+                    if configs[target as usize].is_empty() {
+                        continue;
                     }
                     edges.push((byte, target));
                     if !queued[target as usize] {
@@ -232,11 +331,15 @@ pub(crate) fn build_relevant_powerset_view(
                     let target = intern_mapped_target_config(
                         &targets,
                         state_map,
+                        class_active_language.as_deref(),
                         &mut config_ids,
                         &mut configs,
                     );
                     if queued.len() < configs.len() {
                         queued.resize(configs.len(), false);
+                    }
+                    if configs[target as usize].is_empty() {
+                        continue;
                     }
                     edges.push((byte, target));
                     if !queued[target as usize] {
@@ -260,17 +363,17 @@ pub(crate) fn build_relevant_powerset_view(
             let config = configs[state as usize].clone();
             if let [source] = config.as_ref() {
                 // Raw starts were all seeded before traversal, so the exact
-                // epsilon closure of every direct byte target is already
-                // interned in `raw_start_to_view`. A singleton powerset config
-                // is itself epsilon-closed, hence its byte successor is exactly
-                // the pre-interned closure of the one direct raw target. Avoid
-                // rebuilding that closure and hashing the same config again.
+                // projected epsilon closure of every direct byte target is
+                // already interned in `raw_start_to_view`.
                 for (byte, raw_target) in tokenizer.transitions_from(*source) {
                     if !relevant_bytes[byte as usize] {
                         continue;
                     }
                     let target = raw_start_to_view[raw_target as usize];
                     debug_assert_ne!(target, u32::MAX);
+                    if configs[target as usize].is_empty() {
+                        continue;
+                    }
                     edges.push((byte, target));
                     if !queued[target as usize] {
                         queued[target as usize] = true;
@@ -296,15 +399,20 @@ pub(crate) fn build_relevant_powerset_view(
                     }
                 }
             }
-            // Preserve ascending-byte expansion order so interned powerset-state
-            // ids remain stable while traversing only bytes live from this config.
             candidate_bytes.sort_unstable();
             for &byte in &candidate_bytes {
                 let targets = tokenizer.step_all(&config, byte);
                 if targets.is_empty() {
                     continue;
                 }
-                let target = intern_config(targets.to_vec(), &mut config_ids, &mut configs);
+                let projected = project_raw_config(
+                    targets.to_vec(),
+                    raw_active_language.as_deref(),
+                );
+                if projected.is_empty() {
+                    continue;
+                }
+                let target = intern_config(projected, &mut config_ids, &mut configs);
                 if queued.len() < configs.len() {
                     queued.resize(configs.len(), false);
                 }
@@ -448,6 +556,7 @@ fn ensure_config_transition(
     tokenizer: &Tokenizer,
     state: u32,
     byte: u8,
+    active_language: Option<&[bool]>,
     configs: &mut Vec<Box<[u32]>>,
     config_ids: &mut FxHashMap<Vec<u32>, u32>,
     transitions: &mut Vec<u32>,
@@ -462,7 +571,11 @@ fn ensure_config_transition(
     if targets.is_empty() {
         return u32::MAX;
     }
-    let target = intern_config(targets.to_vec(), config_ids, configs);
+    let targets = project_raw_config(targets.to_vec(), active_language);
+    if targets.is_empty() {
+        return u32::MAX;
+    }
+    let target = intern_config(targets, config_ids, configs);
     if transitions.len() < configs.len() * 256 {
         transitions.resize(configs.len() * 256, u32::MAX);
         known_transitions.resize(configs.len() * 256, 0);
@@ -475,6 +588,7 @@ fn expand_trie_from_config(
     tokenizer: &Tokenizer,
     start_state: u32,
     trie: &[ByteTrieNode],
+    active_language: Option<&[bool]>,
     configs: &mut Vec<Box<[u32]>>,
     config_ids: &mut FxHashMap<Vec<u32>, u32>,
     transitions: &mut Vec<u32>,
@@ -491,6 +605,7 @@ fn expand_trie_from_config(
                 tokenizer,
                 state,
                 byte,
+                active_language,
                 configs,
                 config_ids,
                 transitions,
@@ -529,13 +644,17 @@ fn build_bounded_analysis_view_impl(
     factor_common_first_byte: bool,
 ) -> BoundedAnalysisView {
     let raw_state_count = tokenizer.num_states() as usize;
+    let raw_active_language = raw_active_language_states(tokenizer, active_groups);
     let mut config_ids = FxHashMap::<Vec<u32>, u32>::default();
     let mut configs = Vec::<Box<[u32]>>::new();
     let mut raw_start_to_view = vec![u32::MAX; raw_state_count];
 
-    let start_closure = tokenizer
-        .execute_from_state_end_only(&[], tokenizer.initial_state_id())
-        .to_vec();
+    let start_closure = project_raw_config(
+        tokenizer
+            .execute_from_state_end_only(&[], tokenizer.initial_state_id())
+            .to_vec(),
+        raw_active_language.as_deref(),
+    );
     let start_state = intern_config(start_closure, &mut config_ids, &mut configs);
     if combine_start_states {
         let mut closure = Vec::<u32>::new();
@@ -545,8 +664,7 @@ fn build_bounded_analysis_view_impl(
                 &tokenizer.execute_from_state_end_only(&[], raw_state as u32),
             );
         }
-        closure.sort_unstable();
-        closure.dedup();
+        let closure = project_raw_config(closure, raw_active_language.as_deref());
         let state = intern_config(closure, &mut config_ids, &mut configs);
         for &raw_state in raw_start_states {
             raw_start_to_view[raw_state] = state;
@@ -554,9 +672,12 @@ fn build_bounded_analysis_view_impl(
     } else {
         for &raw_state in raw_start_states {
             assert!(raw_state < raw_state_count, "invalid raw NFA analysis seed");
-            let closure = tokenizer
-                .execute_from_state_end_only(&[], raw_state as u32)
-                .to_vec();
+            let closure = project_raw_config(
+                tokenizer
+                    .execute_from_state_end_only(&[], raw_state as u32)
+                    .to_vec(),
+                raw_active_language.as_deref(),
+            );
             let state = intern_config(closure, &mut config_ids, &mut configs);
             raw_start_to_view[raw_state] = state;
         }
@@ -597,6 +718,7 @@ fn build_bounded_analysis_view_impl(
                     tokenizer,
                     state,
                     first_byte,
+                    raw_active_language.as_deref(),
                     &mut configs,
                     &mut config_ids,
                     &mut transitions,
@@ -614,6 +736,7 @@ fn build_bounded_analysis_view_impl(
             tokenizer,
             state,
             &token_trie,
+            raw_active_language.as_deref(),
             &mut configs,
             &mut config_ids,
             &mut transitions,
@@ -626,6 +749,7 @@ fn build_bounded_analysis_view_impl(
         tokenizer,
         start_state,
         &suffix_trie,
+        raw_active_language.as_deref(),
         &mut configs,
         &mut config_ids,
         &mut transitions,
@@ -825,6 +949,11 @@ fn build_state_map(
     }
 }
 
+/// Refine raw scanner starts through a prebuilt sparse powerset topology.
+/// When `raw_active_language` is supplied, inactive-only members are erased
+/// from powerset class sets and edges into projected-empty configurations are
+/// treated as the common implicit missing target. This permits a topology
+/// built for a larger terminal mask to be reused after the mask shrinks.
 pub(crate) fn compute_state_map_from_prebuilt_sparse_powerset(
     tokenizer: &Tokenizer,
     initial_state_map: Option<&ManyToOneIdMap>,
@@ -832,6 +961,7 @@ pub(crate) fn compute_state_map_from_prebuilt_sparse_powerset(
     raw_start_to_view: &[u32],
     configurations: &[Box<[u32]>],
     output_class_by_config: &[u32],
+    raw_active_language: Option<&[bool]>,
     edge_offsets: &[u32],
     edges: &[(u8, u32)],
 ) -> ManyToOneIdMap {
@@ -839,6 +969,17 @@ pub(crate) fn compute_state_map_from_prebuilt_sparse_powerset(
     assert_eq!(raw_start_to_view.len(), num_states);
     assert!(output_class_by_config.len() >= configurations.len());
     assert!(edge_offsets.len() > configurations.len());
+    if let Some(active_language) = raw_active_language {
+        assert_eq!(active_language.len(), num_states);
+    }
+    let projected_empty = configurations
+        .iter()
+        .map(|config| {
+            raw_active_language.is_some_and(|active| {
+                config.iter().all(|&raw| !active[raw as usize])
+            })
+        })
+        .collect::<Vec<_>>();
 
     let (candidate_members, candidate_representatives, raw_to_candidate) =
         candidate_partition(num_states, initial_state_map);
@@ -877,6 +1018,9 @@ pub(crate) fn compute_state_map_from_prebuilt_sparse_powerset(
             class_set.extend(
                 config
                     .iter()
+                    .filter(|&&raw| {
+                        raw_active_language.is_none_or(|active| active[raw as usize])
+                    })
                     .map(|&raw| classes[raw_to_candidate[raw as usize]]),
             );
             class_set.sort_unstable();
@@ -898,25 +1042,37 @@ pub(crate) fn compute_state_map_from_prebuilt_sparse_powerset(
             let edge_start = edge_offsets[config] as usize;
             let edge_end = edge_offsets[config + 1] as usize;
             let candidate_class = classes[candidate];
-            next_classes[candidate] = match edge_end - edge_start {
-                0 => *zero_edge_signatures.entry(candidate_class).or_insert_with(|| {
+            let mut projected_edges = SmallVec::<[(u8, u32); 8]>::new();
+            if !projected_empty[config] {
+                projected_edges.extend(
+                    edges[edge_start..edge_end]
+                        .iter()
+                        .copied()
+                        .filter(|&(_, target)| !projected_empty[target as usize]),
+                );
+            }
+            next_classes[candidate] = match projected_edges.as_slice() {
+                [] => *zero_edge_signatures.entry(candidate_class).or_insert_with(|| {
                     let class = next_class;
                     next_class += 1;
                     class
                 }),
-                1 => {
-                    let (byte, target) = edges[edge_start];
-                    let key = (candidate_class, byte, class_set_by_config[target as usize]);
+                [(byte, target)] => {
+                    let key = (
+                        candidate_class,
+                        *byte,
+                        class_set_by_config[*target as usize],
+                    );
                     *one_edge_signatures.entry(key).or_insert_with(|| {
                         let class = next_class;
                         next_class += 1;
                         class
                     })
                 }
-                _ => {
+                projected_edges => {
                     let mut signature = SmallVec::<[u32; 8]>::new();
                     signature.push(candidate_class);
-                    for &(byte, target) in &edges[edge_start..edge_end] {
+                    for &(byte, target) in projected_edges {
                         signature.push(byte as u32 + 1);
                         signature.push(class_set_by_config[target as usize] + 1);
                     }
@@ -963,17 +1119,18 @@ pub(crate) fn compute_state_map(
         candidate_partition(num_states, initial_state_map);
     let num_candidates = candidate_representatives.len();
     let singleton_closures = tokenizer.all_singleton_epsilon_closures();
+    let raw_active_language = raw_active_language_states(tokenizer, active_groups);
 
     let mut config_ids = FxHashMap::<Vec<u32>, u32>::default();
     let mut configs = Vec::<Box<[u32]>>::new();
     let start_configs = candidate_representatives
         .iter()
         .map(|&state| {
-            intern_config(
+            let config = project_raw_config(
                 singleton_closures[state].to_vec(),
-                &mut config_ids,
-                &mut configs,
-            )
+                raw_active_language.as_deref(),
+            );
+            intern_config(config, &mut config_ids, &mut configs)
         })
         .collect::<Vec<_>>();
 
@@ -1013,6 +1170,12 @@ pub(crate) fn compute_state_map(
                     continue;
                 }
                 for &reachable in singleton_closures[raw_target as usize].iter() {
+                    if raw_active_language
+                        .as_deref()
+                        .is_some_and(|active| !active[reachable as usize])
+                    {
+                        continue;
+                    }
                     let mark = &mut target_marks[reachable as usize];
                     if *mark != target_generation {
                         *mark = target_generation;
@@ -1102,6 +1265,45 @@ mod tests {
             ));
         }
         trace
+    }
+
+    #[test]
+    fn active_filtered_powerset_drops_inactive_members_before_refinement() {
+        use crate::automata::lexer::ast::Expr;
+        use crate::automata::lexer::compile::build_regex_partitioned_with_adaptive;
+
+        let expressions = vec![
+            Expr::U8Seq(b"ab".to_vec()),
+            Expr::U8Seq(b"xq".to_vec()),
+            Expr::U8Seq(b"yrr".to_vec()),
+        ];
+        let tokenizer = build_regex_partitioned_with_adaptive(
+            &expressions,
+            &[0, 1, 2],
+            false,
+        )
+        .into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let view = build_relevant_powerset_view(
+            &tokenizer,
+            &[true; 256],
+            Some(&[true, false, false]),
+            None,
+        );
+        let start_config = &view.configurations[view.start_state];
+        assert!(!start_config.is_empty());
+        assert!(start_config.iter().all(|&state| {
+            tokenizer.matched_terminals_iter(state).any(|terminal| terminal == 0)
+                || tokenizer
+                    .possible_future_terminals_iter(state)
+                    .any(|terminal| terminal == 0)
+        }));
+        let edge_start = view.edge_offsets[view.start_state] as usize;
+        let edge_end = view.edge_offsets[view.start_state + 1] as usize;
+        let start_edges = &view.edges[edge_start..edge_end];
+        assert!(!start_edges.iter().any(|&(byte, _)| byte == b'x' || byte == b'y'));
     }
 
     #[test]
@@ -1278,6 +1480,7 @@ mod tests {
             &view.raw_start_to_view,
             &view.configurations,
             &output_class_by_config,
+            None,
             &view.edge_offsets,
             &view.edges,
         );

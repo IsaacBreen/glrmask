@@ -366,6 +366,7 @@ impl SharedVocabDfaBase {
         raw_transitions: &Arc<[u32]>,
         state_map: &ManyToOneIdMap,
         relevant_bytes: &[bool; 256],
+        active_dead_classes: Option<&[bool]>,
     ) -> Option<Self> {
         let relevant_count = relevant_bytes.iter().filter(|&&relevant| relevant).count();
         if relevant_count >= 255 {
@@ -387,6 +388,9 @@ impl SharedVocabDfaBase {
         let num_classes = next_class as usize;
         let class_representatives = Self::class_representatives(&byte_to_class, num_classes);
         let quotient_states = state_map.internal_to_originals.len();
+        if active_dead_classes.is_some_and(|dead| dead.len() != quotient_states) {
+            return None;
+        }
         let mut row_major = vec![NONE; quotient_states * num_classes];
         let mut self_loop_bytes = Vec::with_capacity(quotient_states);
         for (internal, &raw_representative) in state_map.representative_original_ids.iter().enumerate() {
@@ -394,23 +398,39 @@ impl SharedVocabDfaBase {
             if raw_representative >= raw_states {
                 return None;
             }
+            let source_dead = active_dead_classes.is_some_and(|dead| dead[internal]);
             let raw_base = raw_representative * 256;
-            for class in 0..num_classes {
-                let target = raw_transitions[raw_base + class_representatives[class] as usize];
-                row_major[internal * num_classes + class] = if target == NONE {
-                    NONE
-                } else {
-                    state_map.original_to_internal[target as usize]
-                };
+            if !source_dead {
+                for class in 0..num_classes {
+                    let target = raw_transitions[raw_base + class_representatives[class] as usize];
+                    row_major[internal * num_classes + class] = if target == NONE {
+                        NONE
+                    } else {
+                        let mapped = state_map.original_to_internal[target as usize];
+                        if active_dead_classes.is_some_and(|dead| dead[mapped as usize]) {
+                            NONE
+                        } else {
+                            mapped
+                        }
+                    };
+                }
             }
             let mut self_loops = U8Set::empty();
             for byte in 0..=255u8 {
                 if !relevant_bytes[byte as usize] {
                     continue;
                 }
+                if source_dead {
+                    continue;
+                }
                 let target = raw_transitions[raw_base + byte as usize];
-                if target != NONE && state_map.original_to_internal[target as usize] == internal as u32 {
-                    self_loops.insert(byte);
+                if target != NONE {
+                    let mapped = state_map.original_to_internal[target as usize];
+                    if mapped == internal as u32
+                        && !active_dead_classes.is_some_and(|dead| dead[mapped as usize])
+                    {
+                        self_loops.insert(byte);
+                    }
                 }
             }
             self_loop_bytes.push(self_loops);

@@ -16,7 +16,7 @@ use super::state_equivalence::nfa::{
     build_bounded_analysis_view, build_relevant_powerset_view,
 };
 use crate::ds::bitset::BitSet;
-use super::compat::TokenizerView;
+use super::compat::{TokenizerView, compute_active_terminal_language_byte_classes};
 use super::disallowed_follows::normalize_disallowed_follows;
 use super::shared::{
     TokenDedup,
@@ -27,6 +27,10 @@ use super::shared::{
 };
 use super::state::fast as state_equivalence_analysis;
 use super::vocab::fast as vocab_equivalence_analysis;
+
+// Rebuilding the selected terminal languages is a fixed-cost semantic
+// prequotient. Restrict it to vocabularies large enough to amortize that build.
+const ACTIVE_LANGUAGE_BYTE_DEDUP_MIN_TOKENS: usize = 50_000;
 
 fn deduplicate_tokens_by_byte_class<'a, S: AsRef<[u8]>>(
     tokens: &'a [S],
@@ -1624,8 +1628,59 @@ fn analyze_equivalences_impl(
 
         let token_dedup_started_at = Instant::now();
         let identity_byte_class: [u8; 256] = std::array::from_fn(|byte| byte as u8);
-        let dedup = deduplicate_tokens_by_byte_class(&prepared.token_bytes, &identity_byte_class);
-        let token_dedup_ms = token_dedup_started_at.elapsed().as_secs_f64() * 1000.0;
+        let identity_dedup =
+            deduplicate_tokens_by_byte_class(&prepared.token_bytes, &identity_byte_class);
+        let identity_token_count = identity_dedup.representative_token_bytes.len();
+        let active_byte_class_started_at = Instant::now();
+        let active_language_byte_classes = (identity_dedup.representative_token_bytes.len()
+            >= ACTIVE_LANGUAGE_BYTE_DEDUP_MIN_TOKENS)
+            .then(|| {
+                active_groups.and_then(|active_groups| {
+                    compute_active_terminal_language_byte_classes(tokenizer, active_groups)
+                })
+            })
+            .flatten();
+        let active_mask_filter_ms = active_byte_class_started_at.elapsed().as_secs_f64() * 1000.0;
+        let class_dedup = active_language_byte_classes.as_ref().map(|byte_to_class| {
+            deduplicate_tokens_by_byte_class(
+                &identity_dedup.representative_token_bytes,
+                byte_to_class,
+            )
+        });
+        let dedup = if let Some(class_dedup) = class_dedup {
+            let original_to_repr = identity_dedup
+                .original_to_repr
+                .iter()
+                .map(|&identity_repr| class_dedup.original_to_repr[identity_repr])
+                .collect::<Vec<_>>();
+            TokenDedup {
+                representative_token_bytes: class_dedup.representative_token_bytes,
+                original_to_repr,
+            }
+        } else {
+            identity_dedup
+        };
+        let token_dedup_ms = token_dedup_started_at.elapsed().as_secs_f64() * 1000.0
+            - active_mask_filter_ms;
+        if (std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some())
+            && let Some(byte_to_class) = active_language_byte_classes.as_ref()
+        {
+            eprintln!(
+                "[glrmask/profile][active_language_byte_dedup] partition={} active_terminals={} byte_classes={} identity_tokens={} canonical_tokens={} build_ms={:.3}",
+                partition_label,
+                active_groups.map_or(0, |active| active.iter().filter(|&&value| value).count()),
+                byte_to_class
+                    .iter()
+                    .copied()
+                    .max()
+                    .map_or(0, |class| class as usize + 1),
+                identity_token_count,
+                dedup.representative_token_bytes.len(),
+                active_mask_filter_ms,
+            );
+        }
         let max_token_len = dedup
             .representative_token_bytes
             .iter()
@@ -1896,7 +1951,7 @@ fn analyze_equivalences_impl(
                 token_len_gt_64: token_len_stats.gt_64,
                 raw_analysis_base_init_ms: 0.0,
                 analysis_view_build_ms,
-                active_mask_filter_ms: 0.0,
+                active_mask_filter_ms,
                 effective_follows_normalize_ms,
                 prepare_inputs_ms,
                 byte_class_setup_ms,
