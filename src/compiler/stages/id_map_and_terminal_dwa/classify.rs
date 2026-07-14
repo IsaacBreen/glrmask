@@ -2094,40 +2094,26 @@ fn exact_terminal_path_two_plus_candidate_dfa(
         .map(|bytes| bytes.len().saturating_sub(1))
         .sum::<usize>();
 
-    let trie_started_at = std::time::Instant::now();
-    let mut prefix_trie_builder = TerminalPathTrieBuilder::with_capacity(total_splits);
-    let mut split_offsets = Vec::with_capacity(vocab.entries.len() + 1);
-    let mut prefix_nodes = Vec::with_capacity(total_splits);
-    split_offsets.push(0usize);
-    for bytes in vocab.entries.values() {
-        let mut prefix_node = 0usize;
-        for split_after in 0..bytes.len().saturating_sub(1) {
-            prefix_node = prefix_trie_builder.insert_byte(prefix_node, bytes[split_after]);
-            prefix_nodes.push(prefix_node);
-        }
-        split_offsets.push(prefix_nodes.len());
-    }
-    let prefix_trie = prefix_trie_builder.finish();
-    let trie_ms = trie_started_at.elapsed().as_secs_f64() * 1000.0;
-
+    // The scanner already interns exact epsilon-closed prefix configurations and
+    // memoizes every (configuration, byte) transition. Store that compact state
+    // ID at each token split directly. A global byte trie duplicates the same
+    // prefixes as nodes and masks, while the downstream pass still visits every
+    // token split in vocabulary order.
     let prefix_started_at = std::time::Instant::now();
     let (mut prefix_scanner, prefix_start) =
         CandidatePrefixPowerset::new(&candidate_tokenizer, words_per_mask);
-    let mut prefix_masks = vec![0u64; prefix_trie.len() * words_per_mask];
-    let mut prefix_stack = vec![(0usize, prefix_start)];
-    while let Some((node, state)) = prefix_stack.pop() {
-        for &(byte, child) in &prefix_trie[node].children {
-            let target = prefix_scanner.step(state, byte);
-            if target == PREFIX_DEAD_STATE {
-                continue;
-            }
-            let target_mask = prefix_scanner.matched_mask(target);
-            let child_base = child * words_per_mask;
-            prefix_masks[child_base..child_base + words_per_mask]
-                .copy_from_slice(target_mask);
-            prefix_stack.push((child, target));
+    let mut split_offsets = Vec::with_capacity(vocab.entries.len() + 1);
+    let mut prefix_states = Vec::<u32>::with_capacity(total_splits);
+    split_offsets.push(0usize);
+    for bytes in vocab.entries.values() {
+        let mut state = prefix_start;
+        for &byte in bytes.iter().take(bytes.len().saturating_sub(1)) {
+            state = prefix_scanner.step(state, byte);
+            prefix_states.push(state);
         }
+        split_offsets.push(prefix_states.len());
     }
+    let trie_ms = 0.0;
     let prefix_ms = prefix_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let suffix_started_at = std::time::Instant::now();
@@ -2240,8 +2226,12 @@ fn exact_terminal_path_two_plus_candidate_dfa(
             let split_start = split_offsets[token_index];
             let split_end = split_offsets[token_index + 1];
             for (split_after, split_index) in (split_start..split_end).enumerate() {
-                let prefix_base = prefix_nodes[split_index] * words_per_mask;
-                matched[0] = prefix_masks[prefix_base];
+                let prefix_state = prefix_states[split_index];
+                matched[0] = if prefix_state == PREFIX_DEAD_STATE {
+                    0
+                } else {
+                    prefix_scanner.matched_mask(prefix_state)[0]
+                };
                 next_continuations.clear();
                 let byte = bytes[split_after];
                 for &(state, active) in &continuations {
@@ -2313,10 +2303,12 @@ fn exact_terminal_path_two_plus_candidate_dfa(
             let split_start = split_offsets[token_index];
             let split_end = split_offsets[token_index + 1];
             for (split_after, split_index) in (split_start..split_end).enumerate() {
-                let prefix_base = prefix_nodes[split_index] * words_per_mask;
-                matched.copy_from_slice(
-                    &prefix_masks[prefix_base..prefix_base + words_per_mask],
-                );
+                let prefix_state = prefix_states[split_index];
+                if prefix_state == PREFIX_DEAD_STATE {
+                    matched.fill(0);
+                } else {
+                    matched.copy_from_slice(prefix_scanner.matched_mask(prefix_state));
+                }
                 next_continuations.clear();
                 let byte = bytes[split_after];
                 for (state, active) in &continuations {
@@ -2401,12 +2393,12 @@ fn exact_terminal_path_two_plus_candidate_dfa(
     }
     if super::types::compile_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][terminal_path_candidate_dfa] tokens={} candidates={} states={} transitions={} prefix_nodes={} suffix_splits={} prefix_configs={} split_checks={} allowed_pairs={} two_plus={} compile_ms={:.3} trie_ms={:.3} prefix_ms={:.3} suffix_ms={:.3} combine_ms={:.3} analyze_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][terminal_path_candidate_dfa] tokens={} candidates={} states={} transitions={} prefix_entries={} suffix_splits={} prefix_configs={} split_checks={} allowed_pairs={} two_plus={} compile_ms={:.3} trie_ms={:.3} prefix_ms={:.3} suffix_ms={:.3} combine_ms={:.3} analyze_ms={:.3} total_ms={:.3}",
             vocab.entries.len(),
             candidate_ids.len(),
             candidate_tokenizer.num_states(),
             candidate_tokenizer.transition_count(),
-            prefix_trie.len(),
+            prefix_states.len(),
             total_splits,
             prefix_scanner.configs.len(),
             split_checks,
@@ -3735,6 +3727,54 @@ mod tests {
         blocked_after_ab.set(1);
         let disallowed = BTreeMap::from([(0u32, blocked_after_ab)]);
         let active = BitSet::all(num_terminals);
+        let bytesets = SharedClassifyBytesets::build(&tokenizer, tokenizer.num_terminals());
+
+        let optimized = exact_terminal_path_two_plus_candidate_dfa(
+            &tokenizer,
+            &vocab,
+            &disallowed,
+            &active,
+        );
+        let reference = exact_terminal_path_two_plus(
+            &tokenizer,
+            &vocab,
+            &disallowed,
+            &bytesets,
+            &active,
+        );
+
+        assert_eq!(optimized.two_plus, reference.two_plus);
+    }
+
+    #[test]
+    fn candidate_dfa_direct_prefix_states_match_reference_across_mask_words() {
+        let expressions = (0..70)
+            .map(|terminal| Expr::U8Seq(format!("t{terminal:02}").into_bytes()))
+            .collect::<Vec<_>>();
+        let partitions = (0..expressions.len() as u32).collect::<Vec<_>>();
+        let tokenizer = build_regex_partitioned_with_adaptive(
+            &expressions,
+            &partitions,
+            false,
+        )
+        .into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let vocab = Vocab::new(
+            (0..70)
+                .map(|terminal| {
+                    let next = (terminal + 1) % 70;
+                    (
+                        terminal as u32,
+                        format!("t{terminal:02}t{next:02}").into_bytes(),
+                    )
+                })
+                .collect(),
+            None,
+        );
+        let active = BitSet::all(70);
+        let disallowed = BTreeMap::new();
         let bytesets = SharedClassifyBytesets::build(&tokenizer, tokenizer.num_terminals());
 
         let optimized = exact_terminal_path_two_plus_candidate_dfa(
