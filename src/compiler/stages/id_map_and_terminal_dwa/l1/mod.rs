@@ -547,6 +547,17 @@ fn l1_remaining_horizon_quotients_enabled(state_count: usize, vocab_count: usize
         && std::env::var_os("GLRMASK_DISABLE_L1_REMAINING_HORIZON_QUOTIENTS").is_none()
 }
 
+fn l1_remaining_horizon_target_probe_supports_quotients(
+    state_count: usize,
+    raw_unique_targets: usize,
+) -> bool {
+    // A depth quotient has to amortize O(depth * states * byte_classes) work.
+    // If the unquotiented first-byte frontier is already small, the direct
+    // packed suffix walk is cheaper than constructing the quotient family.
+    raw_unique_targets >= 20_000
+        && raw_unique_targets >= state_count.saturating_mul(4)
+}
+
 fn l1_sequential_group_assembly_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -1740,6 +1751,54 @@ fn l1_transition(
     l1_canonicalize_target(target, canonical_state)
 }
 
+fn collect_l1_unique_first_targets(
+    states: &[usize],
+    nonempty_first_bytes: &[usize],
+    suffix_horizon_by_first_byte: &[usize; 256],
+    horizon_maps: Option<&[Arc<[u32]>]>,
+    flat_trans: &[u32],
+    transitions_by_byte: Option<&[u32]>,
+    num_tokenizer_states: usize,
+    active_language: &[bool],
+) -> Vec<(u8, u32)> {
+    let dead = u32::MAX;
+    let target_words = num_tokenizer_states.div_ceil(64);
+    let mut target_seen = vec![0u64; target_words];
+    let mut unique_targets = Vec::<(u8, u32)>::new();
+    for &byte in nonempty_first_bytes {
+        let canonical_state = horizon_maps
+            .map(|maps| maps[suffix_horizon_by_first_byte[byte]].as_ref());
+        for &state in states {
+            let target = l1_transition(
+                flat_trans,
+                transitions_by_byte,
+                num_tokenizer_states,
+                Some(active_language),
+                state as u32,
+                byte,
+                canonical_state,
+            );
+            if target != dead {
+                target_seen[target as usize >> 6] |= 1u64 << (target & 63);
+            }
+        }
+        for word in 0..target_words {
+            let mut bits = target_seen[word];
+            if bits == 0 {
+                continue;
+            }
+            target_seen[word] = 0;
+            let base = (word * 64) as u32;
+            while bits != 0 {
+                let offset = bits.trailing_zeros();
+                unique_targets.push((byte as u8, base + offset));
+                bits &= bits - 1;
+            }
+        }
+    }
+    unique_targets
+}
+
 fn find_l1_exact_state_equivalence_by_token_signatures(
     tokenizer: &Tokenizer,
     vocab_order: &L1IdentityVocabOrder,
@@ -1826,8 +1885,40 @@ fn find_l1_exact_state_equivalence_by_flat_signatures(
         max_token_len = max_token_len.max(bytes.len());
     }
 
+    let nonempty_first_bytes: Vec<usize> = token_buckets
+        .token_indices_by_first_byte
+        .iter()
+        .enumerate()
+        .filter_map(|(byte, token_ids)| (!token_ids.is_empty()).then_some(byte))
+        .collect();
+
+    // The finite-horizon quotient prepass is only worthwhile when it avoids a
+    // genuinely large number of suffix profiles.  A state×vocab threshold alone
+    // cannot see whether the raw first-byte frontier is already compact.  Count
+    // that frontier first: the probe is a contiguous byte-major scan and can be
+    // reused directly when the quotient is rejected.
+    let raw_target_probe_started_at = profile_enabled.then(Instant::now);
+    let raw_unique_targets = collect_l1_unique_first_targets(
+        states,
+        &nonempty_first_bytes,
+        &suffix_horizon_by_first_byte,
+        None,
+        flat_trans,
+        transitions_by_byte,
+        num_tokenizer_states,
+        &active_language,
+    );
+    let raw_unique_targets_len = raw_unique_targets.len();
+    let raw_target_probe_ms = raw_target_probe_started_at.map_or(0.0, |started| {
+        started.elapsed().as_secs_f64() * 1000.0
+    });
     let use_remaining_horizon_quotients = allow_remaining_horizon_quotients
-        && l1_remaining_horizon_quotients_enabled(states.len(), sorted_entries.len());
+        && l1_remaining_horizon_quotients_enabled(states.len(), sorted_entries.len())
+        && l1_remaining_horizon_target_probe_supports_quotients(
+            states.len(),
+            raw_unique_targets_len,
+        );
+    let horizon_quotient_started_at = profile_enabled.then(Instant::now);
     let horizon_maps = use_remaining_horizon_quotients.then(|| {
         let byte_to_class = compute_byte_classes(tokenizer_view.dfa());
         super::l2p::equivalence_analysis::state::max_length::find_canonical_state_maps_by_depth_from_labels(
@@ -1837,6 +1928,9 @@ fn find_l1_exact_state_equivalence_by_flat_signatures(
             Some(&relevant_bytes),
             Some(&byte_to_class),
         )
+    });
+    let horizon_quotient_ms = horizon_quotient_started_at.map_or(0.0, |started| {
+        started.elapsed().as_secs_f64() * 1000.0
     });
     if profile_enabled
         && let Some(horizon_maps) = horizon_maps.as_ref()
@@ -1860,55 +1954,21 @@ fn find_l1_exact_state_equivalence_by_flat_signatures(
         );
     }
 
-    let nonempty_first_bytes: Vec<usize> = token_buckets
-        .token_indices_by_first_byte
-        .iter()
-        .enumerate()
-        .filter_map(|(byte, token_ids)| (!token_ids.is_empty()).then_some(byte))
-        .collect();
-
     let unique_targets_started_at = profile_enabled.then(Instant::now);
-    // Byte-major scan: with a byte-major transition table and the (near-)identity
-    // state list, fixing the first byte and sweeping states is a contiguous read.
-    // A reused per-target bitset (~num_states bits, L1-resident) replaces both the
-    // hashset and a num_states-wide u32 stamp array; scanning its set words yields
-    // the distinct targets already in ascending order, so no per-byte sort or
-    // global sort is needed.
-    let target_words = num_tokenizer_states.div_ceil(64);
-    let mut target_seen = vec![0u64; target_words];
-    let mut unique_targets: Vec<(u8, u32)> = Vec::new();
-    for &byte in &nonempty_first_bytes {
-        let canonical_state = horizon_maps
-            .as_ref()
-            .map(|maps| maps[suffix_horizon_by_first_byte[byte]].as_ref());
-        for &state in states {
-            let target = l1_transition(
-                flat_trans,
-                transitions_by_byte,
-                num_tokenizer_states,
-                Some(&active_language),
-                state as u32,
-                byte,
-                canonical_state,
-            );
-            if target != dead {
-                target_seen[target as usize >> 6] |= 1u64 << (target & 63);
-            }
-        }
-        for word in 0..target_words {
-            let mut bits = target_seen[word];
-            if bits == 0 {
-                continue;
-            }
-            target_seen[word] = 0;
-            let base = (word * 64) as u32;
-            while bits != 0 {
-                let offset = bits.trailing_zeros();
-                unique_targets.push((byte as u8, base + offset));
-                bits &= bits - 1;
-            }
-        }
-    }
+    let unique_targets = if let Some(horizon_maps) = horizon_maps.as_deref() {
+        collect_l1_unique_first_targets(
+            states,
+            &nonempty_first_bytes,
+            &suffix_horizon_by_first_byte,
+            Some(horizon_maps),
+            flat_trans,
+            transitions_by_byte,
+            num_tokenizer_states,
+            &active_language,
+        )
+    } else {
+        raw_unique_targets
+    };
     let unique_targets_len = unique_targets.len();
     let unique_targets_ms = unique_targets_started_at.map_or(0.0, |started| {
         started.elapsed().as_secs_f64() * 1000.0
@@ -2206,13 +2266,17 @@ fn find_l1_exact_state_equivalence_by_flat_signatures(
 
     if let Some(total_started_at) = total_started_at {
         eprintln!(
-            "[glrmask/profile][l1_exact_equiv_detail] states={} first_bytes={} unique_targets={} profile_ids={} groups={} terminal_signature_ms={:.3} unique_targets_ms={:.3} target_profiles_ms={:.3} profile_id_intern_ms={:.3} profile_freeze_ms={:.3} profile_intern_ms={:.3} state_keys_ms={:.3} group_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][l1_exact_equiv_detail] states={} first_bytes={} raw_unique_targets={} unique_targets={} horizon_selected={} profile_ids={} groups={} terminal_signature_ms={:.3} raw_target_probe_ms={:.3} horizon_quotient_ms={:.3} unique_targets_ms={:.3} target_profiles_ms={:.3} profile_id_intern_ms={:.3} profile_freeze_ms={:.3} profile_intern_ms={:.3} state_keys_ms={:.3} group_ms={:.3} total_ms={:.3}",
             states.len(),
             nonempty_first_bytes.len(),
+            raw_unique_targets_len,
             unique_targets_len,
+            use_remaining_horizon_quotients,
             profile_ids_len,
             groups_len,
             terminal_signature_ms,
+            raw_target_probe_ms,
+            horizon_quotient_ms,
             unique_targets_ms,
             target_profiles_ms,
             profile_id_intern_ms,
@@ -5258,6 +5322,19 @@ mod packed_suffix_product_tests {
     use crate::automata::lexer::compile::{
         build_regex, build_regex_partitioned_with_adaptive,
     };
+
+    #[test]
+    fn remaining_horizon_probe_rejects_small_raw_frontiers() {
+        assert!(!l1_remaining_horizon_target_probe_supports_quotients(
+            8_108, 9_949,
+        ));
+        assert!(!l1_remaining_horizon_target_probe_supports_quotients(
+            3_000, 19_999,
+        ));
+        assert!(l1_remaining_horizon_target_probe_supports_quotients(
+            3_229, 45_355,
+        ));
+    }
 
     #[test]
     fn packed_suffix_profiles_match_batched_profiles() {

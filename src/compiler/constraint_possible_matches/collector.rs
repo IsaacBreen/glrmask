@@ -200,6 +200,12 @@ struct BuildTimings {
     serial_children_built: usize,
     parallel_empty_children: usize,
     serial_empty_children: usize,
+    nondefault_build_ms: f64,
+    nondefault_rows_built: usize,
+    sparse_signature_nodes: usize,
+    sparse_signature_pairs: usize,
+    empty_subtree_edges: usize,
+    empty_subtree_rows_skipped: usize,
 }
 
 impl BuildTimings {
@@ -249,6 +255,12 @@ impl BuildTimings {
         self.serial_children_built += other.serial_children_built;
         self.parallel_empty_children += other.parallel_empty_children;
         self.serial_empty_children += other.serial_empty_children;
+        self.nondefault_build_ms += other.nondefault_build_ms;
+        self.nondefault_rows_built += other.nondefault_rows_built;
+        self.sparse_signature_nodes += other.sparse_signature_nodes;
+        self.sparse_signature_pairs += other.sparse_signature_pairs;
+        self.empty_subtree_edges += other.empty_subtree_edges;
+        self.empty_subtree_rows_skipped += other.empty_subtree_rows_skipped;
     }
 }
 
@@ -560,7 +572,6 @@ struct SignatureEntry { state_pos: usize, class_id: u32 }
 struct ChildBuildData {
     outcomes: Arc<[SegmentOutcome]>,
     child_class_ids: Vec<u32>,
-    nondefault_rows: Vec<(u32, u32, u32)>,
     reachable: Box<[TokenRange]>,
     result: NodeClasses,
 }
@@ -665,30 +676,48 @@ fn build_node(
         };
         let child_active_started_at = Instant::now();
         let subtree_bytes = U8Set::from_words(*child.subtree_bytes());
-        let mut descend_positions = Vec::with_capacity(active_states.len());
-        let mut child_active_states = Vec::new();
-        let mut child_active_state_hash = 0u64;
-        let seen_gen = next_nonzero_generation(active_seen_gen, active_seen_stamps);
-        for outcome in outcomes.iter() {
-            let descend = if let Some(end_state) = outcome.end_state {
-                let end_idx = end_state as usize;
-                if !is_end[end_idx] && !subtree_bytes.is_subset(&self_loop_bytes[end_idx]) {
-                    let descend_state = canonical_state
-                        .and_then(|map| map.get(end_idx).copied())
-                        .unwrap_or(end_state);
-                    let descend_idx = descend_state as usize;
-                    if active_seen_stamps[descend_idx] != seen_gen {
-                        active_seen_stamps[descend_idx] = seen_gen;
-                        active_seen_positions[descend_idx] = child_active_states.len() as u32;
-                        child_active_states.push(descend_state);
-                        child_active_state_hash =
-                            mix_signature_word(child_active_state_hash, descend_state);
-                    }
-                    active_seen_positions[descend_idx]
-                } else { u32::MAX }
-            } else { u32::MAX };
-            descend_positions.push(descend);
-        }
+        let (descend_positions, child_active_states, child_active_state_hash) =
+            if subtree_bytes.is_empty() {
+                timings.empty_subtree_edges += 1;
+                timings.empty_subtree_rows_skipped += outcomes.len();
+                (vec![u32::MAX; outcomes.len()], Vec::new(), 0u64)
+            } else {
+                let mut descend_positions = Vec::with_capacity(active_states.len());
+                let mut child_active_states = Vec::new();
+                let mut child_active_state_hash = 0u64;
+                let seen_gen = next_nonzero_generation(active_seen_gen, active_seen_stamps);
+                for outcome in outcomes.iter() {
+                    let descend = if let Some(end_state) = outcome.end_state {
+                        let end_idx = end_state as usize;
+                        if !is_end[end_idx]
+                            && !subtree_bytes.is_subset(&self_loop_bytes[end_idx])
+                        {
+                            let descend_state = canonical_state
+                                .and_then(|map| map.get(end_idx).copied())
+                                .unwrap_or(end_state);
+                            let descend_idx = descend_state as usize;
+                            if active_seen_stamps[descend_idx] != seen_gen {
+                                active_seen_stamps[descend_idx] = seen_gen;
+                                active_seen_positions[descend_idx] = child_active_states.len() as u32;
+                                child_active_states.push(descend_state);
+                                child_active_state_hash =
+                                    mix_signature_word(child_active_state_hash, descend_state);
+                            }
+                            active_seen_positions[descend_idx]
+                        } else {
+                            u32::MAX
+                        }
+                    } else {
+                        u32::MAX
+                    };
+                    descend_positions.push(descend);
+                }
+                (
+                    descend_positions,
+                    child_active_states,
+                    child_active_state_hash,
+                )
+            };
         let child_active_set_id = if child_active_states.is_empty() {
             None
         } else {
@@ -765,17 +794,7 @@ fn build_node(
                 local_timings.parallel_child_class_project_ms += elapsed_ms(child_class_project_started_at);
                 (result, child_class_ids)
             };
-            let nondefault_rows = pending
-                .outcomes
-                .iter()
-                .zip(child_class_ids.iter())
-                .enumerate()
-                .filter_map(|(state_pos, (outcome, &child_class_id))| {
-                    (outcome.terminals_id != empty_terminals_id || child_class_id != u32::MAX)
-                        .then_some((state_pos as u32, outcome.terminals_id, child_class_id))
-                })
-                .collect();
-            (ChildBuildData { outcomes: pending.outcomes, child_class_ids, nondefault_rows, reachable: pending.reachable, result }, local_timings)
+            (ChildBuildData { outcomes: pending.outcomes, child_class_ids, reachable: pending.reachable, result }, local_timings)
         }).collect();
         for (data, local_timings) in built { timings.add_assign(local_timings); child_data.push(data); }
     } else {
@@ -793,17 +812,7 @@ fn build_node(
                 timings.serial_child_class_project_ms += elapsed_ms(child_class_project_started_at);
                 (result, child_class_ids)
             };
-            let nondefault_rows = pending
-                .outcomes
-                .iter()
-                .zip(child_class_ids.iter())
-                .enumerate()
-                .filter_map(|(state_pos, (outcome, &child_class_id))| {
-                    (outcome.terminals_id != empty_terminals_id || child_class_id != u32::MAX)
-                        .then_some((state_pos as u32, outcome.terminals_id, child_class_id))
-                })
-                .collect();
-            child_data.push(ChildBuildData { outcomes: pending.outcomes, child_class_ids, nondefault_rows, reachable: pending.reachable, result });
+            child_data.push(ChildBuildData { outcomes: pending.outcomes, child_class_ids, reachable: pending.reachable, result });
         }
     }
 
@@ -840,15 +849,44 @@ fn build_node(
         }
         _ => {
             let dense_pairs = active_states.len() * child_data.len();
-            let sparse_pairs = child_data
-                .iter()
-                .map(|child| child.nondefault_rows.len())
-                .sum::<usize>();
-            if dense_pairs >= 4096 && sparse_pairs.saturating_mul(4) < dense_pairs {
+            let sparse_pairs = if child_data.len() > 4 && dense_pairs >= 4096 {
+                let sparse_probe_started_at = Instant::now();
+                let sparse_pairs = child_data
+                    .iter()
+                    .map(|child| {
+                        child
+                            .outcomes
+                            .iter()
+                            .zip(child.child_class_ids.iter())
+                            .filter(|(outcome, child_class_id)| {
+                                outcome.terminals_id != empty_terminals_id
+                                    || **child_class_id != u32::MAX
+                            })
+                            .count()
+                    })
+                    .sum::<usize>();
+                timings.nondefault_build_ms += elapsed_ms(sparse_probe_started_at);
+                (sparse_pairs.saturating_mul(4) < dense_pairs).then_some(sparse_pairs)
+            } else {
+                None
+            };
+            if let Some(sparse_pairs) = sparse_pairs {
+                timings.sparse_signature_nodes += 1;
+                timings.sparse_signature_pairs += sparse_pairs;
+                timings.nondefault_rows_built += sparse_pairs;
                 let mut offsets = vec![0usize; active_states.len() + 1];
                 for child in &child_data {
-                    for &(state_pos, _, _) in &child.nondefault_rows {
-                        offsets[state_pos as usize + 1] += 1;
+                    for (state_pos, (outcome, &child_class_id)) in child
+                        .outcomes
+                        .iter()
+                        .zip(child.child_class_ids.iter())
+                        .enumerate()
+                    {
+                        if outcome.terminals_id != empty_terminals_id
+                            || child_class_id != u32::MAX
+                        {
+                            offsets[state_pos + 1] += 1;
+                        }
                     }
                 }
                 for state_pos in 0..active_states.len() {
@@ -857,12 +895,23 @@ fn build_node(
                 let mut cursors = offsets[..active_states.len()].to_vec();
                 let mut sparse_entries = vec![(0u32, 0u32, 0u32); sparse_pairs];
                 for (child_index, child) in child_data.iter().enumerate() {
-                    for &(state_pos, terminals_id, child_class_id) in &child.nondefault_rows {
-                        let state_pos = state_pos as usize;
-                        let slot = cursors[state_pos];
-                        sparse_entries[slot] =
-                            (child_index as u32, terminals_id, child_class_id);
-                        cursors[state_pos] += 1;
+                    for (state_pos, (outcome, &child_class_id)) in child
+                        .outcomes
+                        .iter()
+                        .zip(child.child_class_ids.iter())
+                        .enumerate()
+                    {
+                        if outcome.terminals_id != empty_terminals_id
+                            || child_class_id != u32::MAX
+                        {
+                            let slot = cursors[state_pos];
+                            sparse_entries[slot] = (
+                                child_index as u32,
+                                outcome.terminals_id,
+                                child_class_id,
+                            );
+                            cursors[state_pos] += 1;
+                        }
                     }
                 }
 
@@ -1173,7 +1222,7 @@ fn collect_possible_matches_interval_trie_class_build_precomputed(
     );
     let root_compute_ms = elapsed_ms(root_started_at);
     if profile_summary_enabled() {
-        eprintln!("[glrmask/profile][trie_build_interval_timings] segment_table_ms={:.3} signature_hash_ms={:.3} map_materialize_ms={:.3} child_active_ms={:.3} recursive_ms={:.3} reachable_interval_ms={:.3} child_precompute_ms={:.3} parallel_terminal_sets_clone_ms={:.3} parallel_segment_cache_init_ms={:.3} parallel_stamp_alloc_ms={:.3} parallel_child_class_project_ms={:.3} serial_child_class_project_ms={:.3} parallel_children_built={} serial_children_built={} parallel_empty_children={} serial_empty_children={} classes_built={} nodes_built={} active_state_rows={} max_active_states={} child_edges={} max_children_per_node={} child_active_state_rows={} segment_calls={} segment_single_byte_calls={} segment_multi_byte_calls={} segment_states_requested={} segment_cache_hits={} segment_cache_misses={} segment_dense_promotions={} segment_vector_cache_hits={} segment_vector_cache_misses={} segment_vector_cached_states={} segment_dense_hits={} segment_dense_misses={} segment_sparse_hits={} segment_sparse_misses={} segment_bytes_scanned={} segment_terminal_iters={} segment_terminal_pushes={} segment_mask_accumulations={} signature_nodes={} signature_rows={} signature_child_pairs={} signature_bucket_probes={}", timings.segment_table_ms, timings.signature_hash_ms, timings.map_materialize_ms, timings.child_active_ms, timings.recursive_ms, timings.reachable_interval_ms, timings.child_precompute_ms, timings.parallel_terminal_sets_clone_ms, timings.parallel_segment_cache_init_ms, timings.parallel_stamp_alloc_ms, timings.parallel_child_class_project_ms, timings.serial_child_class_project_ms, timings.parallel_children_built, timings.serial_children_built, timings.parallel_empty_children, timings.serial_empty_children, timings.classes_built, timings.nodes_built, timings.active_state_rows, timings.max_active_states, timings.child_edges, timings.max_children_per_node, timings.child_active_state_rows, timings.segment_calls, timings.segment_single_byte_calls, timings.segment_multi_byte_calls, timings.segment_states_requested, timings.segment_cache_hits, timings.segment_cache_misses, timings.segment_dense_promotions, timings.segment_vector_cache_hits, timings.segment_vector_cache_misses, timings.segment_vector_cached_states, timings.segment_dense_hits, timings.segment_dense_misses, timings.segment_sparse_hits, timings.segment_sparse_misses, timings.segment_bytes_scanned, timings.segment_terminal_iters, timings.segment_terminal_pushes, timings.segment_mask_accumulations, timings.signature_nodes, timings.signature_rows, timings.signature_child_pairs, timings.signature_bucket_probes);
+        eprintln!("[glrmask/profile][trie_build_interval_timings] segment_table_ms={:.3} signature_hash_ms={:.3} map_materialize_ms={:.3} child_active_ms={:.3} recursive_ms={:.3} reachable_interval_ms={:.3} child_precompute_ms={:.3} nondefault_build_ms={:.3} parallel_terminal_sets_clone_ms={:.3} parallel_segment_cache_init_ms={:.3} parallel_stamp_alloc_ms={:.3} parallel_child_class_project_ms={:.3} serial_child_class_project_ms={:.3} parallel_children_built={} serial_children_built={} parallel_empty_children={} serial_empty_children={} classes_built={} nodes_built={} active_state_rows={} max_active_states={} child_edges={} max_children_per_node={} child_active_state_rows={} segment_calls={} segment_single_byte_calls={} segment_multi_byte_calls={} segment_states_requested={} segment_cache_hits={} segment_cache_misses={} segment_dense_promotions={} segment_vector_cache_hits={} segment_vector_cache_misses={} segment_vector_cached_states={} segment_dense_hits={} segment_dense_misses={} segment_sparse_hits={} segment_sparse_misses={} segment_bytes_scanned={} segment_terminal_iters={} segment_terminal_pushes={} segment_mask_accumulations={} signature_nodes={} signature_rows={} signature_child_pairs={} signature_bucket_probes={} nondefault_rows_built={} sparse_signature_nodes={} sparse_signature_pairs={} empty_subtree_edges={} empty_subtree_rows_skipped={}", timings.segment_table_ms, timings.signature_hash_ms, timings.map_materialize_ms, timings.child_active_ms, timings.recursive_ms, timings.reachable_interval_ms, timings.child_precompute_ms, timings.nondefault_build_ms, timings.parallel_terminal_sets_clone_ms, timings.parallel_segment_cache_init_ms, timings.parallel_stamp_alloc_ms, timings.parallel_child_class_project_ms, timings.serial_child_class_project_ms, timings.parallel_children_built, timings.serial_children_built, timings.parallel_empty_children, timings.serial_empty_children, timings.classes_built, timings.nodes_built, timings.active_state_rows, timings.max_active_states, timings.child_edges, timings.max_children_per_node, timings.child_active_state_rows, timings.segment_calls, timings.segment_single_byte_calls, timings.segment_multi_byte_calls, timings.segment_states_requested, timings.segment_cache_hits, timings.segment_cache_misses, timings.segment_dense_promotions, timings.segment_vector_cache_hits, timings.segment_vector_cache_misses, timings.segment_vector_cached_states, timings.segment_dense_hits, timings.segment_dense_misses, timings.segment_sparse_hits, timings.segment_sparse_misses, timings.segment_bytes_scanned, timings.segment_terminal_iters, timings.segment_terminal_pushes, timings.segment_mask_accumulations, timings.signature_nodes, timings.signature_rows, timings.signature_child_pairs, timings.signature_bucket_probes, timings.nondefault_rows_built, timings.sparse_signature_nodes, timings.sparse_signature_pairs, timings.empty_subtree_edges, timings.empty_subtree_rows_skipped);
     }
     let profile = PossibleMatchesProfile {
         cache_entries: root_result.class_maps.len(),
