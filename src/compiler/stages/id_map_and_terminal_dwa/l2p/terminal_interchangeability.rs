@@ -7595,6 +7595,85 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
         let mut petal_batch_grouping_ns = 0u64;
         let mut petal_batch_certificate_ns = 0u64;
         let mut petal_batch_map_ns = 0u64;
+        // Large rooted candidate groups are often already exact symmetric
+        // petal families.  Try the whole-group certificate directly before
+        // doing either per-terminal generic-form classification or pairwise
+        // pivot certification.  This is especially important for generic NFA
+        // topologies, where literal families can contain hundreds of terminals
+        // but each terminal moves only a tiny, disjoint quotient petal.
+        let direct_batch_min_terminals = std::env::var(
+            "GLRMASK_TI_DIRECT_BATCH_MIN_TERMINALS",
+        )
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(64);
+        let candidate_groups = if petal_batch_enabled
+            && candidate_groups
+                .iter()
+                .any(|group| group.len() >= direct_batch_min_terminals)
+        {
+            dfa.ensure_support_quotient();
+            let quotient = dfa
+                .support_quotient
+                .as_ref()
+                .expect("support quotient initialized for direct petal batching");
+            let mut residual_groups = Vec::<Vec<TerminalID>>::new();
+            for group in candidate_groups {
+                if group.len() < direct_batch_min_terminals {
+                    residual_groups.push(group);
+                    continue;
+                }
+                let certificate_started_at = Instant::now();
+                let Some(canonical_orders) =
+                    dfa.support_petal_batch_certificate(quotient, &group)
+                else {
+                    petal_batch_certificate_ns +=
+                        certificate_started_at.elapsed().as_nanos() as u64;
+                    residual_groups.push(group);
+                    continue;
+                };
+                petal_batch_certificate_ns +=
+                    certificate_started_at.elapsed().as_nanos() as u64;
+                let map_started_at = Instant::now();
+                let Some(maps) = dfa.support_petal_batch_maps(
+                    quotient,
+                    &group,
+                    &canonical_orders,
+                ) else {
+                    petal_batch_map_ns += map_started_at.elapsed().as_nanos() as u64;
+                    residual_groups.push(group);
+                    continue;
+                };
+                petal_batch_map_ns += map_started_at.elapsed().as_nanos() as u64;
+                let representative = group[0];
+                petal_batch_groups += 1;
+                petal_batch_members += group.len() - 1;
+                support_transposition_checks += group.len() - 1;
+                accepted_representative_members += group.len() - 1;
+                for (&terminal, map) in group[1..].iter().zip(maps) {
+                    result
+                        .get_mut(&representative)
+                        .expect("TI direct batch representative must retain its singleton partition entry")
+                        .insert(terminal);
+                    let removed = result.remove(&terminal);
+                    debug_assert!(
+                        removed.is_some(),
+                        "TI direct batch member must retain its singleton partition entry"
+                    );
+                    let replaced = accepted_maps.insert(
+                        (representative, terminal),
+                        Arc::new(map.scanner_state_map()),
+                    );
+                    debug_assert!(
+                        replaced.is_none(),
+                        "TI direct batch must accept each pair once"
+                    );
+                }
+            }
+            residual_groups
+        } else {
+            candidate_groups
+        };
         let candidate_groups = if petal_batch_enabled
             && dfa.topology.raw_representative_by_state.is_none()
         {
