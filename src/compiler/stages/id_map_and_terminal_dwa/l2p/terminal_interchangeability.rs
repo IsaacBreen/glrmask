@@ -209,6 +209,11 @@ struct SupportQuotient {
 struct SupportPartitionSeed {
     active_terminals: Arc<[bool]>,
     quotient: Arc<SupportQuotient>,
+    /// Exact terminal support tracks expressed in `quotient` classes. These
+    /// depend only on the fixed lexer topology and the retained quotient, not
+    /// on the current active-terminal projection, so a later monotone TI round
+    /// that reuses the same quotient can reuse every support already built.
+    terminal_output_supports: Arc<[Option<Arc<[(u32, u8)]>>]>,
 }
 
 type SupportDeviationMap = SmallVec<[(u32, u32); 8]>;
@@ -1946,7 +1951,7 @@ struct InterchangeabilityDfa {
     /// frozen output mentions that terminal.  This is build-local discovery
     /// scratch, used to propose a tiny support-transposition witness before
     /// falling back to exact refinement.
-    terminal_quotient_output_supports: Option<Vec<Option<Vec<(u32, u8)>>>>,
+    terminal_quotient_output_supports: Option<Vec<Option<Arc<[(u32, u8)]>>>>,
     /// Thread-safe on-demand mirror of `terminal_quotient_output_supports` used
     /// only by the parallel certification path. Each terminal's support is
     /// pure given the (pre-built) global support quotient and immutable
@@ -2405,6 +2410,14 @@ impl InterchangeabilityDfa {
                     .map(|seed| Arc::clone(&seed.quotient))
             })
             .flatten();
+        let terminal_quotient_output_supports = support_quotient.as_ref().and_then(|_| {
+            support_partition_seed.as_ref().map(|seed| {
+                seed.terminal_output_supports
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+        });
         Self {
             topology,
             observed_output_pairs,
@@ -2439,7 +2452,7 @@ impl InterchangeabilityDfa {
             support_partition_seed,
             support_quotient,
             canonical_quotient: None,
-            terminal_quotient_output_supports: None,
+            terminal_quotient_output_supports,
             parallel_terminal_supports: OnceLock::new(),
             quotient_certified: 0,
             support_transposition_certified: 0,
@@ -3118,7 +3131,7 @@ impl InterchangeabilityDfa {
         let supports = self.terminal_quotient_output_supports.get_or_insert_with(|| {
             vec![None; self.finalizer_states_by_terminal.len()]
         });
-        supports[terminal] = Some(support);
+        supports[terminal] = Some(Arc::from(support));
         if let Some(started_at) = started_at {
             self.support_transposition_support_setup_ns += started_at.elapsed().as_nanos() as u64;
         }
@@ -8580,9 +8593,15 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
         }
         assert_partition_invariants(&result, active_terminals);
         if let Some(quotient) = dfa.support_quotient.as_ref() {
+            let terminal_output_supports = dfa
+                .terminal_quotient_output_supports
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| vec![None; dfa.finalizer_states_by_terminal.len()]);
             *context.support_partition_seed.borrow_mut() = Some(SupportPartitionSeed {
                 active_terminals: Arc::from(active_terminals.to_vec()),
                 quotient: Arc::clone(quotient),
+                terminal_output_supports: Arc::from(terminal_output_supports),
             });
         }
         *context.output_projection_seed.borrow_mut() = Some(OutputProjectionSeed {
@@ -11681,6 +11700,7 @@ mod tests {
                     .as_ref()
                     .expect("support quotient initialized"),
             ),
+            terminal_output_supports: Arc::from(vec![None; tokenizer.num_terminals() as usize]),
         };
         let current_active = [true, true, false, false, true, false, true, false];
         let dfa = InterchangeabilityDfa::from_raw_discovery_data(
