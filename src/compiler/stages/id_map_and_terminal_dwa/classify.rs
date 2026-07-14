@@ -12,8 +12,10 @@ use crate::ds::u8set::U8Set;
 use crate::Vocab;
 
 use super::l2p::equivalence_analysis::compat::FlatDfa;
-use super::l2p::equivalence_analysis::state_equivalence::nfa::
-    build_bounded_analysis_view_from_combined_starts;
+use super::l2p::equivalence_analysis::state_equivalence::nfa::{
+    build_bounded_analysis_view_from_combined_starts,
+    build_token_bounded_analysis_view_from_combined_starts,
+};
 use super::types::TerminalPathLength;
 
 /// DFA-derived byte sets for terminal classification, identical across partitions.
@@ -715,12 +717,23 @@ pub(crate) fn classify_terminal_path_lengths(
             heuristic_two_plus.set(t2);
         }
     }
-    let exact = exact_terminal_path_two_plus_candidate_dfa(
-        tokenizer,
-        vocab,
-        disallowed_follows,
-        &heuristic_two_plus,
-    );
+    let use_direct_exact = heuristic_two_plus.count_ones() >= 1_000 && vocab.len() <= 20_000;
+    let exact = if use_direct_exact {
+        exact_terminal_path_two_plus(
+            tokenizer,
+            vocab,
+            disallowed_follows,
+            bytesets,
+            &heuristic_two_plus,
+        )
+    } else {
+        exact_terminal_path_two_plus_candidate_dfa(
+            tokenizer,
+            vocab,
+            disallowed_follows,
+            &heuristic_two_plus,
+        )
+    };
     if std::env::var_os("GLRMASK_TERMINAL_PATH_STRICT_REFERENCE").is_some() {
         let reference = exact_terminal_path_two_plus(
             tokenizer,
@@ -2411,6 +2424,31 @@ fn exact_terminal_path_two_plus_candidate_dfa(
     ExactTerminalPathTwoPlus { two_plus, witnesses }
 }
 
+fn exact_terminal_path_two_plus_deterministic<S: ExactBoundaryDeterministicScanner>(
+    scanner: &S,
+    transitions_by_byte: &[u32],
+    sparse_transitions_by_byte: &[Vec<(u32, u32)>],
+    reverse_transitions_by_byte: &[ReverseByteTransitions],
+    token_entries: &[(u32, &[u8])],
+    active: &BitSet,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    active_start_states: &[u32],
+) -> ExactTerminalPathTwoPlus {
+    exact_terminal_path_two_plus_with_suffix(
+        scanner,
+        transitions_by_byte,
+        sparse_transitions_by_byte,
+        reverse_transitions_by_byte,
+        token_entries,
+        active,
+        disallowed_follows,
+        active_start_states,
+        |suffix, active, candidates| {
+            suffix_terminal_candidates_deterministic(scanner, suffix, active, candidates);
+        },
+    )
+}
+
 const PREFIX_UNKNOWN_STATE: u32 = u32::MAX - 1;
 const PREFIX_DEAD_STATE: u32 = u32::MAX;
 
@@ -2487,7 +2525,7 @@ fn suffix_terminal_candidates_deterministic<S: ExactBoundaryDeterministicScanner
     }
 }
 
-fn exact_terminal_path_two_plus_deterministic<S: ExactBoundaryDeterministicScanner>(
+fn exact_terminal_path_two_plus_with_suffix<S, F>(
     scanner: &S,
     transitions_by_byte: &[u32],
     sparse_transitions_by_byte: &[Vec<(u32, u32)>],
@@ -2496,7 +2534,12 @@ fn exact_terminal_path_two_plus_deterministic<S: ExactBoundaryDeterministicScann
     active: &BitSet,
     disallowed_follows: &BTreeMap<u32, BitSet>,
     active_start_states: &[u32],
-) -> ExactTerminalPathTwoPlus {
+    mut fill_suffix_candidates: F,
+) -> ExactTerminalPathTwoPlus
+where
+    S: ExactBoundaryDeterministicScanner,
+    F: FnMut(&[u8], &BitSet, &mut BitSet),
+{
     let total_started_at = std::time::Instant::now();
     let mut nodes = vec![ExactBoundaryPrefixNode::default()];
     let total_token_bytes = token_entries
@@ -2594,8 +2637,7 @@ fn exact_terminal_path_two_plus_deterministic<S: ExactBoundaryDeterministicScann
                 continue;
             }
             suffixes_evaluated += 1;
-            suffix_terminal_candidates_deterministic(
-                scanner,
+            fill_suffix_candidates(
                 &bytes[split_after + 1..],
                 active,
                 &mut suffix_candidates,
@@ -2656,6 +2698,51 @@ fn exact_terminal_path_two_plus_deterministic<S: ExactBoundaryDeterministicScann
     }
 }
 
+fn suffix_terminal_candidates_nfa(
+    tokenizer: &Tokenizer,
+    suffix: &[u8],
+    active: &BitSet,
+    candidates: &mut BitSet,
+) {
+    candidates.clear_all();
+    let mut states = tokenizer
+        .execute_from_state_end_only(&[], tokenizer.initial_state_id());
+    let mut consumed_suffix = true;
+    for &byte in suffix {
+        if states.iter().all(|&state| {
+            tokenizer
+                .possible_future_terminals(state)
+                .is_disjoint(active)
+        }) {
+            consumed_suffix = false;
+            break;
+        }
+        states = tokenizer.step_all(&states, byte);
+        if states.is_empty() {
+            consumed_suffix = false;
+            break;
+        }
+        for &state in &states {
+            for terminal in tokenizer.matched_terminals_iter(state) {
+                let terminal = terminal as usize;
+                if active.contains(terminal) {
+                    candidates.set(terminal);
+                }
+            }
+        }
+    }
+    if consumed_suffix {
+        for &state in &states {
+            for terminal in tokenizer.possible_future_terminals_iter(state) {
+                let terminal = terminal as usize;
+                if active.contains(terminal) {
+                    candidates.set(terminal);
+                }
+            }
+        }
+    }
+}
+
 fn exact_terminal_path_two_plus(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
@@ -2691,7 +2778,7 @@ fn exact_terminal_path_two_plus(
         .map(|terminal| active.contains(terminal))
         .collect::<Vec<_>>();
     let view_started_at = std::time::Instant::now();
-    let bounded = build_bounded_analysis_view_from_combined_starts(
+    let bounded = build_token_bounded_analysis_view_from_combined_starts(
         tokenizer,
         &raw_start_states,
         &tokens,
@@ -2707,7 +2794,7 @@ fn exact_terminal_path_two_plus(
         .collect::<Vec<_>>();
     view_start_states.sort_unstable();
     view_start_states.dedup();
-    let result = exact_terminal_path_two_plus_deterministic(
+    let result = exact_terminal_path_two_plus_with_suffix(
         &scanner,
         &[],
         &[],
@@ -2716,6 +2803,9 @@ fn exact_terminal_path_two_plus(
         active,
         disallowed_follows,
         &view_start_states,
+        |suffix, active, candidates| {
+            suffix_terminal_candidates_nfa(tokenizer, suffix, active, candidates);
+        },
     );
     if super::types::compile_profile_enabled() {
         eprintln!(

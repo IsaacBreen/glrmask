@@ -536,9 +536,11 @@ fn l1_exact_profile_reuse_enabled() -> bool {
 
 fn l1_remaining_horizon_quotients_enabled(state_count: usize, vocab_count: usize) -> bool {
     // Building every finite-depth quotient costs O(k * states * byte_classes).
-    // Use it only when the state/token product is large enough that shrinking
-    // the packed suffix product reliably repays that fixed refinement cost.
-    state_count.saturating_mul(vocab_count) >= 100_000_000
+    // Moderate vocabularies can have a large state×token product while their
+    // direct packed suffix profiles are already cheap (BFCL p1 is the canonical
+    // case). Keep the prepass for genuinely large vocab buckets such as the
+    // 82k-token p2/O9961 path where suffix-product contraction repays it.
+    vocab_count >= 50_000 && state_count.saturating_mul(vocab_count) >= 100_000_000
         && std::env::var_os("GLRMASK_DISABLE_L1_REMAINING_HORIZON_QUOTIENTS").is_none()
 }
 
@@ -645,6 +647,9 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
     flat_trans: &Arc<[u32]>,
     transitions_by_byte: Option<&[u32]>,
     initial_state_map: Option<&ManyToOneIdMap>,
+    shared_generic_nfa_topology: Option<
+        &super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTopology,
+    >,
 ) -> Option<LocalIdMapTerminalDwa> {
     if vocab.is_empty() {
         return None;
@@ -657,7 +662,12 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
     let id_map_started_at = Instant::now();
     let (mut id_map, vocab_order, _state_to_rep, id_map_profile, exact_profile_reuse) =
         if generic_epsilon_nfa && l1_generic_nfa_exact_profiles_enabled() {
-            build_l1_generic_nfa_exact_id_map(tokenizer, vocab, active_terminals)
+            build_l1_generic_nfa_exact_id_map(
+                tokenizer,
+                vocab,
+                active_terminals,
+                shared_generic_nfa_topology,
+            )
         } else if generic_epsilon_nfa {
             build_l1_generic_nfa_fallback_id_map(tokenizer, vocab, initial_state_map)
         } else {
@@ -813,10 +823,14 @@ fn l1_generic_nfa_exact_profiles_enabled() -> bool {
         .unwrap_or(true)
 }
 
+
 fn build_l1_generic_nfa_exact_id_map<'a>(
     tokenizer: &Tokenizer,
     vocab: &'a Vocab,
     active_terminals: &[bool],
+    shared_topology: Option<
+        &super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTopology,
+    >,
 ) -> (
     InternalIdMap,
     Arc<L1IdentityVocabOrder>,
@@ -834,27 +848,28 @@ fn build_l1_generic_nfa_exact_id_map<'a>(
         .max()
         .unwrap_or(0);
     let raw_states = (0..num_states).collect::<Vec<_>>();
-    let mut relevant_bytes = [false; 256];
-    for (_, bytes) in token_entries {
-        for &byte in bytes.iter() {
-            relevant_bytes[byte as usize] = true;
-        }
-    }
 
     let state_equiv_started_at = Instant::now();
     let view_started_at = Instant::now();
-    let powerset_view = super::l2p::equivalence_analysis::state_equivalence::nfa::build_relevant_powerset_view(
-        tokenizer,
-        &relevant_bytes,
-        Some(active_terminals),
-        None,
-    );
-    let view_states = powerset_view
-        .raw_start_to_view
+    let bounded = if let Some(topology) = shared_topology {
+        topology.materialize(tokenizer, Some(active_terminals))
+    } else {
+        let tokens = token_entries
+            .iter()
+            .map(|(_, bytes)| bytes.as_ref())
+            .collect::<Vec<_>>();
+        super::l2p::equivalence_analysis::state_equivalence::nfa::build_token_bounded_analysis_view(
+            tokenizer,
+            &raw_states,
+            &tokens,
+            Some(active_terminals),
+        )
+    };
+    let view_states = raw_states
         .iter()
-        .map(|&state| state as usize)
+        .map(|&raw_state| bounded.view_state_for_raw_start(raw_state))
         .collect::<Vec<_>>();
-    let tokenizer_view = powerset_view.into_tokenizer_view();
+    let tokenizer_view = bounded.tokenizer_view;
     let view_build_ms = view_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let terminal_signature_started_at = compile_profile_enabled().then(Instant::now);
@@ -872,6 +887,7 @@ fn build_l1_generic_nfa_exact_id_map<'a>(
             terminal_signatures,
             &tokenizer_view,
             None,
+            false,
             terminal_signature_ms,
         );
     let exact_state_equiv_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -897,9 +913,6 @@ fn build_l1_generic_nfa_exact_id_map<'a>(
     );
     tokenizer_states.isolate_original(tokenizer.initial_state_id());
 
-    // The packed proof runs in powerset-view coordinates. Transport only the
-    // proved profile objects back to raw token-boundary representatives; raw
-    // state IDs remain the externally visible TSID coordinate.
     let view_profile_ids = std::mem::take(&mut exact_profile_reuse.representative_profile_ids);
     let view_direct_signatures = Arc::clone(&exact_profile_reuse.direct_state_to_terminal_signature);
     let mut raw_profile_ids = FxHashMap::<u32, Arc<[u32]>>::default();
@@ -1690,6 +1703,7 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
         terminal_signatures,
         &tokenizer_view,
         transitions_by_byte,
+        true,
         terminal_signature_ms,
     )
 }
@@ -1701,6 +1715,7 @@ fn find_l1_exact_state_equivalence_by_flat_signatures(
     terminal_signatures: Vec<Vec<u32>>,
     tokenizer_view: &TokenizerView,
     transitions_by_byte: Option<&[u32]>,
+    allow_remaining_horizon_quotients: bool,
     terminal_signature_ms: f64,
 ) -> (Vec<usize>, Option<L1ExactProfileReuse>) {
     if states.len() <= 1 {
@@ -1744,8 +1759,8 @@ fn find_l1_exact_state_equivalence_by_flat_signatures(
         max_token_len = max_token_len.max(bytes.len());
     }
 
-    let use_remaining_horizon_quotients =
-        l1_remaining_horizon_quotients_enabled(states.len(), sorted_entries.len());
+    let use_remaining_horizon_quotients = allow_remaining_horizon_quotients
+        && l1_remaining_horizon_quotients_enabled(states.len(), sorted_entries.len());
     let horizon_maps = use_remaining_horizon_quotients.then(|| {
         let byte_to_class = compute_byte_classes(tokenizer_view.dfa());
         super::l2p::equivalence_analysis::state::max_length::find_canonical_state_maps_by_depth_from_labels(
@@ -4964,6 +4979,119 @@ mod generic_nfa_tests {
     }
 
     #[test]
+    fn generic_epsilon_l1_shared_superset_topology_matches_subset_topology() {
+        let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
+        let full_vocab = Vocab::new(
+            vec![
+                (0, b"".to_vec()),
+                (1, b"a".to_vec()),
+                (2, b"aa".to_vec()),
+                (3, b"ab".to_vec()),
+                (4, b"b".to_vec()),
+                (5, b"ba".to_vec()),
+                (6, b"bb".to_vec()),
+                (7, b"x".to_vec()),
+            ],
+            None,
+        );
+        let subset_vocab = Vocab::new(
+            vec![
+                (0, b"".to_vec()),
+                (1, b"a".to_vec()),
+                (2, b"aa".to_vec()),
+                (3, b"ab".to_vec()),
+                (4, b"b".to_vec()),
+                (5, b"ba".to_vec()),
+                (6, b"bb".to_vec()),
+            ],
+            None,
+        );
+        let active = [true, true];
+        let raw_states = (0..tokenizer.num_states() as usize).collect::<Vec<_>>();
+        let full_tokens = full_vocab
+            .entries
+            .values()
+            .map(|bytes| bytes.as_slice())
+            .collect::<Vec<_>>();
+        let topology = crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::state_equivalence::nfa::build_token_bounded_analysis_topology(
+            &tokenizer,
+            &raw_states,
+            &full_tokens,
+        );
+
+        let (mut shared_map, shared_order, _, _, shared_reuse) =
+            build_l1_generic_nfa_exact_id_map(
+                &tokenizer,
+                &subset_vocab,
+                &active,
+                Some(&topology),
+            );
+        let (mut standalone_map, standalone_order, _, _, standalone_reuse) =
+            build_l1_generic_nfa_exact_id_map(
+                &tokenizer,
+                &subset_vocab,
+                &active,
+                None,
+            );
+
+        let shared_classes = &shared_map.tokenizer_states.original_to_internal;
+        let standalone_classes = &standalone_map.tokenizer_states.original_to_internal;
+        for left in 0..shared_classes.len() {
+            for right in 0..shared_classes.len() {
+                assert_eq!(
+                    shared_classes[left] == shared_classes[right],
+                    standalone_classes[left] == standalone_classes[right],
+                    "shared superset topology changed subset L1 partition for {left} <> {right}",
+                );
+            }
+        }
+
+        let flat_trans = build_flat_transition_table(&tokenizer);
+        let (shared_dwa, _) = build_l1_terminal_dwa(
+            &tokenizer,
+            shared_order.as_ref(),
+            &mut shared_map,
+            2,
+            &active,
+            flat_trans.as_ref(),
+            shared_reuse.as_ref(),
+        )
+        .expect("shared-topology exact L1 DWA");
+        let (standalone_dwa, _) = build_l1_terminal_dwa(
+            &tokenizer,
+            standalone_order.as_ref(),
+            &mut standalone_map,
+            2,
+            &active,
+            flat_trans.as_ref(),
+            standalone_reuse.as_ref(),
+        )
+        .expect("standalone-topology exact L1 DWA");
+        for raw_state in 0..tokenizer.num_states() as usize {
+            let shared_tsid = shared_map.tokenizer_states.original_to_internal[raw_state];
+            let standalone_tsid = standalone_map.tokenizer_states.original_to_internal[raw_state];
+            for (&token_id, bytes) in subset_vocab.entries.iter() {
+                let shared_token = shared_map.vocab_tokens.original_to_internal[token_id as usize];
+                let standalone_token =
+                    standalone_map.vocab_tokens.original_to_internal[token_id as usize];
+                for terminal in 0..2u32 {
+                    assert_eq!(
+                        shared_dwa
+                            .eval_word(&[terminal as i32])
+                            .tokens_for_tsid(shared_tsid)
+                            .contains(shared_token),
+                        standalone_dwa
+                            .eval_word(&[terminal as i32])
+                            .tokens_for_tsid(standalone_tsid)
+                            .contains(standalone_token),
+                        "raw_state={raw_state} token={token_id} bytes={bytes:?} terminal={terminal}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn generic_epsilon_l1_weights_match_exact_active_state_set_signatures() {
         let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
         let vocab = Vocab::new(
@@ -4989,7 +5117,7 @@ mod generic_nfa_tests {
         .expect("generic epsilon L1 fallback fixture must produce a terminal DWA");
 
         let (mut exact_id_map, exact_order, _, _, exact_reuse) =
-            build_l1_generic_nfa_exact_id_map(&tokenizer, &vocab, &active);
+            build_l1_generic_nfa_exact_id_map(&tokenizer, &vocab, &active, None);
         let flat_trans = build_flat_transition_table(&tokenizer);
         let (exact_dwa, _) = build_l1_terminal_dwa(
             &tokenizer,

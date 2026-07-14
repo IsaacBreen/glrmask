@@ -397,19 +397,18 @@ struct ByteTrieNode {
 
 fn build_byte_trie<'a>(sequences: impl IntoIterator<Item = &'a [u8]>) -> Vec<ByteTrieNode> {
     let mut nodes = vec![ByteTrieNode::default()];
+    let mut edges = FxHashMap::<u64, usize>::default();
     for sequence in sequences {
         let mut node = 0usize;
         for &byte in sequence {
-            let child = if let Some((_, child)) = nodes[node]
-                .children
-                .iter()
-                .find(|(candidate, _)| *candidate == byte)
-            {
-                *child
+            let key = ((node as u64) << 8) | byte as u64;
+            let child = if let Some(&child) = edges.get(&key) {
+                child
             } else {
                 let child = nodes.len();
                 nodes.push(ByteTrieNode::default());
                 nodes[node].children.push((byte, child));
+                edges.insert(key, child);
                 child
             };
             node = child;
@@ -452,12 +451,23 @@ fn ensure_config_transition(
     config_ids: &mut FxHashMap<Vec<u32>, u32>,
     transitions: &mut Vec<u32>,
     known_transitions: &mut Vec<u8>,
+    preseeded_raw_closures: Option<&[u32]>,
 ) -> u32 {
     let slot = state as usize * 256 + byte as usize;
     if known_transitions[slot] != 0 {
         return transitions[slot];
     }
     known_transitions[slot] = 1;
+    if let Some(raw_start_to_view) = preseeded_raw_closures
+        && let [source] = configs[state as usize].as_ref()
+        && let Some(raw_target) = tokenizer.step(*source, byte)
+    {
+        let target = raw_start_to_view[raw_target as usize];
+        if target != u32::MAX {
+            transitions[slot] = target;
+            return target;
+        }
+    }
     let targets = tokenizer.step_all(&configs[state as usize], byte);
     if targets.is_empty() {
         return u32::MAX;
@@ -480,6 +490,7 @@ fn expand_trie_from_config(
     transitions: &mut Vec<u32>,
     known_transitions: &mut Vec<u8>,
     visited: &mut rustc_hash::FxHashSet<(u32, usize)>,
+    preseeded_raw_closures: Option<&[u32]>,
 ) {
     let mut stack = vec![(start_state, 0usize)];
     while let Some((state, node)) = stack.pop() {
@@ -495,6 +506,7 @@ fn expand_trie_from_config(
                 config_ids,
                 transitions,
                 known_transitions,
+                preseeded_raw_closures,
             );
             if target != u32::MAX {
                 stack.push((target, child));
@@ -503,47 +515,99 @@ fn expand_trie_from_config(
     }
 }
 
-fn build_bounded_analysis_view_inner(
-    tokenizer: &Tokenizer,
-    raw_start_states: &[usize],
-    tokens: &[&[u8]],
-    active_groups: Option<&[bool]>,
-    combine_start_states: bool,
-) -> BoundedAnalysisView {
-    build_bounded_analysis_view_impl(
-        tokenizer,
-        raw_start_states,
-        tokens,
-        active_groups,
-        combine_start_states,
-        true,
-    )
+#[derive(Clone)]
+pub(crate) struct TokenBoundedAnalysisTopology {
+    configurations: Arc<[Box<[u32]>]>,
+    start_state: usize,
+    transitions: Arc<[u32]>,
+    raw_start_to_view: Arc<[u32]>,
 }
 
-fn build_bounded_analysis_view_impl(
+impl TokenBoundedAnalysisTopology {
+    pub(crate) fn state_count(&self) -> usize {
+        self.configurations.len()
+    }
+
+    pub(crate) fn materialize(
+        &self,
+        tokenizer: &Tokenizer,
+        active_groups: Option<&[bool]>,
+    ) -> BoundedAnalysisView {
+        let raw_state_count = tokenizer.num_states() as usize;
+        let raw_state_outputs = (0..raw_state_count)
+            .map(|state| FlatDfaState {
+                finalizers: filtered_config_groups(
+                    tokenizer,
+                    std::slice::from_ref(&(state as u32)),
+                    active_groups,
+                    true,
+                ),
+                possible_future_group_ids: filtered_config_groups(
+                    tokenizer,
+                    std::slice::from_ref(&(state as u32)),
+                    active_groups,
+                    false,
+                ),
+            })
+            .collect::<Vec<_>>();
+        let states = self
+            .configurations
+            .iter()
+            .map(|config| {
+                if let [state] = config.as_ref() {
+                    return raw_state_outputs[*state as usize].clone();
+                }
+                let mut finalizers = Vec::<usize>::new();
+                let mut possible_future_group_ids = Vec::<usize>::new();
+                for &state in config.iter() {
+                    let output = &raw_state_outputs[state as usize];
+                    finalizers.extend_from_slice(&output.finalizers);
+                    possible_future_group_ids.extend_from_slice(&output.possible_future_group_ids);
+                }
+                finalizers.sort_unstable();
+                finalizers.dedup();
+                possible_future_group_ids.sort_unstable();
+                possible_future_group_ids.dedup();
+                FlatDfaState {
+                    finalizers,
+                    possible_future_group_ids,
+                }
+            })
+            .collect();
+        BoundedAnalysisView {
+            tokenizer_view: TokenizerView {
+                flat_dfa: FlatDfa {
+                    states,
+                    start_state: self.start_state,
+                    transitions: Arc::clone(&self.transitions),
+                },
+            },
+            raw_start_to_view: self.raw_start_to_view.to_vec(),
+        }
+    }
+}
+
+fn build_bounded_analysis_topology_impl(
     tokenizer: &Tokenizer,
     raw_start_states: &[usize],
     tokens: &[&[u8]],
-    active_groups: Option<&[bool]>,
     combine_start_states: bool,
     factor_common_first_byte: bool,
-) -> BoundedAnalysisView {
+    include_reset_suffixes: bool,
+) -> TokenBoundedAnalysisTopology {
     let raw_state_count = tokenizer.num_states() as usize;
     let mut config_ids = FxHashMap::<Vec<u32>, u32>::default();
     let mut configs = Vec::<Box<[u32]>>::new();
     let mut raw_start_to_view = vec![u32::MAX; raw_state_count];
+    let singleton_closures = tokenizer.all_singleton_epsilon_closures();
 
-    let start_closure = tokenizer
-        .execute_from_state_end_only(&[], tokenizer.initial_state_id())
-        .to_vec();
+    let start_closure = singleton_closures[tokenizer.initial_state_id() as usize].to_vec();
     let start_state = intern_config(start_closure, &mut config_ids, &mut configs);
     if combine_start_states {
         let mut closure = Vec::<u32>::new();
         for &raw_state in raw_start_states {
             assert!(raw_state < raw_state_count, "invalid raw NFA analysis seed");
-            closure.extend_from_slice(
-                &tokenizer.execute_from_state_end_only(&[], raw_state as u32),
-            );
+            closure.extend_from_slice(&singleton_closures[raw_state]);
         }
         closure.sort_unstable();
         closure.dedup();
@@ -554,9 +618,7 @@ fn build_bounded_analysis_view_impl(
     } else {
         for &raw_state in raw_start_states {
             assert!(raw_state < raw_state_count, "invalid raw NFA analysis seed");
-            let closure = tokenizer
-                .execute_from_state_end_only(&[], raw_state as u32)
-                .to_vec();
+            let closure = singleton_closures[raw_state].to_vec();
             let state = intern_config(closure, &mut config_ids, &mut configs);
             raw_start_to_view[raw_state] = state;
         }
@@ -578,11 +640,13 @@ fn build_bounded_analysis_view_impl(
     } else {
         build_byte_trie(tokens.iter().copied())
     };
-    let suffix_trie = build_byte_trie(
-        tokens
-            .iter()
-            .flat_map(|token| (0..token.len()).map(move |offset| &token[offset..])),
-    );
+    let suffix_trie = include_reset_suffixes.then(|| {
+        build_byte_trie(
+            tokens
+                .iter()
+                .flat_map(|token| (0..token.len()).map(move |offset| &token[offset..])),
+        )
+    });
     let mut seeded_configs = raw_start_states
         .iter()
         .map(|&raw| raw_start_to_view[raw])
@@ -601,6 +665,7 @@ fn build_bounded_analysis_view_impl(
                     &mut config_ids,
                     &mut transitions,
                     &mut known_transitions,
+                    (!combine_start_states).then_some(raw_start_to_view.as_slice()),
                 );
                 (target != u32::MAX).then_some(target)
             })
@@ -608,6 +673,7 @@ fn build_bounded_analysis_view_impl(
         seeded_configs.sort_unstable();
         seeded_configs.dedup();
     }
+    let preseeded_raw_closures = (!combine_start_states).then_some(raw_start_to_view.as_slice());
     let mut token_visited = rustc_hash::FxHashSet::<(u32, usize)>::default();
     for state in seeded_configs {
         expand_trie_from_config(
@@ -619,42 +685,68 @@ fn build_bounded_analysis_view_impl(
             &mut transitions,
             &mut known_transitions,
             &mut token_visited,
+            preseeded_raw_closures,
         );
     }
     let mut suffix_visited = rustc_hash::FxHashSet::<(u32, usize)>::default();
-    expand_trie_from_config(
-        tokenizer,
-        start_state,
-        &suffix_trie,
-        &mut configs,
-        &mut config_ids,
-        &mut transitions,
-        &mut known_transitions,
-        &mut suffix_visited,
-    );
-
-    let states = configs
-        .iter()
-        .map(|config| FlatDfaState {
-            finalizers: filtered_config_groups(tokenizer, config, active_groups, true),
-            possible_future_group_ids: filtered_config_groups(
-                tokenizer,
-                config,
-                active_groups,
-                false,
-            ),
-        })
-        .collect();
-    BoundedAnalysisView {
-        tokenizer_view: TokenizerView {
-            flat_dfa: FlatDfa {
-                states,
-                start_state: start_state as usize,
-                transitions: Arc::from(transitions),
-            },
-        },
-        raw_start_to_view,
+    if let Some(suffix_trie) = suffix_trie.as_ref() {
+        expand_trie_from_config(
+            tokenizer,
+            start_state,
+            suffix_trie,
+            &mut configs,
+            &mut config_ids,
+            &mut transitions,
+            &mut known_transitions,
+            &mut suffix_visited,
+            None,
+        );
     }
+
+    TokenBoundedAnalysisTopology {
+        configurations: Arc::from(configs),
+        start_state: start_state as usize,
+        transitions: Arc::from(transitions),
+        raw_start_to_view: Arc::from(raw_start_to_view),
+    }
+}
+
+fn build_bounded_analysis_view_inner(
+    tokenizer: &Tokenizer,
+    raw_start_states: &[usize],
+    tokens: &[&[u8]],
+    active_groups: Option<&[bool]>,
+    combine_start_states: bool,
+) -> BoundedAnalysisView {
+    build_bounded_analysis_topology_impl(
+        tokenizer,
+        raw_start_states,
+        tokens,
+        combine_start_states,
+        true,
+        true,
+    )
+    .materialize(tokenizer, active_groups)
+}
+
+fn build_bounded_analysis_view_impl(
+    tokenizer: &Tokenizer,
+    raw_start_states: &[usize],
+    tokens: &[&[u8]],
+    active_groups: Option<&[bool]>,
+    combine_start_states: bool,
+    factor_common_first_byte: bool,
+    include_reset_suffixes: bool,
+) -> BoundedAnalysisView {
+    build_bounded_analysis_topology_impl(
+        tokenizer,
+        raw_start_states,
+        tokens,
+        combine_start_states,
+        factor_common_first_byte,
+        include_reset_suffixes,
+    )
+    .materialize(tokenizer, active_groups)
 }
 
 pub(crate) fn build_bounded_analysis_view(
@@ -685,6 +777,48 @@ pub(crate) fn build_bounded_analysis_view_from_combined_starts(
         active_groups,
         true,
     )
+}
+
+pub(crate) fn build_token_bounded_analysis_topology(
+    tokenizer: &Tokenizer,
+    raw_start_states: &[usize],
+    tokens: &[&[u8]],
+) -> TokenBoundedAnalysisTopology {
+    build_bounded_analysis_topology_impl(
+        tokenizer,
+        raw_start_states,
+        tokens,
+        false,
+        true,
+        false,
+    )
+}
+
+pub(crate) fn build_token_bounded_analysis_view(
+    tokenizer: &Tokenizer,
+    raw_start_states: &[usize],
+    tokens: &[&[u8]],
+    active_groups: Option<&[bool]>,
+) -> BoundedAnalysisView {
+    build_token_bounded_analysis_topology(tokenizer, raw_start_states, tokens)
+        .materialize(tokenizer, active_groups)
+}
+
+pub(crate) fn build_token_bounded_analysis_view_from_combined_starts(
+    tokenizer: &Tokenizer,
+    raw_start_states: &[usize],
+    tokens: &[&[u8]],
+    active_groups: Option<&[bool]>,
+) -> BoundedAnalysisView {
+    build_bounded_analysis_topology_impl(
+        tokenizer,
+        raw_start_states,
+        tokens,
+        true,
+        true,
+        false,
+    )
+    .materialize(tokenizer, active_groups)
 }
 
 fn intern_config(
@@ -1116,6 +1250,7 @@ mod tests {
             None,
             false,
             true,
+            true,
         );
         let reference = build_bounded_analysis_view_impl(
             &tokenizer,
@@ -1124,6 +1259,7 @@ mod tests {
             None,
             false,
             false,
+            true,
         );
 
         for &raw_state in &raw_start_states {
