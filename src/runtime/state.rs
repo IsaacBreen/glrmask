@@ -1,6 +1,6 @@
 use crate::automata::lexer::Lexer;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Mutex;
-use std::collections::BTreeMap;
 
 use crate::compiler::glr::parser::{ParserGSS, stacks_finished};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -34,6 +34,12 @@ pub(crate) struct CommitBuffers {
     pub exec_results: FxHashMap<u32, crate::automata::lexer::tokenizer::TokenizerExecResult>,
     pub small_exec_result: crate::automata::lexer::tokenizer::TokenizerExecResult,
     pub processing_queue: Vec<FxHashMap<u32, ParserGSS>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct RollbackSnapshot {
+    pub state: BTreeMap<u32, ParserGSS>,
+    pub generation: u64,
 }
 
 impl Clone for CommitBuffers {
@@ -70,6 +76,12 @@ pub struct ConstraintState<'a> {
     pub(crate) mask_cache: Mutex<Option<MaskCacheData>>,
     /// Reusable scratch buffers for fill_mask to avoid per-call allocation.
     pub(crate) mask_scratch: Mutex<MaskScratch>,
+    /// Maximum number of token commits that can be rolled back. Zero keeps the
+    /// ordinary non-speculative path free of history bookkeeping.
+    pub(crate) rollback_capacity: usize,
+    /// Bounded pre-commit semantic snapshots. Parser GSS values are Arc-backed,
+    /// so snapshots structurally share the parser graph rather than copying it.
+    pub(crate) rollback_history: VecDeque<RollbackSnapshot>,
 }
 
 impl<'a> Clone for ConstraintState<'a> {
@@ -81,6 +93,8 @@ impl<'a> Clone for ConstraintState<'a> {
             generation: self.generation,
             mask_cache: Mutex::new(None),
             mask_scratch: Mutex::new(MaskScratch::default()),
+            rollback_capacity: self.rollback_capacity,
+            rollback_history: VecDeque::new(),
         }
     }
 }
@@ -107,6 +121,79 @@ enum GreedyTokenizationStep {
 }
 
 impl<'a> ConstraintState<'a> {
+    pub(crate) fn record_rollback_snapshot(&mut self) {
+        if self.rollback_capacity == 0 {
+            return;
+        }
+        if self.rollback_history.len() == self.rollback_capacity {
+            self.rollback_history.pop_front();
+        }
+        self.rollback_history.push_back(RollbackSnapshot {
+            state: self.state.clone(),
+            generation: self.generation,
+        });
+    }
+
+    /// Roll back the most recent token commits retained by this state.
+    ///
+    /// History is opt-in and bounded at state construction time. Rolling back
+    /// farther than the retained window is an error rather than silently
+    /// replaying or corrupting state.
+    pub fn rollback(&mut self, num_tokens: usize) -> Result<(), String> {
+        if num_tokens == 0 {
+            return Ok(());
+        }
+        if num_tokens > self.rollback_history.len() {
+            return Err(format!(
+                "cannot roll back {num_tokens} token(s): only {} retained",
+                self.rollback_history.len()
+            ));
+        }
+
+        let target = self.rollback_history.len() - num_tokens;
+        let snapshot = self.rollback_history[target].clone();
+        self.rollback_history.truncate(target);
+        self.state = snapshot.state;
+        self.generation = snapshot.generation;
+        self.buffers.clear_all();
+        *self.mask_cache.lock().unwrap() = None;
+        Ok(())
+    }
+
+    /// Return the longest prefix of `tokens` admissible from the current state
+    /// without mutating this state.
+    pub fn validate_tokens(&self, tokens: &[u32]) -> Vec<u32> {
+        let mut cursor = self.clone();
+        // Validation never needs rollback on the transient cursor. Avoid
+        // constructing bounded history snapshots while walking proposals.
+        cursor.rollback_capacity = 0;
+        let mut accepted = Vec::with_capacity(tokens.len());
+
+        for &token_id in tokens {
+            let mask = cursor.mask();
+            if !is_token_set(&mask, token_id) {
+                break;
+            }
+
+            accepted.push(token_id);
+            if cursor.constraint.eos_token_id == Some(token_id) {
+                break;
+            }
+
+            if cursor.commit_token(token_id).is_err() {
+                accepted.pop();
+                break;
+            }
+        }
+
+        accepted
+    }
+
+    /// Whether no valid parser/tokenizer state remains.
+    pub fn is_failed(&self) -> bool {
+        self.state.is_empty()
+    }
+
     pub fn is_complete(&self) -> bool {
         let initial_tsid = self.constraint.tokenizer.initial_state();
         let Some(stack) = self.state.get(&initial_tsid) else {
