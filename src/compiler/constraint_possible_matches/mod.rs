@@ -42,8 +42,23 @@ pub(crate) struct PossibleMatchVocabMap {
 // WARNING: terminal-DWA equivalence maps must never be reused for possible
 // matches. Terminal-DWA equivalence does not imply possible-matches
 // equivalence. This warning must never be removed under any circumstances.
-#[derive(Debug, Clone)]
-pub(crate) struct ConstraintPossibleMatchesConfig;
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ConstraintPossibleMatchesConfig {
+    defer_to_dynamic_mask: bool,
+}
+
+impl ConstraintPossibleMatchesConfig {
+    /// Materialize the full possible-match table during compilation.
+    pub(crate) const EAGER: Self = Self {
+        defer_to_dynamic_mask: false,
+    };
+    /// Keep compile-time PM empty. Runtime static masking remains exact until
+    /// token-start terminal exclusions appear, then falls back to the exact
+    /// dynamic masker for that mask call.
+    pub(crate) const DEFER_TO_DYNAMIC_MASK: Self = Self {
+        defer_to_dynamic_mask: true,
+    };
+}
 
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct ConstraintPossibleMatchesProfile {
@@ -2186,12 +2201,23 @@ fn attach_structured_dispatch_possible_matches(
 pub(crate) fn compute_constraint_possible_matches(
     tokenizer: &Tokenizer,
     token_bytes: &BTreeMap<u32, Vec<u8>>,
-    _config: ConstraintPossibleMatchesConfig,
+    config: ConstraintPossibleMatchesConfig,
 ) -> ConstraintPossibleMatchesComputation {
+    let artifacts_and_profile = get_ordered_vocab_trie_artifacts(token_bytes);
+    if config.defer_to_dynamic_mask {
+        let (artifacts, profile) = artifacts_and_profile;
+        emit_ordered_vocab_cache_profile(profile);
+        let runtime_dynamic_vocab = runtime_dynamic_vocab_artifacts(&artifacts);
+        return empty_possible_matches_computation(
+            tokenizer,
+            token_bytes.len(),
+            runtime_dynamic_vocab,
+        );
+    }
     compute_constraint_possible_matches_with_artifacts(
         tokenizer,
         token_bytes.len(),
-        get_ordered_vocab_trie_artifacts(token_bytes),
+        artifacts_and_profile,
         None,
     )
 }
@@ -2202,6 +2228,35 @@ fn runtime_dynamic_vocab_artifacts(
     RuntimeDynamicMaskVocabArtifacts {
         trie: Arc::clone(&artifacts.trie),
         token_aliases: Arc::clone(&artifacts.ordered_vocab.ordered_to_originals),
+    }
+}
+
+/// Neutral PM artifact for the deferred mode. All dimensions are deliberately
+/// unmapped so PM cannot force tokenizer-state or vocabulary splits during ID
+/// reconciliation; the independently retained dynamic vocabulary is the exact
+/// fallback representation.
+fn empty_possible_matches_computation(
+    tokenizer: &Tokenizer,
+    original_token_count: usize,
+    runtime_dynamic_vocab: RuntimeDynamicMaskVocabArtifacts,
+) -> ConstraintPossibleMatchesComputation {
+    let possible_matches_id_map = InternalIdMap {
+        tokenizer_states: ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+            vec![u32::MAX; tokenizer.num_states() as usize],
+            0,
+        ),
+        vocab_tokens: ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+            vec![u32::MAX; original_token_count],
+            0,
+        ),
+    };
+    ConstraintPossibleMatchesComputation {
+        mapped_possible_matches: MappedArtifact::new(
+            RuntimePossibleMatchesByTerminal::new(),
+            possible_matches_id_map,
+        ),
+        runtime_dynamic_vocab,
+        profile: ConstraintPossibleMatchesProfile::default(),
     }
 }
 
@@ -2352,8 +2407,19 @@ fn compute_constraint_possible_matches_with_artifacts(
 pub(crate) fn compute_constraint_possible_matches_for_vocab(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
-    _config: ConstraintPossibleMatchesConfig,
+    config: ConstraintPossibleMatchesConfig,
 ) -> ConstraintPossibleMatchesComputation {
+    if config.defer_to_dynamic_mask {
+        let (full_artifacts, full_profile) = get_ordered_vocab_trie_artifacts_for_vocab(vocab);
+        emit_ordered_vocab_cache_profile(full_profile);
+        let runtime_dynamic_vocab = runtime_dynamic_vocab_artifacts(&full_artifacts);
+        return empty_possible_matches_computation(
+            tokenizer,
+            vocab.entries.len(),
+            runtime_dynamic_vocab,
+        );
+    }
+
     if pm_vocab_equiv_enabled() && pm_vocab_equiv_supported(tokenizer) {
         let (full_artifacts, full_profile) = get_ordered_vocab_trie_artifacts_for_vocab(vocab);
         let runtime_dynamic_vocab = runtime_dynamic_vocab_artifacts(&full_artifacts);
@@ -2475,7 +2541,7 @@ mod tests {
         let computation = compute_constraint_possible_matches_for_vocab(
             &tokenizer,
             &vocab,
-            ConstraintPossibleMatchesConfig,
+            ConstraintPossibleMatchesConfig::EAGER,
         );
         let mapped = &computation.mapped_possible_matches;
 

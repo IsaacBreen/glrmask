@@ -1019,6 +1019,10 @@ pub struct Constraint {
 
     /// possible_matches keyed by grammar terminal id.
     ///
+    /// An empty table may represent deferred possible-match construction. Static
+    /// masking then uses the exact dynamic-mask fallback whenever token-start
+    /// terminal exclusions make possible matches necessary.
+    ///
     /// Each Weight maps final shared internal tokenizer-state ids to token sets
     /// in the final shared constraint-internal vocab space. Parser-DWA weights
     /// and possible_matches weights are reconciled into this same space during

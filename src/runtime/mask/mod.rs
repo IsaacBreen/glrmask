@@ -486,6 +486,10 @@ mod tests {
         DenseTokenMaskCache,
         MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_STACK_VALUES,
     };
+    use crate::automata::lexer::Lexer;
+    use crate::compiler::glr::accumulator::TerminalsDisallowed;
+    use crate::compiler::glr::parser::ParserGSS;
+    use crate::{Constraint, Vocab};
     use range_set_blaze::RangeSetBlaze;
     use rustc_hash::FxHashMap;
     use std::sync::Arc;
@@ -536,6 +540,85 @@ mod tests {
 
         assert!(!Arc::ptr_eq(&intersected, &dense));
         assert_eq!(&*intersected, &[0b0011_u64, 0b0000]);
+    }
+
+    #[test]
+    fn empty_possible_matches_falls_back_to_exact_dynamic_mask_for_disallowed_seed() {
+        let mut constraint = Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                t A ::= "a";
+                t B ::= "b";
+                nt start ::= A | B;
+            "#,
+            &Vocab::new(
+                vec![
+                    (0, b"a".to_vec()),
+                    (1, b"b".to_vec()),
+                    (2, b"ab".to_vec()),
+                ],
+                None,
+            ),
+        )
+        .expect("test constraint should compile");
+        let terminal_a = constraint
+            .terminal_display_names
+            .iter()
+            .position(|name| name == "A")
+            .expect("A terminal should have a display name") as u32;
+        constraint.possible_matches.clear();
+
+        let tokenizer_state = constraint.tokenizer.initial_state();
+        let disallowed = TerminalsDisallowed::new().with_insert(tokenizer_state, terminal_a);
+        let mut state = constraint.start_dynamic();
+        state.state = std::collections::BTreeMap::from([(
+            tokenizer_state,
+            ParserGSS::from_stacks(&[(vec![0u32], disallowed)]),
+        )]);
+
+        assert!(state.requires_dynamic_possible_matches_fallback());
+        let mut expected = vec![0u32; constraint.mask_len()];
+        state.fill_mask_dynamic(&mut expected);
+        let mut actual = vec![0u32; constraint.mask_len()];
+        state.fill_mask(&mut actual);
+        assert_eq!(actual, expected);
+
+        let mut expected_internal = Vec::new();
+        for (word_index, &word) in expected.iter().enumerate() {
+            let mut word = word;
+            while word != 0 {
+                let bit = word.trailing_zeros() as usize;
+                let original_token = (word_index * 32 + bit) as u32;
+                if let Some(internal_token) =
+                    constraint.final_internal_token_for_original(original_token)
+                {
+                    expected_internal.push(internal_token);
+                }
+                word &= word - 1;
+            }
+        }
+        expected_internal.sort_unstable();
+        expected_internal.dedup();
+        let mut mask_game_buf = vec![0u32; constraint.mask_len()];
+        let actual_internal = state.mask_game_fill_mask_and_internal_ids(&mut mask_game_buf);
+        assert_eq!(mask_game_buf, expected);
+        assert_eq!(actual_internal, expected_internal);
+
+        let loaded = Constraint::load(&constraint.save()).expect("empty-PM constraint should roundtrip");
+        assert!(loaded.possible_matches.is_empty());
+        let mut loaded_state = loaded.start_dynamic();
+        let loaded_tokenizer_state = loaded.tokenizer.initial_state();
+        let loaded_disallowed =
+            TerminalsDisallowed::new().with_insert(loaded_tokenizer_state, terminal_a);
+        loaded_state.state = std::collections::BTreeMap::from([(
+            loaded_tokenizer_state,
+            ParserGSS::from_stacks(&[(vec![0u32], loaded_disallowed)]),
+        )]);
+        let mut loaded_expected = vec![0u32; loaded.mask_len()];
+        loaded_state.fill_mask_dynamic(&mut loaded_expected);
+        let mut loaded_actual = vec![0u32; loaded.mask_len()];
+        loaded_state.fill_mask(&mut loaded_actual);
+        assert_eq!(loaded_actual, loaded_expected);
     }
 
     #[test]
@@ -1380,6 +1463,32 @@ impl<'a> ConstraintState<'a> {
         }
     }
 
+    /// Possible matches are only needed by static masking when token-start
+    /// terminal exclusions can prune the seed universe. Deferred-PM constraints
+    /// encode that policy as an empty PM table; conservatively switch the whole
+    /// mask call to the exact dynamic implementation as soon as an active
+    /// tokenizer-state accumulator carries any exclusion.
+    fn requires_dynamic_possible_matches_fallback(&self) -> bool {
+        if !self.constraint.possible_matches.is_empty() {
+            return false;
+        }
+        for (&tokenizer_state, gss) in &self.state {
+            let mut requires_fallback = false;
+            gss.for_each_acc(|terminals_disallowed| {
+                if terminals_disallowed
+                    .get(&tokenizer_state)
+                    .is_some_and(|terminals| !terminals.is_empty())
+                {
+                    requires_fallback = true;
+                }
+            });
+            if requires_fallback {
+                return true;
+            }
+        }
+        false
+    }
+
     fn fill_mask_uncached(&self, buf: &mut [u32]) {
         let _ = self.fill_mask_uncached_maybe_profile(buf, false);
     }
@@ -1390,6 +1499,15 @@ impl<'a> ConstraintState<'a> {
         force_profile: bool,
     ) -> Option<MaskProfile> {
         let total_start = (force_profile || mask_inner_profile_enabled()).then(Instant::now);
+
+        if self.requires_dynamic_possible_matches_fallback() {
+            self.fill_mask_dynamic(buf);
+            self.store_mask_cache_reuse_dense(buf);
+            return total_start.map(|start| MaskProfile {
+                total_ns: elapsed_ns(start),
+                ..MaskProfile::default()
+            });
+        }
 
         if self.try_fill_mask_single_path_direct(buf) {
             return total_start.map(|start| MaskProfile {
@@ -1967,6 +2085,28 @@ impl<'a> ConstraintState<'a> {
     }
 
     pub(crate) fn mask_game_fill_mask_and_internal_ids(&self, buf: &mut [u32]) -> Vec<u32> {
+        if self.requires_dynamic_possible_matches_fallback() {
+            self.fill_mask(buf);
+            let mut internal_ids = Vec::new();
+            for (word_index, &word) in buf.iter().enumerate() {
+                let mut word = word;
+                while word != 0 {
+                    let bit = word.trailing_zeros() as usize;
+                    let original_token = (word_index * 32 + bit) as u32;
+                    if let Some(internal_token) = self
+                        .constraint
+                        .final_internal_token_for_original(original_token)
+                    {
+                        internal_ids.push(internal_token);
+                    }
+                    word &= word - 1;
+                }
+            }
+            internal_ids.sort_unstable();
+            internal_ids.dedup();
+            return internal_ids;
+        }
+
         if self.try_fill_mask_from_cache(buf) {
             let cache = self.mask_cache.lock().unwrap();
             if cache

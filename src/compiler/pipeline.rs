@@ -1509,10 +1509,15 @@ fn compile_prepared_with_profile_and_table_construction(
                 let compile_started_for_cpm = compile_started_for_tokenizer.clone();
                 scope.spawn(move |_| {
                     let possible_matches_started_ms = elapsed_ms(compile_started_for_cpm.clone());
+                    let possible_matches_config = if env_flag_enabled("GLRMASK_EAGER_POSSIBLE_MATCHES") {
+                        cpm::ConstraintPossibleMatchesConfig::EAGER
+                    } else {
+                        cpm::ConstraintPossibleMatchesConfig::DEFER_TO_DYNAMIC_MASK
+                    };
                     let result = cpm::compute_constraint_possible_matches_for_vocab(
                         &possible_matches_tokenizer,
                         vocab,
-                        cpm::ConstraintPossibleMatchesConfig,
+                        possible_matches_config,
                     );
                     let possible_matches_finished_ms = elapsed_ms(compile_started_for_cpm);
                     *cpm_result_ref
