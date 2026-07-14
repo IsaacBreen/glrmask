@@ -191,6 +191,10 @@ struct SupportQuotient {
     class_for_state: Arc<[u32]>,
     representative_by_class: Arc<[u32]>,
     reverse_predecessors: Vec<Vec<u32>>,
+    /// Byte-labelled reverse edges over quotient representatives.  This lets
+    /// sparse support permutations prove incoming-edge compatibility without
+    /// rescanning every fixed predecessor's complete outgoing row.
+    reverse_edges: Vec<Vec<(u8, u32)>>,
     // Deviation-independent scanner projection for this quotient, precomputed
     // once. Every accepted support-transposition map shares these two Arcs and
     // only attaches its own per-pair deviations, so building an accepted map is
@@ -1960,6 +1964,7 @@ struct InterchangeabilityDfa {
     support_transposition_no_template: usize,
     support_transposition_outside_cone: usize,
     support_transposition_root_rejected: usize,
+    support_transposition_incoming_rejected: usize,
     support_transposition_signature_rejected: usize,
     support_transposition_support_setup_ns: u64,
     support_quotient_build_ns: u64,
@@ -2450,6 +2455,7 @@ impl InterchangeabilityDfa {
             support_transposition_no_template: 0,
             support_transposition_outside_cone: 0,
             support_transposition_root_rejected: 0,
+            support_transposition_incoming_rejected: 0,
             support_transposition_signature_rejected: 0,
             support_transposition_support_setup_ns: 0,
             support_quotient_build_ns: 0,
@@ -3047,16 +3053,22 @@ impl InterchangeabilityDfa {
             self.support_identity_stable_partition();
         let class_count = representative_by_class.len();
         let mut reverse_predecessors = vec![Vec::<u32>::new(); class_count];
+        let mut reverse_edges = vec![Vec::<(u8, u32)>::new(); class_count];
         for (class, &representative) in representative_by_class.iter().enumerate() {
             let state = representative as usize;
-            for &(_, destination) in self.topology.edges_from(state) {
+            for &(byte, destination) in self.topology.edges_from(state) {
                 let destination_class = class_for_state[destination as usize] as usize;
                 reverse_predecessors[destination_class].push(class as u32);
+                reverse_edges[destination_class].push((byte, class as u32));
             }
         }
         for predecessors in &mut reverse_predecessors {
             predecessors.sort_unstable();
             predecessors.dedup();
+        }
+        for edges in &mut reverse_edges {
+            edges.sort_unstable();
+            edges.dedup();
         }
         let class_for_state: Arc<[u32]> = class_for_state.into();
         let representative_by_class: Arc<[u32]> = representative_by_class.into();
@@ -3069,6 +3081,7 @@ impl InterchangeabilityDfa {
             class_for_state,
             representative_by_class,
             reverse_predecessors,
+            reverse_edges,
             scanner_state_count,
             scanner_class_for_original,
             scanner_representative_for_class,
@@ -3403,9 +3416,8 @@ impl InterchangeabilityDfa {
         true
     }
 
-    /// Full exact quotient automorphism check for a proposed sparse class
-    /// permutation. The affected cone is reverse-closed, so every class outside
-    /// it is identity and cannot transition into a moved class.
+    /// Exact quotient-row check for a proposed sparse class permutation. The
+    /// caller chooses an exact sufficient row set.
     fn support_deviations_are_valid(
         &self,
         quotient: &SupportQuotient,
@@ -3468,9 +3480,11 @@ impl InterchangeabilityDfa {
                     deviations,
                     quotient.class_for_state[source_destination] as usize,
                 );
-                if quotient.class_for_state[target_destination] != expected_destination
-                    || outputs.id(self.output_pair_by_state[source_destination])
-                        != self.output_pair_by_state[target_destination]
+                if quotient.class_for_state[target_destination] != expected_destination {
+                    return false;
+                }
+                if outputs.id(self.output_pair_by_state[source_destination])
+                    != self.output_pair_by_state[target_destination]
                 {
                     return false;
                 }
@@ -3687,6 +3701,33 @@ impl InterchangeabilityDfa {
             .as_ref()
             .expect("right terminal support initialized");
         let profile_timing = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
+        let root_class = quotient.class_for_state[self.topology.initial_state] as usize;
+        if Self::mapped_support_class(&deviations, root_class) != root_class as u32 {
+            self.support_transposition_root_rejected += 1;
+            return None;
+        }
+        let verify_started_at = profile_timing.then(Instant::now);
+        if !Self::support_deviation_incoming_edges_are_valid(quotient, &deviations) {
+            debug_assert!({
+                let full_cone = Self::support_quotient_affected_cone_from_supports_small(
+                    quotient,
+                    left_support,
+                    right_support,
+                );
+                !self.support_deviations_are_valid(
+                    quotient,
+                    left,
+                    right,
+                    &full_cone,
+                    &deviations,
+                )
+            });
+            self.support_transposition_incoming_rejected += 1;
+            if let Some(started_at) = verify_started_at {
+                self.support_transposition_verify_ns += started_at.elapsed().as_nanos() as u64;
+            }
+            return None;
+        }
         let cone_started_at = profile_timing.then(Instant::now);
         let affected_rows = Self::support_quotient_affected_rows_from_supports_marked(
             quotient,
@@ -3705,12 +3746,6 @@ impl InterchangeabilityDfa {
                 && affected_rows.contains(&(source as usize))
                 && affected_rows.contains(&(target as usize))
         }));
-        let root_class = quotient.class_for_state[self.topology.initial_state] as usize;
-        if Self::mapped_support_class(&deviations, root_class) != root_class as u32 {
-            self.support_transposition_root_rejected += 1;
-            return None;
-        }
-        let verify_started_at = profile_timing.then(Instant::now);
         let valid = self.support_deviations_are_valid(
             quotient,
             left,
@@ -4800,8 +4835,37 @@ impl InterchangeabilityDfa {
         cone
     }
 
-    /// Exact set of quotient rows whose local automorphism equation can change
-    /// under a proposed sparse class permutation and terminal-label swap.
+    /// Exact incoming-edge condition for a proposed sparse quotient-class
+    /// permutation. For every moved class `source -> target`, applying the same
+    /// permutation to the predecessor endpoint of each byte-labelled incoming
+    /// edge must produce exactly the incoming edges of `target`.
+    fn support_deviation_incoming_edges_are_valid(
+        quotient: &SupportQuotient,
+        deviations: &[(u32, u32)],
+    ) -> bool {
+        for &(source, target) in deviations {
+            let source_edges = &quotient.reverse_edges[source as usize];
+            let target_edges = &quotient.reverse_edges[target as usize];
+            if source_edges.len() != target_edges.len() {
+                return false;
+            }
+            for &(byte, predecessor) in source_edges {
+                let mapped_predecessor =
+                    Self::mapped_support_class(deviations, predecessor as usize);
+                if target_edges
+                    .binary_search(&(byte, mapped_predecessor))
+                    .is_err()
+                {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Exact set of quotient rows whose local automorphism equation can still
+    /// change after incoming-edge compatibility of moved classes has already
+    /// been proved.
     ///
     /// A fixed class whose outgoing destinations are all fixed and whose
     /// destination outputs mention neither swapped terminal has an identical
@@ -4809,10 +4873,12 @@ impl InterchangeabilityDfa {
     /// deeper in the graph. Therefore verification needs only:
     ///
     /// * rows whose destination outputs mention either swapped terminal;
-    /// * moved classes themselves; and
-    /// * direct predecessors of moved classes.
+    /// * moved classes themselves.
     ///
-    /// The old transitive reverse cone is sufficient but much larger.
+    /// Direct predecessors of moved classes no longer need full row scans: the
+    /// byte-labelled incoming-edge check above proves precisely the destination
+    /// permutation condition for those rows. The old transitive reverse cone is
+    /// sufficient but much larger.
     fn support_quotient_affected_rows_from_supports_marked(
         quotient: &SupportQuotient,
         left_support: &[(u32, u8)],
@@ -4845,9 +4911,6 @@ impl InterchangeabilityDfa {
         for &(source, target) in deviations {
             for class in [source as usize, target as usize] {
                 add(class);
-                for &predecessor in &quotient.reverse_predecessors[class] {
-                    add(predecessor as usize);
-                }
             }
         }
         rows
@@ -8642,7 +8705,7 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
 
         if profile_timing {
             eprintln!(
-                "[glrmask/profile][terminal_interchangeability] output_pair_rejections={} output_pair_cached_closed={} output_invariant_checks={} first_round_rejections={} support_transposition_checks={} petal_batch_groups={} petal_batch_members={} petal_batch_grouping_ms={:.3} petal_batch_certificate_ms={:.3} petal_batch_map_ms={:.3} support_transposition_certified={} support_transposition_no_template={} support_transposition_outside_cone={} support_transposition_root_rejected={} support_transposition_signature_rejected={} direct_exact_checks={} exact_fallback_skips={} output_pair_filter_ms={:.3} frozen_output_ms={:.3} first_round_ms={:.3} support_transposition_ms={:.3} support_setup_ms={:.3} support_quotient_build_ms={:.3} support_template_ms={:.3} support_cone_ms={:.3} support_verify_ms={:.3} exact_map_ms={:.3} accepted_map_storage_ms={:.3} quotient_certified={} sparse_quotient_certified={} sparse_cone_avg={:.1} sparse_cone_max={} sparse_cone_ms={:.3} sparse_refinement_ms={:.3} sparse_map_ms={:.3} accepted_representative_members={} total_ms={:.3}",
+                "[glrmask/profile][terminal_interchangeability] output_pair_rejections={} output_pair_cached_closed={} output_invariant_checks={} first_round_rejections={} support_transposition_checks={} petal_batch_groups={} petal_batch_members={} petal_batch_grouping_ms={:.3} petal_batch_certificate_ms={:.3} petal_batch_map_ms={:.3} support_transposition_certified={} support_transposition_no_template={} support_transposition_outside_cone={} support_transposition_root_rejected={} support_transposition_incoming_rejected={} support_transposition_signature_rejected={} direct_exact_checks={} exact_fallback_skips={} output_pair_filter_ms={:.3} frozen_output_ms={:.3} first_round_ms={:.3} support_transposition_ms={:.3} support_setup_ms={:.3} support_quotient_build_ms={:.3} support_template_ms={:.3} support_cone_ms={:.3} support_verify_ms={:.3} exact_map_ms={:.3} accepted_map_storage_ms={:.3} quotient_certified={} sparse_quotient_certified={} sparse_cone_avg={:.1} sparse_cone_max={} sparse_cone_ms={:.3} sparse_refinement_ms={:.3} sparse_map_ms={:.3} accepted_representative_members={} total_ms={:.3}",
                 output_pair_rejections,
                 output_pair_cached_closed,
                 output_invariant_checks,
@@ -8657,6 +8720,7 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                 dfa.support_transposition_no_template,
                 dfa.support_transposition_outside_cone,
                 dfa.support_transposition_root_rejected,
+                dfa.support_transposition_incoming_rejected,
                 dfa.support_transposition_signature_rejected,
                 direct_exact_checks,
                 exact_fallback_skips,
