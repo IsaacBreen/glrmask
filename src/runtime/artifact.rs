@@ -1089,8 +1089,16 @@ pub struct Constraint {
     pub(crate) word_group_sparse_prefix_entries: Vec<usize>,
     #[serde(skip)]
     pub(crate) quad_group_sparse_masks: Vec<InternalTokenBufMasks>,
+    /// Dense output masks for quad groups whose sparse replay is more
+    /// expensive than a sequential output-buffer scan.
+    #[serde(skip)]
+    pub(crate) quad_group_dense_masks: Vec<Option<Box<[u32]>>>,
     #[serde(skip)]
     pub(crate) byte_group_sparse_masks: Vec<InternalTokenBufMasks>,
+    /// Dense output masks for byte groups whose sparse replay is more
+    /// expensive than a sequential output-buffer scan.
+    #[serde(skip)]
+    pub(crate) byte_group_dense_masks: Vec<Option<Box<[u32]>>>,
     pub(crate) word_group_sparse_total_entries: usize,
     #[serde(skip)]
     pub(crate) word_group_sparse_max_entries: usize,

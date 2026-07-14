@@ -20,6 +20,7 @@ pub(crate) struct MaskCacheData {
 pub(crate) struct MaskScratch {
     pub merged_dense: Vec<u64>,
     pub chain_merged_dense: Vec<u64>,
+    pub output_buf: Vec<u32>,
 }
 
 /// Reusable scratch buffers for `commit_bytes_impl`, retained between calls
@@ -31,6 +32,7 @@ pub(crate) struct CommitBuffers {
     pub seen_matches: FxHashSet<(usize, u32)>,
     pub terminal_result_cache: FxHashMap<u32, ParserGSS>,
     pub exec_results: FxHashMap<u32, crate::automata::lexer::tokenizer::TokenizerExecResult>,
+    pub small_exec_result: crate::automata::lexer::tokenizer::TokenizerExecResult,
     pub processing_queue: Vec<FxHashMap<u32, ParserGSS>>,
 }
 
@@ -48,6 +50,8 @@ impl CommitBuffers {
         self.seen_matches.clear();
         self.terminal_result_cache.clear();
         self.exec_results.clear();
+        self.small_exec_result.end_state.clear();
+        self.small_exec_result.matches.clear();
         for bucket in &mut self.processing_queue {
             bucket.clear();
         }

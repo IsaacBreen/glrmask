@@ -117,6 +117,39 @@ fn andnot_sparse_buf_entries(buf: &mut [u32], entries: &[(u16, u32)]) {
 }
 
 #[inline(always)]
+fn group_buf_mask_cost(sparse: &[(u16, u32)], dense: Option<&[u32]>) -> usize {
+    dense.map_or(sparse.len(), <[u32]>::len)
+}
+
+#[inline(always)]
+fn or_group_buf_mask(
+    buf: &mut [u32],
+    sparse: &[(u16, u32)],
+    dense: Option<&[u32]>,
+) -> usize {
+    if let Some(dense) = dense {
+        or_dense_buf(buf, dense);
+    } else {
+        or_sparse_buf_entries(buf, sparse);
+    }
+    group_buf_mask_cost(sparse, dense)
+}
+
+#[inline(always)]
+fn andnot_group_buf_mask(
+    buf: &mut [u32],
+    sparse: &[(u16, u32)],
+    dense: Option<&[u32]>,
+) -> usize {
+    if let Some(dense) = dense {
+        andnot_dense_buf(buf, dense);
+    } else {
+        andnot_sparse_buf_entries(buf, sparse);
+    }
+    group_buf_mask_cost(sparse, dense)
+}
+
+#[inline(always)]
 fn count_complement_subgroups(missing: u64, valid_mask: u64) -> (u32, u32, u32) {
     let mut byte_groups = 0u32;
     let mut nibble_groups = 0u32;
@@ -502,10 +535,15 @@ impl Constraint {
                 let byte_valid = (valid_mask >> shift) & 0xff;
                 let byte_bits = (added >> shift) & 0xff;
                 if byte_valid == 0xff && byte_bits == 0xff {
-                    if let Some(group_mask) = self.byte_group_sparse_masks.get(wi * 8 + byte_idx) {
+                    let group_idx = wi * 8 + byte_idx;
+                    if let Some(group_mask) = self.byte_group_sparse_masks.get(group_idx) {
+                        let dense_mask = self
+                            .byte_group_dense_masks
+                            .get(group_idx)
+                            .and_then(Option::as_deref);
                         stats.added_byte_group_hits += 1;
-                        stats.added_byte_group_entries += group_mask.len() as u64;
-                        or_sparse_buf_entries(buf, group_mask);
+                        stats.added_byte_group_entries +=
+                            or_group_buf_mask(buf, group_mask, dense_mask) as u64;
                         added &= !(0xffu64 << shift);
                     }
                 }
@@ -515,10 +553,17 @@ impl Constraint {
                 let quad_valid = (valid_mask >> shift) & 0x0f;
                 let quad_bits = (added >> shift) & 0x0f;
                 if quad_valid == 0x0f && quad_bits == 0x0f {
-                    if let Some(group_mask) = self.quad_group_sparse_masks.get(wi * 16 + quad_idx) {
+                    let group_idx = wi * 16 + quad_idx;
+                    if let Some(group_mask) = self.quad_group_sparse_masks.get(group_idx) {
+                        let dense_mask = self
+                            .quad_group_dense_masks
+                            .get(group_idx)
+                            .and_then(Option::as_deref);
+                        // DeltaReplayProfileStats historically combines byte
+                        // and quad subgroup activity in these counters.
                         stats.added_byte_group_hits += 1;
-                        stats.added_byte_group_entries += group_mask.len() as u64;
-                        or_sparse_buf_entries(buf, group_mask);
+                        stats.added_byte_group_entries +=
+                            or_group_buf_mask(buf, group_mask, dense_mask) as u64;
                         added &= !(0x0fu64 << shift);
                     }
                 }
@@ -567,10 +612,15 @@ impl Constraint {
                 let byte_valid = (valid_mask >> shift) & 0xff;
                 let byte_bits = (removed >> shift) & 0xff;
                 if byte_valid == 0xff && byte_bits == 0xff {
-                    if let Some(group_mask) = self.byte_group_sparse_masks.get(wi * 8 + byte_idx) {
+                    let group_idx = wi * 8 + byte_idx;
+                    if let Some(group_mask) = self.byte_group_sparse_masks.get(group_idx) {
+                        let dense_mask = self
+                            .byte_group_dense_masks
+                            .get(group_idx)
+                            .and_then(Option::as_deref);
                         stats.removed_byte_group_hits += 1;
-                        stats.removed_byte_group_entries += group_mask.len() as u64;
-                        andnot_sparse_buf_entries(buf, group_mask);
+                        stats.removed_byte_group_entries +=
+                            andnot_group_buf_mask(buf, group_mask, dense_mask) as u64;
                         removed &= !(0xffu64 << shift);
                     }
                 }
@@ -580,10 +630,17 @@ impl Constraint {
                 let quad_valid = (valid_mask >> shift) & 0x0f;
                 let quad_bits = (removed >> shift) & 0x0f;
                 if quad_valid == 0x0f && quad_bits == 0x0f {
-                    if let Some(group_mask) = self.quad_group_sparse_masks.get(wi * 16 + quad_idx) {
+                    let group_idx = wi * 16 + quad_idx;
+                    if let Some(group_mask) = self.quad_group_sparse_masks.get(group_idx) {
+                        let dense_mask = self
+                            .quad_group_dense_masks
+                            .get(group_idx)
+                            .and_then(Option::as_deref);
+                        // See the added-side note above: these profile counters
+                        // intentionally retain their historical combined shape.
                         stats.removed_byte_group_hits += 1;
-                        stats.removed_byte_group_entries += group_mask.len() as u64;
-                        andnot_sparse_buf_entries(buf, group_mask);
+                        stats.removed_byte_group_entries +=
+                            andnot_group_buf_mask(buf, group_mask, dense_mask) as u64;
                         removed &= !(0x0fu64 << shift);
                     }
                 }
@@ -654,8 +711,10 @@ impl Constraint {
                 started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
             let started = profile.then(std::time::Instant::now);
             let weight_token_sets = self.weight_token_set_inventory();
-            let prebuilt_weight_caches = self
-                .compute_direct_sparse_weight_token_buf_masks(&weight_token_sets.final_sets);
+            let prebuilt_weight_caches = self.compute_direct_sparse_weight_token_buf_masks(
+                &weight_token_sets.final_sets,
+                &internal_token_buf_masks,
+            );
             let prebuilt_weight_sparse_ms =
                 started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
             let started = profile.then(std::time::Instant::now);
@@ -730,8 +789,10 @@ impl Constraint {
                         .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
                     let started = profile.then(std::time::Instant::now);
                     let weight_token_sets = self.weight_token_set_inventory();
-                    let prebuilt_weight_caches = self
-                        .compute_direct_sparse_weight_token_buf_masks(&weight_token_sets.final_sets);
+                    let prebuilt_weight_caches = self.compute_direct_sparse_weight_token_buf_masks(
+                        &weight_token_sets.final_sets,
+                        &internal_token_buf_masks,
+                    );
                     let prebuilt_weight_sparse_ms = started
                         .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
                     let started = profile.then(std::time::Instant::now);
@@ -815,6 +876,37 @@ impl Constraint {
             Self::compute_sparse_entry_prefix(&self.word_group_sparse_masks);
         self.quad_group_sparse_masks = quad_group_sparse_masks;
         self.byte_group_sparse_masks = byte_group_sparse_masks;
+        let mask_words = self.mask_len();
+        let (quad_group_dense_masks, byte_group_dense_masks) =
+            if rayon::current_num_threads() == 1 {
+                (
+                    Self::compute_heavy_group_dense_masks(
+                        &self.quad_group_sparse_masks,
+                        mask_words,
+                    ),
+                    Self::compute_heavy_group_dense_masks(
+                        &self.byte_group_sparse_masks,
+                        mask_words,
+                    ),
+                )
+            } else {
+                rayon::join(
+                    || {
+                        Self::compute_heavy_group_dense_masks(
+                            &self.quad_group_sparse_masks,
+                            mask_words,
+                        )
+                    },
+                    || {
+                        Self::compute_heavy_group_dense_masks(
+                            &self.byte_group_sparse_masks,
+                            mask_words,
+                        )
+                    },
+                )
+            };
+        self.quad_group_dense_masks = quad_group_dense_masks;
+        self.byte_group_dense_masks = byte_group_dense_masks;
         self.word_group_sparse_total_entries = word_group_sparse_total_entries;
         self.word_group_sparse_max_entries = word_group_sparse_max_entries;
         let block_ms = block_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
@@ -1020,6 +1112,30 @@ impl Constraint {
         (groups, total_entries, max_entries)
     }
 
+    fn compute_heavy_group_dense_masks(
+        groups: &[InternalTokenBufMasks],
+        mask_words: usize,
+    ) -> Vec<Option<Box<[u32]>>> {
+        if mask_words == 0 {
+            return Vec::new();
+        }
+        let build_group = |group: &InternalTokenBufMasks| {
+            if !Self::prefer_dense_buf_scan(mask_words, group.len()) {
+                return None;
+            }
+            let mut dense = vec![0u32; mask_words];
+            for &(word_idx, mask) in group {
+                dense[word_idx as usize] |= mask;
+            }
+            Some(dense.into_boxed_slice())
+        };
+        if rayon::current_num_threads() == 1 {
+            groups.iter().map(build_group).collect()
+        } else {
+            groups.par_iter().map(build_group).collect()
+        }
+    }
+
     fn compute_sliding_word_group_dense_masks(&self, word_group_len: usize) -> Vec<Box<[u32]>> {
         if self.internal_token_buf_masks.is_empty() || word_group_len == 0 {
             return Vec::new();
@@ -1144,6 +1260,54 @@ impl Constraint {
         tokens.len() <= limit
     }
 
+    fn direct_sparse_work_prefix(
+        internal_token_buf_masks: &[InternalTokenBufMasks],
+        buf_words: usize,
+    ) -> Vec<u64> {
+        // Direct sparse replay scans each selected internal token and then ORs
+        // its image into the original-token mask. Internal cardinality alone is
+        // not a runtime-cost bound: one internal token can represent thousands
+        // of original LLM token IDs. Mirror or_internal_token_to_buf_fast's
+        // heavy-token choice and prefix-sum the worst-case replay work so a
+        // RangeSetBlaze can be costed by ranges rather than token-by-token.
+        let heavy_threshold = buf_words / 4;
+        let mut prefix = Vec::with_capacity(internal_token_buf_masks.len() + 1);
+        prefix.push(0u64);
+        for mask in internal_token_buf_masks {
+            let mask_work = if mask.len() > heavy_threshold {
+                buf_words as u64
+            } else {
+                mask.len() as u64
+            };
+            let next = prefix
+                .last()
+                .copied()
+                .unwrap_or_default()
+                .saturating_add(1)
+                .saturating_add(mask_work);
+            prefix.push(next);
+        }
+        prefix
+    }
+
+    fn direct_sparse_expanded_work(tokens: &RangeSetBlaze<u32>, work_prefix: &[u64]) -> u64 {
+        let n_internal = work_prefix.len().saturating_sub(1);
+        let mut work = 0u64;
+        for range in tokens.ranges() {
+            let start = (*range.start() as usize).min(n_internal);
+            let end_exclusive = (*range.end() as usize)
+                .saturating_add(1)
+                .min(n_internal);
+            if start >= end_exclusive {
+                continue;
+            }
+            work = work.saturating_add(
+                work_prefix[end_exclusive].saturating_sub(work_prefix[start]),
+            );
+        }
+        work
+    }
+
     #[inline(always)]
     pub(crate) fn or_weight_token_set_to_buf_if_contained(
         &self,
@@ -1217,7 +1381,11 @@ impl Constraint {
                     .get(word_idx)
                     .is_some_and(|word| (word & (1u64 << bit)) != 0)
                 {
-                    self.or_internal_token_to_buf_fast(internal_token, buf, &mut stats_entries);
+                    self.or_internal_token_to_buf_fast::<false>(
+                        internal_token,
+                        buf,
+                        &mut stats_entries,
+                    );
                     any = true;
                 }
             }
@@ -1316,23 +1484,29 @@ impl Constraint {
     /// Classify final-weight token sets for the direct runtime-intersection
     /// path. The runtime itself performs an exact intersection with the active
     /// dense state, so no final output buffer is needed for sets under its
-    /// fixed work cap.
+    /// fixed work cap. Bound both the internal-token scan and the worst-case
+    /// expanded output-mask work: token equivalence can make a small internal
+    /// set extremely expensive to replay into the original-token mask.
     fn compute_direct_sparse_weight_token_buf_masks(
         &self,
         final_token_sets: &[(usize, &Arc<RangeSetBlaze<u32>>) ],
+        internal_token_buf_masks: &[InternalTokenBufMasks],
     ) -> DirectSparseWeightBufCaches {
         let buf_words = self.mask_len();
         let direct_sparse = buf_words != 0
             && buf_words <= u16::MAX as usize
             && Self::direct_sparse_weight_buf_cache_enabled()
             && self.final_mask_mapping.internal_len() == 0;
-        let sparse_cost_limit = ((buf_words / 2).min(2048)) as u64;
+        let direct_token_limit = ((buf_words / 2).min(2048)) as u64;
+        let direct_work_limit = direct_token_limit;
+        let work_prefix = Self::direct_sparse_work_prefix(internal_token_buf_masks, buf_words);
 
         #[derive(Default)]
         struct SparseBatch {
             eligible: Vec<usize>,
             fallback: Vec<(usize, Arc<RangeSetBlaze<u32>>)>,
             small_cardinality: usize,
+            expanded_work_max: u64,
         }
 
         impl SparseBatch {
@@ -1340,16 +1514,24 @@ impl Constraint {
                 self.eligible.append(&mut other.eligible);
                 self.fallback.append(&mut other.fallback);
                 self.small_cardinality += other.small_cardinality;
+                self.expanded_work_max = self.expanded_work_max.max(other.expanded_work_max);
             }
         }
 
         let build_one = |batch: &mut SparseBatch,
                          &(key, token_set): &(usize, &Arc<RangeSetBlaze<u32>>)| {
             if direct_sparse
-                && Self::token_set_cardinality_at_most(token_set.as_ref(), sparse_cost_limit)
+                && Self::token_set_cardinality_at_most(token_set.as_ref(), direct_token_limit)
             {
                 batch.small_cardinality += 1;
-                batch.eligible.push(key);
+                let expanded_work =
+                    Self::direct_sparse_expanded_work(token_set.as_ref(), &work_prefix);
+                batch.expanded_work_max = batch.expanded_work_max.max(expanded_work);
+                if expanded_work <= direct_work_limit {
+                    batch.eligible.push(key);
+                } else {
+                    batch.fallback.push((key, Arc::clone(token_set)));
+                }
             } else {
                 batch.fallback.push((key, Arc::clone(token_set)));
             }
@@ -1377,11 +1559,22 @@ impl Constraint {
         if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
         {
+            let cardinality_fallback_sets = batch
+                .eligible
+                .len()
+                .saturating_add(batch.fallback.len())
+                .saturating_sub(batch.small_cardinality);
+            let expanded_work_fallback_sets = batch
+                .small_cardinality
+                .saturating_sub(batch.eligible.len());
             eprintln!(
-                "[glrmask/profile][runtime_direct_sparse] final_sets={} direct_sets={} fallback_sets={}",
+                "[glrmask/profile][runtime_direct_sparse] final_sets={} direct_sets={} fallback_sets={} cardinality_fallback_sets={} expanded_work_fallback_sets={} expanded_work_max={}",
                 batch.eligible.len() + batch.fallback.len(),
                 batch.eligible.len(),
                 batch.fallback.len(),
+                cardinality_fallback_sets,
+                expanded_work_fallback_sets,
+                batch.expanded_work_max,
             );
         }
         DirectSparseWeightBufCaches {
@@ -1697,6 +1890,14 @@ impl Constraint {
             Self::compute_sparse_entry_prefix(&self.word_group_sparse_masks);
         self.quad_group_sparse_masks = quad_group_sparse_masks;
         self.byte_group_sparse_masks = byte_group_sparse_masks;
+        self.quad_group_dense_masks = Self::compute_heavy_group_dense_masks(
+            &self.quad_group_sparse_masks,
+            self.mask_len(),
+        );
+        self.byte_group_dense_masks = Self::compute_heavy_group_dense_masks(
+            &self.byte_group_sparse_masks,
+            self.mask_len(),
+        );
         self.word_group_sparse_total_entries = word_group_sparse_total_entries;
         self.word_group_sparse_max_entries = word_group_sparse_max_entries;
         self.pair_word_group_buf_masks = self.compute_sliding_word_group_dense_masks(2);
@@ -2058,7 +2259,7 @@ impl Constraint {
         }
     }
 
-    fn or_full_internal_word_run_to_buf(
+    fn or_full_internal_word_run_to_buf<const PROFILE: bool>(
         &self,
         mut wi: usize,
         end: usize,
@@ -2070,8 +2271,10 @@ impl Constraint {
             && end < self.word_group_prefix_buf_masks.len()
             && Self::prefer_dense_buf_scan(buf.len(), self.sparse_word_group_entries_in(wi, run_len))
         {
-            stats.normal_full_word_hits += run_len as u64;
-            stats.group_or_sparse_entries += buf.len() as u64;
+            if PROFILE {
+                stats.normal_full_word_hits += run_len as u64;
+                stats.group_or_sparse_entries += buf.len() as u64;
+            }
             self.or_word_group_prefix_diff_to_buf(wi, end, buf);
             return;
         }
@@ -2118,22 +2321,30 @@ impl Constraint {
             };
 
             if let Some((block_len, dense_mask)) = block {
-                stats.normal_full_word_hits += block_len as u64;
-                stats.group_or_sparse_entries += dense_mask.len() as u64;
+                if PROFILE {
+                    stats.normal_full_word_hits += block_len as u64;
+                    stats.group_or_sparse_entries += dense_mask.len() as u64;
+                }
                 or_dense_buf(buf, dense_mask);
                 wi += block_len;
                 continue;
             }
 
             if let Some(group_mask) = self.word_group_sparse_masks.get(wi) {
-                stats.normal_full_word_hits += 1;
+                if PROFILE {
+                    stats.normal_full_word_hits += 1;
+                }
                 if Self::prefer_dense_buf_scan(buf.len(), group_mask.len())
                     && wi + 1 < self.word_group_prefix_buf_masks.len()
                 {
-                    stats.group_or_sparse_entries += buf.len() as u64;
+                    if PROFILE {
+                        stats.group_or_sparse_entries += buf.len() as u64;
+                    }
                     self.or_word_group_prefix_diff_to_buf(wi, wi + 1, buf);
                 } else {
-                    stats.group_or_sparse_entries += group_mask.len() as u64;
+                    if PROFILE {
+                        stats.group_or_sparse_entries += group_mask.len() as u64;
+                    }
                     or_sparse_buf_entries(buf, group_mask);
                 }
             }
@@ -2141,7 +2352,7 @@ impl Constraint {
         }
     }
 
-    fn andnot_full_internal_word_run_from_buf(
+    fn andnot_full_internal_word_run_from_buf<const PROFILE: bool>(
         &self,
         mut wi: usize,
         end: usize,
@@ -2153,8 +2364,10 @@ impl Constraint {
             && end < self.word_group_prefix_buf_masks.len()
             && Self::prefer_dense_buf_scan(buf.len(), self.sparse_word_group_entries_in(wi, run_len))
         {
-            stats.complement_full_word_hits += run_len as u64;
-            stats.group_andnot_sparse_entries += buf.len() as u64;
+            if PROFILE {
+                stats.complement_full_word_hits += run_len as u64;
+                stats.group_andnot_sparse_entries += buf.len() as u64;
+            }
             self.andnot_word_group_prefix_diff_from_buf(wi, end, buf);
             return;
         }
@@ -2201,22 +2414,30 @@ impl Constraint {
             };
 
             if let Some((block_len, dense_mask)) = block {
-                stats.complement_full_word_hits += block_len as u64;
-                stats.group_andnot_sparse_entries += dense_mask.len() as u64;
+                if PROFILE {
+                    stats.complement_full_word_hits += block_len as u64;
+                    stats.group_andnot_sparse_entries += dense_mask.len() as u64;
+                }
                 andnot_dense_buf(buf, dense_mask);
                 wi += block_len;
                 continue;
             }
 
             if let Some(group_mask) = self.word_group_sparse_masks.get(wi) {
-                stats.complement_full_word_hits += 1;
+                if PROFILE {
+                    stats.complement_full_word_hits += 1;
+                }
                 if Self::prefer_dense_buf_scan(buf.len(), group_mask.len())
                     && wi + 1 < self.word_group_prefix_buf_masks.len()
                 {
-                    stats.group_andnot_sparse_entries += buf.len() as u64;
+                    if PROFILE {
+                        stats.group_andnot_sparse_entries += buf.len() as u64;
+                    }
                     self.andnot_word_group_prefix_diff_from_buf(wi, wi + 1, buf);
                 } else {
-                    stats.group_andnot_sparse_entries += group_mask.len() as u64;
+                    if PROFILE {
+                        stats.group_andnot_sparse_entries += group_mask.len() as u64;
+                    }
                     andnot_sparse_buf_entries(buf, group_mask);
                 }
             }
@@ -2265,8 +2486,13 @@ impl Constraint {
             let byte_valid = (valid_mask >> shift) & 0xff;
             let byte_bits = (bits >> shift) & 0xff;
             if byte_valid == 0xff && byte_bits == 0xff {
-                if let Some(group_mask) = self.byte_group_sparse_masks.get(wi * 8 + byte_idx) {
-                    cost += group_mask.len();
+                let group_idx = wi * 8 + byte_idx;
+                if let Some(group_mask) = self.byte_group_sparse_masks.get(group_idx) {
+                    let dense_mask = self
+                        .byte_group_dense_masks
+                        .get(group_idx)
+                        .and_then(Option::as_deref);
+                    cost += group_buf_mask_cost(group_mask, dense_mask);
                     bits &= !(0xffu64 << shift);
                 }
             }
@@ -2277,8 +2503,13 @@ impl Constraint {
             let quad_valid = (valid_mask >> shift) & 0x0f;
             let quad_bits = (bits >> shift) & 0x0f;
             if quad_valid == 0x0f && quad_bits == 0x0f {
-                if let Some(group_mask) = self.quad_group_sparse_masks.get(wi * 16 + quad_idx) {
-                    cost += group_mask.len();
+                let group_idx = wi * 16 + quad_idx;
+                if let Some(group_mask) = self.quad_group_sparse_masks.get(group_idx) {
+                    let dense_mask = self
+                        .quad_group_dense_masks
+                        .get(group_idx)
+                        .and_then(Option::as_deref);
+                    cost += group_buf_mask_cost(group_mask, dense_mask);
                     bits &= !(0x0fu64 << shift);
                 }
             }
@@ -2287,8 +2518,173 @@ impl Constraint {
         cost + self.internal_bits_buf_op_cost(wi, bits, buf_len)
     }
 
+    fn full_internal_word_run_buf_op_cost(
+        &self,
+        mut wi: usize,
+        end: usize,
+        buf_len: usize,
+    ) -> usize {
+        let run_len = end.saturating_sub(wi);
+        if run_len > 0
+            && end < self.word_group_prefix_buf_masks.len()
+            && Self::prefer_dense_buf_scan(
+                buf_len,
+                self.sparse_word_group_entries_in(wi, run_len),
+            )
+        {
+            return buf_len;
+        }
+
+        let mut cost = 0usize;
+        while wi < end {
+            let remaining = end - wi;
+            let block = if remaining >= 32
+                && self
+                    .giga_word_group_buf_masks
+                    .get(wi)
+                    .is_some_and(|dense| {
+                        Self::prefer_dense_buf_scan(
+                            dense.len(),
+                            self.sparse_word_group_entries_in(wi, 32),
+                        )
+                    })
+            {
+                Some((32, self.giga_word_group_buf_masks[wi].len()))
+            } else if remaining >= 16
+                && self
+                    .mega_word_group_buf_masks
+                    .get(wi)
+                    .is_some_and(|dense| {
+                        Self::prefer_dense_buf_scan(
+                            dense.len(),
+                            self.sparse_word_group_entries_in(wi, 16),
+                        )
+                    })
+            {
+                Some((16, self.mega_word_group_buf_masks[wi].len()))
+            } else if remaining >= 8
+                && self
+                    .super_word_group_buf_masks
+                    .get(wi)
+                    .is_some_and(|dense| {
+                        Self::prefer_dense_buf_scan(
+                            dense.len(),
+                            self.sparse_word_group_entries_in(wi, 8),
+                        )
+                    })
+            {
+                Some((8, self.super_word_group_buf_masks[wi].len()))
+            } else if remaining >= 4
+                && self
+                    .quad_word_group_buf_masks
+                    .get(wi)
+                    .is_some_and(|dense| {
+                        Self::prefer_dense_buf_scan(
+                            dense.len(),
+                            self.sparse_word_group_entries_in(wi, 4),
+                        )
+                    })
+            {
+                Some((4, self.quad_word_group_buf_masks[wi].len()))
+            } else if remaining >= 2
+                && self
+                    .pair_word_group_buf_masks
+                    .get(wi)
+                    .is_some_and(|dense| {
+                        Self::prefer_dense_buf_scan(
+                            dense.len(),
+                            self.sparse_word_group_entries_in(wi, 2),
+                        )
+                    })
+            {
+                Some((2, self.pair_word_group_buf_masks[wi].len()))
+            } else {
+                None
+            };
+
+            if let Some((block_len, dense_cost)) = block {
+                cost = cost.saturating_add(dense_cost);
+                wi += block_len;
+                continue;
+            }
+
+            if let Some(group_mask) = self.word_group_sparse_masks.get(wi) {
+                cost = cost.saturating_add(
+                    if Self::prefer_dense_buf_scan(buf_len, group_mask.len())
+                        && wi + 1 < self.word_group_prefix_buf_masks.len()
+                    {
+                        buf_len
+                    } else {
+                        group_mask.len()
+                    },
+                );
+            }
+            wi += 1;
+        }
+        cost
+    }
+
+    fn internal_dense_buf_replay_cost(
+        &self,
+        dense: &[u64],
+        n_internal: usize,
+        buf_len: usize,
+        complement: bool,
+    ) -> usize {
+        let mut cost = 0usize;
+        let mut wi = 0usize;
+        while wi < dense.len() && wi * 64 < n_internal {
+            let remaining = n_internal - wi * 64;
+            let valid_mask = if remaining >= 64 {
+                !0u64
+            } else {
+                (1u64 << remaining) - 1
+            };
+            let bits = if complement {
+                !dense[wi] & valid_mask
+            } else {
+                dense[wi] & valid_mask
+            };
+            if bits == 0 {
+                wi += 1;
+                continue;
+            }
+            if bits == valid_mask {
+                let run_start = wi;
+                wi += 1;
+                while wi < dense.len() && wi * 64 < n_internal {
+                    let remaining = n_internal - wi * 64;
+                    if remaining < 64
+                        || if complement {
+                            dense[wi] != 0
+                        } else {
+                            dense[wi] != !0u64
+                        }
+                    {
+                        break;
+                    }
+                    wi += 1;
+                }
+                cost = cost.saturating_add(self.full_internal_word_run_buf_op_cost(
+                    run_start,
+                    wi,
+                    buf_len,
+                ));
+                continue;
+            }
+            cost = cost.saturating_add(self.internal_bits_grouped_buf_op_cost(
+                wi,
+                bits,
+                valid_mask,
+                buf_len,
+            ));
+            wi += 1;
+        }
+        cost
+    }
+
     #[inline(always)]
-    fn or_internal_token_to_buf_fast(
+    fn or_internal_token_to_buf_fast<const PROFILE: bool>(
         &self,
         internal_token: usize,
         buf: &mut [u32],
@@ -2296,19 +2692,23 @@ impl Constraint {
     ) {
         if internal_token < self.heavy_token_dense_masks.len() {
             if let Some(ref dense_mask) = self.heavy_token_dense_masks[internal_token] {
-                *stats_entries += dense_mask.len() as u64;
+                if PROFILE {
+                    *stats_entries += dense_mask.len() as u64;
+                }
                 or_dense_buf(buf, dense_mask);
                 return;
             }
         }
         let start = self.internal_token_buf_offsets[internal_token] as usize;
         let end = self.internal_token_buf_offsets[internal_token + 1] as usize;
-        *stats_entries += end.saturating_sub(start) as u64;
+        if PROFILE {
+            *stats_entries += end.saturating_sub(start) as u64;
+        }
         or_sparse_buf_entries(buf, &self.internal_token_buf_flat[start..end]);
     }
 
     #[inline(always)]
-    fn andnot_internal_token_from_buf_fast(
+    fn andnot_internal_token_from_buf_fast<const PROFILE: bool>(
         &self,
         internal_token: usize,
         buf: &mut [u32],
@@ -2316,18 +2716,22 @@ impl Constraint {
     ) {
         if internal_token < self.heavy_token_dense_masks.len() {
             if let Some(ref dense_mask) = self.heavy_token_dense_masks[internal_token] {
-                *stats_entries += dense_mask.len() as u64;
+                if PROFILE {
+                    *stats_entries += dense_mask.len() as u64;
+                }
                 andnot_dense_buf(buf, dense_mask);
                 return;
             }
         }
         let start = self.internal_token_buf_offsets[internal_token] as usize;
         let end = self.internal_token_buf_offsets[internal_token + 1] as usize;
-        *stats_entries += end.saturating_sub(start) as u64;
+        if PROFILE {
+            *stats_entries += end.saturating_sub(start) as u64;
+        }
         andnot_sparse_buf_entries(buf, &self.internal_token_buf_flat[start..end]);
     }
 
-    fn or_internal_bits_to_buf_grouped(
+    fn or_internal_bits_to_buf_grouped<const PROFILE: bool>(
         &self,
         wi: usize,
         mut bits: u64,
@@ -2340,9 +2744,16 @@ impl Constraint {
             let byte_valid = (valid_mask >> shift) & 0xff;
             let byte_bits = (bits >> shift) & 0xff;
             if byte_valid == 0xff && byte_bits == 0xff {
-                if let Some(group_mask) = self.byte_group_sparse_masks.get(wi * 8 + byte_idx) {
-                    stats.group_or_sparse_entries += group_mask.len() as u64;
-                    or_sparse_buf_entries(buf, group_mask);
+                let group_idx = wi * 8 + byte_idx;
+                if let Some(group_mask) = self.byte_group_sparse_masks.get(group_idx) {
+                    let dense_mask = self
+                        .byte_group_dense_masks
+                        .get(group_idx)
+                        .and_then(Option::as_deref);
+                    let replay_cost = or_group_buf_mask(buf, group_mask, dense_mask);
+                    if PROFILE {
+                        stats.group_or_sparse_entries += replay_cost as u64;
+                    }
                     bits &= !(0xffu64 << shift);
                 }
             }
@@ -2353,20 +2764,29 @@ impl Constraint {
             let quad_valid = (valid_mask >> shift) & 0x0f;
             let quad_bits = (bits >> shift) & 0x0f;
             if quad_valid == 0x0f && quad_bits == 0x0f {
-                if let Some(group_mask) = self.quad_group_sparse_masks.get(wi * 16 + quad_idx) {
-                    stats.group_or_sparse_entries += group_mask.len() as u64;
-                    or_sparse_buf_entries(buf, group_mask);
+                let group_idx = wi * 16 + quad_idx;
+                if let Some(group_mask) = self.quad_group_sparse_masks.get(group_idx) {
+                    let dense_mask = self
+                        .quad_group_dense_masks
+                        .get(group_idx)
+                        .and_then(Option::as_deref);
+                    let replay_cost = or_group_buf_mask(buf, group_mask, dense_mask);
+                    if PROFILE {
+                        stats.group_or_sparse_entries += replay_cost as u64;
+                    }
                     bits &= !(0x0fu64 << shift);
                 }
             }
         }
 
         while bits != 0 {
-            stats.normal_token_iterations += 1;
+            if PROFILE {
+                stats.normal_token_iterations += 1;
+            }
             let bit = bits.trailing_zeros() as usize;
             let internal_token = wi * 64 + bit;
             if internal_token < self.internal_token_buf_offsets.len().saturating_sub(1) {
-                self.or_internal_token_to_buf_fast(
+                self.or_internal_token_to_buf_fast::<PROFILE>(
                     internal_token,
                     buf,
                     &mut stats.normal_sparse_entries,
@@ -2376,7 +2796,7 @@ impl Constraint {
         }
     }
 
-    fn andnot_internal_bits_from_buf_grouped(
+    fn andnot_internal_bits_from_buf_grouped<const PROFILE: bool>(
         &self,
         wi: usize,
         mut bits: u64,
@@ -2389,10 +2809,17 @@ impl Constraint {
             let byte_valid = (valid_mask >> shift) & 0xff;
             let byte_bits = (bits >> shift) & 0xff;
             if byte_valid == 0xff && byte_bits == 0xff {
-                if let Some(group_mask) = self.byte_group_sparse_masks.get(wi * 8 + byte_idx) {
-                    stats.complement_full_byte_groups += 1;
-                    stats.group_andnot_sparse_entries += group_mask.len() as u64;
-                    andnot_sparse_buf_entries(buf, group_mask);
+                let group_idx = wi * 8 + byte_idx;
+                if let Some(group_mask) = self.byte_group_sparse_masks.get(group_idx) {
+                    let dense_mask = self
+                        .byte_group_dense_masks
+                        .get(group_idx)
+                        .and_then(Option::as_deref);
+                    let replay_cost = andnot_group_buf_mask(buf, group_mask, dense_mask);
+                    if PROFILE {
+                        stats.complement_full_byte_groups += 1;
+                        stats.group_andnot_sparse_entries += replay_cost as u64;
+                    }
                     bits &= !(0xffu64 << shift);
                 }
             }
@@ -2403,21 +2830,30 @@ impl Constraint {
             let quad_valid = (valid_mask >> shift) & 0x0f;
             let quad_bits = (bits >> shift) & 0x0f;
             if quad_valid == 0x0f && quad_bits == 0x0f {
-                if let Some(group_mask) = self.quad_group_sparse_masks.get(wi * 16 + quad_idx) {
-                    stats.complement_full_nibble_groups += 1;
-                    stats.group_andnot_sparse_entries += group_mask.len() as u64;
-                    andnot_sparse_buf_entries(buf, group_mask);
+                let group_idx = wi * 16 + quad_idx;
+                if let Some(group_mask) = self.quad_group_sparse_masks.get(group_idx) {
+                    let dense_mask = self
+                        .quad_group_dense_masks
+                        .get(group_idx)
+                        .and_then(Option::as_deref);
+                    let replay_cost = andnot_group_buf_mask(buf, group_mask, dense_mask);
+                    if PROFILE {
+                        stats.complement_full_nibble_groups += 1;
+                        stats.group_andnot_sparse_entries += replay_cost as u64;
+                    }
                     bits &= !(0x0fu64 << shift);
                 }
             }
         }
 
         while bits != 0 {
-            stats.complement_token_iterations += 1;
+            if PROFILE {
+                stats.complement_token_iterations += 1;
+            }
             let bit = bits.trailing_zeros() as usize;
             let internal_token = wi * 64 + bit;
             if internal_token < self.internal_token_buf_offsets.len().saturating_sub(1) {
-                self.andnot_internal_token_from_buf_fast(
+                self.andnot_internal_token_from_buf_fast::<PROFILE>(
                     internal_token,
                     buf,
                     &mut stats.complement_sparse_entries,
@@ -2427,18 +2863,86 @@ impl Constraint {
         }
     }
 
+    fn fill_internal_dense_complement_to_buf<const PROFILE: bool>(
+        &self,
+        dense: &[u64],
+        n_internal: usize,
+        buf: &mut [u32],
+        stats: &mut DenseToBufProfileStats,
+    ) {
+        copy_dense_buf(buf, &self.all_tokens_buf_mask);
+        let mut wi = 0usize;
+        while wi < dense.len() {
+            if wi * 64 >= n_internal {
+                break;
+            }
+            if PROFILE {
+                stats.dense_words_visited += 1;
+            }
+            let w = dense[wi];
+            let remaining = n_internal - wi * 64;
+            let valid_mask = if remaining >= 64 {
+                !0u64
+            } else {
+                (1u64 << remaining) - 1
+            };
+            let missing = !w & valid_mask;
+            if missing == 0 {
+                wi += 1;
+                continue;
+            }
+            if missing == valid_mask {
+                let run_start = wi;
+                wi += 1;
+                while wi < dense.len() && wi * 64 < n_internal {
+                    let remaining = n_internal - wi * 64;
+                    if remaining < 64 || dense[wi] != 0 {
+                        break;
+                    }
+                    if PROFILE {
+                        stats.dense_words_visited += 1;
+                    }
+                    wi += 1;
+                }
+                self.andnot_full_internal_word_run_from_buf::<PROFILE>(
+                    run_start,
+                    wi,
+                    buf,
+                    stats,
+                );
+                continue;
+            }
+            self.andnot_internal_bits_from_buf_grouped::<PROFILE>(
+                wi,
+                missing,
+                valid_mask,
+                buf,
+                stats,
+            );
+            wi += 1;
+        }
+    }
+
     /// Convert a merged internal token dense bitmap to the output buffer.
     /// Uses a contiguous flat entry array for cache-friendly sequential access,
     /// with word_group fast paths for fully-set 64-bit words and heavy token
     /// dense masks for tokens with many buf entries.
-    pub(crate) fn or_internal_dense_to_buf(
+    fn or_internal_dense_to_buf_impl<const PROFILE: bool>(
         &self,
         dense: &[u64],
         buf: &mut [u32],
         buf_zeroed: bool,
+        mut dirty_complement_scratch: Option<&mut Vec<u32>>,
     ) -> DenseToBufProfileStats {
         if self.final_mask_mapping.internal_len() > 0 {
-            return self.final_mask_mapping.or_dense_to_buf(dense, buf, buf_zeroed);
+            if PROFILE {
+                return self
+                    .final_mask_mapping
+                    .or_dense_to_buf(dense, buf, buf_zeroed);
+            }
+            self.final_mask_mapping
+                .or_dense_to_buf_fast(dense, buf, buf_zeroed);
+            return DenseToBufProfileStats::default();
         }
 
         let mut stats = DenseToBufProfileStats::default();
@@ -2474,43 +2978,50 @@ impl Constraint {
         let dense_complement_fast_path =
             n_set.saturating_mul(5) >= n_internal.saturating_mul(4) && n_missing <= 128;
 
+        let dirty_complement_fast_path = if !buf_zeroed
+            && dirty_complement_scratch.is_some()
+            && !all_mask.is_empty()
+        {
+            let selected_cost =
+                self.internal_dense_buf_replay_cost(dense, n_internal, buf_len, false);
+            let dense_pass_cost = buf_len.saturating_mul(2);
+            if selected_cost <= dense_pass_cost {
+                false
+            } else {
+                let missing_cost =
+                    self.internal_dense_buf_replay_cost(dense, n_internal, buf_len, true);
+                dense_pass_cost.saturating_add(missing_cost) < selected_cost
+            }
+        } else {
+            false
+        };
+
         // Complement conversion seeds ALL and then clears missing-token bits.
         // It is only an OR-equivalent conversion when `buf` is known zero;
         // otherwise the clears can erase bits produced by another parser path.
-        if buf_zeroed && !all_mask.is_empty() && dense_complement_fast_path {
-            stats.complement_path_used = true;
-            // Complement-sparse path: start from all_tokens, subtract missing tokens.
-            copy_dense_buf(buf, all_mask);
-            let mut wi = 0usize;
-            while wi < dense.len() {
-                if wi * 64 >= n_internal {
-                    break;
-                }
-                stats.dense_words_visited += 1;
-                let w = dense[wi];
-                let remaining = n_internal - wi * 64;
-                let valid_mask = if remaining >= 64 { !0u64 } else { (1u64 << remaining) - 1 };
-                let missing = !w & valid_mask;
-                if missing == 0 {
-                    wi += 1;
-                    continue;
-                }
-                if missing == valid_mask {
-                    let run_start = wi;
-                    wi += 1;
-                    while wi < dense.len() && wi * 64 < n_internal {
-                        let remaining = n_internal - wi * 64;
-                        if remaining < 64 || dense[wi] != 0 {
-                            break;
-                        }
-                        stats.dense_words_visited += 1;
-                        wi += 1;
-                    }
-                    self.andnot_full_internal_word_run_from_buf(run_start, wi, buf, &mut stats);
-                    continue;
-                }
-                self.andnot_internal_bits_from_buf_grouped(wi, missing, valid_mask, buf, &mut stats);
-                wi += 1;
+        if !all_mask.is_empty()
+            && ((buf_zeroed && dense_complement_fast_path)
+                || (!buf_zeroed && dirty_complement_fast_path))
+        {
+            if PROFILE {
+                stats.complement_path_used = true;
+            }
+            if buf_zeroed {
+                self.fill_internal_dense_complement_to_buf::<PROFILE>(
+                    dense,
+                    n_internal,
+                    buf,
+                    &mut stats,
+                );
+            } else if let Some(scratch) = dirty_complement_scratch.as_deref_mut() {
+                scratch.resize(buf.len(), 0);
+                self.fill_internal_dense_complement_to_buf::<PROFILE>(
+                    dense,
+                    n_internal,
+                    scratch,
+                    &mut stats,
+                );
+                or_dense_buf(buf, scratch);
             }
         } else {
             // Normal path: process sparse light tokens and dense heavy tokens.
@@ -2519,7 +3030,9 @@ impl Constraint {
                 if wi * 64 >= n_internal {
                     break;
                 }
-                stats.dense_words_visited += 1;
+                if PROFILE {
+                    stats.dense_words_visited += 1;
+                }
                 let w = dense[wi];
                 let remaining = n_internal - wi * 64;
                 let valid_mask = if remaining >= 64 { !0u64 } else { (1u64 << remaining) - 1 };
@@ -2536,10 +3049,17 @@ impl Constraint {
                         if remaining < 64 || dense[wi] != !0u64 {
                             break;
                         }
-                        stats.dense_words_visited += 1;
+                        if PROFILE {
+                            stats.dense_words_visited += 1;
+                        }
                         wi += 1;
                     }
-                    self.or_full_internal_word_run_to_buf(run_start, wi, buf, &mut stats);
+                    self.or_full_internal_word_run_to_buf::<PROFILE>(
+                        run_start,
+                        wi,
+                        buf,
+                        &mut stats,
+                    );
                     continue;
                 }
                 let missing_bits = !valid_bits & valid_mask;
@@ -2553,43 +3073,66 @@ impl Constraint {
                             .unwrap_or_else(|| selected_cost + self.internal_bits_buf_op_cost(wi, missing_bits, buf_len))
                             .saturating_sub(selected_cost);
                         if buf_zeroed && group_mask.len() + missing_cost < selected_cost {
-                            stats.normal_group_complement_hits += 1;
+                            if PROFILE {
+                                stats.normal_group_complement_hits += 1;
+                            }
                             if Self::prefer_dense_buf_scan(buf_len, group_mask.len())
                                 && wi + 1 < self.word_group_prefix_buf_masks.len()
                             {
-                                stats.group_or_sparse_entries += buf_len as u64;
+                                if PROFILE {
+                                    stats.group_or_sparse_entries += buf_len as u64;
+                                }
                                 self.or_word_group_prefix_diff_to_buf(wi, wi + 1, buf);
                             } else {
-                                stats.group_or_sparse_entries += group_mask.len() as u64;
+                                if PROFILE {
+                                    stats.group_or_sparse_entries += group_mask.len() as u64;
+                                }
                                 or_sparse_buf_entries(buf, group_mask);
                             }
                             let mut missing_stats = DenseToBufProfileStats::default();
-                            self.andnot_internal_bits_from_buf_grouped(
+                            self.andnot_internal_bits_from_buf_grouped::<PROFILE>(
                                 wi,
                                 missing_bits,
                                 valid_mask,
                                 buf,
                                 &mut missing_stats,
                             );
-                            stats.normal_group_complement_sparse_entries +=
-                                missing_stats.group_andnot_sparse_entries
-                                    + missing_stats.complement_sparse_entries;
-                            stats.complement_full_byte_groups +=
-                                missing_stats.complement_full_byte_groups;
-                            stats.complement_full_nibble_groups +=
-                                missing_stats.complement_full_nibble_groups;
+                            if PROFILE {
+                                stats.normal_group_complement_sparse_entries +=
+                                    missing_stats.group_andnot_sparse_entries
+                                        + missing_stats.complement_sparse_entries;
+                                stats.complement_full_byte_groups +=
+                                    missing_stats.complement_full_byte_groups;
+                                stats.complement_full_nibble_groups +=
+                                    missing_stats.complement_full_nibble_groups;
+                            }
                             wi += 1;
                             continue;
                         }
                     }
                 }
 
-                self.or_internal_bits_to_buf_grouped(wi, valid_bits, valid_mask, buf, &mut stats);
+                self.or_internal_bits_to_buf_grouped::<PROFILE>(
+                    wi,
+                    valid_bits,
+                    valid_mask,
+                    buf,
+                    &mut stats,
+                );
                 wi += 1;
             }
         }
 
         stats
+    }
+
+    pub(crate) fn or_internal_dense_to_buf(
+        &self,
+        dense: &[u64],
+        buf: &mut [u32],
+        buf_zeroed: bool,
+    ) -> DenseToBufProfileStats {
+        self.or_internal_dense_to_buf_impl::<true>(dense, buf, buf_zeroed, None)
     }
 
     pub(crate) fn or_internal_dense_to_buf_fast(
@@ -2598,13 +3141,22 @@ impl Constraint {
         buf: &mut [u32],
         buf_zeroed: bool,
     ) {
-        if self.final_mask_mapping.internal_len() > 0 {
-            self.final_mask_mapping
-                .or_dense_to_buf_fast(dense, buf, buf_zeroed);
-            return;
-        }
+        let _ = self.or_internal_dense_to_buf_impl::<false>(dense, buf, buf_zeroed, None);
+    }
 
-        let _ = self.or_internal_dense_to_buf(dense, buf, buf_zeroed);
+    pub(crate) fn or_internal_dense_to_buf_fast_with_scratch(
+        &self,
+        dense: &[u64],
+        buf: &mut [u32],
+        buf_zeroed: bool,
+        dirty_complement_scratch: &mut Vec<u32>,
+    ) {
+        let _ = self.or_internal_dense_to_buf_impl::<false>(
+            dense,
+            buf,
+            buf_zeroed,
+            Some(dirty_complement_scratch),
+        );
     }
 
     fn or_original_token_to_buf(&self, token_id: u32, buf: &mut [u32]) {
@@ -2657,6 +3209,78 @@ mod dense_internal_token_mask_tests {
         let internal_tokens = RangeSetBlaze::from_iter([63u32..=65, 190..=400]);
         let actual = Constraint::dense_words_from_internal_set_with_words(&internal_tokens, 3);
         assert_eq!(actual.as_ref(), &[1u64 << 63, 0b11, 1u64 << 62 | 1u64 << 63]);
+    }
+
+    #[test]
+    fn direct_sparse_expanded_work_counts_alias_expansion_and_heavy_tokens() {
+        let masks = vec![
+            vec![(0, 1)],
+            vec![(0, 1), (1, 1), (2, 1), (3, 1), (4, 1)],
+            vec![(0, 1), (1, 1)],
+            vec![(0, 1), (1, 1), (2, 1)],
+        ];
+        let work_prefix = Constraint::direct_sparse_work_prefix(&masks, 16);
+        let selected = RangeSetBlaze::from_iter([0u32..=1, 3..=3]);
+
+        // Each selected internal token costs one membership scan. Token 1 is
+        // heavy because 5 entries exceed 16 / 4, so runtime uses a 16-word
+        // dense OR for it instead of five sparse writes.
+        assert_eq!(
+            Constraint::direct_sparse_expanded_work(&selected, &work_prefix),
+            (1 + 1) + (1 + 16) + (1 + 3)
+        );
+    }
+
+    #[test]
+    fn direct_sparse_expanded_work_clamps_out_of_bounds_ranges() {
+        let masks = vec![vec![(0, 1)], vec![(1, 1), (2, 1)]];
+        let work_prefix = Constraint::direct_sparse_work_prefix(&masks, 16);
+        let selected = RangeSetBlaze::from_iter([1u32..=100]);
+
+        assert_eq!(
+            Constraint::direct_sparse_expanded_work(&selected, &work_prefix),
+            1 + 2
+        );
+    }
+
+    #[test]
+    fn heavy_group_dense_masks_match_sparse_replay_and_threshold() {
+        let groups = vec![
+            vec![(0, 0b0011), (2, 0b0100), (5, 0b1000)],
+            vec![(1, 0b0101), (6, 0b1010)],
+        ];
+        let dense = Constraint::compute_heavy_group_dense_masks(&groups, 8);
+
+        assert!(dense[0].is_some(), "3 sparse entries should beat the 8 / 4 threshold");
+        assert!(dense[1].is_none(), "2 sparse entries should remain sparse at the threshold");
+
+        let mut sparse_or = vec![0x10u32; 8];
+        or_sparse_buf_entries(&mut sparse_or, &groups[0]);
+        let mut adaptive_or = vec![0x10u32; 8];
+        assert_eq!(
+            or_group_buf_mask(&mut adaptive_or, &groups[0], dense[0].as_deref()),
+            8,
+        );
+        assert_eq!(adaptive_or, sparse_or);
+
+        let mut sparse_andnot = vec![u32::MAX; 8];
+        andnot_sparse_buf_entries(&mut sparse_andnot, &groups[0]);
+        let mut adaptive_andnot = vec![u32::MAX; 8];
+        assert_eq!(
+            andnot_group_buf_mask(
+                &mut adaptive_andnot,
+                &groups[0],
+                dense[0].as_deref(),
+            ),
+            8,
+        );
+        assert_eq!(adaptive_andnot, sparse_andnot);
+
+        let mut light = vec![0u32; 8];
+        assert_eq!(
+            or_group_buf_mask(&mut light, &groups[1], dense[1].as_deref()),
+            groups[1].len(),
+        );
     }
 
     #[test]
@@ -2721,7 +3345,87 @@ mod dense_internal_token_mask_tests {
                     "fast OR mismatch: selected={selected:#b} initial={initial:#06b} internal_to_original={:?}",
                     constraint.internal_token_to_tokens,
                 );
+
+                let mut scratch_fast = vec![0u32; constraint.mask_len()];
+                scratch_fast[0] = initial;
+                let mut dirty_complement_scratch = Vec::new();
+                constraint.or_internal_dense_to_buf_fast_with_scratch(
+                    &dense,
+                    &mut scratch_fast,
+                    buf_zeroed,
+                    &mut dirty_complement_scratch,
+                );
+                assert_eq!(
+                    scratch_fast[0],
+                    expected,
+                    "scratch fast OR mismatch: selected={selected:#b} initial={initial:#06b} internal_to_original={:?}",
+                    constraint.internal_token_to_tokens,
+                );
             }
         }
+    }
+
+    #[test]
+    fn dirty_dense_conversion_uses_scratch_complement_when_alias_replay_is_expensive() {
+        let mut entries = Vec::new();
+        for alias in 0u32..64 {
+            for byte_index in 0u32..64 {
+                entries.push((alias * 64 + byte_index, vec![(byte_index + 32) as u8]));
+            }
+        }
+        let vocab = Vocab::new(entries, None);
+        let mut grammar = String::from("start start;\n");
+        for byte_index in 0u32..64 {
+            let literal = serde_json::to_string(&((byte_index + 32) as u8 as char).to_string())
+                .unwrap();
+            grammar.push_str(&format!("t T{byte_index} ::= {literal};\n"));
+        }
+        grammar.push_str("nt start ::= ");
+        for byte_index in 0u32..64 {
+            if byte_index != 0 {
+                grammar.push_str(" | ");
+            }
+            grammar.push_str(&format!("T{byte_index} T{byte_index}"));
+        }
+        grammar.push_str(";\n");
+        let mut constraint = Constraint::from_glrm_grammar(
+            &grammar,
+            &vocab,
+        )
+        .unwrap();
+        constraint.final_mask_mapping = Default::default();
+
+        let n_internal = constraint.internal_token_to_tokens.len();
+        assert_eq!(n_internal, 64, "expected duplicate bytes to form 64 internal tokens");
+
+        let mut dense = vec![0u64; n_internal.div_ceil(64)];
+        for internal in 0..48 {
+            dense[internal / 64] |= 1u64 << (internal % 64);
+        }
+
+        let dirty_token = constraint.internal_token_to_tokens[63][0];
+        let dirty_word = dirty_token as usize / 32;
+        let dirty_bit = dirty_token as usize % 32;
+
+        let mut expected = vec![0u32; constraint.mask_len()];
+        expected[dirty_word] |= 1u32 << dirty_bit;
+        constraint.or_internal_dense_to_buf_fast(&dense, &mut expected, false);
+
+        let mut actual = vec![0u32; constraint.mask_len()];
+        actual[dirty_word] |= 1u32 << dirty_bit;
+        let mut scratch = Vec::new();
+        constraint.or_internal_dense_to_buf_fast_with_scratch(
+            &dense,
+            &mut actual,
+            false,
+            &mut scratch,
+        );
+
+        assert_eq!(actual, expected);
+        assert_eq!(
+            scratch.len(),
+            constraint.mask_len(),
+            "expected the replay-cost model to select dirty scratch complement conversion",
+        );
     }
 }

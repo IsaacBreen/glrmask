@@ -33,7 +33,9 @@ use self::template_advance::{
     advance_stacks_template_dfa,
     advance_stacks_template_dfa_owned,
 };
-use self::tokenizer_scan::{execute_tokenizer_from_state_small, InitialCommitScan};
+use self::tokenizer_scan::{
+    execute_tokenizer_from_state_small, execute_tokenizer_from_state_small_into, InitialCommitScan,
+};
 
 type ParserStatesByTokenizer = FxHashMap<u32, ParserGSS>;
 
@@ -70,10 +72,11 @@ fn advance_parser_stacks(
     {
         if validate_template_advance_enabled() {
             let table_advanced = advance_stacks(&constraint.table, stack, terminal);
-            assert_eq!(
-                template_advanced,
-                table_advanced,
-                "template-DFA advance mismatch for terminal {terminal}"
+            assert!(
+                template_advanced.semantically_eq(&table_advanced),
+                "template-DFA advance mismatch for terminal {terminal}; template={:?} table={:?}",
+                template_advanced.to_stacks(),
+                table_advanced.to_stacks(),
             );
         }
         return template_advanced;
@@ -93,10 +96,11 @@ fn advance_parser_stacks_owned(
     {
         if validate_template_advance_enabled() {
             let table_advanced = advance_stacks_owned(&constraint.table, stack, terminal);
-            assert_eq!(
-                template_advanced,
-                table_advanced,
-                "template-DFA advance mismatch for terminal {terminal}"
+            assert!(
+                template_advanced.semantically_eq(&table_advanced),
+                "template-DFA advance mismatch for terminal {terminal}; template={:?} table={:?}",
+                template_advanced.to_stacks(),
+                table_advanced.to_stacks(),
             );
         }
         return template_advanced;
@@ -118,10 +122,11 @@ fn advance_parser_stacks_profiled(
         if validate_template_advance_enabled() {
             let (table_advanced, table_profile) =
                 advance_stacks_profiled(&constraint.table, stack, terminal);
-            assert_eq!(
-                template_advanced,
-                table_advanced,
-                "template-DFA advance mismatch for terminal {terminal}"
+            assert!(
+                template_advanced.semantically_eq(&table_advanced),
+                "template-DFA advance mismatch for terminal {terminal}; template={:?} table={:?}",
+                template_advanced.to_stacks(),
+                table_advanced.to_stacks(),
             );
             return (template_advanced, table_profile);
         }
@@ -804,7 +809,9 @@ fn queue_parser_state(
     }
 }
 
-fn finalize_pending_state(mut pending_state: ParserStatesByTokenizer) -> BTreeMap<u32, ParserGSS> {
+fn finalize_pending_state(
+    pending_state: &mut ParserStatesByTokenizer,
+) -> BTreeMap<u32, ParserGSS> {
     match pending_state.len() {
         0 => BTreeMap::new(),
         1 => {
@@ -819,7 +826,7 @@ fn finalize_pending_state(mut pending_state: ParserStatesByTokenizer) -> BTreeMa
             }
         }
         _ => {
-            let mut new_state: BTreeMap<u32, ParserGSS> = pending_state.into_iter().collect();
+            let mut new_state: BTreeMap<u32, ParserGSS> = pending_state.drain().collect();
             for parser_state in new_state.values_mut() {
                 *parser_state = parser_state.fuse(Some(1));
             }
@@ -1409,7 +1416,7 @@ fn commit_bytes_full_width_fast_path(
         }
     }
 
-    let new_state = finalize_pending_state(output);
+    let new_state = finalize_pending_state(&mut output);
     if new_state.is_empty() {
         return Some(Err(
             "commit rejected: no valid parser states remain".to_string(),
@@ -1437,6 +1444,8 @@ fn commit_bytes_small_queue_fast_path(
     constraint: &Constraint,
     state: &mut BTreeMap<u32, ParserGSS>,
     bytes: &[u8],
+    exec_result: &mut TokenizerExecResult,
+    pending_state: &mut ParserStatesByTokenizer,
 ) -> Option<Result<(), String>> {
     if constraint.tokenizer.has_epsilon_transitions() {
         return None;
@@ -1450,7 +1459,6 @@ fn commit_bytes_small_queue_fast_path(
         processing_queue[0].push((tokenizer_state, gss.clone()));
     }
 
-    let mut pending_state = ParserStatesByTokenizer::default();
       let mut offset = 0usize;
       while offset <= bytes.len() {
           if processing_queue[offset].is_empty() {
@@ -1461,8 +1469,12 @@ fn commit_bytes_small_queue_fast_path(
           let states_to_process = std::mem::take(&mut processing_queue[offset]);
           let initial_tokenizer_state = constraint.tokenizer.initial_state();
           for (tokenizer_state, mut gss_at_offset) in states_to_process {
-              let exec_result =
-                  execute_tokenizer_from_state_small(constraint, &bytes[offset..], tokenizer_state);
+              execute_tokenizer_from_state_small_into(
+                  constraint,
+                  &bytes[offset..],
+                  tokenizer_state,
+                  exec_result,
+              );
 
             if offset == 0
                 && !gss_at_offset.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty())
@@ -1471,7 +1483,7 @@ fn commit_bytes_small_queue_fast_path(
                     constraint,
                     gss_at_offset,
                     tokenizer_state,
-                    &exec_result,
+                    exec_result,
                 );
                 if gss_at_offset.is_empty() {
                     continue;
@@ -1497,7 +1509,7 @@ fn commit_bytes_small_queue_fast_path(
                   if matched.ignored {
                       if new_offset == bytes.len() {
                           merge_parser_state(
-                              &mut pending_state,
+                              pending_state,
                               initial_tokenizer_state,
                               gss_at_offset.clone(),
                           );
@@ -1515,15 +1527,15 @@ fn commit_bytes_small_queue_fast_path(
                       && let Some(top_state) = gss_at_offset.single_exclusive_top_value()
                       && let Some(action) = constraint.table.action(top_state, matched.terminal_id)
                       && let Some(advanced) = apply_single_top_action_fast(
-                        &constraint.table,
-                        &gss_at_offset,
-                        top_state,
-                        matched.terminal_id,
-                        action,
-                    )
-                {
-                    advanced
-                } else {
+                          &constraint.table,
+                          &gss_at_offset,
+                          top_state,
+                          matched.terminal_id,
+                          action,
+                      )
+                  {
+                      advanced
+                  } else {
                     if !stack_may_advance_on(
                         &constraint.table,
                         &gss_at_offset,
@@ -1535,7 +1547,7 @@ fn commit_bytes_small_queue_fast_path(
                 };
                 let advanced = apply_future_terminal_disallow(
                     constraint,
-                    &exec_result,
+                    exec_result,
                     matched.terminal_id,
                     advanced,
                 );
@@ -1553,7 +1565,7 @@ fn commit_bytes_small_queue_fast_path(
                 emitted_terminal_outputs.push((new_offset, advanced.clone()));
                   if new_offset == bytes.len() {
                       merge_parser_state(
-                          &mut pending_state,
+                          pending_state,
                           initial_tokenizer_state,
                           advanced,
                       );
@@ -1568,7 +1580,7 @@ fn commit_bytes_small_queue_fast_path(
 
             for &end_state in &exec_result.end_state {
                 if end_state_may_advance(constraint, &gss_at_offset, end_state) {
-                    merge_parser_state(&mut pending_state, end_state, gss_at_offset.clone());
+                    merge_parser_state(pending_state, end_state, gss_at_offset.clone());
                 }
             }
         }
@@ -2606,7 +2618,7 @@ fn commit_bytes_impl_profiled(
                             profile.queue_ns.saturating_sub(queue_accounted_ns);
 
                         let fuse_start = Instant::now();
-                        let new_state = finalize_pending_state(std::mem::take(&mut pending_state));
+                        let new_state = finalize_pending_state(&mut pending_state);
                         profile.fuse_ns += fuse_start.elapsed().as_nanos() as u64;
 
                         *state = new_state;
@@ -2803,7 +2815,7 @@ fn commit_bytes_impl_profiled(
 
     let fuse_start = Instant::now();
 
-    let new_state = finalize_pending_state(std::mem::take(&mut pending_state));
+    let new_state = finalize_pending_state(&mut pending_state);
     profile.fuse_ns = fuse_start.elapsed().as_nanos() as u64;
 
     *state = new_state;
@@ -3289,7 +3301,18 @@ fn commit_bytes_impl(
         }
     }
 
-    if let Some(result) = commit_bytes_small_queue_fast_path(constraint, state, bytes) {
+    bufs.pending_state.clear();
+    let small_queue_result = commit_bytes_small_queue_fast_path(
+        constraint,
+        state,
+        bytes,
+        &mut bufs.small_exec_result,
+        &mut bufs.pending_state,
+    );
+    if small_queue_result.is_none() {
+        bufs.pending_state.clear();
+    }
+    if let Some(result) = small_queue_result {
         return result;
     }
 
@@ -3447,7 +3470,7 @@ fn commit_bytes_impl(
                         }
                     }
 
-                    let new_state = finalize_pending_state(std::mem::take(&mut bufs.pending_state));
+                    let new_state = finalize_pending_state(&mut bufs.pending_state);
 
                     *state = new_state;
                     bufs.processing_queue = processing_queue;
@@ -3581,7 +3604,7 @@ fn commit_bytes_impl(
         offset += 1;
     }
 
-    let new_state = finalize_pending_state(std::mem::take(&mut bufs.pending_state));
+    let new_state = finalize_pending_state(&mut bufs.pending_state);
 
     *state = new_state;
     bufs.processing_queue = processing_queue;
