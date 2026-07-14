@@ -2995,7 +2995,7 @@ impl<'a> Lowerer<'a> {
         branches: &[Schema],
     ) -> ImportResult<Option<(ChoiceKind, Vec<Schema>)>> {
         let mut choice_branch = None;
-        for branch in branches {
+        for (branch_idx, branch) in branches.iter().enumerate() {
             if let Some((kind, alternatives)) = pure_choice_branch(branch) {
                 if choice_branch.is_some() {
                     return Ok(None);
@@ -3007,29 +3007,34 @@ impl<'a> Lowerer<'a> {
                     };
                     distributed_alternatives.push(distributed);
                 }
-                choice_branch = Some((kind, distributed_alternatives));
+                choice_branch = Some((branch_idx, kind, distributed_alternatives));
             } else if !self.schema_is_object_like_resolved(branch)? {
                 return Ok(None);
             }
         }
 
-        let Some((kind, alternatives)) = choice_branch else {
+        let Some((choice_branch_idx, kind, alternatives)) = choice_branch else {
             return Ok(None);
         };
-        let object_siblings = branches
-            .iter()
-            .filter(|branch| pure_choice_branch(branch).is_none())
-            .cloned()
-            .collect::<Vec<_>>();
 
         Ok(Some((
             kind,
             alternatives
                 .into_iter()
                 .map(|alternative| {
-                    let mut all_of = Vec::with_capacity(object_siblings.len() + 1);
-                    all_of.extend(object_siblings.iter().cloned());
-                    all_of.push(alternative);
+                    // Distribution substitutes the selected alternative at the
+                    // choice's original position.  Object property order is
+                    // observable in llguidance-compatible lowering, so moving
+                    // the choice after all siblings can incorrectly place its
+                    // properties after properties from later allOf conjuncts.
+                    let mut all_of = Vec::with_capacity(branches.len());
+                    for (branch_idx, branch) in branches.iter().enumerate() {
+                        if branch_idx == choice_branch_idx {
+                            all_of.push(alternative.clone());
+                        } else {
+                            all_of.push(branch.clone());
+                        }
+                    }
                     Schema::assertions(
                         "<distributed-allOf-anyOf>",
                         SchemaAssertions { all_of, ..SchemaAssertions::default() },
