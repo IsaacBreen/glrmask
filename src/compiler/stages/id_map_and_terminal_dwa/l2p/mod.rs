@@ -46,7 +46,10 @@ use crate::Vocab;
 use super::types::{
     compile_profile_enabled, TerminalColoring, TerminalDwaBuildProfile, TerminalDwaPhaseProfile,
 };
-use nwa_builder::{build_nwa_via_trie_walk, internal_vocab_entries, seed_root_nodes};
+use nwa_builder::{
+    build_nwa_via_trie_walk, internal_vocab_entries, seed_root_nodes,
+    try_build_depth2_dwa_direct,
+};
 use terminal_interchangeability::{
     active_terminals_for_partition, binary_transport_modes_from_witnesses,
     canonicalize_transport_mode_states, coalesced_disallowed_follows,
@@ -744,6 +747,33 @@ let strict_reference = reference_terminal_expansion
                 true,
             )
         } else {
+            let direct_depth2 = std::env::var_os("GLRMASK_ASSERT_L2P_DIRECT_DEPTH2")
+                .is_some()
+                .then(|| {
+                    try_build_depth2_dwa_direct(
+                        partition_label,
+                        tokenizer_for_build,
+                        &simplified_id_map,
+                        &internal_vocab,
+                        representative_core_active_terminals,
+                        always_allowed_follows,
+                        equivalence_disallowed_follows,
+                        ignore_terminal,
+                    )
+                })
+                .flatten();
+            if let Some((_, profile)) = &direct_depth2 {
+                eprintln!(
+                    "[glrmask/profile][l2p_direct_depth2] partition={} pairs={} scan_calls={} scan_input_bytes={} accepted_words={} total_ms={:.3}",
+                    partition_label,
+                    profile.pairs,
+                    profile.scan_calls,
+                    profile.scan_input_bytes,
+                    profile.accepted_words,
+                    profile.total_ms,
+                );
+            }
+
             let full_tree = VocabPrefixTree::build_owned(
                 internal_vocab
                     .iter()
@@ -809,13 +839,19 @@ let strict_reference = reference_terminal_expansion
             let nwa_states_after_build = nwa.states().len();
 
             let collapse_started_at = Instant::now();
-            collapse_always_allowed(
+            let collapse_changed = collapse_always_allowed(
                 &mut nwa,
                 always_allowed_follows,
                 grammar.num_terminals as usize,
             );
             let collapse_ms = collapse_started_at.elapsed().as_secs_f64() * 1000.0;
             let nwa_states_after_collapse = nwa.states().len();
+            if std::env::var_os("GLRMASK_ASSERT_L2P_DIRECT_DEPTH2").is_some() {
+                eprintln!(
+                    "[glrmask/profile][l2p_direct_depth2_collapse] partition={} changed={}",
+                    partition_label, collapse_changed,
+                );
+            }
 
             let disallowed_started_at = Instant::now();
             apply_disallowed_follow_constraints(
@@ -857,6 +893,14 @@ let strict_reference = reference_terminal_expansion
             } else {
                 determinize(&nwa).expect("L2+ terminal NWA determinization failed")
             };
+            if let Some((direct_depth2, _)) = &direct_depth2 {
+                assert_eq!(
+                    find_difference(direct_depth2, &det)
+                        .expect("direct depth-2 terminal DWA equivalence check failed"),
+                    None,
+                    "direct depth-2 terminal DWA differs from the NWA construction",
+                );
+            }
             let determinize_ms = determinize_started_at.elapsed().as_secs_f64() * 1000.0;
 
             let minimize_started_at = Instant::now();

@@ -19,6 +19,68 @@ use crate::GlrMaskError;
 const MAX_INDEXED_FINAL_PATH_RANGES: usize = 8;
 const MIN_INDEXED_FINAL_WEIGHT_RANGES: usize = 32;
 
+pub(crate) type Depth2Word = SmallVec<[i32; 2]>;
+
+pub(crate) fn build_depth2_dwa_from_weighted_words(
+    accepted: BTreeMap<Depth2Word, Weight>,
+) -> Result<DWA, GlrMaskError> {
+    let mut by_first = BTreeMap::<i32, (Weight, BTreeMap<i32, Weight>)>::new();
+    let mut empty_weight = Weight::empty();
+    for (word, weight) in accepted {
+        match word.as_slice() {
+            [] => empty_weight = empty_weight.union(&weight),
+            [first] => {
+                let entry = by_first
+                    .entry(*first)
+                    .or_insert_with(|| (Weight::empty(), BTreeMap::new()));
+                entry.0 = entry.0.union(&weight);
+            }
+            [first, second] => {
+                let entry = by_first
+                    .entry(*first)
+                    .or_insert_with(|| (Weight::empty(), BTreeMap::new()));
+                entry
+                    .1
+                    .entry(*second)
+                    .and_modify(|existing| *existing = existing.union(&weight))
+                    .or_insert(weight);
+            }
+            _ => {
+                return Err(GlrMaskError::Compilation(
+                    "depth-2 weighted language contains an overlong word".into(),
+                ));
+            }
+        }
+    }
+
+    let mut dwa = DWA::new(0, 0);
+    if !empty_weight.is_empty() {
+        dwa.set_final_weight(dwa.start_state(), empty_weight);
+    }
+    let mut shared_leaf = None::<u32>;
+    for (first_label, (first_final, second_words)) in by_first {
+        let prefix_weight = Weight::union_all(
+            std::iter::once(&first_final).chain(second_words.values()),
+        );
+        let first_state = dwa.add_state();
+        dwa.add_transition(dwa.start_state(), first_label, first_state, prefix_weight);
+        if !first_final.is_empty() {
+            dwa.set_final_weight(first_state, first_final);
+        }
+        if !second_words.is_empty() {
+            let leaf = *shared_leaf.get_or_insert_with(|| {
+                let state = dwa.add_state();
+                dwa.set_final_weight(state, Weight::all());
+                state
+            });
+            for (second_label, word_weight) in second_words {
+                dwa.add_transition(first_state, second_label, leaf, word_weight);
+            }
+        }
+    }
+    Ok(dwa)
+}
+
 /// Outgoing edges from one NWA state, grouped by the exact shared `Weight`.
 ///
 /// For a path weight `p`, every edge in a group contributes `p ∩ w`, so this
@@ -216,9 +278,11 @@ pub fn determinize_depth2(nwa: &NWA) -> Result<DWA, GlrMaskError> {
 
     let profile = determinize_profile_enabled();
     let total_started_at = profile.then(Instant::now);
-    type Word = SmallVec<[i32; 2]>;
-
-    fn union_word_weight(language: &mut BTreeMap<Word, Weight>, word: Word, add: Weight) {
+    fn union_word_weight(
+        language: &mut BTreeMap<Depth2Word, Weight>,
+        word: Depth2Word,
+        add: Weight,
+    ) {
         if add.is_empty() {
             return;
         }
@@ -271,16 +335,16 @@ pub fn determinize_depth2(nwa: &NWA) -> Result<DWA, GlrMaskError> {
     debug_assert_eq!(topo_order.len(), nwa.states().len());
 
     let dp_started_at = profile.then(Instant::now);
-    let mut languages = vec![BTreeMap::<Word, Weight>::new(); nwa.states().len()];
+    let mut languages = vec![BTreeMap::<Depth2Word, Weight>::new(); nwa.states().len()];
     let mut weight_cache = ScopedWeightOpCache::default();
     let mut dp_word_contributions = 0usize;
     let mut max_state_words = 0usize;
     for state_id in topo_order.into_iter().rev() {
         let state = &nwa.states()[state_id];
-        let mut contributions = BTreeMap::<Word, SmallVec<[Weight; 4]>>::new();
+        let mut contributions = BTreeMap::<Depth2Word, SmallVec<[Weight; 4]>>::new();
         if let Some(final_weight) = &state.final_weight {
             contributions
-                .entry(Word::new())
+                .entry(Depth2Word::new())
                 .or_default()
                 .push(final_weight.clone());
         }
@@ -313,7 +377,7 @@ pub fn determinize_depth2(nwa: &NWA) -> Result<DWA, GlrMaskError> {
                     if contribution.is_empty() {
                         continue;
                     }
-                    let mut word = Word::with_capacity(suffix.len() + 1);
+                    let mut word = Depth2Word::with_capacity(suffix.len() + 1);
                     word.push(label);
                     word.extend_from_slice(suffix);
                     contributions.entry(word).or_default().push(contribution);
@@ -335,7 +399,7 @@ pub fn determinize_depth2(nwa: &NWA) -> Result<DWA, GlrMaskError> {
         .unwrap_or(0.0);
 
     let start_merge_started_at = profile.then(Instant::now);
-    let mut accepted = BTreeMap::<Word, Weight>::new();
+    let mut accepted = BTreeMap::<Depth2Word, Weight>::new();
     for &start_state in nwa.start_states() {
         for (word, weight) in &languages[start_state as usize] {
             union_word_weight(&mut accepted, word.clone(), weight.clone());
@@ -347,56 +411,7 @@ pub fn determinize_depth2(nwa: &NWA) -> Result<DWA, GlrMaskError> {
 
     let accepted_word_count = accepted.len();
     let build_started_at = profile.then(Instant::now);
-    let mut by_first = BTreeMap::<i32, (Weight, BTreeMap<i32, Weight>)>::new();
-    let mut empty_weight = Weight::empty();
-    for (word, weight) in accepted {
-        match word.as_slice() {
-            [] => empty_weight = empty_weight.union(&weight),
-            [first] => {
-                let entry = by_first
-                    .entry(*first)
-                    .or_insert_with(|| (Weight::empty(), BTreeMap::new()));
-                entry.0 = entry.0.union(&weight);
-            }
-            [first, second] => {
-                let entry = by_first
-                    .entry(*first)
-                    .or_insert_with(|| (Weight::empty(), BTreeMap::new()));
-                entry
-                    .1
-                    .entry(*second)
-                    .and_modify(|existing| *existing = existing.union(&weight))
-                    .or_insert(weight);
-            }
-            _ => unreachable!("depth-2 language contains an overlong word"),
-        }
-    }
-
-    let mut dwa = DWA::new(0, 0);
-    if !empty_weight.is_empty() {
-        dwa.set_final_weight(dwa.start_state(), empty_weight);
-    }
-    let mut shared_leaf = None::<u32>;
-    for (first_label, (first_final, second_words)) in by_first {
-        let prefix_weight = Weight::union_all(
-            std::iter::once(&first_final).chain(second_words.values()),
-        );
-        let first_state = dwa.add_state();
-        dwa.add_transition(dwa.start_state(), first_label, first_state, prefix_weight);
-        if !first_final.is_empty() {
-            dwa.set_final_weight(first_state, first_final);
-        }
-        if !second_words.is_empty() {
-            let leaf = *shared_leaf.get_or_insert_with(|| {
-                let state = dwa.add_state();
-                dwa.set_final_weight(state, Weight::all());
-                state
-            });
-            for (second_label, word_weight) in second_words {
-                dwa.add_transition(first_state, second_label, leaf, word_weight);
-            }
-        }
-    }
+    let dwa = build_depth2_dwa_from_weighted_words(accepted)?;
     let build_ms = build_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
         .unwrap_or(0.0);

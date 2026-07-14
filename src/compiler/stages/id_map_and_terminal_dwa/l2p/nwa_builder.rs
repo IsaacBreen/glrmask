@@ -4,7 +4,7 @@
 //! and constructs NWA transitions for each (byte, tokenizer-state) pair.
 
 use crate::automata::lexer::Lexer;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -14,10 +14,15 @@ use smallvec::SmallVec;
 
 use crate::Vocab;
 use crate::automata::lexer::tokenizer::{Tokenizer, TokenizerMatch};
+use crate::automata::weighted::determinize::{
+    Depth2Word, build_depth2_dwa_from_weighted_words,
+};
 use crate::automata::weighted::nwa::NWA;
+use crate::automata::weighted_u32::dwa::DWA;
 use crate::grammar::flat::TerminalID;
 use crate::compiler::possible_matches::PossibleMatchesComputer;
 use crate::compiler::stages::equiv_types::InternalIdMap;
+use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
 use crate::ds::vocab_prefix_tree::VocabPrefixTreeNode;
 use crate::ds::weight::Weight;
@@ -35,6 +40,370 @@ type FutureTerminalColorGroups = SmallVec<[(ColorId, SmallVec<[TerminalID; 4]>);
 
 const NFA_CONFIG_UNKNOWN: u32 = u32::MAX;
 const NFA_CONFIG_DEAD: u32 = u32::MAX - 1;
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DirectDepth2BuildProfile {
+    pub pairs: usize,
+    pub scan_calls: usize,
+    pub scan_input_bytes: usize,
+    pub accepted_words: usize,
+    pub total_ms: f64,
+}
+
+struct DirectDepth2Scanner<'tok> {
+    tokenizer: &'tok Tokenizer,
+    active_terminals: &'tok [bool],
+    disallowed_follows: &'tok BTreeMap<u32, BitSet>,
+    nfa_scan_cache: Option<NfaTrieScanCache<'tok>>,
+    scan_calls: usize,
+    scan_input_bytes: usize,
+}
+
+impl<'tok> DirectDepth2Scanner<'tok> {
+    fn new(
+        tokenizer: &'tok Tokenizer,
+        active_terminals: &'tok [bool],
+        disallowed_follows: &'tok BTreeMap<u32, BitSet>,
+    ) -> Self {
+        Self {
+            tokenizer,
+            active_terminals,
+            disallowed_follows,
+            nfa_scan_cache: tokenizer
+                .has_epsilon_transitions()
+                .then(|| NfaTrieScanCache::new(tokenizer, Some(active_terminals.to_vec()))),
+            scan_calls: 0,
+            scan_input_bytes: 0,
+        }
+    }
+
+    #[inline]
+    fn terminal_is_active(&self, terminal: TerminalID) -> bool {
+        self.active_terminals
+            .get(terminal as usize)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    #[inline]
+    fn follow_allowed(&self, previous: Option<TerminalID>, next: TerminalID) -> bool {
+        !previous.is_some_and(|previous| {
+            self.disallowed_follows
+                .get(&previous)
+                .is_some_and(|row| row.contains(next as usize))
+        })
+    }
+
+    fn execute(&mut self, input: &[u8], start: u32) -> (SmallVec<[u32; 1]>, Vec<TokenizerMatch>) {
+        self.scan_calls += 1;
+        self.scan_input_bytes += input.len();
+        if let Some(cache) = self.nfa_scan_cache.as_mut() {
+            let mut matches = Vec::new();
+            let end_states = cache.execute_into(input, start, &mut matches);
+            return (end_states, matches);
+        }
+
+        let mut execution = self.tokenizer.execute_from_state(input, start);
+        execution.matches.retain(|matched| self.terminal_is_active(matched.id));
+        (execution.end_state, execution.matches)
+    }
+
+    fn append_endpoint_label(
+        &self,
+        depth: usize,
+        word: &Depth2Word,
+        previous: Option<TerminalID>,
+        label: TerminalID,
+        output: &mut BTreeSet<Depth2Word>,
+    ) -> bool {
+        if !self.terminal_is_active(label) || !self.follow_allowed(previous, label) {
+            return true;
+        }
+        if depth >= 2 {
+            return false;
+        }
+        let mut accepted = word.clone();
+        accepted.push(label as i32);
+        output.insert(accepted);
+        true
+    }
+
+    fn scan_suffix(
+        &mut self,
+        input: &[u8],
+        start: u32,
+        depth: usize,
+        word: &Depth2Word,
+        previous: Option<TerminalID>,
+        output: &mut BTreeSet<Depth2Word>,
+    ) -> bool {
+        let (end_states, matches) = self.execute(input, start);
+
+        let mut endpoint_labels = BTreeSet::<TerminalID>::new();
+        for &end_state in &end_states {
+            endpoint_labels.extend(
+                self.tokenizer
+                    .possible_future_terminals_iter(end_state)
+                    .filter(|&terminal| self.terminal_is_active(terminal)),
+            );
+        }
+        for matched in &matches {
+            if matched.width == input.len() {
+                endpoint_labels.insert(matched.id);
+            }
+        }
+        for label in endpoint_labels {
+            if !self.append_endpoint_label(depth, word, previous, label, output) {
+                return false;
+            }
+        }
+
+        let mut continuations = BTreeSet::<(TerminalID, usize)>::new();
+        for matched in matches {
+            if matched.width == 0 {
+                return false;
+            }
+            if matched.width < input.len()
+                && self.follow_allowed(previous, matched.id)
+                && self.terminal_is_active(matched.id)
+            {
+                continuations.insert((matched.id, matched.width));
+            }
+        }
+
+        let reset_states = self.tokenizer.deterministic_reset_states();
+        for (label, width) in continuations {
+            let next_depth = depth + 1;
+            let mut next_word = word.clone();
+            if next_depth <= 2 {
+                next_word.push(label as i32);
+            }
+            for &reset_state in &reset_states {
+                if !self.scan_suffix(
+                    &input[width..],
+                    reset_state,
+                    next_depth,
+                    &next_word,
+                    Some(label),
+                    output,
+                ) {
+                    return false;
+                }
+            }
+        }
+
+        true
+    }
+
+    fn raw_path_has_always_allowed_pair(
+        &mut self,
+        input: &[u8],
+        start: u32,
+        previous: Option<TerminalID>,
+        always_allowed_follows: &[Vec<TerminalID>],
+        seen: &mut FxHashMap<(u32, usize, Option<TerminalID>), bool>,
+    ) -> bool {
+        let key = (start, input.len(), previous);
+        if let Some(&cached) = seen.get(&key) {
+            return cached;
+        }
+
+        let (end_states, matches) = self.execute(input, start);
+        let pair_is_always_allowed = |previous: Option<TerminalID>, next: TerminalID| {
+            previous.is_some_and(|previous| {
+                always_allowed_follows
+                    .get(previous as usize)
+                    .is_some_and(|followers| followers.contains(&next))
+            })
+        };
+
+        for &end_state in &end_states {
+            if self
+                .tokenizer
+                .possible_future_terminals_iter(end_state)
+                .filter(|&terminal| self.terminal_is_active(terminal))
+                .any(|terminal| pair_is_always_allowed(previous, terminal))
+            {
+                seen.insert(key, true);
+                return true;
+            }
+        }
+
+        let reset_states = self.tokenizer.deterministic_reset_states();
+        for matched in matches {
+            if !self.terminal_is_active(matched.id) {
+                continue;
+            }
+            if pair_is_always_allowed(previous, matched.id) {
+                seen.insert(key, true);
+                return true;
+            }
+            if matched.width == 0 {
+                seen.insert(key, true);
+                return true;
+            }
+            if matched.width >= input.len() {
+                continue;
+            }
+            for &reset_state in &reset_states {
+                if self.raw_path_has_always_allowed_pair(
+                    &input[matched.width..],
+                    reset_state,
+                    Some(matched.id),
+                    always_allowed_follows,
+                    seen,
+                ) {
+                    seen.insert(key, true);
+                    return true;
+                }
+            }
+        }
+
+        seen.insert(key, false);
+        false
+    }
+}
+
+pub(crate) fn try_build_depth2_dwa_direct(
+    partition_label: &str,
+    tokenizer: &Tokenizer,
+    id_map: &InternalIdMap,
+    internal_vocab: &[(u32, Vec<u8>)],
+    active_terminals: &[bool],
+    always_allowed_follows: &[Vec<TerminalID>],
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    ignore_terminal: Option<TerminalID>,
+) -> Option<(DWA, DirectDepth2BuildProfile)> {
+    if let Some(ignore) = ignore_terminal {
+        if std::env::var_os("GLRMASK_ASSERT_L2P_DIRECT_DEPTH2").is_some() {
+            eprintln!(
+                "[glrmask/profile][l2p_direct_depth2_skip] partition={} reason=ignore terminal={ignore}",
+                partition_label,
+            );
+        }
+        return None;
+    }
+    let started_at = Instant::now();
+    let num_tsids = id_map.num_tsids() as usize;
+    let mut scanner = DirectDepth2Scanner::new(tokenizer, active_terminals, disallowed_follows);
+    let mut word_tokens = BTreeMap::<Depth2Word, Vec<Vec<u32>>>::new();
+    let dispatch_roots = tokenizer.deterministic_dispatch_roots();
+    let mut pairs = 0usize;
+
+    for (internal_tsid, representative_state) in id_map
+        .tokenizer_states
+        .iter_representative_ids()
+        .enumerate()
+    {
+        let starts: SmallVec<[u32; 8]> = if id_map.tokenizer_states.internal_to_originals
+            [internal_tsid]
+            .contains(&tokenizer.initial_state_id())
+        {
+            dispatch_roots
+                .map(SmallVec::from_slice)
+                .unwrap_or_else(|| SmallVec::from_slice(&[representative_state]))
+        } else {
+            SmallVec::from_slice(&[representative_state])
+        };
+
+        for &(internal_token_id, ref bytes) in internal_vocab {
+            pairs += 1;
+            let mut raw_pair_seen = FxHashMap::default();
+            for &start in &starts {
+                if scanner.raw_path_has_always_allowed_pair(
+                    bytes,
+                    start,
+                    None,
+                    always_allowed_follows,
+                    &mut raw_pair_seen,
+                ) {
+                    if std::env::var_os("GLRMASK_ASSERT_L2P_DIRECT_DEPTH2").is_some() {
+                        eprintln!(
+                            "[glrmask/profile][l2p_direct_depth2_skip] partition={} reason=raw_always_allowed_pair tsid={} token={} start={} bytes={:?}",
+                            partition_label,
+                            internal_tsid,
+                            internal_token_id,
+                            start,
+                            bytes,
+                        );
+                    }
+                    return None;
+                }
+            }
+
+            let mut words = BTreeSet::<Depth2Word>::new();
+            for &start in &starts {
+                if !scanner.scan_suffix(
+                    bytes,
+                    start,
+                    0,
+                    &Depth2Word::new(),
+                    None,
+                    &mut words,
+                ) {
+                    if std::env::var_os("GLRMASK_ASSERT_L2P_DIRECT_DEPTH2").is_some() {
+                        eprintln!(
+                            "[glrmask/profile][l2p_direct_depth2_skip] partition={} reason=depth_or_zero_width tsid={} token={} start={} bytes={:?}",
+                            partition_label,
+                            internal_tsid,
+                            internal_token_id,
+                            start,
+                            bytes,
+                        );
+                    }
+                    return None;
+                }
+            }
+            for word in words {
+                word_tokens
+                    .entry(word)
+                    .or_insert_with(|| vec![Vec::new(); num_tsids])[internal_tsid]
+                    .push(internal_token_id);
+            }
+        }
+    }
+
+    let weighted_words = word_tokens
+        .into_iter()
+        .map(|(word, per_tsid)| {
+            let weight = Weight::from_per_tsid_token_sets(
+                per_tsid
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(tsid, token_ids)| {
+                        (!token_ids.is_empty()).then(|| {
+                            let tokens = RangeSetBlaze::from_iter(
+                                token_ids.into_iter().map(|token| token..=token),
+                            );
+                            (tsid as u32, tokens)
+                        })
+                    }),
+            );
+            (word, weight)
+        })
+        .collect::<BTreeMap<_, _>>();
+    let accepted_words = weighted_words.len();
+    let dwa = match build_depth2_dwa_from_weighted_words(weighted_words) {
+        Ok(dwa) => dwa,
+        Err(error) => {
+            if std::env::var_os("GLRMASK_ASSERT_L2P_DIRECT_DEPTH2").is_some() {
+                eprintln!(
+                    "[glrmask/profile][l2p_direct_depth2_skip] partition={} reason=build_weighted_words error={error}",
+                    partition_label,
+                );
+            }
+            return None;
+        }
+    };
+    let profile = DirectDepth2BuildProfile {
+        pairs,
+        scan_calls: scanner.scan_calls,
+        scan_input_bytes: scanner.scan_input_bytes,
+        accepted_words,
+        total_ms: started_at.elapsed().as_secs_f64() * 1000.0,
+    };
+    Some((dwa, profile))
+}
 
 /// On-demand powerset scanner used only by the trie walker for epsilon-NFA
 /// tokenizers. Configurations are canonical epsilon-closed raw-state sets.

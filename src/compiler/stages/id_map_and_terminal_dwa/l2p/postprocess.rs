@@ -606,6 +606,14 @@ pub(crate) fn collapse_always_allowed(
     let allowed_by_state = allowed_labels_by_state(&incoming_labels, always_allowed_by_label);
 
     let any_singleton = allowed_by_state.iter().any(|s| s.len() == 1);
+    if std::env::var_os("GLRMASK_ASSERT_L2P_DIRECT_DEPTH2").is_some() {
+        let singleton_states = allowed_by_state.iter().filter(|s| s.len() == 1).count();
+        eprintln!(
+            "[glrmask/profile][collapse_always_allowed_gate] states={} singleton_states={}",
+            nwa.states().len(),
+            singleton_states,
+        );
+    }
     if !any_singleton {
         return false;
     }
