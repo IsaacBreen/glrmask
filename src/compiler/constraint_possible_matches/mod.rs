@@ -1878,8 +1878,10 @@ struct PossibleMatchPowersetView {
 
 fn intern_possible_match_config(
     mut config: Vec<u32>,
+    is_closed: bool,
     config_ids: &mut FxHashMap<Vec<u32>, u32>,
     configs: &mut Vec<Box<[u32]>>,
+    config_is_closed: &mut Vec<bool>,
 ) -> Option<u32> {
     config.sort_unstable();
     config.dedup();
@@ -1887,11 +1889,13 @@ fn intern_possible_match_config(
         return None;
     }
     if let Some(&id) = config_ids.get(&config) {
+        config_is_closed[id as usize] |= is_closed;
         return Some(id);
     }
     let id = configs.len() as u32;
     config_ids.insert(config.clone(), id);
     configs.push(config.into_boxed_slice());
+    config_is_closed.push(is_closed);
     Some(id)
 }
 
@@ -1902,12 +1906,15 @@ fn build_possible_match_powerset_view(
     let singleton_closures = tokenizer.all_singleton_epsilon_closures();
     let mut config_ids = FxHashMap::<Vec<u32>, u32>::default();
     let mut configs = Vec::<Box<[u32]>>::new();
+    let mut config_is_closed = Vec::<bool>::new();
     let raw_start_to_view = (0..tokenizer.num_states())
         .map(|raw_state| {
             intern_possible_match_config(
                 singleton_closures[raw_state as usize].to_vec(),
+                true,
                 &mut config_ids,
                 &mut configs,
+                &mut config_is_closed,
             )
             .expect("epsilon closure of tokenizer state must be nonempty")
         })
@@ -1947,11 +1954,18 @@ fn build_possible_match_powerset_view(
             .collect::<Vec<_>>();
         is_end.push(live_config.is_empty());
         boundary_state.push(
-            intern_possible_match_config(live_config, &mut config_ids, &mut configs)
-                .unwrap_or(u32::MAX),
+            intern_possible_match_config(
+                live_config,
+                false,
+                &mut config_ids,
+                &mut configs,
+                &mut config_is_closed,
+            )
+            .unwrap_or(u32::MAX),
         );
 
         let mut row = Box::new([u32::MAX; 256]);
+        let source_is_closed = config_is_closed[config_index];
         for &byte in &active_bytes {
             target_generation = target_generation.wrapping_add(1);
             if target_generation == 0 {
@@ -1959,14 +1973,18 @@ fn build_possible_match_powerset_view(
                 target_generation = 1;
             }
             target_config.clear();
-            // `config` may be a boundary projection with accepting/end states
-            // removed, so close every source before consuming the byte.  Each
-            // direct target is then closed by unioning its cached singleton
-            // closure.  This is exactly `step_all(config, byte)` without two
-            // repeated graph walks, per-call seen-vector allocations, or an
-            // intermediate target sort/dedup.
+            // Ordinary powerset configurations are already epsilon-closed, so
+            // re-expanding every member's source closure is redundant. A
+            // boundary projection may have accepting/end states removed and
+            // is not necessarily closed; those configurations retain the
+            // exact source-closure walk.
             for &source in &config {
-                for &closed_source in singleton_closures[source as usize].iter() {
+                let sources = if source_is_closed {
+                    std::slice::from_ref(&source)
+                } else {
+                    singleton_closures[source as usize].as_ref()
+                };
+                for &closed_source in sources {
                     let target = tokenizer.get_transition(closed_source, byte);
                     if target == u32::MAX {
                         continue;
@@ -1983,8 +2001,10 @@ fn build_possible_match_powerset_view(
             target_config.sort_unstable();
             if let Some(target) = intern_possible_match_config(
                 target_config.clone(),
+                true,
                 &mut config_ids,
                 &mut configs,
+                &mut config_is_closed,
             ) {
                 row[byte as usize] = target;
             }
@@ -1998,6 +2018,7 @@ fn build_possible_match_powerset_view(
         transitions.extend_from_slice(row.as_ref());
     }
     debug_assert_eq!(states.len(), configs.len());
+    debug_assert_eq!(config_is_closed.len(), configs.len());
     debug_assert_eq!(boundary_state.len(), states.len());
     debug_assert_eq!(is_end.len(), states.len());
 
