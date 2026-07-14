@@ -1409,7 +1409,7 @@ fn determinize_with_supports(
         let final_weights_by_signature: Vec<(SmallVec<[Weight; 4]>, f64, f64)> =
             final_signature_groups
                 .par_iter()
-                .map(|final_groups| {
+                .map_init(ScopedWeightOpCache::default, |weight_ops, final_groups| {
                     let mut path_union_ms = 0.0;
                     let mut intersection_ms = 0.0;
                     let final_contributions: SmallVec<[Weight; 4]> = final_groups
@@ -1417,25 +1417,21 @@ fn determinize_with_supports(
                         .filter_map(|(final_w, path_weights)| {
                             let pw_union = if detail_enabled {
                                 let path_union_started = Instant::now();
-                                let pw_union = Weight::union_all(path_weights.iter());
+                                let pw_union = weight_ops.union_all(path_weights.iter());
                                 path_union_ms += elapsed_ms(path_union_started);
                                 pw_union
                             } else {
-                                Weight::union_all(path_weights.iter())
+                                weight_ops.union_all(path_weights.iter())
                             };
                             let contribution = if detail_enabled {
                                 let intersection_started = Instant::now();
-                                let contribution = pw_union.intersection(final_w);
+                                let contribution = weight_ops.intersection(&pw_union, final_w);
                                 intersection_ms += elapsed_ms(intersection_started);
                                 contribution
                             } else {
-                                pw_union.intersection(final_w)
+                                weight_ops.intersection(&pw_union, final_w)
                             };
-                            if contribution.is_empty() {
-                                None
-                            } else {
-                                Some(contribution)
-                            }
+                            (!contribution.is_empty()).then_some(contribution)
                         })
                         .collect();
                     (final_contributions, path_union_ms, intersection_ms)
