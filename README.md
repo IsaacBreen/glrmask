@@ -1,6 +1,6 @@
-# glrmask
+# Shingleback
 
-`glrmask` is a grammar-constrained decoding engine for tokenized LLM generation. It compiles a grammar together with an LLM vocabulary into an immutable `Constraint`, then produces the exact next-token mask for each decoding step and advances that constraint state as tokens are committed.
+Shingleback is a grammar-constrained decoding engine for tokenized LLM generation. It compiles a grammar together with an LLM vocabulary into an immutable `Constraint`, then produces the exact next-token mask for each decoding step and advances that constraint state as tokens are committed.
 
 The project is intended for structured generation and inference-serving workloads where constraints may be reused. It supports general context-free grammars, not only regular expressions or finite-state formats, and moves much of the stack-dependent token-admissibility work out of the per-token mask query and into compilation.
 
@@ -12,7 +12,7 @@ The project is intended for structured generation and inference-serving workload
 - **JSON Schema.** A pragmatic JSON Schema subset is supported, with documented semantic deviations. Full JSON Schema conformance is **not** claimed.
 - **Compile once, run incrementally.** A compiled `Constraint` is immutable; `constraint.start()` creates mutable state for one generation stream.
 - **Serializable constraints.** Compiled constraints can be saved and loaded without recompiling the source grammar.
-- **Python and Rust APIs.** The same core compiler and runtime are exposed through the Rust crate and the `glrmask` Python package.
+- **Python and Rust APIs.** The same core compiler and runtime are exposed through the Rust crate and the `glrmask` Python package. Shingleback 0.1 retains `glrmask` as the Rust crate, PyPI distribution, and Python import name.
 
 ## Installation
 

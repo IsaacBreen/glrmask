@@ -1,4 +1,4 @@
-# glrmask Python bindings
+# Shingleback Python bindings (`glrmask`)
 
 The Python bindings compile grammars into token constraints and expose incremental mask and commit operations.
 

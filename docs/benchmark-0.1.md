@@ -1,6 +1,6 @@
-# glrmask 0.1 native benchmark snapshot
+# Shingleback 0.1 native benchmark snapshot
 
-This note records the bounded native benchmark used for the 0.1 release candidate. It is a hardware-specific snapshot, not a universal performance claim or a comparison establishing superiority over another backend.
+This note records the bounded native benchmark used for the Shingleback 0.1 release candidate. The measured technical package and production code retain the `glrmask` name. It is a hardware-specific snapshot, not a universal performance claim or a comparison establishing superiority over another backend.
 
 ## Exact measured code and machine
 

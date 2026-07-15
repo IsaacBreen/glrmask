@@ -35,10 +35,11 @@
 
 ---
 
-## 0.1.0 — Initial Release
+## 0.1.0 — Shingleback initial release
 
 ### Highlights
 
+- Public project brand: Shingleback. The 0.1 Rust crate, PyPI distribution, and Python import name remain `glrmask`.
 - Vocabulary-specific grammar-constrained decoding for EBNF, Lark, and a documented pragmatic subset of JSON Schema.
 - Reusable compiled `Constraint` objects with incremental mask, commit, completion, and forced-prefix operations.
 - GLR-based parsing for ambiguous and genuinely context-free grammars, including tokenizations that cross grammar-terminal boundaries.
