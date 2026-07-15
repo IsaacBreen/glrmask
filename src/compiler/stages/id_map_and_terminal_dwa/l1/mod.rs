@@ -1827,11 +1827,15 @@ fn collect_l1_unique_first_targets(
     transitions_by_byte: Option<&[u32]>,
     num_tokenizer_states: usize,
     active_language: &[bool],
-) -> Vec<(u8, u32)> {
+    cache_targets: bool,
+) -> (Vec<(u8, u32)>, Option<Vec<u32>>) {
     let dead = u32::MAX;
     let target_words = num_tokenizer_states.div_ceil(64);
     let mut target_seen = vec![0u64; target_words];
     let mut unique_targets = Vec::<(u8, u32)>::new();
+    let mut cached_targets = cache_targets.then(|| {
+        Vec::<u32>::with_capacity(states.len().saturating_mul(nonempty_first_bytes.len()))
+    });
     for &byte in nonempty_first_bytes {
         let canonical_state = horizon_maps
             .map(|maps| maps[suffix_horizon_by_first_byte[byte]].as_ref());
@@ -1845,6 +1849,9 @@ fn collect_l1_unique_first_targets(
                 byte,
                 canonical_state,
             );
+            if let Some(cached_targets) = cached_targets.as_mut() {
+                cached_targets.push(target);
+            }
             if target != dead {
                 target_seen[target as usize >> 6] |= 1u64 << (target & 63);
             }
@@ -1863,7 +1870,7 @@ fn collect_l1_unique_first_targets(
             }
         }
     }
-    unique_targets
+    (unique_targets, cached_targets)
 }
 
 fn find_l1_exact_state_equivalence_by_token_signatures(
@@ -1874,6 +1881,26 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
     flat_trans: &[u32],
     transitions_by_byte: Option<&[u32]>,
 ) -> (Vec<usize>, Option<L1ExactProfileReuse>) {
+    find_l1_exact_state_equivalence_by_token_signatures_with_first_target_cache(
+        tokenizer,
+        vocab_order,
+        states,
+        active_terminals,
+        flat_trans,
+        transitions_by_byte,
+        None,
+    )
+}
+
+fn find_l1_exact_state_equivalence_by_token_signatures_with_first_target_cache(
+    tokenizer: &Tokenizer,
+    vocab_order: &L1IdentityVocabOrder,
+    states: &[usize],
+    active_terminals: &[bool],
+    flat_trans: &[u32],
+    transitions_by_byte: Option<&[u32]>,
+    first_target_cache_override: Option<bool>,
+) -> (Vec<usize>, Option<L1ExactProfileReuse>) {
     let terminal_signature_started_at = compile_profile_enabled().then(Instant::now);
     let _ = flat_trans;
     let tokenizer_view = TokenizerView::new_filtered(tokenizer, active_terminals);
@@ -1882,7 +1909,7 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
     let terminal_signature_ms = terminal_signature_started_at.map_or(0.0, |started| {
         started.elapsed().as_secs_f64() * 1000.0
     });
-    find_l1_exact_state_equivalence_by_flat_signatures(
+    find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
         vocab_order,
         states,
         state_to_terminal_signature,
@@ -1891,6 +1918,7 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
         transitions_by_byte,
         true,
         terminal_signature_ms,
+        first_target_cache_override,
     )
 }
 
@@ -1903,6 +1931,30 @@ fn find_l1_exact_state_equivalence_by_flat_signatures(
     transitions_by_byte: Option<&[u32]>,
     allow_remaining_horizon_quotients: bool,
     terminal_signature_ms: f64,
+) -> (Vec<usize>, Option<L1ExactProfileReuse>) {
+    find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
+        vocab_order,
+        states,
+        state_to_terminal_signature,
+        terminal_signatures,
+        tokenizer_view,
+        transitions_by_byte,
+        allow_remaining_horizon_quotients,
+        terminal_signature_ms,
+        None,
+    )
+}
+
+fn find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
+    vocab_order: &L1IdentityVocabOrder,
+    states: &[usize],
+    state_to_terminal_signature: Vec<u32>,
+    terminal_signatures: Vec<Vec<u32>>,
+    tokenizer_view: &TokenizerView,
+    transitions_by_byte: Option<&[u32]>,
+    allow_remaining_horizon_quotients: bool,
+    terminal_signature_ms: f64,
+    first_target_cache_override: Option<bool>,
 ) -> (Vec<usize>, Option<L1ExactProfileReuse>) {
     if states.len() <= 1 {
         return (states.to_vec(), None);
@@ -1958,6 +2010,14 @@ fn find_l1_exact_state_equivalence_by_flat_signatures(
         .enumerate()
         .filter_map(|(byte, token_ids)| (!token_ids.is_empty()).then_some(byte))
         .collect();
+    const FIRST_TARGET_CACHE_MAX_BYTES: usize = 8 * 1024 * 1024;
+    let first_target_cache_bytes = states
+        .len()
+        .checked_mul(nonempty_first_bytes.len())
+        .and_then(|cells| cells.checked_mul(std::mem::size_of::<u32>()));
+    let cache_first_targets = first_target_cache_override.unwrap_or_else(|| {
+        first_target_cache_bytes.is_some_and(|bytes| bytes <= FIRST_TARGET_CACHE_MAX_BYTES)
+    });
 
     // The finite-horizon quotient prepass is only worthwhile when it avoids a
     // genuinely large number of suffix profiles.  A state×vocab threshold alone
@@ -1965,7 +2025,7 @@ fn find_l1_exact_state_equivalence_by_flat_signatures(
     // that frontier first: the probe is a contiguous byte-major scan and can be
     // reused directly when the quotient is rejected.
     let raw_target_probe_started_at = profile_enabled.then(Instant::now);
-    let raw_unique_targets = collect_l1_unique_first_targets(
+    let (raw_unique_targets, raw_first_targets) = collect_l1_unique_first_targets(
         states,
         &nonempty_first_bytes,
         &suffix_horizon_by_first_byte,
@@ -1974,6 +2034,7 @@ fn find_l1_exact_state_equivalence_by_flat_signatures(
         transitions_by_byte,
         num_tokenizer_states,
         &active_language,
+        cache_first_targets,
     );
     let raw_unique_targets_len = raw_unique_targets.len();
     let raw_target_probe_ms = raw_target_probe_started_at.map_or(0.0, |started| {
@@ -2022,7 +2083,7 @@ fn find_l1_exact_state_equivalence_by_flat_signatures(
     }
 
     let unique_targets_started_at = profile_enabled.then(Instant::now);
-    let unique_targets = if let Some(horizon_maps) = horizon_maps.as_deref() {
+    let (unique_targets, first_targets) = if let Some(horizon_maps) = horizon_maps.as_deref() {
         collect_l1_unique_first_targets(
             states,
             &nonempty_first_bytes,
@@ -2032,9 +2093,10 @@ fn find_l1_exact_state_equivalence_by_flat_signatures(
             transitions_by_byte,
             num_tokenizer_states,
             &active_language,
+            cache_first_targets,
         )
     } else {
-        raw_unique_targets
+        (raw_unique_targets, raw_first_targets)
     };
     let unique_targets_len = unique_targets.len();
     let unique_targets_ms = unique_targets_started_at.map_or(0.0, |started| {
@@ -2248,15 +2310,19 @@ fn find_l1_exact_state_equivalence_by_flat_signatures(
                 profile_col[target as usize] = profile_id;
             }
             for i in tile_start..tile_end {
-                let target = l1_transition(
-                    flat_trans,
-                    transitions_by_byte,
-                    num_tokenizer_states,
-                    Some(&active_language),
-                    states[i] as u32,
-                    byte,
-                    canonical_state,
-                );
+                let target = if let Some(first_targets) = first_targets.as_ref() {
+                    first_targets[slot * num_states_in + i]
+                } else {
+                    l1_transition(
+                        flat_trans,
+                        transitions_by_byte,
+                        num_tokenizer_states,
+                        Some(&active_language),
+                        states[i] as u32,
+                        byte,
+                        canonical_state,
+                    )
+                };
                 keys[i * row_width + col] = if target == dead {
                     0
                 } else {
@@ -5874,14 +5940,27 @@ mod packed_suffix_product_tests {
         let order = l1_identity_vocab_order(&vocab);
         let flat_trans = build_flat_transition_table(&tokenizer);
         let states: Vec<usize> = (0..tokenizer.num_states() as usize).collect();
-          let (mapping, _) = find_l1_exact_state_equivalence_by_token_signatures(
-            &tokenizer,
-            &order,
-            &states,
-              &active_terminals,
-              &flat_trans,
+        let (mapping, _) =
+            find_l1_exact_state_equivalence_by_token_signatures_with_first_target_cache(
+                &tokenizer,
+                &order,
+                &states,
+                &active_terminals,
+                &flat_trans,
                 None,
+                Some(true),
             );
+        let (uncached_mapping, _) =
+            find_l1_exact_state_equivalence_by_token_signatures_with_first_target_cache(
+                &tokenizer,
+                &order,
+                &states,
+                &active_terminals,
+                &flat_trans,
+                None,
+                Some(false),
+            );
+        assert_eq!(uncached_mapping, mapping);
         let num_states = tokenizer.num_states() as usize;
         let mut transitions_by_byte = vec![u32::MAX; num_states * 256];
         for state in 0..num_states {
