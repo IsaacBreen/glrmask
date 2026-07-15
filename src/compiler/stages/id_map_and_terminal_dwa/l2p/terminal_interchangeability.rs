@@ -24,7 +24,9 @@ use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use smallvec::SmallVec;
 use super::nwa_builder::{TerminalNwaTransportMode, TransportScannerStateMap};
 use super::equivalence_analysis::state_equivalence::nfa::{
-    RefinementDepth, build_relevant_powerset_view, compute_state_map_from_prebuilt_sparse_powerset,
+    RefinementDepth, RelevantPowersetView, RelevantPowersetWork,
+    RelevantPowersetWorkBudget, build_relevant_powerset_view,
+    build_relevant_powerset_view_budgeted, compute_state_map_from_prebuilt_sparse_powerset,
     raw_active_language_states,
 };
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -39,6 +41,68 @@ const CHARACTERIZATION_DOMAIN: &[u8] =
     b"glrmask terminal interchangeability characterize v1\0";
 const CHARACTERIZATION_SEED: &[u8] =
     b"glrmask terminal interchangeability characterize seed v1\0";
+
+const TI_NFA_POWERSET_GROWTH_FACTOR: usize = 8;
+const TI_NFA_POWERSET_MIN_CONFIGURATIONS: usize = 16_384;
+const TI_NFA_POWERSET_MAX_CONFIGURATIONS: usize = 262_144;
+const TI_NFA_POWERSET_MIN_EDGES: usize = 1_048_576;
+const TI_NFA_POWERSET_MAX_EDGES: usize = 8_388_608;
+const DEFAULT_TI_PROJECTED_TRANSPORT_MAX_PAIR_WORK: usize = 64;
+const DEFAULT_TI_PROJECTED_TRANSPORT_MAX_TOPOLOGY_WORK: usize = 1_000_000;
+
+fn ti_nfa_powerset_budget(
+    tokenizer: &Tokenizer,
+    relevant_bytes: &[bool; 256],
+    global_state_quotient: Option<&GlobalScannerStateQuotient>,
+) -> RelevantPowersetWorkBudget {
+    fn env_limit(name: &str, computed: usize) -> usize {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|&value| value > 0)
+            .unwrap_or(computed)
+    }
+
+    let seed_states = global_state_quotient.map_or(tokenizer.num_states() as usize, |quotient| {
+        quotient.as_many_to_one().representative_original_ids.len()
+    });
+    let selected_bytes = relevant_bytes.iter().filter(|&&selected| selected).count();
+    let computed_configurations = seed_states
+        .saturating_mul(TI_NFA_POWERSET_GROWTH_FACTOR)
+        .clamp(
+            TI_NFA_POWERSET_MIN_CONFIGURATIONS,
+            TI_NFA_POWERSET_MAX_CONFIGURATIONS,
+        );
+    let computed_edges = seed_states
+        .saturating_mul(selected_bytes)
+        .saturating_mul(TI_NFA_POWERSET_GROWTH_FACTOR)
+        .clamp(TI_NFA_POWERSET_MIN_EDGES, TI_NFA_POWERSET_MAX_EDGES);
+
+    RelevantPowersetWorkBudget {
+        max_configurations: env_limit(
+            "GLRMASK_TI_NFA_POWERSET_MAX_CONFIGURATIONS",
+            computed_configurations,
+        ),
+        max_edges: env_limit(
+            "GLRMASK_TI_NFA_POWERSET_MAX_EDGES",
+            computed_edges,
+        ),
+    }
+}
+
+fn ti_projected_transport_max_pair_work() -> usize {
+    std::env::var("GLRMASK_TI_PROJECTED_TRANSPORT_MAX_PAIR_WORK")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(DEFAULT_TI_PROJECTED_TRANSPORT_MAX_PAIR_WORK)
+}
+
+fn ti_projected_transport_max_topology_work() -> usize {
+    std::env::var("GLRMASK_TI_PROJECTED_TRANSPORT_MAX_TOPOLOGY_WORK")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(DEFAULT_TI_PROJECTED_TRANSPORT_MAX_TOPOLOGY_WORK)
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct CharacterizationHash([u8; blake3::OUT_LEN]);
@@ -408,6 +472,27 @@ impl RestrictedTopology {
         Self::new_inner(tokenizer, relevant_bytes, Some(global_state_quotient))
     }
 
+    fn build_budgeted(
+        tokenizer: &Tokenizer,
+        relevant_bytes: &[bool; 256],
+        global_state_quotient: Option<&GlobalScannerStateQuotient>,
+        budget: RelevantPowersetWorkBudget,
+    ) -> Result<Self, RelevantPowersetWork> {
+        if tokenizer.has_epsilon_transitions() {
+            return Self::new_nfa_budgeted(
+                tokenizer,
+                relevant_bytes,
+                global_state_quotient,
+                budget,
+            );
+        }
+        Ok(Self::new_inner(
+            tokenizer,
+            relevant_bytes,
+            global_state_quotient,
+        ))
+    }
+
     fn new_inner(
         tokenizer: &Tokenizer,
         relevant_bytes: &[bool; 256],
@@ -529,6 +614,34 @@ impl RestrictedTopology {
             None,
             global_state_quotient.map(GlobalScannerStateQuotient::as_many_to_one),
         );
+        Self::from_nfa_view(tokenizer, view, global_state_quotient.is_none())
+    }
+
+    fn new_nfa_budgeted(
+        tokenizer: &Tokenizer,
+        relevant_bytes: &[bool; 256],
+        global_state_quotient: Option<&GlobalScannerStateQuotient>,
+        budget: RelevantPowersetWorkBudget,
+    ) -> Result<Self, RelevantPowersetWork> {
+        let view = build_relevant_powerset_view_budgeted(
+            tokenizer,
+            relevant_bytes,
+            None,
+            global_state_quotient.map(GlobalScannerStateQuotient::as_many_to_one),
+            budget,
+        )?;
+        Ok(Self::from_nfa_view(
+            tokenizer,
+            view,
+            global_state_quotient.is_none(),
+        ))
+    }
+
+    fn from_nfa_view(
+        tokenizer: &Tokenizer,
+        view: RelevantPowersetView,
+        configurations_use_raw_states: bool,
+    ) -> Self {
         let raw_state_count = tokenizer.num_states() as usize;
         let real_state_count = view.states.len();
         let nfa_configurations = Arc::clone(&view.configurations);
@@ -590,7 +703,7 @@ impl RestrictedTopology {
             state_for_raw: Some(Arc::clone(&view.raw_start_to_view)),
             nfa_output_rows: Some((finalizers.into(), future.into())),
             nfa_configurations: Some(nfa_configurations),
-            nfa_configurations_use_raw_states: global_state_quotient.is_none(),
+            nfa_configurations_use_raw_states: configurations_use_raw_states,
             real_state_count,
             initial_state: view.start_state,
             max_outdegree,
@@ -1225,35 +1338,36 @@ pub(crate) struct TiDiscoveryContext {
 }
 
 impl TiDiscoveryContext {
-    pub(crate) fn new(tokenizer: &Tokenizer, relevant_bytes: &[bool; 256]) -> Self {
-        Self::new_with_output_cache(tokenizer, relevant_bytes, None)
-    }
-
-    pub(crate) fn new_with_output_cache(
+    fn from_topology(
         tokenizer: &Tokenizer,
-        relevant_bytes: &[bool; 256],
+        topology: RestrictedTopology,
         shared_output_cache: Option<&SharedTiTokenizerOutputCache>,
+        profile_label: &'static str,
+        started_at: Instant,
+        topology_finished_at: Instant,
     ) -> Self {
         let profile = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
-        let t0 = Instant::now();
-        let topology = Arc::new(RestrictedTopology::new(tokenizer, relevant_bytes));
-        let t1 = Instant::now();
+        let topology = Arc::new(topology);
         let raw = Arc::new(TiRawDiscoveryData::new(
             tokenizer,
             &topology,
             shared_output_cache,
         ));
-        let t2 = Instant::now();
+        let raw_finished_at = Instant::now();
         let (root_output_signatures, root_observed_states) =
             root_output_signatures(&topology, &raw);
-        let t3 = Instant::now();
+        let finished_at = Instant::now();
         if profile {
             eprintln!(
-                "[glrmask/profile][terminal_interchangeability] ti_context_build topology_ms={:.3} raw_ms={:.3} root_sig_ms={:.3} total_ms={:.3}",
-                (t1 - t0).as_secs_f64() * 1000.0,
-                (t2 - t1).as_secs_f64() * 1000.0,
-                (t3 - t2).as_secs_f64() * 1000.0,
-                (t3 - t0).as_secs_f64() * 1000.0,
+                "[glrmask/profile][terminal_interchangeability] {} discovery_states={} sparse_edges={} selected_bytes={} topology_ms={:.3} raw_ms={:.3} root_sig_ms={:.3} total_ms={:.3}",
+                profile_label,
+                topology.real_state_count,
+                topology.edges.len(),
+                topology.bytes.len(),
+                (topology_finished_at - started_at).as_secs_f64() * 1000.0,
+                (raw_finished_at - topology_finished_at).as_secs_f64() * 1000.0,
+                (finished_at - raw_finished_at).as_secs_f64() * 1000.0,
+                (finished_at - started_at).as_secs_f64() * 1000.0,
             );
         }
         Self {
@@ -1267,6 +1381,68 @@ impl TiDiscoveryContext {
             output_pair_closed_active: std::cell::RefCell::new(None),
             first_round_memo: std::cell::RefCell::new(FxHashMap::default()),
         }
+    }
+
+    pub(crate) fn new(tokenizer: &Tokenizer, relevant_bytes: &[bool; 256]) -> Self {
+        Self::new_with_output_cache(tokenizer, relevant_bytes, None)
+    }
+
+    pub(crate) fn new_with_output_cache(
+        tokenizer: &Tokenizer,
+        relevant_bytes: &[bool; 256],
+        shared_output_cache: Option<&SharedTiTokenizerOutputCache>,
+    ) -> Self {
+        let started_at = Instant::now();
+        let topology = RestrictedTopology::new(tokenizer, relevant_bytes);
+        let topology_finished_at = Instant::now();
+        Self::from_topology(
+            tokenizer,
+            topology,
+            shared_output_cache,
+            "ti_context_build",
+            started_at,
+            topology_finished_at,
+        )
+    }
+
+    pub(crate) fn try_new_with_output_cache(
+        tokenizer: &Tokenizer,
+        relevant_bytes: &[bool; 256],
+        shared_output_cache: Option<&SharedTiTokenizerOutputCache>,
+    ) -> Result<Self, RelevantPowersetWork> {
+        let profile = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
+        let budget = ti_nfa_powerset_budget(tokenizer, relevant_bytes, None);
+        let t0 = Instant::now();
+        let topology = match RestrictedTopology::build_budgeted(
+            tokenizer,
+            relevant_bytes,
+            None,
+            budget,
+        ) {
+            Ok(topology) => topology,
+            Err(work) => {
+                if profile {
+                    eprintln!(
+                        "[glrmask/profile][terminal_interchangeability] ti_context_build_aborted configurations={} edges={} max_configurations={} max_edges={} total_ms={:.3}",
+                        work.configurations,
+                        work.edges,
+                        budget.max_configurations,
+                        budget.max_edges,
+                        t0.elapsed().as_secs_f64() * 1000.0,
+                    );
+                }
+                return Err(work);
+            }
+        };
+        let topology_finished_at = Instant::now();
+        Ok(Self::from_topology(
+            tokenizer,
+            topology,
+            shared_output_cache,
+            "ti_context_build",
+            t0,
+            topology_finished_at,
+        ))
     }
 
     /// Build immutable discovery evidence over a total global scanner-state
@@ -1291,43 +1467,66 @@ impl TiDiscoveryContext {
         global_state_quotient: &GlobalScannerStateQuotient,
         shared_output_cache: Option<&SharedTiTokenizerOutputCache>,
     ) -> Self {
-        let profile = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
-        let t0 = Instant::now();
-        let topology = Arc::new(RestrictedTopology::new_with_global_state_quotient(
+        let started_at = Instant::now();
+        let topology = RestrictedTopology::new_with_global_state_quotient(
             tokenizer,
             relevant_bytes,
             global_state_quotient,
-        ));
-        let t1 = Instant::now();
-        let raw = Arc::new(TiRawDiscoveryData::new(
+        );
+        let topology_finished_at = Instant::now();
+        Self::from_topology(
             tokenizer,
-            &topology,
-            shared_output_cache,
-        ));
-        let t2 = Instant::now();
-        let (root_output_signatures, root_observed_states) =
-            root_output_signatures(&topology, &raw);
-        let t3 = Instant::now();
-        if profile {
-            eprintln!(
-                "[glrmask/profile][terminal_interchangeability] ti_context_build_c topology_ms={:.3} raw_ms={:.3} root_sig_ms={:.3} total_ms={:.3}",
-                (t1 - t0).as_secs_f64() * 1000.0,
-                (t2 - t1).as_secs_f64() * 1000.0,
-                (t3 - t2).as_secs_f64() * 1000.0,
-                (t3 - t0).as_secs_f64() * 1000.0,
-            );
-        }
-        Self {
             topology,
-            raw,
-            root_output_signatures,
-            root_observed_states,
-            support_partition_seed: std::cell::RefCell::new(None),
-            output_projection_seed: std::cell::RefCell::new(None),
-            output_pair_closed_memo: std::cell::RefCell::new(FxHashSet::default()),
-            output_pair_closed_active: std::cell::RefCell::new(None),
-            first_round_memo: std::cell::RefCell::new(FxHashMap::default()),
-        }
+            shared_output_cache,
+            "ti_context_build_c",
+            started_at,
+            topology_finished_at,
+        )
+    }
+
+    pub(crate) fn try_new_with_global_state_quotient_and_output_cache(
+        tokenizer: &Tokenizer,
+        relevant_bytes: &[bool; 256],
+        global_state_quotient: &GlobalScannerStateQuotient,
+        shared_output_cache: Option<&SharedTiTokenizerOutputCache>,
+    ) -> Result<Self, RelevantPowersetWork> {
+        let profile = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
+        let budget = ti_nfa_powerset_budget(
+            tokenizer,
+            relevant_bytes,
+            Some(global_state_quotient),
+        );
+        let t0 = Instant::now();
+        let topology = match RestrictedTopology::build_budgeted(
+            tokenizer,
+            relevant_bytes,
+            Some(global_state_quotient),
+            budget,
+        ) {
+            Ok(topology) => topology,
+            Err(work) => {
+                if profile {
+                    eprintln!(
+                        "[glrmask/profile][terminal_interchangeability] ti_context_build_c_aborted configurations={} edges={} max_configurations={} max_edges={} total_ms={:.3}",
+                        work.configurations,
+                        work.edges,
+                        budget.max_configurations,
+                        budget.max_edges,
+                        t0.elapsed().as_secs_f64() * 1000.0,
+                    );
+                }
+                return Err(work);
+            }
+        };
+        let topology_finished_at = Instant::now();
+        Ok(Self::from_topology(
+            tokenizer,
+            topology,
+            shared_output_cache,
+            "ti_context_build_c",
+            t0,
+            topology_finished_at,
+        ))
     }
 
     /// Exact finalizer/future observation IDs from the most recent discovery
@@ -8566,6 +8765,9 @@ fn discover_one_round_with_transport_witnesses_in_context_impl(
         let mut projected_transport_candidates = 0usize;
         let mut projected_transport_merged_groups = 0usize;
         let mut projected_transport_merged_members = 0usize;
+        let mut projected_transport_skipped_groups = 0usize;
+        let mut projected_transport_skipped_candidates = 0usize;
+        let mut projected_transport_pair_work = 0usize;
         if let Some(candidate_groups) = projected_transport_candidate_groups.as_ref() {
             let projected_transport_enabled = std::env::var("GLRMASK_DISABLE_TI_PROJECTED_TRANSPORT")
                 .map(|value| {
@@ -8574,8 +8776,10 @@ fn discover_one_round_with_transport_witnesses_in_context_impl(
                 })
                 .unwrap_or(true);
             if projected_transport_enabled {
-                for candidate_group in candidate_groups {
-                    let unresolved = candidate_group
+                let mut projected_batches = candidate_groups
+                    .iter()
+                    .map(|candidate_group| {
+                        candidate_group
                         .iter()
                         .copied()
                         .filter(|terminal| {
@@ -8583,10 +8787,27 @@ fn discover_one_round_with_transport_witnesses_in_context_impl(
                                 .get(terminal)
                                 .is_some_and(|members| members.len() == 1)
                         })
-                        .collect::<Vec<_>>();
+                        .collect::<Vec<_>>()
+                    })
+                    .filter(|unresolved| unresolved.len() >= 2)
+                    .collect::<Vec<_>>();
+                projected_batches.sort_unstable_by_key(Vec::len);
+                let max_pair_work = ti_projected_transport_max_pair_work();
+                let max_topology_work = ti_projected_transport_max_topology_work();
+                for unresolved in projected_batches {
                     if unresolved.len() < 2 {
                         continue;
                     }
+                    let pair_work = unresolved.len() * unresolved.len().saturating_sub(1) / 2;
+                    let topology_work = topology.edges.len().saturating_mul(unresolved.len());
+                    if projected_transport_pair_work.saturating_add(pair_work) > max_pair_work
+                        || topology_work > max_topology_work
+                    {
+                        projected_transport_skipped_groups += 1;
+                        projected_transport_skipped_candidates += unresolved.len();
+                        continue;
+                    }
+                    projected_transport_pair_work += pair_work;
                     projected_transport_groups += 1;
                     projected_transport_candidates += unresolved.len();
 
@@ -8842,7 +9063,7 @@ fn discover_one_round_with_transport_witnesses_in_context_impl(
 
         if profile_timing {
             eprintln!(
-                "[glrmask/profile][terminal_interchangeability] output_pair_rejections={} output_pair_cached_closed={} output_invariant_checks={} first_round_rejections={} support_transposition_checks={} petal_batch_groups={} petal_batch_members={} petal_batch_grouping_ms={:.3} petal_batch_certificate_ms={:.3} petal_batch_map_ms={:.3} support_transposition_certified={} support_transposition_no_template={} support_transposition_outside_cone={} support_transposition_root_rejected={} support_transposition_incoming_rejected={} support_transposition_signature_rejected={} direct_exact_checks={} exact_fallback_skips={} output_pair_filter_ms={:.3} frozen_output_ms={:.3} first_round_ms={:.3} support_transposition_ms={:.3} support_setup_ms={:.3} support_quotient_build_ms={:.3} support_template_ms={:.3} support_cone_ms={:.3} support_verify_ms={:.3} exact_map_ms={:.3} accepted_map_storage_ms={:.3} projected_transport_groups={} projected_transport_candidates={} projected_transport_merged_groups={} projected_transport_merged_members={} projected_transport_ms={:.3} quotient_certified={} sparse_quotient_certified={} sparse_cone_avg={:.1} sparse_cone_max={} sparse_cone_ms={:.3} sparse_refinement_ms={:.3} sparse_map_ms={:.3} accepted_representative_members={} total_ms={:.3}",
+                "[glrmask/profile][terminal_interchangeability] output_pair_rejections={} output_pair_cached_closed={} output_invariant_checks={} first_round_rejections={} support_transposition_checks={} petal_batch_groups={} petal_batch_members={} petal_batch_grouping_ms={:.3} petal_batch_certificate_ms={:.3} petal_batch_map_ms={:.3} support_transposition_certified={} support_transposition_no_template={} support_transposition_outside_cone={} support_transposition_root_rejected={} support_transposition_incoming_rejected={} support_transposition_signature_rejected={} direct_exact_checks={} exact_fallback_skips={} output_pair_filter_ms={:.3} frozen_output_ms={:.3} first_round_ms={:.3} support_transposition_ms={:.3} support_setup_ms={:.3} support_quotient_build_ms={:.3} support_template_ms={:.3} support_cone_ms={:.3} support_verify_ms={:.3} exact_map_ms={:.3} accepted_map_storage_ms={:.3} projected_transport_groups={} projected_transport_candidates={} projected_transport_merged_groups={} projected_transport_merged_members={} projected_transport_skipped_groups={} projected_transport_skipped_candidates={} projected_transport_pair_work={} projected_transport_ms={:.3} quotient_certified={} sparse_quotient_certified={} sparse_cone_avg={:.1} sparse_cone_max={} sparse_cone_ms={:.3} sparse_refinement_ms={:.3} sparse_map_ms={:.3} accepted_representative_members={} total_ms={:.3}",
                 output_pair_rejections,
                 output_pair_cached_closed,
                 output_invariant_checks,
@@ -8876,6 +9097,9 @@ fn discover_one_round_with_transport_witnesses_in_context_impl(
                 projected_transport_candidates,
                 projected_transport_merged_groups,
                 projected_transport_merged_members,
+                projected_transport_skipped_groups,
+                projected_transport_skipped_candidates,
+                projected_transport_pair_work,
                 projected_transport_ms,
                 dfa.quotient_certified,
                 dfa.sparse_quotient_certified,

@@ -453,65 +453,81 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             // evidence over C representatives; otherwise over raw states.
             let discovery_context = match global_state_quotient.as_ref() {
                 Some(quotient) => {
-                    TiDiscoveryContext::new_with_global_state_quotient_and_output_cache(
+                    TiDiscoveryContext::try_new_with_global_state_quotient_and_output_cache(
                         tokenizer,
                         &relevant_bytes,
                         quotient,
                         shared_ti_output_cache,
                     )
                 }
-                None => TiDiscoveryContext::new_with_output_cache(
+                None => TiDiscoveryContext::try_new_with_output_cache(
                     tokenizer,
                     &relevant_bytes,
                     shared_ti_output_cache,
                 ),
             };
-            let mut transport_witness_rounds = Vec::new();
-            let mut round_count = 0usize;
-            let mut first_round_class_count = None;
-            loop {
-                let round = discover_one_round_with_transport_witnesses_in_context(
-                    tokenizer,
-                    &active,
-                    &discovery_context,
-                    ignore_terminal,
-                );
-                let next_active = active_terminals_for_partition(&round.partition, active.len());
-                let next_classes = fold_one_round_partition(&classes, &round.partition);
-                round_count += 1;
-                first_round_class_count.get_or_insert(next_classes.len());
-                classes = next_classes;
-                transport_witness_rounds.push(round);
-                if next_active == active {
-                    break;
+            match discovery_context {
+                Ok(discovery_context) => {
+                    let mut transport_witness_rounds = Vec::new();
+                    let mut round_count = 0usize;
+                    let mut first_round_class_count = None;
+                    loop {
+                        let round = discover_one_round_with_transport_witnesses_in_context(
+                            tokenizer,
+                            &active,
+                            &discovery_context,
+                            ignore_terminal,
+                        );
+                        let next_active =
+                            active_terminals_for_partition(&round.partition, active.len());
+                        let next_classes = fold_one_round_partition(&classes, &round.partition);
+                        round_count += 1;
+                        first_round_class_count.get_or_insert(next_classes.len());
+                        classes = next_classes;
+                        transport_witness_rounds.push(round);
+                        if next_active == active {
+                            break;
+                        }
+                        active = next_active;
+                    }
+                    let additional_merged_members = first_round_class_count
+                        .unwrap_or(classes.len())
+                        .saturating_sub(classes.len());
+                    let discovery_ms = ti_discovery_started_at
+                        .as_ref()
+                        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+                        .unwrap_or(0.0);
+                    let restricted_observation_seed_started_at =
+                        ti_profile_timing.then(Instant::now);
+                    let restricted_observation_seed = discovery_context
+                        .reusable_nfa_restricted_observation_state_map(
+                            tokenizer,
+                            initial_state_map,
+                        );
+                    let restricted_observation_seed_ms = restricted_observation_seed_started_at
+                        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+                        .unwrap_or(0.0);
+                    let raw_observations = discovery_context
+                        .final_raw_observation_ids(tokenizer.num_states() as usize);
+                    (
+                        Some(classes),
+                        Some(transport_witness_rounds),
+                        round_count,
+                        discovery_ms,
+                        additional_merged_members,
+                        raw_observations,
+                        restricted_observation_seed,
+                        restricted_observation_seed_ms,
+                    )
                 }
-                active = next_active;
+                Err(_) => {
+                    let discovery_ms = ti_discovery_started_at
+                        .as_ref()
+                        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+                        .unwrap_or(0.0);
+                    (None, None, 0, discovery_ms, 0, None, None, 0.0)
+                }
             }
-            let additional_merged_members = first_round_class_count
-                .unwrap_or(classes.len())
-                .saturating_sub(classes.len());
-            let discovery_ms = ti_discovery_started_at
-                .as_ref()
-                .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
-                .unwrap_or(0.0);
-            let restricted_observation_seed_started_at = ti_profile_timing.then(Instant::now);
-            let restricted_observation_seed = discovery_context
-                .reusable_nfa_restricted_observation_state_map(tokenizer, initial_state_map);
-            let restricted_observation_seed_ms = restricted_observation_seed_started_at
-                .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
-                .unwrap_or(0.0);
-            let raw_observations = discovery_context
-                .final_raw_observation_ids(tokenizer.num_states() as usize);
-            (
-                Some(classes),
-                Some(transport_witness_rounds),
-                round_count,
-                discovery_ms,
-                additional_merged_members,
-                raw_observations,
-                restricted_observation_seed,
-                restricted_observation_seed_ms,
-            )
         } else {
             (None, None, 0, 0.0, 0, None, None, 0.0)
         };

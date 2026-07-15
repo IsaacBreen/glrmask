@@ -30,6 +30,18 @@ pub(crate) struct RelevantPowersetView {
     pub(crate) configurations: Arc<[Box<[u32]>]>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RelevantPowersetWorkBudget {
+    pub(crate) max_configurations: usize,
+    pub(crate) max_edges: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RelevantPowersetWork {
+    pub(crate) configurations: usize,
+    pub(crate) edges: usize,
+}
+
 pub(crate) struct PrebuiltSparsePowersetRefinement<'a> {
     pub(crate) raw_start_to_view: &'a [u32],
     pub(crate) configurations: &'a [Box<[u32]>],
@@ -223,6 +235,56 @@ pub(crate) fn build_relevant_powerset_view(
     active_groups: Option<&[bool]>,
     state_map: Option<&ManyToOneIdMap>,
 ) -> RelevantPowersetView {
+    try_build_relevant_powerset_view(
+        tokenizer,
+        relevant_bytes,
+        active_groups,
+        state_map,
+        None,
+    )
+    .expect("unbounded relevant-powerset construction cannot abort")
+}
+
+pub(crate) fn build_relevant_powerset_view_budgeted(
+    tokenizer: &Tokenizer,
+    relevant_bytes: &[bool; 256],
+    active_groups: Option<&[bool]>,
+    state_map: Option<&ManyToOneIdMap>,
+    budget: RelevantPowersetWorkBudget,
+) -> Result<RelevantPowersetView, RelevantPowersetWork> {
+    try_build_relevant_powerset_view(
+        tokenizer,
+        relevant_bytes,
+        active_groups,
+        state_map,
+        Some(budget),
+    )
+}
+
+fn try_build_relevant_powerset_view(
+    tokenizer: &Tokenizer,
+    relevant_bytes: &[bool; 256],
+    active_groups: Option<&[bool]>,
+    state_map: Option<&ManyToOneIdMap>,
+    budget: Option<RelevantPowersetWorkBudget>,
+) -> Result<RelevantPowersetView, RelevantPowersetWork> {
+    #[inline]
+    fn check_budget(
+        configurations: usize,
+        edges: usize,
+        budget: Option<RelevantPowersetWorkBudget>,
+    ) -> Result<(), RelevantPowersetWork> {
+        if budget.is_some_and(|budget| {
+            configurations > budget.max_configurations || edges > budget.max_edges
+        }) {
+            return Err(RelevantPowersetWork {
+                configurations,
+                edges,
+            });
+        }
+        Ok(())
+    }
+
     let raw_state_count = tokenizer.num_states() as usize;
     if let Some(state_map) = state_map {
         assert_eq!(state_map.original_to_internal.len(), raw_state_count);
@@ -315,6 +377,7 @@ pub(crate) fn build_relevant_powerset_view(
                 queued,
             )
         };
+    check_budget(configs.len(), 0, budget)?;
 
     let start_state = raw_start_to_view[tokenizer.initial_state_id() as usize] as usize;
     let bytes = relevant_bytes
@@ -375,6 +438,7 @@ pub(crate) fn build_relevant_powerset_view(
                         continue;
                     }
                     edges.push((byte, target));
+                    check_budget(configs.len(), edges.len(), budget)?;
                     if !queued[target as usize] {
                         queued[target as usize] = true;
                         worklist.push_back(target);
@@ -404,6 +468,7 @@ pub(crate) fn build_relevant_powerset_view(
                         continue;
                     }
                     edges.push((byte, target));
+                    check_budget(configs.len(), edges.len(), budget)?;
                     if !queued[target as usize] {
                         queued[target as usize] = true;
                         worklist.push_back(target);
@@ -437,6 +502,7 @@ pub(crate) fn build_relevant_powerset_view(
                         continue;
                     }
                     edges.push((byte, target));
+                    check_budget(configs.len(), edges.len(), budget)?;
                     if !queued[target as usize] {
                         queued[target as usize] = true;
                         worklist.push_back(target);
@@ -479,6 +545,7 @@ pub(crate) fn build_relevant_powerset_view(
                     queued.resize(configs.len(), false);
                 }
                 edges.push((byte, target));
+                check_budget(configs.len(), edges.len(), budget)?;
                 if !queued[target as usize] {
                     queued[target as usize] = true;
                     worklist.push_back(target);
@@ -549,7 +616,7 @@ pub(crate) fn build_relevant_powerset_view(
             })
             .collect()
     };
-    RelevantPowersetView {
+    Ok(RelevantPowersetView {
         states,
         start_state,
         bytes,
@@ -557,7 +624,7 @@ pub(crate) fn build_relevant_powerset_view(
         edges,
         raw_start_to_view: Arc::from(raw_start_to_view),
         configurations: Arc::from(configs),
-    }
+    })
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -3345,6 +3412,43 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn relevant_powerset_budget_aborts_without_changing_successful_construction() {
+        let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
+        let relevant = [true; 256];
+        let reference = build_relevant_powerset_view(&tokenizer, &relevant, None, None);
+
+        let generous = build_relevant_powerset_view_budgeted(
+            &tokenizer,
+            &relevant,
+            None,
+            None,
+            RelevantPowersetWorkBudget {
+                max_configurations: reference.configurations.len(),
+                max_edges: reference.edges.len(),
+            },
+        )
+        .expect("budget equal to realized exact work must succeed");
+        assert_eq!(generous.configurations.as_ref(), reference.configurations.as_ref());
+        assert_eq!(generous.edge_offsets, reference.edge_offsets);
+        assert_eq!(generous.edges, reference.edges);
+
+        let too_small = build_relevant_powerset_view_budgeted(
+            &tokenizer,
+            &relevant,
+            None,
+            None,
+            RelevantPowersetWorkBudget {
+                max_configurations: reference.configurations.len(),
+                max_edges: reference.edges.len().saturating_sub(1),
+            },
+        );
+        let Err(work) = too_small else {
+            panic!("undersized edge budget must abort powerset construction");
+        };
+        assert!(work.edges > reference.edges.len().saturating_sub(1));
     }
 
     #[test]
