@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use rayon::prelude::*;
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -424,6 +424,11 @@ impl<'tok> ContinuationNfaScanCache<'tok> {
 
 impl DynamicContinuationPartition {
     #[inline]
+    pub(crate) fn has_narrow_group_set(&self) -> bool {
+        self.groups.len() <= 64
+    }
+
+    #[inline]
     pub(crate) fn token_group(&self, token_id: u32) -> Option<usize> {
         self.token_groups
             .get(token_id as usize)
@@ -466,6 +471,8 @@ pub(crate) struct DynamicMaskVocab {
     initialized: bool,
     continuation_partitions:
         Arc<Mutex<FxHashMap<u32, Arc<DynamicContinuationPartition>>>>,
+    declined_continuation_sources: Arc<Mutex<FxHashSet<u32>>>,
+    continuation_entries: Arc<OnceLock<Arc<Vec<(u32, Box<[u8]>)>>>>,
     mask_cache: Arc<Mutex<Vec<DynamicMaskCacheEntry>>>,
 }
 
@@ -484,6 +491,8 @@ impl DynamicMaskVocab {
             pending_source: Some(source),
             initialized: false,
             continuation_partitions: Arc::new(Mutex::new(FxHashMap::default())),
+            declined_continuation_sources: Arc::new(Mutex::new(FxHashSet::default())),
+            continuation_entries: Arc::new(OnceLock::new()),
             mask_cache: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -498,6 +507,8 @@ impl DynamicMaskVocab {
             pending_source: None,
             initialized: true,
             continuation_partitions: Arc::new(Mutex::new(FxHashMap::default())),
+            declined_continuation_sources: Arc::new(Mutex::new(FxHashSet::default())),
+            continuation_entries: Arc::new(OnceLock::new()),
             mask_cache: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -647,11 +658,12 @@ impl DynamicMaskVocab {
         config: u32,
         by_end_states: &mut BTreeMap<Vec<u32>, Vec<u32>>,
     ) -> bool {
+        const GROUP_CAP: usize = 256;
         let node = self.trie.node(node_id);
         if let Some(token_id) = node.token_id {
             let end_states = scan_cache.non_end_states(config);
             by_end_states.entry(end_states).or_default().push(token_id);
-            if by_end_states.len() > 64 {
+            if by_end_states.len() > GROUP_CAP {
                 return false;
             }
         }
@@ -671,7 +683,7 @@ impl DynamicMaskVocab {
                     .entry(Vec::new())
                     .or_default()
                     .extend_from_slice(self.trie.subtree_tokens(edge.child));
-                if by_end_states.len() > 64 {
+                if by_end_states.len() > GROUP_CAP {
                     return false;
                 }
             } else {
@@ -728,7 +740,7 @@ impl DynamicMaskVocab {
                     );
                 } else {
                     assert!(
-                        reference.len() > 64,
+                        reference.len() > 256,
                         "NFA continuation trie traversal aborted at the group cap but scalar replay did not"
                     );
                 }
@@ -745,7 +757,7 @@ impl DynamicMaskVocab {
             );
         }
 
-        if by_end_states.len() > 64 {
+        if by_end_states.len() > 256 {
             return None;
         }
 
@@ -771,8 +783,12 @@ impl DynamicMaskVocab {
                 token_count,
             });
         }
-        let mut subtree_groups = vec![0u64; self.trie.nodes.len()];
-        if !self.trie.nodes.is_empty() {
+        let mut subtree_groups = if groups.len() <= 64 {
+            vec![0u64; self.trie.nodes.len()]
+        } else {
+            Vec::new()
+        };
+        if !subtree_groups.is_empty() {
             self.fill_continuation_subtree_groups(0, &token_groups, &mut subtree_groups);
         }
         Some(DynamicContinuationPartition {
@@ -791,6 +807,71 @@ impl DynamicMaskVocab {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(&source_state)
             .cloned()
+    }
+
+    fn continuation_entries(&self) -> Arc<Vec<(u32, Box<[u8]>)>> {
+        Arc::clone(
+            self.continuation_entries
+                .get_or_init(|| Arc::new(self.canonical_token_entries())),
+        )
+    }
+
+    pub(crate) fn cached_or_build_continuation_partition(
+        &self,
+        tokenizer: &Tokenizer,
+        source_state: u32,
+        mask_words: usize,
+    ) -> Option<Arc<DynamicContinuationPartition>> {
+        const MAX_DYNAMIC_CONTINUATION_PARTITIONS: usize = 32;
+
+        if let Some(partition) = self.cached_continuation_partition(source_state) {
+            return Some(partition);
+        }
+        if self
+            .declined_continuation_sources
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(&source_state)
+        {
+            return None;
+        }
+        let started = std::time::Instant::now();
+        let entries = self.continuation_entries();
+        let built = self
+            .build_continuation_partition(tokenizer, source_state, mask_words, &entries)
+            .map(Arc::new);
+        if std::env::var_os("GLRMASK_PROFILE_DYNAMIC_MASK").is_some() {
+            eprintln!(
+                "[glrmask/profile][dynamic_continuation_lazy_build] source={} groups={} build_ms={:.3}",
+                source_state,
+                built.as_ref().map_or(0, |partition| partition.groups.len()),
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+
+        let Some(built) = built else {
+            self.declined_continuation_sources
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(source_state);
+            return None;
+        };
+
+        let mut partitions = self
+            .continuation_partitions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(existing) = partitions.get(&source_state) {
+            return Some(Arc::clone(existing));
+        }
+        if partitions.len() >= MAX_DYNAMIC_CONTINUATION_PARTITIONS {
+            // The cap bounds retained memory, not runtime acceleration. A
+            // transient partition is still much cheaper than falling back to
+            // a full vocabulary-trie walk for this mask.
+            return Some(built);
+        }
+        partitions.insert(source_state, Arc::clone(&built));
+        Some(built)
     }
 
     pub(crate) fn prebuild_continuation_partitions(
@@ -873,7 +954,12 @@ impl DynamicMaskVocab {
                 }
                 covered.len()
             };
-            if covered_len >= 32 {
+            // A moderately broad one-byte entrance can be more useful than the
+            // broad self-loop state itself: it preserves the exact residual
+            // distinction needed to admit most vocabulary tokens in one bulk
+            // continuation query. 24 covers common alpha/identifier entrances
+            // without treating narrow punctuation paths as prebuild candidates.
+            if covered_len >= 24 {
                 entry_sources.push((source_state, covered_len));
             }
         }
@@ -897,7 +983,7 @@ impl DynamicMaskVocab {
                 source_discovery_started_at.elapsed().as_secs_f64() * 1000.0,
             );
         }
-        let entries = Arc::new(self.canonical_token_entries());
+        let entries = self.continuation_entries();
         let build = |source_state: &u32| {
             let started = profile.then(std::time::Instant::now);
             let partition = self
@@ -980,6 +1066,8 @@ impl Default for DynamicMaskVocab {
             pending_source: None,
             initialized: false,
             continuation_partitions: Arc::new(Mutex::new(FxHashMap::default())),
+            declined_continuation_sources: Arc::new(Mutex::new(FxHashSet::default())),
+            continuation_entries: Arc::new(OnceLock::new()),
             mask_cache: Arc::new(Mutex::new(Vec::new())),
         }
     }

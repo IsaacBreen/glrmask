@@ -37,7 +37,16 @@ struct TraverseWork {
     tokenizer_state: u32,
     gss: ParserStacks,
     initial_prune_guard: InitialPruneGuard,
-    continuation_filter: Option<(usize, u64)>,
+    continuation_filter: Option<ContinuationFilter>,
+}
+
+#[derive(Clone, Copy)]
+enum ContinuationFilter {
+    Narrow {
+        partition_index: usize,
+        required_groups: u64,
+    },
+    AlreadyMarked,
 }
 
 #[derive(Clone)]
@@ -65,6 +74,65 @@ fn or_mask(buf: &mut [u32], mask: &[u32]) {
     for (target, source) in buf.iter_mut().zip(mask) {
         *target |= *source;
     }
+}
+
+#[inline]
+fn mask_bit_is_set(buf: &[u32], token_id: u32) -> bool {
+    let word = token_id as usize / 32;
+    let bit = token_id % 32;
+    buf.get(word)
+        .is_some_and(|slot| *slot & (1u32 << bit) != 0)
+}
+
+fn canonical_token_is_marked(
+    vocab: &super::artifact::DynamicMaskVocab,
+    canonical_token_id: u32,
+    buf: &[u32],
+) -> bool {
+    vocab
+        .token_ids(canonical_token_id)
+        .is_some_and(|token_ids| token_ids.iter().all(|&token_id| mask_bit_is_set(buf, token_id)))
+}
+
+fn subtree_is_fully_marked(
+    vocab: &super::artifact::DynamicMaskVocab,
+    trie: &DynamicMaskTrie,
+    node: u32,
+    buf: &[u32],
+) -> bool {
+    trie.subtree_tokens(node)
+        .iter()
+        .all(|&token_id| canonical_token_is_marked(vocab, token_id, buf))
+}
+
+fn should_lazy_build_continuation_partition(
+    constraint: &Constraint,
+    tokenizer_state: u32,
+    stacks: &ParserStacks,
+    traversal_cache: &mut DynamicTraversalCache,
+) -> bool {
+    let tokenizer = &constraint.tokenizer;
+    if tokenizer_state == tokenizer.initial_state()
+        || tokenizer.transitions_from(tokenizer_state).count() < 128
+        || tokenizer.self_loop_bytes(tokenizer_state).len() >= 24
+        || tokenizer.matched_terminals_iter(tokenizer_state).next().is_some()
+        || !(1..=4).contains(&tokenizer.possible_future_terminals_iter(tokenizer_state).count())
+    {
+        return false;
+    }
+
+    // The expensive residual shape is only worth partitioning when a broad
+    // immediate successor is already admissible for the current parser stack.
+    // This cheaply rejects lookalike lexer states whose partition would prove
+    // only a handful of tokens.
+    let mut target_widths = FxHashMap::<u32, usize>::default();
+    for (_, target) in tokenizer.transitions_from(tokenizer_state) {
+        *target_widths.entry(target).or_default() += 1;
+    }
+    target_widths.into_iter().any(|(target, width)| {
+        width >= 24
+            && token_boundary_allowed_cached(constraint, target, stacks, traversal_cache)
+    })
 }
 
 fn update_eos_mask(state: &ConstraintState<'_>, buf: &mut [u32]) {
@@ -474,6 +542,7 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
     let mut subtree_mark_tokens = 0usize;
     let mut continuation_groups_admitted = 0usize;
     let mut continuation_groups_traversed = 0usize;
+    let mut lazy_continuation_builds_remaining = 1usize;
     if profile {
         eprintln!(
             "[glrmask/profile][dynamic_mask_config] tokenizer_states={} epsilon={} fast_transition_rows={}",
@@ -517,45 +586,89 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
                     ),
                 );
             }
-            if initial_prune_guard.is_passed()
-                && let Some(partition) = vocab.cached_continuation_partition(tokenizer_state)
-            {
-                let mut admitted_groups = 0u64;
-                for (group_id, group) in partition.groups.iter().enumerate() {
-                    let admitted = group.end_states.iter().any(|&end_state| {
-                        token_boundary_allowed_cached(
-                            state.constraint,
-                            end_state,
-                            &stacks,
-                            &mut traversal_cache,
-                        )
-                    });
-                    if admitted {
-                        or_mask(buf, &group.mask);
-                        admitted_groups |= 1u64 << group_id;
-                        continuation_groups_admitted += 1;
+            if initial_prune_guard.is_passed() {
+                let mut partition = vocab.cached_continuation_partition(tokenizer_state);
+                if partition.is_none()
+                    && lazy_continuation_builds_remaining != 0
+                    && should_lazy_build_continuation_partition(
+                        state.constraint,
+                        tokenizer_state,
+                        &stacks,
+                        &mut traversal_cache,
+                    )
+                {
+                    lazy_continuation_builds_remaining -= 1;
+                    partition = vocab.cached_or_build_continuation_partition(
+                        &state.constraint.tokenizer,
+                        tokenizer_state,
+                        buf.len(),
+                    );
+                }
+                if let Some(partition) = partition {
+                    let mut admitted_groups = vec![false; partition.groups.len()];
+                    let mut admitted_tokens = 0usize;
+                    for (group_id, group) in partition.groups.iter().enumerate() {
+                        let admitted = group.end_states.iter().any(|&end_state| {
+                            token_boundary_allowed_cached(
+                                state.constraint,
+                                end_state,
+                                &stacks,
+                                &mut traversal_cache,
+                            )
+                        });
+                        if admitted {
+                            admitted_groups[group_id] = true;
+                            admitted_tokens += group.token_count;
+                        }
+                    }
+                    if admitted_tokens != 0 {
+                        for (group_id, group) in partition.groups.iter().enumerate() {
+                            if admitted_groups[group_id] {
+                                or_mask(buf, &group.mask);
+                                continuation_groups_admitted += 1;
+                            }
+                        }
+                        if profile {
+                            eprintln!(
+                                "[glrmask/profile][dynamic_continuation_use] source={} admitted_tokens={}",
+                                tokenizer_state,
+                                admitted_tokens,
+                            );
+                        }
+                        let required_group_count = admitted_groups
+                            .iter()
+                            .filter(|&&admitted| !admitted)
+                            .count();
+                        if required_group_count != 0 {
+                            let continuation_filter = if partition.has_narrow_group_set() {
+                                let required_groups = admitted_groups
+                                    .iter()
+                                    .enumerate()
+                                    .fold(0u64, |groups, (group_id, &admitted)| {
+                                        groups | ((!admitted) as u64) << group_id
+                                    });
+                                let partition_index = continuation_partitions.len();
+                                continuation_partitions.push(partition);
+                                ContinuationFilter::Narrow {
+                                    partition_index,
+                                    required_groups,
+                                }
+                            } else {
+                                ContinuationFilter::AlreadyMarked
+                            };
+                            traversal.push(TraverseWork {
+                                trie_index: 0,
+                                node: 0,
+                                tokenizer_state,
+                                gss: stacks.clone(),
+                                initial_prune_guard: initial_prune_guard.clone(),
+                                continuation_filter: Some(continuation_filter),
+                            });
+                            continuation_groups_traversed += required_group_count;
+                        }
+                        continue;
                     }
                 }
-                let all_groups = if partition.groups.len() == 64 {
-                    u64::MAX
-                } else {
-                    (1u64 << partition.groups.len()) - 1
-                };
-                let required_groups = all_groups & !admitted_groups;
-                if required_groups != 0 {
-                    let partition_index = continuation_partitions.len();
-                    continuation_partitions.push(partition);
-                    traversal.push(TraverseWork {
-                        trie_index: 0,
-                        node: 0,
-                        tokenizer_state,
-                        gss: stacks.clone(),
-                        initial_prune_guard: initial_prune_guard.clone(),
-                        continuation_filter: Some((partition_index, required_groups)),
-                    });
-                    continuation_groups_traversed += required_groups.count_ones() as usize;
-                }
-                continue;
             }
 
             traversal.push(TraverseWork {
@@ -569,16 +682,38 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
         }
     }
 
+    // Continuation partitions prove tokens for the union of all dynamic seeds,
+    // not just for the seed that selected the partition. Once any partition has
+    // filled part of the output mask, an otherwise-unfiltered seed can skip
+    // leaves and complete subtrees that are already globally admitted.
+    if continuation_groups_admitted != 0 {
+        for work in &mut traversal {
+            if work.continuation_filter.is_none() {
+                work.continuation_filter = Some(ContinuationFilter::AlreadyMarked);
+            }
+        }
+    }
+
     while let Some(current) = traversal.pop() {
         work_items += 1;
         let trie = &tries[current.trie_index];
         let node = trie.node(current.node);
-        if let Some((partition_index, required_groups)) = current.continuation_filter
-            && continuation_partitions[partition_index].subtree_groups(current.node)
+        match current.continuation_filter {
+            Some(ContinuationFilter::Narrow {
+                partition_index,
+                required_groups,
+            }) if continuation_partitions[partition_index].subtree_groups(current.node)
                 & required_groups
-                == 0
-        {
-            continue;
+                == 0 =>
+            {
+                continue;
+            }
+            Some(ContinuationFilter::AlreadyMarked)
+                if subtree_is_fully_marked(vocab, trie, current.node, buf) =>
+            {
+                continue;
+            }
+            _ => {}
         }
         let subtree_action = raw_self_loop_subtree(
             state.constraint,
@@ -598,15 +733,22 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
             continue;
         }
 
-        let token_is_required = current.continuation_filter.is_none_or(
-            |(partition_index, required_groups)| {
+        let token_is_required = match current.continuation_filter {
+            None => true,
+            Some(ContinuationFilter::Narrow {
+                partition_index,
+                required_groups,
+            }) => {
                 node.token_id
                     .and_then(|token_id| {
                         continuation_partitions[partition_index].token_group(token_id)
                     })
                     .is_some_and(|group| required_groups & (1u64 << group) != 0)
-            },
-        );
+            }
+            Some(ContinuationFilter::AlreadyMarked) => node
+                .token_id
+                .is_some_and(|token_id| !canonical_token_is_marked(vocab, token_id, buf)),
+        };
         if token_is_required
             && node.token_id.is_some()
             && current.initial_prune_guard.allows_token_boundary()
@@ -628,12 +770,17 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
         }
 
         for edge in trie.children(current.node) {
-            if let Some((partition_index, required_groups)) = current.continuation_filter
-                && continuation_partitions[partition_index].subtree_groups(edge.child)
+            if let Some(ContinuationFilter::Narrow {
+                partition_index,
+                required_groups,
+            }) = current.continuation_filter
+            {
+                if continuation_partitions[partition_index].subtree_groups(edge.child)
                     & required_groups
                     == 0
-            {
-                continue;
+                {
+                    continue;
+                }
             }
             trie_edges += 1;
             let segment = trie.edge_bytes(edge);
