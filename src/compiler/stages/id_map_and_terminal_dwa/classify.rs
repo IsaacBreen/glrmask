@@ -1,6 +1,7 @@
 //! Vocab and terminal classification utilities.
 
 use crate::automata::lexer::compile::build_regex;
+use crate::automata::lexer::ast::Expr;
 use crate::automata::lexer::Lexer;
 use rustc_hash::FxHashMap;
 use std::collections::{BTreeMap, HashMap};
@@ -201,29 +202,53 @@ fn merge_sorted_token_ids(mut left: Vec<u32>, right: Vec<u32>) -> Vec<u32> {
 }
 
 #[derive(Debug)]
-struct VocabByteSet {
+pub(crate) struct VocabClassificationFacts {
     bytes: U8Set,
+    observed_follow_bytes: [U8Set; 256],
 }
 
-impl crate::vocab::VocabDerivedArtifact for VocabByteSet {}
+impl crate::vocab::VocabDerivedArtifact for VocabClassificationFacts {}
 
-fn vocab_byte_set(vocab: &Vocab) -> U8Set {
-    if let Some(cached) = vocab.vocab_derived_cache_get::<VocabByteSet>() {
-        return cached.bytes;
+fn vocab_classification_facts(vocab: &Vocab) -> Arc<VocabClassificationFacts> {
+    if let Some(cached) = vocab.vocab_derived_cache_get::<VocabClassificationFacts>() {
+        return cached;
     }
 
     let mut byteset = U8Set::empty();
+    let mut observed_follow_bytes = [U8Set::empty(); 256];
     for bytes in vocab.entries.values() {
         for &byte in bytes {
             byteset.insert(byte);
         }
+        for pair in bytes.windows(2) {
+            observed_follow_bytes[pair[0] as usize].insert(pair[1]);
+        }
     }
-    vocab.vocab_derived_cache_set(std::sync::Arc::new(VocabByteSet { bytes: byteset }));
-    byteset
+    let facts = Arc::new(VocabClassificationFacts {
+        bytes: byteset,
+        observed_follow_bytes,
+    });
+    vocab.vocab_derived_cache_set(Arc::clone(&facts));
+    facts
+}
+
+pub(crate) fn cache_vocab_classification_facts(
+    vocab: &Vocab,
+    bytes: U8Set,
+    observed_follow_bytes: [U8Set; 256],
+) {
+    vocab.vocab_derived_cache_set(Arc::new(VocabClassificationFacts {
+        bytes,
+        observed_follow_bytes,
+    }));
+}
+
+fn vocab_byte_set(vocab: &Vocab) -> U8Set {
+    vocab_classification_facts(vocab).bytes
 }
 
 pub(crate) fn prepare_vocab_for_terminal_classification(vocab: &Vocab) {
-    let _ = vocab_byte_set(vocab);
+    let _ = vocab_classification_facts(vocab);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -682,7 +707,8 @@ pub(crate) fn classify_terminal_path_lengths(
 ) -> Vec<TerminalPathLength> {
     let nt = num_terminals as usize;
     // 1. Vocab byte bitset: all bytes appearing in any vocab token.
-    let vocab_bytes = vocab_byte_set(vocab);
+    let vocab_facts = vocab_classification_facts(vocab);
+    let vocab_bytes = vocab_facts.bytes;
 
     // 2. Byte bitsets per terminal — use cache if available.
     let owned_bytesets: Option<SharedClassifyBytesets>;
@@ -699,13 +725,27 @@ pub(crate) fn classify_terminal_path_lengths(
     // terminal pair split inside one vocabulary token.
     let mut heuristic_two_plus = BitSet::new(nt);
 
+    // A real within-token terminal boundary necessarily consumes two adjacent
+    // token bytes: the byte ending t1's matched prefix and the byte starting
+    // t2's suffix.  The former heuristic only required those bytes to occur
+    // somewhere in the vocabulary independently, which admitted many impossible
+    // candidates and forced expensive exact scans.  Record the actually observed
+    // byte-pair relation once, then require a last-byte/first-byte pair to occur.
     for t1 in 0..nt {
         if bytesets.last_bytes[t1].is_disjoint(&vocab_bytes) {
             continue;
         }
+        let mut observed_after_t1 = U8Set::empty();
+        for last_byte in bytesets.last_bytes[t1].iter() {
+            observed_after_t1 = observed_after_t1
+                .union(&vocab_facts.observed_follow_bytes[last_byte as usize]);
+        }
+        if observed_after_t1.is_empty() {
+            continue;
+        }
         let disallowed = disallowed_follows.get(&(t1 as u32));
         for t2 in 0..nt {
-            if bytesets.first_bytes[t2].is_disjoint(&vocab_bytes) {
+            if bytesets.first_bytes[t2].is_disjoint(&observed_after_t1) {
                 continue;
             }
             if let Some(d) = disallowed {
@@ -717,8 +757,20 @@ pub(crate) fn classify_terminal_path_lengths(
             heuristic_two_plus.set(t2);
         }
     }
-    let use_direct_exact = heuristic_two_plus.count_ones() >= 1_000 && vocab.len() <= 20_000;
-    let exact = if use_direct_exact {
+    let heuristic_candidate_count = heuristic_two_plus.count_ones();
+    let use_direct_exact = (heuristic_candidate_count >= 1_000 && vocab.len() <= 20_000)
+        // Recompiling a broad candidate lexer is disproportionately expensive
+        // for small/medium partitions.  The full-tokenizer exact view avoids
+        // that compilation and is cheaper once the candidate set is wide.
+        || (heuristic_candidate_count >= 64 && vocab.len() <= 4_096);
+    let exact = if let Some(exact) = exact_terminal_path_two_plus_finite_literals(
+        tokenizer,
+        vocab,
+        disallowed_follows,
+        &heuristic_two_plus,
+    ) {
+        exact
+    } else if use_direct_exact {
         exact_terminal_path_two_plus(
             tokenizer,
             vocab,
@@ -1852,6 +1904,270 @@ struct ExactTerminalPathTwoPlus {
     witnesses: Vec<Option<TerminalBoundaryWitness>>,
 }
 
+const FINITE_LITERAL_CLASSIFY_MAX_CANDIDATES: usize = 64;
+const FINITE_LITERAL_CLASSIFY_MAX_VARIANTS: usize = 256;
+const FINITE_LITERAL_CLASSIFY_MAX_TOTAL_BYTES: usize = 16 * 1024;
+
+fn collect_finite_literal_strings(expr: &Expr) -> Option<Vec<Vec<u8>>> {
+    fn collect(expr: &Expr, variants: &mut usize, total_bytes: &mut usize) -> Option<Vec<Vec<u8>>> {
+        let mut account = |values: &Vec<Vec<u8>>| -> Option<()> {
+            *variants = variants.checked_add(values.len())?;
+            *total_bytes = total_bytes.checked_add(values.iter().map(Vec::len).sum::<usize>())?;
+            (*variants <= FINITE_LITERAL_CLASSIFY_MAX_VARIANTS
+                && *total_bytes <= FINITE_LITERAL_CLASSIFY_MAX_TOTAL_BYTES)
+                .then_some(())
+        };
+        match expr {
+            Expr::U8Seq(bytes) => {
+                let values = vec![bytes.clone()];
+                account(&values)?;
+                Some(values)
+            }
+            Expr::Epsilon => {
+                let values = vec![Vec::new()];
+                account(&values)?;
+                Some(values)
+            }
+            Expr::Shared(inner) => collect(inner, variants, total_bytes),
+            Expr::Choice(options) => {
+                let mut result = Vec::new();
+                for option in options {
+                    result.extend(collect(option, variants, total_bytes)?);
+                    if result.len() > FINITE_LITERAL_CLASSIFY_MAX_VARIANTS {
+                        return None;
+                    }
+                }
+                result.sort_unstable();
+                result.dedup();
+                Some(result)
+            }
+            Expr::Seq(parts) => {
+                let mut result = vec![Vec::new()];
+                for part in parts {
+                    let suffixes = collect(part, variants, total_bytes)?;
+                    let product_len = result.len().checked_mul(suffixes.len())?;
+                    if product_len > FINITE_LITERAL_CLASSIFY_MAX_VARIANTS {
+                        return None;
+                    }
+                    let mut next = Vec::with_capacity(product_len);
+                    for prefix in &result {
+                        for suffix in &suffixes {
+                            let mut bytes = Vec::with_capacity(prefix.len() + suffix.len());
+                            bytes.extend_from_slice(prefix);
+                            bytes.extend_from_slice(suffix);
+                            next.push(bytes);
+                        }
+                    }
+                    result = next;
+                }
+                result.sort_unstable();
+                result.dedup();
+                Some(result)
+            }
+            _ => None,
+        }
+    }
+
+    let mut variants = 0usize;
+    let mut total_bytes = 0usize;
+    let mut values = collect(expr, &mut variants, &mut total_bytes)?;
+    values.sort_unstable();
+    values.dedup();
+    (!values.is_empty() && values.iter().all(|value| !value.is_empty())).then_some(values)
+}
+
+/// Exact terminal-path classification for a small family of finite literal
+/// languages.  Starting the prefix scanner from every live residual of a
+/// literal means terminal `t` is final at a split exactly when the consumed
+/// token prefix is a non-empty suffix of one of `t`'s literals.  Starting the
+/// suffix scanner from reset means `t` is viable exactly when the remaining
+/// token suffix and one of `t`'s literals are prefix-comparable.
+fn exact_terminal_path_two_plus_finite_literals(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    candidates: &BitSet,
+) -> Option<ExactTerminalPathTwoPlus> {
+    let candidate_ids = candidates.iter().collect::<Vec<_>>();
+    if candidate_ids.is_empty() || candidate_ids.len() > FINITE_LITERAL_CLASSIFY_MAX_CANDIDATES {
+        return None;
+    }
+    let literals_by_local = candidate_ids
+        .iter()
+        .map(|&terminal| {
+            collect_finite_literal_strings(tokenizer.terminal_expr(terminal as u32)?)
+        })
+        .collect::<Option<Vec<_>>>()?;
+
+    // Dense trie over every possible non-empty literal completion.  The small
+    // specialization cap keeps this comfortably tiny while making token-prefix
+    // scanning branch-light and allocation-free.
+    const NONE: u16 = u16::MAX;
+    let mut trie = vec![Box::new([NONE; 256])];
+    let mut matched_masks = vec![0u64];
+    let mut reset_trie = vec![Box::new([NONE; 256])];
+    let mut reset_accepting_masks = vec![0u64];
+    for (local, literals) in literals_by_local.iter().enumerate() {
+        let bit = 1u64 << local;
+        for literal in literals {
+            let mut reset_node = 0usize;
+            for &byte in literal {
+                let next = reset_trie[reset_node][byte as usize];
+                reset_node = if next == NONE {
+                    if reset_trie.len() >= usize::from(NONE) {
+                        return None;
+                    }
+                    let child = reset_trie.len();
+                    reset_trie.push(Box::new([NONE; 256]));
+                    reset_accepting_masks.push(0);
+                    reset_trie[reset_node][byte as usize] = child as u16;
+                    child
+                } else {
+                    next as usize
+                };
+            }
+            reset_accepting_masks[reset_node] |= bit;
+
+            for start in 0..literal.len() {
+                let mut node = 0usize;
+                for &byte in &literal[start..] {
+                    let next = trie[node][byte as usize];
+                    node = if next == NONE {
+                        if trie.len() >= usize::from(NONE) {
+                            return None;
+                        }
+                        let child = trie.len();
+                        trie.push(Box::new([NONE; 256]));
+                        matched_masks.push(0);
+                        trie[node][byte as usize] = child as u16;
+                        child
+                    } else {
+                        next as usize
+                    };
+                }
+                matched_masks[node] |= bit;
+            }
+        }
+    }
+    let mut reset_subtree_masks = reset_accepting_masks.clone();
+    for node in (0..reset_trie.len()).rev() {
+        let mut subtree = reset_subtree_masks[node];
+        for &child in reset_trie[node].iter() {
+            if child != NONE {
+                subtree |= reset_subtree_masks[child as usize];
+            }
+        }
+        reset_subtree_masks[node] = subtree;
+    }
+
+    let all_local = if candidate_ids.len() == 64 {
+        u64::MAX
+    } else {
+        (1u64 << candidate_ids.len()) - 1
+    };
+    let mut allowed_after = vec![all_local; candidate_ids.len()];
+    for (local_1, &terminal_1) in candidate_ids.iter().enumerate() {
+        if let Some(blocked) = disallowed_follows.get(&(terminal_1 as u32)) {
+            let mut allowed = all_local;
+            for (local_2, &terminal_2) in candidate_ids.iter().enumerate() {
+                if blocked.contains(terminal_2) {
+                    allowed &= !(1u64 << local_2);
+                }
+            }
+            allowed_after[local_1] = allowed;
+        }
+    }
+
+    let started_at = std::time::Instant::now();
+    let mut found = 0u64;
+    let mut witnesses = vec![None; candidates.len()];
+    let mut checked_prefix_matches = 0usize;
+    'tokens: for (&token_id, bytes) in vocab.entries.iter() {
+        if bytes.len() < 2 {
+            continue;
+        }
+        let mut node = 0usize;
+        for split_position in 1..bytes.len() {
+            let next = trie[node][bytes[split_position - 1] as usize];
+            if next == NONE {
+                break;
+            }
+            node = next as usize;
+            let mut prefix_terminals = matched_masks[node];
+            if prefix_terminals == 0 {
+                continue;
+            }
+            checked_prefix_matches += 1;
+            let suffix = &bytes[split_position..];
+            let mut suffix_viable = 0u64;
+            let mut suffix_node = 0usize;
+            let mut consumed_suffix = true;
+            for &byte in suffix {
+                let next = reset_trie[suffix_node][byte as usize];
+                if next == NONE {
+                    consumed_suffix = false;
+                    break;
+                }
+                suffix_node = next as usize;
+                // A literal that ends before the token suffix does is already
+                // matched inside the suffix and is therefore viable.
+                suffix_viable |= reset_accepting_masks[suffix_node];
+            }
+            if consumed_suffix {
+                // The token suffix may itself end inside a longer literal; all
+                // terminal leaves below the reached node remain completable.
+                suffix_viable |= reset_subtree_masks[suffix_node];
+            }
+            while prefix_terminals != 0 {
+                let local_1 = prefix_terminals.trailing_zeros() as usize;
+                prefix_terminals &= prefix_terminals - 1;
+                let followers = suffix_viable & allowed_after[local_1];
+                if followers == 0 {
+                    continue;
+                }
+                found |= 1u64 << local_1;
+                found |= followers;
+                if witnesses[candidate_ids[local_1]].is_none() {
+                    let local_2 = followers.trailing_zeros() as usize;
+                    let witness = TerminalBoundaryWitness {
+                        token_id,
+                        token_bytes: bytes.clone(),
+                        split_position,
+                        terminal_1: candidate_ids[local_1],
+                        terminal_2: candidate_ids[local_2],
+                    };
+                    witnesses[candidate_ids[local_1]] = Some(witness.clone());
+                    if witnesses[candidate_ids[local_2]].is_none() {
+                        witnesses[candidate_ids[local_2]] = Some(witness);
+                    }
+                }
+            }
+            if found == all_local {
+                break 'tokens;
+            }
+        }
+    }
+
+    let mut two_plus = BitSet::new(candidates.len());
+    for local in 0..candidate_ids.len() {
+        if found & (1u64 << local) != 0 {
+            two_plus.set(candidate_ids[local]);
+        }
+    }
+    if super::types::compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][terminal_path_finite_literals] tokens={} candidates={} trie_nodes={} checked_prefix_matches={} two_plus={} total_ms={:.3}",
+            vocab.len(),
+            candidate_ids.len(),
+            trie.len(),
+            checked_prefix_matches,
+            two_plus.count_ones(),
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    Some(ExactTerminalPathTwoPlus { two_plus, witnesses })
+}
+
 struct CandidatePrefixPowerset<'a> {
     tokenizer: &'a Tokenizer,
     words_per_mask: usize,
@@ -1859,6 +2175,110 @@ struct CandidatePrefixPowerset<'a> {
     config_ids: FxHashMap<Vec<u32>, u32>,
     transitions: Vec<[u32; 256]>,
     matched_masks: Vec<u64>,
+}
+
+/// Exact powerset scanner for the original epsilon-NFA, restricted to one
+/// active terminal language.  Unlike the bounded-view builder this retains
+/// only the configuration IDs and matched-terminal masks needed by terminal
+/// path classification, so prefix propagation and boundary discovery can be
+/// fused in one token scan.
+struct ActivePrefixPowerset<'a> {
+    tokenizer: &'a Tokenizer,
+    active: &'a BitSet,
+    active_language: Vec<bool>,
+    words_per_mask: usize,
+    configs: Vec<Box<[u32]>>,
+    config_ids: FxHashMap<Vec<u32>, u32>,
+    transitions: Vec<[u32; 256]>,
+    matched_masks: Vec<u64>,
+}
+
+impl<'a> ActivePrefixPowerset<'a> {
+    fn new(tokenizer: &'a Tokenizer, active: &'a BitSet, raw_start_states: &[usize]) -> (Self, u32) {
+        let words_per_mask = active.len().div_ceil(64);
+        let active_language = (0..tokenizer.num_states())
+            .map(|state| {
+                !tokenizer.matched_terminal_bitset(state).is_disjoint(active)
+                    || !tokenizer.possible_future_terminals(state).is_disjoint(active)
+            })
+            .collect::<Vec<_>>();
+        let singleton_closures = tokenizer.all_singleton_epsilon_closures();
+        let mut start_states = Vec::<u32>::new();
+        for &raw_state in raw_start_states {
+            start_states.extend(
+                singleton_closures[raw_state]
+                    .iter()
+                    .copied()
+                    .filter(|&state| active_language[state as usize]),
+            );
+        }
+        let mut scanner = Self {
+            tokenizer,
+            active,
+            active_language,
+            words_per_mask,
+            configs: Vec::new(),
+            config_ids: FxHashMap::default(),
+            transitions: Vec::new(),
+            matched_masks: Vec::new(),
+        };
+        let start = scanner.intern(start_states);
+        (scanner, start)
+    }
+
+    fn intern(&mut self, mut states: Vec<u32>) -> u32 {
+        if states.is_empty() {
+            return PREFIX_DEAD_STATE;
+        }
+        states.sort_unstable();
+        states.dedup();
+        if let Some(&state) = self.config_ids.get(&states) {
+            return state;
+        }
+        let state = self.configs.len() as u32;
+        self.config_ids.insert(states.clone(), state);
+        let mask_base = self.matched_masks.len();
+        self.matched_masks.resize(mask_base + self.words_per_mask, 0);
+        for &raw_state in &states {
+            for terminal in self.tokenizer.matched_terminal_bitset(raw_state).iter() {
+                if self.active.contains(terminal) {
+                    self.matched_masks[mask_base + (terminal >> 6)] |=
+                        1u64 << (terminal & 63);
+                }
+            }
+        }
+        self.configs.push(states.into_boxed_slice());
+        self.transitions.push([PREFIX_UNKNOWN_STATE; 256]);
+        state
+    }
+
+    #[inline]
+    fn step(&mut self, state: u32, byte: u8) -> u32 {
+        if state == PREFIX_DEAD_STATE {
+            return PREFIX_DEAD_STATE;
+        }
+        let cached = self.transitions[state as usize][byte as usize];
+        if cached != PREFIX_UNKNOWN_STATE {
+            return cached;
+        }
+        let mut targets = self
+            .tokenizer
+            .step_all(self.configs[state as usize].as_ref(), byte)
+            .into_iter()
+            .filter(|&target| self.active_language[target as usize])
+            .collect::<Vec<_>>();
+        targets.sort_unstable();
+        targets.dedup();
+        let target = self.intern(targets);
+        self.transitions[state as usize][byte as usize] = target;
+        target
+    }
+
+    #[inline]
+    fn matched_mask(&self, state: u32) -> &[u64] {
+        let base = state as usize * self.words_per_mask;
+        &self.matched_masks[base..base + self.words_per_mask]
+    }
 }
 
 impl<'a> CandidatePrefixPowerset<'a> {
@@ -2735,28 +3155,108 @@ fn suffix_terminal_candidates_nfa(
     }
 }
 
-fn exact_terminal_path_two_plus(
+fn exact_terminal_path_two_plus_fused_nfa(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
     disallowed_follows: &BTreeMap<u32, BitSet>,
-    bytesets: &SharedClassifyBytesets,
     active: &BitSet,
+    raw_start_states: &[usize],
 ) -> ExactTerminalPathTwoPlus {
-    let empty = || ExactTerminalPathTwoPlus {
-        two_plus: BitSet::new(active.len()),
-        witnesses: vec![None; active.len()],
-    };
-    if active.is_empty() || vocab.is_empty() {
-        return empty();
+    let started_at = std::time::Instant::now();
+    let words_per_mask = active.len().div_ceil(64);
+    let (mut prefix_scanner, prefix_start) =
+        ActivePrefixPowerset::new(tokenizer, active, raw_start_states);
+
+    let mut allowed_after = vec![0u64; active.len() * words_per_mask];
+    for terminal_1 in active.iter() {
+        let base = terminal_1 * words_per_mask;
+        for word_index in 0..words_per_mask {
+            let mut allowed = active.words().get(word_index).copied().unwrap_or(0);
+            if let Some(blocked) = disallowed_follows.get(&(terminal_1 as u32)) {
+                allowed &= !blocked.words().get(word_index).copied().unwrap_or(0);
+            }
+            allowed_after[base + word_index] = allowed;
+        }
     }
-    let active_words = active.words();
-    let raw_start_states = (0..tokenizer.num_states())
-        .filter(|&state| state_future_intersects_words(bytesets, state, active_words))
-        .map(|state| state as usize)
-        .collect::<Vec<_>>();
-    if raw_start_states.is_empty() {
-        return empty();
+
+    let mut two_plus_words = vec![0u64; words_per_mask];
+    let mut followers = vec![0u64; words_per_mask];
+    let mut suffix_candidates = BitSet::new(active.len());
+    let mut witnesses = vec![None; active.len()];
+    let mut split_checks = 0usize;
+    let mut allowed_pairs = 0usize;
+
+    for (&token_id, bytes) in vocab.entries.iter() {
+        if bytes.len() < 2 {
+            continue;
+        }
+        let mut prefix_state = prefix_start;
+        for split_position in 1..bytes.len() {
+            prefix_state = prefix_scanner.step(prefix_state, bytes[split_position - 1]);
+            if prefix_state == PREFIX_DEAD_STATE {
+                break;
+            }
+            let matched = prefix_scanner.matched_mask(prefix_state);
+            if matched.iter().all(|&word| word == 0) {
+                continue;
+            }
+            split_checks += 1;
+            suffix_terminal_candidates_nfa(
+                tokenizer,
+                &bytes[split_position..],
+                active,
+                &mut suffix_candidates,
+            );
+            if suffix_candidates.is_empty() {
+                continue;
+            }
+            allowed_pairs += accumulate_terminal_path_boundaries(
+                matched,
+                suffix_candidates.words(),
+                &allowed_after,
+                words_per_mask,
+                active.len(),
+                &mut two_plus_words,
+                &mut followers,
+                Some((&mut witnesses, token_id, bytes, split_position)),
+            );
+        }
     }
+
+    let mut two_plus = BitSet::new(active.len());
+    for (word_index, &word) in two_plus_words.iter().enumerate() {
+        let mut pending = word;
+        while pending != 0 {
+            let terminal = word_index * 64 + pending.trailing_zeros() as usize;
+            pending &= pending - 1;
+            if terminal < active.len() {
+                two_plus.set(terminal);
+            }
+        }
+    }
+    if super::types::compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][terminal_path_fused_nfa] tokens={} active={} raw_start_states={} configs={} split_checks={} allowed_pairs={} two_plus={} total_ms={:.3}",
+            vocab.len(),
+            active.count_ones(),
+            raw_start_states.len(),
+            prefix_scanner.configs.len(),
+            split_checks,
+            allowed_pairs,
+            two_plus.count_ones(),
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    ExactTerminalPathTwoPlus { two_plus, witnesses }
+}
+
+fn exact_terminal_path_two_plus_bounded_view_from_starts(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    active: &BitSet,
+    raw_start_states: &[usize],
+) -> ExactTerminalPathTwoPlus {
     let token_entries = vocab
         .entries
         .iter()
@@ -2772,7 +3272,7 @@ fn exact_terminal_path_two_plus(
     let view_started_at = std::time::Instant::now();
     let bounded = build_token_bounded_analysis_view_from_combined_starts(
         tokenizer,
-        &raw_start_states,
+        raw_start_states,
         &tokens,
         Some(&active_groups),
     );
@@ -2811,6 +3311,60 @@ fn exact_terminal_path_two_plus(
         );
     }
     result
+}
+
+fn exact_terminal_path_two_plus(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    bytesets: &SharedClassifyBytesets,
+    active: &BitSet,
+) -> ExactTerminalPathTwoPlus {
+    let empty = || ExactTerminalPathTwoPlus {
+        two_plus: BitSet::new(active.len()),
+        witnesses: vec![None; active.len()],
+    };
+    if active.is_empty() || vocab.is_empty() {
+        return empty();
+    }
+    let active_words = active.words();
+    let raw_start_states = (0..tokenizer.num_states())
+        .filter(|&state| state_future_intersects_words(bytesets, state, active_words))
+        .map(|state| state as usize)
+        .collect::<Vec<_>>();
+    if raw_start_states.is_empty() {
+        return empty();
+    }
+    if active.count_ones() <= 256 && vocab.len() <= 4_096 {
+        let fused = exact_terminal_path_two_plus_fused_nfa(
+            tokenizer,
+            vocab,
+            disallowed_follows,
+            active,
+            &raw_start_states,
+        );
+        if std::env::var_os("GLRMASK_TERMINAL_PATH_FUSED_NFA_STRICT_REFERENCE").is_some() {
+            let reference = exact_terminal_path_two_plus_bounded_view_from_starts(
+                tokenizer,
+                vocab,
+                disallowed_follows,
+                active,
+                &raw_start_states,
+            );
+            assert_eq!(
+                fused.two_plus, reference.two_plus,
+                "fused NFA terminal-path classification differed from bounded-view reference"
+            );
+        }
+        return fused;
+    }
+    exact_terminal_path_two_plus_bounded_view_from_starts(
+        tokenizer,
+        vocab,
+        disallowed_follows,
+        active,
+        &raw_start_states,
+    )
 }
 
 fn assert_exact_boundary_batch_matches_scalar_reference(
@@ -3427,6 +3981,7 @@ mod tests {
     use super::{
         classify_terminal_path_lengths, classify_vocab_char_type,
         exact_terminal_path_two_plus, exact_terminal_path_two_plus_candidate_dfa,
+        exact_terminal_path_two_plus_finite_literals,
         parse_exact_l2p_boundary_filter_mode,
         suffix_has_allowed_l2p_follow_from_reset, ExactL2pBoundaryFilterMode,
         SharedClassifyBytesets,
@@ -3744,6 +4299,59 @@ mod tests {
         );
 
         assert_eq!(optimized.two_plus, reference.two_plus);
+    }
+
+    #[test]
+    fn finite_literal_terminal_paths_match_generic_exact_reference() {
+        let expressions = vec![
+            Expr::U8Seq(b"ab".to_vec()),
+            Expr::U8Seq(b"b".to_vec()),
+            Expr::Choice(vec![Expr::U8Seq(b"cd".to_vec()), Expr::U8Seq(b"cde".to_vec())]),
+            Expr::Seq(vec![Expr::U8Seq(b"x".to_vec()), Expr::U8Seq(b"y".to_vec())]),
+        ];
+        let num_terminals = expressions.len();
+        let tokenizer = build_regex_partitioned_with_adaptive(
+            &expressions,
+            &[0, 1, 2, 3],
+            false,
+        )
+        .into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let vocab = Vocab::new(
+            vec![
+                (0, b"abb".to_vec()),
+                (1, b"bc".to_vec()),
+                (2, b"abcd".to_vec()),
+                (3, b"cdey".to_vec()),
+                (4, b"xyab".to_vec()),
+                (5, b"zz".to_vec()),
+            ],
+            None,
+        );
+        let mut blocked = BitSet::new(num_terminals);
+        blocked.set(1);
+        let disallowed = BTreeMap::from([(0u32, blocked)]);
+        let active = BitSet::all(num_terminals);
+        let bytesets = SharedClassifyBytesets::build(&tokenizer, tokenizer.num_terminals());
+
+        let specialized = exact_terminal_path_two_plus_finite_literals(
+            &tokenizer,
+            &vocab,
+            &disallowed,
+            &active,
+        )
+        .expect("finite literal specialization");
+        let reference = exact_terminal_path_two_plus(
+            &tokenizer,
+            &vocab,
+            &disallowed,
+            &bytesets,
+            &active,
+        );
+
+        assert_eq!(specialized.two_plus, reference.two_plus);
     }
 
     #[test]
