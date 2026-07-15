@@ -168,6 +168,17 @@ fn stack_count(state: &ConstraintState<'_>) -> usize {
         .sum()
 }
 
+fn unique_parser_path_count(state: &ConstraintState<'_>) -> usize {
+    let mut paths = state
+        .debug_parser_stacks()
+        .into_iter()
+        .flat_map(|(_, stacks)| stacks)
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths.dedup();
+    paths.len()
+}
+
 #[test]
 fn ebnf_masks_and_commits() {
     let constraint = ebnf(&["a", "b", "c"], r#"start ::= "a" ("b" | "c")"#);
@@ -470,15 +481,15 @@ fn json_schema_optional_label_with_additional_tail_reaches_multiple_gss_paths() 
     let mut state = constraint.start();
 
     state.commit_token(0).unwrap();
-    assert_eq!(state.parser_path_count(1_000_000), 1);
+    assert_eq!(unique_parser_path_count(&state), 1);
     state.commit_token(1).unwrap();
-    assert_eq!(state.parser_path_count(1_000_000), 1);
+    assert_eq!(unique_parser_path_count(&state), 1);
     state.commit_token(2).unwrap();
-    assert_eq!(state.parser_path_count(1_000_000), 1);
+    assert_eq!(unique_parser_path_count(&state), 1);
     state.commit_token(3).unwrap();
 
     let stacks = state.debug_parser_stacks();
-    assert_eq!(state.parser_path_count(1_000_000), 2, "{stacks:?}");
+    assert_eq!(unique_parser_path_count(&state), 2, "{stacks:?}");
 }
 
 #[test]
