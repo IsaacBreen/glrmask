@@ -9,7 +9,9 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 
 use crate::automata::lexer::Lexer;
-use crate::automata::lexer::tokenizer::TokenizerStateSet;
+use crate::automata::lexer::tokenizer::{
+    TokenizerExecResult, TokenizerMatch, TokenizerStateSet,
+};
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::compiler::glr::parser::{
     advance_stacks, stack_may_advance_on, stack_may_advance_on_any, ParserGSS,
@@ -76,6 +78,124 @@ fn or_mask(buf: &mut [u32], mask: &[u32]) {
     }
 }
 
+const DYNAMIC_NFA_CONFIG_UNKNOWN: u32 = u32::MAX;
+const DYNAMIC_NFA_CONFIG_DEAD: u32 = u32::MAX - 1;
+
+struct DynamicNfaScanCache<'a> {
+    constraint: &'a Constraint,
+    epsilon_closures: Arc<[Box<[u32]>]>,
+    config_ids: FxHashMap<Vec<u32>, u32>,
+    configs: Vec<Box<[u32]>>,
+    transitions: Vec<Option<Box<[u32; 256]>>>,
+    raw_start_config: Vec<u32>,
+}
+
+impl<'a> DynamicNfaScanCache<'a> {
+    fn new(constraint: &'a Constraint) -> Self {
+        Self {
+            constraint,
+            epsilon_closures: constraint.tokenizer.all_singleton_epsilon_closures(),
+            config_ids: FxHashMap::default(),
+            configs: Vec::new(),
+            transitions: Vec::new(),
+            raw_start_config: vec![
+                DYNAMIC_NFA_CONFIG_UNKNOWN;
+                constraint.tokenizer.num_states() as usize
+            ],
+        }
+    }
+
+    fn intern_config(&mut self, mut states: Vec<u32>) -> u32 {
+        states.sort_unstable();
+        states.dedup();
+        if let Some(&id) = self.config_ids.get(states.as_slice()) {
+            return id;
+        }
+        let id = self.configs.len() as u32;
+        self.config_ids.insert(states.clone(), id);
+        self.configs.push(states.into_boxed_slice());
+        self.transitions.push(None);
+        id
+    }
+
+    fn config_for_raw_start(&mut self, state: u32) -> u32 {
+        let slot = state as usize;
+        let cached = self.raw_start_config[slot];
+        if cached != DYNAMIC_NFA_CONFIG_UNKNOWN {
+            return cached;
+        }
+        let config = self.intern_config(self.epsilon_closures[slot].to_vec());
+        self.raw_start_config[slot] = config;
+        config
+    }
+
+    fn step_config(&mut self, config: u32, byte: u8) -> Option<u32> {
+        let config_index = config as usize;
+        if let Some(row) = self.transitions[config_index].as_ref() {
+            let cached = row[byte as usize];
+            if cached != DYNAMIC_NFA_CONFIG_UNKNOWN {
+                return (cached != DYNAMIC_NFA_CONFIG_DEAD).then_some(cached);
+            }
+        }
+
+        let closed_targets = {
+            let mut targets = Vec::<u32>::new();
+            for &state in self.configs[config_index].iter() {
+                let target = self.constraint.tokenizer_fast_transitions[state as usize]
+                    [byte as usize];
+                if target != u32::MAX {
+                    targets.extend_from_slice(&self.epsilon_closures[target as usize]);
+                }
+            }
+            targets
+        };
+        let target = if closed_targets.is_empty() {
+            DYNAMIC_NFA_CONFIG_DEAD
+        } else {
+            self.intern_config(closed_targets)
+        };
+        let row = self.transitions[config_index]
+            .get_or_insert_with(|| Box::new([DYNAMIC_NFA_CONFIG_UNKNOWN; 256]));
+        row[byte as usize] = target;
+        (target != DYNAMIC_NFA_CONFIG_DEAD).then_some(target)
+    }
+
+    fn execute_from_state_all_widths(&mut self, input: &[u8], start: u32) -> TokenizerExecResult {
+        let mut config = self.config_for_raw_start(start);
+        let mut matches = Vec::new();
+        for (index, &byte) in input.iter().enumerate() {
+            let Some(next_config) = self.step_config(config, byte) else {
+                return TokenizerExecResult {
+                    end_state: TokenizerStateSet::new(),
+                    matches,
+                };
+            };
+            config = next_config;
+            let width = index + 1;
+            for &state in self.configs[config as usize].iter() {
+                matches.extend(
+                    self.constraint
+                        .tokenizer
+                        .matched_terminals_iter(state)
+                        .map(|id| TokenizerMatch {
+                            id,
+                            width,
+                            end_state: state,
+                        }),
+                );
+            }
+        }
+        let mut end_state = TokenizerStateSet::new();
+        end_state.extend(
+            self.configs[config as usize]
+                .iter()
+                .copied()
+                .filter(|&state| !self.constraint.tokenizer.is_end(state)),
+        );
+        TokenizerExecResult { end_state, matches }
+    }
+}
+
 #[inline]
 fn mask_bit_is_set(buf: &[u32], token_id: u32) -> bool {
     let word = token_id as usize / 32;
@@ -115,8 +235,6 @@ fn should_lazy_build_continuation_partition(
     if tokenizer_state == tokenizer.initial_state()
         || tokenizer.transitions_from(tokenizer_state).count() < 128
         || tokenizer.self_loop_bytes(tokenizer_state).len() >= 24
-        || tokenizer.matched_terminals_iter(tokenizer_state).next().is_some()
-        || !(1..=4).contains(&tokenizer.possible_future_terminals_iter(tokenizer_state).count())
     {
         return false;
     }
@@ -533,6 +651,7 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
     let mut segment_stack = Vec::<(usize, u32, ParserStacks)>::with_capacity(8);
     let mut self_loop_cache = FxHashMap::<u32, U8Set>::default();
     let mut traversal_cache = DynamicTraversalCache::default();
+    let mut lexer_scan_cache = DynamicNfaScanCache::new(state.constraint);
     let tries = [vocab.trie.clone()];
     let mut continuation_partitions = Vec::new();
     let mut work_items = 0usize;
@@ -567,7 +686,7 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
                     &mut self_loop_cache,
                 );
                 eprintln!(
-                    "[glrmask/profile][dynamic_seed] generation={} tokenizer_state={} initial={} stack_paths={} exclusions={} loop_bytes={} boundary_allowed={}",
+                    "[glrmask/profile][dynamic_seed] generation={} tokenizer_state={} initial={} stack_paths={} exclusions={} transitions={} matched={} futures={} loop_bytes={} boundary_allowed={}",
                     state.generation,
                     tokenizer_state,
                     tokenizer_state == initial_tsid,
@@ -577,6 +696,17 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
                         .values()
                         .map(BTreeSet::len)
                         .sum::<usize>(),
+                    state.constraint.tokenizer.transitions_from(tokenizer_state).count(),
+                    state
+                        .constraint
+                        .tokenizer
+                        .matched_terminals_iter(tokenizer_state)
+                        .count(),
+                    state
+                        .constraint
+                        .tokenizer
+                        .possible_future_terminals_iter(tokenizer_state)
+                        .count(),
                     loop_bytes.len(),
                     token_boundary_allowed_cached(
                         state.constraint,
@@ -608,7 +738,7 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
                     let mut admitted_groups = vec![false; partition.groups.len()];
                     let mut admitted_tokens = 0usize;
                     for (group_id, group) in partition.groups.iter().enumerate() {
-                        let admitted = group.end_states.iter().any(|&end_state| {
+                        let residual_admitted = group.end_states.iter().any(|&end_state| {
                             token_boundary_allowed_cached(
                                 state.constraint,
                                 end_state,
@@ -616,6 +746,24 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
                                 &mut traversal_cache,
                             )
                         });
+                        let final_terminal_admitted = !residual_admitted
+                            && group.final_terminals.iter().any(|&terminal| {
+                                let Some(advanced) = parser_child_cached(
+                                    state.constraint,
+                                    &stacks,
+                                    terminal,
+                                    &mut traversal_cache,
+                                ) else {
+                                    return false;
+                                };
+                                token_boundary_allowed_cached(
+                                    state.constraint,
+                                    initial_tsid,
+                                    &advanced,
+                                    &mut traversal_cache,
+                                )
+                            });
+                        let admitted = residual_admitted || final_terminal_admitted;
                         if admitted {
                             admitted_groups[group_id] = true;
                             admitted_tokens += group.token_count;
@@ -641,18 +789,18 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
                             .count();
                         if required_group_count != 0 {
                             let continuation_filter = if partition.has_narrow_group_set() {
-                                let required_groups = admitted_groups
-                                    .iter()
-                                    .enumerate()
-                                    .fold(0u64, |groups, (group_id, &admitted)| {
-                                        groups | ((!admitted) as u64) << group_id
-                                    });
-                                let partition_index = continuation_partitions.len();
-                                continuation_partitions.push(partition);
-                                ContinuationFilter::Narrow {
-                                    partition_index,
-                                    required_groups,
-                                }
+                            let required_groups = admitted_groups
+                                .iter()
+                                .enumerate()
+                                .fold(0u64, |groups, (group_id, &admitted)| {
+                                    groups | ((!admitted) as u64) << group_id
+                                });
+                            let partition_index = continuation_partitions.len();
+                            continuation_partitions.push(partition);
+                            ContinuationFilter::Narrow {
+                                partition_index,
+                                required_groups,
+                            }
                             } else {
                                 ContinuationFilter::AlreadyMarked
                             };
@@ -796,9 +944,7 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
 
             while let Some((position, tokenizer_state, gss)) = segment_stack.pop() {
                 lexer_executions += 1;
-                let execution = state
-                    .constraint
-                    .tokenizer
+                let execution = lexer_scan_cache
                     .execute_from_state_all_widths(&segment[position..], tokenizer_state);
 
                 for matched in &execution.matches {

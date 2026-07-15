@@ -310,8 +310,15 @@ pub(crate) enum DynamicMaskAliasStore {
 #[derive(Debug)]
 pub(crate) struct DynamicContinuationGroup {
     pub(crate) end_states: Box<[u32]>,
+    pub(crate) final_terminals: Box<[TerminalID]>,
     pub(crate) mask: Box<[u32]>,
     pub(crate) token_count: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
+struct DynamicContinuationOutcome {
+    end_states: Vec<u32>,
+    final_terminals: Vec<TerminalID>,
 }
 
 #[derive(Debug)]
@@ -419,6 +426,16 @@ impl<'tok> ContinuationNfaScanCache<'tok> {
             .copied()
             .filter(|&state| !self.tokenizer.is_end(state))
             .collect()
+    }
+
+    fn final_terminals(&self, config: u32) -> Vec<TerminalID> {
+        let mut terminals = self.configs[config as usize]
+            .iter()
+            .flat_map(|&state| self.tokenizer.matched_terminals_iter(state))
+            .collect::<Vec<_>>();
+        terminals.sort_unstable();
+        terminals.dedup();
+        terminals
     }
 }
 
@@ -613,7 +630,7 @@ impl DynamicMaskVocab {
         tokenizer: &Tokenizer,
         node_id: u32,
         state: u32,
-        by_end_states: &mut BTreeMap<Vec<u32>, Vec<u32>>,
+        by_outcome: &mut BTreeMap<DynamicContinuationOutcome, Vec<u32>>,
     ) {
         let node = self.trie.node(node_id);
         if let Some(token_id) = node.token_id {
@@ -622,7 +639,14 @@ impl DynamicMaskVocab {
             } else {
                 vec![state]
             };
-            by_end_states.entry(end_states).or_default().push(token_id);
+            let final_terminals = tokenizer.matched_terminals_iter(state).collect();
+            by_outcome
+                .entry(DynamicContinuationOutcome {
+                    end_states,
+                    final_terminals,
+                })
+                .or_default()
+                .push(token_id);
         }
 
         for edge in self.trie.children(node_id) {
@@ -636,8 +660,8 @@ impl DynamicMaskVocab {
                 }
             }
             if blocked {
-                by_end_states
-                    .entry(Vec::new())
+                by_outcome
+                    .entry(DynamicContinuationOutcome::default())
                     .or_default()
                     .extend_from_slice(self.trie.subtree_tokens(edge.child));
             } else {
@@ -645,7 +669,7 @@ impl DynamicMaskVocab {
                     tokenizer,
                     edge.child,
                     next_state,
-                    by_end_states,
+                    by_outcome,
                 );
             }
         }
@@ -656,14 +680,17 @@ impl DynamicMaskVocab {
         scan_cache: &mut ContinuationNfaScanCache<'_>,
         node_id: u32,
         config: u32,
-        by_end_states: &mut BTreeMap<Vec<u32>, Vec<u32>>,
+        by_outcome: &mut BTreeMap<DynamicContinuationOutcome, Vec<u32>>,
     ) -> bool {
         const GROUP_CAP: usize = 256;
         let node = self.trie.node(node_id);
         if let Some(token_id) = node.token_id {
-            let end_states = scan_cache.non_end_states(config);
-            by_end_states.entry(end_states).or_default().push(token_id);
-            if by_end_states.len() > GROUP_CAP {
+            let outcome = DynamicContinuationOutcome {
+                end_states: scan_cache.non_end_states(config),
+                final_terminals: scan_cache.final_terminals(config),
+            };
+            by_outcome.entry(outcome).or_default().push(token_id);
+            if by_outcome.len() > GROUP_CAP {
                 return false;
             }
         }
@@ -679,11 +706,11 @@ impl DynamicMaskVocab {
                 next_config = next;
             }
             if blocked {
-                by_end_states
-                    .entry(Vec::new())
+                by_outcome
+                    .entry(DynamicContinuationOutcome::default())
                     .or_default()
                     .extend_from_slice(self.trie.subtree_tokens(edge.child));
-                if by_end_states.len() > GROUP_CAP {
+                if by_outcome.len() > GROUP_CAP {
                     return false;
                 }
             } else {
@@ -691,7 +718,7 @@ impl DynamicMaskVocab {
                     scan_cache,
                     edge.child,
                     next_config,
-                    by_end_states,
+                    by_outcome,
                 ) {
                     return false;
                 }
@@ -707,7 +734,7 @@ impl DynamicMaskVocab {
         mask_words: usize,
         entries: &[(u32, Box<[u8]>)],
     ) -> Option<DynamicContinuationPartition> {
-        let mut by_end_states = BTreeMap::<Vec<u32>, Vec<u32>>::new();
+        let mut by_outcome = BTreeMap::<DynamicContinuationOutcome, Vec<u32>>::new();
         if tokenizer.has_epsilon_transitions() {
             let mut scan_cache = ContinuationNfaScanCache::new(tokenizer);
             let start_config = scan_cache.config_for_raw_start(source_state);
@@ -715,27 +742,40 @@ impl DynamicMaskVocab {
                 &mut scan_cache,
                 0,
                 start_config,
-                &mut by_end_states,
+                &mut by_outcome,
             );
 
             if std::env::var_os("GLRMASK_DYNAMIC_CONTINUATION_NFA_STRICT_REFERENCE").is_some() {
-                let mut reference = BTreeMap::<Vec<u32>, Vec<u32>>::new();
+                let mut reference =
+                    BTreeMap::<DynamicContinuationOutcome, Vec<u32>>::new();
                 for (canonical_token_id, bytes) in entries {
-                    let mut end_states = tokenizer
-                        .execute_from_state_end_only(bytes, source_state)
+                    let execution = tokenizer.execute_from_state_all_widths(bytes, source_state);
+                    let mut end_states = execution
+                        .end_state
                         .into_iter()
                         .filter(|&state| !tokenizer.is_end(state))
                         .collect::<Vec<_>>();
                     end_states.sort_unstable();
                     end_states.dedup();
+                    let mut final_terminals = execution
+                        .matches
+                        .into_iter()
+                        .filter(|matched| matched.width == bytes.len())
+                        .map(|matched| matched.id)
+                        .collect::<Vec<_>>();
+                    final_terminals.sort_unstable();
+                    final_terminals.dedup();
                     reference
-                        .entry(end_states)
+                        .entry(DynamicContinuationOutcome {
+                            end_states,
+                            final_terminals,
+                        })
                         .or_default()
                         .push(*canonical_token_id);
                 }
                 if completed {
                     assert_eq!(
-                        by_end_states, reference,
+                        by_outcome, reference,
                         "NFA continuation trie traversal differed from scalar token replay"
                     );
                 } else {
@@ -753,11 +793,11 @@ impl DynamicMaskVocab {
                 tokenizer,
                 0,
                 source_state,
-                &mut by_end_states,
+                &mut by_outcome,
             );
         }
 
-        if by_end_states.len() > 256 {
+        if by_outcome.len() > 256 {
             return None;
         }
 
@@ -769,8 +809,8 @@ impl DynamicMaskVocab {
             .max()
             .unwrap_or(0);
         let mut token_groups = vec![u16::MAX; max_token_id.saturating_add(1)];
-        let mut groups = Vec::with_capacity(by_end_states.len());
-        for (group_id, (end_states, canonical_token_ids)) in by_end_states.into_iter().enumerate() {
+        let mut groups = Vec::with_capacity(by_outcome.len());
+        for (group_id, (outcome, canonical_token_ids)) in by_outcome.into_iter().enumerate() {
             let mut mask = vec![0u32; mask_words];
             let mut token_count = 0usize;
             for canonical_token_id in canonical_token_ids {
@@ -778,7 +818,8 @@ impl DynamicMaskVocab {
                 token_groups[canonical_token_id as usize] = group_id as u16;
             }
             groups.push(DynamicContinuationGroup {
-                end_states: end_states.into_boxed_slice(),
+                end_states: outcome.end_states.into_boxed_slice(),
+                final_terminals: outcome.final_terminals.into_boxed_slice(),
                 mask: mask.into_boxed_slice(),
                 token_count,
             });
@@ -971,6 +1012,7 @@ impl DynamicMaskVocab {
             .map(|(state, _)| state)
             .collect::<Vec<_>>();
         source_states.extend(entry_sources.iter().map(|&(state, _)| state));
+        source_states.push(tokenizer.initial_state());
         source_states.sort_unstable();
         source_states.dedup();
         source_states.truncate(4);
