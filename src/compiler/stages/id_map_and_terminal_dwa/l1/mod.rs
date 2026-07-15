@@ -173,11 +173,12 @@ fn l1_identity_vocab_order(vocab: &Vocab) -> Arc<L1IdentityVocabOrder> {
         .map(|(&id, bytes)| (id, Arc::<[u8]>::from(bytes.clone().into_boxed_slice())))
         .collect();
 
-    token_entries_sorted.sort_unstable_by(|(_, left_bytes), (_, right_bytes)| {
+    token_entries_sorted.sort_unstable_by(|(left_id, left_bytes), (right_id, right_bytes)| {
         left_bytes
             .first()
             .cmp(&right_bytes.first())
             .then(left_bytes.cmp(right_bytes))
+            .then(left_id.cmp(right_id))
     });
 
     let mut token_original_to_internal = vec![u32::MAX; vocab.max_token_id() as usize + 1];
@@ -846,6 +847,8 @@ const L1_GENERIC_NFA_TOKEN_BOUNDED_LARGE_WORK_BUDGET:
         max_configurations: 64_000,
         max_trie_visits: 1_000_000,
     };
+const L1_GENERIC_NFA_RELEVANT_POWERSET_PROBE_MIN_VOCAB: usize = 20_000;
+const L1_GENERIC_NFA_RELEVANT_POWERSET_PROBE_MAX_STATES: usize = 4_096;
 
 pub(crate) fn l1_generic_nfa_token_bounded_view_enabled(
     state_count: usize,
@@ -874,8 +877,63 @@ fn build_l1_generic_nfa_analysis_view(
     >,
     large_work_budget: super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisWorkBudget,
 ) -> (Vec<usize>, TokenizerView, &'static str) {
+    let mut relevant_bytes = [false; 256];
+    for (_, bytes) in token_entries {
+        for &byte in bytes.iter() {
+            relevant_bytes[byte as usize] = true;
+        }
+    }
+
     let use_unbudgeted_token_bounded_view =
         l1_generic_nfa_token_bounded_view_enabled(raw_states.len(), token_entries.len());
+    if !use_unbudgeted_token_bounded_view
+        && token_entries.len() >= L1_GENERIC_NFA_RELEVANT_POWERSET_PROBE_MIN_VOCAB
+    {
+        match super::l2p::equivalence_analysis::state_equivalence::nfa::build_relevant_powerset_view_budgeted(
+            tokenizer,
+            &relevant_bytes,
+            Some(active_terminals),
+            None,
+            super::l2p::equivalence_analysis::state_equivalence::nfa::RelevantPowersetWorkBudget {
+                max_configurations: L1_GENERIC_NFA_RELEVANT_POWERSET_PROBE_MAX_STATES,
+                max_edges: usize::MAX,
+            },
+        ) {
+            Ok(powerset_view) => {
+                let state_count = powerset_view.configurations.len();
+                let view_states = powerset_view
+                    .raw_start_to_view
+                    .iter()
+                    .map(|&state| state as usize)
+                    .collect::<Vec<_>>();
+                if compile_profile_enabled() {
+                    eprintln!(
+                        "[glrmask/profile][l1_relevant_powerset_probe] outcome=selected raw_states={} vocab_tokens={} view_states={} max_states={}",
+                        raw_states.len(),
+                        token_entries.len(),
+                        state_count,
+                        L1_GENERIC_NFA_RELEVANT_POWERSET_PROBE_MAX_STATES,
+                    );
+                }
+                return (
+                    view_states,
+                    powerset_view.into_tokenizer_view(),
+                    "relevant_powerset_probe",
+                );
+            }
+            Err(work) => {
+                if compile_profile_enabled() {
+                    eprintln!(
+                        "[glrmask/profile][l1_relevant_powerset_probe] outcome=aborted raw_states={} vocab_tokens={} states={} max_states={}",
+                        raw_states.len(),
+                        token_entries.len(),
+                        work.configurations,
+                        L1_GENERIC_NFA_RELEVANT_POWERSET_PROBE_MAX_STATES,
+                    );
+                }
+            }
+        }
+    }
     let bounded_view = if use_unbudgeted_token_bounded_view {
         let bounded = if let Some(topology) = shared_topology {
             topology.materialize(tokenizer, Some(active_terminals))
@@ -942,12 +1000,6 @@ fn build_l1_generic_nfa_analysis_view(
         return (view_states, bounded.tokenizer_view, analysis_view);
     }
 
-    let mut relevant_bytes = [false; 256];
-    for (_, bytes) in token_entries {
-        for &byte in bytes.iter() {
-            relevant_bytes[byte as usize] = true;
-        }
-    }
     let powerset_view = super::l2p::equivalence_analysis::state_equivalence::nfa::build_relevant_powerset_view(
         tokenizer,
         &relevant_bytes,
@@ -2111,6 +2163,18 @@ fn find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
     });
 
     let target_profiles_started_at = profile_enabled.then(Instant::now);
+    let self_loop_bytes_by_state = (0..num_tokenizer_states)
+        .map(|state| {
+            let mut bytes = [0u64; 4];
+            let row = &flat_trans[state * 256..state * 256 + 256];
+            for (byte, &target) in row.iter().enumerate() {
+                if target == state as u32 {
+                    bytes[byte / 64] |= 1u64 << (byte % 64);
+                }
+            }
+            bytes
+        })
+        .collect::<Vec<_>>();
     let mut targets_by_first_byte = vec![Vec::<u32>::new(); 256];
     for (byte, target) in unique_targets {
         targets_by_first_byte[byte as usize].push(target);
@@ -2124,8 +2188,10 @@ fn find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
         let byte_idx = *byte as usize;
         let token_ids = &token_buckets.token_indices_by_first_byte[byte_idx];
         let suffix_lcps = &token_buckets.suffix_lcps_by_first_byte[byte_idx];
+        let prebuilt_trie = token_buckets.packed_suffix_tries_by_first_byte[byte_idx]
+            .as_deref()
+            .expect("non-empty first-byte bucket must retain its prepared suffix trie");
         if token_ids.len() >= 10_000 && targets.len() >= 32 && rayon::current_num_threads() > 1 {
-            let trie = L1PackedSuffixTrie::build(sorted_entries, token_ids, suffix_lcps);
             let chunk_count = std::env::var("GLRMASK_L1_LARGE_BUCKET_CHUNKS")
                 .ok()
                 .and_then(|value| value.trim().parse::<usize>().ok())
@@ -2147,13 +2213,14 @@ fn find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
                         &token_buckets.suffix_first_bytes_by_bucket[byte_idx],
                         token_buckets.has_empty_suffix_by_bucket[byte_idx],
                         &state_to_terminal_signature,
+                        &self_loop_bytes_by_state,
                         flat_trans,
                         transitions_by_byte,
                         num_tokenizer_states,
                         Some(&active_language),
                         horizon_maps.as_deref(),
                         suffix_horizon_by_first_byte[byte_idx],
-                        Some(&trie),
+                        Some(prebuilt_trie),
                     )
                 })
                 .flatten()
@@ -2187,13 +2254,14 @@ fn find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
                 &token_buckets.suffix_first_bytes_by_bucket[byte_idx],
                 token_buckets.has_empty_suffix_by_bucket[byte_idx],
                 &state_to_terminal_signature,
+                &self_loop_bytes_by_state,
                 flat_trans,
                 transitions_by_byte,
                 num_tokenizer_states,
                 Some(&active_language),
                 horizon_maps.as_deref(),
                 suffix_horizon_by_first_byte[byte_idx],
-                None,
+                Some(prebuilt_trie),
             )
         }
     };
@@ -2612,10 +2680,11 @@ const L1_NONE: u32 = u32::MAX;
 
 /// Compact suffix trie for one first-byte vocabulary bucket. Token IDs are
 /// byte-sorted, so each node's subtree is one contiguous token interval.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 struct L1PackedSuffixTrieNode {
     incoming_byte: u8,
     terminal_token: u32,
+    terminal_token_end: u32,
     subtree_start: u32,
     subtree_end: u32,
     first_child: u32,
@@ -2630,6 +2699,7 @@ impl L1PackedSuffixTrieNode {
         Self {
             incoming_byte: 0,
             terminal_token: L1_NONE,
+            terminal_token_end: L1_NONE,
             subtree_start: L1_NONE,
             subtree_end: L1_NONE,
             first_child: L1_NONE,
@@ -2648,15 +2718,18 @@ impl L1PackedSuffixTrieNode {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 struct L1PackedSuffixTrieEdge {
     byte: u8,
     child: u32,
 }
 
+#[derive(Debug)]
 struct L1PackedSuffixTrie {
     nodes: Vec<L1PackedSuffixTrieNode>,
     edges: Vec<L1PackedSuffixTrieEdge>,
+    remaining_horizon_by_node: Vec<usize>,
+    subtree_bytes_by_node: Vec<[u64; 4]>,
 }
 
 impl L1PackedSuffixTrie {
@@ -2704,8 +2777,13 @@ impl L1PackedSuffixTrie {
 
             let token_id = internal_token_id as u32;
             let terminal = *path.last().expect("suffix trie terminal path") as usize;
-            debug_assert_eq!(nodes[terminal].terminal_token, L1_NONE);
-            nodes[terminal].terminal_token = token_id;
+            if nodes[terminal].terminal_token == L1_NONE {
+                nodes[terminal].terminal_token = token_id;
+                nodes[terminal].terminal_token_end = token_id;
+            } else {
+                debug_assert_eq!(token_id, nodes[terminal].terminal_token_end + 1);
+                nodes[terminal].terminal_token_end = token_id;
+            }
         }
         debug_assert_eq!(nodes.len(), node_capacity);
 
@@ -2714,7 +2792,7 @@ impl L1PackedSuffixTrie {
         // that interval once bottom-up avoids rewriting it along each token path.
         for node_index in (0..nodes.len()).rev() {
             let mut subtree_start = nodes[node_index].terminal_token;
-            let mut subtree_end = nodes[node_index].terminal_token;
+            let mut subtree_end = nodes[node_index].terminal_token_end;
             let mut child = nodes[node_index].first_child;
             while child != L1_NONE {
                 let child_node = nodes[child as usize];
@@ -2747,7 +2825,30 @@ impl L1PackedSuffixTrie {
             nodes[node_index].first_edge = first_edge;
             nodes[node_index].edge_len = edges.len() as u32 - first_edge;
         }
-        Self { nodes, edges }
+        let mut remaining_horizon_by_node = vec![0usize; nodes.len()];
+        let mut subtree_bytes_by_node = vec![[0u64; 4]; nodes.len()];
+        for node_index in (0..nodes.len()).rev() {
+            let node = nodes[node_index];
+            let mut remaining_horizon = 0usize;
+            for edge_offset in 0..node.edge_len as usize {
+                let edge = edges[node.first_edge as usize + edge_offset];
+                let child = edge.child as usize;
+                remaining_horizon =
+                    remaining_horizon.max(1 + remaining_horizon_by_node[child]);
+                subtree_bytes_by_node[node_index][edge.byte as usize / 64] |=
+                    1u64 << (edge.byte as usize % 64);
+                for word in 0..4 {
+                    subtree_bytes_by_node[node_index][word] |= subtree_bytes_by_node[child][word];
+                }
+            }
+            remaining_horizon_by_node[node_index] = remaining_horizon;
+        }
+        Self {
+            nodes,
+            edges,
+            remaining_horizon_by_node,
+            subtree_bytes_by_node,
+        }
     }
 }
 
@@ -2772,6 +2873,20 @@ struct L1PackedProductBehaviorRecord {
     hash_next: u32,
 }
 
+const L1_UNIFORM_BEHAVIOR_FLAG: u32 = 1 << 31;
+
+#[inline]
+fn l1_encode_uniform_behavior(signature: u32) -> u32 {
+    debug_assert!(signature != 0 && signature < L1_UNIFORM_BEHAVIOR_FLAG);
+    L1_UNIFORM_BEHAVIOR_FLAG | signature
+}
+
+#[inline]
+fn l1_uniform_behavior_signature(behavior: u32) -> Option<u32> {
+    (behavior & L1_UNIFORM_BEHAVIOR_FLAG != 0)
+        .then_some(behavior & !L1_UNIFORM_BEHAVIOR_FLAG)
+}
+
 #[inline]
 fn l1_packed_hash_behavior(terminal_signature: u32, child_behaviors: &[u32]) -> u64 {
     let mut hash = terminal_signature as u64 ^ 0x9e37_79b9_7f4a_7c15;
@@ -2791,6 +2906,9 @@ fn l1_packed_uniform_signature(
 ) -> u32 {
     if behavior_id == 0 {
         return 0;
+    }
+    if let Some(signature) = l1_uniform_behavior_signature(behavior_id) {
+        return signature;
     }
     let node = trie.nodes[node_index];
     if node.edge_len == 0 {
@@ -2816,8 +2934,12 @@ fn l1_packed_append_behavior(
         return;
     }
     let node = trie.nodes[node_index];
+    if let Some(signature) = l1_uniform_behavior_signature(behavior_id) {
+        append_l1_signature_profile_range(profile, signature, node.subtree_start, node.subtree_end);
+        return;
+    }
     if node.edge_len == 0 {
-        append_l1_signature_profile_run(profile, behavior_id, node.subtree_start);
+        append_l1_signature_profile_range(profile, behavior_id, node.subtree_start, node.subtree_end);
         return;
     }
     if node.terminal_token == L1_NONE && node.edge_len == 1 {
@@ -2836,14 +2958,21 @@ fn l1_packed_append_behavior(
 
     let record = records[data[node_index].records_start as usize + behavior_id as usize - 1];
     if record.uniform_signature != 0 {
-        append_l1_signature_profile_run(profile, record.uniform_signature, node.subtree_start);
-        if node.subtree_end != node.subtree_start {
-            profile.last_mut().expect("uniform packed profile run").2 = node.subtree_end;
-        }
+        append_l1_signature_profile_range(
+            profile,
+            record.uniform_signature,
+            node.subtree_start,
+            node.subtree_end,
+        );
         return;
     }
     if record.terminal_signature != 0 {
-        append_l1_signature_profile_run(profile, record.terminal_signature, node.terminal_token);
+        append_l1_signature_profile_range(
+            profile,
+            record.terminal_signature,
+            node.terminal_token,
+            node.terminal_token_end,
+        );
     }
     let children_start = record.child_behaviors_start as usize;
     for edge_offset in 0..node.edge_len as usize {
@@ -2883,6 +3012,7 @@ fn l1_bucket_suffix_signature_profiles_packed(
     suffix_first_bytes: &[u64; 4],
     has_empty_suffix: bool,
     state_to_terminal_signature: &[u32],
+    self_loop_bytes_by_state: &[[u64; 4]],
     flat_trans: &[u32],
     transitions_by_byte: Option<&[u32]>,
     num_lexer_states: usize,
@@ -2991,17 +3121,8 @@ fn l1_bucket_suffix_signature_profiles_packed(
         owned_trie = L1PackedSuffixTrie::build(sorted_entries, token_ids, suffix_lcps);
         &owned_trie
     };
-    let mut remaining_horizon_by_node = vec![0usize; trie.nodes.len()];
-    for node_index in (0..trie.nodes.len()).rev() {
-        let node = trie.nodes[node_index];
-        let mut remaining_horizon = 0usize;
-        for edge_offset in 0..node.edge_len as usize {
-            let child = trie.edges[node.first_edge as usize + edge_offset].child as usize;
-            remaining_horizon =
-                remaining_horizon.max(1 + remaining_horizon_by_node[child]);
-        }
-        remaining_horizon_by_node[node_index] = remaining_horizon;
-    }
+    let remaining_horizon_by_node = &trie.remaining_horizon_by_node;
+    let subtree_bytes_by_node = &trie.subtree_bytes_by_node;
     debug_assert_eq!(remaining_horizon_by_node[0], suffix_horizon);
     let trie_ms = trie_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     let propagate_started_at = profiling.then(Instant::now);
@@ -3016,13 +3137,17 @@ fn l1_bucket_suffix_signature_profiles_packed(
     let mut seen_stamp = vec![0u32; num_lexer_states];
     let mut seen_index = vec![0u32; num_lexer_states];
     let mut stamp = 0u32;
-    for node_index in 0..trie.nodes.len() {
+    let mut uniform_subtree_transitions = 0usize;
+    let mut active_nodes = Vec::<usize>::with_capacity(trie.nodes.len().min(states.len().max(1)));
+    active_nodes.push(0);
+    let mut active_node_cursor = 0usize;
+    while active_node_cursor < active_nodes.len() {
+        let node_index = active_nodes[active_node_cursor];
+        active_node_cursor += 1;
         let node = trie.nodes[node_index];
         let parent_start = data[node_index].states_start as usize;
         let parent_len = data[node_index].states_len as usize;
-        if parent_len == 0 {
-            continue;
-        }
+        debug_assert_ne!(parent_len, 0);
         for edge_offset in 0..node.edge_len as usize {
             let edge_index = node.first_edge as usize + edge_offset;
             let edge = trie.edges[edge_index];
@@ -3031,6 +3156,23 @@ fn l1_bucket_suffix_signature_profiles_packed(
                 .map(|maps| maps[remaining_horizon_by_node[child]].as_ref());
             edge_data[edge_index].map_start = transition_maps.len() as u32;
             let child_start = states.len() as u32;
+            let uniform_transition = |next: u32| -> Option<u32> {
+                if next == dead {
+                    return Some(L1_NONE);
+                }
+                let self_loops = &self_loop_bytes_by_state[next as usize];
+                let subtree = &subtree_bytes_by_node[child];
+                if (0..4).all(|word| subtree[word] & !self_loops[word] == 0) {
+                    let signature = state_to_terminal_signature[next as usize];
+                    Some(if signature == 0 {
+                        L1_NONE
+                    } else {
+                        l1_encode_uniform_behavior(signature)
+                    })
+                } else {
+                    None
+                }
+            };
             if parent_len == 1 {
                 let next = l1_transition(
                     flat_trans,
@@ -3041,8 +3183,9 @@ fn l1_bucket_suffix_signature_profiles_packed(
                     edge.byte as usize,
                     canonical_state,
                 );
-                if next == dead {
-                    transition_maps.push(L1_NONE);
+                if let Some(encoded) = uniform_transition(next) {
+                    uniform_subtree_transitions += usize::from(next != dead);
+                    transition_maps.push(encoded);
                 } else {
                     states.push(next);
                     transition_maps.push(0);
@@ -3066,15 +3209,19 @@ fn l1_bucket_suffix_signature_profiles_packed(
                     edge.byte as usize,
                     canonical_state,
                 );
-                let first_index = if first == dead {
-                    L1_NONE
+                let mut first_added_raw = None;
+                let first_index = if let Some(encoded) = uniform_transition(first) {
+                    uniform_subtree_transitions += usize::from(first != dead);
+                    encoded
                 } else {
                     states.push(first);
+                    first_added_raw = Some(first);
                     0
                 };
-                let second_index = if second == dead {
-                    L1_NONE
-                } else if second == first && first != dead {
+                let second_index = if let Some(encoded) = uniform_transition(second) {
+                    uniform_subtree_transitions += usize::from(second != dead);
+                    encoded
+                } else if first_added_raw == Some(second) {
                     0
                 } else {
                     let index = states.len() as u32 - child_start;
@@ -3100,8 +3247,9 @@ fn l1_bucket_suffix_signature_profiles_packed(
                         edge.byte as usize,
                         canonical_state,
                     );
-                    if next == dead {
-                        transition_maps.push(L1_NONE);
+                    if let Some(encoded) = uniform_transition(next) {
+                        uniform_subtree_transitions += usize::from(next != dead);
+                        transition_maps.push(encoded);
                     } else if seen_stamp[next as usize] == stamp {
                         transition_maps.push(seen_index[next as usize]);
                     } else {
@@ -3115,6 +3263,9 @@ fn l1_bucket_suffix_signature_profiles_packed(
             }
             data[child].states_start = child_start;
             data[child].states_len = states.len() as u32 - child_start;
+            if data[child].states_len != 0 {
+                active_nodes.push(child);
+            }
         }
     }
 
@@ -3129,8 +3280,11 @@ fn l1_bucket_suffix_signature_profiles_packed(
     let mut behavior_hash_heads = FxHashMap::<u64, u32>::default();
     let mut unary_behavior_ids = FxHashMap::<(u32, u32), u32>::default();
     let mut binary_behavior_ids = FxHashMap::<(u32, u32, u32), u32>::default();
+    let mut small_unary_behavior_ids = Vec::<((u32, u32), u32)>::new();
+    let mut small_binary_behavior_ids = Vec::<((u32, u32, u32), u32)>::new();
     let mut scratch_children = Vec::<u32>::new();
-    for node_index in (0..trie.nodes.len()).rev() {
+    const SMALL_NODE_LINEAR_INTERN_LIMIT: usize = 16;
+    for &node_index in active_nodes.iter().rev() {
         let node = trie.nodes[node_index];
         let state_start = data[node_index].states_start as usize;
         let state_len = data[node_index].states_len as usize;
@@ -3154,6 +3308,8 @@ fn l1_bucket_suffix_signature_profiles_packed(
                 let child_state_index = transition_maps[map_start + state_offset];
                 behavior_ids.push(if child_state_index == L1_NONE {
                     0
+                } else if l1_uniform_behavior_signature(child_state_index).is_some() {
+                    child_state_index
                 } else {
                     behavior_ids[child_behavior_start + child_state_index as usize]
                 });
@@ -3165,13 +3321,20 @@ fn l1_bucket_suffix_signature_profiles_packed(
             let child = trie.edges[edge_index].child as usize;
             let child_behavior_start = data[child].behaviors_start as usize;
             let map_start = edge_data[edge_index].map_start as usize;
-            unary_behavior_ids.clear();
+            let use_linear_intern = state_len <= SMALL_NODE_LINEAR_INTERN_LIMIT;
+            if use_linear_intern {
+                small_unary_behavior_ids.clear();
+            } else {
+                unary_behavior_ids.clear();
+            }
             for state_offset in 0..state_len {
                 let state = states[state_start + state_offset];
                 let terminal_signature = state_to_terminal_signature[state as usize];
                 let child_state_index = transition_maps[map_start + state_offset];
                 let child_behavior = if child_state_index == L1_NONE {
                     0
+                } else if l1_uniform_behavior_signature(child_state_index).is_some() {
+                    child_state_index
                 } else {
                     behavior_ids[child_behavior_start + child_state_index as usize]
                 };
@@ -3180,7 +3343,14 @@ fn l1_bucket_suffix_signature_profiles_packed(
                     continue;
                 }
                 let key = (terminal_signature, child_behavior);
-                let behavior_id = if let Some(&id) = unary_behavior_ids.get(&key) {
+                let existing = if use_linear_intern {
+                    small_unary_behavior_ids
+                        .iter()
+                        .find_map(|(candidate, id)| (*candidate == key).then_some(*id))
+                } else {
+                    unary_behavior_ids.get(&key).copied()
+                };
+                let behavior_id = if let Some(id) = existing {
                     id
                 } else {
                     let child_behaviors_start = record_child_behaviors.len() as u32;
@@ -3206,7 +3376,11 @@ fn l1_bucket_suffix_signature_profiles_packed(
                         uniform_signature,
                         hash_next: L1_NONE,
                     });
-                    unary_behavior_ids.insert(key, id);
+                    if use_linear_intern {
+                        small_unary_behavior_ids.push((key, id));
+                    } else {
+                        unary_behavior_ids.insert(key, id);
+                    }
                     id
                 };
                 behavior_ids.push(behavior_id);
@@ -3222,7 +3396,12 @@ fn l1_bucket_suffix_signature_profiles_packed(
             let second_behavior_start = data[second_child].behaviors_start as usize;
             let first_map_start = edge_data[first_edge_index].map_start as usize;
             let second_map_start = edge_data[second_edge_index].map_start as usize;
-            binary_behavior_ids.clear();
+            let use_linear_intern = state_len <= SMALL_NODE_LINEAR_INTERN_LIMIT;
+            if use_linear_intern {
+                small_binary_behavior_ids.clear();
+            } else {
+                binary_behavior_ids.clear();
+            }
             for state_offset in 0..state_len {
                 let state = states[state_start + state_offset];
                 let terminal_signature = if node.terminal_token == L1_NONE {
@@ -3233,12 +3412,16 @@ fn l1_bucket_suffix_signature_profiles_packed(
                 let first_state_index = transition_maps[first_map_start + state_offset];
                 let first_behavior = if first_state_index == L1_NONE {
                     0
+                } else if l1_uniform_behavior_signature(first_state_index).is_some() {
+                    first_state_index
                 } else {
                     behavior_ids[first_behavior_start + first_state_index as usize]
                 };
                 let second_state_index = transition_maps[second_map_start + state_offset];
                 let second_behavior = if second_state_index == L1_NONE {
                     0
+                } else if l1_uniform_behavior_signature(second_state_index).is_some() {
+                    second_state_index
                 } else {
                     behavior_ids[second_behavior_start + second_state_index as usize]
                 };
@@ -3247,7 +3430,14 @@ fn l1_bucket_suffix_signature_profiles_packed(
                     continue;
                 }
                 let key = (terminal_signature, first_behavior, second_behavior);
-                let behavior_id = if let Some(&id) = binary_behavior_ids.get(&key) {
+                let existing = if use_linear_intern {
+                    small_binary_behavior_ids
+                        .iter()
+                        .find_map(|(candidate, id)| (*candidate == key).then_some(*id))
+                } else {
+                    binary_behavior_ids.get(&key).copied()
+                };
+                let behavior_id = if let Some(id) = existing {
                     id
                 } else {
                     let child_behaviors_start = record_child_behaviors.len() as u32;
@@ -3288,7 +3478,11 @@ fn l1_bucket_suffix_signature_profiles_packed(
                         uniform_signature,
                         hash_next: L1_NONE,
                     });
-                    binary_behavior_ids.insert(key, id);
+                    if use_linear_intern {
+                        small_binary_behavior_ids.push((key, id));
+                    } else {
+                        binary_behavior_ids.insert(key, id);
+                    }
                     id
                 };
                 behavior_ids.push(behavior_id);
@@ -3297,7 +3491,10 @@ fn l1_bucket_suffix_signature_profiles_packed(
         }
 
         let child_count = node.edge_len as usize;
-        behavior_hash_heads.clear();
+        let use_linear_intern = state_len <= SMALL_NODE_LINEAR_INTERN_LIMIT;
+        if !use_linear_intern {
+            behavior_hash_heads.clear();
+        }
         scratch_children.clear();
         if scratch_children.capacity() < child_count {
             scratch_children.reserve(child_count - scratch_children.capacity());
@@ -3316,6 +3513,8 @@ fn l1_bucket_suffix_signature_profiles_packed(
                 let child_state_index = transition_maps[edge_data[edge_index].map_start as usize + state_offset];
                 scratch_children.push(if child_state_index == L1_NONE {
                     0
+                } else if l1_uniform_behavior_signature(child_state_index).is_some() {
+                    child_state_index
                 } else {
                     behavior_ids[data[child].behaviors_start as usize + child_state_index as usize]
                 });
@@ -3324,19 +3523,37 @@ fn l1_bucket_suffix_signature_profiles_packed(
                 behavior_ids.push(0);
                 continue;
             }
-            let hash = l1_packed_hash_behavior(terminal_signature, &scratch_children);
+            let hash = (!use_linear_intern)
+                .then(|| l1_packed_hash_behavior(terminal_signature, &scratch_children));
             let mut found = None;
-            let mut candidate = behavior_hash_heads.get(&hash).copied().unwrap_or(L1_NONE);
-            while candidate != L1_NONE {
-                let record = records[data[node_index].records_start as usize + candidate as usize - 1];
-                if record.terminal_signature == terminal_signature
-                    && record_child_behaviors[record.child_behaviors_start as usize..record.child_behaviors_start as usize + child_count]
-                        == scratch_children[..]
-                {
-                    found = Some(candidate);
-                    break;
+            if use_linear_intern {
+                let records_start = data[node_index].records_start as usize;
+                for (offset, record) in records[records_start..].iter().enumerate() {
+                    if record.terminal_signature == terminal_signature
+                        && record_child_behaviors[record.child_behaviors_start as usize
+                            ..record.child_behaviors_start as usize + child_count]
+                            == scratch_children[..]
+                    {
+                        found = Some(offset as u32 + 1);
+                        break;
+                    }
                 }
-                candidate = record.hash_next;
+            } else {
+                let hash = hash.expect("hashed behavior interning");
+                let mut candidate = behavior_hash_heads.get(&hash).copied().unwrap_or(L1_NONE);
+                while candidate != L1_NONE {
+                    let record = records
+                        [data[node_index].records_start as usize + candidate as usize - 1];
+                    if record.terminal_signature == terminal_signature
+                        && record_child_behaviors[record.child_behaviors_start as usize
+                            ..record.child_behaviors_start as usize + child_count]
+                            == scratch_children[..]
+                    {
+                        found = Some(candidate);
+                        break;
+                    }
+                    candidate = record.hash_next;
+                }
             }
             let behavior_id = if let Some(id) = found {
                 id
@@ -3387,13 +3604,20 @@ fn l1_bucket_suffix_signature_profiles_packed(
                     uniform_signature = candidate_uniform;
                 }
                 let id = records.len() as u32 - data[node_index].records_start + 1;
+                let hash_next = if let Some(hash) = hash {
+                    behavior_hash_heads.get(&hash).copied().unwrap_or(L1_NONE)
+                } else {
+                    L1_NONE
+                };
                 records.push(L1PackedProductBehaviorRecord {
                     terminal_signature,
                     child_behaviors_start,
                     uniform_signature,
-                    hash_next: behavior_hash_heads.get(&hash).copied().unwrap_or(L1_NONE),
+                    hash_next,
                 });
-                behavior_hash_heads.insert(hash, id);
+                if let Some(hash) = hash {
+                    behavior_hash_heads.insert(hash, id);
+                }
                 id
             };
             behavior_ids.push(behavior_id);
@@ -3451,12 +3675,14 @@ fn l1_bucket_suffix_signature_profiles_packed(
     });
     if let Some(total_started_at) = total_started_at {
         eprintln!(
-            "[glrmask/profile][l1_packed_product] first_byte={} tokens={} targets={} trie_nodes={} states={} trie_ms={:.3} propagate_ms={:.3} behavior_ms={:.3} materialize_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][l1_packed_product] first_byte={} tokens={} targets={} trie_nodes={} active_nodes={} states={} uniform_subtree_transitions={} trie_ms={:.3} propagate_ms={:.3} behavior_ms={:.3} materialize_ms={:.3} total_ms={:.3}",
             first_byte,
             token_ids.len(),
             walk_targets.len(),
             trie.nodes.len(),
+            active_nodes.len(),
             states.len(),
+            uniform_subtree_transitions,
             trie_ms,
             propagate_ms,
             behavior_ms,
@@ -3476,6 +3702,7 @@ struct L1SortedTokenBuckets {
     suffix_subtree_bytes: Vec<[u64; 4]>,
     suffix_first_bytes_by_bucket: Vec<[u64; 4]>,
     has_empty_suffix_by_bucket: Vec<bool>,
+    packed_suffix_tries_by_first_byte: Vec<Option<Arc<L1PackedSuffixTrie>>>,
 }
 
 fn build_l1_sorted_token_buckets(sorted_entries: &[(u32, Arc<[u8]>)]) -> L1SortedTokenBuckets {
@@ -3520,6 +3747,19 @@ fn build_l1_sorted_token_buckets(sorted_entries: &[(u32, Arc<[u8]>)]) -> L1Sorte
         }
     }
 
+    let packed_suffix_tries_by_first_byte = (0..256)
+        .map(|first_byte| {
+            let token_ids = &token_indices_by_first_byte[first_byte];
+            (!token_ids.is_empty()).then(|| {
+                Arc::new(L1PackedSuffixTrie::build(
+                    sorted_entries,
+                    token_ids,
+                    &suffix_lcps_by_first_byte[first_byte],
+                ))
+            })
+        })
+        .collect();
+
     L1SortedTokenBuckets {
         empty_token_indices,
         token_indices_by_first_byte,
@@ -3527,6 +3767,7 @@ fn build_l1_sorted_token_buckets(sorted_entries: &[(u32, Arc<[u8]>)]) -> L1Sorte
         suffix_subtree_bytes,
         suffix_first_bytes_by_bucket,
         has_empty_suffix_by_bucket,
+        packed_suffix_tries_by_first_byte,
     }
 }
 
@@ -3724,6 +3965,21 @@ fn append_l1_signature_profile_run(profile: &mut Vec<(u32, u32, u32)>, sig_id: u
         }
     }
     profile.push((sig_id, token_id, token_id));
+}
+
+#[inline]
+fn append_l1_signature_profile_range(
+    profile: &mut Vec<(u32, u32, u32)>,
+    sig_id: u32,
+    token_start: u32,
+    token_end: u32,
+) {
+    debug_assert!(token_start != L1_NONE);
+    debug_assert!(token_end >= token_start);
+    append_l1_signature_profile_run(profile, sig_id, token_start);
+    if token_end != token_start {
+        profile.last_mut().expect("packed profile range").2 = token_end;
+    }
 }
 
 fn build_l1_terminal_dwa(
@@ -5124,7 +5380,7 @@ mod generic_nfa_tests {
     use crate::automata::lexer::tokenizer::arbitrary_epsilon_l1_test_tokenizer;
 
     #[test]
-    fn large_token_bounded_budget_abort_falls_back_to_relevant_powerset() {
+    fn large_vocab_prefers_bounded_relevant_powerset_probe_before_token_bounded_fallback() {
         let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
         let raw_states = (0..tokenizer.num_states() as usize).collect::<Vec<_>>();
         let token = Arc::<[u8]>::from(b"a".as_slice());
@@ -5150,7 +5406,7 @@ mod generic_nfa_tests {
                 max_trie_visits: 0,
             },
         );
-        assert_eq!(analysis_view, "relevant_powerset");
+        assert_eq!(analysis_view, "relevant_powerset_probe");
     }
 
     #[test]
@@ -5528,20 +5784,33 @@ mod packed_suffix_product_tests {
             (0, Arc::from(&b""[..])),
             (1, Arc::from(&b"a"[..])),
             (2, Arc::from(&b"ab"[..])),
-            (3, Arc::from(&b"abc"[..])),
-            (4, Arc::from(&b"abd"[..])),
-            (5, Arc::from(&b"ac"[..])),
-            (6, Arc::from(&b"b"[..])),
-            (7, Arc::from(&b"ba"[..])),
-            (8, Arc::from(&b"bb"[..])),
-            (9, Arc::from(&b"c"[..])),
-            (10, Arc::from(&b"cab"[..])),
+            (3, Arc::from(&b"ab"[..])),
+            (4, Arc::from(&b"abc"[..])),
+            (5, Arc::from(&b"abd"[..])),
+            (6, Arc::from(&b"ac"[..])),
+            (7, Arc::from(&b"b"[..])),
+            (8, Arc::from(&b"ba"[..])),
+            (9, Arc::from(&b"bb"[..])),
+            (10, Arc::from(&b"c"[..])),
+            (11, Arc::from(&b"cab"[..])),
         ];
         let buckets = build_l1_sorted_token_buckets(&sorted_entries);
         let active_terminals = vec![true, false, true, true];
         let (state_to_terminal_signature, _) =
             build_l1_state_to_terminal_signatures(&tokenizer, &active_terminals);
         let flat_trans = build_flat_transition_table(&tokenizer);
+        let self_loop_bytes_by_state = (0..tokenizer.num_states() as usize)
+            .map(|state| {
+                let mut bytes = [0u64; 4];
+                let row = &flat_trans[state * 256..state * 256 + 256];
+                for (byte, &target) in row.iter().enumerate() {
+                    if target == state as u32 {
+                        bytes[byte / 64] |= 1u64 << (byte % 64);
+                    }
+                }
+                bytes
+            })
+            .collect::<Vec<_>>();
         let targets: Vec<u32> = (0..tokenizer.num_states()).collect();
         let mut relevant_bytes = [false; 256];
         let max_token_len = sorted_entries
@@ -5596,6 +5865,7 @@ mod packed_suffix_product_tests {
                 &buckets.suffix_first_bytes_by_bucket[first_byte],
                 buckets.has_empty_suffix_by_bucket[first_byte],
                 &state_to_terminal_signature,
+                &self_loop_bytes_by_state,
                 &flat_trans,
                 None,
                 tokenizer.num_states() as usize,
@@ -5614,6 +5884,7 @@ mod packed_suffix_product_tests {
                 &buckets.suffix_first_bytes_by_bucket[first_byte],
                 buckets.has_empty_suffix_by_bucket[first_byte],
                 &state_to_terminal_signature,
+                &self_loop_bytes_by_state,
                 &flat_trans,
                 None,
                 tokenizer.num_states() as usize,
@@ -5655,6 +5926,19 @@ mod packed_suffix_product_tests {
         let second_child = trie.nodes[first_child].next_sibling as usize;
         assert_eq!((trie.nodes[first_child].subtree_start, trie.nodes[first_child].subtree_end), (1, 1));
         assert_eq!((trie.nodes[second_child].subtree_start, trie.nodes[second_child].subtree_end), (2, 2));
+    }
+
+    #[test]
+    fn suffix_trie_preserves_duplicate_byte_alias_ranges() {
+        let entries: Vec<(u32, Arc<[u8]>)> = vec![
+            (91, Arc::from(b"a".as_slice())),
+            (7, Arc::from(b"a".as_slice())),
+            (4, Arc::from(b"ab".as_slice())),
+        ];
+        let trie = L1PackedSuffixTrie::build(&entries, &[0, 1, 2], &[0, 0, 0]);
+        let root = trie.nodes[0];
+        assert_eq!((root.terminal_token, root.terminal_token_end), (0, 1));
+        assert_eq!((root.subtree_start, root.subtree_end), (0, 2));
     }
 
     #[test]

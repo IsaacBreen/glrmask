@@ -58,7 +58,7 @@ use crate::compiler::stages::templates::compile_dfa::{
 use crate::ds::bitset::BitSet;
 use crate::ds::weight::Weight;
 use crate::grammar::flat::{GrammarDef, Terminal};
-use crate::runtime::{Constraint, DynamicMaskVocab, SpecialTokenTerminal};
+use crate::runtime::{Constraint, SpecialTokenTerminal};
 use crate::DynamicConstraint;
 
 fn env_flag_enabled(name: &str) -> bool {
@@ -199,7 +199,7 @@ fn compile_thread_count() -> Option<usize> {
     {
         return std::thread::available_parallelism()
             .ok()
-            .map(|parallelism| parallelism.get().min(10))
+            .map(|parallelism| parallelism.get().min(8))
             .filter(|&value| value > 1);
     }
 
@@ -2070,10 +2070,7 @@ let eager_possible_matches = env_flag_enabled("GLRMASK_EAGER_POSSIBLE_MATCHES");
             tokenizer,
             ignore_terminal: prepared_grammar.ignore_terminal,
             special_token_terminals,
-            dynamic_mask_vocab: DynamicMaskVocab::from_compiler_artifacts(
-                runtime_dynamic_vocab.trie,
-                runtime_dynamic_vocab.token_aliases,
-            ),
+            dynamic_mask_vocab: runtime_dynamic_vocab.vocab,
             possible_matches: possible_matches.into_artifact(),
             state_to_internal_tsid: internal_ids.tokenizer_states.original_to_internal.clone(),
             internal_tsid_to_states: internal_ids.tokenizer_states.internal_to_originals_vecs(),
@@ -2149,35 +2146,58 @@ pub(crate) fn compile_dynamic_owned_with_table_construction(
     vocab: &Vocab,
     default_table_construction: GlrTableConstruction,
 ) -> DynamicConstraint {
+    let profile = compile_profile_enabled();
+    let total_started_at = profile.then(Instant::now);
+    let prepare_started_at = profile.then(Instant::now);
     let prepared_grammar = prepare_grammar_transforms_only(grammar);
+    let prepare_ms = prepare_started_at.map_or(0.0, elapsed_ms);
     run_with_compile_thread_pool(|| {
+        let analysis_started_at = profile.then(Instant::now);
         let analyzed_grammar = AnalyzedGrammar::from_grammar_def(&prepared_grammar);
         if let Err(message) = analyzed_grammar.check_table_build_normal_form() {
             panic!("[glrmask] grammar precondition violations:\n{}", message);
         }
+        let analysis_ms = analysis_started_at.map_or(0.0, elapsed_ms);
 
-        let (tokenizer, table) = rayon::join(
+        let ((tokenizer, tokenizer_ms), (table, table_ms)) = rayon::join(
             || {
+                let started_at = Instant::now();
                 let mut tokenizer = build_tokenizer(&prepared_grammar);
                 tokenizer.isolate_start_state_and_drain_nullable_terminals();
-                tokenizer
+                (tokenizer, elapsed_ms(started_at))
             },
             || {
-                GLRTable::build_with_default_construction(
+                let started_at = Instant::now();
+                let table = GLRTable::build_with_default_construction(
                     &analyzed_grammar,
                     default_table_construction,
-                )
+                );
+                (table, elapsed_ms(started_at))
             },
         );
 
-        DynamicConstraint::from_parts(
+        let finalize_started_at = profile.then(Instant::now);
+        let constraint = DynamicConstraint::from_parts(
             table,
             analyzed_grammar.terminal_display_names.clone(),
             tokenizer,
             prepared_grammar.ignore_terminal,
             collect_special_token_terminals(&prepared_grammar),
             vocab,
-        )
+        );
+        if let Some(total_started_at) = total_started_at {
+            eprintln!(
+                "[glrmask/profile][dynamic_compile] prepare_ms={:.3} analysis_ms={:.3} tokenizer_ms={:.3} table_ms={:.3} finalize_ms={:.3} parallel_core_wall_ms={:.3} total_ms={:.3}",
+                prepare_ms,
+                analysis_ms,
+                tokenizer_ms,
+                table_ms,
+                finalize_started_at.map_or(0.0, elapsed_ms),
+                tokenizer_ms.max(table_ms),
+                elapsed_ms(total_started_at),
+            );
+        }
+        constraint
     })
 }
 

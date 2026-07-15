@@ -23,6 +23,7 @@ use crate::automata::weighted::terminal_automaton::TerminalAutomaton;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap, MappedArtifact};
 use crate::ds::bitset::BitSet;
+use crate::ds::u8set::U8Set;
 use crate::grammar::flat::TerminalID;
 use crate::Vocab;
 
@@ -123,13 +124,31 @@ fn build_char_type_sub_vocabs(vocab: &Vocab) -> Arc<[Vocab]> {
     }
 
     let mut partition_entries: Vec<Vec<(u32, Vec<u8>)>> = (0..9).map(|_| Vec::new()).collect();
+    let mut partition_bytes = [U8Set::empty(); 9];
+    let mut partition_follow_bytes: Vec<[U8Set; 256]> =
+        (0..9).map(|_| [U8Set::empty(); 256]).collect();
     for (&token_id, bytes) in vocab.entries.iter() {
         let idx = classify_vocab_char_type(bytes) as usize;
+        for &byte in bytes {
+            partition_bytes[idx].insert(byte);
+        }
+        for pair in bytes.windows(2) {
+            partition_follow_bytes[idx][pair[0] as usize].insert(pair[1]);
+        }
         partition_entries[idx].push((token_id, bytes.clone()));
     }
     let sub_vocabs: Arc<[Vocab]> = partition_entries
         .into_iter()
-        .map(|entries| Vocab::new(entries, None))
+        .enumerate()
+        .map(|(idx, entries)| {
+            let vocab = Vocab::new(entries, None);
+            classify::cache_vocab_classification_facts(
+                &vocab,
+                partition_bytes[idx],
+                partition_follow_bytes[idx],
+            );
+            vocab
+        })
         .collect::<Vec<_>>()
         .into();
     vocab.vocab_derived_cache_set(Arc::new(CharTypeSubVocabs {

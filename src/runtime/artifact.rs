@@ -501,6 +501,30 @@ impl DynamicMaskVocab {
         Self::from_source(DynamicMaskVocabSource { trie, token_aliases })
     }
 
+    pub(crate) fn from_compiler_artifacts_materialized(
+        trie: Arc<VocabPrefixTree>,
+        token_aliases: Arc<Vec<Vec<u32>>>,
+    ) -> Self {
+        let mut vocab = Self::from_compiler_artifacts(trie, token_aliases);
+        let materialized = vocab.materialize_pending_source();
+        debug_assert!(materialized);
+        vocab
+    }
+
+    pub(crate) fn from_materialized_ordered(
+        trie: Arc<DynamicMaskTrie>,
+        token_aliases: Arc<Vec<Vec<u32>>>,
+    ) -> Self {
+        Self {
+            trie,
+            token_aliases: DynamicMaskAliasStore::Ordered(token_aliases),
+            pending_source: None,
+            initialized: true,
+            continuation_partitions: Arc::new(Mutex::new(FxHashMap::default())),
+            mask_cache: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
     fn from_source(source: DynamicMaskVocabSource) -> Self {
         Self {
             trie: Arc::new(DynamicMaskTrie::new()),

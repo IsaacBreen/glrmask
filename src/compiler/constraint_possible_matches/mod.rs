@@ -25,6 +25,7 @@ use crate::ds::u8set::U8Set;
 use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::ds::weight::{shared_rangeset, Weight};
 use crate::grammar::flat::TerminalID;
+use crate::runtime::{DynamicMaskTrie, DynamicMaskVocab};
 use crate::vocab::VocabDerivedArtifact;
 use crate::Vocab;
 
@@ -77,8 +78,7 @@ pub(crate) struct ConstraintPossibleMatchesComputation {
 
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeDynamicMaskVocabArtifacts {
-    pub(crate) trie: Arc<VocabPrefixTree>,
-    pub(crate) token_aliases: Arc<Vec<Vec<u32>>>,
+    pub(crate) vocab: DynamicMaskVocab,
 }
 
 #[derive(Debug, Clone)]
@@ -92,9 +92,20 @@ struct OrderedVocab {
 struct OrderedVocabTrieArtifacts {
     ordered_vocab: Arc<OrderedVocab>,
     trie: Arc<VocabPrefixTree>,
+    runtime_dynamic_trie: Arc<OnceLock<Arc<DynamicMaskTrie>>>,
 }
 
 impl VocabDerivedArtifact for OrderedVocabTrieArtifacts {}
+
+impl OrderedVocabTrieArtifacts {
+    fn new(ordered_vocab: Arc<OrderedVocab>, trie: Arc<VocabPrefixTree>) -> Self {
+        Self {
+            ordered_vocab,
+            trie,
+            runtime_dynamic_trie: Arc::new(OnceLock::new()),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct OrderedVocabCacheFingerprint {
@@ -349,7 +360,7 @@ fn get_ordered_vocab_trie_artifacts(
         let trie = Arc::new(build_ordered_vocab_prefix_tree(ordered_vocab.as_ref()));
         let trie_build_ns = trie_started_at.elapsed().as_nanos();
         return (
-            OrderedVocabTrieArtifacts { ordered_vocab, trie },
+            OrderedVocabTrieArtifacts::new(ordered_vocab, trie),
             OrderedVocabCacheProfile {
                 status: OrderedVocabCacheStatus::Disabled,
                 probe_ns: 0,
@@ -416,10 +427,10 @@ fn get_ordered_vocab_trie_artifacts(
     let entry = OrderedVocabCacheEntry {
         fingerprint,
         source_original_to_ordered,
-        artifacts: OrderedVocabTrieArtifacts {
-            ordered_vocab: Arc::clone(&ordered_vocab),
-            trie: Arc::clone(&trie),
-        },
+        artifacts: OrderedVocabTrieArtifacts::new(
+            Arc::clone(&ordered_vocab),
+            Arc::clone(&trie),
+        ),
     };
 
     let cache_entries = {
@@ -432,7 +443,7 @@ fn get_ordered_vocab_trie_artifacts(
     };
 
     (
-        OrderedVocabTrieArtifacts { ordered_vocab, trie },
+        OrderedVocabTrieArtifacts::new(ordered_vocab, trie),
         OrderedVocabCacheProfile {
             status: OrderedVocabCacheStatus::Miss,
             probe_ns: probe_started_at.elapsed().as_nanos(),
@@ -475,7 +486,7 @@ fn get_ordered_vocab_trie_artifacts_for_vocab(
     let trie_started_at = Instant::now();
     let trie = Arc::new(build_ordered_vocab_prefix_tree(ordered_vocab.as_ref()));
     let trie_build_ns = trie_started_at.elapsed().as_nanos();
-    let artifacts = OrderedVocabTrieArtifacts { ordered_vocab, trie };
+    let artifacts = OrderedVocabTrieArtifacts::new(ordered_vocab, trie);
     vocab.vocab_derived_cache_set(Arc::new(artifacts.clone()));
 
     (
@@ -2271,10 +2282,20 @@ pub(crate) fn compute_constraint_possible_matches(
 fn runtime_dynamic_vocab_artifacts(
     artifacts: &OrderedVocabTrieArtifacts,
 ) -> RuntimeDynamicMaskVocabArtifacts {
+    let runtime_trie = Arc::clone(artifacts.runtime_dynamic_trie.get_or_init(|| {
+        Arc::new(DynamicMaskTrie::from_vocab_prefix_tree(artifacts.trie.as_ref()))
+    }));
     RuntimeDynamicMaskVocabArtifacts {
-        trie: Arc::clone(&artifacts.trie),
-        token_aliases: Arc::clone(&artifacts.ordered_vocab.ordered_to_originals),
+        vocab: DynamicMaskVocab::from_materialized_ordered(
+            runtime_trie,
+            Arc::clone(&artifacts.ordered_vocab.ordered_to_originals),
+        ),
     }
+}
+
+pub(crate) fn runtime_dynamic_vocab_for_vocab(vocab: &Vocab) -> DynamicMaskVocab {
+    let artifacts = get_ordered_vocab_trie_artifacts_for_vocab(vocab).0;
+    runtime_dynamic_vocab_artifacts(&artifacts).vocab
 }
 
 /// Neutral PM artifact for the deferred mode. All dimensions are deliberately
@@ -2556,7 +2577,12 @@ pub(crate) fn compute_constraint_possible_matches_for_vocab_with_raw_byte_classe
 }
 
 pub(crate) fn prepare_vocab_for_possible_matches(vocab: &Vocab) {
-    let _ = get_ordered_vocab_trie_artifacts_for_vocab(vocab);
+    let artifacts = get_ordered_vocab_trie_artifacts_for_vocab(vocab).0;
+    // Runtime dynamic-mask vocabulary structure is a pure function of token
+    // bytes. Build it during vocab preparation so grammar compilation only
+    // creates fresh, constraint-local mutable runtime caches around the shared
+    // immutable trie.
+    let _ = runtime_dynamic_vocab_artifacts(&artifacts);
 }
 
 #[cfg(test)]

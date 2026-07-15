@@ -1,4 +1,4 @@
-//! Rooted terminal interchangeability and certified scanner transport for L2+ terminal-DWA construction.
+//! Rooted terminal interchangeability for the L2+ terminal-DWA reference path.
 //!
 //! For one vocabulary partition, the tokenizer DFA itself is left unchanged.
 //! The partition only chooses which byte transitions `characterize` traverses.
@@ -24,7 +24,9 @@ use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use smallvec::SmallVec;
 use super::nwa_builder::{TerminalNwaTransportMode, TransportScannerStateMap};
 use super::equivalence_analysis::state_equivalence::nfa::{
-    RefinementDepth, build_relevant_powerset_view, compute_state_map_from_prebuilt_sparse_powerset,
+    RefinementDepth, RelevantPowersetView, RelevantPowersetWork,
+    RelevantPowersetWorkBudget, build_relevant_powerset_view,
+    build_relevant_powerset_view_budgeted, compute_state_map_from_prebuilt_sparse_powerset,
     raw_active_language_states,
 };
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -39,6 +41,52 @@ const CHARACTERIZATION_DOMAIN: &[u8] =
     b"glrmask terminal interchangeability characterize v1\0";
 const CHARACTERIZATION_SEED: &[u8] =
     b"glrmask terminal interchangeability characterize seed v1\0";
+
+const TI_NFA_POWERSET_GROWTH_FACTOR: usize = 8;
+const TI_NFA_POWERSET_MIN_CONFIGURATIONS: usize = 16_384;
+const TI_NFA_POWERSET_MAX_CONFIGURATIONS: usize = 262_144;
+const TI_NFA_POWERSET_MIN_EDGES: usize = 1_048_576;
+const TI_NFA_POWERSET_MAX_EDGES: usize = 8_388_608;
+
+fn ti_nfa_powerset_budget(
+    tokenizer: &Tokenizer,
+    relevant_bytes: &[bool; 256],
+    global_state_quotient: Option<&GlobalScannerStateQuotient>,
+) -> RelevantPowersetWorkBudget {
+    fn env_limit(name: &str, computed: usize) -> usize {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|&value| value > 0)
+            .unwrap_or(computed)
+    }
+
+    let seed_states = global_state_quotient.map_or(tokenizer.num_states() as usize, |quotient| {
+        quotient.as_many_to_one().representative_original_ids.len()
+    });
+    let selected_bytes = relevant_bytes.iter().filter(|&&selected| selected).count();
+    let computed_configurations = seed_states
+        .saturating_mul(TI_NFA_POWERSET_GROWTH_FACTOR)
+        .clamp(
+            TI_NFA_POWERSET_MIN_CONFIGURATIONS,
+            TI_NFA_POWERSET_MAX_CONFIGURATIONS,
+        );
+    let computed_edges = seed_states
+        .saturating_mul(selected_bytes)
+        .saturating_mul(TI_NFA_POWERSET_GROWTH_FACTOR)
+        .clamp(TI_NFA_POWERSET_MIN_EDGES, TI_NFA_POWERSET_MAX_EDGES);
+
+    RelevantPowersetWorkBudget {
+        max_configurations: env_limit(
+            "GLRMASK_TI_NFA_POWERSET_MAX_CONFIGURATIONS",
+            computed_configurations,
+        ),
+        max_edges: env_limit(
+            "GLRMASK_TI_NFA_POWERSET_MAX_EDGES",
+            computed_edges,
+        ),
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct CharacterizationHash([u8; blake3::OUT_LEN]);
@@ -408,6 +456,27 @@ impl RestrictedTopology {
         Self::new_inner(tokenizer, relevant_bytes, Some(global_state_quotient))
     }
 
+    fn build_budgeted(
+        tokenizer: &Tokenizer,
+        relevant_bytes: &[bool; 256],
+        global_state_quotient: Option<&GlobalScannerStateQuotient>,
+        budget: RelevantPowersetWorkBudget,
+    ) -> Result<Self, RelevantPowersetWork> {
+        if tokenizer.has_epsilon_transitions() {
+            return Self::new_nfa_budgeted(
+                tokenizer,
+                relevant_bytes,
+                global_state_quotient,
+                budget,
+            );
+        }
+        Ok(Self::new_inner(
+            tokenizer,
+            relevant_bytes,
+            global_state_quotient,
+        ))
+    }
+
     fn new_inner(
         tokenizer: &Tokenizer,
         relevant_bytes: &[bool; 256],
@@ -529,6 +598,34 @@ impl RestrictedTopology {
             None,
             global_state_quotient.map(GlobalScannerStateQuotient::as_many_to_one),
         );
+        Self::from_nfa_view(tokenizer, view, global_state_quotient.is_none())
+    }
+
+    fn new_nfa_budgeted(
+        tokenizer: &Tokenizer,
+        relevant_bytes: &[bool; 256],
+        global_state_quotient: Option<&GlobalScannerStateQuotient>,
+        budget: RelevantPowersetWorkBudget,
+    ) -> Result<Self, RelevantPowersetWork> {
+        let view = build_relevant_powerset_view_budgeted(
+            tokenizer,
+            relevant_bytes,
+            None,
+            global_state_quotient.map(GlobalScannerStateQuotient::as_many_to_one),
+            budget,
+        )?;
+        Ok(Self::from_nfa_view(
+            tokenizer,
+            view,
+            global_state_quotient.is_none(),
+        ))
+    }
+
+    fn from_nfa_view(
+        tokenizer: &Tokenizer,
+        view: RelevantPowersetView,
+        configurations_use_raw_states: bool,
+    ) -> Self {
         let raw_state_count = tokenizer.num_states() as usize;
         let real_state_count = view.states.len();
         let nfa_configurations = Arc::clone(&view.configurations);
@@ -590,7 +687,7 @@ impl RestrictedTopology {
             state_for_raw: Some(Arc::clone(&view.raw_start_to_view)),
             nfa_output_rows: Some((finalizers.into(), future.into())),
             nfa_configurations: Some(nfa_configurations),
-            nfa_configurations_use_raw_states: global_state_quotient.is_none(),
+            nfa_configurations_use_raw_states: configurations_use_raw_states,
             real_state_count,
             initial_state: view.start_state,
             max_outdegree,
@@ -1225,35 +1322,36 @@ pub(crate) struct TiDiscoveryContext {
 }
 
 impl TiDiscoveryContext {
-    pub(crate) fn new(tokenizer: &Tokenizer, relevant_bytes: &[bool; 256]) -> Self {
-        Self::new_with_output_cache(tokenizer, relevant_bytes, None)
-    }
-
-    pub(crate) fn new_with_output_cache(
+    fn from_topology(
         tokenizer: &Tokenizer,
-        relevant_bytes: &[bool; 256],
+        topology: RestrictedTopology,
         shared_output_cache: Option<&SharedTiTokenizerOutputCache>,
+        profile_label: &'static str,
+        started_at: Instant,
+        topology_finished_at: Instant,
     ) -> Self {
         let profile = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
-        let t0 = Instant::now();
-        let topology = Arc::new(RestrictedTopology::new(tokenizer, relevant_bytes));
-        let t1 = Instant::now();
+        let topology = Arc::new(topology);
         let raw = Arc::new(TiRawDiscoveryData::new(
             tokenizer,
             &topology,
             shared_output_cache,
         ));
-        let t2 = Instant::now();
+        let raw_finished_at = Instant::now();
         let (root_output_signatures, root_observed_states) =
             root_output_signatures(&topology, &raw);
-        let t3 = Instant::now();
+        let finished_at = Instant::now();
         if profile {
             eprintln!(
-                "[glrmask/profile][terminal_interchangeability] ti_context_build topology_ms={:.3} raw_ms={:.3} root_sig_ms={:.3} total_ms={:.3}",
-                (t1 - t0).as_secs_f64() * 1000.0,
-                (t2 - t1).as_secs_f64() * 1000.0,
-                (t3 - t2).as_secs_f64() * 1000.0,
-                (t3 - t0).as_secs_f64() * 1000.0,
+                "[glrmask/profile][terminal_interchangeability] {} discovery_states={} sparse_edges={} selected_bytes={} topology_ms={:.3} raw_ms={:.3} root_sig_ms={:.3} total_ms={:.3}",
+                profile_label,
+                topology.real_state_count,
+                topology.edges.len(),
+                topology.bytes.len(),
+                (topology_finished_at - started_at).as_secs_f64() * 1000.0,
+                (raw_finished_at - topology_finished_at).as_secs_f64() * 1000.0,
+                (finished_at - raw_finished_at).as_secs_f64() * 1000.0,
+                (finished_at - started_at).as_secs_f64() * 1000.0,
             );
         }
         Self {
@@ -1267,6 +1365,68 @@ impl TiDiscoveryContext {
             output_pair_closed_active: std::cell::RefCell::new(None),
             first_round_memo: std::cell::RefCell::new(FxHashMap::default()),
         }
+    }
+
+    pub(crate) fn new(tokenizer: &Tokenizer, relevant_bytes: &[bool; 256]) -> Self {
+        Self::new_with_output_cache(tokenizer, relevant_bytes, None)
+    }
+
+    pub(crate) fn new_with_output_cache(
+        tokenizer: &Tokenizer,
+        relevant_bytes: &[bool; 256],
+        shared_output_cache: Option<&SharedTiTokenizerOutputCache>,
+    ) -> Self {
+        let started_at = Instant::now();
+        let topology = RestrictedTopology::new(tokenizer, relevant_bytes);
+        let topology_finished_at = Instant::now();
+        Self::from_topology(
+            tokenizer,
+            topology,
+            shared_output_cache,
+            "ti_context_build",
+            started_at,
+            topology_finished_at,
+        )
+    }
+
+    pub(crate) fn try_new_with_output_cache(
+        tokenizer: &Tokenizer,
+        relevant_bytes: &[bool; 256],
+        shared_output_cache: Option<&SharedTiTokenizerOutputCache>,
+    ) -> Result<Self, RelevantPowersetWork> {
+        let profile = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
+        let budget = ti_nfa_powerset_budget(tokenizer, relevant_bytes, None);
+        let t0 = Instant::now();
+        let topology = match RestrictedTopology::build_budgeted(
+            tokenizer,
+            relevant_bytes,
+            None,
+            budget,
+        ) {
+            Ok(topology) => topology,
+            Err(work) => {
+                if profile {
+                    eprintln!(
+                        "[glrmask/profile][terminal_interchangeability] ti_context_build_aborted configurations={} edges={} max_configurations={} max_edges={} total_ms={:.3}",
+                        work.configurations,
+                        work.edges,
+                        budget.max_configurations,
+                        budget.max_edges,
+                        t0.elapsed().as_secs_f64() * 1000.0,
+                    );
+                }
+                return Err(work);
+            }
+        };
+        let topology_finished_at = Instant::now();
+        Ok(Self::from_topology(
+            tokenizer,
+            topology,
+            shared_output_cache,
+            "ti_context_build",
+            t0,
+            topology_finished_at,
+        ))
     }
 
     /// Build immutable discovery evidence over a total global scanner-state
@@ -1291,43 +1451,66 @@ impl TiDiscoveryContext {
         global_state_quotient: &GlobalScannerStateQuotient,
         shared_output_cache: Option<&SharedTiTokenizerOutputCache>,
     ) -> Self {
-        let profile = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
-        let t0 = Instant::now();
-        let topology = Arc::new(RestrictedTopology::new_with_global_state_quotient(
+        let started_at = Instant::now();
+        let topology = RestrictedTopology::new_with_global_state_quotient(
             tokenizer,
             relevant_bytes,
             global_state_quotient,
-        ));
-        let t1 = Instant::now();
-        let raw = Arc::new(TiRawDiscoveryData::new(
+        );
+        let topology_finished_at = Instant::now();
+        Self::from_topology(
             tokenizer,
-            &topology,
-            shared_output_cache,
-        ));
-        let t2 = Instant::now();
-        let (root_output_signatures, root_observed_states) =
-            root_output_signatures(&topology, &raw);
-        let t3 = Instant::now();
-        if profile {
-            eprintln!(
-                "[glrmask/profile][terminal_interchangeability] ti_context_build_c topology_ms={:.3} raw_ms={:.3} root_sig_ms={:.3} total_ms={:.3}",
-                (t1 - t0).as_secs_f64() * 1000.0,
-                (t2 - t1).as_secs_f64() * 1000.0,
-                (t3 - t2).as_secs_f64() * 1000.0,
-                (t3 - t0).as_secs_f64() * 1000.0,
-            );
-        }
-        Self {
             topology,
-            raw,
-            root_output_signatures,
-            root_observed_states,
-            support_partition_seed: std::cell::RefCell::new(None),
-            output_projection_seed: std::cell::RefCell::new(None),
-            output_pair_closed_memo: std::cell::RefCell::new(FxHashSet::default()),
-            output_pair_closed_active: std::cell::RefCell::new(None),
-            first_round_memo: std::cell::RefCell::new(FxHashMap::default()),
-        }
+            shared_output_cache,
+            "ti_context_build_c",
+            started_at,
+            topology_finished_at,
+        )
+    }
+
+    pub(crate) fn try_new_with_global_state_quotient_and_output_cache(
+        tokenizer: &Tokenizer,
+        relevant_bytes: &[bool; 256],
+        global_state_quotient: &GlobalScannerStateQuotient,
+        shared_output_cache: Option<&SharedTiTokenizerOutputCache>,
+    ) -> Result<Self, RelevantPowersetWork> {
+        let profile = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
+        let budget = ti_nfa_powerset_budget(
+            tokenizer,
+            relevant_bytes,
+            Some(global_state_quotient),
+        );
+        let t0 = Instant::now();
+        let topology = match RestrictedTopology::build_budgeted(
+            tokenizer,
+            relevant_bytes,
+            Some(global_state_quotient),
+            budget,
+        ) {
+            Ok(topology) => topology,
+            Err(work) => {
+                if profile {
+                    eprintln!(
+                        "[glrmask/profile][terminal_interchangeability] ti_context_build_c_aborted configurations={} edges={} max_configurations={} max_edges={} total_ms={:.3}",
+                        work.configurations,
+                        work.edges,
+                        budget.max_configurations,
+                        budget.max_edges,
+                        t0.elapsed().as_secs_f64() * 1000.0,
+                    );
+                }
+                return Err(work);
+            }
+        };
+        let topology_finished_at = Instant::now();
+        Ok(Self::from_topology(
+            tokenizer,
+            topology,
+            shared_output_cache,
+            "ti_context_build_c",
+            t0,
+            topology_finished_at,
+        ))
     }
 
     /// Exact finalizer/future observation IDs from the most recent discovery
@@ -1856,14 +2039,9 @@ pub(crate) struct TiRoundTransportWitnesses {
     active_before_round: Vec<bool>,
     pub(crate) partition: BTreeMap<TerminalID, BTreeSet<TerminalID>>,
     /// Certified maps for precisely the accepted representative/member pairs
-    /// of this historical round. The key is `(new_representative,
+    /// of this historical round.  The key is `(new_representative,
     /// old_representative)`.
     maps: BTreeMap<(TerminalID, TerminalID), Arc<TransportScannerStateMap>>,
-    /// Pairs certified only after projecting away unrelated terminal outputs.
-    /// These are exact scanner transports, but not global terminal-label
-    /// automorphisms, so they must use the boundary-resetting transport NWA
-    /// rather than post-DWA global suffix relabelling.
-    projected_pairs: BTreeSet<(TerminalID, TerminalID)>,
 }
 
 impl TiRoundTransportWitnesses {
@@ -1872,7 +2050,6 @@ impl TiRoundTransportWitnesses {
             active_before_round: active_terminals.to_vec(),
             partition: singleton_partition(active_terminals),
             maps: BTreeMap::new(),
-            projected_pairs: BTreeSet::new(),
         }
     }
 }
@@ -7663,34 +7840,6 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
     context: &TiDiscoveryContext,
     ignore_terminal: Option<TerminalID>,
 ) -> TiRoundTransportWitnesses {
-    discover_one_round_with_transport_witnesses_in_context_impl(
-        tokenizer,
-        active_terminals,
-        context,
-        ignore_terminal,
-        true,
-    )
-}
-
-/// Strong TI proves a global terminal-label automorphism. The transport NWA
-/// needs less: for one member `m` reconstructed from representative `r`, it is
-/// sufficient to certify the scanner transport after projecting frozen lexer
-/// outputs to the unresolved candidate family. Unrelated terminal outputs are
-/// never emitted by that member mode, so requiring them to participate in the
-/// same global permutation is unnecessarily strong.
-///
-/// The projected fallback is deliberately applied only to terminals that the
-/// strong pass left as singletons, and only within an already-rooted candidate
-/// group. Thus every accepted projected map is a direct current-round
-/// representative/member witness; iterative composition remains exclusively a
-/// cross-round operation in `binary_transport_modes_from_witnesses`.
-fn discover_one_round_with_transport_witnesses_in_context_impl(
-    tokenizer: &Tokenizer,
-    active_terminals: &[bool],
-    context: &TiDiscoveryContext,
-    ignore_terminal: Option<TerminalID>,
-    allow_projected_transport_fallback: bool,
-) -> TiRoundTransportWitnesses {
         let candidates = active_terminals
             .iter()
             .enumerate()
@@ -7746,8 +7895,6 @@ fn discover_one_round_with_transport_witnesses_in_context_impl(
             .into_iter()
             .filter(|group| group.len() >= 2)
             .collect::<Vec<_>>();
-        let projected_transport_candidate_groups = allow_projected_transport_fallback
-            .then(|| structural_candidate_groups.clone());
         let structural_color_count = 0usize;
         let structural_candidate_pairs = structural_candidate_groups
             .iter()
@@ -7824,12 +7971,11 @@ fn discover_one_round_with_transport_witnesses_in_context_impl(
                 output_hypergraph_filter_ms,
             );
         }
-        if exact_candidate_pairs == 0 && projected_transport_candidate_groups.is_none() {
+        if exact_candidate_pairs == 0 {
             return TiRoundTransportWitnesses::singleton(active_terminals);
         }
         let mut result = singleton_partition(active_terminals);
         let mut accepted_maps = BTreeMap::<(TerminalID, TerminalID), Arc<TransportScannerStateMap>>::new();
-        let mut projected_pairs = BTreeSet::<(TerminalID, TerminalID)>::new();
         let mut output_pair_rejections = 0usize;
         let mut output_pair_cached_closed = 0usize;
         let mut output_invariant_checks = 0usize;
@@ -8561,106 +8707,6 @@ fn discover_one_round_with_transport_witnesses_in_context_impl(
         }
         }
 
-        let projected_transport_started_at = profile_timing.then(Instant::now);
-        let mut projected_transport_groups = 0usize;
-        let mut projected_transport_candidates = 0usize;
-        let mut projected_transport_merged_groups = 0usize;
-        let mut projected_transport_merged_members = 0usize;
-        if let Some(candidate_groups) = projected_transport_candidate_groups.as_ref() {
-            let projected_transport_enabled = std::env::var("GLRMASK_DISABLE_TI_PROJECTED_TRANSPORT")
-                .map(|value| {
-                    let value = value.trim();
-                    value == "0" || value.eq_ignore_ascii_case("false")
-                })
-                .unwrap_or(true);
-            if projected_transport_enabled {
-                for candidate_group in candidate_groups {
-                    let unresolved = candidate_group
-                        .iter()
-                        .copied()
-                        .filter(|terminal| {
-                            result
-                                .get(terminal)
-                                .is_some_and(|members| members.len() == 1)
-                        })
-                        .collect::<Vec<_>>();
-                    if unresolved.len() < 2 {
-                        continue;
-                    }
-                    projected_transport_groups += 1;
-                    projected_transport_candidates += unresolved.len();
-
-                    let mut projected_active = vec![false; active_terminals.len()];
-                    for &terminal in &unresolved {
-                        projected_active[terminal as usize] = true;
-                    }
-                    let projected_round =
-                        discover_one_round_with_transport_witnesses_in_context_impl(
-                            tokenizer,
-                            &projected_active,
-                            context,
-                            ignore_terminal,
-                            false,
-                        );
-
-                    for (&representative, projected_members) in &projected_round.partition {
-                        if projected_members.len() < 2 {
-                            continue;
-                        }
-                        projected_transport_merged_groups += 1;
-                        debug_assert!(
-                            result
-                                .get(&representative)
-                                .is_some_and(|members| members.len() == 1),
-                            "projected transport representative must be an unresolved singleton before its batch merge",
-                        );
-                        for &member in projected_members {
-                            if member == representative {
-                                continue;
-                            }
-                            debug_assert!(
-                                result
-                                    .get(&member)
-                                    .is_some_and(|members| members.len() == 1),
-                                "projected transport member must be an unresolved singleton before its batch merge",
-                            );
-                            let map = projected_round
-                                .maps
-                                .get(&(representative, member))
-                                .unwrap_or_else(|| {
-                                    panic!(
-                                        "projected transport discovery lost witness: rep={} member={}",
-                                        representative, member,
-                                    )
-                                });
-                            result
-                                .get_mut(&representative)
-                                .expect("projected transport representative must remain present")
-                                .insert(member);
-                            let removed = result.remove(&member);
-                            debug_assert!(
-                                removed.is_some(),
-                                "projected transport member must remain a singleton entry until merged",
-                            );
-                            let replaced = accepted_maps
-                                .insert((representative, member), Arc::clone(map));
-                            debug_assert!(
-                                replaced.is_none(),
-                                "strong and projected TI must not both accept the same current-round pair",
-                            );
-                            let newly_projected = projected_pairs.insert((representative, member));
-                            debug_assert!(newly_projected);
-                            projected_transport_merged_members += 1;
-                            accepted_representative_members += 1;
-                        }
-                    }
-                }
-            }
-        }
-        let projected_transport_ms = projected_transport_started_at
-            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
-            .unwrap_or(0.0);
-
         if std::env::var_os("GLRMASK_DUMP_TI_CONE_COMPONENTS").is_some() {
             dfa.ensure_support_quotient();
             let quotient = dfa
@@ -8842,7 +8888,7 @@ fn discover_one_round_with_transport_witnesses_in_context_impl(
 
         if profile_timing {
             eprintln!(
-                "[glrmask/profile][terminal_interchangeability] output_pair_rejections={} output_pair_cached_closed={} output_invariant_checks={} first_round_rejections={} support_transposition_checks={} petal_batch_groups={} petal_batch_members={} petal_batch_grouping_ms={:.3} petal_batch_certificate_ms={:.3} petal_batch_map_ms={:.3} support_transposition_certified={} support_transposition_no_template={} support_transposition_outside_cone={} support_transposition_root_rejected={} support_transposition_incoming_rejected={} support_transposition_signature_rejected={} direct_exact_checks={} exact_fallback_skips={} output_pair_filter_ms={:.3} frozen_output_ms={:.3} first_round_ms={:.3} support_transposition_ms={:.3} support_setup_ms={:.3} support_quotient_build_ms={:.3} support_template_ms={:.3} support_cone_ms={:.3} support_verify_ms={:.3} exact_map_ms={:.3} accepted_map_storage_ms={:.3} projected_transport_groups={} projected_transport_candidates={} projected_transport_merged_groups={} projected_transport_merged_members={} projected_transport_ms={:.3} quotient_certified={} sparse_quotient_certified={} sparse_cone_avg={:.1} sparse_cone_max={} sparse_cone_ms={:.3} sparse_refinement_ms={:.3} sparse_map_ms={:.3} accepted_representative_members={} total_ms={:.3}",
+                "[glrmask/profile][terminal_interchangeability] output_pair_rejections={} output_pair_cached_closed={} output_invariant_checks={} first_round_rejections={} support_transposition_checks={} petal_batch_groups={} petal_batch_members={} petal_batch_grouping_ms={:.3} petal_batch_certificate_ms={:.3} petal_batch_map_ms={:.3} support_transposition_certified={} support_transposition_no_template={} support_transposition_outside_cone={} support_transposition_root_rejected={} support_transposition_incoming_rejected={} support_transposition_signature_rejected={} direct_exact_checks={} exact_fallback_skips={} output_pair_filter_ms={:.3} frozen_output_ms={:.3} first_round_ms={:.3} support_transposition_ms={:.3} support_setup_ms={:.3} support_quotient_build_ms={:.3} support_template_ms={:.3} support_cone_ms={:.3} support_verify_ms={:.3} exact_map_ms={:.3} accepted_map_storage_ms={:.3} quotient_certified={} sparse_quotient_certified={} sparse_cone_avg={:.1} sparse_cone_max={} sparse_cone_ms={:.3} sparse_refinement_ms={:.3} sparse_map_ms={:.3} accepted_representative_members={} total_ms={:.3}",
                 output_pair_rejections,
                 output_pair_cached_closed,
                 output_invariant_checks,
@@ -8872,11 +8918,6 @@ fn discover_one_round_with_transport_witnesses_in_context_impl(
                 dfa.support_transposition_verify_ns as f64 / 1_000_000.0,
                 exact_map_ns as f64 / 1_000_000.0,
                 accepted_map_storage_ns as f64 / 1_000_000.0,
-                projected_transport_groups,
-                projected_transport_candidates,
-                projected_transport_merged_groups,
-                projected_transport_merged_members,
-                projected_transport_ms,
                 dfa.quotient_certified,
                 dfa.sparse_quotient_certified,
                 dfa.sparse_quotient_cone_classes_total as f64
@@ -8907,7 +8948,6 @@ fn discover_one_round_with_transport_witnesses_in_context_impl(
             active_before_round: active_terminals.to_vec(),
             partition: result,
             maps: accepted_maps,
-            projected_pairs,
         }
     }
 
@@ -9157,7 +9197,6 @@ pub(crate) fn binary_transport_modes_from_witnesses(
     let mut active = original_active_terminals.to_vec();
     let mut classes = singleton_partition(&active);
     let mut map_for_original = vec![None::<Arc<TransportScannerStateMap>>; terminal_count];
-    let mut projected_for_original = vec![false; terminal_count];
 
     for round in rounds {
         assert_eq!(
@@ -9180,15 +9219,11 @@ pub(crate) fn binary_transport_modes_from_witnesses(
                             active,
                         )
                     });
-                let round_is_projected = round
-                    .projected_pairs
-                    .contains(&(representative, old_representative));
                 let original_members = classes
                     .get(&old_representative)
                     .expect("TI replay round must refer only to current representatives");
                 for &original_member in original_members {
                     let original_member = original_member as usize;
-                    projected_for_original[original_member] |= round_is_projected;
                     map_for_original[original_member] = Some(
                         map_for_original[original_member]
                             .take()
@@ -9227,11 +9262,10 @@ pub(crate) fn binary_transport_modes_from_witnesses(
                     representative, member,
                 )
             });
-            modes.push(TerminalNwaTransportMode::member_with_boundary_reset(
+            modes.push(TerminalNwaTransportMode::member(
                 map.as_ref().clone(),
                 representative,
                 member,
-                projected_for_original[member as usize],
             ));
         }
     }
@@ -11524,41 +11558,6 @@ mod tests {
         ]);
         let mut dfa = InterchangeabilityDfa::new(&tokenizer, &[true, true], &[true; 256]);
         assert!(dfa.interchange_map(0, 1).is_none());
-    }
-
-    #[test]
-    fn projected_transport_certifies_overlapping_literal_pair_rejected_by_strong_ti() {
-        let expressions = vec![
-            Expr::U8Seq(b"\"a\": ".to_vec()),
-            Expr::U8Seq(b"\"a\": null".to_vec()),
-            Expr::U8Seq(b"\"b\": ".to_vec()),
-            Expr::U8Seq(b"\"b\": null".to_vec()),
-        ];
-        let tokenizer = tokenizer(expressions);
-        let mut relevant_bytes = [false; 256];
-        for byte in b"\" :{}[]," {
-            relevant_bytes[*byte as usize] = true;
-        }
-
-        let mut strong = InterchangeabilityDfa::new(
-            &tokenizer,
-            &[true, true, true, true],
-            &relevant_bytes,
-        );
-        assert!(
-            strong.interchange_map(1, 3).is_none(),
-            "the overlapping short literals must prevent the null-suffixed pair from being a global label-swap automorphism",
-        );
-
-        let mut projected = InterchangeabilityDfa::new(
-            &tokenizer,
-            &[false, true, false, true],
-            &relevant_bytes,
-        );
-        let map = projected
-            .interchange_map(1, 3)
-            .expect("projecting unrelated outputs must recover the exact null-suffixed scanner transport");
-        assert_eq!(map.scanner_state_map.len(), tokenizer.num_states() as usize);
     }
 
     #[test]

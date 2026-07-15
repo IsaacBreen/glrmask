@@ -285,13 +285,46 @@ impl Constraint {
     }
 
     pub(crate) fn rebuild_dynamic_runtime_caches(&mut self) {
+        let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
+        let total_started_at = profile.then(std::time::Instant::now);
+        let started_at = profile.then(std::time::Instant::now);
         self.table.rebuild_guarded_shift_index();
+        let guarded_shift_ms = started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let started_at = profile.then(std::time::Instant::now);
         if !self.dynamic_mask_vocab.is_initialized() {
             self.dynamic_mask_vocab = self.build_dynamic_mask_vocab();
         }
-        self.dynamic_mask_vocab
-            .prebuild_continuation_partitions(&self.tokenizer, self.mask_len());
+        let dynamic_vocab_ms = started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let started_at = profile.then(std::time::Instant::now);
+        let prebuild_dynamic_continuations = std::env::var("GLRMASK_PREBUILD_DYNAMIC_CONTINUATION_PARTITIONS")
+            .map(|value| {
+                let normalized = value.trim().to_ascii_lowercase();
+                !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
+            })
+            .unwrap_or(false);
+        if prebuild_dynamic_continuations {
+            self.dynamic_mask_vocab
+                .prebuild_continuation_partitions(&self.tokenizer, self.mask_len());
+        }
+        let continuation_ms = started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let started_at = profile.then(std::time::Instant::now);
         self.tokenizer_fast_transitions = self.compute_tokenizer_fast_transitions();
+        let tokenizer_fast_ms = started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        if let Some(total_started_at) = total_started_at {
+            eprintln!(
+                "[glrmask/profile][dynamic_runtime_finalize] guarded_shift_ms={:.3} dynamic_vocab_ms={:.3} continuation_ms={:.3} tokenizer_fast_ms={:.3} total_ms={:.3}",
+                guarded_shift_ms,
+                dynamic_vocab_ms,
+                continuation_ms,
+                tokenizer_fast_ms,
+                total_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
     }
 
     #[inline]
