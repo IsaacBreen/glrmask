@@ -3208,6 +3208,224 @@ impl InterchangeabilityDfa {
         );
     }
 
+    fn support_identity_stable_partition_inplace(&mut self) -> (Vec<u32>, Vec<u32>) {
+        let profile = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
+        let total_started_at = profile.then(Instant::now);
+        self.ensure_canonical_identity_round(1);
+        let round_one_finished_at = profile.then(Instant::now);
+        let state_count = self.state_count();
+        let dead_state = self.dead_state();
+        let mut class_for_state = self.canonical_rounds[1].classes.clone();
+        let initial_class_count = self.canonical_rounds[1].representative_by_class.len();
+
+        let mut counts = vec![0usize; initial_class_count];
+        for &class in &class_for_state {
+            counts[class as usize] += 1;
+        }
+        let mut block_start = Vec::with_capacity(state_count);
+        let mut block_end = Vec::with_capacity(state_count);
+        let mut offset = 0usize;
+        for &count in &counts {
+            block_start.push(offset);
+            offset += count;
+            block_end.push(offset);
+        }
+        let mut next = block_start.clone();
+        let mut states = vec![0u32; state_count];
+        for (state, &class) in class_for_state.iter().enumerate() {
+            let slot = &mut next[class as usize];
+            states[*slot] = state as u32;
+            *slot += 1;
+        }
+        let mut position = vec![0usize; state_count];
+        for (pos, &state) in states.iter().enumerate() {
+            position[state as usize] = pos;
+        }
+        let dead_class = class_for_state[dead_state] as usize;
+        let partition_init_finished_at = profile.then(Instant::now);
+
+        // Flat reverse-edge CSR retaining byte labels.
+        let mut reverse_counts = vec![0usize; state_count];
+        let mut edge_count = 0usize;
+        for source in 0..state_count {
+            for &(_, destination) in self.topology.edges_from(source) {
+                reverse_counts[destination as usize] += 1;
+                edge_count += 1;
+            }
+        }
+        let reverse_finished_at = profile.then(Instant::now);
+        let mut reverse_offsets = Vec::with_capacity(state_count + 1);
+        reverse_offsets.push(0usize);
+        for &count in &reverse_counts {
+            reverse_offsets.push(reverse_offsets.last().copied().unwrap() + count);
+        }
+        let mut next_reverse = reverse_offsets[..state_count].to_vec();
+        let mut reverse_edges = vec![(0u8, 0u32); edge_count];
+        for source in 0..state_count {
+            for &(byte, destination) in self.topology.edges_from(source) {
+                let slot = &mut next_reverse[destination as usize];
+                reverse_edges[*slot] = (byte, source as u32);
+                *slot += 1;
+            }
+        }
+
+        let mut queue = VecDeque::<usize>::new();
+        let mut queued = vec![false; initial_class_count];
+        for class in 0..initial_class_count {
+            if class != dead_class {
+                queue.push_back(class);
+                queued[class] = true;
+            }
+        }
+        let mut incoming_by_byte = (0..256)
+            .map(|_| Vec::<u32>::new())
+            .collect::<Vec<_>>();
+        let mut touched_bytes = Vec::<u8>::new();
+        let mut marked_count = vec![0usize; initial_class_count];
+        let mut touched_blocks = Vec::<usize>::new();
+
+        while let Some(splitter) = queue.pop_front() {
+            queued[splitter] = false;
+            let splitter_start = block_start[splitter];
+            let splitter_end = block_end[splitter];
+            if splitter_start == splitter_end {
+                continue;
+            }
+            touched_bytes.clear();
+            for pos in splitter_start..splitter_end {
+                let destination = states[pos] as usize;
+                for &(byte, source) in
+                    &reverse_edges[reverse_offsets[destination]..reverse_offsets[destination + 1]]
+                {
+                    let bucket = &mut incoming_by_byte[byte as usize];
+                    if bucket.is_empty() {
+                        touched_bytes.push(byte);
+                    }
+                    // Determinism guarantees one source occurrence per byte.
+                    bucket.push(source);
+                }
+            }
+
+            for &byte in &touched_bytes {
+                touched_blocks.clear();
+                for &source in &incoming_by_byte[byte as usize] {
+                    let source = source as usize;
+                    let class = class_for_state[source] as usize;
+                    if marked_count[class] == 0 {
+                        touched_blocks.push(class);
+                    }
+                    let target_pos = block_end[class] - 1 - marked_count[class];
+                    let source_pos = position[source];
+                    if source_pos != target_pos {
+                        let other = states[target_pos] as usize;
+                        states.swap(source_pos, target_pos);
+                        position[source] = target_pos;
+                        position[other] = source_pos;
+                    }
+                    marked_count[class] += 1;
+                }
+                incoming_by_byte[byte as usize].clear();
+
+                for &class in &touched_blocks {
+                    let marked = marked_count[class];
+                    marked_count[class] = 0;
+                    let start = block_start[class];
+                    let end = block_end[class];
+                    let len = end - start;
+                    if marked == 0 || marked == len {
+                        continue;
+                    }
+                    let split = end - marked;
+                    let unmarked = len - marked;
+                    let was_queued = queued[class];
+                    let new_class = block_start.len();
+
+                    // Synthetic dead has no explicit outgoing edges and is
+                    // therefore always in the unmarked prefix. Keep its block
+                    // id fixed and queue only the separated non-dead suffix.
+                    let new_is_marked = class == dead_class || marked <= unmarked;
+                    let (new_start, new_end) = if new_is_marked {
+                        block_end[class] = split;
+                        (split, end)
+                    } else {
+                        block_start[class] = split;
+                        (start, split)
+                    };
+                    block_start.push(new_start);
+                    block_end.push(new_end);
+                    queued.push(false);
+                    marked_count.push(0);
+                    for pos in new_start..new_end {
+                        class_for_state[states[pos] as usize] = new_class as u32;
+                    }
+
+                    if was_queued {
+                        queued[new_class] = true;
+                        queue.push_back(new_class);
+                    } else if class == dead_class {
+                        queued[new_class] = true;
+                        queue.push_back(new_class);
+                    } else {
+                        let old_len = block_end[class] - block_start[class];
+                        let new_len = new_end - new_start;
+                        if old_len <= new_len {
+                            queued[class] = true;
+                            queue.push_back(class);
+                        } else {
+                            queued[new_class] = true;
+                            queue.push_back(new_class);
+                        }
+                    }
+                }
+            }
+        }
+        let refine_finished_at = profile.then(Instant::now);
+
+        let mut canonical_for_class = vec![u32::MAX; block_start.len()];
+        let mut representative_by_class = Vec::<u32>::new();
+        let mut canonical_classes = Vec::with_capacity(state_count);
+        for state in 0..state_count {
+            let class = class_for_state[state] as usize;
+            let canonical = if canonical_for_class[class] == u32::MAX {
+                let canonical = representative_by_class.len() as u32;
+                canonical_for_class[class] = canonical;
+                representative_by_class.push(state as u32);
+                canonical
+            } else {
+                canonical_for_class[class]
+            };
+            canonical_classes.push(canonical);
+        }
+        if let (
+            Some(total_started_at),
+            Some(round_one_finished_at),
+            Some(partition_init_finished_at),
+            Some(reverse_finished_at),
+            Some(refine_finished_at),
+        ) = (
+            total_started_at,
+            round_one_finished_at,
+            partition_init_finished_at,
+            reverse_finished_at,
+            refine_finished_at,
+        ) {
+            eprintln!(
+                "[glrmask/profile][ti_support_quotient_inplace] states={} edges={} initial_classes={} final_classes={} round1_ms={:.3} partition_init_ms={:.3} reverse_ms={:.3} refine_ms={:.3} canonicalize_ms={:.3} total_ms={:.3}",
+                state_count,
+                edge_count,
+                initial_class_count,
+                representative_by_class.len(),
+                (round_one_finished_at - total_started_at).as_secs_f64() * 1000.0,
+                (partition_init_finished_at - round_one_finished_at).as_secs_f64() * 1000.0,
+                (reverse_finished_at - partition_init_finished_at).as_secs_f64() * 1000.0,
+                (refine_finished_at - reverse_finished_at).as_secs_f64() * 1000.0,
+                refine_finished_at.elapsed().as_secs_f64() * 1000.0,
+                total_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        (canonical_classes, representative_by_class)
+    }
+
     fn support_identity_stable_partition(&mut self) -> (Vec<u32>, Vec<u32>) {
         if let Some(seed) = self.support_partition_seed.clone() {
             let reduced = self.support_identity_stable_partition_from_seed(&seed);
@@ -3217,12 +3435,12 @@ impl InterchangeabilityDfa {
             }
             reduced
         } else {
-            let sparse = self.support_identity_stable_partition_sparse_worklist();
+            let inplace = self.support_identity_stable_partition_inplace();
             if std::env::var_os("GLRMASK_TI_SPARSE_WORKLIST_QUOTIENT_VERIFY").is_some() {
                 let full = self.support_identity_stable_partition_full();
-                assert!(same_equality_partition_u32(&sparse.0, &full.0));
+                assert!(same_equality_partition_u32(&inplace.0, &full.0));
             }
-            sparse
+            inplace
         }
     }
 
@@ -3781,14 +3999,12 @@ impl InterchangeabilityDfa {
             .support_quotient
             .as_ref()
             .expect("support quotient initialized");
-        let cone_classes = Self::support_quotient_affected_cone_from_supports_small(
+        let cone_classes = Self::support_quotient_affected_cone_from_supports_capped(
             quotient,
             left_support,
             right_support,
-        );
-        if cone_classes.len() > 12 {
-            return None;
-        }
+            12,
+        )?;
         let root_class = quotient.class_for_state[self.topology.initial_state] as usize;
         let dead_class = quotient.class_for_state[self.dead_state()] as usize;
         let mut outputs = SparseSwappedOutputIds::new(
@@ -4951,6 +5167,41 @@ impl InterchangeabilityDfa {
         cone
     }
 
+    fn support_quotient_affected_cone_from_supports_capped(
+        quotient: &SupportQuotient,
+        left_support: &[(u32, u8)],
+        right_support: &[(u32, u8)],
+        max_classes: usize,
+    ) -> Option<SmallVec<[usize; 16]>> {
+        let mut cone = SmallVec::<[usize; 16]>::new();
+        let push_new = |class: usize, cone: &mut SmallVec<[usize; 16]>| {
+            if cone.contains(&class) {
+                return true;
+            }
+            if cone.len() == max_classes {
+                return false;
+            }
+            cone.push(class);
+            true
+        };
+        for &(class, _) in left_support.iter().chain(right_support) {
+            if !push_new(class as usize, &mut cone) {
+                return None;
+            }
+        }
+        let mut next = 0usize;
+        while next < cone.len() {
+            let class = cone[next];
+            next += 1;
+            for &predecessor in &quotient.reverse_predecessors[class] {
+                if !push_new(predecessor as usize, &mut cone) {
+                    return None;
+                }
+            }
+        }
+        Some(cone)
+    }
+
     fn support_quotient_affected_cone_from_supports_small(
         quotient: &SupportQuotient,
         left_support: &[(u32, u8)],
@@ -5097,6 +5348,403 @@ impl InterchangeabilityDfa {
             }
         }
         rows
+    }
+
+    fn raw_terminal_cone_capped(
+        &self,
+        terminal: TerminalID,
+        max_states: usize,
+        marks: &mut Vec<u32>,
+        mark_epoch: &mut u32,
+    ) -> Option<Vec<u32>> {
+        let state_count = self.state_count();
+        if marks.len() != state_count {
+            marks.resize(state_count, 0);
+            *mark_epoch = 0;
+        }
+        *mark_epoch = mark_epoch.wrapping_add(1);
+        if *mark_epoch == 0 {
+            marks.fill(0);
+            *mark_epoch = 1;
+        }
+        let epoch = *mark_epoch;
+        let mut cone = Vec::<u32>::new();
+        let push_new = |state: u32, cone: &mut Vec<u32>, marks: &mut [u32]| {
+            let state_index = state as usize;
+            if marks[state_index] == epoch {
+                return true;
+            }
+            if cone.len() == max_states {
+                return false;
+            }
+            marks[state_index] = epoch;
+            cone.push(state);
+            true
+        };
+        for destinations in [
+            &self.finalizer_states_by_terminal[terminal as usize],
+            &self.future_finalizer_states_by_terminal[terminal as usize],
+        ] {
+            for &destination in destinations {
+                for &source in &self.reverse_predecessors[destination as usize] {
+                    if !push_new(source, &mut cone, marks) {
+                        return None;
+                    }
+                }
+            }
+        }
+        let mut next = 0usize;
+        while next < cone.len() {
+            let state = cone[next] as usize;
+            next += 1;
+            for &predecessor in &self.reverse_predecessors[state] {
+                if !push_new(predecessor, &mut cone, marks) {
+                    return None;
+                }
+            }
+        }
+        cone.sort_unstable();
+        Some(cone)
+    }
+
+    fn output_pair_matches_swap(
+        &self,
+        source_output_id: u32,
+        target_output_id: u32,
+        left: TerminalID,
+        right: TerminalID,
+    ) -> bool {
+        let source = &self.output_pairs[source_output_id as usize];
+        let target = &self.output_pairs[target_output_id as usize];
+        let swap = Some((left as usize, right as usize));
+        source.finalizers.mapped(swap) == target.finalizers
+            && source.future_finalizers.mapped(swap) == target.future_finalizers
+    }
+
+    fn raw_identity_states_equivalent(
+        &self,
+        left: u32,
+        right: u32,
+        memo: &mut FxHashMap<(u32, u32), bool>,
+    ) -> bool {
+        if left == right {
+            return true;
+        }
+        let key = if left <= right { (left, right) } else { (right, left) };
+        if let Some(&cached) = memo.get(&key) {
+            return cached;
+        }
+        let mut queue = VecDeque::<(u32, u32)>::new();
+        let mut seen = FxHashSet::<(u32, u32)>::default();
+        queue.push_back((left, right));
+        while let Some((left_state, right_state)) = queue.pop_front() {
+            if left_state == right_state {
+                continue;
+            }
+            let pair_key = if left_state <= right_state {
+                (left_state, right_state)
+            } else {
+                (right_state, left_state)
+            };
+            if !seen.insert(pair_key) {
+                continue;
+            }
+            if let Some(&cached) = memo.get(&pair_key) {
+                if cached {
+                    continue;
+                }
+                memo.insert(key, false);
+                return false;
+            }
+            for &byte in &self.topology.bytes {
+                let left_destination = self
+                    .topology
+                    .destination_for_byte(left_state as usize, byte) as u32;
+                let right_destination = self
+                    .topology
+                    .destination_for_byte(right_state as usize, byte) as u32;
+                if self.output_pair_by_state[left_destination as usize]
+                    != self.output_pair_by_state[right_destination as usize]
+                {
+                    memo.insert(key, false);
+                    return false;
+                }
+                if left_destination != right_destination {
+                    queue.push_back((left_destination, right_destination));
+                }
+            }
+        }
+        for pair in seen {
+            memo.insert(pair, true);
+        }
+        memo.insert(key, true);
+        true
+    }
+
+    fn raw_small_cone_interchange_map(
+        &self,
+        left: TerminalID,
+        right: TerminalID,
+        left_cone: &[u32],
+        right_cone: &[u32],
+        identity_equivalence_memo: &mut FxHashMap<(u32, u32), bool>,
+    ) -> Option<InterchangeMap> {
+        if left_cone.is_empty() || right_cone.is_empty() {
+            return None;
+        }
+        let mut common = Vec::<u32>::new();
+        let mut left_petal = Vec::<u32>::new();
+        let mut right_petal = Vec::<u32>::new();
+        let mut left_cursor = 0usize;
+        let mut right_cursor = 0usize;
+        while left_cursor < left_cone.len() || right_cursor < right_cone.len() {
+            match (left_cone.get(left_cursor), right_cone.get(right_cursor)) {
+                (Some(&left_state), Some(&right_state)) if left_state == right_state => {
+                    common.push(left_state);
+                    left_cursor += 1;
+                    right_cursor += 1;
+                }
+                (Some(&left_state), Some(&right_state)) if left_state < right_state => {
+                    left_petal.push(left_state);
+                    left_cursor += 1;
+                }
+                (Some(_), Some(&right_state)) => {
+                    right_petal.push(right_state);
+                    right_cursor += 1;
+                }
+                (Some(&left_state), None) => {
+                    left_petal.push(left_state);
+                    left_cursor += 1;
+                }
+                (None, Some(&right_state)) => {
+                    right_petal.push(right_state);
+                    right_cursor += 1;
+                }
+                (None, None) => break,
+            }
+        }
+        if left_petal.len() != right_petal.len() || left_petal.is_empty() {
+            return None;
+        }
+        let cone_len = left_petal.len();
+        let left_index = left_petal
+            .iter()
+            .enumerate()
+            .map(|(index, &state)| (state, index))
+            .collect::<FxHashMap<_, _>>();
+        let right_index = right_petal
+            .iter()
+            .enumerate()
+            .map(|(index, &state)| (state, index))
+            .collect::<FxHashMap<_, _>>();
+        let common_set = common.iter().copied().collect::<FxHashSet<_>>();
+
+        let rows_locally_compatible = |left_state: u32, right_state: u32| {
+            let left_state = left_state as usize;
+            let right_state = right_state as usize;
+            if (left_state == self.topology.initial_state)
+                != (right_state == self.topology.initial_state)
+                || self.topology.state_has_raw_source(left_state)
+                    != self.topology.state_has_raw_source(right_state)
+            {
+                return false;
+            }
+            for &byte in &self.topology.bytes {
+                let left_destination =
+                    self.topology.destination_for_byte(left_state, byte) as u32;
+                let right_destination =
+                    self.topology.destination_for_byte(right_state, byte) as u32;
+                if !self.output_pair_matches_swap(
+                        self.output_pair_by_state[left_destination as usize],
+                        self.output_pair_by_state[right_destination as usize],
+                        left,
+                        right,
+                    )
+                {
+                    return false;
+                }
+                let left_internal = left_index.contains_key(&left_destination);
+                let right_internal = right_index.contains_key(&right_destination);
+                if left_internal != right_internal {
+                    return false;
+                }
+                let left_common = common_set.contains(&left_destination);
+                let right_common = common_set.contains(&right_destination);
+                if left_common != right_common
+                    || (left_common && left_destination != right_destination)
+                    || right_index.contains_key(&left_destination)
+                    || left_index.contains_key(&right_destination)
+                {
+                    return false;
+                }
+            }
+            true
+        };
+
+        let mut candidates = vec![Vec::<usize>::new(); cone_len];
+        for (left_slot, &left_state) in left_petal.iter().enumerate() {
+            for (right_slot, &right_state) in right_petal.iter().enumerate() {
+                if rows_locally_compatible(left_state, right_state) {
+                    candidates[left_slot].push(right_slot);
+                }
+            }
+            if candidates[left_slot].is_empty() {
+                return None;
+            }
+        }
+        let mut order = (0..cone_len).collect::<Vec<_>>();
+        order.sort_unstable_by_key(|&slot| candidates[slot].len());
+        let mut assignment = vec![usize::MAX; cone_len];
+        let mut used = vec![false; cone_len];
+
+        fn search(
+            depth: usize,
+            order: &[usize],
+            candidates: &[Vec<usize>],
+            assignment: &mut [usize],
+            used: &mut [bool],
+            verify: &mut dyn FnMut(&[usize]) -> bool,
+        ) -> bool {
+            if depth == order.len() {
+                return verify(assignment);
+            }
+            let left_slot = order[depth];
+            for &right_slot in &candidates[left_slot] {
+                if used[right_slot] {
+                    continue;
+                }
+                assignment[left_slot] = right_slot;
+                used[right_slot] = true;
+                if search(depth + 1, order, candidates, assignment, used, verify) {
+                    return true;
+                }
+                used[right_slot] = false;
+                assignment[left_slot] = usize::MAX;
+            }
+            false
+        }
+
+        let mut winning_assignment = None::<Vec<usize>>;
+        let mut verify = |assignment: &[usize]| {
+            let mut inverse = vec![usize::MAX; cone_len];
+            for (left_slot, &right_slot) in assignment.iter().enumerate() {
+                if right_slot >= cone_len || inverse[right_slot] != usize::MAX {
+                    return false;
+                }
+                inverse[right_slot] = left_slot;
+            }
+            let mapped_state = |state: u32| -> u32 {
+                if let Some(&slot) = left_index.get(&state) {
+                    right_petal[assignment[slot]]
+                } else if let Some(&slot) = right_index.get(&state) {
+                    left_petal[inverse[slot]]
+                } else {
+                    state
+                }
+            };
+            if mapped_state(self.topology.initial_state as u32)
+                != self.topology.initial_state as u32
+            {
+                return false;
+            }
+            for &source in left_petal
+                .iter()
+                .chain(&right_petal)
+                .chain(&common)
+            {
+                let target_source = mapped_state(source) as usize;
+                for &byte in &self.topology.bytes {
+                    let source_destination = self
+                        .topology
+                        .destination_for_byte(source as usize, byte) as u32;
+                    let target_destination = self
+                        .topology
+                        .destination_for_byte(target_source, byte) as u32;
+                    let destination_matches = if left_index.contains_key(&source_destination)
+                        || right_index.contains_key(&source_destination)
+                        || common_set.contains(&source_destination)
+                    {
+                        mapped_state(source_destination) == target_destination
+                    } else {
+                        !left_index.contains_key(&target_destination)
+                            && !right_index.contains_key(&target_destination)
+                            && !common_set.contains(&target_destination)
+                            && self.raw_identity_states_equivalent(
+                                source_destination,
+                                target_destination,
+                                identity_equivalence_memo,
+                            )
+                    };
+                    if !destination_matches
+                        || !self.output_pair_matches_swap(
+                            self.output_pair_by_state[source_destination as usize],
+                            self.output_pair_by_state[target_destination as usize],
+                            left,
+                            right,
+                        )
+                    {
+                        return false;
+                    }
+                }
+            }
+            winning_assignment = Some(assignment.to_vec());
+            true
+        };
+        if !search(
+            0,
+            &order,
+            &candidates,
+            &mut assignment,
+            &mut used,
+            &mut verify,
+        ) {
+            return None;
+        }
+        let assignment = winning_assignment.expect("successful cone search records assignment");
+        let mut deviations = Vec::<(u32, u32)>::with_capacity(cone_len * 2);
+        for (left_slot, &right_slot) in assignment.iter().enumerate() {
+            let left_state = left_petal[left_slot];
+            let right_state = right_petal[right_slot];
+            deviations.push((left_state, right_state));
+            deviations.push((right_state, left_state));
+        }
+        deviations.sort_unstable_by_key(|&(target, _)| target);
+
+        let scanner_state_map = if let (Some(state_for_raw), Some(raw_representatives)) = (
+            self.topology.state_for_raw.as_ref(),
+            self.topology.raw_representative_by_state.as_ref(),
+        ) {
+            let unused_representative = raw_representatives
+                .iter()
+                .copied()
+                .find(|&representative| representative != u32::MAX)
+                .unwrap_or(0);
+            let representative_for_class: Arc<[u32]> = raw_representatives
+                .iter()
+                .copied()
+                .map(|representative| {
+                    if representative == u32::MAX {
+                        unused_representative
+                    } else {
+                        representative
+                    }
+                })
+                .collect::<Vec<_>>()
+                .into();
+            TransportScannerStateMap::Quotient {
+                state_count: self.topology.raw_state_count,
+                class_for_original: Arc::clone(state_for_raw),
+                representative_for_class,
+                source_class_for_target_deviations: deviations.into_boxed_slice(),
+            }
+        } else {
+            let mut targets = (0..self.topology.real_state_count as u32).collect::<Vec<_>>();
+            for &(target, source) in &deviations {
+                targets[target as usize] = source;
+            }
+            TransportScannerStateMap::Explicit(targets.into())
+        };
+        Some(InterchangeMap { scanner_state_map })
     }
 
     fn support_quotient_terminal_cone(
@@ -7524,6 +8172,22 @@ impl InterchangeabilityDfa {
     }
 
 
+    fn support_quotient_fallback_enabled(&self) -> bool {
+        if let Ok(value) = std::env::var("GLRMASK_TI_SUPPORT_QUOTIENT_FALLBACK") {
+            let value = value.trim();
+            return value.is_empty() || value == "1" || value.eq_ignore_ascii_case("true");
+        }
+        let max_states = std::env::var("GLRMASK_TI_SUPPORT_QUOTIENT_MAX_STATES")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(16_384);
+        let max_edges = std::env::var("GLRMASK_TI_SUPPORT_QUOTIENT_MAX_EDGES")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(300_000);
+        self.state_count() <= max_states && self.topology.edges.len() <= max_edges
+    }
+
     fn characterize_pair(&mut self, left: TerminalID, right: TerminalID) -> PairCharacterization {
         let state_count = self.state_count();
         let swap = Some((left as usize, right as usize));
@@ -8031,6 +8695,136 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
         let mut petal_batch_grouping_ns = 0u64;
         let mut petal_batch_certificate_ns = 0u64;
         let mut petal_batch_map_ns = 0u64;
+        // Literal-like terminal families commonly differ only inside a tiny
+        // reverse-closed scanner cone. Prove those symmetries directly before
+        // constructing a stable quotient of the entire discovery topology.
+        // This path is exact: the common cone is fixed, the two disjoint petals
+        // are exhaustively matched, and every selected-byte row/output is
+        // verified under the terminal transposition.
+        let raw_small_cone_max_states = std::env::var("GLRMASK_TI_RAW_SMALL_CONE_MAX_STATES")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(8);
+        let candidate_groups = if petal_batch_enabled
+            && std::env::var_os("GLRMASK_DISABLE_TI_RAW_SMALL_BATCH").is_none()
+        {
+            let grouping_started_at = Instant::now();
+            let mut cone_marks = Vec::<u32>::new();
+            let mut cone_mark_epoch = 0u32;
+            let mut identity_equivalence_memo = FxHashMap::<(u32, u32), bool>::default();
+            let mut residual_groups = Vec::<Vec<TerminalID>>::new();
+
+            for candidate_group in candidate_groups {
+                let mut by_cone_size =
+                    BTreeMap::<usize, Vec<(TerminalID, Vec<u32>)>>::new();
+                let mut unresolved = Vec::<TerminalID>::new();
+                for &terminal in &candidate_group {
+                    if let Some(cone) = dfa.raw_terminal_cone_capped(
+                        terminal,
+                        raw_small_cone_max_states,
+                        &mut cone_marks,
+                        &mut cone_mark_epoch,
+                    ) {
+                        by_cone_size
+                            .entry(cone.len())
+                            .or_default()
+                            .push((terminal, cone));
+                    } else {
+                        unresolved.push(terminal);
+                    }
+                }
+
+                struct RawConeClass {
+                    representative: TerminalID,
+                    cone: Vec<u32>,
+                    members: Vec<(TerminalID, InterchangeMap)>,
+                }
+
+                for bucket in by_cone_size.into_values() {
+                    let mut classes = Vec::<RawConeClass>::new();
+                    for (terminal, cone) in bucket {
+                        let mut accepted = None::<(usize, InterchangeMap)>;
+                        for (class_index, class) in classes.iter().enumerate() {
+                            if let Some(map) = dfa.raw_small_cone_interchange_map(
+                                class.representative,
+                                terminal,
+                                &class.cone,
+                                &cone,
+                                &mut identity_equivalence_memo,
+                            ) {
+                                accepted = Some((class_index, map));
+                                break;
+                            }
+                        }
+                        if let Some((class_index, map)) = accepted {
+                            classes[class_index].members.push((terminal, map));
+                        } else {
+                            classes.push(RawConeClass {
+                                representative: terminal,
+                                cone,
+                                members: Vec::new(),
+                            });
+                        }
+                    }
+
+                    for class in classes {
+                        if class.members.is_empty() {
+                            unresolved.push(class.representative);
+                            continue;
+                        }
+                        let representative = class.representative;
+                        petal_batch_groups += 1;
+                        petal_batch_members += class.members.len();
+                        support_transposition_checks += class.members.len();
+                        accepted_representative_members += class.members.len();
+                        for (terminal, map) in class.members {
+                            result
+                                .get_mut(&representative)
+                                .expect("raw TI batch representative must remain present")
+                                .insert(terminal);
+                            let removed = result.remove(&terminal);
+                            debug_assert!(
+                                removed.is_some(),
+                                "raw TI batch member must remain a singleton until merged",
+                            );
+                            let replaced = accepted_maps.insert(
+                                (representative, terminal),
+                                Arc::new(map.scanner_state_map()),
+                            );
+                            debug_assert!(replaced.is_none());
+                        }
+                    }
+                }
+
+                unresolved.sort_unstable();
+                unresolved.dedup();
+                if unresolved.len() >= 2 {
+                    residual_groups.push(unresolved);
+                }
+            }
+            petal_batch_grouping_ns += grouping_started_at.elapsed().as_nanos() as u64;
+            residual_groups
+        } else {
+            candidate_groups
+        };
+
+        // The full stable support quotient is another optional merge finder.
+        // On large discovery products it can cost far more than the downstream
+        // optimization is worth. Exact raw-cone merges above are retained;
+        // remaining candidates simply stay distinct when this structural work
+        // bound is exceeded.
+        let support_quotient_fallback_enabled = dfa.support_quotient_fallback_enabled();
+        let support_quotient_skipped_candidates = if support_quotient_fallback_enabled {
+            0usize
+        } else {
+            candidate_groups.iter().map(Vec::len).sum::<usize>()
+        };
+        let candidate_groups = if support_quotient_fallback_enabled {
+            candidate_groups
+        } else {
+            Vec::new()
+        };
+
         // Large rooted candidate groups are often already exact symmetric
         // petal families.  Try the whole-group certificate directly before
         // doing either per-terminal generic-form classification or pairwise
@@ -8888,7 +9682,7 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
 
         if profile_timing {
             eprintln!(
-                "[glrmask/profile][terminal_interchangeability] output_pair_rejections={} output_pair_cached_closed={} output_invariant_checks={} first_round_rejections={} support_transposition_checks={} petal_batch_groups={} petal_batch_members={} petal_batch_grouping_ms={:.3} petal_batch_certificate_ms={:.3} petal_batch_map_ms={:.3} support_transposition_certified={} support_transposition_no_template={} support_transposition_outside_cone={} support_transposition_root_rejected={} support_transposition_incoming_rejected={} support_transposition_signature_rejected={} direct_exact_checks={} exact_fallback_skips={} output_pair_filter_ms={:.3} frozen_output_ms={:.3} first_round_ms={:.3} support_transposition_ms={:.3} support_setup_ms={:.3} support_quotient_build_ms={:.3} support_template_ms={:.3} support_cone_ms={:.3} support_verify_ms={:.3} exact_map_ms={:.3} accepted_map_storage_ms={:.3} quotient_certified={} sparse_quotient_certified={} sparse_cone_avg={:.1} sparse_cone_max={} sparse_cone_ms={:.3} sparse_refinement_ms={:.3} sparse_map_ms={:.3} accepted_representative_members={} total_ms={:.3}",
+                "[glrmask/profile][terminal_interchangeability] output_pair_rejections={} output_pair_cached_closed={} output_invariant_checks={} first_round_rejections={} support_transposition_checks={} petal_batch_groups={} petal_batch_members={} petal_batch_grouping_ms={:.3} petal_batch_certificate_ms={:.3} petal_batch_map_ms={:.3} support_transposition_certified={} support_transposition_no_template={} support_transposition_outside_cone={} support_transposition_root_rejected={} support_transposition_incoming_rejected={} support_transposition_signature_rejected={} direct_exact_checks={} exact_fallback_skips={} support_quotient_skipped_candidates={} output_pair_filter_ms={:.3} frozen_output_ms={:.3} first_round_ms={:.3} support_transposition_ms={:.3} support_setup_ms={:.3} support_quotient_build_ms={:.3} support_template_ms={:.3} support_cone_ms={:.3} support_verify_ms={:.3} exact_map_ms={:.3} accepted_map_storage_ms={:.3} quotient_certified={} sparse_quotient_certified={} sparse_cone_avg={:.1} sparse_cone_max={} sparse_cone_ms={:.3} sparse_refinement_ms={:.3} sparse_map_ms={:.3} accepted_representative_members={} total_ms={:.3}",
                 output_pair_rejections,
                 output_pair_cached_closed,
                 output_invariant_checks,
@@ -8907,6 +9701,7 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                 dfa.support_transposition_signature_rejected,
                 direct_exact_checks,
                 exact_fallback_skips,
+                support_quotient_skipped_candidates,
                 output_pair_filter_ns as f64 / 1_000_000.0,
                 frozen_output_ns as f64 / 1_000_000.0,
                 first_round_ns as f64 / 1_000_000.0,

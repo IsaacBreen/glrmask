@@ -1,6 +1,7 @@
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHasher};
 use smallvec::SmallVec;
 use std::collections::VecDeque;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::automata::lexer::Lexer;
@@ -129,6 +130,44 @@ enum RepresentativeClosure {
     Multi(Box<[u32]>),
 }
 
+/// Intern powerset configurations without storing every state vector twice.
+/// The old `FxHashMap<Vec<u32>, u32>` kept one heap allocation as the map key
+/// and cloned the same vector into `configs`. Large powersets therefore paid a
+/// full configuration copy and roughly doubled configuration storage for every
+/// newly discovered state. Keep the canonical vectors only in `configs`; the
+/// hash table stores compact candidate IDs and resolves rare hash collisions by
+/// exact slice comparison.
+#[derive(Default)]
+struct RelevantConfigInterner {
+    ids_by_hash: FxHashMap<u64, SmallVec<[u32; 1]>>,
+}
+
+impl RelevantConfigInterner {
+    #[inline]
+    fn hash(states: &[u32]) -> u64 {
+        let mut hasher = FxHasher::default();
+        states.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn intern(&mut self, states: Vec<u32>, configs: &mut Vec<Box<[u32]>>) -> u32 {
+        let hash = Self::hash(&states);
+        if let Some(candidates) = self.ids_by_hash.get(&hash) {
+            if let Some(id) = candidates
+                .iter()
+                .copied()
+                .find(|&id| configs[id as usize].as_ref() == states.as_slice())
+            {
+                return id;
+            }
+        }
+        let id = configs.len() as u32;
+        configs.push(states.into_boxed_slice());
+        self.ids_by_hash.entry(hash).or_default().push(id);
+        id
+    }
+}
+
 impl RepresentativeClosure {
     #[inline]
     fn singleton(&self) -> Option<u32> {
@@ -202,13 +241,11 @@ fn mapped_class_active_language(
     })
 }
 
-fn intern_mapped_target_config(
+fn mapped_target_config(
     targets: &[u32],
     state_map: &ManyToOneIdMap,
     class_active_language: Option<&[bool]>,
-    config_ids: &mut FxHashMap<Vec<u32>, u32>,
-    configs: &mut Vec<Box<[u32]>>,
-) -> u32 {
+) -> Vec<u32> {
     let mut target_config = targets
         .iter()
         .map(|&raw_state| state_map.original_to_internal[raw_state as usize])
@@ -218,7 +255,18 @@ fn intern_mapped_target_config(
         .collect::<Vec<_>>();
     target_config.sort_unstable();
     target_config.dedup();
-    intern_config(target_config, config_ids, configs)
+    target_config
+}
+
+fn intern_mapped_target_config(
+    targets: &[u32],
+    state_map: &ManyToOneIdMap,
+    class_active_language: Option<&[bool]>,
+    config_ids: &mut RelevantConfigInterner,
+    configs: &mut Vec<Box<[u32]>>,
+) -> u32 {
+    let target_config = mapped_target_config(targets, state_map, class_active_language);
+    config_ids.intern(target_config, configs)
 }
 
 impl BoundedAnalysisView {
@@ -310,7 +358,7 @@ fn try_build_relevant_powerset_view(
     let (mut config_ids, mut configs, raw_start_to_view, mut worklist, mut queued) =
         if let Some(state_map) = state_map {
             let class_count = state_map.representative_original_ids.len();
-            let mut config_ids = FxHashMap::<Vec<u32>, u32>::default();
+            let mut config_ids = RelevantConfigInterner::default();
             let mut configs = Vec::<Box<[u32]>>::new();
             let mut class_to_view = vec![u32::MAX; class_count];
             let mut worklist = VecDeque::<u32>::new();
@@ -324,7 +372,7 @@ fn try_build_relevant_powerset_view(
                 } else {
                     Vec::new()
                 };
-                let state = intern_config(config, &mut config_ids, &mut configs);
+                let state = config_ids.intern(config, &mut configs);
                 class_to_view[class as usize] = state;
                 if queued.len() < configs.len() {
                     queued.resize(configs.len(), false);
@@ -347,7 +395,7 @@ fn try_build_relevant_powerset_view(
                 queued,
             )
         } else {
-            let mut config_ids = FxHashMap::<Vec<u32>, u32>::default();
+            let mut config_ids = RelevantConfigInterner::default();
             let mut configs = Vec::<Box<[u32]>>::new();
             let mut raw_start_to_view = vec![u32::MAX; raw_state_count];
             let mut worklist = VecDeque::<u32>::new();
@@ -359,7 +407,7 @@ fn try_build_relevant_powerset_view(
                         .to_vec(),
                     raw_active_language.as_deref(),
                 );
-                let state = intern_config(closure, &mut config_ids, &mut configs);
+                let state = config_ids.intern(closure, &mut configs);
                 raw_start_to_view[raw_state] = state;
                 if queued.len() < configs.len() {
                     queued.resize(configs.len(), false);
@@ -399,6 +447,57 @@ fn try_build_relevant_powerset_view(
             })
             .collect::<Vec<_>>()
     });
+    // For a mapped powerset, the one-byte NFA successor of a configuration is
+    // the union of the one-byte successors of its member classes. Cache those
+    // exact class/byte successor class-sets once. The old inner loop rebuilt a
+    // raw representative vector, re-ran epsilon closure, remapped raw targets,
+    // sorted, and deduplicated for every configuration × byte pair.
+    let mapped_targets_by_class_byte = state_map.map(|state_map| {
+        let closure_by_class = closure_by_class
+            .as_ref()
+            .expect("mapped powerset must retain representative closures");
+        let class_count = state_map.representative_original_ids.len();
+        let byte_count = bytes.len();
+        let mut byte_slot = [usize::MAX; 256];
+        for (slot, &byte) in bytes.iter().enumerate() {
+            byte_slot[byte as usize] = slot;
+        }
+        let mut targets = (0..class_count.saturating_mul(byte_count))
+            .map(|_| Box::<[u32]>::default())
+            .collect::<Vec<_>>();
+        for class in 0..class_count {
+            if let Some(raw_source) = closure_by_class[class].singleton() {
+                for (byte, raw_target) in tokenizer.transitions_from(raw_source) {
+                    let slot = byte_slot[byte as usize];
+                    if slot == usize::MAX {
+                        continue;
+                    }
+                    let raw_targets = tokenizer.execute_from_state_end_only(&[], raw_target);
+                    let mapped = mapped_target_config(
+                        &raw_targets,
+                        state_map,
+                        class_active_language.as_deref(),
+                    );
+                    targets[class * byte_count + slot] = mapped.into_boxed_slice();
+                }
+            } else {
+                let representative = state_map.representative_original_ids[class];
+                for (slot, &byte) in bytes.iter().enumerate() {
+                    let raw_targets = tokenizer.step_all(&[representative], byte);
+                    if raw_targets.is_empty() {
+                        continue;
+                    }
+                    let mapped = mapped_target_config(
+                        &raw_targets,
+                        state_map,
+                        class_active_language.as_deref(),
+                    );
+                    targets[class * byte_count + slot] = mapped.into_boxed_slice();
+                }
+            }
+        }
+        targets
+    });
     let mut edge_offsets = Vec::<u32>::with_capacity(configs.len() + 1);
     let mut edges = Vec::<(u8, u32)>::new();
     edge_offsets.push(0);
@@ -406,15 +505,26 @@ fn try_build_relevant_powerset_view(
         let closure_by_class = closure_by_class
             .as_ref()
             .expect("mapped powerset must retain representative closures");
+        let mapped_targets_by_class_byte = mapped_targets_by_class_byte
+            .as_ref()
+            .expect("mapped powerset must retain cached class transitions");
+        let class_count = state_map.representative_original_ids.len();
+        let byte_count = bytes.len();
+        let mut target_marks = vec![0u32; class_count];
+        let mut target_epoch = 0u32;
         while let Some(state) = worklist.pop_front() {
             assert_eq!(
                 state as usize + 1,
                 edge_offsets.len(),
                 "powerset states must be processed in interning order",
             );
-            let config = configs[state as usize].clone();
-            if config.len() == 1
-                && let Some(raw_source) = closure_by_class[config[0] as usize].singleton()
+            let config_index = state as usize;
+            let singleton_class = match configs[config_index].as_ref() {
+                [class] => Some(*class),
+                _ => None,
+            };
+            if let Some(class) = singleton_class
+                && let Some(raw_source) = closure_by_class[class as usize].singleton()
             {
                 for (byte, raw_target) in tokenizer.transitions_from(raw_source) {
                     if !relevant_bytes[byte as usize] {
@@ -445,22 +555,29 @@ fn try_build_relevant_powerset_view(
                     }
                 }
             } else {
-                let source_states = config
-                    .iter()
-                    .map(|&class| state_map.representative_original_ids[class as usize])
-                    .collect::<Vec<_>>();
-                for &byte in &bytes {
-                    let targets = tokenizer.step_all(&source_states, byte);
-                    if targets.is_empty() {
+                for (byte_slot, &byte) in bytes.iter().enumerate() {
+                    target_epoch = target_epoch.wrapping_add(1);
+                    if target_epoch == 0 {
+                        target_marks.fill(0);
+                        target_epoch = 1;
+                    }
+                    let mut target_config = Vec::<u32>::new();
+                    for &class in configs[config_index].iter() {
+                        for &target_class in
+                            &mapped_targets_by_class_byte[class as usize * byte_count + byte_slot]
+                        {
+                            let mark = &mut target_marks[target_class as usize];
+                            if *mark != target_epoch {
+                                *mark = target_epoch;
+                                target_config.push(target_class);
+                            }
+                        }
+                    }
+                    if target_config.is_empty() {
                         continue;
                     }
-                    let target = intern_mapped_target_config(
-                        &targets,
-                        state_map,
-                        class_active_language.as_deref(),
-                        &mut config_ids,
-                        &mut configs,
-                    );
+                    target_config.sort_unstable();
+                    let target = config_ids.intern(target_config, &mut configs);
                     if queued.len() < configs.len() {
                         queued.resize(configs.len(), false);
                     }
@@ -487,12 +604,16 @@ fn try_build_relevant_powerset_view(
                 edge_offsets.len(),
                 "powerset states must be processed in interning order",
             );
-            let config = configs[state as usize].clone();
-            if let [source] = config.as_ref() {
+            let config_index = state as usize;
+            let singleton_source = match configs[config_index].as_ref() {
+                [source] => Some(*source),
+                _ => None,
+            };
+            if let Some(source) = singleton_source {
                 // Raw starts were all seeded before traversal, so the exact
                 // projected epsilon closure of every direct byte target is
                 // already interned in `raw_start_to_view`.
-                for (byte, raw_target) in tokenizer.transitions_from(*source) {
+                for (byte, raw_target) in tokenizer.transitions_from(source) {
                     if !relevant_bytes[byte as usize] {
                         continue;
                     }
@@ -518,7 +639,7 @@ fn try_build_relevant_powerset_view(
                 byte_epoch = 1;
             }
             candidate_bytes.clear();
-            for &source in config.iter() {
+            for &source in configs[config_index].iter() {
                 for (byte, _) in tokenizer.transitions_from(source) {
                     let byte_index = byte as usize;
                     if relevant_bytes[byte_index] && byte_marks[byte_index] != byte_epoch {
@@ -529,7 +650,7 @@ fn try_build_relevant_powerset_view(
             }
             candidate_bytes.sort_unstable();
             for &byte in &candidate_bytes {
-                let targets = tokenizer.step_all(&config, byte);
+                let targets = tokenizer.step_all(&configs[config_index], byte);
                 if targets.is_empty() {
                     continue;
                 }
@@ -540,7 +661,7 @@ fn try_build_relevant_powerset_view(
                 if projected.is_empty() {
                     continue;
                 }
-                let target = intern_config(projected, &mut config_ids, &mut configs);
+                let target = config_ids.intern(projected, &mut configs);
                 if queued.len() < configs.len() {
                     queued.resize(configs.len(), false);
                 }
@@ -3412,6 +3533,23 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn relevant_powerset_handles_fully_filtered_empty_configurations() {
+        let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
+        let relevant = [true; 256];
+        let inactive_groups = [false, false];
+        let view = build_relevant_powerset_view(
+            &tokenizer,
+            &relevant,
+            Some(&inactive_groups),
+            None,
+        );
+
+        assert!(view.configurations.iter().all(|config| config.is_empty()));
+        assert!(view.edges.is_empty());
+        assert!(view.raw_start_to_view.iter().all(|&state| state == view.start_state as u32));
     }
 
     #[test]
