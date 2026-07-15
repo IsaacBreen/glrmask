@@ -4259,6 +4259,22 @@ mod tests {
         }
     }
 
+    fn default_unit_inline_budget() -> UnitInlineBudget {
+        UnitInlineBudget {
+            started_at: std::time::Instant::now(),
+            max_ms: DEFAULT_UNIT_INLINE_WORK_MAX_WALL_MS,
+            max_iterations: DEFAULT_UNIT_INLINE_WORK_MAX_ITERATIONS,
+            max_cells: DEFAULT_UNIT_INLINE_WORK_MAX_CELLS,
+            max_synthetic_states: DEFAULT_UNIT_INLINE_WORK_MAX_SYNTHETIC_STATES,
+            max_stack_effect_visits: DEFAULT_UNIT_INLINE_WORK_MAX_STACK_EFFECT_VISITS,
+            iterations: std::sync::atomic::AtomicUsize::new(0),
+            cells: std::sync::atomic::AtomicUsize::new(0),
+            synthetic_states: std::sync::atomic::AtomicUsize::new(0),
+            stack_effect_visits: std::sync::atomic::AtomicUsize::new(0),
+            abort_code: std::sync::atomic::AtomicU8::new(ABORT_NONE),
+        }
+    }
+
     fn table_with_stack_shifts(
         shifts: Vec<StackShift>,
         goto_rows: &[(u32, &[(NonterminalID, (u32, bool))])],
@@ -4775,7 +4791,7 @@ mod tests {
 
         let mut predecessors = vec![PredecessorSet::new(); 6];
         predecessors[5] = smallvec![1, 2];
-        let budget = UnitInlineBudget::from_env();
+        let budget = default_unit_inline_budget();
 
         let result = apply_reduce_to_frame(
             &table,
@@ -4831,7 +4847,7 @@ mod tests {
 
         let mut predecessors = vec![PredecessorSet::new(); 6];
         predecessors[5] = smallvec![1, 2];
-        let budget = UnitInlineBudget::from_env();
+        let budget = default_unit_inline_budget();
 
         let result = apply_reduce_to_frame(
             &table,
@@ -4939,7 +4955,7 @@ mod tests {
         ));
         assert_eq!(shortcut_reads, vec![((0, 0), (3, 0)), ((0, 0), (4, 0))]);
 
-        let budget = UnitInlineBudget::from_env();
+        let budget = default_unit_inline_budget();
         let generic = try_inline_action_to_stack_shifts_detailed(
             &table,
             &predecessors,
@@ -5021,7 +5037,7 @@ mod tests {
         };
         let mut predecessors = vec![PredecessorSet::new(); 5];
         predecessors[2].push(1);
-        let budget = UnitInlineBudget::from_env();
+        let budget = default_unit_inline_budget();
 
         let action = table.action(2, 0).expect("expected split action");
         let result = try_inline_action_to_stack_shifts(
@@ -5085,7 +5101,7 @@ mod tests {
         };
         let mut predecessors = vec![PredecessorSet::new(); 6];
         predecessors[2].push(1);
-        let budget = UnitInlineBudget::from_env();
+        let budget = default_unit_inline_budget();
 
         let action = table.action(2, 0).expect("expected split action");
         let result = try_inline_action_to_stack_shifts(
@@ -5144,7 +5160,7 @@ mod tests {
         };
         let mut predecessors = vec![PredecessorSet::new(); 9];
         predecessors[2].extend_from_slice(&[1, 6]);
-        let budget = UnitInlineBudget::from_env();
+        let budget = default_unit_inline_budget();
 
         let action = table.action(2, 0).expect("expected reduce action");
         let result = try_inline_action_to_stack_shifts(
