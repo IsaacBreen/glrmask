@@ -521,6 +521,8 @@ impl DynamicMaskVocab {
             pending_source: None,
             initialized: true,
             continuation_partitions: Arc::new(Mutex::new(FxHashMap::default())),
+            declined_continuation_sources: Arc::new(Mutex::new(FxHashSet::default())),
+            continuation_entries: Arc::new(OnceLock::new()),
             mask_cache: Arc::new(Mutex::new(Vec::new())),
         }
     }
