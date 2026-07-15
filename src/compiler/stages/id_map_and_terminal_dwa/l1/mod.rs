@@ -680,6 +680,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
                 tokenizer,
                 vocab,
                 active_terminals,
+                flat_trans.as_ref(),
                 shared_generic_nfa_topology,
             )
         } else if generic_epsilon_nfa {
@@ -867,6 +868,7 @@ fn build_l1_generic_nfa_analysis_view(
     raw_states: &[usize],
     token_entries: &[(u32, Arc<[u8]>)],
     active_terminals: &[bool],
+    flat_trans: &[u32],
     shared_topology: Option<
         &super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTopology,
     >,
@@ -882,8 +884,9 @@ fn build_l1_generic_nfa_analysis_view(
                 .iter()
                 .map(|(_, bytes)| bytes.as_ref())
                 .collect::<Vec<_>>();
-            super::l2p::equivalence_analysis::state_equivalence::nfa::build_token_bounded_analysis_view_projected_sorted(
+            super::l2p::equivalence_analysis::state_equivalence::nfa::build_token_bounded_analysis_view_projected_sorted_with_raw_transitions(
                 tokenizer,
+                flat_trans,
                 raw_states,
                 &tokens,
                 active_terminals,
@@ -895,13 +898,15 @@ fn build_l1_generic_nfa_analysis_view(
             .iter()
             .map(|(_, bytes)| bytes.as_ref())
             .collect::<Vec<_>>();
-        match super::l2p::equivalence_analysis::state_equivalence::nfa::try_build_token_bounded_analysis_view_projected_sorted(
+        let bounded = super::l2p::equivalence_analysis::state_equivalence::nfa::try_build_token_bounded_analysis_view_projected_sorted_with_raw_transitions(
             tokenizer,
+            flat_trans,
             raw_states,
             &tokens,
             active_terminals,
             large_work_budget,
-        ) {
+        );
+        match bounded {
             Ok((bounded, work)) => {
                 if compile_profile_enabled() {
                     eprintln!(
@@ -965,6 +970,7 @@ fn build_l1_generic_nfa_exact_id_map<'a>(
     tokenizer: &Tokenizer,
     vocab: &'a Vocab,
     active_terminals: &[bool],
+    flat_trans: &[u32],
     shared_topology: Option<
         &super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTopology,
     >,
@@ -993,6 +999,7 @@ fn build_l1_generic_nfa_exact_id_map<'a>(
         &raw_states,
         token_entries,
         active_terminals,
+        flat_trans,
         shared_topology,
         L1_GENERIC_NFA_TOKEN_BOUNDED_LARGE_WORK_BUDGET,
     );
@@ -5130,11 +5137,13 @@ mod generic_nfa_tests {
             raw_states.len(),
             token_entries.len(),
         ));
+        let flat_trans = build_flat_transition_table(&tokenizer);
         let (_, _, analysis_view) = build_l1_generic_nfa_analysis_view(
             &tokenizer,
             &raw_states,
             &token_entries,
             &active,
+            &flat_trans,
             None,
             super::super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisWorkBudget {
                 max_configurations: usize::MAX,
@@ -5322,12 +5331,14 @@ mod generic_nfa_tests {
             &raw_states,
             &full_tokens,
         );
+        let flat_trans = build_flat_transition_table(&tokenizer);
 
         let (mut shared_map, shared_order, _, _, shared_reuse) =
             build_l1_generic_nfa_exact_id_map(
                 &tokenizer,
                 &subset_vocab,
                 &active,
+                &flat_trans,
                 Some(&topology),
             );
         let (mut standalone_map, standalone_order, _, _, standalone_reuse) =
@@ -5335,6 +5346,7 @@ mod generic_nfa_tests {
                 &tokenizer,
                 &subset_vocab,
                 &active,
+                &flat_trans,
                 None,
             );
 
@@ -5420,9 +5432,9 @@ mod generic_nfa_tests {
         )
         .expect("generic epsilon L1 fallback fixture must produce a terminal DWA");
 
-        let (mut exact_id_map, exact_order, _, _, exact_reuse) =
-            build_l1_generic_nfa_exact_id_map(&tokenizer, &vocab, &active, None);
         let flat_trans = build_flat_transition_table(&tokenizer);
+        let (mut exact_id_map, exact_order, _, _, exact_reuse) =
+            build_l1_generic_nfa_exact_id_map(&tokenizer, &vocab, &active, &flat_trans, None);
         let (exact_dwa, _) = build_l1_terminal_dwa(
             &tokenizer,
             exact_order.as_ref(),
