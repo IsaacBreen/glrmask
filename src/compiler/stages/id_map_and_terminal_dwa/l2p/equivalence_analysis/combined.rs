@@ -592,6 +592,13 @@ fn compose_raw_quotient_state_map_impl(
     }
 }
 
+fn final_analysis_view_representatives(query_representatives: &[usize]) -> Vec<usize> {
+    let mut representatives = query_representatives.to_vec();
+    representatives.sort_unstable();
+    representatives.dedup();
+    representatives
+}
+
 fn build_internal_id_map_from_combined_result(
     tokenizer: &Tokenizer,
     initial_state_map: Option<&ManyToOneIdMap>,
@@ -2067,13 +2074,14 @@ fn analyze_equivalences_impl(
         let tokenizer_states =
             compose_raw_quotient_state_map(&tokenizer_states, &final_preclass_representatives);
 
-        let mut final_view_states = tokenizer_states
-            .representative_original_ids
-            .iter()
-            .map(|&raw| raw_start_to_view[raw as usize] as usize)
-            .collect::<Vec<_>>();
-        final_view_states.sort_unstable();
-        final_view_states.dedup();
+        // The exact refinement is already expressed in bounded analysis-view
+        // coordinates. Composing the raw quotient deliberately chooses the
+        // first raw member of each final class as its stored representative;
+        // that raw member need not be one of the preclass representatives that
+        // were seeded into `raw_start_to_view`. Re-projecting the composed raw
+        // representative can therefore yield the unseeded u32::MAX sentinel.
+        // Keep the exact view representatives directly for the vocab pass.
+        let final_view_states = final_analysis_view_representatives(&query_representatives);
 
         let (dedup_vocab_classes, vocab_analysis_dfa_build_ms, vocab_equiv_ms) =
             if let Some((classes, build_ms)) = precomputed_vocab {
@@ -2757,6 +2765,28 @@ mod prepass_selection_tests {
         assert_eq!(composed.original_to_internal, vec![0, 0, 0, 0]);
         assert_eq!(composed.internal_to_originals, vec![vec![0, 1, 2, 3]]);
         assert_eq!(composed.representative_original_ids, vec![3]);
+    }
+
+    #[test]
+    fn bounded_vocab_pass_keeps_exact_analysis_view_coordinates() {
+        let preclasses = ManyToOneIdMap {
+            original_to_internal: vec![0, 1, 0, 1],
+            internal_to_originals: vec![vec![0, 2], vec![1, 3]],
+            representative_original_ids: vec![2, 3],
+        };
+        let composed = compose_raw_quotient_state_map(&preclasses, &[0, 0]);
+
+        // The bounded view was seeded only by the preclass representatives.
+        // Ordinary raw quotient composition is nevertheless free to retain raw
+        // state 0, the first member of the merged class, as its representative.
+        let raw_start_to_view = [u32::MAX, u32::MAX, 7, 8];
+        let composed_raw_representative = composed.representative_original_ids[0] as usize;
+        assert_eq!(composed_raw_representative, 0);
+        assert_eq!(raw_start_to_view[composed_raw_representative], u32::MAX);
+
+        // The exact refinement already supplied the representative in bounded
+        // view coordinates, so the subsequent vocab pass must stay there.
+        assert_eq!(final_analysis_view_representatives(&[7, 7]), vec![7]);
     }
 
     #[test]
