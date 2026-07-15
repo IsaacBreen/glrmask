@@ -2624,8 +2624,86 @@ pub(crate) fn compute_state_map(
         }
     }
 
+    if matches!(depth, RefinementDepth::Stable) {
+        // The direct NFA analysis has already materialized the exact one-byte
+        // epsilon-closed successor configuration for every candidate and
+        // relevant byte.  Reuse the same predecessor-driven stable refinement
+        // as the sparse powerset path instead of rescanning every candidate in
+        // synchronous Moore rounds.  Long deterministic chains can require one
+        // logical refinement propagation per byte of distinguishing depth; the
+        // worklist follows only affected predecessors rather than performing a
+        // whole-graph pass for each propagation step.
+        //
+        // Multiple candidates can share the same epsilon-closed start
+        // configuration. Their one-byte successor configurations are then
+        // identical, so one candidate row is sufficient to materialize that
+        // configuration's sparse outgoing edges.
+        let mut source_candidate_by_config = vec![usize::MAX; configs.len()];
+        for (candidate, &config) in start_configs.iter().enumerate() {
+            let slot = &mut source_candidate_by_config[config as usize];
+            if *slot == usize::MAX {
+                *slot = candidate;
+            } else {
+                debug_assert!((0..active_bytes.len()).all(|byte_slot| {
+                    target_configs[*slot * active_bytes.len() + byte_slot]
+                        == target_configs[candidate * active_bytes.len() + byte_slot]
+                }));
+            }
+        }
+
+        let mut edge_offsets = Vec::<u32>::with_capacity(configs.len() + 1);
+        let mut edges = Vec::<(u8, u32)>::new();
+        edge_offsets.push(0);
+        for source_candidate in source_candidate_by_config {
+            if source_candidate != usize::MAX {
+                let row_start = source_candidate * active_bytes.len();
+                for (byte_slot, &byte) in active_bytes.iter().enumerate() {
+                    let target = target_configs[row_start + byte_slot];
+                    if target != u32::MAX {
+                        edges.push((byte, target));
+                    }
+                }
+            }
+            edge_offsets.push(edges.len() as u32);
+        }
+
+        let profile_timing = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
+        let started_at = std::time::Instant::now();
+        let refined = refine_prebuilt_sparse_powerset_worklist(
+            &classes,
+            &start_configs,
+            &configs,
+            &raw_to_candidate,
+            None,
+            &edge_offsets,
+            &edges,
+        );
+        if profile_timing {
+            let class_count = refined
+                .iter()
+                .copied()
+                .collect::<rustc_hash::FxHashSet<_>>()
+                .len();
+            eprintln!(
+                "[glrmask/profile][nfa_restricted_direct_worklist] states={} candidates={} configs={} edges={} classes={} total_ms={:.3}",
+                num_states,
+                num_candidates,
+                configs.len(),
+                edges.len(),
+                class_count,
+                started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        return build_state_map(
+            &candidate_members,
+            &candidate_representatives,
+            &refined,
+            num_states,
+        );
+    }
+
     let round_limit = match depth {
-        RefinementDepth::Stable => num_candidates,
+        RefinementDepth::Stable => unreachable!("stable refinement returned above"),
         RefinementDepth::Bounded(rounds) => rounds,
     };
     for _ in 0..round_limit {
@@ -3311,6 +3389,72 @@ mod tests {
             &direct.original_to_internal,
             &from_identity.original_to_internal,
         ));
+    }
+
+    #[test]
+    fn direct_nfa_worklist_matches_synchronous_refinement() {
+        let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
+        let mut relevant_ab = [false; 256];
+        relevant_ab[b'a' as usize] = true;
+        relevant_ab[b'b' as usize] = true;
+        let relevant_all = [true; 256];
+        let active_left = [true, false];
+        let active_right = [false, true];
+        let active_both = [true, true];
+
+        for relevant in [&relevant_ab, &relevant_all] {
+            for active_groups in [
+                None,
+                Some(active_left.as_slice()),
+                Some(active_right.as_slice()),
+                Some(active_both.as_slice()),
+            ] {
+                let synchronous = compute_state_map(
+                    &tokenizer,
+                    relevant,
+                    active_groups,
+                    None,
+                    RefinementDepth::Bounded(tokenizer.num_states() as usize),
+                );
+                let worklist = compute_state_map(
+                    &tokenizer,
+                    relevant,
+                    active_groups,
+                    None,
+                    RefinementDepth::Stable,
+                );
+                assert!(same_partition(
+                    &synchronous.original_to_internal,
+                    &worklist.original_to_internal,
+                ));
+
+                let seed = compute_state_map(
+                    &tokenizer,
+                    relevant,
+                    active_groups,
+                    None,
+                    RefinementDepth::Bounded(1),
+                );
+                let seeded_synchronous = compute_state_map(
+                    &tokenizer,
+                    relevant,
+                    active_groups,
+                    Some(&seed),
+                    RefinementDepth::Bounded(tokenizer.num_states() as usize),
+                );
+                let seeded_worklist = compute_state_map(
+                    &tokenizer,
+                    relevant,
+                    active_groups,
+                    Some(&seed),
+                    RefinementDepth::Stable,
+                );
+                assert!(same_partition(
+                    &seeded_synchronous.original_to_internal,
+                    &seeded_worklist.original_to_internal,
+                ));
+            }
+        }
     }
 
     #[test]
