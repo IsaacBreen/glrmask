@@ -195,7 +195,7 @@ fn compile_thread_count() -> Option<usize> {
     {
         return std::thread::available_parallelism()
             .ok()
-            .map(|parallelism| parallelism.get().min(10))
+            .map(|parallelism| parallelism.get().min(8))
             .filter(|&value| value > 1);
     }
 
