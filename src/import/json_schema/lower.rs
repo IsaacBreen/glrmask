@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::{Arc, Mutex};
 
-use regex::escape as regex_escape;
+use regex::{Regex, escape as regex_escape};
 use serde_json::Value;
 
 use crate::automata::lexer::{Lexer, compile::build_regex};
@@ -156,6 +157,7 @@ pub(crate) struct Lowerer<'a> {
     pub(crate) shared_pattern_overlap_keys: BTreeMap<String, Vec<String>>,
     pub(crate) shared_pattern_overlap_literal_rules: BTreeMap<String, String>,
     pub(crate) shared_pattern_appearance_rules: BTreeMap<(String, Vec<String>), String>,
+    pub(crate) property_pattern_regex_cache: Arc<Mutex<HashMap<String, Result<Regex, String>>>>,
     pub(crate) fixed_object_profile: Option<FixedObjectLowerProfile>,
     pub(crate) fixed_object_nfa_templates: HashMap<FixedObjectTemplateKey, ExprNFA>,
     pub(crate) terminal_partition_classes: BTreeMap<String, JsonTerminalPartitionClass>,
@@ -211,6 +213,7 @@ impl<'a> Lowerer<'a> {
             shared_pattern_overlap_keys: BTreeMap::new(),
             shared_pattern_overlap_literal_rules: BTreeMap::new(),
             shared_pattern_appearance_rules: BTreeMap::new(),
+            property_pattern_regex_cache: Arc::new(Mutex::new(HashMap::new())),
             fixed_object_profile: (std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
                 || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some())
             .then(FixedObjectLowerProfile::default),
@@ -251,6 +254,7 @@ impl<'a> Lowerer<'a> {
             shared_pattern_overlap_keys: BTreeMap::new(),
             shared_pattern_overlap_literal_rules: BTreeMap::new(),
             shared_pattern_appearance_rules: BTreeMap::new(),
+            property_pattern_regex_cache: Arc::clone(&self.property_pattern_regex_cache),
             fixed_object_profile: None,
             fixed_object_nfa_templates: HashMap::new(),
             terminal_partition_classes: BTreeMap::new(),
@@ -590,10 +594,15 @@ impl<'a> Lowerer<'a> {
         if let Some(values) = &assertions.enum_values {
             let values = values
                 .iter()
-                .filter_map(|value| match self.json_literal_satisfies_assertions(value, assertions) {
-                    Ok(true) => Some(Ok(value)),
-                    Ok(false) => None,
-                    Err(error) => Some(Err(error)),
+                .filter_map(|value| {
+                    match self.json_literal_satisfies_assertions_without_enum_membership(
+                        value,
+                        assertions,
+                    ) {
+                        Ok(true) => Some(Ok(value)),
+                        Ok(false) => None,
+                        Err(error) => Some(Err(error)),
+                    }
                 })
                 .collect::<ImportResult<Vec<_>>>()?;
             if let Some(encoded_literals) = large_string_enum_regex_literals(assertions, &values)? {
@@ -818,9 +827,12 @@ impl<'a> Lowerer<'a> {
                 ref_stack.remove(&normalized);
                 result
             }
-            SchemaKind::Assertions(assertions) => {
-                self.json_literal_satisfies_assertions_inner(value, assertions, ref_stack)
-            }
+            SchemaKind::Assertions(assertions) => self.json_literal_satisfies_assertions_inner(
+                value,
+                assertions,
+                ref_stack,
+                true,
+            ),
         }
     }
 
@@ -830,7 +842,16 @@ impl<'a> Lowerer<'a> {
         assertions: &SchemaAssertions,
     ) -> ImportResult<bool> {
         let mut ref_stack = BTreeSet::new();
-        self.json_literal_satisfies_assertions_inner(value, assertions, &mut ref_stack)
+        self.json_literal_satisfies_assertions_inner(value, assertions, &mut ref_stack, true)
+    }
+
+    fn json_literal_satisfies_assertions_without_enum_membership(
+        &self,
+        value: &Value,
+        assertions: &SchemaAssertions,
+    ) -> ImportResult<bool> {
+        let mut ref_stack = BTreeSet::new();
+        self.json_literal_satisfies_assertions_inner(value, assertions, &mut ref_stack, false)
     }
 
     fn json_literal_satisfies_assertions_inner(
@@ -838,6 +859,7 @@ impl<'a> Lowerer<'a> {
         value: &Value,
         assertions: &SchemaAssertions,
         ref_stack: &mut BTreeSet<String>,
+        check_enum_membership: bool,
     ) -> ImportResult<bool> {
         for branch in &assertions.all_of {
             if !self.json_literal_satisfies_schema_inner(value, branch, ref_stack)? {
@@ -878,7 +900,8 @@ impl<'a> Lowerer<'a> {
         {
             return Ok(false);
         }
-        if let Some(enum_values) = &assertions.enum_values
+        if check_enum_membership
+            && let Some(enum_values) = &assertions.enum_values
             && !enum_values.iter().any(|enum_value| enum_value == value)
         {
             return Ok(false);

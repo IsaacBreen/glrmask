@@ -28,6 +28,27 @@ fn encoded_json_key_regex(encoded: &str) -> String {
 }
 
 impl<'a> Lowerer<'a> {
+    pub(crate) fn property_name_matches_pattern_cached(
+        &self,
+        pattern: &str,
+        property_name: &str,
+    ) -> ImportResult<bool> {
+        let mut cache = self
+            .property_pattern_regex_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let compiled = cache.entry(pattern.to_string()).or_insert_with(|| {
+            let ascii_pattern = preprocess_ascii_shorthand(pattern);
+            Regex::new(&ascii_pattern).map_err(|error| error.to_string())
+        });
+        match compiled {
+            Ok(regex) => Ok(regex.is_match(property_name)),
+            Err(error) => Err(SchemaImportError::new(format!(
+                "invalid patternProperties regex {pattern:?}: {error}"
+            ))),
+        }
+    }
+
     fn literal_quote_expr(&self) -> GrammarExpr {
         if split_literal_terminals_enabled() {
             r(JSON_QUOTE_RULE)
@@ -1391,7 +1412,7 @@ impl<'a> Lowerer<'a> {
 
         let mut overlaps = Vec::new();
         for key in &self.shared_ap_literal_keys {
-            match property_name_matches_pattern(pattern, key) {
+            match self.property_name_matches_pattern_cached(pattern, key) {
                 Ok(true) => overlaps.push(key.clone()),
                 Ok(false) => {}
                 Err(error) if is_regex_compile_limit_error(&error) => {
@@ -1415,7 +1436,7 @@ impl<'a> Lowerer<'a> {
     ) -> ImportResult<Vec<String>> {
         let mut overlaps = Vec::new();
         for key in fixed_keys {
-            match property_name_matches_pattern(pattern, key) {
+            match self.property_name_matches_pattern_cached(pattern, key) {
                 Ok(true) => overlaps.push(key.clone()),
                 Ok(false) => {}
                 Err(error) if is_regex_compile_limit_error(&error) => {
@@ -1559,7 +1580,7 @@ impl<'a> Lowerer<'a> {
             }
             let mut covered_by_local_pattern = false;
             for pattern in local_patterns {
-                if property_name_matches_pattern(pattern, &key)? {
+                if self.property_name_matches_pattern_cached(pattern, &key)? {
                     covered_by_local_pattern = true;
                     break;
                 }
@@ -1615,7 +1636,7 @@ impl<'a> Lowerer<'a> {
             }
             let mut covered_by_shared_pattern = false;
             for pattern in &self.shared_ap_patterns {
-                match property_name_matches_pattern(pattern, key) {
+                match self.property_name_matches_pattern_cached(pattern, key) {
                     Ok(true) => {
                         covered_by_shared_pattern = true;
                         break;
@@ -1688,7 +1709,7 @@ impl<'a> Lowerer<'a> {
             }
             let mut covered_by_local_pattern = false;
             for pattern in local_patterns {
-                if property_name_matches_pattern(pattern, &key)? {
+                if self.property_name_matches_pattern_cached(pattern, &key)? {
                     covered_by_local_pattern = true;
                     break;
                 }
@@ -1844,7 +1865,7 @@ impl<'a> Lowerer<'a> {
     ) -> ImportResult<GrammarExpr> {
         let mut pattern_expr = self.pattern_key_colon_full_terminal_language(pattern)?;
         for key in fixed_keys {
-            if property_name_matches_pattern(pattern, key)? {
+            if self.property_name_matches_pattern_cached(pattern, key)? {
                 pattern_expr = GrammarExpr::Exclude {
                     expr: Box::new(pattern_expr),
                     exclude: Box::new(self.lower_literal_key_colon_exact_with_prefix(b"", key)),

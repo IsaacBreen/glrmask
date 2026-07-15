@@ -231,7 +231,7 @@ impl DynamicConstraint {
         compile_dynamic_from_source(
             schema,
             vocab,
-            GlrTableConstruction::LegacyRowBisim,
+            GlrTableConstruction::Lalr,
             parse_json_schema_to_named,
             Some(json_schema::prepare_named_grammar),
         )

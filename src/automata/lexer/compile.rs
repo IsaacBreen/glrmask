@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use rayon::prelude::*;
@@ -254,10 +254,33 @@ fn split_top_level_group_ops(expr: &Expr) -> (Expr, Vec<Expr>, Vec<Expr>) {
 #[derive(Default)]
 struct NestedGroupOpCache {
     compiled: FxHashMap<Expr, Arc<DFA>>,
+    shared_duplicates: Option<Arc<SharedDuplicateNestedGroupOpCache>>,
     cache_hits: usize,
     cache_misses: usize,
     compiled_ms: f64,
     max_compile_ms: f64,
+}
+
+struct SharedDuplicateNestedGroupOpCache {
+    duplicated: FxHashSet<Expr>,
+    compiled: Mutex<FxHashMap<Expr, Arc<OnceLock<Arc<DFA>>>>>,
+}
+
+impl SharedDuplicateNestedGroupOpCache {
+    fn cell_if_duplicated(&self, expr: &Expr) -> Option<Arc<OnceLock<Arc<DFA>>>> {
+        if !self.duplicated.contains(expr) {
+            return None;
+        }
+        let mut compiled = self
+            .compiled
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Some(Arc::clone(
+            compiled
+                .entry(expr.clone())
+                .or_insert_with(|| Arc::new(OnceLock::new())),
+        ))
+    }
 }
 
 fn materialize_nested_group_ops(expr: Expr, cache: &mut NestedGroupOpCache) -> Expr {
@@ -266,6 +289,36 @@ fn materialize_nested_group_ops(expr: Expr, cache: &mut NestedGroupOpCache) -> E
             if let Some(compiled) = cache.compiled.get(&expr) {
                 cache.cache_hits += 1;
                 return Expr::Dfa(compiled.clone());
+            }
+
+            if let Some(shared) = cache.shared_duplicates.clone()
+                && let Some(cell) = shared.cell_if_duplicated(&expr)
+            {
+                let started_at = Instant::now();
+                let was_ready = cell.get().is_some();
+                let compiled = Arc::clone(cell.get_or_init(|| {
+                    let mut nested_cache = NestedGroupOpCache {
+                        shared_duplicates: Some(Arc::clone(&shared)),
+                        ..NestedGroupOpCache::default()
+                    };
+                    Arc::new(compile_with_plan(
+                        build_exclusion_compile_plan_with_labels_and_cache(
+                            std::slice::from_ref(&expr),
+                            None,
+                            &mut nested_cache,
+                        ),
+                    ))
+                }));
+                if was_ready {
+                    cache.cache_hits += 1;
+                } else {
+                    cache.cache_misses += 1;
+                    let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+                    cache.compiled_ms += elapsed_ms;
+                    cache.max_compile_ms = cache.max_compile_ms.max(elapsed_ms);
+                }
+                cache.compiled.insert(expr, Arc::clone(&compiled));
+                return Expr::Dfa(compiled);
             }
 
             cache.cache_misses += 1;
@@ -310,6 +363,77 @@ fn materialize_nested_group_ops(expr: Expr, cache: &mut NestedGroupOpCache) -> E
         }
         Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Dfa(_) | Expr::Epsilon => expr,
     }
+}
+
+fn count_nested_group_ops(expr: &Expr, counts: &mut FxHashMap<Expr, usize>) {
+    match expr {
+        Expr::Exclude { expr: inner, exclude } => {
+            *counts.entry(expr.clone()).or_default() += 1;
+            count_nested_group_ops(inner, counts);
+            count_nested_group_ops(exclude, counts);
+        }
+        Expr::Intersect { expr: inner, intersect } => {
+            *counts.entry(expr.clone()).or_default() += 1;
+            count_nested_group_ops(inner, counts);
+            count_nested_group_ops(intersect, counts);
+        }
+        Expr::Seq(parts) | Expr::Choice(parts) => {
+            for part in parts {
+                count_nested_group_ops(part, counts);
+            }
+        }
+        Expr::Repeat { expr, .. } => count_nested_group_ops(expr, counts),
+        Expr::Shared(expr) => count_nested_group_ops(expr, counts),
+        Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Dfa(_) | Expr::Epsilon => {}
+    }
+}
+
+fn shared_duplicate_nested_group_op_cache(
+    exprs: &[Expr],
+    grouped: &BTreeMap<u32, Vec<usize>>,
+) -> Option<Arc<SharedDuplicateNestedGroupOpCache>> {
+    let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
+    let started_at = profile.then(Instant::now);
+    let singleton_partitions = grouped
+        .values()
+        .filter(|terminal_ids| terminal_ids.len() == 1)
+        .count();
+    if grouped.len() < 64 || singleton_partitions * 4 < grouped.len() * 3 {
+        return None;
+    }
+
+    let mut counts = FxHashMap::<Expr, usize>::default();
+    for terminal_ids in grouped.values() {
+        for &terminal_id in terminal_ids {
+            let (base, excluded, intersections) = split_top_level_group_ops(&exprs[terminal_id]);
+            count_nested_group_ops(&base, &mut counts);
+            for expr in &excluded {
+                count_nested_group_ops(expr, &mut counts);
+            }
+            for expr in &intersections {
+                count_nested_group_ops(expr, &mut counts);
+            }
+        }
+    }
+    let duplicated = counts
+        .into_iter()
+        .filter_map(|(expr, count)| (count > 1).then_some(expr))
+        .collect::<FxHashSet<_>>();
+    if let Some(started_at) = started_at {
+        eprintln!(
+            "[glrmask/profile][tokenizer] shared_duplicate_nested_ops partitions={} singleton_partitions={} duplicated={} scan_ms={:.3}",
+            grouped.len(),
+            singleton_partitions,
+            duplicated.len(),
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    (!duplicated.is_empty()).then(|| {
+        Arc::new(SharedDuplicateNestedGroupOpCache {
+            duplicated,
+            compiled: Mutex::new(FxHashMap::default()),
+        })
+    })
 }
 
 struct ExclusionCompilePlan {
@@ -1685,6 +1809,15 @@ fn compile_terminal_ids(
     visible_labels: Option<&[String]>,
     terminal_ids: &[usize],
 ) -> DFA {
+    compile_terminal_ids_with_shared_duplicate_cache(exprs, visible_labels, terminal_ids, None)
+}
+
+fn compile_terminal_ids_with_shared_duplicate_cache(
+    exprs: &[Expr],
+    visible_labels: Option<&[String]>,
+    terminal_ids: &[usize],
+    shared_duplicates: Option<&Arc<SharedDuplicateNestedGroupOpCache>>,
+) -> DFA {
     let local_exprs = terminal_ids
         .iter()
         .map(|&terminal| exprs[terminal].clone())
@@ -1695,9 +1828,14 @@ fn compile_terminal_ids(
             .map(|&terminal| labels[terminal].clone())
             .collect::<Vec<_>>()
     });
-    compile_with_plan(build_exclusion_compile_plan_with_labels(
+    let mut nested_group_op_cache = NestedGroupOpCache {
+        shared_duplicates: shared_duplicates.cloned(),
+        ..NestedGroupOpCache::default()
+    };
+    compile_with_plan(build_exclusion_compile_plan_with_labels_and_cache(
         &local_exprs,
         local_labels.as_deref(),
+        &mut nested_group_op_cache,
     ))
 }
 
@@ -1716,6 +1854,7 @@ fn compile_partition_components(
     for (terminal, &partition) in partitions.iter().enumerate() {
         grouped.entry(partition).or_default().push(terminal);
     }
+    let shared_duplicates = shared_duplicate_nested_group_op_cache(exprs, &grouped);
 
     grouped
         .into_iter()
@@ -1723,7 +1862,12 @@ fn compile_partition_components(
         .into_par_iter()
         .map(|(partition, terminal_ids)| {
             let started_at = Instant::now();
-            let dfa = compile_terminal_ids(exprs, visible_labels, &terminal_ids);
+            let dfa = compile_terminal_ids_with_shared_duplicate_cache(
+                exprs,
+                visible_labels,
+                &terminal_ids,
+                shared_duplicates.as_ref(),
+            );
             if profile {
                 eprintln!(
                     "[glrmask/profile][tokenizer] partition_compile partition={} terminals={} states={} transitions={} total_ms={:.3}",

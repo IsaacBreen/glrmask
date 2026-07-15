@@ -435,6 +435,23 @@ pub(crate) fn build_tokenizer(grammar: &GrammarDef) -> Tokenizer {
     build_tokenizer_from_exprs_partitioned(&exprs, Some(&terminal_labels), &partition_ids)
 }
 
+/// Dynamic masking can execute directly over partitioned NFA tokenizer states,
+/// so large terminal sets do not need to pay for expensive product DFA
+/// construction up front. Keep the historical tokenizer policy for smaller
+/// grammars, where the more deterministic shape is useful at mask time.
+/// Explicit lexer env overrides continue to take precedence over this default.
+fn build_dynamic_tokenizer(grammar: &GrammarDef) -> Tokenizer {
+    const LARGE_DYNAMIC_LEXER_TERMINALS: usize = 96;
+
+    let explicit_policy = std::env::var_os("GLRMASK_LEXER_SINGLETONS").is_some()
+        || std::env::var_os("GLRMASK_LEXER_ADAPTIVE").is_some();
+    if !explicit_policy && grammar.terminals.len() >= LARGE_DYNAMIC_LEXER_TERMINALS {
+        build_tokenizer_with_partition_options(grammar, true, false)
+    } else {
+        build_tokenizer(grammar)
+    }
+}
+
 fn env_flag(name: &str, default: bool) -> bool {
     match std::env::var(name) {
         Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
@@ -2162,7 +2179,7 @@ pub(crate) fn compile_dynamic_owned_with_table_construction(
         let ((tokenizer, tokenizer_ms), (table, table_ms)) = rayon::join(
             || {
                 let started_at = Instant::now();
-                let mut tokenizer = build_tokenizer(&prepared_grammar);
+                let mut tokenizer = build_dynamic_tokenizer(&prepared_grammar);
                 tokenizer.isolate_start_state_and_drain_nullable_terminals();
                 (tokenizer, elapsed_ms(started_at))
             },

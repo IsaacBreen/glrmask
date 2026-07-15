@@ -26,8 +26,6 @@ use super::lower::{
     JSON_KEY_SEPARATOR_RULE, JSON_KEY_SUFFIX_RULE, JSON_QUOTE_RULE,
     JSON_NUMBER_RULE, JSON_OBJECT_RULE, JSON_STRING_RULE, JSON_VALUE_RULE,
 };
-use super::string::property_name_matches_pattern;
-
 const LARGE_OBJECT_LITERAL_KEY_TRIE_MIN_ITEMS: usize = 64;
 const LARGE_OBJECT_KEY_TRIE_PREFIX_SPLIT_BYTES: usize = 1;
 
@@ -790,7 +788,7 @@ impl<'a> Lowerer<'a> {
                 .as_ref()
                 .expect("propertyNames requires fixed property names")
             {
-                if !property_name_matches_pattern(pattern, key)? {
+                if !self.property_name_matches_pattern_cached(pattern, key)? {
                     return Err(SchemaImportError::new(format!(
                         "propertyNames pattern {pattern:?} does not allow fixed property {key:?}"
                     )));
@@ -1686,7 +1684,10 @@ impl<'a> Lowerer<'a> {
         for property in &normalized.properties {
             let mut effective_schema = property.schema.clone();
             for pattern_property in &normalized.pattern_properties {
-                if property_matches_pattern(&pattern_property.pattern, &property.name)? {
+                if self.property_name_matches_pattern_cached(
+                    &pattern_property.pattern,
+                    &property.name,
+                )? {
                     let pattern_schema =
                         pattern_schema_for_property(&effective_schema, &pattern_property.schema);
                     effective_schema = all_of_schema(effective_schema, pattern_schema);
@@ -3523,7 +3524,10 @@ impl<'a> Lowerer<'a> {
     ) -> ImportResult<ObjectItem> {
         let mut intersected_schema = None;
         for pattern_property in pattern_properties {
-            if property_matches_pattern(&pattern_property.pattern, &property.name)? {
+            if self.property_name_matches_pattern_cached(
+                &pattern_property.pattern,
+                &property.name,
+            )? {
                 let current_schema = intersected_schema
                     .take()
                     .unwrap_or_else(|| property.schema.clone());
@@ -4051,7 +4055,10 @@ impl<'a> Lowerer<'a> {
 
             let mut matching_pattern_schema = None;
             for pattern_property in &schema.pattern_properties {
-                if property_matches_pattern(&pattern_property.pattern, required_name)? {
+                if self.property_name_matches_pattern_cached(
+                    &pattern_property.pattern,
+                    required_name,
+                )? {
                     matching_pattern_schema = Some(match matching_pattern_schema {
                         Some(schema) => all_of_schema(schema, pattern_property.schema.clone()),
                         None => pattern_property.schema.clone(),
@@ -4467,10 +4474,6 @@ fn is_string_schema(schema: &Schema) -> bool {
     }
 
     assertions.string.is_some()
-}
-
-fn property_matches_pattern(pattern: &str, property_name: &str) -> ImportResult<bool> {
-    property_name_matches_pattern(pattern, property_name)
 }
 
 fn pattern_schema_for_property(property_schema: &Schema, pattern_schema: &Schema) -> Schema {

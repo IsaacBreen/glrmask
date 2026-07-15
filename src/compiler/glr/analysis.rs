@@ -280,20 +280,24 @@ pub(crate) fn eliminate_right_recursion(
 ) -> bool {
     // Resolve indirect right recursion by inlining right ends.
     const MAX_INDIRECT_ROUNDS: usize = 200;
-    let mut completed = false;
-    for _ in 0..MAX_INDIRECT_ROUNDS {
-        let num_nt = max_nt_id(rules) + 1;
-        let nullable = compute_nullable(rules, num_nt);
-        let graph = build_right_reachability_graph(rules, &nullable);
-        match find_cycle_excluding_self_loops(&graph) {
-            Some(cycle) => {
-                let from = cycle[0];
-                let to = cycle[1 % cycle.len()];
-                inline_right_end(rules, from, to, &nullable);
-            }
-            None => {
-                completed = true;
-                break;
+    let num_nt = max_nt_id(rules) + 1;
+    let nullable = compute_nullable(rules, num_nt);
+    let mut completed = !has_indirect_right_recursion_fast(rules, &nullable, num_nt);
+    if !completed {
+        for _ in 0..MAX_INDIRECT_ROUNDS {
+            let num_nt = max_nt_id(rules) + 1;
+            let nullable = compute_nullable(rules, num_nt);
+            let graph = build_right_reachability_graph(rules, &nullable);
+            match find_cycle_excluding_self_loops(&graph) {
+                Some(cycle) => {
+                    let from = cycle[0];
+                    let to = cycle[1 % cycle.len()];
+                    inline_right_end(rules, from, to, &nullable);
+                }
+                None => {
+                    completed = true;
+                    break;
+                }
             }
         }
     }
@@ -313,6 +317,61 @@ pub(crate) fn eliminate_right_recursion(
         resolve_direct_rr_batched(rules, &rr_nts);
     }
     completed
+}
+
+/// Exact linear-time precheck for indirect right-recursion cycles.
+///
+/// The rewrite path needs an explicit cycle and retains the ordered graph
+/// implementation below. Most normalization passes have no indirect cycle at
+/// all, however. In that common case, building `BTreeMap<BTreeSet<_>>` rows is
+/// pure overhead on large generated grammars. Kahn elimination over a compact
+/// adjacency vector proves acyclicity exactly; direct self-loops are ignored
+/// because the batched direct-right-recursion rewrite handles them separately.
+fn has_indirect_right_recursion_fast(
+    rules: &[Rule],
+    nullable: &BTreeSet<NonterminalID>,
+    num_nt: NonterminalID,
+) -> bool {
+    let num_nt = num_nt as usize;
+    let mut edges = vec![Vec::<NonterminalID>::new(); num_nt];
+    let mut indegree = vec![0u32; num_nt];
+
+    for rule in rules {
+        let lhs = rule.lhs as usize;
+        for symbol in rule.rhs.iter().rev() {
+            match symbol {
+                Symbol::Nonterminal(target) => {
+                    if *target != rule.lhs {
+                        edges[lhs].push(*target);
+                        indegree[*target as usize] += 1;
+                    }
+                    if !nullable.contains(target) {
+                        break;
+                    }
+                }
+                Symbol::Terminal(_) => break,
+            }
+        }
+    }
+
+    let mut queue = VecDeque::with_capacity(num_nt);
+    for (node, &degree) in indegree.iter().enumerate() {
+        if degree == 0 {
+            queue.push_back(node as NonterminalID);
+        }
+    }
+    let mut removed = 0usize;
+    while let Some(node) = queue.pop_front() {
+        removed += 1;
+        for &target in &edges[node as usize] {
+            let degree = &mut indegree[target as usize];
+            *degree -= 1;
+            if *degree == 0 {
+                queue.push_back(target);
+            }
+        }
+    }
+    removed != num_nt
 }
 
 fn max_nt_id(rules: &[Rule]) -> u32 {
@@ -3023,6 +3082,62 @@ mod tests {
         let nullable = compute_nullable(&rules, 1);
 
         assert!(!has_indirect_left_recursion_with_nullable(&rules, &nullable));
+    }
+
+    #[test]
+    fn indirect_right_recursion_fast_precheck_matches_ordered_reference() {
+        const N: u32 = 3;
+        let edge_count = (N * N) as usize;
+        for mask in 0usize..(1usize << edge_count) {
+            let mut rules = Vec::new();
+            for lhs in 0..N {
+                for target in 0..N {
+                    let bit = (lhs * N + target) as usize;
+                    if (mask >> bit) & 1 != 0 {
+                        rules.push(Rule {
+                            lhs,
+                            rhs: vec![Symbol::Nonterminal(target)],
+                        });
+                    }
+                }
+            }
+            let nullable = BTreeSet::new();
+            let reference = find_cycle_excluding_self_loops(&build_right_reachability_graph(
+                &rules, &nullable,
+            ))
+            .is_some();
+            assert_eq!(
+                has_indirect_right_recursion_fast(&rules, &nullable, N),
+                reference,
+                "edge mask {mask:#x}",
+            );
+        }
+    }
+
+    #[test]
+    fn indirect_right_recursion_fast_precheck_observes_nullable_suffixes() {
+        let rules = vec![
+            Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Nonterminal(1), Symbol::Nonterminal(2)],
+            },
+            Rule {
+                lhs: 1,
+                rhs: vec![Symbol::Terminal(0), Symbol::Nonterminal(0)],
+            },
+            Rule {
+                lhs: 2,
+                rhs: Vec::new(),
+            },
+        ];
+        let nullable = compute_nullable(&rules, 3);
+        let reference = find_cycle_excluding_self_loops(&build_right_reachability_graph(
+            &rules, &nullable,
+        ))
+        .is_some();
+
+        assert!(reference);
+        assert!(has_indirect_right_recursion_fast(&rules, &nullable, 3));
     }
 
     #[test]

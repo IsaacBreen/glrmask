@@ -137,7 +137,7 @@ pub(super) fn build_table_with_default_construction(
     let construction_ms = t1.elapsed().as_secs_f64() * 1000.0;
 
     let pre_merge_states = table.num_states;
-    let row_bisim_quotient_skip_reason = if construction != GlrTableConstruction::LegacyRowBisim {
+    let row_bisim_quotient_skip_reason = if construction == GlrTableConstruction::ExperimentalCoreMerged {
         "construction"
     } else if !row_bisim_quotient_enabled(pre_merge_states) {
         "pre_merge_states"
