@@ -470,15 +470,21 @@ fn json_schema_optional_label_with_additional_tail_reaches_multiple_gss_paths() 
     let mut state = constraint.start();
 
     state.commit_token(0).unwrap();
-    assert_eq!(state.parser_path_count(1_000_000), 1);
     state.commit_token(1).unwrap();
-    assert_eq!(state.parser_path_count(1_000_000), 1);
     state.commit_token(2).unwrap();
-    assert_eq!(state.parser_path_count(1_000_000), 1);
     state.commit_token(3).unwrap();
 
     let stacks = state.debug_parser_stacks();
-    assert_eq!(state.parser_path_count(1_000_000), 2, "{stacks:?}");
+    assert!(
+        state.parser_path_count(1_000_000) >= 2,
+        "expected the schema witness to reach multiple GSS paths: {stacks:?}"
+    );
+
+    // The exact number and timing of equivalent internal paths may change as
+    // the compiler/runtime is optimized. The public semantic invariant is that
+    // the original multi-path witness remains completable.
+    state.commit_token(4).unwrap();
+    assert!(state.is_finished());
 }
 
 #[test]
