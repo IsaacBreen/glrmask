@@ -1978,6 +1978,333 @@ fn build_state_map(
     }
 }
 
+fn prebuilt_candidate_target_sets(
+    configurations: &[Box<[u32]>],
+    raw_to_candidate: &[usize],
+    raw_active_language: Option<&[bool]>,
+) -> Vec<SmallVec<[u32; 4]>> {
+    configurations
+        .iter()
+        .map(|config| {
+            let mut candidates = SmallVec::<[u32; 4]>::new();
+            candidates.extend(config.iter().filter_map(|&raw| {
+                if raw_active_language.is_some_and(|active| !active[raw as usize]) {
+                    None
+                } else {
+                    Some(raw_to_candidate[raw as usize] as u32)
+                }
+            }));
+            candidates.sort_unstable();
+            candidates.dedup();
+            candidates
+        })
+        .collect()
+}
+
+fn prebuilt_candidate_signature(
+    candidate: usize,
+    class_for_candidate: &[u32],
+    start_configs: &[u32],
+    candidate_sets_by_config: &[SmallVec<[u32; 4]>],
+    edge_offsets: &[u32],
+    edges: &[(u8, u32)],
+) -> SmallVec<[u32; 64]> {
+    let config = start_configs[candidate] as usize;
+    if candidate_sets_by_config[config].is_empty() {
+        return SmallVec::new();
+    }
+    let edge_start = edge_offsets[config] as usize;
+    let edge_end = edge_offsets[config + 1] as usize;
+    let mut signature = SmallVec::<[u32; 64]>::new();
+    let mut target_classes = SmallVec::<[u32; 8]>::new();
+    for &(byte, target_config) in &edges[edge_start..edge_end] {
+        let target_candidates = &candidate_sets_by_config[target_config as usize];
+        if target_candidates.is_empty() {
+            continue;
+        }
+        target_classes.clear();
+        target_classes.extend(
+            target_candidates
+                .iter()
+                .map(|&target| class_for_candidate[target as usize]),
+        );
+        target_classes.sort_unstable();
+        target_classes.dedup();
+        signature.push(byte as u32 + 1);
+        signature.push(target_classes.len() as u32);
+        signature.extend(target_classes.iter().map(|&class| class + 1));
+    }
+    signature
+}
+
+/// Compute the same stable set-valued NFA partition as the synchronous Moore
+/// recurrence, but only revisit source blocks whose signatures can change.
+///
+/// A block split changes the class id of only the moved target candidates.
+/// Therefore only source candidates with an edge to one of those moved targets
+/// can acquire a different transition-class-set signature. Repartitioning just
+/// those predecessor blocks reaches the same coarsest stable refinement while
+/// avoiding one whole-graph pass per byte of a long lexer chain.
+fn refine_prebuilt_sparse_powerset_worklist(
+    initial_classes: &[u32],
+    start_configs: &[u32],
+    configurations: &[Box<[u32]>],
+    raw_to_candidate: &[usize],
+    raw_active_language: Option<&[bool]>,
+    edge_offsets: &[u32],
+    edges: &[(u8, u32)],
+) -> Vec<u32> {
+    let num_candidates = initial_classes.len();
+    if num_candidates <= 1 {
+        return initial_classes.to_vec();
+    }
+
+    let candidate_sets_by_config = prebuilt_candidate_target_sets(
+        configurations,
+        raw_to_candidate,
+        raw_active_language,
+    );
+
+    let initial_class_count = initial_classes
+        .iter()
+        .copied()
+        .max()
+        .map_or(0usize, |class| class as usize + 1);
+    let mut class_for_candidate = initial_classes.to_vec();
+    let mut members_by_class = vec![Vec::<u32>::new(); initial_class_count];
+    for (candidate, &class) in class_for_candidate.iter().enumerate() {
+        members_by_class[class as usize].push(candidate as u32);
+    }
+
+    // Reverse dependency graph: target candidate -> source candidates whose
+    // transition signature mentions that target. Byte labels are unnecessary
+    // here because a queued source block recomputes its complete exact
+    // signature. Duplicate source entries are harmless and are suppressed by
+    // the per-block queued bit.
+    let mut reverse_predecessors = vec![Vec::<u32>::new(); num_candidates];
+    for source in 0..num_candidates {
+        let config = start_configs[source] as usize;
+        if candidate_sets_by_config[config].is_empty() {
+            continue;
+        }
+        let edge_start = edge_offsets[config] as usize;
+        let edge_end = edge_offsets[config + 1] as usize;
+        for &(_, target_config) in &edges[edge_start..edge_end] {
+            for &target in &candidate_sets_by_config[target_config as usize] {
+                reverse_predecessors[target as usize].push(source as u32);
+            }
+        }
+    }
+    for predecessors in &mut reverse_predecessors {
+        predecessors.sort_unstable();
+        predecessors.dedup();
+    }
+
+    // Keep exact signatures for established blocks. Initially every output
+    // block must be classified once. After that, a target split dirties only
+    // predecessor *candidates*, and only those candidates are re-signatured.
+    // This avoids repeatedly scanning a large mostly-unchanged source block.
+    let mut block_signature = vec![None::<SmallVec<[u32; 64]>>; members_by_class.len()];
+    let mut position_in_class = vec![0usize; num_candidates];
+    for members in &members_by_class {
+        for (position, &candidate) in members.iter().enumerate() {
+            position_in_class[candidate as usize] = position;
+        }
+    }
+    let mut dirty_by_class = vec![Vec::<u32>::new(); members_by_class.len()];
+    let mut candidate_dirty = vec![false; num_candidates];
+    let mut queue = VecDeque::<usize>::new();
+    let mut queued = vec![false; members_by_class.len()];
+    for class in 0..members_by_class.len() {
+        if members_by_class[class].len() > 1 {
+            queued[class] = true;
+            queue.push_back(class);
+        }
+    }
+
+    let mut moved_candidates = Vec::<u32>::new();
+
+    while let Some(class) = queue.pop_front() {
+        queued[class] = false;
+        if members_by_class[class].len() <= 1 {
+            dirty_by_class[class].clear();
+            continue;
+        }
+        moved_candidates.clear();
+
+        if block_signature[class].is_none() {
+            // First exact classification of this output block. New blocks are
+            // born with a known exact signature and thereafter use the dirty
+            // candidate path below.
+            let old_members = std::mem::take(&mut members_by_class[class]);
+            let mut groups = Vec::<(SmallVec<[u32; 64]>, Vec<u32>)>::new();
+            let mut group_by_signature =
+                FxHashMap::<SmallVec<[u32; 64]>, usize>::default();
+            for candidate in old_members {
+                let signature = prebuilt_candidate_signature(
+                    candidate as usize,
+                    &class_for_candidate,
+                    start_configs,
+                    &candidate_sets_by_config,
+                    edge_offsets,
+                    edges,
+                );
+                let next_group = groups.len();
+                let group = *group_by_signature.entry(signature.clone()).or_insert_with(|| {
+                    groups.push((signature, Vec::new()));
+                    next_group
+                });
+                groups[group].1.push(candidate);
+            }
+
+            let retained = groups
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, (_, members))| members.len())
+                .map(|(index, _)| index)
+                .expect("nonempty block has a signature group");
+            groups.swap(0, retained);
+            let (retained_signature, retained_members) = groups.remove(0);
+            block_signature[class] = Some(retained_signature);
+            members_by_class[class] = retained_members;
+            for (position, &candidate) in members_by_class[class].iter().enumerate() {
+                class_for_candidate[candidate as usize] = class as u32;
+                position_in_class[candidate as usize] = position;
+            }
+
+            for (signature, group) in groups {
+                let new_class = members_by_class.len();
+                for (position, &candidate) in group.iter().enumerate() {
+                    class_for_candidate[candidate as usize] = new_class as u32;
+                    position_in_class[candidate as usize] = position;
+                    moved_candidates.push(candidate);
+                }
+                members_by_class.push(group);
+                block_signature.push(Some(signature));
+                dirty_by_class.push(Vec::new());
+                queued.push(false);
+            }
+        } else {
+            // Only candidates explicitly invalidated by a target-class change
+            // can differ from this block's stored exact signature.
+            let old_signature = block_signature[class]
+                .as_ref()
+                .expect("initialized block has a signature")
+                .clone();
+            let dirty = std::mem::take(&mut dirty_by_class[class]);
+            let mut changed_groups =
+                FxHashMap::<SmallVec<[u32; 64]>, Vec<u32>>::default();
+            for candidate in dirty {
+                let candidate = candidate as usize;
+                if !candidate_dirty[candidate]
+                    || class_for_candidate[candidate] as usize != class
+                {
+                    continue;
+                }
+                candidate_dirty[candidate] = false;
+                let signature = prebuilt_candidate_signature(
+                    candidate,
+                    &class_for_candidate,
+                    start_configs,
+                    &candidate_sets_by_config,
+                    edge_offsets,
+                    edges,
+                );
+                if signature != old_signature {
+                    changed_groups
+                        .entry(signature)
+                        .or_default()
+                        .push(candidate as u32);
+                }
+            }
+
+            if !changed_groups.is_empty() {
+                let changed_count = changed_groups.values().map(Vec::len).sum::<usize>();
+                let old_signature_members = members_by_class[class].len() - changed_count;
+
+                // If every member changed, no candidate still represents the
+                // old block signature. Retain the largest new group under the
+                // existing class id; only candidates moved to other ids need
+                // predecessor invalidation.
+                let retained_changed_signature = if old_signature_members == 0 {
+                    changed_groups
+                        .iter()
+                        .max_by_key(|(_, members)| members.len())
+                        .map(|(signature, _)| signature.clone())
+                } else {
+                    None
+                };
+
+                let retained_changed_group = retained_changed_signature.is_some();
+                if let Some(retained_signature) = retained_changed_signature {
+                    let retained = changed_groups
+                        .remove(&retained_signature)
+                        .expect("retained changed group exists");
+                    block_signature[class] = Some(retained_signature);
+                    members_by_class[class].clear();
+                    members_by_class[class].extend_from_slice(&retained);
+                    for (position, &candidate) in retained.iter().enumerate() {
+                        class_for_candidate[candidate as usize] = class as u32;
+                        position_in_class[candidate as usize] = position;
+                    }
+                }
+
+                for (signature, group) in changed_groups {
+                    let new_class = members_by_class.len();
+                    // Remove only changed candidates. Unaffected members stay
+                    // in place and keep the old exact block signature.
+                    if !retained_changed_group {
+                        for &candidate in &group {
+                            let candidate_index = candidate as usize;
+                            let position = position_in_class[candidate_index];
+                            let removed = members_by_class[class].swap_remove(position);
+                            debug_assert_eq!(removed, candidate);
+                            if position < members_by_class[class].len() {
+                                let swapped = members_by_class[class][position] as usize;
+                                position_in_class[swapped] = position;
+                            }
+                        }
+                    }
+                    for (position, &candidate) in group.iter().enumerate() {
+                        class_for_candidate[candidate as usize] = new_class as u32;
+                        position_in_class[candidate as usize] = position;
+                        moved_candidates.push(candidate);
+                    }
+                    members_by_class.push(group);
+                    block_signature.push(Some(signature));
+                    dirty_by_class.push(Vec::new());
+                    queued.push(false);
+                }
+            }
+        }
+
+        // A moved target changes only the signatures of source candidates that
+        // mention it. Mark those candidates, not their whole blocks. Blocks
+        // still awaiting their first exact classification need no dirty mark:
+        // that full classification will observe the current target classes.
+        for &moved in &moved_candidates {
+            for &source in &reverse_predecessors[moved as usize] {
+                let source = source as usize;
+                let source_class = class_for_candidate[source] as usize;
+                if members_by_class[source_class].len() <= 1
+                    || block_signature[source_class].is_none()
+                    || candidate_dirty[source]
+                {
+                    continue;
+                }
+                candidate_dirty[source] = true;
+                dirty_by_class[source_class].push(source as u32);
+                if !queued[source_class] {
+                    queued[source_class] = true;
+                    queue.push_back(source_class);
+                }
+            }
+        }
+    }
+
+    class_for_candidate
+}
+
 /// Refine raw scanner starts through a prebuilt sparse powerset topology.
 /// When `raw_active_language` is supplied, inactive-only members are erased
 /// from powerset class sets and edges into projected-empty configurations are
@@ -2001,14 +2328,6 @@ pub(crate) fn compute_state_map_from_prebuilt_sparse_powerset(
     if let Some(active_language) = raw_active_language {
         assert_eq!(active_language.len(), num_states);
     }
-    let projected_empty = configurations
-        .iter()
-        .map(|config| {
-            raw_active_language.is_some_and(|active| {
-                config.iter().all(|&raw| !active[raw as usize])
-            })
-        })
-        .collect::<Vec<_>>();
 
     let (candidate_members, candidate_representatives, raw_to_candidate) =
         candidate_partition(num_states, initial_state_map);
@@ -2022,8 +2341,52 @@ pub(crate) fn compute_state_map_from_prebuilt_sparse_powerset(
         .map(|&config| output_class_by_config[config as usize])
         .collect::<Vec<_>>();
 
+    if matches!(depth, RefinementDepth::Stable) {
+        let profile_timing = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
+        let started_at = std::time::Instant::now();
+        let refined = refine_prebuilt_sparse_powerset_worklist(
+            &classes,
+            &start_configs,
+            configurations,
+            &raw_to_candidate,
+            raw_active_language,
+            edge_offsets,
+            edges,
+        );
+        if profile_timing {
+            let class_count = refined
+                .iter()
+                .copied()
+                .collect::<rustc_hash::FxHashSet<_>>()
+                .len();
+            eprintln!(
+                "[glrmask/profile][nfa_restricted_worklist] states={} candidates={} configs={} edges={} classes={} total_ms={:.3}",
+                num_states,
+                num_candidates,
+                configurations.len(),
+                edges.len(),
+                class_count,
+                started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        return build_state_map(
+            &candidate_members,
+            &candidate_representatives,
+            &refined,
+            num_states,
+        );
+    }
+
+    let projected_empty = configurations
+        .iter()
+        .map(|config| {
+            raw_active_language.is_some_and(|active| {
+                config.iter().all(|&raw| !active[raw as usize])
+            })
+        })
+        .collect::<Vec<_>>();
     let round_limit = match depth {
-        RefinementDepth::Stable => num_candidates,
+        RefinementDepth::Stable => unreachable!("stable refinement returned above"),
         RefinementDepth::Bounded(rounds) => rounds,
     };
     let mut class_set_by_config = vec![0u32; configurations.len()];
@@ -2985,10 +3348,214 @@ mod tests {
             &view.edge_offsets,
             &view.edges,
         );
+        let synchronous = compute_state_map_from_prebuilt_sparse_powerset(
+            &tokenizer,
+            None,
+            RefinementDepth::Bounded(tokenizer.num_states() as usize),
+            &view.raw_start_to_view,
+            &view.configurations,
+            &output_class_by_config,
+            None,
+            &view.edge_offsets,
+            &view.edges,
+        );
 
         assert!(same_partition(
             &direct.original_to_internal,
             &reused.original_to_internal,
         ));
+        assert!(same_partition(
+            &synchronous.original_to_internal,
+            &reused.original_to_internal,
+        ));
+    }
+
+    #[test]
+    fn prebuilt_sparse_worklist_matches_projected_synchronous_refinement() {
+        let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
+        let mut relevant = [false; 256];
+        relevant[b'a' as usize] = true;
+        relevant[b'b' as usize] = true;
+        let active_groups = [true, false];
+        let view = build_relevant_powerset_view(
+            &tokenizer,
+            &relevant,
+            Some(&active_groups),
+            None,
+        );
+        let output_class_by_config = powerset_output_class_ids(&view);
+        let active_language = raw_active_language_states(&tokenizer, Some(&active_groups))
+            .expect("active group projection");
+
+        let seed = compute_state_map_from_prebuilt_sparse_powerset(
+            &tokenizer,
+            None,
+            RefinementDepth::Bounded(1),
+            &view.raw_start_to_view,
+            &view.configurations,
+            &output_class_by_config,
+            Some(&active_language),
+            &view.edge_offsets,
+            &view.edges,
+        );
+        let worklist = compute_state_map_from_prebuilt_sparse_powerset(
+            &tokenizer,
+            Some(&seed),
+            RefinementDepth::Stable,
+            &view.raw_start_to_view,
+            &view.configurations,
+            &output_class_by_config,
+            Some(&active_language),
+            &view.edge_offsets,
+            &view.edges,
+        );
+        let synchronous = compute_state_map_from_prebuilt_sparse_powerset(
+            &tokenizer,
+            Some(&seed),
+            RefinementDepth::Bounded(tokenizer.num_states() as usize),
+            &view.raw_start_to_view,
+            &view.configurations,
+            &output_class_by_config,
+            Some(&active_language),
+            &view.edge_offsets,
+            &view.edges,
+        );
+
+        assert!(same_partition(
+            &synchronous.original_to_internal,
+            &worklist.original_to_internal,
+        ));
+    }
+
+    #[test]
+    fn prebuilt_sparse_worklist_matches_synchronous_on_random_topologies() {
+        fn next_u32(state: &mut u64) -> u32 {
+            *state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (*state >> 32) as u32
+        }
+
+        let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
+        let num_states = tokenizer.num_states() as usize;
+        for seed in 0..128u64 {
+            let mut rng = seed ^ 0x9e37_79b9_7f4a_7c15;
+            let extra_configs = num_states * 3 + 1;
+            let mut configurations = (0..num_states)
+                .map(|state| vec![state as u32].into_boxed_slice())
+                .collect::<Vec<_>>();
+            for _ in 0..extra_configs {
+                let mut config = Vec::<u32>::new();
+                for raw in 0..num_states {
+                    if next_u32(&mut rng).is_multiple_of(3) {
+                        config.push(raw as u32);
+                    }
+                }
+                if config.is_empty() && next_u32(&mut rng) & 1 != 0 {
+                    config.push((next_u32(&mut rng) as usize % num_states) as u32);
+                }
+                configurations.push(config.into_boxed_slice());
+            }
+
+            let raw_start_to_view = (0..num_states as u32).collect::<Vec<_>>();
+            let output_class_by_config = (0..configurations.len())
+                .map(|_| next_u32(&mut rng) % 5)
+                .collect::<Vec<_>>();
+            let mut edge_offsets = Vec::<u32>::with_capacity(configurations.len() + 1);
+            let mut edges = Vec::<(u8, u32)>::new();
+            edge_offsets.push(0);
+            for _ in 0..configurations.len() {
+                for byte in 0..5u8 {
+                    if next_u32(&mut rng) & 1 != 0 {
+                        edges.push((
+                            byte,
+                            next_u32(&mut rng) % configurations.len() as u32,
+                        ));
+                    }
+                }
+                edge_offsets.push(edges.len() as u32);
+            }
+            let mut active_language = (0..num_states)
+                .map(|_| next_u32(&mut rng) & 1 != 0)
+                .collect::<Vec<_>>();
+            if !active_language.iter().any(|&active| active) {
+                active_language[next_u32(&mut rng) as usize % num_states] = true;
+            }
+
+            for active_language in [None, Some(active_language.as_slice())] {
+                let synchronous = compute_state_map_from_prebuilt_sparse_powerset(
+                    &tokenizer,
+                    None,
+                    RefinementDepth::Bounded(num_states),
+                    &raw_start_to_view,
+                    &configurations,
+                    &output_class_by_config,
+                    active_language,
+                    &edge_offsets,
+                    &edges,
+                );
+                let worklist = compute_state_map_from_prebuilt_sparse_powerset(
+                    &tokenizer,
+                    None,
+                    RefinementDepth::Stable,
+                    &raw_start_to_view,
+                    &configurations,
+                    &output_class_by_config,
+                    active_language,
+                    &edge_offsets,
+                    &edges,
+                );
+                assert!(
+                    same_partition(
+                        &synchronous.original_to_internal,
+                        &worklist.original_to_internal,
+                    ),
+                    "unseeded mismatch at seed={seed} active_projection={}",
+                    active_language.is_some(),
+                );
+
+                let initial = compute_state_map_from_prebuilt_sparse_powerset(
+                    &tokenizer,
+                    None,
+                    RefinementDepth::Bounded(1),
+                    &raw_start_to_view,
+                    &configurations,
+                    &output_class_by_config,
+                    active_language,
+                    &edge_offsets,
+                    &edges,
+                );
+                let seeded_synchronous = compute_state_map_from_prebuilt_sparse_powerset(
+                    &tokenizer,
+                    Some(&initial),
+                    RefinementDepth::Bounded(num_states),
+                    &raw_start_to_view,
+                    &configurations,
+                    &output_class_by_config,
+                    active_language,
+                    &edge_offsets,
+                    &edges,
+                );
+                let seeded_worklist = compute_state_map_from_prebuilt_sparse_powerset(
+                    &tokenizer,
+                    Some(&initial),
+                    RefinementDepth::Stable,
+                    &raw_start_to_view,
+                    &configurations,
+                    &output_class_by_config,
+                    active_language,
+                    &edge_offsets,
+                    &edges,
+                );
+                assert!(
+                    same_partition(
+                        &seeded_synchronous.original_to_internal,
+                        &seeded_worklist.original_to_internal,
+                    ),
+                    "seeded mismatch at seed={seed} active_projection={}",
+                    active_language.is_some(),
+                );
+            }
+        }
     }
 }
