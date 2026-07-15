@@ -947,18 +947,34 @@ fn expand_trie_frontiers(
             for state_offset in 0..state_len {
                 let state = product_states[state_start + state_offset];
                 if let [source] = configs[state as usize].as_ref() {
-                    for (byte, raw_target) in tokenizer.transitions_from(*source) {
+                    for (byte, _) in tokenizer.transitions_from(*source) {
                         let child_slot = child_slot_by_byte[byte as usize];
                         if child_slot == u16::MAX {
                             continue;
                         }
-                        let target = raw_start_to_view[raw_target as usize];
+                        // Preserve the sparse root scan, but use the exact
+                        // configuration transition. A physical raw target may
+                        // not have been preseeded as a raw start, so directly
+                        // indexing `raw_start_to_view` can incorrectly turn a
+                        // live transition into DEAD.
+                        let target = ensure_config_transition(
+                            tokenizer,
+                            raw_transitions,
+                            state,
+                            byte,
+                            configs,
+                            config_ids,
+                            transitions,
+                            known_transitions,
+                            None,
+                            singleton_closures,
+                            active_language,
+                            target_marks,
+                            target_generation,
+                        );
                         if target == u32::MAX {
                             continue;
                         }
-                        let transition_slot = state as usize * 256 + byte as usize;
-                        known_transitions[transition_slot] = 1;
-                        transitions[transition_slot] = target;
                         child_frontiers[child_slot as usize].push(target);
                     }
                     continue;
@@ -2510,6 +2526,56 @@ mod tests {
                         "raw_state={raw_state} token={token:?}",
                     );
                 }
+            }
+        }
+
+        // A sparse-root edge can reach a raw state that was not itself one of
+        // the preseeded start states. The sparse path must fall back to exact
+        // configuration construction rather than treating the missing
+        // raw_start_to_view entry as DEAD.
+        let subset_start_states = vec![2usize, 4usize];
+        let subset_tokens: &[&[u8]] = &[b"a", b"b"];
+        let subset_active_groups = [true, true];
+        let (frontier, frontier_work) = build_bounded_analysis_topology_impl_with_expansion(
+            &tokenizer,
+            None,
+            &subset_start_states,
+            subset_tokens,
+            false,
+            true,
+            false,
+            true,
+            Some(&subset_active_groups),
+            None,
+            true,
+        )
+        .expect("frontier topology build with unpreseeded targets");
+        let (dfs, dfs_work) = build_bounded_analysis_topology_impl_with_expansion(
+            &tokenizer,
+            None,
+            &subset_start_states,
+            subset_tokens,
+            false,
+            true,
+            false,
+            true,
+            Some(&subset_active_groups),
+            None,
+            false,
+        )
+        .expect("DFS topology build with unpreseeded targets");
+        assert_eq!(frontier_work, dfs_work);
+        let frontier = frontier.materialize_already_projected(&tokenizer, &subset_active_groups);
+        let dfs = dfs.materialize_already_projected(&tokenizer, &subset_active_groups);
+        for &raw_state in &subset_start_states {
+            let frontier_start = frontier.view_state_for_raw_start(raw_state);
+            let dfs_start = dfs.view_state_for_raw_start(raw_state);
+            for &token in subset_tokens {
+                assert_eq!(
+                    view_trace(&frontier.tokenizer_view, frontier_start, token),
+                    view_trace(&dfs.tokenizer_view, dfs_start, token),
+                    "unpreseeded target raw_state={raw_state} token={token:?}",
+                );
             }
         }
 
