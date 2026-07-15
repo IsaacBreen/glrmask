@@ -882,7 +882,7 @@ fn build_l1_generic_nfa_analysis_view(
                 .iter()
                 .map(|(_, bytes)| bytes.as_ref())
                 .collect::<Vec<_>>();
-            super::l2p::equivalence_analysis::state_equivalence::nfa::build_token_bounded_analysis_view_projected(
+            super::l2p::equivalence_analysis::state_equivalence::nfa::build_token_bounded_analysis_view_projected_sorted(
                 tokenizer,
                 raw_states,
                 &tokens,
@@ -895,7 +895,7 @@ fn build_l1_generic_nfa_analysis_view(
             .iter()
             .map(|(_, bytes)| bytes.as_ref())
             .collect::<Vec<_>>();
-        match super::l2p::equivalence_analysis::state_equivalence::nfa::try_build_token_bounded_analysis_view_projected(
+        match super::l2p::equivalence_analysis::state_equivalence::nfa::try_build_token_bounded_analysis_view_projected_sorted(
             tokenizer,
             raw_states,
             &tokens,

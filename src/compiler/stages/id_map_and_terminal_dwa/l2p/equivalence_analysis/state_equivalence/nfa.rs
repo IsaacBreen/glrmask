@@ -560,7 +560,7 @@ pub(crate) fn build_relevant_powerset_view(
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default, PartialEq, Eq)]
 struct ByteTrieNode {
     children: Vec<(u8, usize)>,
 }
@@ -583,6 +583,36 @@ fn build_byte_trie<'a>(sequences: impl IntoIterator<Item = &'a [u8]>) -> Vec<Byt
             };
             node = child;
         }
+    }
+    nodes
+}
+
+/// Build the same trie as [`build_byte_trie`] when input sequences are already
+/// in lexicographic byte order. Consecutive sequences share exactly their LCP,
+/// so no edge hash table is needed: truncate the previous prefix path to the
+/// LCP and append the new suffix once.
+fn build_byte_trie_sorted(sequences: &[&[u8]]) -> Vec<ByteTrieNode> {
+    debug_assert!(sequences.windows(2).all(|pair| pair[0] <= pair[1]));
+
+    let mut nodes = vec![ByteTrieNode::default()];
+    let mut path = vec![0usize];
+    let mut previous: &[u8] = &[];
+    for &sequence in sequences {
+        let lcp = previous
+            .iter()
+            .zip(sequence.iter())
+            .take_while(|(left, right)| left == right)
+            .count();
+        path.truncate(lcp + 1);
+        let mut node = *path.last().expect("root path must remain present");
+        for &byte in &sequence[lcp..] {
+            let child = nodes.len();
+            nodes.push(ByteTrieNode::default());
+            nodes[node].children.push((byte, child));
+            path.push(child);
+            node = child;
+        }
+        previous = sequence;
     }
     nodes
 }
@@ -634,7 +664,10 @@ fn ensure_config_transition(
     transitions: &mut Vec<u32>,
     known_transitions: &mut Vec<u8>,
     preseeded_raw_closures: Option<&[u32]>,
+    singleton_closures: &[Box<[u32]>],
     active_language: Option<&[bool]>,
+    target_marks: &mut [u32],
+    target_generation: &mut u32,
 ) -> u32 {
     let slot = state as usize * 256 + byte as usize;
     if known_transitions[slot] != 0 {
@@ -651,16 +684,15 @@ fn ensure_config_transition(
             return target;
         }
     }
-    let targets = tokenizer.step_all(&configs[state as usize], byte);
-    let targets = if let Some(active_language) = active_language {
-        targets
-            .iter()
-            .copied()
-            .filter(|&target| active_language[target as usize])
-            .collect::<Vec<_>>()
-    } else {
-        targets.to_vec()
-    };
+    let targets = step_epsilon_closed_config_cached(
+        tokenizer,
+        configs[state as usize].as_ref(),
+        byte,
+        singleton_closures,
+        active_language,
+        target_marks,
+        target_generation,
+    );
     if targets.is_empty() {
         return u32::MAX;
     }
@@ -673,6 +705,45 @@ fn ensure_config_transition(
     target
 }
 
+/// Step a configuration that is already epsilon-closed (possibly after an
+/// active-language projection) without closing its source again. The target is
+/// exactly the union of the cached singleton epsilon closures reached by direct
+/// byte transitions from the closed source configuration.
+fn step_epsilon_closed_config_cached(
+    tokenizer: &Tokenizer,
+    config: &[u32],
+    byte: u8,
+    singleton_closures: &[Box<[u32]>],
+    active_language: Option<&[bool]>,
+    target_marks: &mut [u32],
+    target_generation: &mut u32,
+) -> Vec<u32> {
+    *target_generation = target_generation.wrapping_add(1);
+    if *target_generation == 0 {
+        target_marks.fill(0);
+        *target_generation = 1;
+    }
+    let generation = *target_generation;
+    let mut targets = Vec::<u32>::new();
+    for &source in config {
+        let Some(direct_target) = tokenizer.step(source, byte) else {
+            continue;
+        };
+        for &target in singleton_closures[direct_target as usize].iter() {
+            if active_language.is_some_and(|active| !active[target as usize]) {
+                continue;
+            }
+            let mark = &mut target_marks[target as usize];
+            if *mark != generation {
+                *mark = generation;
+                targets.push(target);
+            }
+        }
+    }
+    targets.sort_unstable();
+    targets
+}
+
 fn expand_trie_from_config(
     tokenizer: &Tokenizer,
     start_state: u32,
@@ -683,7 +754,10 @@ fn expand_trie_from_config(
     known_transitions: &mut Vec<u8>,
     visited: &mut rustc_hash::FxHashSet<(u32, usize)>,
     preseeded_raw_closures: Option<&[u32]>,
+    singleton_closures: &[Box<[u32]>],
     active_language: Option<&[bool]>,
+    target_marks: &mut [u32],
+    target_generation: &mut u32,
 ) {
     let mut stack = vec![(start_state, 0usize)];
     while let Some((state, node)) = stack.pop() {
@@ -700,7 +774,10 @@ fn expand_trie_from_config(
                 transitions,
                 known_transitions,
                 preseeded_raw_closures,
+                singleton_closures,
                 active_language,
+                target_marks,
+                target_generation,
             );
             if target != u32::MAX {
                 stack.push((target, child));
@@ -719,7 +796,10 @@ fn expand_trie_from_config_budgeted(
     known_transitions: &mut Vec<u8>,
     visited: &mut rustc_hash::FxHashSet<(u32, usize)>,
     preseeded_raw_closures: Option<&[u32]>,
+    singleton_closures: &[Box<[u32]>],
     active_language: Option<&[bool]>,
+    target_marks: &mut [u32],
+    target_generation: &mut u32,
     budget: TokenBoundedAnalysisWorkBudget,
     prior_trie_visits: usize,
 ) -> Result<(), TokenBoundedAnalysisWork> {
@@ -751,7 +831,10 @@ fn expand_trie_from_config_budgeted(
                 transitions,
                 known_transitions,
                 preseeded_raw_closures,
+                singleton_closures,
                 active_language,
+                target_marks,
+                target_generation,
             );
             if target != u32::MAX {
                 stack.push((target, child));
@@ -950,6 +1033,7 @@ fn build_bounded_analysis_topology_impl(
     combine_start_states: bool,
     factor_common_first_byte: bool,
     include_reset_suffixes: bool,
+    tokens_are_sorted: bool,
     active_groups: Option<&[bool]>,
     budget: Option<TokenBoundedAnalysisWorkBudget>,
 ) -> Result<(TokenBoundedAnalysisTopology, TokenBoundedAnalysisWork), TokenBoundedAnalysisWork> {
@@ -1002,7 +1086,6 @@ fn build_bounded_analysis_topology_impl(
             raw_start_to_view[raw_state] = state;
         }
     }
-
     if budget.is_some_and(|budget| configs.len() > budget.max_configurations) {
         return Err(TokenBoundedAnalysisWork {
             configurations: configs.len(),
@@ -1021,7 +1104,14 @@ fn build_bounded_analysis_topology_impl(
         })
         .flatten();
     let token_trie = if common_first_byte.is_some() {
-        build_byte_trie(tokens.iter().map(|token| &token[1..]))
+        if tokens_are_sorted {
+            let suffixes = tokens.iter().map(|token| &token[1..]).collect::<Vec<_>>();
+            build_byte_trie_sorted(&suffixes)
+        } else {
+            build_byte_trie(tokens.iter().map(|token| &token[1..]))
+        }
+    } else if tokens_are_sorted {
+        build_byte_trie_sorted(tokens)
     } else {
         build_byte_trie(tokens.iter().copied())
     };
@@ -1032,6 +1122,8 @@ fn build_bounded_analysis_topology_impl(
                 .flat_map(|token| (0..token.len()).map(move |offset| &token[offset..])),
         )
     });
+    let mut target_marks = vec![0u32; raw_state_count];
+    let mut target_generation = 0u32;
     let mut seeded_configs = raw_start_states
         .iter()
         .map(|&raw| raw_start_to_view[raw])
@@ -1050,7 +1142,10 @@ fn build_bounded_analysis_topology_impl(
                 &mut transitions,
                 &mut known_transitions,
                 (!combine_start_states).then_some(raw_start_to_view.as_slice()),
+                singleton_closures.as_ref(),
                 active_language.as_deref(),
+                &mut target_marks,
+                &mut target_generation,
             );
             if target != u32::MAX {
                 advanced_seeded_configs.push(target);
@@ -1080,7 +1175,10 @@ fn build_bounded_analysis_topology_impl(
                 &mut known_transitions,
                 &mut token_visited,
                 preseeded_raw_closures,
+                singleton_closures.as_ref(),
                 active_language.as_deref(),
+                &mut target_marks,
+                &mut target_generation,
                 budget,
                 0,
             )?;
@@ -1095,7 +1193,10 @@ fn build_bounded_analysis_topology_impl(
                 &mut known_transitions,
                 &mut token_visited,
                 preseeded_raw_closures,
+                singleton_closures.as_ref(),
                 active_language.as_deref(),
+                &mut target_marks,
+                &mut target_generation,
             );
         }
     }
@@ -1112,7 +1213,10 @@ fn build_bounded_analysis_topology_impl(
                 &mut known_transitions,
                 &mut suffix_visited,
                 None,
+                singleton_closures.as_ref(),
                 active_language.as_deref(),
+                &mut target_marks,
+                &mut target_generation,
                 budget,
                 token_visited.len(),
             )?;
@@ -1127,7 +1231,10 @@ fn build_bounded_analysis_topology_impl(
                 &mut known_transitions,
                 &mut suffix_visited,
                 None,
+                singleton_closures.as_ref(),
                 active_language.as_deref(),
+                &mut target_marks,
+                &mut target_generation,
             );
         }
     }
@@ -1161,6 +1268,7 @@ fn build_bounded_analysis_view_inner(
         combine_start_states,
         true,
         true,
+        false,
         None,
         None,
     )
@@ -1185,6 +1293,7 @@ fn build_bounded_analysis_view_impl(
         combine_start_states,
         factor_common_first_byte,
         include_reset_suffixes,
+        false,
         None,
         None,
     )
@@ -1235,6 +1344,7 @@ pub(crate) fn build_token_bounded_analysis_topology(
         false,
         true,
         false,
+        false,
         None,
         None,
     )
@@ -1248,6 +1358,37 @@ pub(crate) fn build_token_bounded_analysis_view_projected(
     tokens: &[&[u8]],
     active_groups: &[bool],
 ) -> BoundedAnalysisView {
+    build_token_bounded_analysis_view_projected_with_order(
+        tokenizer,
+        raw_start_states,
+        tokens,
+        active_groups,
+        false,
+    )
+}
+
+pub(crate) fn build_token_bounded_analysis_view_projected_sorted(
+    tokenizer: &Tokenizer,
+    raw_start_states: &[usize],
+    tokens: &[&[u8]],
+    active_groups: &[bool],
+) -> BoundedAnalysisView {
+    build_token_bounded_analysis_view_projected_with_order(
+        tokenizer,
+        raw_start_states,
+        tokens,
+        active_groups,
+        true,
+    )
+}
+
+fn build_token_bounded_analysis_view_projected_with_order(
+    tokenizer: &Tokenizer,
+    raw_start_states: &[usize],
+    tokens: &[&[u8]],
+    active_groups: &[bool],
+    tokens_are_sorted: bool,
+) -> BoundedAnalysisView {
     build_bounded_analysis_topology_impl(
         tokenizer,
         raw_start_states,
@@ -1255,6 +1396,7 @@ pub(crate) fn build_token_bounded_analysis_view_projected(
         false,
         true,
         false,
+        tokens_are_sorted,
         Some(active_groups),
         None,
     )
@@ -1270,6 +1412,41 @@ pub(crate) fn try_build_token_bounded_analysis_view_projected(
     active_groups: &[bool],
     budget: TokenBoundedAnalysisWorkBudget,
 ) -> Result<(BoundedAnalysisView, TokenBoundedAnalysisWork), TokenBoundedAnalysisWork> {
+    try_build_token_bounded_analysis_view_projected_with_order(
+        tokenizer,
+        raw_start_states,
+        tokens,
+        active_groups,
+        budget,
+        false,
+    )
+}
+
+pub(crate) fn try_build_token_bounded_analysis_view_projected_sorted(
+    tokenizer: &Tokenizer,
+    raw_start_states: &[usize],
+    tokens: &[&[u8]],
+    active_groups: &[bool],
+    budget: TokenBoundedAnalysisWorkBudget,
+) -> Result<(BoundedAnalysisView, TokenBoundedAnalysisWork), TokenBoundedAnalysisWork> {
+    try_build_token_bounded_analysis_view_projected_with_order(
+        tokenizer,
+        raw_start_states,
+        tokens,
+        active_groups,
+        budget,
+        true,
+    )
+}
+
+fn try_build_token_bounded_analysis_view_projected_with_order(
+    tokenizer: &Tokenizer,
+    raw_start_states: &[usize],
+    tokens: &[&[u8]],
+    active_groups: &[bool],
+    budget: TokenBoundedAnalysisWorkBudget,
+    tokens_are_sorted: bool,
+) -> Result<(BoundedAnalysisView, TokenBoundedAnalysisWork), TokenBoundedAnalysisWork> {
     let (topology, work) = build_bounded_analysis_topology_impl(
         tokenizer,
         raw_start_states,
@@ -1277,6 +1454,7 @@ pub(crate) fn try_build_token_bounded_analysis_view_projected(
         false,
         true,
         false,
+        tokens_are_sorted,
         Some(active_groups),
         Some(budget),
     )?;
@@ -1308,6 +1486,7 @@ pub(crate) fn build_token_bounded_analysis_view_from_combined_starts(
         tokens,
         true,
         true,
+        false,
         false,
         None,
         None,
@@ -1784,7 +1963,78 @@ pub(crate) fn compute_state_map(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sorted_byte_trie_matches_generic_builder() {
+        let sequences: Vec<&[u8]> = vec![
+            b"",
+            b"a",
+            b"a",
+            b"aa",
+            b"ab",
+            b"aba",
+            b"b",
+            b"ba",
+            b"z",
+            b"\xff",
+        ];
+        assert_eq!(
+            build_byte_trie(sequences.iter().copied()),
+            build_byte_trie_sorted(&sequences),
+        );
+    }
     use crate::automata::lexer::tokenizer::arbitrary_epsilon_l1_test_tokenizer;
+
+    #[test]
+    fn cached_closed_config_step_matches_scalar_step_all() {
+        let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
+        let singleton_closures = tokenizer.all_singleton_epsilon_closures();
+        let active_group_masks: [Option<&[bool]>; 4] = [
+            None,
+            Some(&[true, false]),
+            Some(&[false, true]),
+            Some(&[true, true]),
+        ];
+
+        for active_groups in active_group_masks {
+            let active_language = raw_active_language_states(&tokenizer, active_groups);
+            let mut target_marks = vec![0u32; tokenizer.num_states() as usize];
+            let mut target_generation = 0u32;
+            for raw_state in 0..tokenizer.num_states() as usize {
+                let config = singleton_closures[raw_state]
+                    .iter()
+                    .copied()
+                    .filter(|&state| {
+                        active_language
+                            .as_deref()
+                            .is_none_or(|active| active[state as usize])
+                    })
+                    .collect::<Vec<_>>();
+                for byte in 0u8..=u8::MAX {
+                    let scalar = tokenizer
+                        .step_all(&config, byte)
+                        .iter()
+                        .copied()
+                        .filter(|&state| {
+                            active_language
+                                .as_deref()
+                                .is_none_or(|active| active[state as usize])
+                        })
+                        .collect::<Vec<_>>();
+                    let cached = step_epsilon_closed_config_cached(
+                        &tokenizer,
+                        &config,
+                        byte,
+                        singleton_closures.as_ref(),
+                        active_language.as_deref(),
+                        &mut target_marks,
+                        &mut target_generation,
+                    );
+                    assert_eq!(cached, scalar, "raw_state={raw_state} byte={byte}");
+                }
+            }
+        }
+    }
 
     fn view_trace(
         view: &TokenizerView,
@@ -1909,6 +2159,7 @@ mod tests {
             &tokens,
             false,
             true,
+            false,
             false,
             Some(&active_groups),
             None,
