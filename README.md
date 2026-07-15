@@ -218,9 +218,18 @@ The key design tradeoff is therefore deliberate: spend more work when a grammar 
 
 Compilation cost and online decoding cost should be measured separately. The design is aimed at workloads where a compiled grammar is reused across many mask queries or generation streams; a one-shot grammar may value compilation latency differently from a long-running serving workload.
 
-The initial public benchmark table is intentionally not populated with provisional internal numbers. Final results will be added only from the dedicated reproducible release benchmark pass, with hardware, tokenizer, workloads, comparison configuration, and latency distribution reported together.
+The 0.1 native benchmark snapshot measured production commit `89559ad2600056e730439031ff2525c6b2c86632` on a Hetzner CX23 in Helsinki with 2 shared AMD EPYC-Rome vCPUs and 4 GB RAM. The build used `RUSTFLAGS=-C target-cpu=native`, so these results are hardware-specific native release-build measurements, not generic-wheel timings.
 
-<!-- Release benchmark table placeholder: fill only from the verified release benchmark report. -->
+| workload | compile median | mask+commit p50 | mask+commit p99.9 |
+|---|---:|---:|---:|
+| 8-tool BFCL schema (`bfcl-008`) | 136.50 ms | 4.785 µs | 31.995 µs |
+| 512-tool BFCL schema (`bfcl-512`) | 985.44 ms | 4.893 µs | 25.753 µs |
+| recursive JSON GLRM CFG (`json-glrm`) | 63.11 ms | 5.646 µs | 32.855 µs |
+| Vercel compile-tail sentinel (`vercel`) | 24.93 s | 8.657 µs | 34.956 µs |
+
+Vercel remains a deliberately difficult compile-tail case at about 25 seconds on this shared 2-vCPU machine. One isolated 1.424 ms mask+commit outlier occurred in 66,200 measured O62060 samples; no >1 ms runtime sample occurred in the other four workloads. Raw mask disagreements collected against `llguidance_native` were not adjudicated as correctness evidence, and these measurements do not support a claim of universal superiority over another backend.
+
+See [the full 0.1 benchmark methodology and results](docs/benchmark-0.1.md) for all five workloads, percentile distributions, environment details, and caveats.
 
 ## Other API features
 
@@ -260,7 +269,7 @@ Python exposes the corresponding incremental operations, with `mask()` returning
 - **JSON Schema is not fully conformant.** It is a pragmatic subset with [documented semantic deviations](docs/json-schema-semantic-deviations.md); some unsupported constructs error, while some documented cases broaden or restrict semantics.
 - **Source builds are currently required.** Until wheels and registry packages are actually published, Python installation requires a Rust toolchain and native build tools, and Rust consumers must depend on a source checkout.
 - **Compiled constraints are vocabulary-specific.** Recompile when the tokenizer vocabulary or token-byte mapping changes.
-- **Benchmark numbers are pending the final reproducible release benchmark pass.** This README deliberately does not publish unstable internal measurements.
+- **Benchmark numbers are hardware-specific.** The [0.1 benchmark snapshot](docs/benchmark-0.1.md) reports a native CPU-tuned build on one Hetzner CX23; it is not a hardware-independent guarantee.
 
 ## Examples
 

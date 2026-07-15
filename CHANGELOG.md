@@ -36,17 +36,18 @@
 ---
 
 ## 0.1.0 — Initial Release
-### Features
-- **EBNF, Lark, and JSON Schema** grammar frontends
-- **GLR parser** for ambiguous grammar support
-- **DWA-based mask computation** in microseconds
-- **Serialization**: `save()`/`load()` via bincode
-- **Force detection**: `forced_token()` and `is_dead()` utilities
-- 206 tests (179 unit + 27 integration)
 
-### Architecture
-- `ds/`: Core data structures (RangeSet, U8Set, BitSet)
-- `automata/`: DFA, NFA, regex, weighted automata (NWA, DWA)
-- `compiler/`: Grammar → GLR table → NWA → DWA pipeline
-- `frontend/`: EBNF, Lark, JSON Schema parsers
-- `runtime/`: Constraint state, mask computation, force detection
+### Highlights
+
+- Vocabulary-specific grammar-constrained decoding for EBNF, Lark, and a documented pragmatic subset of JSON Schema.
+- Reusable compiled `Constraint` objects with incremental mask, commit, completion, and forced-prefix operations.
+- GLR-based parsing for ambiguous and genuinely context-free grammars, including tokenizations that cross grammar-terminal boundaries.
+- Rust and Python APIs, including the public Python `glrmask` import surface and clean source installation with declared NumPy dependency.
+- Constraint serialization for compile-once, load-and-run deployments, plus a smaller execution-only runtime crate for serving artifacts.
+- Build-only Python wheel CI covering Python 3.9–3.13 across manylinux x86_64/aarch64, macOS x86_64/arm64, and Windows x86_64.
+
+### Release evidence and caveats
+
+- The bounded native release benchmark is documented in [`docs/benchmark-0.1.md`](docs/benchmark-0.1.md), including exact hardware, methodology, compile latency, runtime percentiles, and tail caveats.
+- JSON Schema support is not full specification conformance; see [`docs/json-schema-semantic-deviations.md`](docs/json-schema-semantic-deviations.md).
+- The Vercel benchmark remains a long compile-tail case at about 25 seconds on the measured shared 2-vCPU host.
