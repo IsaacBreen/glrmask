@@ -8,7 +8,13 @@ tokens incrementally, and serialize to bytes.
 
 - EBNF
 - Lark
-- JSON Schema
+- JSON Schema (partial support; not full specification conformance)
+
+JSON Schema support is a pragmatic subset, not a claim of full JSON Schema
+conformance. Unsupported constructs may be rejected, and some cases deliberately
+broaden or restrict the accepted instances for tractability. See
+[JSON Schema semantic deviations](docs/json-schema-semantic-deviations.md) before
+relying on exact equivalence to the source schema.
 
 ## Quick Start
 
