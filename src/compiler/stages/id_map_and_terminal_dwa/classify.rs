@@ -732,6 +732,7 @@ pub(crate) fn classify_terminal_path_lengths(
             vocab,
             disallowed_follows,
             &heuristic_two_plus,
+            bytesets,
         )
     };
     if std::env::var_os("GLRMASK_TERMINAL_PATH_STRICT_REFERENCE").is_some() {
@@ -1855,27 +1856,56 @@ struct ExactTerminalPathTwoPlus {
 struct CandidatePrefixPowerset<'a> {
     tokenizer: &'a Tokenizer,
     words_per_mask: usize,
+    terminal_to_local: Option<Box<[u32]>>,
     configs: Vec<Box<[u32]>>,
     config_ids: FxHashMap<Vec<u32>, u32>,
     transitions: Vec<[u32; 256]>,
     matched_masks: Vec<u64>,
+    future_masks: Vec<u64>,
 }
 
 impl<'a> CandidatePrefixPowerset<'a> {
-    fn new(tokenizer: &'a Tokenizer, words_per_mask: usize) -> (Self, u32) {
+    fn new(
+        tokenizer: &'a Tokenizer,
+        words_per_mask: usize,
+        terminal_to_local: Option<Box<[u32]>>,
+    ) -> (Self, u32, u32) {
         let mut scanner = Self {
             tokenizer,
             words_per_mask,
+            terminal_to_local,
             configs: Vec::new(),
             config_ids: FxHashMap::default(),
             transitions: Vec::new(),
             matched_masks: Vec::new(),
+            future_masks: Vec::new(),
         };
         let start_states = (0..tokenizer.num_states())
-            .filter(|&state| !tokenizer.possible_future_terminals(state).is_empty())
+            .filter(|&state| scanner.state_has_candidate_future(state))
             .collect::<Vec<_>>();
         let start = scanner.intern(start_states);
-        (scanner, start)
+        let reset = scanner.intern(
+            tokenizer
+                .execute_from_state_end_only(&[], tokenizer.initial_state_id())
+                .to_vec(),
+        );
+        (scanner, start, reset)
+    }
+
+    #[inline]
+    fn local_terminal(&self, terminal: usize) -> Option<usize> {
+        self.terminal_to_local.as_ref().map_or(Some(terminal), |map| {
+            let local = map[terminal];
+            (local != u32::MAX).then_some(local as usize)
+        })
+    }
+
+    #[inline]
+    fn state_has_candidate_future(&self, state: u32) -> bool {
+        self.tokenizer
+            .possible_future_terminals(state)
+            .iter()
+            .any(|terminal| self.local_terminal(terminal).is_some())
     }
 
     fn intern(&mut self, mut states: Vec<u32>) -> u32 {
@@ -1892,10 +1922,18 @@ impl<'a> CandidatePrefixPowerset<'a> {
         let mask_base = self.matched_masks.len();
         self.matched_masks
             .resize(mask_base + self.words_per_mask, 0);
+        self.future_masks
+            .resize(mask_base + self.words_per_mask, 0);
         for &raw_state in &states {
             for terminal in self.tokenizer.matched_terminal_bitset(raw_state).iter() {
-                self.matched_masks[mask_base + (terminal >> 6)] |=
-                    1u64 << (terminal & 63);
+                if let Some(local) = self.local_terminal(terminal) {
+                    self.matched_masks[mask_base + (local >> 6)] |= 1u64 << (local & 63);
+                }
+            }
+            for terminal in self.tokenizer.possible_future_terminals(raw_state).iter() {
+                if let Some(local) = self.local_terminal(terminal) {
+                    self.future_masks[mask_base + (local >> 6)] |= 1u64 << (local & 63);
+                }
             }
         }
         self.configs.push(states.into_boxed_slice());
@@ -1912,13 +1950,19 @@ impl<'a> CandidatePrefixPowerset<'a> {
         if cached != PREFIX_UNKNOWN_STATE {
             return cached;
         }
-        let mut targets = self.configs[state as usize]
-            .iter()
-            .filter_map(|&raw_state| {
-                let target = self.tokenizer.get_transition(raw_state, byte);
-                (target != u32::MAX).then_some(target)
-            })
-            .collect::<Vec<_>>();
+        let mut targets = if self.tokenizer.has_epsilon_transitions() {
+            self.tokenizer
+                .step_all(&self.configs[state as usize], byte)
+                .to_vec()
+        } else {
+            self.configs[state as usize]
+                .iter()
+                .filter_map(|&raw_state| {
+                    let target = self.tokenizer.get_transition(raw_state, byte);
+                    (target != u32::MAX).then_some(target)
+                })
+                .collect::<Vec<_>>()
+        };
         targets.sort_unstable();
         targets.dedup();
         let target = self.intern(targets);
@@ -1930,6 +1974,12 @@ impl<'a> CandidatePrefixPowerset<'a> {
     fn matched_mask(&self, state: u32) -> &[u64] {
         let base = state as usize * self.words_per_mask;
         &self.matched_masks[base..base + self.words_per_mask]
+    }
+
+    #[inline]
+    fn future_mask(&self, state: u32) -> &[u64] {
+        let base = state as usize * self.words_per_mask;
+        &self.future_masks[base..base + self.words_per_mask]
     }
 }
 
@@ -2044,6 +2094,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
     vocab: &Vocab,
     disallowed_follows: &BTreeMap<u32, BitSet>,
     candidates: &BitSet,
+    bytesets: &SharedClassifyBytesets,
 ) -> ExactTerminalPathTwoPlus {
     let total_started_at = std::time::Instant::now();
     let candidate_ids = candidates.iter().collect::<Vec<_>>();
@@ -2054,20 +2105,37 @@ fn exact_terminal_path_two_plus_candidate_dfa(
         };
     }
     let compile_started_at = std::time::Instant::now();
-    let exprs = Arc::<[crate::automata::lexer::ast::Expr]>::from(candidate_ids
-        .iter()
-        .map(|&terminal| {
-            tokenizer
-                .terminal_expr(terminal as u32)
-                .unwrap_or_else(|| panic!("missing terminal expression for terminal {terminal}"))
-                .clone()
-        })
-        .collect::<Vec<_>>()
-        .into_boxed_slice());
-    let candidate_tokenizer = build_regex(exprs.as_ref()).into_tokenizer(
-        candidate_ids.len() as u32,
-        Some(Arc::clone(&exprs)),
-    );
+    let uses_original_tokenizer = tokenizer.has_epsilon_transitions()
+        && candidate_ids.len().saturating_mul(10)
+            >= (tokenizer.num_terminals() as usize).saturating_mul(9);
+    let terminal_to_local = uses_original_tokenizer.then(|| {
+        let mut map = vec![u32::MAX; tokenizer.num_terminals() as usize];
+        for (local, &terminal) in candidate_ids.iter().enumerate() {
+            map[terminal] = local as u32;
+        }
+        map.into_boxed_slice()
+    });
+    let owned_candidate_tokenizer = if uses_original_tokenizer {
+        None
+    } else {
+        let exprs = Arc::<[crate::automata::lexer::ast::Expr]>::from(
+            candidate_ids
+                .iter()
+                .map(|&terminal| {
+                    tokenizer
+                        .terminal_expr(terminal as u32)
+                        .unwrap_or_else(|| panic!("missing terminal expression for terminal {terminal}"))
+                        .clone()
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        Some(Arc::new(
+            build_regex(exprs.as_ref())
+                .into_tokenizer(candidate_ids.len() as u32, Some(Arc::clone(&exprs))),
+        ))
+    };
+    let candidate_tokenizer = owned_candidate_tokenizer.as_deref().unwrap_or(tokenizer);
     let compile_ms = compile_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let mut local_disallowed = BTreeMap::<u32, BitSet>::new();
@@ -2100,8 +2168,11 @@ fn exact_terminal_path_two_plus_candidate_dfa(
     // prefixes as nodes and masks, while the downstream pass still visits every
     // token split in vocabulary order.
     let prefix_started_at = std::time::Instant::now();
-    let (mut prefix_scanner, prefix_start) =
-        CandidatePrefixPowerset::new(&candidate_tokenizer, words_per_mask);
+    let (mut prefix_scanner, prefix_start, reset_state) = CandidatePrefixPowerset::new(
+        candidate_tokenizer,
+        words_per_mask,
+        terminal_to_local,
+    );
     let mut split_offsets = Vec::with_capacity(vocab.entries.len() + 1);
     let mut prefix_states = Vec::<u32>::with_capacity(total_splits);
     split_offsets.push(0usize);
@@ -2117,44 +2188,68 @@ fn exact_terminal_path_two_plus_candidate_dfa(
     let prefix_ms = prefix_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let suffix_started_at = std::time::Instant::now();
-    let state_count = candidate_tokenizer.num_states() as usize;
-    let flat_trans = super::l1::build_flat_transition_table(&candidate_tokenizer);
-    let mut finalizer_masks = vec![0u64; state_count * words_per_mask];
-    let mut future_masks = vec![0u64; state_count * words_per_mask];
-    for state in 0..state_count {
-        let base = state * words_per_mask;
-        finalizer_masks[base..base + words_per_mask].copy_from_slice(
-            &candidate_tokenizer.matched_terminal_bitset(state as u32).words()
-                [..words_per_mask],
-        );
-        future_masks[base..base + words_per_mask].copy_from_slice(
-            &candidate_tokenizer.possible_future_terminals(state as u32).words()
-                [..words_per_mask],
-        );
-    }
+    let mut dense_flat_trans = Vec::new();
+    let mut dense_finalizer_masks = Vec::new();
+    let mut dense_future_masks = Vec::new();
+    let continuation_reset_state = if uses_original_tokenizer {
+        reset_state
+    } else {
+        let state_count = candidate_tokenizer.num_states() as usize;
+        dense_flat_trans = super::l1::build_flat_transition_table(candidate_tokenizer);
+        dense_finalizer_masks = vec![0u64; state_count * words_per_mask];
+        dense_future_masks = vec![0u64; state_count * words_per_mask];
+        for state in 0..state_count {
+            let base = state * words_per_mask;
+            dense_finalizer_masks[base..base + words_per_mask].copy_from_slice(
+                &candidate_tokenizer.matched_terminal_bitset(state as u32).words()
+                    [..words_per_mask],
+            );
+            dense_future_masks[base..base + words_per_mask].copy_from_slice(
+                &candidate_tokenizer.possible_future_terminals(state as u32).words()
+                    [..words_per_mask],
+            );
+        }
+        candidate_tokenizer.initial_state_id()
+    };
     let mut suffix_viable_masks = vec![0u64; total_splits * words_per_mask];
-    let reset_state = candidate_tokenizer.initial_state_id();
     if words_per_mask == 1 {
         for (token_index, bytes) in vocab.entries.values().enumerate() {
             let split_start = split_offsets[token_index];
             for split_after in 0..bytes.len().saturating_sub(1) {
-                let mut state = reset_state;
+                let mut state = continuation_reset_state;
                 let mut matched = 0u64;
                 let mut consumed_suffix = true;
                 for &byte in &bytes[split_after + 1..] {
-                    if future_masks[state as usize] == 0 {
-                        consumed_suffix = false;
-                        break;
+                    if uses_original_tokenizer {
+                        if prefix_scanner.future_mask(state)[0] == 0 {
+                            consumed_suffix = false;
+                            break;
+                        }
+                        state = prefix_scanner.step(state, byte);
+                        if state == PREFIX_DEAD_STATE {
+                            consumed_suffix = false;
+                            break;
+                        }
+                        matched |= prefix_scanner.matched_mask(state)[0];
+                    } else {
+                        if dense_future_masks[state as usize] == 0 {
+                            consumed_suffix = false;
+                            break;
+                        }
+                        state = dense_flat_trans[state as usize * 256 + byte as usize];
+                        if state == u32::MAX {
+                            consumed_suffix = false;
+                            break;
+                        }
+                        matched |= dense_finalizer_masks[state as usize];
                     }
-                    state = flat_trans[state as usize * 256 + byte as usize];
-                    if state == u32::MAX {
-                        consumed_suffix = false;
-                        break;
-                    }
-                    matched |= finalizer_masks[state as usize];
                 }
                 if consumed_suffix {
-                    matched |= future_masks[state as usize];
+                    matched |= if uses_original_tokenizer {
+                        prefix_scanner.future_mask(state)[0]
+                    } else {
+                        dense_future_masks[state as usize]
+                    };
                 }
                 suffix_viable_masks[split_start + split_after] = matched;
             }
@@ -2165,31 +2260,56 @@ fn exact_terminal_path_two_plus_candidate_dfa(
             let split_start = split_offsets[token_index];
             for split_after in 0..bytes.len().saturating_sub(1) {
                 matched.fill(0);
-                let mut state = reset_state;
+                let mut state = continuation_reset_state;
                 let mut consumed_suffix = true;
                 for &byte in &bytes[split_after + 1..] {
-                    let state_base = state as usize * words_per_mask;
-                    if future_masks[state_base..state_base + words_per_mask]
-                        .iter()
-                        .all(|&word| word == 0)
-                    {
-                        consumed_suffix = false;
-                        break;
-                    }
-                    state = flat_trans[state as usize * 256 + byte as usize];
-                    if state == u32::MAX {
-                        consumed_suffix = false;
-                        break;
-                    }
-                    let state_base = state as usize * words_per_mask;
-                    for word_index in 0..words_per_mask {
-                        matched[word_index] |= finalizer_masks[state_base + word_index];
+                    if uses_original_tokenizer {
+                        if prefix_scanner
+                            .future_mask(state)
+                            .iter()
+                            .all(|&word| word == 0)
+                        {
+                            consumed_suffix = false;
+                            break;
+                        }
+                        state = prefix_scanner.step(state, byte);
+                        if state == PREFIX_DEAD_STATE {
+                            consumed_suffix = false;
+                            break;
+                        }
+                        for word_index in 0..words_per_mask {
+                            matched[word_index] |= prefix_scanner.matched_mask(state)[word_index];
+                        }
+                    } else {
+                        let state_base = state as usize * words_per_mask;
+                        if dense_future_masks[state_base..state_base + words_per_mask]
+                            .iter()
+                            .all(|&word| word == 0)
+                        {
+                            consumed_suffix = false;
+                            break;
+                        }
+                        state = dense_flat_trans[state as usize * 256 + byte as usize];
+                        if state == u32::MAX {
+                            consumed_suffix = false;
+                            break;
+                        }
+                        let state_base = state as usize * words_per_mask;
+                        for word_index in 0..words_per_mask {
+                            matched[word_index] |= dense_finalizer_masks[state_base + word_index];
+                        }
                     }
                 }
                 if consumed_suffix {
-                    let state_base = state as usize * words_per_mask;
-                    for word_index in 0..words_per_mask {
-                        matched[word_index] |= future_masks[state_base + word_index];
+                    if uses_original_tokenizer {
+                        for word_index in 0..words_per_mask {
+                            matched[word_index] |= prefix_scanner.future_mask(state)[word_index];
+                        }
+                    } else {
+                        let state_base = state as usize * words_per_mask;
+                        for word_index in 0..words_per_mask {
+                            matched[word_index] |= dense_future_masks[state_base + word_index];
+                        }
                     }
                 }
                 let suffix_base = (split_start + split_after) * words_per_mask;
@@ -2235,12 +2355,27 @@ fn exact_terminal_path_two_plus_candidate_dfa(
                 next_continuations.clear();
                 let byte = bytes[split_after];
                 for &(state, active) in &continuations {
-                    let target = flat_trans[state as usize * 256 + byte as usize];
-                    if target == u32::MAX {
+                    let target = if uses_original_tokenizer {
+                        prefix_scanner.step(state, byte)
+                    } else {
+                        dense_flat_trans[state as usize * 256 + byte as usize]
+                    };
+                    if target == PREFIX_DEAD_STATE || target == u32::MAX {
                         continue;
                     }
-                    matched[0] |= finalizer_masks[target as usize] & active;
-                    let live = future_masks[target as usize] & active;
+                    let (target_matched, target_future) = if uses_original_tokenizer {
+                        (
+                            prefix_scanner.matched_mask(target)[0],
+                            prefix_scanner.future_mask(target)[0],
+                        )
+                    } else {
+                        (
+                            dense_finalizer_masks[target as usize],
+                            dense_future_masks[target as usize],
+                        )
+                    };
+                    matched[0] |= target_matched & active;
+                    let live = target_future & active;
                     merge_word_continuation(&mut next_continuations, target, live);
                 }
 
@@ -2286,7 +2421,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
                 }
                 merge_word_continuation(
                     &mut next_continuations,
-                    reset_state,
+                    continuation_reset_state,
                     followers[0],
                 );
                 std::mem::swap(&mut continuations, &mut next_continuations);
@@ -2312,16 +2447,27 @@ fn exact_terminal_path_two_plus_candidate_dfa(
                 next_continuations.clear();
                 let byte = bytes[split_after];
                 for (state, active) in &continuations {
-                    let target = flat_trans[*state as usize * 256 + byte as usize];
-                    if target == u32::MAX {
+                    let target = if uses_original_tokenizer {
+                        prefix_scanner.step(*state, byte)
+                    } else {
+                        dense_flat_trans[*state as usize * 256 + byte as usize]
+                    };
+                    if target == PREFIX_DEAD_STATE || target == u32::MAX {
                         continue;
                     }
-                    let target_base = target as usize * words_per_mask;
                     for word_index in 0..words_per_mask {
-                        matched[word_index] |=
-                            finalizer_masks[target_base + word_index] & active[word_index];
-                        live[word_index] =
-                            future_masks[target_base + word_index] & active[word_index];
+                        let target_matched = if uses_original_tokenizer {
+                            prefix_scanner.matched_mask(target)[word_index]
+                        } else {
+                            dense_finalizer_masks[target as usize * words_per_mask + word_index]
+                        };
+                        let target_future = if uses_original_tokenizer {
+                            prefix_scanner.future_mask(target)[word_index]
+                        } else {
+                            dense_future_masks[target as usize * words_per_mask + word_index]
+                        };
+                        matched[word_index] |= target_matched & active[word_index];
+                        live[word_index] = target_future & active[word_index];
                     }
                     merge_mask_continuation(&mut next_continuations, target, &live);
                 }
@@ -2353,7 +2499,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
                 }
                 merge_mask_continuation(
                     &mut next_continuations,
-                    reset_state,
+                    continuation_reset_state,
                     &followers,
                 );
                 std::mem::swap(&mut continuations, &mut next_continuations);
@@ -3734,6 +3880,7 @@ mod tests {
             &vocab,
             &disallowed,
             &active,
+            &bytesets,
         );
         let reference = exact_terminal_path_two_plus(
             &tokenizer,
@@ -3782,6 +3929,7 @@ mod tests {
             &vocab,
             &disallowed,
             &active,
+            &bytesets,
         );
         let reference = exact_terminal_path_two_plus(
             &tokenizer,

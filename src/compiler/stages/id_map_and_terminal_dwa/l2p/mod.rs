@@ -687,6 +687,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             shared_analysis_dfa_cache,
             shared_base_setup_ms,
             flat_trans,
+            shared_transition_cache,
             equivalence_initial_state_map,
             token_position_partition_for_analysis,
             std::env::var_os("GLRMASK_TI_DISABLE_RAW_OBSERVATION_REUSE")

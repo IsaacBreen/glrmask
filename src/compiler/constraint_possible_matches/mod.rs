@@ -21,6 +21,7 @@ use crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis:
 };
 use crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::vocab::fast as vocab_equivalence_analysis;
 use crate::ds::bitset::BitSet;
+use crate::ds::u8set::U8Set;
 use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::ds::weight::{shared_rangeset, Weight};
 use crate::grammar::flat::TerminalID;
@@ -1895,7 +1896,10 @@ fn nfa_powerset_collect_enabled(state_count: usize, root_terminal_union: usize) 
 }
 
 struct PossibleMatchPowersetView {
-    tokenizer_view: TokenizerView,
+    num_states: usize,
+    matched_terminals: Vec<Box<[TerminalID]>>,
+    byte_transitions: Vec<Vec<u32>>,
+    self_loop_bytes: Vec<U8Set>,
     raw_start_to_view: Vec<u32>,
     boundary_state: Vec<u32>,
     is_end: Vec<bool>,
@@ -1924,9 +1928,33 @@ fn intern_possible_match_config(
     Some(id)
 }
 
+fn intern_possible_match_canonical_config(
+    config: &[u32],
+    is_closed: bool,
+    config_ids: &mut FxHashMap<Vec<u32>, u32>,
+    configs: &mut Vec<Box<[u32]>>,
+    config_is_closed: &mut Vec<bool>,
+) -> Option<u32> {
+    if config.is_empty() {
+        return None;
+    }
+    debug_assert!(config.windows(2).all(|pair| pair[0] < pair[1]));
+    if let Some(&id) = config_ids.get(config) {
+        config_is_closed[id as usize] |= is_closed;
+        return Some(id);
+    }
+    let id = configs.len() as u32;
+    let owned = config.to_vec();
+    config_ids.insert(owned.clone(), id);
+    configs.push(owned.into_boxed_slice());
+    config_is_closed.push(is_closed);
+    Some(id)
+}
+
 fn build_possible_match_powerset_view(
     tokenizer: &Tokenizer,
     relevant_bytes: &[bool; 256],
+    raw_byte_to_class: Option<&[u8; 256]>,
 ) -> PossibleMatchPowersetView {
     let singleton_closures = tokenizer.all_singleton_epsilon_closures();
     let mut config_ids = FxHashMap::<Vec<u32>, u32>::default();
@@ -1945,13 +1973,28 @@ fn build_possible_match_powerset_view(
         })
         .collect::<Vec<_>>();
 
-    let active_bytes = relevant_bytes
-        .iter()
-        .enumerate()
-        .filter_map(|(byte, &active)| active.then_some(byte as u8))
-        .collect::<Vec<_>>();
-    let mut states = Vec::<FlatDfaState>::new();
-    let mut transition_rows = Vec::<Box<[u32; 256]>>::new();
+    let active_byte_classes = if let Some(raw_byte_to_class) = raw_byte_to_class {
+        let mut members = vec![Vec::<u8>::new(); 256];
+        for (byte, &active) in relevant_bytes.iter().enumerate() {
+            if active {
+                members[raw_byte_to_class[byte] as usize].push(byte as u8);
+            }
+        }
+        members
+            .into_iter()
+            .filter(|members| !members.is_empty())
+            .map(|members| (members[0], members))
+            .collect::<Vec<_>>()
+    } else {
+        relevant_bytes
+            .iter()
+            .enumerate()
+            .filter_map(|(byte, &active)| active.then_some((byte as u8, vec![byte as u8])))
+            .collect::<Vec<_>>()
+    };
+    let mut matched_terminals = Vec::<Box<[TerminalID]>>::new();
+    let mut byte_transitions = (0..256).map(|_| Vec::<u32>::new()).collect::<Vec<_>>();
+    let mut self_loop_bytes = Vec::<U8Set>::new();
     let mut boundary_state = Vec::<u32>::new();
     let mut is_end = Vec::<bool>::new();
     let mut target_marks = vec![0u32; tokenizer.num_states() as usize];
@@ -1963,14 +2006,11 @@ fn build_possible_match_powerset_view(
         let mut finalizers = config
             .iter()
             .flat_map(|&raw_state| tokenizer.matched_terminals_iter(raw_state))
-            .map(|terminal| terminal as usize)
+            .map(|terminal| terminal as TerminalID)
             .collect::<Vec<_>>();
         finalizers.sort_unstable();
         finalizers.dedup();
-        states.push(FlatDfaState {
-            finalizers,
-            possible_future_group_ids: Vec::new(),
-        });
+        matched_terminals.push(finalizers.into_boxed_slice());
 
         let live_config = config
             .iter()
@@ -1979,8 +2019,8 @@ fn build_possible_match_powerset_view(
             .collect::<Vec<_>>();
         is_end.push(live_config.is_empty());
         boundary_state.push(
-            intern_possible_match_config(
-                live_config,
+            intern_possible_match_canonical_config(
+                &live_config,
                 false,
                 &mut config_ids,
                 &mut configs,
@@ -1991,7 +2031,7 @@ fn build_possible_match_powerset_view(
 
         let mut row = Box::new([u32::MAX; 256]);
         let source_is_closed = config_is_closed[config_index];
-        for &byte in &active_bytes {
+        for &(byte, ref class_members) in &active_byte_classes {
             target_generation = target_generation.wrapping_add(1);
             if target_generation == 0 {
                 target_marks.fill(0);
@@ -2024,37 +2064,42 @@ fn build_possible_match_powerset_view(
                 }
             }
             target_config.sort_unstable();
-            if let Some(target) = intern_possible_match_config(
-                target_config.clone(),
+            if let Some(target) = intern_possible_match_canonical_config(
+                &target_config,
                 true,
                 &mut config_ids,
                 &mut configs,
                 &mut config_is_closed,
             ) {
-                row[byte as usize] = target;
+                for &class_byte in class_members {
+                    row[class_byte as usize] = target;
+                }
             }
         }
-        transition_rows.push(row);
+        let mut self_loops = U8Set::empty();
+        for (byte, &target) in row.iter().enumerate() {
+            byte_transitions[byte].push(target);
+            if target == config_index as u32 {
+                self_loops.insert(byte as u8);
+            }
+        }
+        self_loop_bytes.push(self_loops);
         config_index += 1;
     }
 
-    let mut transitions = Vec::with_capacity(states.len() * 256);
-    for row in transition_rows {
-        transitions.extend_from_slice(row.as_ref());
-    }
-    debug_assert_eq!(states.len(), configs.len());
+    let num_states = configs.len();
+    debug_assert_eq!(matched_terminals.len(), num_states);
+    debug_assert!(byte_transitions.iter().all(|column| column.len() == num_states));
+    debug_assert_eq!(self_loop_bytes.len(), num_states);
     debug_assert_eq!(config_is_closed.len(), configs.len());
-    debug_assert_eq!(boundary_state.len(), states.len());
-    debug_assert_eq!(is_end.len(), states.len());
+    debug_assert_eq!(boundary_state.len(), num_states);
+    debug_assert_eq!(is_end.len(), num_states);
 
     PossibleMatchPowersetView {
-        tokenizer_view: TokenizerView {
-            flat_dfa: FlatDfa {
-                states,
-                start_state: raw_start_to_view[tokenizer.start_state() as usize] as usize,
-                transitions: Arc::from(transitions),
-            },
-        },
+        num_states,
+        matched_terminals,
+        byte_transitions,
+        self_loop_bytes,
         raw_start_to_view,
         boundary_state,
         is_end,
@@ -2219,6 +2264,7 @@ pub(crate) fn compute_constraint_possible_matches(
         token_bytes.len(),
         artifacts_and_profile,
         None,
+        None,
     )
 }
 
@@ -2265,6 +2311,7 @@ fn compute_constraint_possible_matches_with_artifacts(
     original_token_count: usize,
     artifacts_and_profile: (OrderedVocabTrieArtifacts, OrderedVocabCacheProfile),
     initial_vocab_map: Option<&ManyToOneIdMap>,
+    raw_byte_to_class: Option<&[u8; 256]>,
 ) -> ConstraintPossibleMatchesComputation {
     let pm_started_at = Instant::now();
 
@@ -2297,7 +2344,11 @@ fn compute_constraint_possible_matches_with_artifacts(
             }
         }
         let view_started_at = Instant::now();
-        let powerset = build_possible_match_powerset_view(tokenizer, &relevant_bytes);
+        let powerset = build_possible_match_powerset_view(
+            tokenizer,
+            &relevant_bytes,
+            raw_byte_to_class,
+        );
         let view_build_ms = elapsed_ms(view_started_at);
         let mut view_entries = trie_build_states
             .iter()
@@ -2306,13 +2357,16 @@ fn compute_constraint_possible_matches_with_artifacts(
         view_entries.sort_unstable();
         view_entries.dedup();
         let (view_result, _) =
-            collector::collect_possible_matches_interval_trie_class_build_for_flat_view(
-                &powerset.tokenizer_view,
-                tokenizer.num_terminals() as usize,
-                &powerset.is_end,
+            collector::collect_possible_matches_interval_trie_class_build_precomputed(
                 &trie.root,
                 &view_entries,
                 Some(&powerset.boundary_state),
+                powerset.num_states,
+                tokenizer.num_terminals() as usize,
+                &powerset.matched_terminals,
+                &powerset.is_end,
+                &powerset.byte_transitions,
+                &powerset.self_loop_bytes,
             );
         let mut state_classes = vec![u32::MAX; tokenizer.num_states() as usize];
         for &raw_state in &trie_build_states {
@@ -2325,7 +2379,7 @@ fn compute_constraint_possible_matches_with_artifacts(
             eprintln!(
                 "[glrmask/profile][trie_build_nfa_powerset] raw_states={} view_states={} root_view_states={} classes={} view_build_ms={:.3}",
                 trie_build_states.len(),
-                powerset.tokenizer_view.dfa().states.len(),
+                powerset.num_states,
                 view_entries.len(),
                 view_result.class_maps.len(),
                 view_build_ms,
@@ -2404,10 +2458,11 @@ fn compute_constraint_possible_matches_with_artifacts(
     }
 }
 
-pub(crate) fn compute_constraint_possible_matches_for_vocab(
+fn compute_constraint_possible_matches_for_vocab_impl(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
     config: ConstraintPossibleMatchesConfig,
+    raw_byte_to_class: Option<&[u8; 256]>,
 ) -> ConstraintPossibleMatchesComputation {
     if config.defer_to_dynamic_mask {
         let (full_artifacts, full_profile) = get_ordered_vocab_trie_artifacts_for_vocab(vocab);
@@ -2462,6 +2517,7 @@ pub(crate) fn compute_constraint_possible_matches_for_vocab(
             vocab.entries.len(),
             get_ordered_vocab_trie_artifacts(&compact_token_bytes),
             Some(&pm_vocab_map),
+            raw_byte_to_class,
         );
         computation.runtime_dynamic_vocab = runtime_dynamic_vocab;
         computation.profile.vocab_equiv_ms = vocab_equiv_ms;
@@ -2473,6 +2529,29 @@ pub(crate) fn compute_constraint_possible_matches_for_vocab(
         vocab.entries.len(),
         get_ordered_vocab_trie_artifacts_for_vocab(vocab),
         None,
+        raw_byte_to_class,
+    )
+}
+
+pub(crate) fn compute_constraint_possible_matches_for_vocab(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    config: ConstraintPossibleMatchesConfig,
+) -> ConstraintPossibleMatchesComputation {
+    compute_constraint_possible_matches_for_vocab_impl(tokenizer, vocab, config, None)
+}
+
+pub(crate) fn compute_constraint_possible_matches_for_vocab_with_raw_byte_classes(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    config: ConstraintPossibleMatchesConfig,
+    raw_byte_to_class: &[u8; 256],
+) -> ConstraintPossibleMatchesComputation {
+    compute_constraint_possible_matches_for_vocab_impl(
+        tokenizer,
+        vocab,
+        config,
+        Some(raw_byte_to_class),
     )
 }
 
@@ -2622,18 +2701,21 @@ mod tests {
                 relevant_bytes[byte as usize] = true;
             }
         }
-        let powerset = build_possible_match_powerset_view(&tokenizer, &relevant_bytes);
+        let powerset = build_possible_match_powerset_view(&tokenizer, &relevant_bytes, None);
         let mut view_entries = powerset.raw_start_to_view.clone();
         view_entries.sort_unstable();
         view_entries.dedup();
         let (powerset_rows, _) =
-            collector::collect_possible_matches_interval_trie_class_build_for_flat_view(
-                &powerset.tokenizer_view,
-                tokenizer.num_terminals() as usize,
-                &powerset.is_end,
+            collector::collect_possible_matches_interval_trie_class_build_precomputed(
                 &artifacts.trie.root,
                 &view_entries,
                 Some(&powerset.boundary_state),
+                powerset.num_states,
+                tokenizer.num_terminals() as usize,
+                &powerset.matched_terminals,
+                &powerset.is_end,
+                &powerset.byte_transitions,
+                &powerset.self_loop_bytes,
             );
         let sparse_expanded = expand_interval_class_maps(&sparse.class_maps);
         let powerset_expanded = expand_interval_class_maps(&powerset_rows.class_maps);

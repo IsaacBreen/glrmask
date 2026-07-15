@@ -568,6 +568,58 @@ fn mix_signature_word(hash: u64, word: u32) -> u64 {
     hash.wrapping_mul(0x517cc1b727220a95).wrapping_add((word as u64).wrapping_add(0x9e3779b97f4a7c15))
 }
 
+fn classify_fixed_signatures<const N: usize>(
+    active_states: &[u32],
+    mut signature_for: impl FnMut(usize, u32) -> [u32; N],
+    representative_states: &mut Vec<u32>,
+    representative_state_positions: &mut Vec<usize>,
+    classes: &mut [u32],
+) {
+    const SMALL_CLASS_LIMIT: usize = 16;
+    let mut small_signatures = [[u32::MAX; N]; SMALL_CLASS_LIMIT];
+    let mut small_len = 0usize;
+    let mut by_signature: Option<FxHashMap<[u32; N], u32>> = None;
+
+    for (state_pos, &state) in active_states.iter().enumerate() {
+        let signature = signature_for(state_pos, state);
+        let class_id = if let Some(by_signature) = by_signature.as_mut() {
+            if let Some(&class_id) = by_signature.get(&signature) {
+                class_id
+            } else {
+                let class_id = representative_states.len() as u32;
+                by_signature.insert(signature, class_id);
+                representative_states.push(state);
+                representative_state_positions.push(state_pos);
+                class_id
+            }
+        } else if let Some(class_id) = small_signatures[..small_len]
+            .iter()
+            .position(|&existing| existing == signature)
+        {
+            class_id as u32
+        } else {
+            let class_id = representative_states.len() as u32;
+            representative_states.push(state);
+            representative_state_positions.push(state_pos);
+            if small_len < SMALL_CLASS_LIMIT {
+                small_signatures[small_len] = signature;
+                small_len += 1;
+            } else {
+                let mut map = FxHashMap::default();
+                for (existing_class, &existing_signature) in
+                    small_signatures[..small_len].iter().enumerate()
+                {
+                    map.insert(existing_signature, existing_class as u32);
+                }
+                map.insert(signature, class_id);
+                by_signature = Some(map);
+            }
+            class_id
+        };
+        classes[state_pos] = class_id;
+    }
+}
+
 struct SignatureEntry { state_pos: usize, class_id: u32 }
 struct ChildBuildData {
     outcomes: Arc<[SegmentOutcome]>,
@@ -749,37 +801,62 @@ fn build_node(
     let should_parallelize = rayon::current_num_threads() > 1 && parallel_depth > 0 && child_pending.len() >= 4 && active_states.len() >= parallel_min_active;
     let mut child_data = Vec::with_capacity(child_pending.len());
     if should_parallelize {
-        let built: Vec<(ChildBuildData, BuildTimings)> = child_pending.into_par_iter().map(|pending| {
+        let built: Vec<(ChildBuildData, BuildTimings)> = child_pending
+            .into_par_iter()
+            .map_init(
+            || {
+                let terminal_sets_clone_started_at = Instant::now();
+                let local_terminal_sets = terminal_sets.clone();
+                let terminal_sets_clone_ms = elapsed_ms(terminal_sets_clone_started_at);
+
+                let segment_cache_init_started_at = Instant::now();
+                let local_segment_cache = FxHashMap::default();
+                let local_segment_outcome_tables = Vec::<SegmentOutcomeCache>::new();
+                let segment_cache_init_ms = elapsed_ms(segment_cache_init_started_at);
+
+                let stamp_alloc_started_at = Instant::now();
+                let local_terminal_stamps = vec![0u32; num_terminals];
+                let local_active_seen_stamps = vec![0u32; num_states];
+                let local_active_seen_positions = vec![0u32; num_states];
+                let stamp_alloc_ms = elapsed_ms(stamp_alloc_started_at);
+
+                (
+                    local_terminal_sets,
+                    local_segment_cache,
+                    local_segment_outcome_tables,
+                    0u32,
+                    local_terminal_stamps,
+                    0u32,
+                    local_active_seen_stamps,
+                    local_active_seen_positions,
+                    SerialSegmentVectorCache::default(),
+                    Some((terminal_sets_clone_ms, segment_cache_init_ms, stamp_alloc_ms)),
+                )
+            },
+            |worker, pending| {
+            let (
+                local_terminal_sets,
+                local_segment_cache,
+                local_segment_outcome_tables,
+                local_stamp_gen,
+                local_terminal_stamps,
+                local_active_seen_gen,
+                local_active_seen_stamps,
+                local_active_seen_positions,
+                local_vector_cache,
+                setup_profile,
+            ) = worker;
             let mut local_timings = BuildTimings::default();
+            if let Some((clone_ms, cache_init_ms, stamp_alloc_ms)) = setup_profile.take() {
+                local_timings.parallel_terminal_sets_clone_ms += clone_ms;
+                local_timings.parallel_segment_cache_init_ms += cache_init_ms;
+                local_timings.parallel_stamp_alloc_ms += stamp_alloc_ms;
+            }
             local_timings.parallel_children_built += 1;
             let (result, child_class_ids) = if pending.child_active_states.is_empty() {
                 local_timings.parallel_empty_children += 1;
                 (NodeClasses { classes: Vec::new(), class_maps: Vec::new() }, vec![u32::MAX; pending.descend_positions.len()])
             } else {
-                let terminal_sets_clone_started_at = Instant::now();
-                let mut local_terminal_sets = terminal_sets.clone();
-                local_timings.parallel_terminal_sets_clone_ms += elapsed_ms(terminal_sets_clone_started_at);
-
-                let segment_cache_init_started_at = Instant::now();
-                let mut local_segment_cache = FxHashMap::default();
-                let mut local_segment_outcome_tables = Vec::<SegmentOutcomeCache>::new();
-                local_timings.parallel_segment_cache_init_ms += elapsed_ms(segment_cache_init_started_at);
-
-                let mut local_stamp_gen = 0u32;
-                let mut local_active_seen_gen = 0u32;
-                let stamp_alloc_started_at = Instant::now();
-                let mut local_terminal_stamps = vec![0u32; num_terminals];
-                let mut local_active_seen_stamps = vec![0u32; num_states];
-                let mut local_active_seen_positions = vec![0u32; num_states];
-                local_timings.parallel_stamp_alloc_ms += elapsed_ms(stamp_alloc_started_at);
-
-                // This fork owns the entire child subtree and processes it
-                // serially (`parallel_depth = 0`).  Re-enable the vector cache
-                // locally: repeated `(radix segment, active-state set)` pairs
-                // inside one subtree are immutable and require no cross-worker
-                // synchronization.  Previously every fork discarded this
-                // cache merely because the outer collector was parallel.
-                let mut local_vector_cache = SerialSegmentVectorCache::default();
                 let local_active_set_id = Some(
                     local_vector_cache
                         .active_sets
@@ -787,7 +864,7 @@ fn build_node(
                 );
 
                 let recursive_started_at = Instant::now();
-                let result = build_node(pending.child, num_states, num_terminals, &pending.child_active_states, matched_terminals, matched_terminal_masks, node_terminal_ids, empty_terminals_id, is_end, byte_transitions, self_loop_bytes, canonical_state, &mut local_terminal_sets, &mut local_segment_cache, &mut local_segment_outcome_tables, &mut local_timings, &mut local_stamp_gen, &mut local_terminal_stamps, &mut local_active_seen_gen, &mut local_active_seen_stamps, &mut local_active_seen_positions, 0, parallel_min_active, dense_segment_cache_min_entries, Some(&mut local_vector_cache), local_active_set_id);
+                let result = build_node(pending.child, num_states, num_terminals, &pending.child_active_states, matched_terminals, matched_terminal_masks, node_terminal_ids, empty_terminals_id, is_end, byte_transitions, self_loop_bytes, canonical_state, local_terminal_sets, local_segment_cache, local_segment_outcome_tables, &mut local_timings, local_stamp_gen, local_terminal_stamps, local_active_seen_gen, local_active_seen_stamps, local_active_seen_positions, 0, parallel_min_active, dense_segment_cache_min_entries, Some(local_vector_cache), local_active_set_id);
                 local_timings.recursive_ms += elapsed_ms(recursive_started_at);
                 let child_class_project_started_at = Instant::now();
                 let child_class_ids = pending.descend_positions.iter().map(|&pos| if pos == u32::MAX { u32::MAX } else { result.classes[pos as usize] }).collect();
@@ -826,10 +903,46 @@ fn build_node(
     match child_data.len() {
         0 => {
             if node.has_token() {
-                let mut by_term: FxHashMap<u32, u32> = FxHashMap::default();
+                const SMALL_CLASS_LIMIT: usize = 16;
+                let mut small_terms = [u32::MAX; SMALL_CLASS_LIMIT];
+                let mut small_len = 0usize;
+                let mut by_term: Option<FxHashMap<u32, u32>> = None;
                 for (state_pos, &state) in active_states.iter().enumerate() {
                     let term_id = node_terminal_ids[state as usize];
-                    let class_id = *by_term.entry(term_id).or_insert_with(|| { let id = representative_states.len() as u32; representative_states.push(state); representative_state_positions.push(state_pos); id });
+                    let class_id = if let Some(by_term) = by_term.as_mut() {
+                        if let Some(&class_id) = by_term.get(&term_id) {
+                            class_id
+                        } else {
+                            let class_id = representative_states.len() as u32;
+                            by_term.insert(term_id, class_id);
+                            representative_states.push(state);
+                            representative_state_positions.push(state_pos);
+                            class_id
+                        }
+                    } else if let Some(class_id) = small_terms[..small_len]
+                        .iter()
+                        .position(|&existing| existing == term_id)
+                    {
+                        class_id as u32
+                    } else {
+                        let class_id = representative_states.len() as u32;
+                        representative_states.push(state);
+                        representative_state_positions.push(state_pos);
+                        if small_len < SMALL_CLASS_LIMIT {
+                            small_terms[small_len] = term_id;
+                            small_len += 1;
+                        } else {
+                            let mut map = FxHashMap::default();
+                            for (existing_class, &existing_term) in
+                                small_terms[..small_len].iter().enumerate()
+                            {
+                                map.insert(existing_term, existing_class as u32);
+                            }
+                            map.insert(term_id, class_id);
+                            by_term = Some(map);
+                        }
+                        class_id
+                    };
                     classes[state_pos] = class_id;
                 }
             } else if let Some(&state) = active_states.first() {
@@ -839,11 +952,47 @@ fn build_node(
         }
         1 => {
             let child = &child_data[0];
-            let mut by_sig: FxHashMap<(u32, u32, u32), u32> = FxHashMap::default();
+            const SMALL_CLASS_LIMIT: usize = 16;
+            let mut small_signatures = [(u32::MAX, u32::MAX, u32::MAX); SMALL_CLASS_LIMIT];
+            let mut small_len = 0usize;
+            let mut by_sig: Option<FxHashMap<(u32, u32, u32), u32>> = None;
             for (state_pos, &state) in active_states.iter().enumerate() {
                 let node_terms = if node.has_token() { node_terminal_ids[state as usize] } else { empty_terminals_id };
                 let sig = (node_terms, child.outcomes[state_pos].terminals_id, child.child_class_ids[state_pos]);
-                let class_id = *by_sig.entry(sig).or_insert_with(|| { let id = representative_states.len() as u32; representative_states.push(state); representative_state_positions.push(state_pos); id });
+                let class_id = if let Some(by_sig) = by_sig.as_mut() {
+                    if let Some(&class_id) = by_sig.get(&sig) {
+                        class_id
+                    } else {
+                        let class_id = representative_states.len() as u32;
+                        by_sig.insert(sig, class_id);
+                        representative_states.push(state);
+                        representative_state_positions.push(state_pos);
+                        class_id
+                    }
+                } else if let Some(class_id) = small_signatures[..small_len]
+                    .iter()
+                    .position(|&existing| existing == sig)
+                {
+                    class_id as u32
+                } else {
+                    let class_id = representative_states.len() as u32;
+                    representative_states.push(state);
+                    representative_state_positions.push(state_pos);
+                    if small_len < SMALL_CLASS_LIMIT {
+                        small_signatures[small_len] = sig;
+                        small_len += 1;
+                    } else {
+                        let mut map = FxHashMap::default();
+                        for (existing_class, &existing_sig) in
+                            small_signatures[..small_len].iter().enumerate()
+                        {
+                            map.insert(existing_sig, existing_class as u32);
+                        }
+                        map.insert(sig, class_id);
+                        by_sig = Some(map);
+                    }
+                    class_id
+                };
                 classes[state_pos] = class_id;
             }
         }
@@ -961,43 +1110,42 @@ fn build_node(
             } else {
                 match child_data.len() {
                     2 => {
-                        let mut by_sig: FxHashMap<[u32; 5], u32> = FxHashMap::default();
                         let c0 = &child_data[0];
                         let c1 = &child_data[1];
-                        for (state_pos, &state) in active_states.iter().enumerate() {
+                        classify_fixed_signatures(
+                            active_states,
+                            |state_pos, state| {
                             let node_terms = if node.has_token() {
                                 node_terminal_ids[state as usize]
                             } else {
                                 empty_terminals_id
                             };
-                            let key = [
+                                [
                                 node_terms,
                                 c0.outcomes[state_pos].terminals_id,
                                 c0.child_class_ids[state_pos],
                                 c1.outcomes[state_pos].terminals_id,
                                 c1.child_class_ids[state_pos],
-                            ];
-                            let class_id = *by_sig.entry(key).or_insert_with(|| {
-                                let id = representative_states.len() as u32;
-                                representative_states.push(state);
-                                representative_state_positions.push(state_pos);
-                                id
-                            });
-                            classes[state_pos] = class_id;
-                        }
+                                ]
+                            },
+                            &mut representative_states,
+                            &mut representative_state_positions,
+                            &mut classes,
+                        );
                     }
                     3 => {
-                        let mut by_sig: FxHashMap<[u32; 7], u32> = FxHashMap::default();
                         let c0 = &child_data[0];
                         let c1 = &child_data[1];
                         let c2 = &child_data[2];
-                        for (state_pos, &state) in active_states.iter().enumerate() {
+                        classify_fixed_signatures(
+                            active_states,
+                            |state_pos, state| {
                             let node_terms = if node.has_token() {
                                 node_terminal_ids[state as usize]
                             } else {
                                 empty_terminals_id
                             };
-                            let key = [
+                                [
                                 node_terms,
                                 c0.outcomes[state_pos].terminals_id,
                                 c0.child_class_ids[state_pos],
@@ -1005,29 +1153,27 @@ fn build_node(
                                 c1.child_class_ids[state_pos],
                                 c2.outcomes[state_pos].terminals_id,
                                 c2.child_class_ids[state_pos],
-                            ];
-                            let class_id = *by_sig.entry(key).or_insert_with(|| {
-                                let id = representative_states.len() as u32;
-                                representative_states.push(state);
-                                representative_state_positions.push(state_pos);
-                                id
-                            });
-                            classes[state_pos] = class_id;
-                        }
+                                ]
+                            },
+                            &mut representative_states,
+                            &mut representative_state_positions,
+                            &mut classes,
+                        );
                     }
                     4 => {
-                        let mut by_sig: FxHashMap<[u32; 9], u32> = FxHashMap::default();
                         let c0 = &child_data[0];
                         let c1 = &child_data[1];
                         let c2 = &child_data[2];
                         let c3 = &child_data[3];
-                        for (state_pos, &state) in active_states.iter().enumerate() {
+                        classify_fixed_signatures(
+                            active_states,
+                            |state_pos, state| {
                             let node_terms = if node.has_token() {
                                 node_terminal_ids[state as usize]
                             } else {
                                 empty_terminals_id
                             };
-                            let key = [
+                                [
                                 node_terms,
                                 c0.outcomes[state_pos].terminals_id,
                                 c0.child_class_ids[state_pos],
@@ -1037,15 +1183,12 @@ fn build_node(
                                 c2.child_class_ids[state_pos],
                                 c3.outcomes[state_pos].terminals_id,
                                 c3.child_class_ids[state_pos],
-                            ];
-                            let class_id = *by_sig.entry(key).or_insert_with(|| {
-                                let id = representative_states.len() as u32;
-                                representative_states.push(state);
-                                representative_state_positions.push(state_pos);
-                                id
-                            });
-                            classes[state_pos] = class_id;
-                        }
+                                ]
+                            },
+                            &mut representative_states,
+                            &mut representative_state_positions,
+                            &mut classes,
+                        );
                     }
                     _ => {
                         let mut buckets: FxHashMap<u64, Vec<SignatureEntry>> = FxHashMap::default();
@@ -1112,7 +1255,7 @@ fn build_node(
     NodeClasses { classes, class_maps }
 }
 
-fn collect_possible_matches_interval_trie_class_build_precomputed(
+pub(crate) fn collect_possible_matches_interval_trie_class_build_precomputed(
     root: &VocabPrefixTreeNode,
     entries: &[u32],
     canonical_state: Option<&[u32]>,
@@ -1161,7 +1304,7 @@ fn collect_possible_matches_interval_trie_class_build_precomputed(
     let parallel_depth = std::env::var("GLRMASK_PM_ROOT_PARALLEL_DEPTH")
         .ok()
         .and_then(|v| v.parse::<u8>().ok())
-        .unwrap_or(4);
+        .unwrap_or(2);
     let parallel_min_active = std::env::var("GLRMASK_PM_PARALLEL_MIN_ACTIVE_STATES")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
@@ -1185,7 +1328,7 @@ fn collect_possible_matches_interval_trie_class_build_precomputed(
     let mut active_seen_gen = 0u32;
     let mut active_seen_stamps = vec![0u32; num_states];
     let mut active_seen_positions = vec![0u32; num_states];
-    let serial_segment_cache_enabled = rayon::current_num_threads() == 1
+    let serial_segment_cache_enabled = (rayon::current_num_threads() == 1 || parallel_depth == 0)
         && std::env::var_os("GLRMASK_DISABLE_PM_SEGMENT_VECTOR_CACHE").is_none();
     let mut serial_segment_cache =
         serial_segment_cache_enabled.then(SerialSegmentVectorCache::default);

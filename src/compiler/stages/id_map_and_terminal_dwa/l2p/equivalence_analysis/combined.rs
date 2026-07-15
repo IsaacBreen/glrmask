@@ -1585,6 +1585,7 @@ pub(crate) fn analyze_equivalences_with_group_filter(
     shared_analysis_dfa_cache: Option<&super::vocab::fast::SharedVocabAnalysisDfaCache>,
     shared_base_setup_ms: f64,
     flat_trans: Option<&std::sync::Arc<[u32]>>,
+    shared_transition_cache: Option<&std::sync::OnceLock<super::compat::FlatTransitionCache>>,
     initial_state_map: Option<&ManyToOneIdMap>,
     token_position_partition: Option<&GlobalTokenPositionStatePartition>,
     precomputed_raw_observations: Option<(&[u32], &[u32])>,
@@ -1602,6 +1603,7 @@ pub(crate) fn analyze_equivalences_with_group_filter(
         shared_analysis_dfa_cache,
         shared_base_setup_ms,
         flat_trans,
+        shared_transition_cache,
         initial_state_map,
         token_position_partition,
         precomputed_raw_observations,
@@ -1625,6 +1627,7 @@ fn analyze_equivalences_impl(
     shared_analysis_dfa_cache: Option<&super::vocab::fast::SharedVocabAnalysisDfaCache>,
     shared_base_setup_ms: f64,
     flat_trans: Option<&std::sync::Arc<[u32]>>,
+    shared_transition_cache: Option<&std::sync::OnceLock<super::compat::FlatTransitionCache>>,
     initial_state_map: Option<&ManyToOneIdMap>,
     token_position_partition: Option<&GlobalTokenPositionStatePartition>,
     precomputed_raw_observations: Option<(&[u32], &[u32])>,
@@ -1765,7 +1768,7 @@ fn analyze_equivalences_impl(
             active_language_byte_classes.as_ref(),
         );
         let prepass_powerset_started_at = Instant::now();
-        let prepass_powerset_candidate = should_probe_prepass_powerset.then(|| {
+        let mut prepass_powerset_candidate = should_probe_prepass_powerset.then(|| {
             build_relevant_powerset_view(
                 tokenizer,
                 &prepass_relevant_bytes,
@@ -1848,8 +1851,15 @@ fn analyze_equivalences_impl(
             powerset_min_bounded_pairs,
         );
         let powerset_started_at = Instant::now();
+        let can_reuse_prepass_powerset = prepass_relevant_bytes == relevant_bytes;
         let powerset_candidate = should_probe_powerset.then(|| {
-            build_relevant_powerset_view(tokenizer, &relevant_bytes, active_groups, None)
+            if can_reuse_prepass_powerset {
+                prepass_powerset_candidate.take().unwrap_or_else(|| {
+                    build_relevant_powerset_view(tokenizer, &relevant_bytes, active_groups, None)
+                })
+            } else {
+                build_relevant_powerset_view(tokenizer, &relevant_bytes, active_groups, None)
+            }
         });
         let powerset_build_ms = powerset_started_at.elapsed().as_secs_f64() * 1000.0;
         let powerset_probed = powerset_candidate.is_some();
@@ -1903,7 +1913,17 @@ fn analyze_equivalences_impl(
         let analysis_view = &analysis_view_owned;
 
         let byte_class_started_at = Instant::now();
-        let byte_to_class = super::compat::compute_byte_classes(analysis_view.dfa());
+        // The active-language classes are an exact byte congruence for every
+        // residual of every active terminal language.  They are therefore a
+        // sound (possibly finer) partition for the derived analysis view too,
+        // and avoid rescanning every analysis-view transition column.
+        let byte_to_class = active_language_byte_classes
+            .or_else(|| {
+                shared_transition_cache
+                    .and_then(std::sync::OnceLock::get)
+                    .map(|cache| cache.byte_to_class)
+            })
+            .unwrap_or_else(|| super::compat::compute_byte_classes(analysis_view.dfa()));
         let byte_class_setup_ms = byte_class_started_at.elapsed().as_secs_f64() * 1000.0;
 
         let follows_normalize_started_at = Instant::now();

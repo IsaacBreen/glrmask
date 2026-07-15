@@ -153,19 +153,31 @@ pub(crate) fn run_state_equivalence_pipeline(
         ..StateEquivalencePipelineProfile::default()
     };
     let statistic = max_length::compute_statistic(vocab);
+    let mut epsilon_stable_restricted_observation = false;
 
     for kind in &config.passes {
-        if matches!(kind, StateEquivalencePassKind::MaxLength)
-            && !tokenizer.has_epsilon_transitions()
-            && matches!(scope, StateEquivalenceScope::L2p)
-            && kbounded_tokenizer_view.is_some_and(|view| {
-                view.is_relevant_byte_congruent(&current_state_map, statistic.relevant_bytes())
-            })
-        {
-            // A visible-output right congruence is already safe for every
-            // vocabulary suffix, hence for the bounded max-length observer.
-            // Retaining it is at least as fine as the optional prepass; the
-            // following exact token refinement still decides the final map.
+        let bounded_observer_already_certified =
+            matches!(kind, StateEquivalencePassKind::MaxLength)
+                && matches!(scope, StateEquivalenceScope::L2p)
+                && (epsilon_stable_restricted_observation
+                    || (!tokenizer.has_epsilon_transitions()
+                        && kbounded_tokenizer_view.is_some_and(|view| {
+                            view.is_relevant_byte_congruent(
+                                &current_state_map,
+                                statistic.relevant_bytes(),
+                            )
+                        })));
+        if bounded_observer_already_certified {
+            // A stable visible-output right congruence over the vocabulary
+            // bytes is stronger than every finite-depth observer over those
+            // same bytes. For epsilon tokenizers the mandatory restricted-
+            // observation pass computes that stable congruence directly; for
+            // DFA views `is_relevant_byte_congruent` certifies it.
+            //
+            // Keep the finer congruence and let the following exact token
+            // refinement perform any additional safe merging. The bounded
+            // max-length pass here can only coarsen the partition; it is not
+            // required for correctness.
             profile.max_length_skipped = false;
             profile.max_length_state_equiv_ms = 0.0;
             profile.max_length_reps = current_state_map.num_internal_ids() as usize;
@@ -220,6 +232,9 @@ pub(crate) fn run_state_equivalence_pipeline(
                     started_at.elapsed().as_secs_f64() * 1000.0,
                     current_state_map.num_internal_ids() as usize,
                 );
+                if tokenizer.has_epsilon_transitions() {
+                    epsilon_stable_restricted_observation = true;
+                }
             }
             StateEquivalencePassKind::MaxLength => {
                 let mode = match scope {
@@ -294,4 +309,83 @@ fn record_max_length_profile(
         representative_count,
         skipped: false,
     });
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::automata::lexer::tokenizer::arbitrary_epsilon_l1_test_tokenizer;
+
+    fn same_partition(left: &ManyToOneIdMap, right: &ManyToOneIdMap) -> bool {
+        left.original_to_internal.len() == right.original_to_internal.len()
+            && (0..left.original_to_internal.len()).all(|i| {
+                (0..left.original_to_internal.len()).all(|j| {
+                    (left.original_to_internal[i] == left.original_to_internal[j])
+                        == (right.original_to_internal[i] == right.original_to_internal[j])
+                })
+            })
+    }
+
+    #[test]
+    fn stable_epsilon_restricted_observation_certifies_bounded_max_length() {
+        let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
+        let vocab = Vocab::new(
+            vec![
+                (0, b"a".to_vec()),
+                (1, b"b".to_vec()),
+                (2, b"ab".to_vec()),
+                (3, b"ba".to_vec()),
+            ],
+            None,
+        );
+        let restricted_only = StateEquivalencePipelineConfig {
+            passes: vec![StateEquivalencePassKind::RestrictedObservation],
+        };
+        let with_max_length = StateEquivalencePipelineConfig {
+            passes: vec![
+                StateEquivalencePassKind::RestrictedObservation,
+                StateEquivalencePassKind::MaxLength,
+            ],
+        };
+
+        let (restricted_map, _) = run_state_equivalence_pipeline(
+            &tokenizer,
+            &vocab,
+            None,
+            None,
+            StateEquivalenceScope::L2p,
+            &restricted_only,
+            None,
+            None,
+            None,
+        );
+        let (certified_map, profile) = run_state_equivalence_pipeline(
+            &tokenizer,
+            &vocab,
+            None,
+            None,
+            StateEquivalenceScope::L2p,
+            &with_max_length,
+            None,
+            None,
+            None,
+        );
+
+        assert!(same_partition(&restricted_map, &certified_map));
+        assert!(profile.max_length_congruence_certified);
+        assert_eq!(profile.max_length_state_equiv_ms, 0.0);
+        assert_eq!(
+            profile.max_length_reps,
+            profile.restricted_observation_reps
+        );
+        assert_eq!(
+            profile
+                .pass_profiles
+                .last()
+                .expect("max-length profile")
+                .name,
+            "max_length_congruence_certified"
+        );
+    }
 }

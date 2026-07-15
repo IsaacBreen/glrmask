@@ -319,6 +319,9 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
     flat_trans: Arc<[u32]>,
     global_max_length_state_map: &ManyToOneIdMap,
     external_classify_cache: Option<&classify::SharedClassifyCache>,
+    external_transition_cache: Option<
+        &OnceLock<l2p::equivalence_analysis::compat::FlatTransitionCache>,
+    >,
 ) -> (TerminalDwaFamilies, TerminalDwaPhaseProfile) {
     let total_started_at = Instant::now();
     let mut profile = TerminalDwaPhaseProfile::default();
@@ -512,7 +515,8 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
         l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache::new();
     let shared_original_vocab_analysis_dfa_cache =
         l2p::equivalence_analysis::vocab::fast::SharedVocabAnalysisDfaCache::default();
-    let shared_transition_cache = OnceLock::new();
+    let owned_transition_cache = OnceLock::new();
+    let shared_transition_cache = external_transition_cache.unwrap_or(&owned_transition_cache);
     // Grammar-wide and identical for every L2P vocabulary partition. Compute
     // once before parallel partition construction rather than repeating the
     // same FIRST/FOLLOW occurrence traversal in each partition.
@@ -547,7 +551,7 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
             Some(&shared_vocab_dfa_cache),
             Some(&shared_original_vocab_dfa_cache),
             Some(&shared_original_vocab_analysis_dfa_cache),
-            Some(&shared_transition_cache),
+            Some(shared_transition_cache),
             Some(&shared_ti_output_cache),
             Some(&shared_classify_cache),
         )
@@ -790,6 +794,7 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
             flat_trans,
             global_max_length_state_map,
             external_classify_cache,
+            None,
         );
     let family_count = families.len();
     let final_merge_started_at = Instant::now();

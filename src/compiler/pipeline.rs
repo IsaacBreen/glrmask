@@ -187,7 +187,11 @@ fn compile_thread_count() -> Option<usize> {
         return Some(value);
     }
 
-    if std::env::var_os("RAYON_NUM_THREADS").is_some() {
+    if std::env::var("RAYON_NUM_THREADS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .is_some_and(|value| value > 0)
+    {
         return None;
     }
 
@@ -201,7 +205,10 @@ fn compile_thread_count() -> Option<usize> {
 
     #[cfg(not(target_os = "macos"))]
     {
-        None
+        return std::thread::available_parallelism()
+            .ok()
+            .map(|parallelism| parallelism.get().min(8))
+            .filter(|&value| value > 1);
     }
 }
 
@@ -844,6 +851,11 @@ struct TokenizerDagLane {
 
 struct FlatGlobalDagLane {
     flat_trans: Arc<[u32]>,
+    shared_transition_cache: Arc<
+        std::sync::OnceLock<
+            crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::compat::FlatTransitionCache,
+        >,
+    >,
     flat_trans_ms: f64,
     global_max_length_state_map: ManyToOneIdMap,
     global_max_length_ms: f64,
@@ -1327,6 +1339,7 @@ fn launch_terminal_dag_if_ready<'scope>(
                 Arc::clone(&flat_global.flat_trans),
                 &flat_global.global_max_length_state_map,
                 Some(&classify.shared_classify_cache),
+                Some(flat_global.shared_transition_cache.as_ref()),
             );
         let special_started_at = Instant::now();
         let special_token_terminals = collect_special_token_terminals(prepared_grammar);
@@ -1505,29 +1518,27 @@ fn compile_prepared_with_profile_and_table_construction(
                     tokenizer_ready_ms: elapsed_ms(analysis_started_for_tokenizer),
                 };
 
-                let possible_matches_tokenizer = Arc::clone(&tokenizer_lane.tokenizer);
-                let compile_started_for_cpm = compile_started_for_tokenizer.clone();
-                scope.spawn(move |_| {
-                    let possible_matches_started_ms = elapsed_ms(compile_started_for_cpm.clone());
-                    let possible_matches_config = if env_flag_enabled("GLRMASK_EAGER_POSSIBLE_MATCHES") {
-                        cpm::ConstraintPossibleMatchesConfig::EAGER
-                    } else {
-                        cpm::ConstraintPossibleMatchesConfig::DEFER_TO_DYNAMIC_MASK
-                    };
-                    let result = cpm::compute_constraint_possible_matches_for_vocab(
-                        &possible_matches_tokenizer,
-                        vocab,
-                        possible_matches_config,
-                    );
-                    let possible_matches_finished_ms = elapsed_ms(compile_started_for_cpm);
-                    *cpm_result_ref
-                        .lock()
-                        .expect("possible-matches result slot poisoned") = Some((
-                        result,
-                        possible_matches_started_ms,
-                        possible_matches_finished_ms,
-                    ));
-                });
+let eager_possible_matches = env_flag_enabled("GLRMASK_EAGER_POSSIBLE_MATCHES");
+                if !eager_possible_matches {
+                    let possible_matches_tokenizer = Arc::clone(&tokenizer_lane.tokenizer);
+                    let compile_started_for_cpm = compile_started_for_tokenizer.clone();
+                    scope.spawn(move |_| {
+                        let possible_matches_started_ms = elapsed_ms(compile_started_for_cpm.clone());
+                        let result = cpm::compute_constraint_possible_matches_for_vocab(
+                            &possible_matches_tokenizer,
+                            vocab,
+                            cpm::ConstraintPossibleMatchesConfig::DEFER_TO_DYNAMIC_MASK,
+                        );
+                        let possible_matches_finished_ms = elapsed_ms(compile_started_for_cpm);
+                        *cpm_result_ref
+                            .lock()
+                            .expect("possible-matches result slot poisoned") = Some((
+                            result,
+                            possible_matches_started_ms,
+                            possible_matches_finished_ms,
+                        ));
+                    });
+                }
 
                 let flat_global_tokenizer = Arc::clone(&tokenizer_lane.tokenizer);
                 let compile_started_for_terminal = compile_started_for_tokenizer.clone();
@@ -1540,6 +1551,42 @@ fn compile_prepared_with_profile_and_table_construction(
                         ),
                     );
                     let flat_trans_ms = elapsed_ms(flat_trans_started_at);
+                    let shared_transition_cache = Arc::new(std::sync::OnceLock::new());
+
+                    if eager_possible_matches {
+                        let possible_matches_tokenizer = Arc::clone(&flat_global_tokenizer);
+                        let possible_matches_flat_trans = Arc::clone(&flat_trans);
+                        let possible_matches_transition_cache = Arc::clone(&shared_transition_cache);
+                        let compile_started_for_cpm = compile_started_for_terminal.clone();
+                        scope.spawn(move |_| {
+                            let possible_matches_started_ms =
+                                elapsed_ms(compile_started_for_cpm.clone());
+                            let raw_byte_to_class = possible_matches_transition_cache
+                                .get_or_init(|| {
+                                    crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::compat::derive_flat_transition_cache(
+                                        &possible_matches_tokenizer,
+                                        possible_matches_flat_trans,
+                                    )
+                                })
+                                .byte_to_class;
+                            let result =
+                                cpm::compute_constraint_possible_matches_for_vocab_with_raw_byte_classes(
+                                    &possible_matches_tokenizer,
+                                    vocab,
+                                    cpm::ConstraintPossibleMatchesConfig::EAGER,
+                                    &raw_byte_to_class,
+                                );
+                            let possible_matches_finished_ms = elapsed_ms(compile_started_for_cpm);
+                            *cpm_result_ref
+                                .lock()
+                                .expect("possible-matches result slot poisoned") = Some((
+                                result,
+                                possible_matches_started_ms,
+                                possible_matches_finished_ms,
+                            ));
+                        });
+                    }
+
                     let global_max_length_started_at = Instant::now();
                     let global_max_length_state_map =
                         crate::compiler::stages::id_map_and_terminal_dwa::build_global_max_length_state_map(
@@ -1554,6 +1601,7 @@ fn compile_prepared_with_profile_and_table_construction(
                         .expect("terminal DAG join state poisoned")
                         .flat_global = Some(FlatGlobalDagLane {
                         flat_trans,
+                        shared_transition_cache,
                         flat_trans_ms,
                         global_max_length_state_map,
                         global_max_length_ms,
