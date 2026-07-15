@@ -2816,7 +2816,7 @@ fn arrays_use_item_schema_and_min_max_items() {
 }
 
 #[test]
-fn bounded_object_arrays_use_exprnfa_rule() {
+fn bounded_object_arrays_use_separated_sequence_range() {
     let schema = json!({
         "type": "array",
         "items": {
@@ -2830,10 +2830,9 @@ fn bounded_object_arrays_use_exprnfa_rule() {
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("bounded_array_"), "{glrm}");
-    assert!(grammar.rules.iter().any(|rule| {
-        rule.name.contains("bounded_array_") && matches!(rule.expr, GrammarExpr::ExprNFA(_))
-    }), "{glrm}");
+    assert!(contains_separated_sequence(start_expr(&grammar)), "{glrm}");
+    assert!(glrm.contains("{0,3}"), "{glrm}");
+    assert!(!glrm.contains("bounded_array_"), "{glrm}");
     lower(&grammar).unwrap();
 }
 

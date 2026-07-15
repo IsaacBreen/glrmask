@@ -1,4 +1,3 @@
-use crate::grammar::expr_nfa::ExprNfaBuilder;
 use crate::import::ast::{GrammarExpr, Quantifier};
 
 use super::ast::{ArraySchema, SchemaKind};
@@ -53,10 +52,6 @@ impl<'a> Lowerer<'a> {
             && let Some(max) = schema.max_items
             && max >= 2
         {
-            if bounded_array_object_item_candidate(&schema.items) {
-                let item = self.lower_schema(&schema.items)?;
-                return Ok(self.bounded_homogeneous_array_exprnfa(item, schema.min_items, max));
-            }
             if self.should_terminalize_bounded_scalar_array(max)
                 && let Some((item, partition_class)) =
                     self.lower_inline_bounded_array_string_item_expr(&schema.items)?
@@ -211,42 +206,6 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    fn bounded_homogeneous_array_exprnfa(
-        &mut self,
-        item: GrammarExpr,
-        min: usize,
-        max: usize,
-    ) -> GrammarExpr {
-        let mut builder = ExprNfaBuilder::new();
-        let accept_state = builder.add_state();
-        let mut item_states = Vec::with_capacity(max + 1);
-        item_states.push(builder.start_state());
-        for _ in 0..max {
-            item_states.push(builder.add_state());
-        }
-        builder.set_accepting(accept_state);
-
-        for &state in item_states.iter().skip(min) {
-            builder.add_transition(state, lit("]"), accept_state);
-        }
-
-        for count in 0..max {
-            let transition = if count == 0 {
-                item.clone()
-            } else {
-                seq(vec![self.item_separator_expr(), item.clone()])
-            };
-            builder.add_transition(item_states[count], transition, item_states[count + 1]);
-        }
-
-        let rule_name = self.fresh_rule_name("bounded_array");
-        self.add_nonterminal_rule(
-            &rule_name,
-            GrammarExpr::ExprNFA(Box::new(builder.build().into_determinized_and_minimized())),
-        );
-        seq(vec![lit("["), super::lower::r(&rule_name)])
-    }
-
     fn bounded_homogeneous_array_terminal(
         &mut self,
         item: GrammarExpr,
@@ -381,12 +340,5 @@ impl<'a> Lowerer<'a> {
             None if required_min == 0 => vec![(item, Some(Quantifier::ZeroPlus))],
             None => vec![(item, Some(Quantifier::Range(required_min, None)))],
         }
-    }
-}
-
-fn bounded_array_object_item_candidate(schema: &super::ast::Schema) -> bool {
-    match &schema.kind {
-        SchemaKind::Assertions(assertions) => assertions.object.is_some(),
-        _ => false,
     }
 }
