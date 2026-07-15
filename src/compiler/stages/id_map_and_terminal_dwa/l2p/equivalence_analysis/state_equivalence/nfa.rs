@@ -850,6 +850,116 @@ fn expand_trie_from_config_budgeted(
     Ok(())
 }
 
+/// Expand all reachable configuration × trie-node pairs by propagating a
+/// unique configuration frontier from each trie node into each child. A trie
+/// node has exactly one parent, so the child frontier can be deduplicated with
+/// a reusable generation-mark table instead of a global hash set of
+/// `(configuration, trie_node)` pairs.
+fn expand_trie_frontiers(
+    tokenizer: &Tokenizer,
+    start_states: &[u32],
+    trie: &[ByteTrieNode],
+    configs: &mut Vec<Box<[u32]>>,
+    config_ids: &mut FxHashMap<Vec<u32>, u32>,
+    transitions: &mut Vec<u32>,
+    known_transitions: &mut Vec<u8>,
+    preseeded_raw_closures: Option<&[u32]>,
+    singleton_closures: &[Box<[u32]>],
+    active_language: Option<&[bool]>,
+    target_marks: &mut [u32],
+    target_generation: &mut u32,
+    budget: Option<TokenBoundedAnalysisWorkBudget>,
+    prior_trie_visits: usize,
+) -> Result<usize, TokenBoundedAnalysisWork> {
+    if trie.is_empty() || start_states.is_empty() {
+        return Ok(0);
+    }
+
+    let mut node_state_start = vec![0u32; trie.len()];
+    let mut node_state_len = vec![0u32; trie.len()];
+    let mut product_states = Vec::<u32>::with_capacity(start_states.len());
+    product_states.extend_from_slice(start_states);
+    node_state_len[0] = start_states.len() as u32;
+
+    let mut config_marks = vec![0u32; configs.len().max(1)];
+    let mut config_generation = 0u32;
+    let mut trie_visits = 0usize;
+
+    for node_index in 0..trie.len() {
+        let state_start = node_state_start[node_index] as usize;
+        let state_len = node_state_len[node_index] as usize;
+        if state_len == 0 {
+            continue;
+        }
+        if let Some(budget) = budget {
+            let next_total_visits = prior_trie_visits + trie_visits + state_len;
+            if next_total_visits > budget.max_trie_visits {
+                return Err(TokenBoundedAnalysisWork {
+                    configurations: configs.len(),
+                    trie_visits: budget.max_trie_visits.saturating_add(1),
+                });
+            }
+            if configs.len() > budget.max_configurations {
+                return Err(TokenBoundedAnalysisWork {
+                    configurations: configs.len(),
+                    trie_visits: prior_trie_visits + trie_visits,
+                });
+            }
+        }
+        trie_visits += state_len;
+
+        for &(byte, child) in &trie[node_index].children {
+            config_generation = config_generation.wrapping_add(1);
+            if config_generation == 0 {
+                config_marks.fill(0);
+                config_generation = 1;
+            }
+            let child_start = product_states.len();
+            for state_offset in 0..state_len {
+                let state = product_states[state_start + state_offset];
+                let target = ensure_config_transition(
+                    tokenizer,
+                    state,
+                    byte,
+                    configs,
+                    config_ids,
+                    transitions,
+                    known_transitions,
+                    preseeded_raw_closures,
+                    singleton_closures,
+                    active_language,
+                    target_marks,
+                    target_generation,
+                );
+                if target == u32::MAX {
+                    continue;
+                }
+                if config_marks.len() < configs.len() {
+                    config_marks.resize(configs.len(), 0);
+                }
+                let mark = &mut config_marks[target as usize];
+                if *mark != config_generation {
+                    *mark = config_generation;
+                    product_states.push(target);
+                }
+            }
+            debug_assert_eq!(node_state_len[child], 0, "trie child has multiple parents");
+            node_state_start[child] = child_start as u32;
+            node_state_len[child] = (product_states.len() - child_start) as u32;
+        }
+    }
+
+    if let Some(budget) = budget
+        && configs.len() > budget.max_configurations
+    {
+        return Err(TokenBoundedAnalysisWork {
+            configurations: configs.len(),
+            trie_visits: prior_trie_visits + trie_visits,
+        });
+    }
+    Ok(trie_visits)
+}
+
 #[derive(Clone)]
 pub(crate) struct TokenBoundedAnalysisTopology {
     configurations: Arc<[Box<[u32]>]>,
@@ -1037,6 +1147,34 @@ fn build_bounded_analysis_topology_impl(
     active_groups: Option<&[bool]>,
     budget: Option<TokenBoundedAnalysisWorkBudget>,
 ) -> Result<(TokenBoundedAnalysisTopology, TokenBoundedAnalysisWork), TokenBoundedAnalysisWork> {
+    let use_frontier_expansion =
+        std::env::var_os("GLRMASK_DISABLE_TRIE_FRONTIER_EXPANSION").is_none();
+    build_bounded_analysis_topology_impl_with_expansion(
+        tokenizer,
+        raw_start_states,
+        tokens,
+        combine_start_states,
+        factor_common_first_byte,
+        include_reset_suffixes,
+        tokens_are_sorted,
+        active_groups,
+        budget,
+        use_frontier_expansion,
+    )
+}
+
+fn build_bounded_analysis_topology_impl_with_expansion(
+    tokenizer: &Tokenizer,
+    raw_start_states: &[usize],
+    tokens: &[&[u8]],
+    combine_start_states: bool,
+    factor_common_first_byte: bool,
+    include_reset_suffixes: bool,
+    tokens_are_sorted: bool,
+    active_groups: Option<&[bool]>,
+    budget: Option<TokenBoundedAnalysisWorkBudget>,
+    use_frontier_expansion: bool,
+) -> Result<(TokenBoundedAnalysisTopology, TokenBoundedAnalysisWork), TokenBoundedAnalysisWork> {
     let raw_state_count = tokenizer.num_states() as usize;
     let mut config_ids = FxHashMap::<Vec<u32>, u32>::default();
     let mut configs = Vec::<Box<[u32]>>::new();
@@ -1162,86 +1300,127 @@ fn build_bounded_analysis_topology_impl(
         }
     }
     let preseeded_raw_closures = (!combine_start_states).then_some(raw_start_to_view.as_slice());
-    let mut token_visited = rustc_hash::FxHashSet::<(u32, usize)>::default();
-    for state in seeded_configs {
-        if let Some(budget) = budget {
-            expand_trie_from_config_budgeted(
+    let (token_trie_visits, suffix_trie_visits) = if use_frontier_expansion {
+        let token_trie_visits = expand_trie_frontiers(
+            tokenizer,
+            &seeded_configs,
+            &token_trie,
+            &mut configs,
+            &mut config_ids,
+            &mut transitions,
+            &mut known_transitions,
+            preseeded_raw_closures,
+            singleton_closures.as_ref(),
+            active_language.as_deref(),
+            &mut target_marks,
+            &mut target_generation,
+            budget,
+            0,
+        )?;
+        let suffix_trie_visits = if let Some(suffix_trie) = suffix_trie.as_ref() {
+            expand_trie_frontiers(
                 tokenizer,
-                state,
-                &token_trie,
-                &mut configs,
-                &mut config_ids,
-                &mut transitions,
-                &mut known_transitions,
-                &mut token_visited,
-                preseeded_raw_closures,
-                singleton_closures.as_ref(),
-                active_language.as_deref(),
-                &mut target_marks,
-                &mut target_generation,
-                budget,
-                0,
-            )?;
-        } else {
-            expand_trie_from_config(
-                tokenizer,
-                state,
-                &token_trie,
-                &mut configs,
-                &mut config_ids,
-                &mut transitions,
-                &mut known_transitions,
-                &mut token_visited,
-                preseeded_raw_closures,
-                singleton_closures.as_ref(),
-                active_language.as_deref(),
-                &mut target_marks,
-                &mut target_generation,
-            );
-        }
-    }
-    let mut suffix_visited = rustc_hash::FxHashSet::<(u32, usize)>::default();
-    if let Some(suffix_trie) = suffix_trie.as_ref() {
-        if let Some(budget) = budget {
-            expand_trie_from_config_budgeted(
-                tokenizer,
-                start_state,
+                std::slice::from_ref(&start_state),
                 suffix_trie,
                 &mut configs,
                 &mut config_ids,
                 &mut transitions,
                 &mut known_transitions,
-                &mut suffix_visited,
                 None,
                 singleton_closures.as_ref(),
                 active_language.as_deref(),
                 &mut target_marks,
                 &mut target_generation,
                 budget,
-                token_visited.len(),
-            )?;
+                token_trie_visits,
+            )?
         } else {
-            expand_trie_from_config(
-                tokenizer,
-                start_state,
-                suffix_trie,
-                &mut configs,
-                &mut config_ids,
-                &mut transitions,
-                &mut known_transitions,
-                &mut suffix_visited,
-                None,
-                singleton_closures.as_ref(),
-                active_language.as_deref(),
-                &mut target_marks,
-                &mut target_generation,
-            );
+            0
+        };
+        (token_trie_visits, suffix_trie_visits)
+    } else {
+        let mut token_visited = rustc_hash::FxHashSet::<(u32, usize)>::default();
+        for state in seeded_configs.iter().copied() {
+            if let Some(budget) = budget {
+                expand_trie_from_config_budgeted(
+                    tokenizer,
+                    state,
+                    &token_trie,
+                    &mut configs,
+                    &mut config_ids,
+                    &mut transitions,
+                    &mut known_transitions,
+                    &mut token_visited,
+                    preseeded_raw_closures,
+                    singleton_closures.as_ref(),
+                    active_language.as_deref(),
+                    &mut target_marks,
+                    &mut target_generation,
+                    budget,
+                    0,
+                )?;
+            } else {
+                expand_trie_from_config(
+                    tokenizer,
+                    state,
+                    &token_trie,
+                    &mut configs,
+                    &mut config_ids,
+                    &mut transitions,
+                    &mut known_transitions,
+                    &mut token_visited,
+                    preseeded_raw_closures,
+                    singleton_closures.as_ref(),
+                    active_language.as_deref(),
+                    &mut target_marks,
+                    &mut target_generation,
+                );
+            }
         }
-    }
+        let mut suffix_visited = rustc_hash::FxHashSet::<(u32, usize)>::default();
+        if let Some(suffix_trie) = suffix_trie.as_ref() {
+            if let Some(budget) = budget {
+                expand_trie_from_config_budgeted(
+                    tokenizer,
+                    start_state,
+                    suffix_trie,
+                    &mut configs,
+                    &mut config_ids,
+                    &mut transitions,
+                    &mut known_transitions,
+                    &mut suffix_visited,
+                    None,
+                    singleton_closures.as_ref(),
+                    active_language.as_deref(),
+                    &mut target_marks,
+                    &mut target_generation,
+                    budget,
+                    token_visited.len(),
+                )?;
+            } else {
+                expand_trie_from_config(
+                    tokenizer,
+                    start_state,
+                    suffix_trie,
+                    &mut configs,
+                    &mut config_ids,
+                    &mut transitions,
+                    &mut known_transitions,
+                    &mut suffix_visited,
+                    None,
+                    singleton_closures.as_ref(),
+                    active_language.as_deref(),
+                    &mut target_marks,
+                    &mut target_generation,
+                );
+            }
+        }
+        (token_visited.len(), suffix_visited.len())
+    };
 
     let work = TokenBoundedAnalysisWork {
         configurations: configs.len(),
-        trie_visits: token_visited.len() + suffix_visited.len(),
+        trie_visits: token_trie_visits + suffix_trie_visits,
     };
     Ok((
         TokenBoundedAnalysisTopology {
@@ -2062,6 +2241,105 @@ mod tests {
             ));
         }
         trace
+    }
+
+    #[test]
+    fn trie_frontier_expansion_matches_pair_hash_dfs() {
+        let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
+        let raw_start_states = (0..tokenizer.num_states() as usize).collect::<Vec<_>>();
+        let active_groups = [true, false];
+        let token_sets: [&[&[u8]]; 2] = [
+            &[b"a", b"aa", b"ab", b"aba"],
+            &[b"a", b"ab", b"b", b"ba", b"x", b"xyz"],
+        ];
+
+        for tokens in token_sets {
+            let (frontier, frontier_work) = build_bounded_analysis_topology_impl_with_expansion(
+                &tokenizer,
+                &raw_start_states,
+                tokens,
+                false,
+                true,
+                false,
+                true,
+                Some(&active_groups),
+                None,
+                true,
+            )
+            .expect("frontier topology build");
+            let (dfs, dfs_work) = build_bounded_analysis_topology_impl_with_expansion(
+                &tokenizer,
+                &raw_start_states,
+                tokens,
+                false,
+                true,
+                false,
+                true,
+                Some(&active_groups),
+                None,
+                false,
+            )
+            .expect("DFS topology build");
+            assert_eq!(frontier_work, dfs_work);
+
+            let frontier = frontier.materialize_already_projected(&tokenizer, &active_groups);
+            let dfs = dfs.materialize_already_projected(&tokenizer, &active_groups);
+            for &raw_state in &raw_start_states {
+                let frontier_start = frontier.view_state_for_raw_start(raw_state);
+                let dfs_start = dfs.view_state_for_raw_start(raw_state);
+                for &token in tokens {
+                    assert_eq!(
+                        view_trace(&frontier.tokenizer_view, frontier_start, token),
+                        view_trace(&dfs.tokenizer_view, dfs_start, token),
+                        "raw_state={raw_state} token={token:?}",
+                    );
+                }
+            }
+        }
+
+        // Also cover the generic unsorted-token path, combined starts, and the
+        // reset-suffix trie used by non-L1 callers.
+        let unsorted_tokens: &[&[u8]] = &[b"xyz", b"a", b"ba", b"ab", b"x"];
+        let (frontier, frontier_work) = build_bounded_analysis_topology_impl_with_expansion(
+            &tokenizer,
+            &raw_start_states,
+            unsorted_tokens,
+            true,
+            false,
+            true,
+            false,
+            None,
+            None,
+            true,
+        )
+        .expect("frontier topology build with reset suffixes");
+        let (dfs, dfs_work) = build_bounded_analysis_topology_impl_with_expansion(
+            &tokenizer,
+            &raw_start_states,
+            unsorted_tokens,
+            true,
+            false,
+            true,
+            false,
+            None,
+            None,
+            false,
+        )
+        .expect("DFS topology build with reset suffixes");
+        assert_eq!(frontier_work, dfs_work);
+        let frontier = frontier.materialize(&tokenizer, None);
+        let dfs = dfs.materialize(&tokenizer, None);
+        for &raw_state in &raw_start_states {
+            let frontier_start = frontier.view_state_for_raw_start(raw_state);
+            let dfs_start = dfs.view_state_for_raw_start(raw_state);
+            for &token in unsorted_tokens {
+                assert_eq!(
+                    view_trace(&frontier.tokenizer_view, frontier_start, token),
+                    view_trace(&dfs.tokenizer_view, dfs_start, token),
+                    "combined raw_state={raw_state} token={token:?}",
+                );
+            }
+        }
     }
 
     #[test]
