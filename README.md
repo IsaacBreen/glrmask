@@ -1,26 +1,40 @@
 # Shingleback
 
-Shingleback is a grammar-constrained decoding engine for tokenized LLM generation. It compiles a grammar together with an LLM vocabulary into an immutable `Constraint`, then produces the exact next-token mask for each decoding step and advances that constraint state as tokens are committed.
+Shingleback is a grammar-constrained decoding engine for tokenized LLM generation. It compiles a grammar together with an LLM vocabulary into an immutable `Constraint`, then produces the next-token mask for each decoding step and advances the constraint state as sampled tokens are committed.
 
-The project is intended for structured generation and inference-serving workloads where constraints may be reused. It supports general context-free grammars, not only regular expressions or finite-state formats, and moves much of the stack-dependent token-admissibility work out of the per-token mask query and into compilation.
+**Shingleback is the project name.** The v0.1 Rust crate, PyPI distribution, and Python import are all named **`glrmask`**:
+
+```text
+Rust crate:    glrmask
+PyPI package:  glrmask
+Python import: glrmask
+```
+
+The core contract is tokenization-complete existential admissibility. For a current byte prefix `u`, a vocabulary token `v` with byte spelling `β(v)`, and compiled language `L`, the mask admits `v` exactly when some continuation `w` exists such that `u β(v) w ∈ L`. A token may therefore cross lexer-token or grammar-terminal boundaries and still be admissible.
+
+Shingleback supports general context-free grammars, not only regular languages, and moves much of the stack-dependent token-admissibility work out of the per-token mask query and into compilation.
 
 ## What it supports
 
-- **Exact grammar-constrained token masking.** For the compiled grammar and byte-backed vocabulary, a token is admitted exactly when committing it leaves at least one possible continuation to a string in the compiled language.
+- **Tokenization-complete grammar-constrained masking.** For the compiled grammar and byte-backed vocabulary, a token is admitted exactly when appending its bytes leaves at least one completion in the compiled language.
 - **General context-free constraints.** Recursive and ambiguous grammar structure is supported through the parser-based compilation and runtime.
 - **Grammar inputs.** EBNF and Lark grammars are supported directly.
 - **JSON Schema.** A pragmatic JSON Schema subset is supported, with documented semantic deviations. Full JSON Schema conformance is **not** claimed.
 - **Compile once, run incrementally.** A compiled `Constraint` is immutable; `constraint.start()` creates mutable state for one generation stream.
 - **Serializable constraints.** Compiled constraints can be saved and loaded without recompiling the source grammar.
-- **Python and Rust APIs.** The same core compiler and runtime are exposed through the Rust crate and the `glrmask` Python package. Shingleback 0.1 retains `glrmask` as the Rust crate, PyPI distribution, and Python import name.
+- **Python and Rust APIs.** The same core compiler and runtime are exposed through the `glrmask` Rust crate and Python package.
 
 ## Installation
 
-The project has not yet been published to a package registry. Install from a source checkout.
-
 ### Python
 
-Building from source requires Python, a Rust toolchain, and your platform's native linker/build tools. From the repository root:
+Install the v0.1 release from PyPI:
+
+```bash
+python -m pip install glrmask==0.1.0
+```
+
+On platforms with a published wheel, `pip` installs the native extension directly. Building from source requires Python, a Rust toolchain, and the platform's native linker/build tools. From a source checkout:
 
 ```bash
 python3 -m venv .venv
@@ -28,18 +42,24 @@ source .venv/bin/activate
 python -m pip install ./python
 ```
 
-`pip` installs the Python runtime dependency (`numpy`) and uses Maturin in an isolated build environment to build the native extension.
+`pip` installs the Python runtime dependency (`numpy`) and uses Maturin in an isolated build environment when a source build is required.
 
 ### Rust
 
-Until registry publication, use the checkout as a path dependency from an external Cargo project:
+Add the v0.1 crate from crates.io:
+
+```bash
+cargo add glrmask@0.1.0
+```
+
+or add it directly to `Cargo.toml`:
 
 ```toml
 [dependencies]
-glrmask = { path = "/path/to/glrmask-checkout" }
+glrmask = "0.1.0"
 ```
 
-## Five-minute Python quickstart
+## Minimal Python example
 
 A vocabulary maps the exact token bytes used by the model to token IDs. Compile a grammar against that vocabulary, create a state, ask for the next-token mask, and commit the sampled token:
 
@@ -170,7 +190,7 @@ cargo run --example json_schema
 
 ## A genuinely context-free example
 
-The classic language `a^n b^n` for `n >= 1` is not regular. It requires matching an unbounded number of `a` symbols with the same number of following `b` symbols. The recursive EBNF grammar is direct:
+The classic language `a^n b^n` for `n >= 1` is not regular. It requires matching an unbounded number of `a` symbols with the same number of following `b` symbols. A finite-state constraint cannot represent the language exactly for unbounded `n`; a context-free grammar can:
 
 ```text
 start ::= "a" start "b" | "a" "b"
@@ -218,18 +238,9 @@ The key design tradeoff is therefore deliberate: spend more work when a grammar 
 
 Compilation cost and online decoding cost should be measured separately. The design is aimed at workloads where a compiled grammar is reused across many mask queries or generation streams; a one-shot grammar may value compilation latency differently from a long-running serving workload.
 
-The 0.1 native benchmark snapshot measured production commit `89559ad2600056e730439031ff2525c6b2c86632` on a Hetzner CX23 in Helsinki with 2 shared AMD EPYC-Rome vCPUs and 4 GB RAM. The build used `RUSTFLAGS=-C target-cpu=native`, so these results are hardware-specific native release-build measurements, not generic-wheel timings.
+The v0.1 public benchmark is a bounded `make example-slow-all` comparison of the benchmark harness's `llguidance`, `glrmask`, `glrmask-native`, and `xgrammar` backends on one controlled machine. It is intentionally **not** the full benchmark corpus. Backend versions, machine details, exact methodology, failures or timeouts, and the measured results are recorded in [the v0.1 benchmark report](docs/benchmark-0.1.md).
 
-| workload | compile median | mask+commit p50 | mask+commit p99.9 |
-|---|---:|---:|---:|
-| 8-tool BFCL schema (`bfcl-008`) | 136.50 ms | 4.785 µs | 31.995 µs |
-| 512-tool BFCL schema (`bfcl-512`) | 985.44 ms | 4.893 µs | 25.753 µs |
-| recursive JSON GLRM CFG (`json-glrm`) | 63.11 ms | 5.646 µs | 32.855 µs |
-| Vercel compile-tail sentinel (`vercel`) | 24.93 s | 8.657 µs | 34.956 µs |
-
-Vercel remains a deliberately difficult compile-tail case at about 25 seconds on this shared 2-vCPU machine. One isolated 1.424 ms mask+commit outlier occurred in 66,200 measured O62060 samples; no >1 ms runtime sample occurred in the other four workloads. Raw mask disagreements collected against `llguidance_native` were not adjudicated as correctness evidence, and these measurements do not support a claim of universal superiority over another backend.
-
-See [the full 0.1 benchmark methodology and results](docs/benchmark-0.1.md) for all five workloads, percentile distributions, environment details, and caveats.
+The comparison is a performance measurement, not a declaration that one backend is semantic ground truth. Different constrained-decoding systems can intentionally expose different token-admissibility policies, so raw mask disagreements require separate correctness analysis.
 
 ## Other API features
 
@@ -267,9 +278,9 @@ Python exposes the corresponding incremental operations, with `mask()` returning
 ## Limitations
 
 - **JSON Schema is not fully conformant.** It is a pragmatic subset with [documented semantic deviations](docs/json-schema-semantic-deviations.md); some unsupported constructs error, while some documented cases broaden or restrict semantics.
-- **Source builds are currently required.** Until wheels and registry packages are actually published, Python installation requires a Rust toolchain and native build tools, and Rust consumers must depend on a source checkout.
 - **Compiled constraints are vocabulary-specific.** Recompile when the tokenizer vocabulary or token-byte mapping changes.
-- **Benchmark numbers are hardware-specific.** The [0.1 benchmark snapshot](docs/benchmark-0.1.md) reports a native CPU-tuned build on one Hetzner CX23; it is not a hardware-independent guarantee.
+- **Benchmark results are environment-specific.** The [v0.1 benchmark](docs/benchmark-0.1.md) records one bounded benchmark target on one machine; it is not the full corpus or a hardware-independent guarantee.
+- **Serving-framework integrations are not part of v0.1.** Shingleback v0.1 ships the compiler/runtime library and public Rust/Python APIs. Direct integrations with serving systems such as vLLM are follow-up work.
 
 ## Examples
 
@@ -282,4 +293,4 @@ cargo run --example json_schema
 
 ## License
 
-The project metadata currently declares `MIT OR Apache-2.0`. The final release artifact dry-run requires the actual license text files to be added before publication.
+Licensed under either the MIT License or the Apache License, Version 2.0, at your option.

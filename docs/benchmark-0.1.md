@@ -1,118 +1,98 @@
-# Shingleback 0.1 native benchmark snapshot
+# Shingleback v0.1 benchmark
 
-This note records the bounded native benchmark used for the Shingleback 0.1 release candidate. The measured technical package and production code retain the `glrmask` name. It is a hardware-specific snapshot, not a universal performance claim or a comparison establishing superiority over another backend.
-
-## Exact measured code and machine
-
-The performance-relevant production code was exactly:
+Shingleback v0.1 uses a bounded, deliberately difficult performance comparison based on the CFA harness target:
 
 ```text
-89559ad2600056e730439031ff2525c6b2c86632
+make example-slow-all
 ```
 
-The benchmark ran on:
+The target expands to 195 selected slow or problematic schemas and compares four backends:
 
-- Hetzner CX23 in Helsinki (`hel1`);
-- 2 shared AMD EPYC-Rome vCPUs;
-- 4 GB RAM;
-- Ubuntu 24.04 x86_64;
-- Rust 1.97.0;
-- Python 3.12.3;
-- native release build with `RUSTFLAGS=-C target-cpu=native`.
+- `llguidance`
+- `glrmask`
+- `glrmask-native`
+- `xgrammar`
 
-These numbers are therefore specific to this machine and build. They are not generic-wheel timings.
+This is **not** the full benchmark dataset. A broader corpus run is separate follow-up work.
 
-The benchmark used CFA source commit `465a922c77529eee7155a42b90d3a546e1c20a94` with the cached Llama 3 vocabulary used by the benchmark environment.
+## Benchmark status
 
-## Workloads
+The final four-backend comparison is being completed separately from the v0.1.0 package release. Final aggregate performance results are therefore not claimed in the v0.1.0 release documentation. They will be added here in a documentation-only follow-up after the completed result payload has been parsed and checked.
 
-| short name | workload |
+Backend failures and hard timeouts will be reported rather than discarded. No result will be reconstructed from partial console output or earlier aborted runs.
+
+## Environment
+
+The final run uses this machine and software environment:
+
+```text
+Host: MSI Windows PC
+CPU: 13th Gen Intel(R) Core(TM) i7-13620H
+Physical cores: 10
+Logical processors: 16
+Host RAM: 15.7 GiB
+WSL: Ubuntu 24.04 under WSL2
+Kernel: 6.18.33.2-microsoft-standard-WSL2
+WSL memory: 10 GB
+WSL swap: 8 GB
+Python: 3.12.13
+```
+
+Backend versions and release provenance:
+
+| Backend | Version / provenance |
 |---|---|
-| `bfcl-008` | `bfcl_catalog/size_008/catalog_008_000` |
-| `bfcl-512` | `bfcl_catalog/size_512/catalog_512_000` |
-| `json-glrm` | `grammar_glrm/json/json` |
-| `github-o62060` | `jsb/data/Github_hard---o62060` |
-| `vercel` | `jsb/data/JsonSchemaStore---vercel` |
+| `llguidance` | `1.7.6` |
+| `glrmask` | `0.1.0`, frozen release RC `a97e9bc18756590c74d01e1e06cca04176f71d52` |
+| `glrmask-native` | same `glrmask 0.1.0` release code, native adapter path |
+| `xgrammar` | `0.2.3` |
 
-CFA preprocessing that would alter source semantics was disabled:
-
-```text
---no-strip-pattern-max-length
---no-coerce-one-of-to-any-of
-```
+The CFA benchmark snapshot is based on commit `d753fb7403e63106ddecb22d7829b2cf669307fd`. The benchmark copy contains harness and compatibility changes needed to expose exactly the four requested adapters, use the local tokenizer cache and corpus, preserve compatibility with the frozen Shingleback RC, and enforce a true parent-process hard timeout for native xgrammar compilation. Those changes do not alter Shingleback/glrmask release code.
 
 ## Methodology
 
-Build timing used three repetitions per workload, except Vercel, which used one full-suite build because it is the deliberately long regression sentinel. The build table reports median, minimum, and maximum over those runs.
+The effective final command is:
 
-A separate Vercel sentinel used a 30-second build timeout and completed in `25.277667773 s`. The full-suite Vercel build took `24.925028667 s`.
-
-Runtime timing requested 51 complete example traversals per successfully built workload. Run 0 was excluded as warmup. Token-step timings from runs 1 through 50 were pooled. Mask, commit, and combined mask+commit distributions were recorded separately.
-
-For expected-valid labeled examples, glrmask had to replay the full example without mask rejection, commit rejection, sequence death, or validity mismatch. The checked-in JSON GLRM example has no explicit validity label; its replay completed under glrmask.
-
-## Compile/build latency
-
-| workload | runs | median | min | max | replay status |
-|---|---:|---:|---:|---:|---|
-| `bfcl-008` | 3 | 136.50 ms | 129.10 ms | 139.77 ms | valid gold replay passed |
-| `bfcl-512` | 3 | 985.44 ms | 929.13 ms | 1,022.42 ms | valid gold replay passed |
-| `json-glrm` | 3 | 63.11 ms | 59.70 ms | 81.82 ms | unlabeled example replay completed |
-| `github-o62060` | 3 | 1,595.23 ms | 1,592.83 ms | 1,621.43 ms | valid gold replay passed |
-| `vercel` | 1 | 24,925.03 ms | 24,925.03 ms | 24,925.03 ms | valid gold replay passed |
-
-Vercel remains a long compile-tail case. On this shared 2-vCPU machine it completed in about 25 seconds, rather than reproducing the older greater-than-120-second timeout.
-
-## Runtime distributions
-
-Run 0 is excluded. Percentiles pool token steps from runs 1 through 50.
-
-| workload | metric | samples | p50 µs | p95 µs | p99 µs | p99.9 µs | max µs |
-|---|---|---:|---:|---:|---:|---:|---:|
-| `bfcl-008` | mask | 2,550 | 2.355 | 3.898 | 5.215 | 26.676 | 35.036 |
-| `bfcl-008` | commit | 2,550 | 2.195 | 6.923 | 9.595 | 28.029 | 32.981 |
-| `bfcl-008` | mask+commit | 2,550 | 4.785 | 9.448 | 12.354 | 31.995 | 44.313 |
-| `bfcl-512` | mask | 2,550 | 2.224 | 4.033 | 10.435 | 18.425 | 35.186 |
-| `bfcl-512` | commit | 2,550 | 2.535 | 8.461 | 12.816 | 19.737 | 23.534 |
-| `bfcl-512` | mask+commit | 2,550 | 4.893 | 11.106 | 17.970 | 25.753 | 40.597 |
-| `json-glrm` | mask | 750 | 2.089 | 4.293 | 7.721 | 16.648 | 18.374 |
-| `json-glrm` | commit | 750 | 3.526 | 10.220 | 17.583 | 25.370 | 27.171 |
-| `json-glrm` | mask+commit | 750 | 5.646 | 14.665 | 21.914 | 32.855 | 33.462 |
-| `github-o62060` | mask | 66,200 | 2.224 | 4.719 | 6.372 | 18.343 | 139.241 |
-| `github-o62060` | commit | 66,200 | 4.198 | 9.067 | 14.707 | 24.760 | 1,420.941 |
-| `github-o62060` | mask+commit | 66,200 | 6.743 | 12.224 | 20.229 | 31.735 | 1,423.737 |
-| `vercel` | mask | 12,750 | 2.746 | 5.436 | 7.750 | 20.133 | 40.707 |
-| `vercel` | commit | 12,750 | 5.410 | 12.233 | 17.734 | 27.606 | 114.285 |
-| `vercel` | mask+commit | 12,750 | 8.657 | 15.539 | 22.899 | 34.956 | 116.680 |
-
-Four of the five workloads recorded no runtime sample above 1 ms in any measured mask, commit, or mask+commit distribution. The exception was one isolated O62060 commit and combined mask+commit sample:
-
-```text
-O62060 mask+commit p99.9: 31.735 µs
-O62060 mask+commit max:   1,423.737 µs
-samples above 1 ms:      1 / 66,200
+```bash
+make example-slow-all \
+  PYTHON=/home/isaac/release-bench/venv/bin/python \
+  FRAMEWORKS='llguidance glrmask glrmask_native xgrammar' \
+  BUILD_RUNS=3 \
+  BUILD_TIMEOUT=60 \
+  TIMING_RUNS='glrmask_native:50,default:100,llguidance:1' \
+  OUTPUT=/home/isaac/release-bench/results/example-slow-all-four-backend.json.zst \
+  V=1
 ```
 
-A claim that maximum latency is universally below 1 ms would therefore be false.
+Key benchmark semantics are:
 
-## Correctness and comparison caveats
+```text
+195 selected slow/problematic schemas
+--max-examples-per-problem -1
+--discrepancy-sample-budget 500
+--max-dispute-scan 0
+--on-build-error continue
+--build-timeout-seconds 60
+--build-runs 3
+--timing-runs glrmask_native:50,default:100,llguidance:1
+```
 
-All four expected-valid labeled workloads replayed fully under glrmask. The unlabeled checked-in recursive JSON GLRM example also replayed fully.
+The comparison is a **performance comparison**. Neither `llguidance` nor `xgrammar` is treated as semantic ground truth, and a raw token-mask disagreement is not by itself evidence that either backend is correct or incorrect. Correctness differences require separate language-level analysis.
 
-The benchmark also collected raw token-mask disagreements with `llguidance_native`, but those disagreements were not adjudicated as ground truth. They do not establish that either backend is correct or incorrect on a disputed token, and successful gold replay does not prove equality of the full token-mask language.
+A pre-measurement five-second machine-load sample observed low background activity, with approximately 3.9% average total CPU utilization. The benchmark runs on Linux-native WSL paths rather than `/mnt/c` to avoid mounted-Windows-filesystem overhead.
 
-This benchmark does not support a claim of universal superiority over another backend.
+## Results
 
-## Public interpretation
+Final aggregate results are not included in the v0.1.0 package release. The completed result payload will be parsed to report, for each backend, build successes, build failures, hard 60-second timeouts, central build-time metrics, runtime or token-mask metrics, tail metrics where clearly defined, and the exact number of contributing problems, examples, and tokens.
 
-The bounded release snapshot supports the following limited statements:
+## Interpretation boundaries
 
-- the measured small BFCL tool schema compiled in about 0.14 seconds on this machine;
-- the 512-tool BFCL catalog compiled in about 0.99 seconds;
-- the recursive JSON GLRM grammar compiled in about 63 ms;
-- O62060 compiled in about 1.6 seconds;
-- Vercel remained the clear compile-tail case at about 25 seconds;
-- combined mask+commit p99.9 was between about 25.8 and 35.0 µs across the five workloads;
-- one isolated 1.42 ms combined runtime outlier occurred in 66,200 O62060 samples.
+Any later v0.1 benchmark results support only claims tied to the exact benchmark target, machine, backend versions, and measured metrics recorded here.
 
-These are measurements of the exact commit and environment above, not hardware-independent guarantees.
+They do not establish:
+
+- performance on the full CFA corpus;
+- hardware-independent latency or throughput guarantees;
+- universal superiority of one constrained-decoding backend;
+- semantic equivalence between the four backends;
+- correctness of one backend merely because another backend disagrees with it.

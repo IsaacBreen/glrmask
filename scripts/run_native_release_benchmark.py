@@ -128,8 +128,50 @@ def _git_metadata(path: Path) -> dict[str, Any]:
 def _sysctl(name: str) -> str | None:
     if shutil.which("sysctl") is None:
         return None
-    value = _run_text(["sysctl", "-n", name])
+    proc = subprocess.run(
+        ["sysctl", "-n", name],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return None
+    value = proc.stdout.strip()
     return value or None
+
+
+def _physical_cpu_count() -> int | None:
+    if platform.system() == "Darwin":
+        value = _sysctl("hw.physicalcpu")
+        if value:
+            try:
+                return int(value)
+            except ValueError:
+                pass
+
+    cpuinfo = Path("/proc/cpuinfo")
+    if cpuinfo.exists():
+        physical_cores: set[tuple[str, str]] = set()
+        physical_id: str | None = None
+        core_id: str | None = None
+        for line in [*cpuinfo.read_text(errors="replace").splitlines(), ""]:
+            if not line.strip():
+                if physical_id is not None and core_id is not None:
+                    physical_cores.add((physical_id, core_id))
+                physical_id = None
+                core_id = None
+                continue
+            if ":" not in line:
+                continue
+            key, value = (part.strip() for part in line.split(":", 1))
+            if key == "physical id":
+                physical_id = value
+            elif key == "core id":
+                core_id = value
+        if physical_cores:
+            return len(physical_cores)
+    return None
 
 
 def _cpu_metadata() -> dict[str, Any]:
@@ -144,7 +186,7 @@ def _cpu_metadata() -> dict[str, Any]:
     return {
         "model": cpu_model or platform.processor() or None,
         "logical_cpus": os.cpu_count(),
-        "physical_cpus": int(_sysctl("hw.physicalcpu") or 0) or None,
+        "physical_cpus": _physical_cpu_count(),
     }
 
 
