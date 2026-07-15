@@ -12,7 +12,7 @@ use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule, Quantifier};
 
 use super::ast::{
     AdditionalProperties, ArraySchema, NumberSchema, ObjectSchema, Schema, SchemaAssertions,
-    SchemaDocument, SchemaKind, SchemaType,
+    SchemaDocument, SchemaKind, SchemaType, StringSchema,
 };
 
 use super::config::JsonSchemaConfig;
@@ -49,6 +49,7 @@ const STRING_ENUM_REGEX_MIN_ENCODED_BYTES: usize = 1024;
 pub(crate) const JSON_LITERAL_LEXER_PARTITION: &str = "json_literals";
 pub(crate) const JSON_OTHER_LEXER_PARTITION: &str = "json_other";
 pub(crate) const JSON_PATTERN_LEXER_PARTITION: &str = "json_patterns";
+pub(crate) const JSON_PATTERN_FAMILY_LEXER_PARTITION_PREFIX: &str = "json_pattern_family_";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum JsonTerminalPartitionClass {
@@ -64,6 +65,25 @@ impl JsonTerminalPartitionClass {
             (Pattern, _) | (_, Pattern) => Pattern,
             (Literal, _) | (_, Literal) => Literal,
             (Other, Other) => Other,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct JsonPatternPartitionKey {
+    min_length: usize,
+    max_length: Option<usize>,
+    pattern: Option<String>,
+    format: Option<String>,
+}
+
+impl From<&StringSchema> for JsonPatternPartitionKey {
+    fn from(schema: &StringSchema) -> Self {
+        Self {
+            min_length: schema.min_length,
+            max_length: schema.max_length,
+            pattern: schema.pattern.clone(),
+            format: schema.format.clone(),
         }
     }
 }
@@ -139,6 +159,7 @@ pub(crate) struct Lowerer<'a> {
     pub(crate) fixed_object_profile: Option<FixedObjectLowerProfile>,
     pub(crate) fixed_object_nfa_templates: HashMap<FixedObjectTemplateKey, ExprNFA>,
     pub(crate) terminal_partition_classes: BTreeMap<String, JsonTerminalPartitionClass>,
+    pub(crate) terminal_pattern_partition_keys: BTreeMap<String, JsonPatternPartitionKey>,
     terminal_partition_class: JsonTerminalPartitionClass,
     definition_rules: BTreeMap<String, String>,
     definition_by_pointer: BTreeMap<String, &'a Schema>,
@@ -195,6 +216,7 @@ impl<'a> Lowerer<'a> {
             .then(FixedObjectLowerProfile::default),
             fixed_object_nfa_templates: HashMap::new(),
             terminal_partition_classes: BTreeMap::new(),
+            terminal_pattern_partition_keys: BTreeMap::new(),
             terminal_partition_class: JsonTerminalPartitionClass::Other,
             definition_rules: BTreeMap::new(),
             definition_by_pointer,
@@ -232,6 +254,7 @@ impl<'a> Lowerer<'a> {
             fixed_object_profile: None,
             fixed_object_nfa_templates: HashMap::new(),
             terminal_partition_classes: BTreeMap::new(),
+            terminal_pattern_partition_keys: BTreeMap::new(),
             terminal_partition_class: JsonTerminalPartitionClass::Other,
             definition_rules: BTreeMap::new(),
             definition_by_pointer: self.definition_by_pointer.clone(),
@@ -251,6 +274,7 @@ impl<'a> Lowerer<'a> {
         &mut self,
         rules: Vec<NamedRule>,
         terminal_partition_classes: BTreeMap<String, JsonTerminalPartitionClass>,
+        terminal_pattern_partition_keys: BTreeMap<String, JsonPatternPartitionKey>,
     ) -> ImportResult<()> {
         let mut existing_by_name = HashMap::with_capacity(self.rules.len() + rules.len());
         for (index, rule) in self.rules.iter().enumerate() {
@@ -276,6 +300,21 @@ impl<'a> Lowerer<'a> {
                 .entry(terminal)
                 .and_modify(|existing| *existing = existing.merge(class))
                 .or_insert(class);
+        }
+        for (terminal, key) in terminal_pattern_partition_keys {
+            match self.terminal_pattern_partition_keys.entry(terminal) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(key);
+                }
+                std::collections::btree_map::Entry::Occupied(entry) => {
+                    if entry.get() != &key {
+                        return Err(SchemaImportError::new(format!(
+                            "isolated JSON Schema lowering produced conflicting pattern partition key for terminal {:?}",
+                            entry.key()
+                        )));
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -334,6 +373,7 @@ impl<'a> Lowerer<'a> {
         grammar.lexer_partitions = build_json_lexer_partition_classes(
             &grammar,
             &self.terminal_partition_classes,
+            &self.terminal_pattern_partition_keys,
             &resolved_terminals,
         );
         let repeat_audit_started_at = profile_enabled.then(std::time::Instant::now);
@@ -1148,6 +1188,16 @@ impl<'a> Lowerer<'a> {
         });
     }
 
+    pub(crate) fn add_pattern_terminal_rule_with_partition_key(
+        &mut self,
+        name: &str,
+        expr: GrammarExpr,
+        key: JsonPatternPartitionKey,
+    ) {
+        self.add_pattern_terminal_rule(name, expr);
+        self.terminal_pattern_partition_keys.insert(name.to_string(), key);
+    }
+
     pub(crate) fn add_internal_terminal_rule(&mut self, name: &str, expr: GrammarExpr) {
         self.used_rule_names.insert(name.to_string());
         self.rules.push(NamedRule {
@@ -1614,9 +1664,24 @@ fn emit_repeated_single_byte_terminal_warnings(
 fn build_json_lexer_partition_classes(
     grammar: &NamedGrammar,
     terminal_partition_classes: &BTreeMap<String, JsonTerminalPartitionClass>,
+    terminal_pattern_partition_keys: &BTreeMap<String, JsonPatternPartitionKey>,
     resolved_terminals: &BTreeMap<String, Expr>,
 ) -> BTreeMap<String, String> {
     let mut class_by_terminal_expr = HashMap::new();
+    let pattern_partition_by_key = terminal_pattern_partition_keys
+        .values()
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .enumerate()
+        .map(|(index, key)| {
+            (
+                key,
+                format!("{JSON_PATTERN_FAMILY_LEXER_PARTITION_PREFIX}{index}"),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut pattern_partition_by_terminal_expr = HashMap::new();
 
     // Terminal lowering deduplicates equal resolved lexer expressions to one
     // TerminalID. Merge importer provenance on that same identity before
@@ -1640,6 +1705,19 @@ fn build_json_lexer_partition_classes(
                 *existing = existing.merge(class);
             })
             .or_insert(class);
+        if let Some(key) = terminal_pattern_partition_keys.get(&rule.name) {
+            let partition = pattern_partition_by_key
+                .get(key)
+                .expect("pattern partition key must have an assigned family");
+            pattern_partition_by_terminal_expr
+                .entry(terminal_expr.clone())
+                .and_modify(|existing: &mut String| {
+                    if partition < existing {
+                        *existing = partition.clone();
+                    }
+                })
+                .or_insert_with(|| partition.clone());
+        }
     }
 
     grammar
@@ -1653,7 +1731,10 @@ fn build_json_lexer_partition_classes(
             let partition = match class_by_terminal_expr[terminal_expr] {
                 JsonTerminalPartitionClass::Other => JSON_OTHER_LEXER_PARTITION,
                 JsonTerminalPartitionClass::Literal => JSON_LITERAL_LEXER_PARTITION,
-                JsonTerminalPartitionClass::Pattern => JSON_PATTERN_LEXER_PARTITION,
+                JsonTerminalPartitionClass::Pattern => pattern_partition_by_terminal_expr
+                    .get(terminal_expr)
+                    .map(String::as_str)
+                    .unwrap_or(JSON_PATTERN_LEXER_PARTITION),
             };
             (rule.name.clone(), partition.to_string())
         })
