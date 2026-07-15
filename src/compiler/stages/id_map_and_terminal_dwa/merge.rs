@@ -4,7 +4,7 @@
 //! and disjoint vocabs (e.g., different character-type partitions) uniformly
 //! via composite-key refinement.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -28,6 +28,7 @@ use crate::ds::weight::Weight;
 use super::types::{LocalIdMapTerminalDwa, TerminalDwaPhaseProfile, compile_profile_enabled};
 
 type RemapCache<T> = FxHashMap<usize, T>;
+type CompositeClassKey = SmallVec<[u32; 16]>;
 
 fn merged_terminal_dwa_phase_enabled(variable: &str, default: bool) -> bool {
     std::env::var(variable)
@@ -1976,13 +1977,13 @@ fn build_unified_global_id_map(
     num_tokenizer_states: usize,
     max_token_id: u32,
 ) -> (InternalIdMap, Option<Vec<Vec<u32>>>) {
-    let mut composite_to_class: HashMap<Vec<u32>, u32> = HashMap::new();
+    let mut composite_to_class = FxHashMap::<CompositeClassKey, u32>::default();
     let mut state_o2i = vec![0u32; num_tokenizer_states];
     let mut state_i2o: Vec<Vec<u32>> = Vec::new();
     let mut state_reps: Vec<u32> = Vec::new();
 
     for state in 0..num_tokenizer_states {
-        let composite: Vec<u32> = inputs
+        let composite: CompositeClassKey = inputs
             .iter()
             .map(|input| input.tokenizer_states.original_to_internal[state])
             .collect();
@@ -2018,13 +2019,13 @@ fn build_unified_global_token_id_map_generic(
     inputs: &[&InternalIdMap],
     max_token_id: u32,
 ) -> ManyToOneIdMap {
-    let mut token_composite_to_class: HashMap<Vec<u32>, u32> = HashMap::new();
+    let mut token_composite_to_class = FxHashMap::<CompositeClassKey, u32>::default();
     let mut token_o2i = vec![u32::MAX; max_token_id as usize + 1];
     let mut token_i2o: Vec<Vec<u32>> = Vec::new();
     let mut token_reps: Vec<u32> = Vec::new();
 
     for token_id in 0..=max_token_id {
-        let composite: Vec<u32> = inputs
+        let composite: CompositeClassKey = inputs
             .iter()
             .map(|input| {
                 input
@@ -2134,7 +2135,7 @@ fn build_direct_local_to_global_token_map(local_to_global: &[u32]) -> Vec<Vec<u3
 }
 
 fn reorder_classes(
-    composite_to_class: HashMap<Vec<u32>, u32>,
+    composite_to_class: FxHashMap<CompositeClassKey, u32>,
     o2i: &mut [u32],
     i2o: &mut Vec<Vec<u32>>,
     reps: &mut Vec<u32>,
@@ -2144,7 +2145,7 @@ fn reorder_classes(
         return;
     }
 
-    let mut sorted: Vec<(Vec<u32>, u32)> = composite_to_class.into_iter().collect();
+    let mut sorted: Vec<(CompositeClassKey, u32)> = composite_to_class.into_iter().collect();
     sorted.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut old_to_new = vec![0u32; num_classes];
@@ -2167,7 +2168,7 @@ fn reorder_classes(
 }
 
 fn reorder_classes_with_sentinel(
-    composite_to_class: HashMap<Vec<u32>, u32>,
+    composite_to_class: FxHashMap<CompositeClassKey, u32>,
     o2i: &mut [u32],
     i2o: &mut Vec<Vec<u32>>,
     reps: &mut Vec<u32>,
@@ -2178,7 +2179,7 @@ fn reorder_classes_with_sentinel(
         return;
     }
 
-    let mut sorted: Vec<(Vec<u32>, u32)> = composite_to_class.into_iter().collect();
+    let mut sorted: Vec<(CompositeClassKey, u32)> = composite_to_class.into_iter().collect();
     sorted.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut old_to_new = vec![0u32; num_classes];

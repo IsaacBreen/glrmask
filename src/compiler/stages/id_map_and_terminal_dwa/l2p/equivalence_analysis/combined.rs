@@ -437,6 +437,24 @@ fn should_use_l2p_nfa_powerset(
     }
 }
 
+#[inline]
+fn should_use_l2p_nfa_prepass_powerset(
+    policy: L2pNfaAnalysisViewPolicy,
+    candidate_present: bool,
+) -> bool {
+    match policy {
+        // Adaptive probing already gates construction on the estimated cost of
+        // the bounded alternative. Once the exact sparse candidate has been
+        // built successfully, do not throw it away because of a second,
+        // unrelated state-count cliff. The prepass is consumed only by bounded
+        // max-length refinement; stable restricted observation uses the direct
+        // incremental NFA engine.
+        L2pNfaAnalysisViewPolicy::Adaptive => candidate_present,
+        L2pNfaAnalysisViewPolicy::Bounded => false,
+        L2pNfaAnalysisViewPolicy::Powerset => true,
+    }
+}
+
 fn should_skip_max_length_for_partition(
     partition_label: &str,
     initial_state_count: usize,
@@ -1760,11 +1778,9 @@ fn analyze_equivalences_impl(
         let prepass_powerset_states = prepass_powerset_candidate
             .as_ref()
             .map_or(0, |powerset| powerset.states.len());
-        let use_prebuilt_nfa_refinement = should_use_l2p_nfa_powerset(
+        let use_prebuilt_nfa_refinement = should_use_l2p_nfa_prepass_powerset(
             analysis_view_policy,
             prepass_powerset_candidate.is_some(),
-            prepass_powerset_states,
-            powerset_max_states,
         );
         let prepass_output_classes = use_prebuilt_nfa_refinement
             .then(|| {

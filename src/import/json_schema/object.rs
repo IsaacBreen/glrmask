@@ -572,14 +572,25 @@ impl<'a> Lowerer<'a> {
                         expressions,
                         lowerer.rules,
                         lowerer.terminal_partition_classes,
+                        lowerer.terminal_pattern_partition_keys,
                     ))
                 })
                 .collect::<ImportResult<Vec<_>>>()?
         };
 
         let mut expressions = Vec::with_capacity(cases.len());
-        for (chunk_expressions, rules, terminal_partition_classes) in isolated {
-            self.append_isolated_rules(rules, terminal_partition_classes)?;
+        for (
+            chunk_expressions,
+            rules,
+            terminal_partition_classes,
+            terminal_pattern_partition_keys,
+        ) in isolated
+        {
+            self.append_isolated_rules(
+                rules,
+                terminal_partition_classes,
+                terminal_pattern_partition_keys,
+            )?;
             expressions.extend(chunk_expressions);
         }
         Ok(expressions)

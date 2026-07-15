@@ -2816,7 +2816,7 @@ fn arrays_use_item_schema_and_min_max_items() {
 }
 
 #[test]
-fn bounded_object_arrays_use_exprnfa_rule() {
+fn bounded_object_arrays_use_separated_sequence_range() {
     let schema = json!({
         "type": "array",
         "items": {
@@ -2830,11 +2830,56 @@ fn bounded_object_arrays_use_exprnfa_rule() {
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("bounded_array_"), "{glrm}");
-    assert!(grammar.rules.iter().any(|rule| {
-        rule.name.contains("bounded_array_") && matches!(rule.expr, GrammarExpr::ExprNFA(_))
-    }), "{glrm}");
+    assert!(contains_separated_sequence(start_expr(&grammar)), "{glrm}");
+    assert!(glrm.contains("{0,3}"), "{glrm}");
+    assert!(!glrm.contains("bounded_array_"), "{glrm}");
     lower(&grammar).unwrap();
+}
+
+#[test]
+fn literal_key_pattern_values_share_a_partition_family_without_grouping_pattern_keys() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _split_literal_terminals = SplitLiteralTerminalsOverrideGuard {
+        original: swap_split_literal_terminals_test_override(Some(false)),
+    };
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "KEY1": {"type": "string", "pattern": "^/.*"},
+            "KEY2": {"type": "string", "pattern": "^/.*"}
+        },
+        "patternProperties": {
+            "^dynamic_[0-9]+$": {"type": "string", "pattern": "^/.*"}
+        },
+        "additionalProperties": false
+    });
+
+    let mut grammar = schema_to_named_grammar(&schema).unwrap();
+    super::prepare_named_grammar(&mut grammar).unwrap();
+
+    let fixed_pattern_terminals = grammar
+        .rules
+        .iter()
+        .filter(|rule| {
+            rule.is_terminal && rule.name.starts_with("json_property_string_value_")
+        })
+        .map(|rule| rule.name.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(fixed_pattern_terminals.len(), 2, "{:?}", grammar.rules);
+    let first_partition = &grammar.lexer_partitions[&fixed_pattern_terminals[0]];
+    let second_partition = &grammar.lexer_partitions[&fixed_pattern_terminals[1]];
+    assert_eq!(first_partition, second_partition);
+
+    let pattern_key_terminal = grammar
+        .rules
+        .iter()
+        .find(|rule| rule.is_terminal && rule.name.starts_with("json_pattern_key_colon_"))
+        .expect("patternProperties should emit a pattern-derived key terminal");
+    assert_ne!(
+        first_partition,
+        &grammar.lexer_partitions[&pattern_key_terminal.name],
+        "pattern-derived keys must retain singleton isolation"
+    );
 }
 
 #[test]

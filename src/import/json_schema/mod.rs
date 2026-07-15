@@ -50,6 +50,10 @@ fn is_pattern_partition(partition: &str) -> bool {
         || partition.starts_with("json_pattern_")
 }
 
+fn is_pattern_family_partition(partition: &str) -> bool {
+    partition.starts_with(lower::JSON_PATTERN_FAMILY_LEXER_PARTITION_PREFIX)
+}
+
 fn partition_class(partition: Option<&str>) -> lower::JsonTerminalPartitionClass {
     match partition {
         Some(lower::JSON_LITERAL_LEXER_PARTITION) => {
@@ -70,6 +74,7 @@ fn finalize_lexer_partitions_with_options(
     let resolved_terminals = resolved_named_terminal_exprs(grammar)?;
     let mut pattern_partitions = HashMap::new();
     let mut class_by_terminal_expr = HashMap::new();
+    let mut declared_pattern_family_by_terminal_expr = HashMap::new();
 
     // Named terminal rules are deduplicated to `TerminalID` by resolved lexer
     // expression, not by rule name. Combine provenance on that exact identity
@@ -93,6 +98,19 @@ fn finalize_lexer_partitions_with_options(
                 *existing = existing.merge(class);
             })
             .or_insert(class);
+        if let Some(partition) = previous_partitions
+            .get(&rule.name)
+            .filter(|partition| is_pattern_family_partition(partition))
+        {
+            declared_pattern_family_by_terminal_expr
+                .entry(terminal_expr.clone())
+                .and_modify(|existing: &mut String| {
+                    if partition < existing {
+                        *existing = partition.clone();
+                    }
+                })
+                .or_insert_with(|| partition.clone());
+        }
     }
 
     grammar.default_lexer_partition = None;
@@ -110,10 +128,16 @@ fn finalize_lexer_partitions_with_options(
                 lower::JSON_LITERAL_LEXER_PARTITION.to_string()
             }
             lower::JsonTerminalPartitionClass::Pattern if pattern_singletons => {
-                pattern_partitions
-                    .entry(terminal_expr.clone())
-                    .or_insert_with(|| format!("json_pattern_{}", rule.name))
-                    .clone()
+                if let Some(partition) =
+                    declared_pattern_family_by_terminal_expr.get(terminal_expr)
+                {
+                    partition.clone()
+                } else {
+                    pattern_partitions
+                        .entry(terminal_expr.clone())
+                        .or_insert_with(|| format!("json_pattern_{}", rule.name))
+                        .clone()
+                }
             }
             lower::JsonTerminalPartitionClass::Pattern => {
                 lower::JSON_PATTERN_LEXER_PARTITION.to_string()
@@ -224,6 +248,38 @@ mod lexer_partition_policy_tests {
         assert_eq!(grammar.lexer_partitions["A"], lower::JSON_PATTERN_LEXER_PARTITION);
         assert_eq!(grammar.lexer_partitions["B"], lower::JSON_PATTERN_LEXER_PARTITION);
         assert_eq!(grammar.lexer_partitions["C"], lower::JSON_PATTERN_LEXER_PARTITION);
+    }
+
+    #[test]
+    fn declared_pattern_family_groups_distinct_terminal_languages() {
+        let family = format!("{}0", lower::JSON_PATTERN_FAMILY_LEXER_PARTITION_PREFIX);
+        let mut grammar = NamedGrammar {
+            rules: vec![
+                terminal("A", GrammarExpr::RawRegex("a+".to_string())),
+                terminal("B", GrammarExpr::RawRegex("b+".to_string())),
+                terminal("C", GrammarExpr::RawRegex("c+".to_string())),
+            ],
+            start: "A".to_string(),
+            ignore: None,
+            lexer_partitions: [
+                ("A".to_string(), family.clone()),
+                ("B".to_string(), family.clone()),
+                ("C".to_string(), lower::JSON_PATTERN_LEXER_PARTITION.to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            lexer_literal_partitions: Default::default(),
+            default_lexer_partition: None,
+        };
+
+        finalize_lexer_partitions_with_options(&mut grammar, true).unwrap();
+        assert_eq!(grammar.lexer_partitions["A"], family);
+        assert_eq!(grammar.lexer_partitions["B"], family);
+        assert_ne!(grammar.lexer_partitions["C"], family);
+
+        let finalized = grammar.lexer_partitions.clone();
+        finalize_lexer_partitions_with_options(&mut grammar, true).unwrap();
+        assert_eq!(grammar.lexer_partitions, finalized);
     }
 }
 

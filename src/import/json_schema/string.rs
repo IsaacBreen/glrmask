@@ -12,7 +12,7 @@ use super::error::{ImportResult, SchemaImportError};
 use super::split_literal_terminals_enabled;
 use super::lower::{
     choice, json_additional_key_string_rule, json_key_string_rule, lit, lit_bytes, never, r, seq, Lowerer,
-    JsonTerminalPartitionClass,
+    JsonPatternPartitionKey, JsonTerminalPartitionClass,
     JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE,
     JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE, JSON_ADDITIONAL_KEY_COLON_SHARED_RULE,
     JSON_ITEM_SEPARATOR_RULE, JSON_KEY_SEPARATOR_RULE, JSON_KEY_SUFFIX_RULE, JSON_QUOTE_RULE,
@@ -1053,7 +1053,11 @@ impl<'a> Lowerer<'a> {
             } else {
                 "json_property_string_value"
             });
-            self.add_pattern_terminal_rule(&name, expr);
+            self.add_pattern_terminal_rule_with_partition_key(
+                &name,
+                expr,
+                JsonPatternPartitionKey::from(schema),
+            );
             return Ok(r(&name));
         }
 

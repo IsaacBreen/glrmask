@@ -15,7 +15,6 @@ use crate::ds::weight::{ScopedWeightOpCache, Weight};
 type QueryKey = (u32, i32);
 type CancellationTask = (u32, u32, i32);
 type QueryWeights = Vec<SmallQueryWeights>;
-type QueuedQueries = Vec<SmallQueuedQueries>;
 type DerivedEpsilons = Vec<Option<FxHashMap<u32, Weight>>>;
 type SubsetMemo = FxHashMap<(usize, usize), bool>;
 
@@ -92,62 +91,6 @@ impl SmallQueryWeights {
             Self::Many(entries) => {
                 for (&query_key, weight) in entries {
                     f(query_key, weight);
-                }
-            }
-        }
-    }
-}
-
-#[derive(Clone, Default)]
-enum SmallQueuedQueries {
-    #[default]
-    Empty,
-    One(QueryKey),
-    Many(FxHashSet<QueryKey>),
-}
-
-impl SmallQueuedQueries {
-    fn insert(&mut self, query_key: QueryKey) -> bool {
-        match self {
-            Self::Empty => {
-                *self = Self::One(query_key);
-                true
-            }
-            Self::One(existing) => {
-                if *existing == query_key {
-                    false
-                } else {
-                    let previous = *existing;
-                    let mut entries = FxHashSet::default();
-                    entries.insert(previous);
-                    entries.insert(query_key);
-                    *self = Self::Many(entries);
-                    true
-                }
-            }
-            Self::Many(entries) => entries.insert(query_key),
-        }
-    }
-
-    fn remove(&mut self, query_key: &QueryKey) {
-        match self {
-            Self::Empty => {}
-            Self::One(existing) => {
-                if existing == query_key {
-                    *self = Self::Empty;
-                }
-            }
-            Self::Many(entries) => {
-                if !entries.remove(query_key) {
-                    return;
-                }
-                match entries.len() {
-                    0 => *self = Self::Empty,
-                    1 => {
-                        let remaining = *entries.iter().next().unwrap();
-                        *self = Self::One(remaining);
-                    }
-                    _ => {}
                 }
             }
         }
@@ -360,19 +303,6 @@ fn union_guarded_pending(
     }
 }
 
-fn enqueue_cancellation_task(
-    worklist: &mut VecDeque<CancellationTask>,
-    queued: &mut QueuedQueries,
-    state: u32,
-    source_state: u32,
-    positive_label: i32,
-) {
-    let task = (state, source_state, positive_label);
-    if queued[state as usize].insert((source_state, positive_label)) {
-        worklist.push_back(task);
-    }
-}
-
 fn record_query_weight(
     query_weights: &mut QueryWeights,
     state: u32,
@@ -385,14 +315,13 @@ fn record_query_weight(
 fn queue_query_weight(
     query_weights: &mut QueryWeights,
     worklist: &mut VecDeque<CancellationTask>,
-    queued: &mut QueuedQueries,
     state: u32,
     source_state: u32,
     positive_label: i32,
     add: Weight,
 ) {
     if record_query_weight(query_weights, state, (source_state, positive_label), add) {
-        enqueue_cancellation_task(worklist, queued, state, source_state, positive_label);
+        worklist.push_back((state, source_state, positive_label));
     }
 }
 
@@ -404,7 +333,6 @@ fn propagate_query_through_derived_epsilons(
     positive_label: i32,
     query_weights: &mut QueryWeights,
     worklist: &mut VecDeque<CancellationTask>,
-    queued: &mut QueuedQueries,
     derived_epsilons: &DerivedEpsilons,
     foreign_derived: Option<&DerivedEpsilons>,
 ) {
@@ -414,8 +342,7 @@ fn propagate_query_through_derived_epsilons(
     let propagate = |target_state: u32,
                      epsilon_weight: &Weight,
                      query_weights: &mut QueryWeights,
-                     worklist: &mut VecDeque<CancellationTask>,
-                     queued: &mut QueuedQueries| {
+                     worklist: &mut VecDeque<CancellationTask>| {
         let propagated = intersect_with_single_weight_hint(
             query_weight_to_current,
             query_single,
@@ -427,7 +354,6 @@ fn propagate_query_through_derived_epsilons(
         queue_query_weight(
             query_weights,
             worklist,
-            queued,
             target_state,
             source_state,
             positive_label,
@@ -437,14 +363,14 @@ fn propagate_query_through_derived_epsilons(
 
     if let Some(local_map) = local {
         for (&target_state, epsilon_weight) in local_map {
-            propagate(target_state, epsilon_weight, query_weights, worklist, queued);
+            propagate(target_state, epsilon_weight, query_weights, worklist);
         }
     }
     if let Some(foreign_map) = foreign {
         for (&target_state, epsilon_weight) in foreign_map {
             // Skip if local already has a stronger entry for this target
             // (merging handled below in queue_query_weight's dedup anyway).
-            propagate(target_state, epsilon_weight, query_weights, worklist, queued);
+            propagate(target_state, epsilon_weight, query_weights, worklist);
         }
     }
 }
@@ -457,7 +383,6 @@ fn extend_derived_epsilons(
     edge_weight: &Weight,
     query_weights: &mut QueryWeights,
     worklist: &mut VecDeque<CancellationTask>,
-    queued: &mut QueuedQueries,
     derived_epsilons: &mut DerivedEpsilons,
     subset_memo: &mut SubsetMemo,
 ) {
@@ -510,7 +435,6 @@ fn extend_derived_epsilons(
         queue_query_weight(
             query_weights,
             worklist,
-            queued,
             target_state,
             upstream_source_state,
             upstream_label,
@@ -557,7 +481,6 @@ fn compute_cancellations_range_inner(
 
     let mut query_weights: QueryWeights = vec![SmallQueryWeights::Empty; state_count as usize];
     let mut worklist = VecDeque::<CancellationTask>::new();
-    let mut queued: QueuedQueries = vec![SmallQueuedQueries::Empty; state_count as usize];
     let mut derived_epsilons: DerivedEpsilons = vec![None; state_count as usize];
     let mut subset_memo = SubsetMemo::default();
 
@@ -577,7 +500,6 @@ fn compute_cancellations_range_inner(
                 queue_query_weight(
                     &mut query_weights,
                     &mut worklist,
-                    &mut queued,
                     *target_state,
                     source_state,
                     positive_label,
@@ -588,7 +510,6 @@ fn compute_cancellations_range_inner(
     }
 
     while let Some((current_state, source_state, positive_label)) = worklist.pop_front() {
-        queued[current_state as usize].remove(&(source_state, positive_label));
         let Some(query_weight_to_current) = query_weights[current_state as usize]
             .get(&(source_state, positive_label))
             .cloned()
@@ -605,7 +526,6 @@ fn compute_cancellations_range_inner(
             positive_label,
             &mut query_weights,
             &mut worklist,
-            &mut queued,
             &derived_epsilons,
             foreign_derived,
         );
@@ -624,7 +544,6 @@ fn compute_cancellations_range_inner(
                         edge_weight,
                         &mut query_weights,
                         &mut worklist,
-                        &mut queued,
                         &mut derived_epsilons,
                         &mut subset_memo,
                     );
@@ -646,7 +565,6 @@ fn compute_cancellations_range_inner(
                         edge_weight,
                         &mut query_weights,
                         &mut worklist,
-                        &mut queued,
                         &mut derived_epsilons,
                         &mut subset_memo,
                     );
@@ -671,7 +589,6 @@ fn compute_cancellations_range_inner(
             queue_query_weight(
                 &mut query_weights,
                 &mut worklist,
-                &mut queued,
                 *target_state,
                 source_state,
                 positive_label,
@@ -1100,7 +1017,15 @@ pub(crate) fn apply_finality_fixpoint(nwa: &mut NWA) {
     let initial_ms = initial_started_at.map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
     let mut weight_ops = ScopedWeightOpCache::default();
     let rayon_workers = rayon::current_num_threads();
-    let use_chunked_parallel_waves = acyclic
+    // The serial acyclic solver reuses an invocation-local weight-operation
+    // cache. On the large parser NWAs this consistently beats the chunked Rayon
+    // wave solver, whose uncached intersections dominate despite parallelism.
+    // Keep the parallel path available for targeted experiments.
+    let force_parallel_finality = std::env::var("GLRMASK_FORCE_PARALLEL_FINALITY")
+        .map(|value| value == "1")
+        .unwrap_or(false);
+    let use_chunked_parallel_waves = force_parallel_finality
+        && acyclic
         && rayon_workers > 1
         && finality_edge_count >= MIN_PARALLEL_FINALITY_EDGES_PER_WORKER * rayon_workers;
 
