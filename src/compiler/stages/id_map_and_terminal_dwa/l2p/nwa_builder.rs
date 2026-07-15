@@ -1457,9 +1457,7 @@ mod tests {
 
     use super::*;
     use crate::automata::lexer::ast::Expr;
-    use crate::automata::lexer::compile::{
-        build_regex_monolithic as build_regex, build_regex_partitioned_with_adaptive,
-    };
+    use crate::automata::lexer::compile::build_regex_monolithic as build_regex;
     use crate::automata::weighted::determinize::determinize;
     use crate::automata::weighted::minimize::minimize_owned;
     use crate::compiler::stages::equiv_types::ManyToOneIdMap;
@@ -1958,50 +1956,6 @@ mod tests {
     }
 
     #[test]
-    fn epsilon_partitioned_transport_nwa_matches_ordinary_nwa() {
-        let expressions = vec![
-            Expr::U8Seq(b"a".to_vec()),
-            Expr::U8Seq(b"a".to_vec()),
-        ];
-        let terminal_count = expressions.len() as u32;
-        let tokenizer = build_regex_partitioned_with_adaptive(
-            &expressions,
-            &[0, 1],
-            false,
-        )
-        .into_tokenizer(
-            terminal_count,
-            Some(Arc::from(expressions.into_boxed_slice())),
-        );
-        assert!(tokenizer.has_epsilon_transitions());
-
-        let partition = discover_one_round(&tokenizer, &[true, true], &[true; 256], None);
-        let modes = binary_transport_modes(
-            &tokenizer,
-            &[true, true],
-            &partition,
-            &[true; 256],
-            None,
-        );
-        let tree = VocabPrefixTree::build(&[
-            (0, b"a".to_vec()),
-            (1, b"aa".to_vec()),
-            (2, b"aaa".to_vec()),
-        ]);
-        let id_map = singleton_id_map(tokenizer.num_states(), 3);
-        let baseline = build_baseline_test_artifact(&tokenizer, &tree, &id_map);
-        let compact = build_transport_test_artifact(
-            &tokenizer,
-            &tree,
-            &id_map,
-            &visible_output_raw_labels(&partition, &[true, true]),
-            &modes,
-        );
-        compare_terminal_dwa(&baseline, &compact)
-            .expect("epsilon-aware transport scanning must preserve the exact terminal language");
-    }
-
-    #[test]
     fn compact_transport_output_filter_preserves_the_baseline_language() {
         // These duplicate literals are rooted-interchangeable. Raw
         // nonrepresentatives remain present in the lexer metadata, but their
@@ -2352,21 +2306,15 @@ impl TransportScannerStateMap {
     }
 }
 
-/// One temporary scanner-transport mode for terminal reconstruction.
-///
-/// The ordinary mode emits only final representatives. A member mode scans
-/// from one certified transport state map and emits exactly one label: its
-/// member whenever the transported scan emits that member's representative.
-/// It never relabels or emits unrelated terminals. `requires_boundary_reset`
-/// records whether the composed witness used projected certification; when any
-/// mode has that flag, all modes are replayed by the exact transport NWA so
-/// mixed strong/projected terminal sequences inside one vocabulary token remain
-/// available at every terminal boundary.
+/// One temporary binary-witness scanner mode for strict terminal
+/// interchangeability. The ordinary mode emits only final representatives. A
+/// member mode scans from one certified binary transport state map and emits
+/// exactly one label: its member whenever the transported scan emits that
+/// member's representative. It never relabels or emits unrelated terminals.
 #[derive(Clone, Debug)]
 pub(crate) struct TerminalNwaTransportMode {
     pub(crate) scanner_state_for_original: TransportScannerStateMap,
     member_reconstruction: Option<(TerminalID, TerminalID)>,
-    requires_boundary_reset: bool,
 }
 
 impl TerminalNwaTransportMode {
@@ -2376,7 +2324,6 @@ impl TerminalNwaTransportMode {
                 (0..state_count as u32).collect::<Vec<_>>().into(),
             ),
             member_reconstruction: None,
-            requires_boundary_reset: false,
         }
     }
 
@@ -2385,35 +2332,15 @@ impl TerminalNwaTransportMode {
         representative: TerminalID,
         member: TerminalID,
     ) -> Self {
-        Self::member_with_boundary_reset(
-            scanner_state_for_original,
-            representative,
-            member,
-            false,
-        )
-    }
-
-    pub(crate) fn member_with_boundary_reset(
-        scanner_state_for_original: TransportScannerStateMap,
-        representative: TerminalID,
-        member: TerminalID,
-        requires_boundary_reset: bool,
-    ) -> Self {
         Self {
             scanner_state_for_original,
             member_reconstruction: Some((representative, member)),
-            requires_boundary_reset,
         }
     }
 
     #[inline]
     pub(crate) fn member_reconstruction(&self) -> Option<(TerminalID, TerminalID)> {
         self.member_reconstruction
-    }
-
-    #[inline]
-    pub(crate) fn requires_boundary_reset(&self) -> bool {
-        self.requires_boundary_reset
     }
 
     #[inline]
@@ -2872,50 +2799,38 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
             }
 
             for (context, source_nodes) in contexts_at_offset {
-                let remaining = &segment_bytes[offset..];
+                match_map.clear();
+                let mut scan_state = context.scanner_state;
+                let mut alive = true;
                 let scan_timer = self.transport.timing.start();
-                let end_states = if self.base.has_epsilon_transitions {
-                    self.base
-                        .nfa_scan_cache
-                        .as_mut()
-                        .expect("epsilon tokenizer must initialize NFA trie scan cache")
-                        .execute_into(remaining, context.scanner_state, &mut matches)
-                } else {
-                    match_map.clear();
-                    let mut scan_state = context.scanner_state;
-                    let mut alive = true;
-                    for (index, &byte) in remaining.iter().enumerate() {
-                        let Some(next) = self.base.fast_step(scan_state, byte) else {
-                            alive = false;
-                            break;
-                        };
-                        scan_state = next;
-                        for terminal in self.base.tokenizer.matched_terminals_iter(scan_state) {
-                            if !self.mapped_labels(context, terminal).is_empty() {
-                                match_map.insert(terminal, (index + 1, scan_state));
-                            }
+                let mut scanned_bytes = 0_u64;
+                for (index, &byte) in segment_bytes[offset..].iter().enumerate() {
+                    scanned_bytes += 1;
+                    let Some(next) = self.base.fast_step(scan_state, byte) else {
+                        alive = false;
+                        break;
+                    };
+                    scan_state = next;
+                    for terminal in self.base.tokenizer.matched_terminals_iter(scan_state) {
+                        if !self.mapped_labels(context, terminal).is_empty() {
+                            match_map.insert(terminal, (index + 1, scan_state));
                         }
                     }
-                    matches.clear();
-                    matches.extend(match_map.iter().map(
-                        |(&id, &(width, end_state))| TokenizerMatch {
-                            id,
-                            width,
-                            end_state,
-                        },
-                    ));
-                    if alive {
-                        SmallVec::from_buf([scan_state])
-                    } else {
-                        SmallVec::new()
-                    }
-                };
+                }
                 self.transport.timing.trie_scan_ms +=
                     self.transport.timing.elapsed_ms(scan_timer);
                 self.transport.timing.trie_scan_calls += 1;
-                self.transport.timing.trie_scan_bytes += remaining.len() as u64;
+                self.transport.timing.trie_scan_bytes += scanned_bytes;
+                let end_state = alive.then_some(scan_state);
 
-                for &end_state in &end_states {
+                matches.clear();
+                matches.extend(match_map.iter().map(|(&id, &(width, end_state))| TokenizerMatch {
+                    id,
+                    width,
+                    end_state,
+                }));
+
+                if let Some(end_state) = end_state {
                     if child_node.has_token() {
                         self.add_future_leaf_token_from_sources(
                             &source_nodes,
@@ -2937,13 +2852,11 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
                     let mapped_labels = self.mapped_labels(context, matched.id);
                     if next_offset == segment_bytes.len()
                         && child_node.has_token()
-                        && ((self.base.has_epsilon_transitions
-                            && !self.base.tokenizer.has_deterministic_dispatch())
-                            || !end_states.iter().copied().any(|state| {
-                                self.base
-                                    .possible_future_terminals_for_state(state)
-                                    .contains(&matched.id)
-                            }))
+                        && !end_state.is_some_and(|state| {
+                            self.base
+                                .possible_future_terminals_for_state(state)
+                                .contains(&matched.id)
+                        })
                     {
                         self.base.profile.match_transition_additions +=
                             (source_nodes.len() * mapped_labels.len()) as u64;
@@ -2965,7 +2878,7 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
                         child_node,
                         leaf_token_id,
                         matched.id,
-                        Some(matched.end_state),
+                        end_state,
                         next_offset == segment_bytes.len(),
                     ) else {
                         continue;
@@ -3028,14 +2941,9 @@ fn ensure_transport_continuation_state(
     state
 }
 
-/// Exact transport-aware trie walk for terminal reconstruction modes.
-///
-/// Strong TI can reconstruct members after minimizing a representative-only
-/// DWA. Projected transports are weaker: they are exact for one reconstructed
-/// member but do not justify globally substituting that member on every suffix
-/// edge. When any composed witness is projected, the compiler uses this builder
-/// with the complete mode set so every terminal boundary resets to all certified
-/// scanner transports before the next terminal is scanned.
+/// Slow reference trie walk for strict terminal interchangeability. It is used
+/// only while the feature is validation-gated. Normal L2P construction remains
+/// on `build_nwa_via_trie_walk` above.
 pub(crate) fn build_transport_nwa_via_trie_walk<'a>(
     tokenizer: &'a Tokenizer,
     ignore_terminal: Option<TerminalID>,
@@ -3049,6 +2957,10 @@ pub(crate) fn build_transport_nwa_via_trie_walk<'a>(
     modes: &[TerminalNwaTransportMode],
 ) -> TerminalDwaBuildProfile {
     assert!(!modes.is_empty());
+    assert!(
+        !tokenizer.has_epsilon_transitions(),
+        "TI transport construction requires a deterministic tokenizer",
+    );
     let mut roots = NodesByTransportContext::default();
     let mut initial_source_states = Vec::<bool>::new();
     let mut transport = TransportModePlanner::new(modes, visible_output_raw_labels);
@@ -3058,17 +2970,7 @@ pub(crate) fn build_transport_nwa_via_trie_walk<'a>(
         .iter_representative_ids()
         .collect();
     let root_context_timer = transport.timing.start();
-    let mut root_contexts = transport.contexts_for_original_states(&representative_states);
-    let initial = tokenizer.initial_state_id();
-    for (internal_tsid, contexts) in root_contexts.iter_mut().enumerate() {
-        if id_map.tokenizer_states.internal_to_originals[internal_tsid].contains(&initial) {
-            *contexts = transport
-                .contexts_for_original_states(&[initial])
-                .into_iter()
-                .next()
-                .expect("one actual initial state must produce one transport context set");
-        }
-    }
+    let root_contexts = transport.contexts_for_original_states(&representative_states);
 
     for (internal_tsid, contexts) in root_contexts.into_iter().enumerate() {
         // All transport modes start from the same parser-side condition for
