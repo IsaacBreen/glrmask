@@ -217,12 +217,13 @@ impl BoundedAnalysisView {
     }
 }
 
-pub(crate) fn build_relevant_powerset_view(
+fn build_relevant_powerset_view_impl(
     tokenizer: &Tokenizer,
     relevant_bytes: &[bool; 256],
     active_groups: Option<&[bool]>,
     state_map: Option<&ManyToOneIdMap>,
-) -> RelevantPowersetView {
+    max_states: Option<usize>,
+) -> Result<RelevantPowersetView, usize> {
     let raw_state_count = tokenizer.num_states() as usize;
     if let Some(state_map) = state_map {
         assert_eq!(state_map.original_to_internal.len(), raw_state_count);
@@ -317,6 +318,9 @@ pub(crate) fn build_relevant_powerset_view(
         };
 
     let start_state = raw_start_to_view[tokenizer.initial_state_id() as usize] as usize;
+    if max_states.is_some_and(|limit| configs.len() > limit) {
+        return Err(configs.len());
+    }
     let bytes = relevant_bytes
         .iter()
         .enumerate()
@@ -366,6 +370,9 @@ pub(crate) fn build_relevant_powerset_view(
                         &mut config_ids,
                         &mut configs,
                     );
+                    if max_states.is_some_and(|limit| configs.len() > limit) {
+                        return Err(configs.len());
+                    }
                     if queued.len() < configs.len() {
                         queued.resize(configs.len(), false);
                     }
@@ -397,6 +404,9 @@ pub(crate) fn build_relevant_powerset_view(
                         &mut config_ids,
                         &mut configs,
                     );
+                    if max_states.is_some_and(|limit| configs.len() > limit) {
+                        return Err(configs.len());
+                    }
                     if queued.len() < configs.len() {
                         queued.resize(configs.len(), false);
                     }
@@ -475,6 +485,9 @@ pub(crate) fn build_relevant_powerset_view(
                     continue;
                 }
                 let target = intern_config(projected, &mut config_ids, &mut configs);
+                if max_states.is_some_and(|limit| configs.len() > limit) {
+                    return Err(configs.len());
+                }
                 if queued.len() < configs.len() {
                     queued.resize(configs.len(), false);
                 }
@@ -549,7 +562,7 @@ pub(crate) fn build_relevant_powerset_view(
             })
             .collect()
     };
-    RelevantPowersetView {
+    Ok(RelevantPowersetView {
         states,
         start_state,
         bytes,
@@ -557,7 +570,39 @@ pub(crate) fn build_relevant_powerset_view(
         edges,
         raw_start_to_view: Arc::from(raw_start_to_view),
         configurations: Arc::from(configs),
-    }
+    })
+}
+
+pub(crate) fn build_relevant_powerset_view(
+    tokenizer: &Tokenizer,
+    relevant_bytes: &[bool; 256],
+    active_groups: Option<&[bool]>,
+    state_map: Option<&ManyToOneIdMap>,
+) -> RelevantPowersetView {
+    build_relevant_powerset_view_impl(
+        tokenizer,
+        relevant_bytes,
+        active_groups,
+        state_map,
+        None,
+    )
+    .expect("uncapped relevant powerset construction")
+}
+
+pub(crate) fn try_build_relevant_powerset_view(
+    tokenizer: &Tokenizer,
+    relevant_bytes: &[bool; 256],
+    active_groups: Option<&[bool]>,
+    state_map: Option<&ManyToOneIdMap>,
+    max_states: usize,
+) -> Result<RelevantPowersetView, usize> {
+    build_relevant_powerset_view_impl(
+        tokenizer,
+        relevant_bytes,
+        active_groups,
+        state_map,
+        Some(max_states),
+    )
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
