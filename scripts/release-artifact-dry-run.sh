@@ -68,7 +68,7 @@ CARGO_TARGET_DIR="$cargo_target" cargo +stable publish --dry-run --locked -p glr
 
 "$PYTHON_BIN" -m venv "$tool_venv"
 "$tool_venv/bin/python" -m pip install --upgrade pip
-"$tool_venv/bin/python" -m pip install 'maturin>=1,<2' twine
+"$tool_venv/bin/python" -m pip install 'maturin>=1.10,<2' twine
 
 (
   cd python
