@@ -1274,6 +1274,202 @@ fn build_state_map(
     }
 }
 
+/// Compute the stable set-valued NFA observation quotient by standard labelled
+/// transition-system partition refinement.
+///
+/// The synchronous reference recurrence repeatedly replaces each candidate's
+/// byte successor set by the set of current target blocks. A partition is a
+/// fixed point of that recurrence exactly when, for every target block `S` and
+/// byte `b`, every source block is uniform with respect to the predicate
+/// "has a `b` successor in `S`". Refining blocks by those reverse-labelled
+/// predecessor sets therefore computes the same coarsest stable partition,
+/// without propagating information only one graph edge per global round.
+fn compute_stable_state_map_from_prebuilt_sparse_powerset_partition_refinement(
+    tokenizer: &Tokenizer,
+    initial_state_map: Option<&ManyToOneIdMap>,
+    raw_start_to_view: &[u32],
+    configurations: &[Box<[u32]>],
+    output_class_by_config: &[u32],
+    raw_active_language: Option<&[bool]>,
+    edge_offsets: &[u32],
+    edges: &[(u8, u32)],
+) -> ManyToOneIdMap {
+    let num_states = tokenizer.num_states() as usize;
+    let (candidate_members, candidate_representatives, raw_to_candidate) =
+        candidate_partition(num_states, initial_state_map);
+    let num_candidates = candidate_representatives.len();
+    let start_configs = candidate_representatives
+        .iter()
+        .map(|&state| raw_start_to_view[state])
+        .collect::<Vec<_>>();
+
+    // Project every powerset configuration once into candidate coordinates.
+    // The reference recurrence repeats this projection every refinement round.
+    let mut candidate_set_by_config = Vec::<SmallVec<[u32; 4]>>::with_capacity(configurations.len());
+    let mut projected_empty = Vec::<bool>::with_capacity(configurations.len());
+    for config in configurations {
+        let mut candidates = SmallVec::<[u32; 4]>::new();
+        candidates.extend(config.iter().filter_map(|&raw| {
+            if raw_active_language.is_some_and(|active| !active[raw as usize]) {
+                None
+            } else {
+                Some(raw_to_candidate[raw as usize] as u32)
+            }
+        }));
+        candidates.sort_unstable();
+        candidates.dedup();
+        projected_empty.push(candidates.is_empty());
+        candidate_set_by_config.push(candidates);
+    }
+
+    // Reverse labelled NFA edges in candidate coordinates. Duplicate
+    // `(byte, source)` entries do not affect existential predecessor tests, so
+    // canonicalize them once here.
+    let mut reverse = vec![Vec::<(u8, u32)>::new(); num_candidates];
+    for (source, &config) in start_configs.iter().enumerate() {
+        let config = config as usize;
+        if projected_empty[config] {
+            continue;
+        }
+        let edge_start = edge_offsets[config] as usize;
+        let edge_end = edge_offsets[config + 1] as usize;
+        for &(byte, target_config) in &edges[edge_start..edge_end] {
+            let target_config = target_config as usize;
+            if projected_empty[target_config] {
+                continue;
+            }
+            for &target in &candidate_set_by_config[target_config] {
+                reverse[target as usize].push((byte, source as u32));
+            }
+        }
+    }
+    for incoming in &mut reverse {
+        incoming.sort_unstable();
+        incoming.dedup();
+    }
+
+    // Initial partition: visible output of each candidate's start powerset.
+    let mut initial_block_by_output = FxHashMap::<u32, usize>::default();
+    let mut blocks = Vec::<Vec<u32>>::new();
+    let mut block_of = vec![usize::MAX; num_candidates];
+    for (candidate, &config) in start_configs.iter().enumerate() {
+        let output = output_class_by_config[config as usize];
+        let next = blocks.len();
+        let block = *initial_block_by_output.entry(output).or_insert_with(|| {
+            blocks.push(Vec::new());
+            next
+        });
+        blocks[block].push(candidate as u32);
+        block_of[candidate] = block;
+    }
+
+    let mut worklist = (0..blocks.len()).collect::<VecDeque<_>>();
+    let mut queued = vec![true; blocks.len()];
+    let mut predecessors_by_byte = (0..256).map(|_| Vec::<u32>::new()).collect::<Vec<_>>();
+    let mut state_marks = vec![0u32; num_candidates];
+    let mut mark_epoch = 0u32;
+    let mut touched_count = vec![0usize; blocks.len()];
+    let mut touched_blocks = Vec::<usize>::new();
+
+    while let Some(splitter) = worklist.pop_front() {
+        queued[splitter] = false;
+        if blocks[splitter].is_empty() {
+            continue;
+        }
+        // Snapshot the splitter: the partition may split this block while its
+        // predecessor predicates are being processed.
+        let splitter_members = blocks[splitter].clone();
+        for target in splitter_members {
+            for &(byte, source) in &reverse[target as usize] {
+                predecessors_by_byte[byte as usize].push(source);
+            }
+        }
+
+        for predecessors in &mut predecessors_by_byte {
+            if predecessors.is_empty() {
+                continue;
+            }
+            predecessors.sort_unstable();
+            predecessors.dedup();
+
+            mark_epoch = mark_epoch.wrapping_add(1);
+            if mark_epoch == 0 {
+                state_marks.fill(0);
+                mark_epoch = 1;
+            }
+            touched_blocks.clear();
+            if touched_count.len() < blocks.len() {
+                touched_count.resize(blocks.len(), 0);
+            }
+            for &source in predecessors.iter() {
+                let source = source as usize;
+                state_marks[source] = mark_epoch;
+                let block = block_of[source];
+                if touched_count[block] == 0 {
+                    touched_blocks.push(block);
+                }
+                touched_count[block] += 1;
+            }
+
+            for block in touched_blocks.drain(..) {
+                let inside_count = touched_count[block];
+                touched_count[block] = 0;
+                if inside_count == 0 || inside_count == blocks[block].len() {
+                    continue;
+                }
+
+                let old_was_queued = queued[block];
+                let members = std::mem::take(&mut blocks[block]);
+                let mut inside = Vec::with_capacity(inside_count);
+                let mut outside = Vec::with_capacity(members.len() - inside_count);
+                for state in members {
+                    if state_marks[state as usize] == mark_epoch {
+                        inside.push(state);
+                    } else {
+                        outside.push(state);
+                    }
+                }
+
+                // Keep the larger half under the old ID. When the old block is
+                // not already queued, Hopcroft's smaller-half rule is enough;
+                // when it is queued, both halves must remain scheduled.
+                let (kept, split) = if inside.len() >= outside.len() {
+                    (inside, outside)
+                } else {
+                    (outside, inside)
+                };
+                blocks[block] = kept;
+                let new_block = blocks.len();
+                for &state in &split {
+                    block_of[state as usize] = new_block;
+                }
+                blocks.push(split);
+                queued.push(false);
+                touched_count.push(0);
+
+                if old_was_queued {
+                    if !queued[new_block] {
+                        queued[new_block] = true;
+                        worklist.push_back(new_block);
+                    }
+                } else if !queued[new_block] {
+                    queued[new_block] = true;
+                    worklist.push_back(new_block);
+                }
+            }
+            predecessors.clear();
+        }
+    }
+
+    let classes = block_of.into_iter().map(|block| block as u32).collect::<Vec<_>>();
+    build_state_map(
+        &candidate_members,
+        &candidate_representatives,
+        &classes,
+        num_states,
+    )
+}
+
 /// Refine raw scanner starts through a prebuilt sparse powerset topology.
 /// When `raw_active_language` is supplied, inactive-only members are erased
 /// from powerset class sets and edges into projected-empty configurations are
@@ -1290,6 +1486,18 @@ pub(crate) fn compute_state_map_from_prebuilt_sparse_powerset(
     edge_offsets: &[u32],
     edges: &[(u8, u32)],
 ) -> ManyToOneIdMap {
+    if matches!(depth, RefinementDepth::Stable) {
+        return compute_stable_state_map_from_prebuilt_sparse_powerset_partition_refinement(
+            tokenizer,
+            initial_state_map,
+            raw_start_to_view,
+            configurations,
+            output_class_by_config,
+            raw_active_language,
+            edge_offsets,
+            edges,
+        );
+    }
     let num_states = tokenizer.num_states() as usize;
     assert_eq!(raw_start_to_view.len(), num_states);
     assert!(output_class_by_config.len() >= configurations.len());
@@ -1894,6 +2102,22 @@ mod tests {
         assert!(same_partition(
             &direct.original_to_internal,
             &reused.original_to_internal,
+        ));
+
+        let partition_refined =
+            compute_stable_state_map_from_prebuilt_sparse_powerset_partition_refinement(
+                &tokenizer,
+                None,
+                &view.raw_start_to_view,
+                &view.configurations,
+                &output_class_by_config,
+                None,
+                &view.edge_offsets,
+                &view.edges,
+            );
+        assert!(same_partition(
+            &direct.original_to_internal,
+            &partition_refined.original_to_internal,
         ));
     }
 }
