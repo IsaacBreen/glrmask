@@ -273,7 +273,9 @@ pub(crate) fn compute_state_map(
     let sig_len = 1 + active_bytes.len();
     let mut signature = vec![0u64; sig_len];
 
+    let mut diagnostic_rounds = 0usize;
     for _ in 0..num_candidates {
+        diagnostic_rounds += 1;
         let mut next_classes = vec![0u32; num_candidates];
         // Bucket candidates by a cheap signature hash and resolve collisions by
         // comparing against the flat per-class signature store. This assigns
@@ -317,6 +319,9 @@ pub(crate) fn compute_state_map(
         if next_class_count == current_class_count
             && same_candidate_partition(&current_classes, &next_classes)
         {
+            if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
+                eprintln!("[glrmask/profile][restricted_observation_simple] candidates={} active_bytes={} rounds={} classes={}", num_candidates, active_bytes.len(), diagnostic_rounds, next_class_count);
+            }
             return map_from_candidate_classes(
                 &candidate_members,
                 &candidate_representatives,
