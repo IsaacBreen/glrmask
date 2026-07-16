@@ -4765,6 +4765,7 @@ mod tests {
 
     #[test]
     fn reduce_frame_allows_origin_dependent_multiple_goto_targets() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let mut table = table_with_stack_shifts(Vec::new(), &[
             (1, &[(10, (3, false))]),
             (2, &[(10, (4, false))]),
@@ -4821,6 +4822,7 @@ mod tests {
 
     #[test]
     fn reduce_frame_allows_origin_dependent_single_goto_target() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let mut table = table_with_stack_shifts(Vec::new(), &[
             (1, &[(10, (3, false))]),
             (2, &[(10, (3, false))]),
@@ -4905,6 +4907,7 @@ mod tests {
 
     #[test]
     fn trivial_origin_dependent_one_push_shortcut_matches_generic_refusal() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let mut action = vec![ActionRow::default(); 6];
         action[3].insert(0, Action::Shift(5, true));
         action[4].insert(0, Action::Shift(5, true));
@@ -4991,6 +4994,7 @@ mod tests {
 
     #[test]
     fn inline_action_to_stack_shifts_keeps_multishift_replacement_reduce_chain() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let mut action = vec![ActionRow::default(); 5];
         action[2].insert(
             0,
@@ -5055,6 +5059,7 @@ mod tests {
 
     #[test]
     fn inline_action_to_stack_shifts_handles_replace_shift_and_replace_goto() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let mut action = vec![ActionRow::default(); 6];
         action[2].insert(
             0,
@@ -5119,6 +5124,7 @@ mod tests {
 
     #[test]
     fn inline_action_to_stack_shifts_guards_divergent_replace_gotos_by_predecessor() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let mut action = vec![ActionRow::default(); 9];
         action[2].insert(0, Action::Reduce(10, 1));
         action[3].insert(0, Action::Shift(7, false));
