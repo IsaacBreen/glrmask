@@ -1,6 +1,6 @@
 use crate::automata::lexer::Lexer;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use crate::Vocab;
@@ -1887,11 +1887,14 @@ fn analyze_equivalences_impl(
             powerset_states,
             powerset_max_states,
         );
-        let (analysis_view_owned, raw_start_to_view) = if use_powerset {
+        let (analysis_view_owned, preclass_view_states) = if use_powerset {
             let powerset = powerset_candidate
                 .expect("powerset analysis policy must build a powerset candidate");
-            let raw_start_to_view = Arc::clone(&powerset.raw_start_to_view);
-            (powerset.into_tokenizer_view(), raw_start_to_view)
+            let preclass_view_states = raw_pre_representatives
+                .iter()
+                .map(|&raw| powerset.view_state_for_raw_start(raw))
+                .collect::<Vec<_>>();
+            (powerset.into_tokenizer_view(), preclass_view_states)
         } else {
             let bounded = build_bounded_analysis_view(
                 tokenizer,
@@ -1899,11 +1902,11 @@ fn analyze_equivalences_impl(
                 &dedup.representative_token_bytes,
                 active_groups,
             );
-            let mut raw_start_to_view = vec![u32::MAX; tokenizer.num_states() as usize];
-            for &raw in &raw_pre_representatives {
-                raw_start_to_view[raw] = bounded.view_state_for_raw_start(raw) as u32;
-            }
-            (bounded.tokenizer_view, Arc::from(raw_start_to_view))
+            let preclass_view_states = raw_pre_representatives
+                .iter()
+                .map(|&raw| bounded.view_state_for_raw_start(raw))
+                .collect::<Vec<_>>();
+            (bounded.tokenizer_view, preclass_view_states)
         };
         let analysis_view_build_ms =
             analysis_view_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -1947,10 +1950,6 @@ fn analyze_equivalences_impl(
         let effective_follows_normalize_ms = effective_follows_prepare_ms
             + follows_normalize_started_at.elapsed().as_secs_f64() * 1000.0;
 
-        let preclass_view_states = raw_pre_representatives
-            .iter()
-            .map(|&raw| raw_start_to_view[raw] as usize)
-            .collect::<Vec<_>>();
         let mut query_view_states = preclass_view_states.clone();
         query_view_states.sort_unstable();
         query_view_states.dedup();

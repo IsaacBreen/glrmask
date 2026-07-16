@@ -88,6 +88,30 @@ pub(crate) fn powerset_output_class_ids(view: &RelevantPowersetView) -> Vec<u32>
 }
 
 impl RelevantPowersetView {
+    /// Return the powerset-view state corresponding to a raw lexer start.
+    ///
+    /// Unlike token-bounded analysis, a relevant-powerset view is total over
+    /// the raw lexer-state domain. Keep that invariant behind a checked API so
+    /// callers cannot accidentally cast the unmapped sentinel into a view ID.
+    pub(crate) fn view_state_for_raw_start(&self, raw_state: usize) -> usize {
+        let state = self
+            .raw_start_to_view
+            .get(raw_state)
+            .copied()
+            .expect("raw state is outside relevant-powerset domain");
+        assert_ne!(
+            state,
+            u32::MAX,
+            "relevant-powerset view must map every raw lexer state",
+        );
+        let state = state as usize;
+        assert!(
+            state < self.states.len(),
+            "relevant-powerset raw-start map produced an invalid view state",
+        );
+        state
+    }
+
     pub(crate) fn into_tokenizer_view(self) -> TokenizerView {
         let mut transitions = vec![u32::MAX; self.states.len() * 256];
         for state in 0..self.states.len() {
@@ -271,9 +295,22 @@ fn intern_mapped_target_config(
 
 impl BoundedAnalysisView {
     pub(crate) fn view_state_for_raw_start(&self, raw_state: usize) -> usize {
-        let state = self.raw_start_to_view[raw_state];
-        assert_ne!(state, u32::MAX, "raw state was not seeded into bounded NFA analysis");
-        state as usize
+        let state = self
+            .raw_start_to_view
+            .get(raw_state)
+            .copied()
+            .expect("raw state is outside bounded NFA analysis domain");
+        assert_ne!(
+            state,
+            u32::MAX,
+            "raw state was not seeded into bounded NFA analysis",
+        );
+        let state = state as usize;
+        assert!(
+            state < self.tokenizer_view.dfa().states.len(),
+            "bounded raw-start map produced an invalid view state",
+        );
+        state
     }
 }
 
@@ -2522,7 +2559,19 @@ pub(crate) fn compute_state_map_from_prebuilt_sparse_powerset(
     let num_candidates = candidate_representatives.len();
     let start_configs = candidate_representatives
         .iter()
-        .map(|&state| raw_start_to_view[state])
+        .map(|&state| {
+            let config = raw_start_to_view[state];
+            assert_ne!(
+                config,
+                u32::MAX,
+                "prebuilt powerset omitted candidate raw representative {state}",
+            );
+            assert!(
+                (config as usize) < configurations.len(),
+                "prebuilt powerset mapped raw representative {state} to invalid configuration {config}",
+            );
+            config
+        })
         .collect::<Vec<_>>();
     let mut classes = start_configs
         .iter()

@@ -3223,6 +3223,14 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
     shared_cache: Option<&SharedVocabDfaCache>,
     shared_analysis_dfa_cache: Option<&SharedVocabAnalysisDfaCache>,
 ) -> (VocabEquivalenceResult, f64) {
+    let input_state_count = tokenizer.dfa().states.len();
+    for &state in initial_states {
+        assert!(
+            state < input_state_count,
+            "vocabulary equivalence received invalid initial state {state}; analysis view has {input_state_count} states",
+        );
+    }
+
     let profiling = compile_profile_enabled();
     let elapsed_ms = |started_at: Option<Instant>| {
         started_at.map_or(0.0, |instant| instant.elapsed().as_secs_f64() * 1000.0)
@@ -3299,6 +3307,13 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
     } else {
         (&dfa, initial_states_for_dfa, None)
     };
+    for &state in initial_states_ref {
+        assert!(
+            state < dfa_ref.num_states,
+            "vocabulary equivalence remapped initial state {state} outside compact DFA with {} states",
+            dfa_ref.num_states,
+        );
+    }
     let compacted_states = compact_to_original.map_or(dfa.num_states, |states| states.len());
     let num_tokens = strings.len();
     let num_initial_states = initial_states_ref.len();
