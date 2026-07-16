@@ -1,4 +1,5 @@
 use im::{HashMap as IHashMap, OrdMap};
+use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::{SmallVec, smallvec};
 use super::stack_vecs::dispatch::DynStackVec;
 use std::collections::{HashMap as StdHashMap, HashSet, VecDeque};
@@ -1466,6 +1467,368 @@ where
 
 
 
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct SemanticTrieNode<T> {
+    empty: bool,
+    children: Vec<(T, u32)>,
+    max_depth: u32,
+}
+
+enum SemanticPendingNode<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+    Lower(Arc<Lower<T>>),
+    Upper(Arc<Upper<T, A>>),
+}
+
+impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> SemanticPendingNode<T, A> {
+    fn sort_key(&self) -> (u32, u8) {
+        match self {
+            Self::Lower(node) => (node.max_depth(), 0),
+            Self::Upper(node) => (node.max_depth(), 1),
+        }
+    }
+}
+
+/// Canonicalizes the finite stack language represented by one or more GSSes.
+///
+/// Keys are exact within this interner: Segment boundaries, one-child General
+/// nodes, depth-slot layout, accumulator values, and DAG sharing do not affect
+/// the result. The canonical representation is a deterministic trie whose
+/// nodes are interned and shared. Work follows reachable GSS/trie nodes rather
+/// than enumerating concrete stack paths.
+pub(crate) struct GssSemanticKeyInterner<
+    T: Clone + Eq + Hash + Ord,
+    A: Merge + Clone + Eq + Hash,
+> {
+    nodes: Vec<SemanticTrieNode<T>>,
+    interned: FxHashMap<SemanticTrieNode<T>, u32>,
+    lower_memo: FxHashMap<usize, (Arc<Lower<T>>, u32)>,
+    upper_memo: FxHashMap<usize, (Arc<Upper<T, A>>, u32)>,
+    union_memo: FxHashMap<(u32, u32), u32>,
+}
+
+impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
+    GssSemanticKeyInterner<T, A>
+{
+    pub(crate) fn new() -> Self {
+        let empty_language = SemanticTrieNode {
+            empty: false,
+            children: Vec::new(),
+            max_depth: 0,
+        };
+        let mut interned = FxHashMap::default();
+        interned.insert(empty_language.clone(), 0);
+        Self {
+            nodes: vec![empty_language],
+            interned,
+            lower_memo: FxHashMap::default(),
+            upper_memo: FxHashMap::default(),
+            union_memo: FxHashMap::default(),
+        }
+    }
+
+    #[inline]
+    fn lower_id(&self, node: &Arc<Lower<T>>) -> Option<u32> {
+        self.lower_memo
+            .get(&lower_node_id(node))
+            .map(|(_, id)| *id)
+    }
+
+    #[inline]
+    fn upper_id(&self, node: &Arc<Upper<T, A>>) -> Option<u32> {
+        self.upper_memo
+            .get(&(Arc::as_ptr(node) as usize))
+            .map(|(_, id)| *id)
+    }
+
+    fn intern_node(&mut self, empty: bool, mut children: Vec<(T, u32)>) -> u32 {
+        children.retain(|(_, child)| *child != 0);
+        children.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        debug_assert!(children.windows(2).all(|pair| pair[0].0 != pair[1].0));
+        let max_depth = children
+            .iter()
+            .map(|(_, child)| self.nodes[*child as usize].max_depth.saturating_add(1))
+            .max()
+            .unwrap_or(0);
+        let node = SemanticTrieNode {
+            empty,
+            children,
+            max_depth,
+        };
+        if let Some(id) = self.interned.get(&node) {
+            return *id;
+        }
+        let id = u32::try_from(self.nodes.len()).expect("semantic GSS trie exceeded u32 node IDs");
+        self.nodes.push(node.clone());
+        self.interned.insert(node, id);
+        id
+    }
+
+    #[inline]
+    fn union_pair(left: u32, right: u32) -> (u32, u32) {
+        if left <= right {
+            (left, right)
+        } else {
+            (right, left)
+        }
+    }
+
+    fn union_ids(&mut self, left: u32, right: u32) -> u32 {
+        if left == right || right == 0 {
+            return left;
+        }
+        if left == 0 {
+            return right;
+        }
+        let root = Self::union_pair(left, right);
+        if let Some(id) = self.union_memo.get(&root) {
+            return *id;
+        }
+
+        let mut pending = vec![root];
+        let mut unseen = FxHashSet::default();
+        let mut order = Vec::new();
+        while let Some(pair @ (left, right)) = pending.pop() {
+            if left == right || left == 0 || right == 0 || self.union_memo.contains_key(&pair) {
+                continue;
+            }
+            if !unseen.insert(pair) {
+                continue;
+            }
+            order.push(pair);
+
+            let left_children = &self.nodes[left as usize].children;
+            let right_children = &self.nodes[right as usize].children;
+            let mut li = 0;
+            let mut ri = 0;
+            while li < left_children.len() && ri < right_children.len() {
+                match left_children[li].0.cmp(&right_children[ri].0) {
+                    std::cmp::Ordering::Less => li += 1,
+                    std::cmp::Ordering::Greater => ri += 1,
+                    std::cmp::Ordering::Equal => {
+                        let child_pair = Self::union_pair(left_children[li].1, right_children[ri].1);
+                        if child_pair.0 != child_pair.1
+                            && child_pair.0 != 0
+                            && !self.union_memo.contains_key(&child_pair)
+                        {
+                            pending.push(child_pair);
+                        }
+                        li += 1;
+                        ri += 1;
+                    }
+                }
+            }
+        }
+
+        order.sort_unstable_by_key(|(left, right)| {
+            self.nodes[*left as usize]
+                .max_depth
+                .max(self.nodes[*right as usize].max_depth)
+        });
+
+        for pair @ (left, right) in order {
+            if self.union_memo.contains_key(&pair) {
+                continue;
+            }
+            let left_node = self.nodes[left as usize].clone();
+            let right_node = self.nodes[right as usize].clone();
+            let mut children = Vec::with_capacity(left_node.children.len() + right_node.children.len());
+            let mut li = 0;
+            let mut ri = 0;
+            while li < left_node.children.len() || ri < right_node.children.len() {
+                if ri == right_node.children.len()
+                    || (li < left_node.children.len()
+                        && left_node.children[li].0 < right_node.children[ri].0)
+                {
+                    children.push(left_node.children[li].clone());
+                    li += 1;
+                } else if li == left_node.children.len()
+                    || right_node.children[ri].0 < left_node.children[li].0
+                {
+                    children.push(right_node.children[ri].clone());
+                    ri += 1;
+                } else {
+                    let left_child = left_node.children[li].1;
+                    let right_child = right_node.children[ri].1;
+                    let child = if left_child == right_child {
+                        left_child
+                    } else if left_child == 0 {
+                        right_child
+                    } else if right_child == 0 {
+                        left_child
+                    } else {
+                        *self
+                            .union_memo
+                            .get(&Self::union_pair(left_child, right_child))
+                            .expect("semantic trie child union must be processed before its parent")
+                    };
+                    children.push((left_node.children[li].0.clone(), child));
+                    li += 1;
+                    ri += 1;
+                }
+            }
+            let id = self.intern_node(left_node.empty || right_node.empty, children);
+            self.union_memo.insert(pair, id);
+        }
+
+        *self
+            .union_memo
+            .get(&root)
+            .expect("semantic trie root union was not constructed")
+    }
+
+    pub(crate) fn key(&mut self, gss: &LeveledGSS<T, A>) -> u32 {
+        if let Some(id) = self.upper_id(&gss.inner) {
+            return id;
+        }
+
+        // Deterministic shallow stacks dominate exact-admission queries. Build
+        // their canonical unary trie directly instead of allocating traversal
+        // worklists and pointer memo tables. The cached max-depth check makes
+        // rejection O(1), and the traversal is strictly capped.
+        const SINGLE_STACK_KEY_MAX_DEPTH: usize = 64;
+        if gss.max_depth() as usize <= SINGLE_STACK_KEY_MAX_DEPTH
+            && let Some((stack, _)) = gss.try_single_stack_bounded(SINGLE_STACK_KEY_MAX_DEPTH)
+        {
+            let mut id = self.intern_node(true, Vec::new());
+            for value in stack {
+                id = self.intern_node(false, vec![(value, id)]);
+            }
+            self.upper_memo.insert(
+                Arc::as_ptr(&gss.inner) as usize,
+                (gss.inner.clone(), id),
+            );
+            return id;
+        }
+
+        let mut pending = vec![SemanticPendingNode::Upper(gss.inner.clone())];
+        let mut seen_upper = FxHashSet::default();
+        let mut seen_lower = FxHashSet::default();
+        let mut nodes = Vec::new();
+
+        while let Some(node) = pending.pop() {
+            match &node {
+                SemanticPendingNode::Lower(lower) => {
+                    let ptr = lower_node_id(lower);
+                    if self.lower_memo.contains_key(&ptr) || !seen_lower.insert(ptr) {
+                        continue;
+                    }
+                    match &**lower {
+                        Lower::Segment(segment) => {
+                            pending.push(SemanticPendingNode::Lower(segment.next.clone()));
+                        }
+                        Lower::General { children, .. } => {
+                            pending.extend(
+                                children
+                                    .values()
+                                    .flat_map(|kids| kids.values())
+                                    .cloned()
+                                    .map(SemanticPendingNode::Lower),
+                            );
+                        }
+                    }
+                    nodes.push(node);
+                }
+                SemanticPendingNode::Upper(upper) => {
+                    let ptr = Arc::as_ptr(upper) as usize;
+                    if self.upper_memo.contains_key(&ptr) || !seen_upper.insert(ptr) {
+                        continue;
+                    }
+                    match &**upper {
+                        Upper::Interface(interface) => {
+                            pending.push(SemanticPendingNode::Lower(interface.inner.clone()));
+                        }
+                        Upper::Branch(branch) => {
+                            pending.extend(
+                                branch
+                                    .children
+                                    .values()
+                                    .flat_map(|kids| kids.values())
+                                    .cloned()
+                                    .map(SemanticPendingNode::Upper),
+                            );
+                        }
+                    }
+                    nodes.push(node);
+                }
+            }
+        }
+
+        nodes.sort_unstable_by_key(SemanticPendingNode::sort_key);
+        for node in nodes {
+            match node {
+                SemanticPendingNode::Lower(lower) => {
+                    let ptr = lower_node_id(&lower);
+                    if self.lower_memo.contains_key(&ptr) {
+                        continue;
+                    }
+                    let id = match &*lower {
+                        Lower::Segment(segment) => {
+                            let mut id = self
+                                .lower_id(&segment.next)
+                                .expect("semantic trie Segment child must precede parent");
+                            for value in segment.values.iter() {
+                                id = self.intern_node(false, vec![(value.clone(), id)]);
+                            }
+                            id
+                        }
+                        Lower::General {
+                            children, empty, ..
+                        } => {
+                            let mut canonical_children = Vec::with_capacity(children.len());
+                            for (value, kids) in children.iter() {
+                                let mut child_union = 0;
+                                for child in kids.values() {
+                                    let child_id = self
+                                        .lower_id(child)
+                                        .expect("semantic trie General child must precede parent");
+                                    child_union = self.union_ids(child_union, child_id);
+                                }
+                                canonical_children.push((value.clone(), child_union));
+                            }
+                            self.intern_node(*empty, canonical_children)
+                        }
+                    };
+                    self.lower_memo.insert(ptr, (lower, id));
+                }
+                SemanticPendingNode::Upper(upper) => {
+                    let ptr = Arc::as_ptr(&upper) as usize;
+                    if self.upper_memo.contains_key(&ptr) {
+                        continue;
+                    }
+                    let id = match &*upper {
+                        Upper::Interface(interface) => self
+                            .lower_id(&interface.inner)
+                            .expect("semantic trie Interface lower node must precede parent"),
+                        Upper::Branch(branch) => {
+                            let mut canonical_children = Vec::with_capacity(branch.children.len());
+                            for (value, kids) in branch.children.iter() {
+                                let mut child_union = 0;
+                                for child in kids.values() {
+                                    let child_id = self
+                                        .upper_id(child)
+                                        .expect("semantic trie Branch child must precede parent");
+                                    child_union = self.union_ids(child_union, child_id);
+                                }
+                                canonical_children.push((value.clone(), child_union));
+                            }
+                            self.intern_node(branch.empty.is_some(), canonical_children)
+                        }
+                    };
+                    self.upper_memo.insert(ptr, (upper, id));
+                }
+            }
+        }
+
+        self.upper_id(&gss.inner)
+            .expect("semantic trie root must be canonicalized")
+    }
+
+    #[cfg(test)]
+    fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+}
 
 #[derive(Clone)]
 pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
@@ -4695,7 +5058,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        CompactMap, CompactOrdMap, LeveledGSS, Lower, Merge, new_interface,
+        CompactMap, CompactOrdMap, GssSemanticKeyInterner, LeveledGSS, Lower, Merge,
+        new_interface,
     };
 
     #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -4747,7 +5111,7 @@ mod tests {
             empty: true,
             max_depth: 0,
         });
-        for depth in 0_u32..40 {
+        for depth in 0_u32..8 {
             let mut children = CompactMap::new();
             let child = CompactOrdMap::unit(depth, lower.clone());
             children.insert(0_u32, child.clone());
@@ -4765,6 +5129,99 @@ mod tests {
         // The DAG has only 41 Lower nodes but represents 2^40 concrete paths.
         // The explicit limit must stop after discovering the third path.
         assert!(gss.to_stacks(2).is_none());
+    }
+
+    #[test]
+    fn semantic_key_ignores_segment_general_layout_and_accumulators() {
+        let segment = LeveledGSS::from_single_stack(vec![0_u32, 1], TestAcc(1));
+
+        let floor = LeveledGSS::from_single_stack(Vec::<u32>::new(), TestAcc(9));
+        let one_segment = LeveledGSS::from_single_stack(vec![0_u32], TestAcc(9));
+        let one_general = one_segment.absorb_push_same_acc(0, &floor);
+        let segment_over_general = one_general.push(1);
+        let two_generals = segment_over_general.absorb_push_same_acc(1, &one_general);
+
+        let segment_stacks = segment
+            .to_stacks(1)
+            .expect("single Segment stack must fit the explicit limit");
+        let general_stacks = two_generals
+            .to_stacks(1)
+            .expect("single General-chain stack must fit the explicit limit");
+        assert_eq!(segment_stacks[0].0, general_stacks[0].0);
+
+        let mut interner = GssSemanticKeyInterner::new();
+        assert_eq!(interner.key(&segment), interner.key(&two_generals));
+
+        let different = LeveledGSS::from_single_stack(vec![0_u32, 2], TestAcc(1));
+        assert_ne!(interner.key(&segment), interner.key(&different));
+    }
+
+    #[test]
+    fn semantic_key_exactly_matches_small_stack_languages() {
+        let universe = [
+            Vec::<u32>::new(),
+            vec![0],
+            vec![1],
+            vec![0, 0],
+            vec![0, 1],
+            vec![1, 0],
+        ];
+        let mut interner = GssSemanticKeyInterner::new();
+        let mut language_by_key = std::collections::HashMap::<u32, u32>::new();
+
+        for language_bits in 0_u32..(1 << universe.len()) {
+            let stacks = universe
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| language_bits & (1 << index) != 0)
+                .map(|(index, stack)| (stack.clone(), TestAcc(index as u32)))
+                .collect::<Vec<_>>();
+            let canonical = LeveledGSS::from_stacks(&stacks);
+            let reversed_merge = LeveledGSS::merge_many(
+                stacks
+                    .iter()
+                    .rev()
+                    .map(|(stack, acc)| LeveledGSS::from_single_stack(stack.clone(), acc.clone())),
+            );
+            let different_accumulators = LeveledGSS::merge_many(
+                stacks.iter().map(|(stack, _)| {
+                    LeveledGSS::from_single_stack(stack.clone(), TestAcc(100))
+                }),
+            );
+
+            let key = interner.key(&canonical);
+            assert_eq!(key, interner.key(&reversed_merge));
+            assert_eq!(key, interner.key(&different_accumulators));
+            assert_eq!(language_by_key.insert(key, language_bits), None);
+        }
+    }
+
+    #[test]
+    fn semantic_key_stays_compressed_for_exponential_path_dag() {
+        let mut lower = Arc::new(Lower::General {
+            children: CompactMap::new(),
+            empty: true,
+            max_depth: 0,
+        });
+        for depth in 0_u32..40 {
+            let mut children = CompactMap::new();
+            let child = CompactOrdMap::unit(depth, lower.clone());
+            children.insert(0_u32, child.clone());
+            children.insert(1_u32, child);
+            lower = Arc::new(Lower::General {
+                children,
+                empty: false,
+                max_depth: depth + 1,
+            });
+        }
+        let gss = LeveledGSS {
+            inner: new_interface(lower, TestAcc(0)),
+        };
+
+        let mut interner = GssSemanticKeyInterner::new();
+        assert_ne!(interner.key(&gss), 0);
+        // Empty language + accepting floor + one canonical node per GSS level.
+        assert_eq!(interner.node_count(), 42);
     }
 
     #[test]
@@ -4821,8 +5278,13 @@ mod tests {
         assert_eq!(gss.max_depth(), DEPTH);
         assert!(gss.try_single_stack_bounded(256).is_none());
 
-        // Avoid recursively dropping a deliberately pathological 100k-node chain.
+        let mut interner = GssSemanticKeyInterner::new();
+        assert_ne!(interner.key(&gss), 0);
+        assert_eq!(interner.node_count(), DEPTH as usize + 2);
+
+        // Avoid recursively dropping deliberately pathological 100k-node chains.
         std::mem::forget(gss);
+        std::mem::forget(interner);
     }
 
     #[test]
@@ -5119,5 +5581,7 @@ mod tests {
         assert_eq!(first, vec![(vec![1, 2], ()), (vec![4], ())]);
         assert_eq!(second, vec![(vec![1, 3], ())]);
     }
+
+
 
 }

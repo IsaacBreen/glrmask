@@ -10,7 +10,7 @@ use super::table::{
     StackShiftGuard,
 };
 use crate::ds::bitset::BitSet;
-use crate::ds::leveled_gss::{LeveledGSS, Merge, VirtualStack};
+use crate::ds::leveled_gss::{GssSemanticKeyInterner, LeveledGSS, Merge, VirtualStack};
 use crate::grammar::flat::TerminalID;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
@@ -2669,53 +2669,22 @@ pub(crate) fn stack_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: T
     admitted
 }
 
-const EXACT_ADMISSION_KEY_MAX_STACKS: usize = 256;
-const EXACT_ADMISSION_KEY_MAX_DEPTH: u32 = 256;
+type ExactAdmissionSemanticKey = u32;
 
-type ExactAdmissionStackKey = Vec<Vec<u32>>;
-type ExactAdmissionShape = LeveledGSS<u32, ()>;
-
-#[derive(PartialEq, Eq)]
-enum ExactAdmissionKey {
-    Stacks(ExactAdmissionStackKey),
-    Shape(ExactAdmissionShape),
-}
-
-struct ExactAdmissionVisitedAny {
-    key: ExactAdmissionKey,
-    terminals: BitSet,
-}
-
-fn exact_admission_stack_key(frontier: &ParserGSS) -> Option<ExactAdmissionStackKey> {
-    if frontier.max_depth() > EXACT_ADMISSION_KEY_MAX_DEPTH {
-        return None;
-    }
-    let mut key = frontier
-        .to_stacks(EXACT_ADMISSION_KEY_MAX_STACKS)?
-        .into_iter()
-        .map(|(stack, _)| stack)
-        .collect::<Vec<_>>();
-    key.sort();
-    key.dedup();
-    Some(key)
-}
-
-fn exact_admission_key(frontier: &ParserGSS) -> ExactAdmissionKey {
-    if let Some(stack_key) = exact_admission_stack_key(frontier) {
-        ExactAdmissionKey::Stacks(stack_key)
-    } else {
-        // Only pay to erase accumulators and compare the shared GSS shape when
-        // the explicit semantic key exceeds its path or depth budget.
-        ExactAdmissionKey::Shape(frontier.apply(|_| ()))
-    }
-}
+type ExactAdmissionKeyInterner = GssSemanticKeyInterner<u32, TerminalsDisallowed>;
 
 fn exact_admission_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> bool {
     let mut queue = VecDeque::<ParserGSS>::new();
-    let mut visited = Vec::<ExactAdmissionKey>::new();
+    let mut visited = FxHashSet::<ExactAdmissionSemanticKey>::default();
+    let mut key_interner = ExactAdmissionKeyInterner::new();
 
     for state in stack.peek_values() {
-        exact_admission_enqueue_frontier(stack.isolate(Some(state)), &mut queue, &mut visited);
+        exact_admission_enqueue_frontier(
+            stack.isolate(Some(state)),
+            &mut queue,
+            &mut visited,
+            &mut key_interner,
+        );
     }
 
     while let Some(frontier) = queue.pop_front() {
@@ -2747,6 +2716,7 @@ fn exact_admission_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: Te
                         *len as usize,
                         &mut queue,
                         &mut visited,
+                        &mut key_interner,
                     );
                 }
                 Action::Split {
@@ -2768,6 +2738,7 @@ fn exact_admission_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: Te
                             len as usize,
                             &mut queue,
                             &mut visited,
+                            &mut key_interner,
                         );
                     }
                 }
@@ -2793,7 +2764,8 @@ fn exact_admission_may_advance_on_any(
     }
 
     let mut queue = VecDeque::<(ParserGSS, BitSet)>::new();
-    let mut visited = Vec::<ExactAdmissionVisitedAny>::new();
+    let mut visited = FxHashMap::<ExactAdmissionSemanticKey, BitSet>::default();
+    let mut key_interner = ExactAdmissionKeyInterner::new();
 
     for state in stack.peek_values() {
         exact_admission_enqueue_frontier_any(
@@ -2801,6 +2773,7 @@ fn exact_admission_may_advance_on_any(
             terminals,
             &mut queue,
             &mut visited,
+            &mut key_interner,
         );
     }
 
@@ -2840,6 +2813,7 @@ fn exact_admission_may_advance_on_any(
                     &reduce_terminals,
                     &mut queue,
                     &mut visited,
+                    &mut key_interner,
                 );
             }
         }
@@ -2972,7 +2946,8 @@ fn exact_admission_enqueue_reduce_any(
     rhs_len: usize,
     terminals: &BitSet,
     queue: &mut VecDeque<(ParserGSS, BitSet)>,
-    visited: &mut Vec<ExactAdmissionVisitedAny>,
+    visited: &mut FxHashMap<ExactAdmissionSemanticKey, BitSet>,
+    key_interner: &mut ExactAdmissionKeyInterner,
 ) {
     for (base, target, is_replace) in
         reduce_branches_from_isolated(table, isolated, nt, rhs_len)
@@ -2982,7 +2957,13 @@ fn exact_admission_enqueue_reduce_any(
         } else {
             base.push(target)
         };
-        exact_admission_enqueue_frontier_any(next, terminals, queue, visited);
+        exact_admission_enqueue_frontier_any(
+            next,
+            terminals,
+            queue,
+            visited,
+            key_interner,
+        );
     }
 }
 
@@ -2990,25 +2971,23 @@ fn exact_admission_enqueue_frontier_any(
     frontier: ParserGSS,
     terminals: &BitSet,
     queue: &mut VecDeque<(ParserGSS, BitSet)>,
-    visited: &mut Vec<ExactAdmissionVisitedAny>,
+    visited: &mut FxHashMap<ExactAdmissionSemanticKey, BitSet>,
+    key_interner: &mut ExactAdmissionKeyInterner,
 ) {
     if frontier.is_empty() || terminals.is_empty() {
         return;
     }
 
-    let key = exact_admission_key(&frontier);
-    let new_terminals = if let Some(seen) = visited.iter_mut().find(|seen| seen.key == key) {
-        let delta = terminals.difference(&seen.terminals);
+    let key = key_interner.key(&frontier);
+    let new_terminals = if let Some(seen_terminals) = visited.get_mut(&key) {
+        let delta = terminals.difference(seen_terminals);
         if delta.is_empty() {
             return;
         }
-        seen.terminals.union_with(&delta);
+        seen_terminals.union_with(&delta);
         delta
     } else {
-        visited.push(ExactAdmissionVisitedAny {
-            key,
-            terminals: terminals.clone(),
-        });
+        visited.insert(key, terminals.clone());
         terminals.clone()
     };
 
@@ -3048,7 +3027,8 @@ fn exact_admission_enqueue_reduce(
     nt: u32,
     rhs_len: usize,
     queue: &mut VecDeque<ParserGSS>,
-    visited: &mut Vec<ExactAdmissionKey>,
+    visited: &mut FxHashSet<ExactAdmissionSemanticKey>,
+    key_interner: &mut ExactAdmissionKeyInterner,
 ) {
     for (base, target, is_replace) in
         reduce_branches_from_isolated(table, isolated, nt, rhs_len)
@@ -3058,23 +3038,23 @@ fn exact_admission_enqueue_reduce(
         } else {
             base.push(target)
         };
-        exact_admission_enqueue_frontier(next, queue, visited);
+        exact_admission_enqueue_frontier(next, queue, visited, key_interner);
     }
 }
 
 fn exact_admission_enqueue_frontier(
     frontier: ParserGSS,
     queue: &mut VecDeque<ParserGSS>,
-    visited: &mut Vec<ExactAdmissionKey>,
+    visited: &mut FxHashSet<ExactAdmissionSemanticKey>,
+    key_interner: &mut ExactAdmissionKeyInterner,
 ) {
     if frontier.is_empty() {
         return;
     }
-    let key = exact_admission_key(&frontier);
-    if visited.contains(&key) {
+    let key = key_interner.key(&frontier);
+    if !visited.insert(key) {
         return;
     }
-    visited.push(key);
     queue.push_back(frontier);
 }
 
