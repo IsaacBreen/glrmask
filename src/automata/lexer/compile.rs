@@ -281,6 +281,16 @@ impl SharedDuplicateNestedGroupOpCache {
                 .or_insert_with(|| Arc::new(OnceLock::new())),
         ))
     }
+
+    #[cfg(test)]
+    fn all_entries_initialized(&self) -> bool {
+        let compiled = self
+            .compiled
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        compiled.len() == self.duplicated.len()
+            && compiled.values().all(|cell| cell.get().is_some())
+    }
 }
 
 fn materialize_nested_group_ops(expr: Expr, cache: &mut NestedGroupOpCache) -> Expr {
@@ -434,6 +444,46 @@ fn shared_duplicate_nested_group_op_cache(
             compiled: Mutex::new(FxHashMap::default()),
         })
     })
+}
+
+fn expr_structural_size(expr: &Expr) -> usize {
+    match expr {
+        Expr::Exclude { expr, exclude } => {
+            1 + expr_structural_size(expr) + expr_structural_size(exclude)
+        }
+        Expr::Intersect { expr, intersect } => {
+            1 + expr_structural_size(expr) + expr_structural_size(intersect)
+        }
+        Expr::Seq(parts) | Expr::Choice(parts) => {
+            1 + parts.iter().map(expr_structural_size).sum::<usize>()
+        }
+        Expr::Repeat { expr, .. } => 1 + expr_structural_size(expr),
+        Expr::Shared(expr) => 1 + expr_structural_size(expr),
+        Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Dfa(_) | Expr::Epsilon => 1,
+    }
+}
+
+/// Populate every cross-partition nested-group-op cache entry before the
+/// partition compilation itself fans out over Rayon.
+///
+/// Lazy `OnceLock` initialization inside the parallel partition loop can
+/// deadlock: several workers may block on one cache entry while the worker
+/// initializing it launches nested Rayon work that requires those same
+/// workers. Compile proper subexpressions first, then their parents, so nested
+/// shared entries are already available while a parent is materialized.
+fn prewarm_shared_duplicate_nested_group_ops(
+    shared: &Arc<SharedDuplicateNestedGroupOpCache>,
+) {
+    let mut duplicated = shared.duplicated.iter().cloned().collect::<Vec<_>>();
+    duplicated.sort_unstable_by_key(expr_structural_size);
+
+    let mut cache = NestedGroupOpCache {
+        shared_duplicates: Some(Arc::clone(shared)),
+        ..NestedGroupOpCache::default()
+    };
+    for expr in duplicated {
+        let _ = materialize_nested_group_ops(expr, &mut cache);
+    }
 }
 
 struct ExclusionCompilePlan {
@@ -1855,6 +1905,9 @@ fn compile_partition_components(
         grouped.entry(partition).or_default().push(terminal);
     }
     let shared_duplicates = shared_duplicate_nested_group_op_cache(exprs, &grouped);
+    if let Some(shared_duplicates) = &shared_duplicates {
+        prewarm_shared_duplicate_nested_group_ops(shared_duplicates);
+    }
 
     grouped
         .into_iter()
@@ -4309,6 +4362,35 @@ mod tests {
         let result = tokenizer.execute_from_state(b"a", tokenizer.initial_state());
         assert!(result.matches.iter().any(|matched| matched.id == 0));
         assert!(!result.end_state.is_empty());
+    }
+
+    #[test]
+    fn shared_nested_group_ops_are_initialized_before_parallel_partition_compile() {
+        let shared_nested = Expr::Exclude {
+            expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"abcdefghijklmnopqrstuvwxyz"))),
+            exclude: Box::new(Expr::U8Seq(b"x".to_vec())),
+        };
+        let expressions = (0..64u8)
+            .map(|suffix| {
+                Expr::Seq(vec![
+                    shared_nested.clone(),
+                    Expr::U8Seq(vec![b'0' + suffix % 10]),
+                ])
+            })
+            .collect::<Vec<_>>();
+        let partitions = (0..expressions.len() as u32).collect::<Vec<_>>();
+        let mut grouped = std::collections::BTreeMap::<u32, Vec<usize>>::new();
+        for (terminal, &partition) in partitions.iter().enumerate() {
+            grouped.entry(partition).or_default().push(terminal);
+        }
+
+        let shared = super::shared_duplicate_nested_group_op_cache(&expressions, &grouped)
+            .expect("the repeated nested exclusion should use the shared cache");
+        super::prewarm_shared_duplicate_nested_group_ops(&shared);
+        assert!(shared.all_entries_initialized());
+
+        let components = super::compile_partition_components(&expressions, None, &partitions);
+        assert_eq!(components.len(), expressions.len());
     }
 
     #[test]
