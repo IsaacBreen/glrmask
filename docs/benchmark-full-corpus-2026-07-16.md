@@ -47,7 +47,7 @@ For each configured framework/problem pair:
 - each recorded token timing is the elementwise minimum across the traversals;
 - timing values after the first effective-death token are null and excluded.
 
-TBM is the measured mask-generation time plus commit time for one token position. TTFM here follows the CFA report definition: successful build time plus the median first-mask time across the retained examples.
+TBM is the measured mask-generation time plus commit time for one token position. TTFM here follows the CFA report definition: successful build time plus the median first-mask time across the retained examples. TTFM is reported only when a successful build has at least one finite first-mask sample; successful builds with no retained measurable example remain in the build-time counts but are excluded from TTFM.
 
 The aggregate covers **21,018 examples** and **3,168,113 token positions before timing truncation**. Of those examples, 10,131 were labelled expected-valid and 10,887 expected-invalid. Effective death occurred in 11,098 examples: 10,836 expected-invalid examples and 262 expected-valid examples. The latter is a material corpus/harness outcome and is not hidden.
 
@@ -88,9 +88,9 @@ Times are milliseconds over successful builds for each framework's actual covera
 
 | Framework | Problems | p50 | p90 | p95 | p99 | p99.9 | max |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| GLRMask native | 8,966 | 50.964 | 151.503 | 257.565 | 565.006 | 2,217.618 | 6,440.288 |
-| GLRMask dynamic | 4,083 | 4.580 | 12.949 | 17.560 | 44.552 | 250.257 | 549.949 |
-| LLGuidance native | 8,967 | 0.940 | 2.538 | 3.964 | 11.834 | 42.986 | 239.964 |
+| GLRMask native | 8,112 | 49.976 | 126.751 | 233.860 | 449.047 | 1,748.917 | 6,440.288 |
+| GLRMask dynamic | 3,577 | 4.405 | 11.162 | 14.978 | 31.690 | 230.266 | 549.949 |
+| LLGuidance native | 8,109 | 0.923 | 2.093 | 3.129 | 9.885 | 14.883 | 49.805 |
 
 LLGuidance native built faster on 8,955 of the 8,956 joint-success problems using a 1% tie tolerance. The median per-problem LLGuidance/GLRMask build-time ratio was 0.019; equivalently, GLRMask native paid roughly a 52× larger paired median build cost. This is the expected ahead-of-time/runtime tradeoff, not a runtime result.
 
@@ -130,7 +130,7 @@ GLRMask native's measured tail remained below 50 µs. LLGuidance native had 1,56
 
 ### GLRMask native vs LLGuidance native
 
-The paired runtime population contains **2,111,184 shared token positions** from **8,116 problems** where both had timing data.
+The paired runtime population contains **2,111,184 shared token positions** from **8,103 problems** with at least one finite shared TBM value. The separate discrepancy analysis below has 8,116 mask-evaluable problems.
 
 | Framework | Paired TBM samples | p50 µs | p90 µs | p95 µs | p99 µs | p99.9 µs | max µs |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -141,7 +141,7 @@ At shared token positions and a 1% tie tolerance, GLRMask native was faster at 2
 
 ### GLRMask native vs GLRMask dynamic
 
-Dynamic coverage exists only in the first 4,425 configured problems. The paired runtime population contains **1,170,139 shared token positions** from **3,579 problems**.
+Dynamic coverage exists only in the first 4,425 configured problems. The paired runtime population contains **1,170,139 shared token positions** from **3,576 problems** with at least one finite shared TBM value. The separate discrepancy analysis below has 3,579 mask-evaluable problems.
 
 | Framework | Paired TBM samples | p50 µs | p90 µs | p95 µs | p99 µs | p99.9 µs | max µs |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -150,7 +150,7 @@ Dynamic coverage exists only in the first 4,425 configured problems. The paired 
 
 GLRMask native was faster at 1,152,805 shared positions (98.52%). The median per-position dynamic/native TBM ratio was 20.340×. Dynamic mode's faster build therefore came with a large runtime and tail penalty in this corpus.
 
-For dynamic versus LLGuidance, the paired population contains 1,167,293 token positions from 3,579 problems. The median paired TBM values were 59.097 µs for dynamic and 13.516 µs for LLGuidance.
+For dynamic versus LLGuidance, the paired population contains 1,167,293 token positions from 3,575 problems with at least one finite shared TBM value. The median paired TBM values were 59.097 µs for dynamic and 13.516 µs for LLGuidance. The discrepancy analysis remains based on 3,579 mask-evaluable problems.
 
 ## Mask discrepancies
 
