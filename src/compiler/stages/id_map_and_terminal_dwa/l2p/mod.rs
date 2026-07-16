@@ -384,6 +384,13 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
             relevant_bytes[byte as usize] = true;
         }
     }
+    // DIAGNOSTIC ONLY: hide ASCII spelling bytes from p1 TI discovery.
+    if partition_label == "p1" {
+        for byte in b'0'..=b'9' { relevant_bytes[byte as usize] = false; }
+        for byte in b'A'..=b'Z' { relevant_bytes[byte as usize] = false; }
+        for byte in b'a'..=b'z' { relevant_bytes[byte as usize] = false; }
+        relevant_bytes[b'_' as usize] = false;
+    }
 
     let token_position_partition_started_at = l2p_timing_profile_enabled().then(Instant::now);
     // Global token-position partition C. C combines partial partitions over
@@ -398,7 +405,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // The pre-TI quotient and representative-core token-position partition are
     // two wrappers over the same C map. Build the positional analysis once.
     let (global_state_quotient, token_position_partition) =
-        if l2p_global_token_position_enabled() && matches!(partition_label, "p7" | "p8") {
+        if l2p_global_token_position_enabled() && matches!(partition_label, "p1" | "p7" | "p8") {
             match equivalence_analysis::state_equivalence::global_token_position::
                 compute_global_token_position_state_views(
                     tokenizer,
