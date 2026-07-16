@@ -1,5 +1,6 @@
 pub mod compile;
 pub(crate) mod constraint_possible_matches;
+pub(crate) mod debug_terminal_paths;
 pub mod glr;
 pub mod grammar;
 pub(crate) mod pipeline;

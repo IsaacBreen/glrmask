@@ -1364,6 +1364,17 @@ fn launch_terminal_dag_if_ready<'scope>(
             &tokenizer.tokenizer,
             &special_token_terminals,
         );
+        crate::compiler::debug_terminal_paths::maybe_dump_terminal_paths(
+            &terminal_dwas,
+            &analysis.analyzed_grammar,
+            vocab,
+        );
+        crate::compiler::debug_terminal_paths::maybe_dump_final_terminal_dwa(
+            &terminal_dwas,
+            &analysis.analyzed_grammar,
+            vocab,
+            tokenizer.tokenizer.num_states() as usize,
+        );
         terminal_phase_profile.terminal_dwa_ms += elapsed_ms(special_started_at);
         let terminal_dwa_finished_ms = elapsed_ms(compile_started_at.clone());
 

@@ -25,7 +25,7 @@ use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::compiler::stages::mapped_artifact::MappedArtifact;
 use crate::ds::weight::Weight;
 
-use super::types::{LocalIdMapTerminalDwa, TerminalDwaPhaseProfile, compile_profile_enabled};
+use super::types::{LocalIdMapTerminalDwa, TerminalDwaFamilies, TerminalDwaPhaseProfile, compile_profile_enabled};
 
 type RemapCache<T> = FxHashMap<usize, T>;
 type CompositeClassKey = SmallVec<[u32; 16]>;
@@ -760,6 +760,60 @@ pub(crate) fn merge_mapped_dwas(
         max_token_id,
     );
     MappedArtifact::new(merged.dwa, merged.id_map)
+}
+
+
+/// Diagnostic-only reconstruction of the legacy single terminal DWA from the
+/// split production families. The production pipeline intentionally avoids
+/// this determinization and instead builds parser DWAs per family.
+pub(crate) fn debug_merge_terminal_families(
+    families: &TerminalDwaFamilies,
+    num_tokenizer_states: usize,
+    max_token_id: u32,
+) -> MappedArtifact<DWA> {
+    let inputs: Vec<(&crate::automata::weighted::terminal_automaton::TerminalAutomaton, &InternalIdMap)> =
+        [&families.l1, &families.l2p, &families.special]
+            .into_iter()
+            .flatten()
+            .map(|family| (family.artifact(), family.id_map()))
+            .collect();
+    assert!(!inputs.is_empty(), "cannot merge empty terminal-family set");
+
+    let id_map_refs: Vec<&InternalIdMap> = inputs.iter().map(|(_, id_map)| *id_map).collect();
+    let (global_id_map, _) =
+        build_unified_global_id_map(&id_map_refs, num_tokenizer_states, max_token_id);
+    let mut global_nwa = NWA::new(
+        global_id_map.num_tsids(),
+        global_id_map.max_internal_token_id(),
+    );
+    let mut global_body = global_nwa.body();
+
+    for (automaton, id_map) in inputs {
+        let mut nwa = match automaton {
+            crate::automata::weighted::terminal_automaton::TerminalAutomaton::Dwa(dwa) => {
+                dwa.to_nwa()
+            }
+            crate::automata::weighted::terminal_automaton::TerminalAutomaton::TokenDeterministicNwa(nwa) => {
+                nwa.clone()
+            }
+        };
+        let tsid_map = build_local_to_global_tsid_map(id_map, &global_id_map);
+        let token_map = build_local_to_global_token_map(id_map, &global_id_map);
+        remap_nwa_with_maps(
+            &mut nwa,
+            &tsid_map,
+            &token_map,
+            global_id_map.num_tsids() as usize,
+        );
+        global_body = global_nwa.union_in_place(&nwa, &global_body);
+    }
+    global_nwa.set_start_states(global_body.start_states);
+
+    let deterministic = determinize(&global_nwa)
+        .expect("diagnostic final terminal-DWA determinization failed");
+    let mut mapped = MappedArtifact::new(minimize_owned(deterministic), global_id_map);
+    mapped.compact_dimensions_fast();
+    mapped
 }
 
 fn immediate_dwa_accepting_edges(dwa: &DWA) -> Option<Vec<(i32, Weight)>> {
