@@ -17,6 +17,42 @@ pub use dynamic_constraint::{DynamicConstraint, DynamicConstraintState};
 pub use runtime::{Constraint, ConstraintState};
 pub use vocab::Vocab;
 
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CompilerCacheStats {
+    pub token_set_entries: usize,
+    pub live_token_set_entries: usize,
+    pub weight_buckets: usize,
+    pub weight_entries: usize,
+    pub live_weight_entries: usize,
+    pub current_thread_weight_ops: usize,
+    pub current_thread_token_set_ops: usize,
+    pub current_thread_public_intersections: usize,
+    pub current_thread_weight_hashes: usize,
+    pub weight_op_generation: u64,
+    pub weight_hash_generation: u64,
+    pub vocab_artifacts: usize,
+}
+
+#[doc(hidden)]
+pub fn compiler_cache_stats(vocab: Option<&Vocab>) -> CompilerCacheStats {
+    let stats = ds::weight::weight_cache_stats();
+    CompilerCacheStats {
+        token_set_entries: stats.token_set_entries,
+        live_token_set_entries: stats.live_token_set_entries,
+        weight_buckets: stats.weight_buckets,
+        weight_entries: stats.weight_entries,
+        live_weight_entries: stats.live_weight_entries,
+        current_thread_weight_ops: stats.current_thread_weight_ops,
+        current_thread_token_set_ops: stats.current_thread_token_set_ops,
+        current_thread_public_intersections: stats.current_thread_public_intersections,
+        current_thread_weight_hashes: stats.current_thread_weight_hashes,
+        weight_op_generation: stats.weight_op_generation,
+        weight_hash_generation: stats.weight_hash_generation,
+        vocab_artifacts: vocab.map_or(0, Vocab::compiler_cache_entry_count),
+    }
+}
+
 pub(crate) use error::{GlrMaskError, Result};
 
 /// Compile a Constraint from a serialized GrammarDef JSON + vocab.

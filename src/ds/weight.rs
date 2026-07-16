@@ -745,9 +745,9 @@ static WEIGHT_HASH_MEMO_GENERATION: AtomicU64 = AtomicU64::new(0);
 const PUBLIC_WEIGHT_INTERSECTION_CACHE_CAP: usize = 262_144;
 
 struct PublicWeightIntersectionMemoEntry {
-    left: Weight,
-    right: Weight,
-    result: Weight,
+    left: Weak<WeightMap>,
+    right: Weak<WeightMap>,
+    result: Weak<WeightMap>,
 }
 
 #[derive(Default)]
@@ -764,10 +764,17 @@ impl PublicWeightIntersectionMemo {
     fn lookup(&mut self, left: &Weight, right: &Weight) -> Option<Weight> {
         let (key, ordered_left, ordered_right) = ordered_commutative_weight_pair(left, right);
         let entry = self.results.get(&key)?;
-        if Arc::ptr_eq(&entry.left.0, &ordered_left.0)
-            && Arc::ptr_eq(&entry.right.0, &ordered_right.0)
+        let cached_left = entry.left.upgrade();
+        let cached_right = entry.right.upgrade();
+        let cached_result = entry.result.upgrade();
+        if let (Some(cached_left), Some(cached_right), Some(cached_result)) =
+            (cached_left, cached_right, cached_result)
         {
-            return Some(entry.result.clone());
+            if Arc::ptr_eq(&cached_left, &ordered_left.0)
+                && Arc::ptr_eq(&cached_right, &ordered_right.0)
+            {
+                return Some(Weight(cached_result));
+            }
         }
         self.results.remove(&key);
         None
@@ -781,9 +788,9 @@ impl PublicWeightIntersectionMemo {
         self.results.insert(
             key,
             PublicWeightIntersectionMemoEntry {
-                left: ordered_left.clone(),
-                right: ordered_right.clone(),
-                result: result.clone(),
+                left: Arc::downgrade(&ordered_left.0),
+                right: Arc::downgrade(&ordered_right.0),
+                result: Arc::downgrade(&result.0),
             },
         );
     }
@@ -1012,6 +1019,60 @@ pub fn clear_weight_interners() {
 pub fn clear_weight_op_caches() {
     WEIGHT_OP_MEMO_GENERATION.fetch_add(1, Ordering::Release);
     WEIGHT_HASH_MEMO_GENERATION.fetch_add(1, Ordering::Release);
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct WeightCacheStats {
+    pub token_set_entries: usize,
+    pub live_token_set_entries: usize,
+    pub weight_buckets: usize,
+    pub weight_entries: usize,
+    pub live_weight_entries: usize,
+    pub current_thread_weight_ops: usize,
+    pub current_thread_token_set_ops: usize,
+    pub current_thread_public_intersections: usize,
+    pub current_thread_weight_hashes: usize,
+    pub weight_op_generation: u64,
+    pub weight_hash_generation: u64,
+}
+
+pub(crate) fn weight_cache_stats() -> WeightCacheStats {
+    let token_set_entries = GLOBAL_TOKEN_SETS.len();
+    let live_token_set_entries = GLOBAL_TOKEN_SETS
+        .iter()
+        .filter(|entry| entry.value().strong_count() > 0)
+        .count();
+    let weight_buckets = GLOBAL_WEIGHTS.len();
+    let (weight_entries, live_weight_entries) = GLOBAL_WEIGHTS.iter().fold(
+        (0usize, 0usize),
+        |(total, live), bucket| {
+            let entries = bucket.value();
+            (
+                total + entries.len(),
+                live + entries.iter().filter(|weak| weak.strong_count() > 0).count(),
+            )
+        },
+    );
+    let (current_thread_weight_ops, current_thread_token_set_ops) = WEIGHT_OP_MEMO.with(|memo| {
+        let memo = memo.borrow();
+        (memo.results.len(), memo.token_set_results.len())
+    });
+    let current_thread_public_intersections = PUBLIC_WEIGHT_INTERSECTION_MEMO
+        .with(|memo| memo.borrow().results.len());
+    let current_thread_weight_hashes = WEIGHT_HASH_MEMO.with(|memo| memo.borrow().results.len());
+    WeightCacheStats {
+        token_set_entries,
+        live_token_set_entries,
+        weight_buckets,
+        weight_entries,
+        live_weight_entries,
+        current_thread_weight_ops,
+        current_thread_token_set_ops,
+        current_thread_public_intersections,
+        current_thread_weight_hashes,
+        weight_op_generation: WEIGHT_OP_MEMO_GENERATION.load(Ordering::Acquire),
+        weight_hash_generation: WEIGHT_HASH_MEMO_GENERATION.load(Ordering::Acquire),
+    }
 }
 
 fn lookup_memoized_weight_op(kind: WeightOpKind, left: &Weight, right: &Weight) -> Option<Weight> {
@@ -2930,6 +2991,26 @@ mod tests {
     fn weight_for_tsid(tsid: u32, ranges: &[(u32, u32)]) -> Weight {
         let token_set = rangeset_from_ranges(ranges.iter().map(|(start, end)| *start..=*end));
         Weight::from_token_set_for_tsid(tsid, token_set)
+    }
+
+    #[test]
+    fn public_intersection_memo_does_not_keep_weights_alive() {
+        clear_weight_op_caches();
+        let left = weight_for_tsid(1, &[(1, 10)]);
+        let right = weight_for_tsid(1, &[(5, 15)]);
+        let left_weak = Arc::downgrade(&left.0);
+        let right_weak = Arc::downgrade(&right.0);
+        let result = left.intersection(&right);
+        let result_weak = Arc::downgrade(&result.0);
+        assert!(with_public_weight_intersection_memo(|memo| !memo.results.is_empty()));
+
+        drop(result);
+        drop(right);
+        drop(left);
+
+        assert!(left_weak.upgrade().is_none());
+        assert!(right_weak.upgrade().is_none());
+        assert!(result_weak.upgrade().is_none());
     }
 
     #[test]

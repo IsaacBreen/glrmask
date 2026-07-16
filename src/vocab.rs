@@ -99,4 +99,13 @@ impl Vocab {
             artifacts.entry(TypeId::of::<T>()).or_insert(erased);
         }
     }
+
+    #[doc(hidden)]
+    pub fn compiler_cache_entry_count(&self) -> usize {
+        self.compiler_cache
+            .artifacts
+            .lock()
+            .map(|artifacts| artifacts.len())
+            .unwrap_or(0)
+    }
 }

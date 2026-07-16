@@ -23,6 +23,10 @@ use crate::compiler::stages::id_map_and_terminal_dwa::types::compile_profile_ena
 
 pub type VocabEquivalenceResult = BTreeSet<Vec<usize>>;
 
+fn conservative_singleton_vocab_equivalence(num_tokens: usize) -> VocabEquivalenceResult {
+    (0..num_tokens).map(|token| vec![token]).collect()
+}
+
 type EdgeList = SmallVec<[(usize, usize); 4]>;
 
 struct DagNode {
@@ -3224,10 +3228,13 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
     shared_analysis_dfa_cache: Option<&SharedVocabAnalysisDfaCache>,
 ) -> (VocabEquivalenceResult, f64) {
     let input_state_count = tokenizer.dfa().states.len();
-    for &state in initial_states {
-        assert!(
-            state < input_state_count,
-            "vocabulary equivalence received invalid initial state {state}; analysis view has {input_state_count} states",
+    if initial_states.iter().any(|&state| state >= input_state_count) {
+        // An invalid/sentinel state cannot justify merging any vocabulary
+        // entries.  Preserve correctness by declining all equivalence merges
+        // rather than indexing with a leaked u32::MAX mapping.
+        return (
+            conservative_singleton_vocab_equivalence(strings.len()),
+            0.0,
         );
     }
 
@@ -3307,11 +3314,10 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
     } else {
         (&dfa, initial_states_for_dfa, None)
     };
-    for &state in initial_states_ref {
-        assert!(
-            state < dfa_ref.num_states,
-            "vocabulary equivalence remapped initial state {state} outside compact DFA with {} states",
-            dfa_ref.num_states,
+    if initial_states_ref.iter().any(|&state| state >= dfa_ref.num_states) {
+        return (
+            conservative_singleton_vocab_equivalence(strings.len()),
+            build_dfa_ms,
         );
     }
     let compacted_states = compact_to_original.map_or(dfa.num_states, |states| states.len());
@@ -3808,6 +3814,30 @@ mod shared_base_tests {
         );
 
         assert_eq!(compacted, uncompacted);
+    }
+
+    #[test]
+    fn invalid_sentinel_initial_state_falls_back_to_singletons() {
+        let view = TokenizerView {
+            flat_dfa: sample_dfa(),
+        };
+        let tokens: Vec<&[u8]> = vec![b"a", b"b", b"aa"];
+        let disallowed = BTreeMap::<u32, BitSet>::new();
+        let result = find_vocab_equivalence_classes_with_group_filter(
+            &view,
+            &tokens,
+            &[u32::MAX as usize],
+            &disallowed,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(
+            result,
+            BTreeSet::from([vec![0usize], vec![1usize], vec![2usize]])
+        );
     }
 
     #[test]

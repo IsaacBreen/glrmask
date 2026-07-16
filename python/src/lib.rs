@@ -1158,6 +1158,8 @@ fn add_internal_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     internal.add_function(wrap_pyfunction!(clear_stale_weights, &internal)?)?;
     internal.add_function(wrap_pyfunction!(clear_weight_op_caches, &internal)?)?;
+    internal.add_function(wrap_pyfunction!(clear_weight_caches, &internal)?)?;
+    internal.add_function(wrap_pyfunction!(compiler_cache_stats, &internal)?)?;
     internal.add_function(wrap_pyfunction!(prepare_vocab_for_compile, &internal)?)?;
     internal.add_function(wrap_pyfunction!(compile_grammar_def_json, &internal)?)?;
     internal.add_function(wrap_pyfunction!(dump_json_schema_grammar_glrm, &internal)?)?;
@@ -1210,6 +1212,31 @@ fn clear_stale_weights() {
 #[pyfunction]
 fn clear_weight_op_caches() {
     glrmask::Constraint::clear_weight_op_caches();
+}
+
+#[pyfunction]
+fn clear_weight_caches() {
+    glrmask::Constraint::clear_weight_op_caches();
+    glrmask::Constraint::clear_stale_weights();
+}
+
+#[pyfunction]
+fn compiler_cache_stats(vocab: Option<&PyVocab>) -> std::collections::BTreeMap<&'static str, u64> {
+    let stats = glrmask::compiler_cache_stats(vocab.map(|vocab| &vocab.inner));
+    std::collections::BTreeMap::from([
+        ("token_set_entries", stats.token_set_entries as u64),
+        ("live_token_set_entries", stats.live_token_set_entries as u64),
+        ("weight_buckets", stats.weight_buckets as u64),
+        ("weight_entries", stats.weight_entries as u64),
+        ("live_weight_entries", stats.live_weight_entries as u64),
+        ("current_thread_weight_ops", stats.current_thread_weight_ops as u64),
+        ("current_thread_token_set_ops", stats.current_thread_token_set_ops as u64),
+        ("current_thread_public_intersections", stats.current_thread_public_intersections as u64),
+        ("current_thread_weight_hashes", stats.current_thread_weight_hashes as u64),
+        ("weight_op_generation", stats.weight_op_generation),
+        ("weight_hash_generation", stats.weight_hash_generation),
+        ("vocab_artifacts", stats.vocab_artifacts as u64),
+    ])
 }
 
 #[pyfunction]
