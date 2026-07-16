@@ -325,7 +325,37 @@ struct DynamicContinuationOutcome {
 pub(crate) struct DynamicContinuationPartition {
     pub(crate) groups: Box<[DynamicContinuationGroup]>,
     token_groups: Box<[u16]>,
-    subtree_groups: Box<[u64]>,
+    subtree_groups: Box<[u128]>,
+}
+
+/// Exact whole-token lexical behavior from the tokenizer's initial state.
+///
+/// `accept` represents a lexer reset that lands exactly at the vocabulary-token
+/// boundary. `end_states` preserve no-finalization lexer residuals. Each branch
+/// commits one terminal and evaluates the remaining byte suffix from the
+/// tokenizer initial state. Programs are structurally interned, so tokens with
+/// identical lexical behavior share one runtime parser query and one dense mask.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub(crate) struct DynamicTokenProgram {
+    pub(crate) accept: bool,
+    pub(crate) end_states: Box<[u32]>,
+    pub(crate) branches: Box<[(TerminalID, u32)]>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct DynamicTokenProgramPartition {
+    pub(crate) programs: Box<[DynamicTokenProgram]>,
+    pub(crate) root_programs: Box<[u16]>,
+    pub(crate) token_programs: Box<[u16]>,
+    pub(crate) token_count: usize,
 }
 
 const CONTINUATION_NFA_CONFIG_UNKNOWN: u32 = u32::MAX;
@@ -439,10 +469,171 @@ impl<'tok> ContinuationNfaScanCache<'tok> {
     }
 }
 
+struct InitialTokenProgramBuilder<'tok> {
+    tokenizer: &'tok Tokenizer,
+    initial_state: u32,
+    suffix_ids: FxHashMap<(u8, u32), u32>,
+    suffix_nodes: Vec<(u8, u32)>,
+    suffix_lengths: Vec<u16>,
+    program_by_suffix: Vec<u32>,
+    interned: FxHashMap<DynamicTokenProgram, u32>,
+    programs: Vec<DynamicTokenProgram>,
+}
+
+impl<'tok> InitialTokenProgramBuilder<'tok> {
+    fn new(tokenizer: &'tok Tokenizer) -> Self {
+        let accept = DynamicTokenProgram {
+            accept: true,
+            end_states: Box::new([]),
+            branches: Box::new([]),
+        };
+        let mut interned = FxHashMap::default();
+        interned.insert(accept.clone(), 0);
+        let initial_state = tokenizer.initial_state();
+        Self {
+            tokenizer,
+            initial_state,
+            suffix_ids: FxHashMap::default(),
+            suffix_nodes: vec![(0, 0)],
+            suffix_lengths: vec![0],
+            program_by_suffix: vec![0],
+            interned,
+            programs: vec![accept],
+        }
+    }
+
+    fn intern(&mut self, program: DynamicTokenProgram) -> u32 {
+        if let Some(&id) = self.interned.get(&program) {
+            return id;
+        }
+        let id = u32::try_from(self.programs.len())
+            .expect("dynamic token-program count exceeded u32");
+        self.programs.push(program.clone());
+        self.interned.insert(program, id);
+        id
+    }
+
+    fn register_suffixes(&mut self, bytes: &[u8]) -> u32 {
+        let mut rest = 0;
+        for &byte in bytes.iter().rev() {
+            let key = (byte, rest);
+            rest = if let Some(&existing) = self.suffix_ids.get(&key) {
+                existing
+            } else {
+                let id = u32::try_from(self.suffix_nodes.len())
+                    .expect("dynamic token suffix count exceeded u32");
+                let length = self.suffix_lengths[rest as usize]
+                    .checked_add(1)
+                    .expect("dynamic token suffix length exceeded u16");
+                self.suffix_ids.insert(key, id);
+                self.suffix_nodes.push(key);
+                self.suffix_lengths.push(length);
+                self.program_by_suffix.push(u32::MAX);
+                id
+            };
+        }
+        rest
+    }
+
+    fn build_programs(&mut self) {
+        let max_len = self.suffix_lengths.iter().copied().max().unwrap_or(0) as usize;
+        let mut by_len = vec![Vec::<u32>::new(); max_len + 1];
+        for (suffix_id, &length) in self.suffix_lengths.iter().enumerate().skip(1) {
+            by_len[length as usize].push(suffix_id as u32);
+        }
+
+        for suffix_ids in by_len.into_iter().skip(1) {
+            if suffix_ids.is_empty() {
+                continue;
+            }
+            let specs = suffix_ids
+                .par_iter()
+                .map_init(
+                    || {
+                        let mut scan_cache = ContinuationNfaScanCache::new(self.tokenizer);
+                        let initial_config =
+                            scan_cache.config_for_raw_start(self.initial_state);
+                        (scan_cache, initial_config, Vec::<(u8, u32)>::new())
+                    },
+                    |(scan_cache, initial_config, suffix_bytes), &suffix_id| {
+                        suffix_bytes.clear();
+                        let mut cursor = suffix_id;
+                        while cursor != 0 {
+                            let node = self.suffix_nodes[cursor as usize];
+                            suffix_bytes.push(node);
+                            cursor = node.1;
+                        }
+                        let mut config = *initial_config;
+                        let mut accept = false;
+                        let mut branches = Vec::new();
+                        let mut alive = true;
+                        for &(byte, rest) in suffix_bytes.iter() {
+                            let Some(next_config) = scan_cache.step_config(config, byte) else {
+                                alive = false;
+                                break;
+                            };
+                            config = next_config;
+                            let program = self.program_by_suffix[rest as usize];
+                            debug_assert_ne!(program, u32::MAX);
+                            for &state in scan_cache.configs[config as usize].iter() {
+                                branches.extend(
+                                    self.tokenizer
+                                        .matched_terminals_iter(state)
+                                        .map(|terminal| (terminal, program)),
+                                );
+                            }
+                        }
+                        branches.sort_unstable();
+                        branches.dedup();
+
+                        let mut end_states = if alive {
+                            scan_cache.configs[config as usize]
+                                .iter()
+                                .copied()
+                                .filter(|&state| {
+                                    if state == self.initial_state {
+                                        accept = true;
+                                        false
+                                    } else {
+                                        !self.tokenizer.is_end(state)
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                        } else {
+                            Vec::new()
+                        };
+                        end_states.sort_unstable();
+                        end_states.dedup();
+
+                        (
+                            suffix_id,
+                            DynamicTokenProgram {
+                                accept,
+                                end_states: end_states.into_boxed_slice(),
+                                branches: branches.into_boxed_slice(),
+                            },
+                        )
+                    },
+                )
+                .collect::<Vec<_>>();
+
+            for (suffix_id, program) in specs {
+                let program_id = self.intern(program);
+                self.program_by_suffix[suffix_id as usize] = program_id;
+            }
+        }
+    }
+
+    #[inline]
+    fn program_for_suffix(&self, suffix: u32) -> u32 {
+        self.program_by_suffix[suffix as usize]
+    }
+}
+
 impl DynamicContinuationPartition {
     #[inline]
     pub(crate) fn has_narrow_group_set(&self) -> bool {
-        self.groups.len() <= 64
+        self.groups.len() <= 128
     }
 
     #[inline]
@@ -455,7 +646,7 @@ impl DynamicContinuationPartition {
     }
 
     #[inline]
-    pub(crate) fn subtree_groups(&self, node: u32) -> u64 {
+    pub(crate) fn subtree_groups(&self, node: u32) -> u128 {
         self.subtree_groups[node as usize]
     }
 }
@@ -490,6 +681,8 @@ pub(crate) struct DynamicMaskVocab {
         Arc<Mutex<FxHashMap<u32, Arc<DynamicContinuationPartition>>>>,
     declined_continuation_sources: Arc<Mutex<FxHashSet<u32>>>,
     continuation_entries: Arc<OnceLock<Arc<Vec<(u32, Box<[u8]>)>>>>,
+    initial_token_program_partition:
+        Arc<OnceLock<Arc<DynamicTokenProgramPartition>>>,
     mask_cache: Arc<Mutex<Vec<DynamicMaskCacheEntry>>>,
 }
 
@@ -523,6 +716,7 @@ impl DynamicMaskVocab {
             continuation_partitions: Arc::new(Mutex::new(FxHashMap::default())),
             declined_continuation_sources: Arc::new(Mutex::new(FxHashSet::default())),
             continuation_entries: Arc::new(OnceLock::new()),
+            initial_token_program_partition: Arc::new(OnceLock::new()),
             mask_cache: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -536,6 +730,7 @@ impl DynamicMaskVocab {
             continuation_partitions: Arc::new(Mutex::new(FxHashMap::default())),
             declined_continuation_sources: Arc::new(Mutex::new(FxHashSet::default())),
             continuation_entries: Arc::new(OnceLock::new()),
+            initial_token_program_partition: Arc::new(OnceLock::new()),
             mask_cache: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -552,6 +747,7 @@ impl DynamicMaskVocab {
             continuation_partitions: Arc::new(Mutex::new(FxHashMap::default())),
             declined_continuation_sources: Arc::new(Mutex::new(FxHashSet::default())),
             continuation_entries: Arc::new(OnceLock::new()),
+            initial_token_program_partition: Arc::new(OnceLock::new()),
             mask_cache: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -632,14 +828,14 @@ impl DynamicMaskVocab {
         &self,
         node_id: u32,
         token_groups: &[u16],
-        subtree_groups: &mut [u64],
-    ) -> u64 {
+        subtree_groups: &mut [u128],
+    ) -> u128 {
         let node = self.trie.node(node_id);
         let mut groups = node
             .token_id
             .and_then(|token_id| token_groups.get(token_id as usize).copied())
             .filter(|&group| group != u16::MAX)
-            .map_or(0, |group| 1u64 << group);
+            .map_or(0, |group| 1u128 << group);
         for edge in self.trie.children(node_id) {
             groups |= self.fill_continuation_subtree_groups(
                 edge.child,
@@ -850,8 +1046,8 @@ impl DynamicMaskVocab {
                 token_count,
             });
         }
-        let mut subtree_groups = if groups.len() <= 64 {
-            vec![0u64; self.trie.nodes.len()]
+        let mut subtree_groups = if groups.len() <= 128 {
+            vec![0u128; self.trie.nodes.len()]
         } else {
             Vec::new()
         };
@@ -881,6 +1077,107 @@ impl DynamicMaskVocab {
             self.continuation_entries
                 .get_or_init(|| Arc::new(self.canonical_token_entries())),
         )
+    }
+
+    fn build_initial_token_program_partition(
+        &self,
+        tokenizer: &Tokenizer,
+        _mask_words: usize,
+    ) -> DynamicTokenProgramPartition {
+        let started = std::time::Instant::now();
+        let entries = self.continuation_entries();
+        let mut builder = InitialTokenProgramBuilder::new(tokenizer);
+        let register_started = std::time::Instant::now();
+        let suffix_roots = entries
+            .iter()
+            .map(|(_, bytes)| builder.register_suffixes(bytes))
+            .collect::<Vec<_>>();
+        let register_ms = register_started.elapsed().as_secs_f64() * 1000.0;
+        let programs_started = std::time::Instant::now();
+        builder.build_programs();
+        let programs_ms = programs_started.elapsed().as_secs_f64() * 1000.0;
+        let mapping_started = std::time::Instant::now();
+        let max_token_id = entries
+            .iter()
+            .flat_map(|(canonical_token_id, _)| {
+                self.token_ids(*canonical_token_id)
+                    .into_iter()
+                    .flatten()
+                    .copied()
+            })
+            .max()
+            .unwrap_or(0) as usize;
+        let mut token_programs = vec![u16::MAX; max_token_id.saturating_add(1)];
+        let mut root_programs = FxHashSet::<u16>::default();
+        let mut token_count = 0usize;
+        for ((canonical_token_id, _), suffix) in entries.iter().zip(suffix_roots) {
+            let program = builder.program_for_suffix(suffix);
+            let program = u16::try_from(program)
+                .expect("dynamic root token-program count exceeded u16");
+            root_programs.insert(program);
+            if let Some(token_ids) = self.token_ids(*canonical_token_id) {
+                for &token_id in token_ids {
+                    token_programs[token_id as usize] = program;
+                    token_count += 1;
+                }
+            }
+        }
+        let mut root_programs = root_programs.into_iter().collect::<Vec<_>>();
+        root_programs.sort_unstable();
+        let mapping_ms = mapping_started.elapsed().as_secs_f64() * 1000.0;
+
+        let suffix_count = builder.suffix_nodes.len();
+        let branch_count = builder
+            .programs
+            .iter()
+            .map(|program| program.branches.len())
+            .sum::<usize>();
+        let partition = DynamicTokenProgramPartition {
+            programs: builder.programs.into_boxed_slice(),
+            root_programs: root_programs.into_boxed_slice(),
+            token_programs: token_programs.into_boxed_slice(),
+            token_count,
+        };
+        if std::env::var_os("GLRMASK_PROFILE_DYNAMIC_MASK").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+        {
+            eprintln!(
+                "[glrmask/profile][dynamic_token_program_partition] programs={} roots={} suffixes={} branches={} tokens={} register_ms={:.3} programs_ms={:.3} mapping_ms={:.3} build_ms={:.3}",
+                partition.programs.len(),
+                partition.root_programs.len(),
+                suffix_count,
+                branch_count,
+                partition.token_count,
+                register_ms,
+                programs_ms,
+                mapping_ms,
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        partition
+    }
+
+    pub(crate) fn initial_token_program_partition(
+        &self,
+    ) -> Option<Arc<DynamicTokenProgramPartition>> {
+        self.initial_token_program_partition.get().cloned()
+    }
+
+    pub(crate) fn install_initial_token_program_partition(
+        &self,
+        partition: Arc<DynamicTokenProgramPartition>,
+    ) {
+        let _ = self.initial_token_program_partition.set(partition);
+    }
+
+    pub(crate) fn prebuild_initial_token_program_partition(
+        &self,
+        tokenizer: &Tokenizer,
+        mask_words: usize,
+    ) {
+        self.initial_token_program_partition.get_or_init(|| {
+            Arc::new(self.build_initial_token_program_partition(tokenizer, mask_words))
+        });
     }
 
     pub(crate) fn cached_or_build_continuation_partition(
@@ -1136,6 +1433,7 @@ impl Default for DynamicMaskVocab {
             continuation_partitions: Arc::new(Mutex::new(FxHashMap::default())),
             declined_continuation_sources: Arc::new(Mutex::new(FxHashSet::default())),
             continuation_entries: Arc::new(OnceLock::new()),
+            initial_token_program_partition: Arc::new(OnceLock::new()),
             mask_cache: Arc::new(Mutex::new(Vec::new())),
         }
     }

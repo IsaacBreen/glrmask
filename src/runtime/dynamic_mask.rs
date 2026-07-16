@@ -21,7 +21,9 @@ use crate::ds::leveled_gss::LeveledGSS;
 use crate::ds::u8set::U8Set;
 use crate::grammar::flat::TerminalID;
 
-use super::artifact::{Constraint, DynamicMaskStateKey, DynamicMaskTrie};
+use super::artifact::{
+    Constraint, DynamicMaskStateKey, DynamicMaskTrie, DynamicTokenProgramPartition,
+};
 use super::state::ConstraintState;
 
 type ParserStacks = LeveledGSS<u32, ()>;
@@ -31,6 +33,11 @@ struct DynamicTraversalCache {
     boundary: FxHashMap<(u32, usize), (ParserStacks, bool)>,
     lexer_relevant: FxHashMap<(u32, usize), (ParserStacks, bool)>,
     parser_children: FxHashMap<(usize, TerminalID), (ParserStacks, Option<ParserStacks>)>,
+}
+
+#[derive(Default)]
+struct DynamicTokenProgramCache {
+    results: FxHashMap<(u32, usize), bool>,
 }
 
 #[derive(Clone)]
@@ -47,7 +54,7 @@ struct TraverseWork {
 enum ContinuationFilter {
     Narrow {
         partition_index: usize,
-        required_groups: u64,
+        required_groups: u128,
     },
     AlreadyMarked,
 }
@@ -481,6 +488,44 @@ fn parser_child_cached(
     result
 }
 
+fn token_program_accepts(
+    constraint: &Constraint,
+    partition: &DynamicTokenProgramPartition,
+    program_id: u32,
+    stacks: &ParserStacks,
+    traversal_cache: &mut DynamicTraversalCache,
+    program_cache: &mut DynamicTokenProgramCache,
+) -> bool {
+    let program = &partition.programs[program_id as usize];
+    if program.accept {
+        return true;
+    }
+
+    let key = (program_id, stacks.ptr_key());
+    if let Some(result) = program_cache.results.get(&key) {
+        return *result;
+    }
+
+    let accepted = program.end_states.iter().any(|&end_state| {
+        token_boundary_allowed_cached(constraint, end_state, stacks, traversal_cache)
+    }) || program.branches.iter().any(|&(terminal, suffix)| {
+        let Some(advanced) = parser_child_cached(constraint, stacks, terminal, traversal_cache)
+        else {
+            return false;
+        };
+        token_program_accepts(
+            constraint,
+            partition,
+            suffix,
+            &advanced,
+            traversal_cache,
+            program_cache,
+        )
+    });
+    program_cache.results.insert(key, accepted);
+    accepted
+}
+
 fn token_boundary_allowed(
     constraint: &Constraint,
     tokenizer_state: u32,
@@ -712,6 +757,7 @@ fn fill_mask_dynamic_impl(
     let mut segment_stack = Vec::<(usize, u32, ParserStacks)>::with_capacity(8);
     let mut self_loop_cache = FxHashMap::<u32, U8Set>::default();
     let mut traversal_cache = DynamicTraversalCache::default();
+    let mut token_program_cache = DynamicTokenProgramCache::default();
     let mut lexer_scan_cache = DynamicNfaScanCache::new(state.constraint, deadline);
     let tries = [vocab.trie.clone()];
     let mut continuation_partitions = Vec::new();
@@ -722,6 +768,8 @@ fn fill_mask_dynamic_impl(
     let mut subtree_mark_tokens = 0usize;
     let mut continuation_groups_admitted = 0usize;
     let mut continuation_groups_traversed = 0usize;
+    let mut token_program_groups_evaluated = 0usize;
+    let mut token_program_groups_admitted = 0usize;
     let mut lazy_continuation_builds_remaining = 1usize;
     if profile {
         eprintln!(
@@ -778,6 +826,40 @@ fn fill_mask_dynamic_impl(
                         &mut traversal_cache,
                     ),
                 );
+            }
+            if tokenizer_state == initial_tsid
+                && initial_prune_guard.is_passed()
+                && let Some(program_partition) = vocab.initial_token_program_partition()
+            {
+                let mut accepted_programs = vec![false; program_partition.programs.len()];
+                for &program in program_partition.root_programs.iter() {
+                    check_deadline()?;
+                    token_program_groups_evaluated += 1;
+                    if token_program_accepts(
+                        state.constraint,
+                        &program_partition,
+                        u32::from(program),
+                        &stacks,
+                        &mut traversal_cache,
+                        &mut token_program_cache,
+                    ) {
+                        accepted_programs[program as usize] = true;
+                        token_program_groups_admitted += 1;
+                    }
+                }
+                for (word, programs) in buf
+                    .iter_mut()
+                    .zip(program_partition.token_programs.chunks(32))
+                {
+                    let mut accepted_bits = 0u32;
+                    for (bit, &program) in programs.iter().enumerate() {
+                        let accepted = program != u16::MAX
+                            && accepted_programs[program as usize];
+                        accepted_bits |= u32::from(accepted) << bit;
+                    }
+                    *word |= accepted_bits;
+                }
+                continue;
             }
             if initial_prune_guard.is_passed() {
                 let mut partition = vocab.cached_continuation_partition(tokenizer_state);
@@ -857,8 +939,8 @@ fn fill_mask_dynamic_impl(
                             let required_groups = admitted_groups
                                 .iter()
                                 .enumerate()
-                                .fold(0u64, |groups, (group_id, &admitted)| {
-                                    groups | ((!admitted) as u64) << group_id
+                                .fold(0u128, |groups, (group_id, &admitted)| {
+                                    groups | ((!admitted) as u128) << group_id
                                 });
                             let partition_index = continuation_partitions.len();
                             continuation_partitions.push(partition);
@@ -957,7 +1039,7 @@ fn fill_mask_dynamic_impl(
                     .and_then(|token_id| {
                         continuation_partitions[partition_index].token_group(token_id)
                     })
-                    .is_some_and(|group| required_groups & (1u64 << group) != 0)
+                    .is_some_and(|group| required_groups & (1u128 << group) != 0)
             }
             Some(ContinuationFilter::AlreadyMarked) => node
                 .token_id
@@ -1072,7 +1154,7 @@ fn fill_mask_dynamic_impl(
     }
     if let Some(total_started_at) = total_started_at {
         eprintln!(
-            "[glrmask/profile][dynamic_mask] generation={} cache_hit=false key_ms={:.3} work_items={} trie_edges={} lexer_execs={} subtree_marks={} subtree_tokens={} continuation_admitted={} continuation_traversed={} boundary_cache={} relevant_cache={} child_cache={} total_ms={:.3}",
+            "[glrmask/profile][dynamic_mask] generation={} cache_hit=false key_ms={:.3} work_items={} trie_edges={} lexer_execs={} subtree_marks={} subtree_tokens={} token_program_evaluated={} token_program_admitted={} token_program_cache={} continuation_admitted={} continuation_traversed={} boundary_cache={} relevant_cache={} child_cache={} total_ms={:.3}",
             state.generation,
             key_ms,
             work_items,
@@ -1080,6 +1162,9 @@ fn fill_mask_dynamic_impl(
             lexer_executions,
             subtree_marks,
             subtree_mark_tokens,
+            token_program_groups_evaluated,
+            token_program_groups_admitted,
+            token_program_cache.results.len(),
             continuation_groups_admitted,
             continuation_groups_traversed,
             traversal_cache.boundary.len(),
