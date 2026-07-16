@@ -31,6 +31,14 @@ impl<'a> Lowerer<'a> {
             && (std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
                 || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some());
         let profile_started_at = profile_enabled.then(std::time::Instant::now);
+        if schema.location.ends_with("/additionalProperties")
+            && self.any_of_has_self_recursive_ref_branch(&assertions.any_of)?
+        {
+            return Err(SchemaImportError::at(
+                &schema.location,
+                "recursive additionalProperties anyOf schemas are unsupported",
+            ));
+        }
         // The two-field string-discriminator path checks its complete object
         // shape itself. With no enclosing sibling assertions it can run before
         // the generic branch cloning and subsumption work.
@@ -140,6 +148,20 @@ impl<'a> Lowerer<'a> {
             );
         }
         Ok(choice(alternatives))
+    }
+
+    fn any_of_has_self_recursive_ref_branch(&self, branches: &[Schema]) -> ImportResult<bool> {
+        for branch in branches {
+            let SchemaKind::Ref(pointer) = &branch.kind else {
+                continue;
+            };
+            let normalized = normalize_local_ref(pointer)?;
+            let target = self.resolve_ref_target(pointer)?;
+            if self.schema_transitively_refs_pointer(target, &normalized, &mut BTreeSet::new())? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn try_merge_single_object_any_of_with_siblings(
