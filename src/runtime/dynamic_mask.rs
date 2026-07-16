@@ -15,7 +15,7 @@ use crate::automata::lexer::tokenizer::{
 };
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::compiler::glr::parser::{
-    advance_stacks, stack_may_advance_on, stack_may_advance_on_any, ParserGSS,
+    advance_stacks, stack_may_advance_on_any, ParserGSS,
 };
 use crate::ds::leveled_gss::LeveledGSS;
 use crate::ds::u8set::U8Set;
@@ -501,9 +501,10 @@ fn parser_child(
         return Some(stacks.clone());
     }
     let parser_gss = with_empty_accumulators(stacks);
-    if !stack_may_advance_on(&constraint.table, &parser_gss, terminal) {
-        return None;
-    }
+    // The actual structural advance is already the definitive admissibility
+    // test. Running exact admission first duplicates reduction simulation on
+    // every program branch and is especially costly when many token programs
+    // share the same small terminal set.
     let advanced = advance_stacks(&constraint.table, &parser_gss, terminal).apply(|_| ());
     (!advanced.is_empty()).then_some(advanced)
 }
@@ -601,16 +602,17 @@ fn token_boundary_allowed(
     tokenizer_state: u32,
     stacks: &ParserStacks,
 ) -> bool {
-    let parser_gss = with_empty_accumulators(stacks);
-    constraint
+    let accessible = constraint
         .tokenizer
-        .tokens_accessible_from_state(tokenizer_state)
-        .iter()
-        .any(|terminal| {
-            let terminal = terminal as TerminalID;
-            Some(terminal) == constraint.ignore_terminal
-                || stack_may_advance_on(&constraint.table, &parser_gss, terminal)
-        })
+        .tokens_accessible_from_state(tokenizer_state);
+    if constraint
+        .ignore_terminal
+        .is_some_and(|terminal| accessible.contains(terminal as usize))
+    {
+        return true;
+    }
+    let parser_gss = with_empty_accumulators(stacks);
+    stack_may_advance_on_any(&constraint.table, &parser_gss, accessible)
 }
 
 fn token_boundary_allowed_cached(
