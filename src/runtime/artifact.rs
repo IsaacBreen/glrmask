@@ -1217,29 +1217,58 @@ impl DynamicMaskVocab {
 
         let source_started = std::time::Instant::now();
         let initial_state = tokenizer.initial_state();
-        let mut program_counts = vec![0u64; builder.programs.len()];
+        let mut root_token_counts = vec![0u32; builder.programs.len()];
         for &program in &token_programs {
             if program != u16::MAX {
-                program_counts[program as usize] =
-                    program_counts[program as usize].saturating_add(1);
+                root_token_counts[program as usize] =
+                    root_token_counts[program as usize].saturating_add(1);
             }
         }
-        // A terminal match transfers control to an initial-state suffix
-        // program. Propagate root-token frequency down those shorter suffix
-        // edges so residual states reached after in-token boundaries are ranked
-        // alongside ordinary whole-token end states.
-        for program_id in (0..builder.programs.len()).rev() {
-            let count = program_counts[program_id];
-            if count == 0 {
+        // Count distinct root-program reachability. Counting branch paths
+        // grows exponentially through the suffix DAG and saturates, erasing
+        // the ranking signal used to choose residual accelerators.
+        let reach_words = builder.programs.len().div_ceil(64);
+        let mut reachable_roots = vec![vec![0u64; reach_words]; builder.programs.len()];
+        for (program, &count) in root_token_counts.iter().enumerate() {
+            if count != 0 {
+                reachable_roots[program][program / 64] |= 1u64 << (program % 64);
+            }
+        }
+        for program in (0..builder.programs.len()).rev() {
+            let roots = reachable_roots[program].clone();
+            if roots.iter().all(|&word| word == 0) {
                 continue;
             }
-            for &(_, target) in builder.programs[program_id].branches.iter() {
+            for &(_, target) in builder.programs[program].branches.iter() {
                 let target = target as usize;
-                if target != program_id {
-                    program_counts[target] = program_counts[target].saturating_add(count);
+                debug_assert!(target <= program);
+                if target == program {
+                    continue;
+                }
+                for (dst, src) in reachable_roots[target].iter_mut().zip(&roots) {
+                    *dst |= *src;
                 }
             }
         }
+        let program_counts = reachable_roots
+            .iter()
+            .map(|roots| {
+                roots
+                    .iter()
+                    .enumerate()
+                    .map(|(word_index, &word)| {
+                        let mut word = word;
+                        let mut count = 0u64;
+                        while word != 0 {
+                            let bit = word.trailing_zeros() as usize;
+                            count += u64::from(root_token_counts[word_index * 64 + bit]);
+                            word &= word - 1;
+                        }
+                        count
+                    })
+                    .sum::<u64>()
+            })
+            .collect::<Vec<_>>();
         let mut source_scores = vec![0u64; tokenizer.num_states() as usize];
         for (program_id, &count) in program_counts.iter().enumerate() {
             if count == 0 {
@@ -1282,7 +1311,7 @@ impl DynamicMaskVocab {
         let mut source_states = ranked_source_states
             .iter()
             .filter(|&&(_, _, transitions, _, _)| transitions != 0)
-            .take(2)
+            .take(1)
             .map(|&(state, _, _, _, _)| state)
             .collect::<Vec<_>>();
         if let Some(state) = (0..tokenizer.num_states())
