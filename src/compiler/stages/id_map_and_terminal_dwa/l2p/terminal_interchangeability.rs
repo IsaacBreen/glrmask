@@ -3229,7 +3229,9 @@ impl InterchangeabilityDfa {
             }
         }
         for terminal in missing {
-            supports[terminal as usize] = Some(std::mem::take(&mut built[terminal as usize]));
+            supports[terminal as usize] = Some(Arc::from(std::mem::take(
+                &mut built[terminal as usize],
+            )));
         }
         if let Some(started_at) = started_at {
             self.support_transposition_support_setup_ns +=
