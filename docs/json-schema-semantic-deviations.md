@@ -1,6 +1,6 @@
 # JSON Schema semantic deviations
 
-Shingleback v0.1 implements a pragmatic JSON Schema subset rather than claiming
+GLRMask v0.1 implements a pragmatic JSON Schema subset rather than claiming
 full specification conformance. Unsupported constructs may be rejected, and the
 intentional deviations below can broaden or restrict the accepted instance
 language. Each entry records the reason and expected impact.

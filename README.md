@@ -1,8 +1,8 @@
-# Shingleback
+# GLRMask
 
-Shingleback is a grammar-constrained decoding engine for tokenized LLM generation. It compiles a grammar together with an LLM vocabulary into an immutable `Constraint`, then produces the next-token mask for each decoding step and advances the constraint state as sampled tokens are committed.
+**GLRMask: grammar-constrained token masking for context-free languages.**
 
-**Shingleback is the project name.** The v0.1 Rust crate, PyPI distribution, and Python import are all named **`glrmask`**:
+GLRMask compiles a grammar together with an LLM vocabulary into an immutable `Constraint`, then produces the next-token mask for each decoding step and advances the constraint state as sampled tokens are committed. The Rust crate, PyPI distribution, and Python import are all named **`glrmask`**:
 
 ```text
 Rust crate:    glrmask
@@ -12,7 +12,7 @@ Python import: glrmask
 
 The core contract is tokenization-complete existential admissibility. For a current byte prefix `u`, a vocabulary token `v` with byte spelling `β(v)`, and compiled language `L`, the mask admits `v` exactly when some continuation `w` exists such that `u β(v) w ∈ L`. A token may therefore cross lexer-token or grammar-terminal boundaries and still be admissible.
 
-Shingleback supports general context-free grammars, not only regular languages, and moves much of the stack-dependent token-admissibility work out of the per-token mask query and into compilation.
+GLRMask supports general context-free grammars, not only regular languages, and moves much of the stack-dependent token-admissibility work out of the per-token mask query and into compilation.
 
 ## What it supports
 
@@ -280,7 +280,7 @@ Python exposes the corresponding incremental operations, with `mask()` returning
 - **JSON Schema is not fully conformant.** It is a pragmatic subset with [documented semantic deviations](docs/json-schema-semantic-deviations.md); some unsupported constructs error, while some documented cases broaden or restrict semantics.
 - **Compiled constraints are vocabulary-specific.** Recompile when the tokenizer vocabulary or token-byte mapping changes.
 - **Benchmark results are environment-specific.** The [v0.1 benchmark](docs/benchmark-0.1.md) records one bounded benchmark target on one machine; it is not the full corpus or a hardware-independent guarantee.
-- **Serving-framework integrations are not part of v0.1.** Shingleback v0.1 ships the compiler/runtime library and public Rust/Python APIs. Direct integrations with serving systems such as vLLM are follow-up work.
+- **Serving-framework integrations are not part of v0.1.** GLRMask v0.1 ships the compiler/runtime library and public Rust/Python APIs. Direct integrations with serving systems such as vLLM are follow-up work.
 
 ## Examples
 

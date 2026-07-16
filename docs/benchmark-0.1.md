@@ -1,6 +1,6 @@
-# Shingleback v0.1 benchmark
+# GLRMask v0.1 benchmark
 
-Shingleback v0.1 uses a bounded, deliberately difficult performance comparison based on the CFA harness target:
+GLRMask v0.1 uses a bounded, deliberately difficult performance comparison based on the CFA harness target:
 
 ```text
 make example-slow-all
@@ -47,7 +47,7 @@ Backend versions and release provenance:
 | `glrmask-native` | same `glrmask 0.1.0` release code, native adapter path |
 | `xgrammar` | `0.2.3` |
 
-The CFA benchmark snapshot is based on commit `d753fb7403e63106ddecb22d7829b2cf669307fd`. The benchmark copy contains harness and compatibility changes needed to expose exactly the four requested adapters, use the local tokenizer cache and corpus, preserve compatibility with the frozen Shingleback RC, and enforce a true parent-process hard timeout for native xgrammar compilation. Those changes do not alter Shingleback/glrmask release code.
+The CFA benchmark snapshot is based on commit `d753fb7403e63106ddecb22d7829b2cf669307fd`. The benchmark copy contains harness and compatibility changes needed to expose exactly the four requested adapters, use the local tokenizer cache and corpus, preserve compatibility with the frozen, then-branded Shingleback RC, and enforce a true parent-process hard timeout for native xgrammar compilation. Those changes do not alter GLRMask release code.
 
 ## Methodology
 

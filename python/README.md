@@ -1,6 +1,6 @@
-# Shingleback Python bindings (`glrmask`)
+# GLRMask Python bindings (`glrmask`)
 
-Shingleback is the project name; the PyPI distribution and Python import remain `glrmask`. The bindings compile grammars together with a token vocabulary and expose incremental mask and commit operations.
+GLRMask provides grammar-constrained token masking for context-free languages. The PyPI distribution and Python import are both `glrmask`. The bindings compile grammars together with a token vocabulary and expose incremental mask and commit operations.
 
 ## Install
 

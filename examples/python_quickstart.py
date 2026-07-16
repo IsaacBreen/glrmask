@@ -1,4 +1,4 @@
-"""Minimal Shingleback Python first-run example using the glrmask package."""
+"""Minimal GLRMask Python first-run example using the glrmask package."""
 
 import glrmask
 
