@@ -73,10 +73,10 @@ fn advance_parser_stacks(
         if validate_template_advance_enabled() {
             let table_advanced = advance_stacks(&constraint.table, stack, terminal);
             assert!(
-                template_advanced.semantically_eq(&table_advanced),
+                template_advanced.semantically_eq(&table_advanced, 4_096).expect("template validation exceeded explicit stack limit"),
                 "template-DFA advance mismatch for terminal {terminal}; template={:?} table={:?}",
-                template_advanced.to_stacks(),
-                table_advanced.to_stacks(),
+                template_advanced.to_stacks(4_096).expect("stack enumeration exceeded explicit limit"),
+                table_advanced.to_stacks(4_096).expect("stack enumeration exceeded explicit limit"),
             );
         }
         return template_advanced;
@@ -97,10 +97,10 @@ fn advance_parser_stacks_owned(
         if validate_template_advance_enabled() {
             let table_advanced = advance_stacks_owned(&constraint.table, stack, terminal);
             assert!(
-                template_advanced.semantically_eq(&table_advanced),
+                template_advanced.semantically_eq(&table_advanced, 4_096).expect("template validation exceeded explicit stack limit"),
                 "template-DFA advance mismatch for terminal {terminal}; template={:?} table={:?}",
-                template_advanced.to_stacks(),
-                table_advanced.to_stacks(),
+                template_advanced.to_stacks(4_096).expect("stack enumeration exceeded explicit limit"),
+                table_advanced.to_stacks(4_096).expect("stack enumeration exceeded explicit limit"),
             );
         }
         return template_advanced;
@@ -123,10 +123,10 @@ fn advance_parser_stacks_profiled(
             let (table_advanced, table_profile) =
                 advance_stacks_profiled(&constraint.table, stack, terminal);
             assert!(
-                template_advanced.semantically_eq(&table_advanced),
+                template_advanced.semantically_eq(&table_advanced, 4_096).expect("template validation exceeded explicit stack limit"),
                 "template-DFA advance mismatch for terminal {terminal}; template={:?} table={:?}",
-                template_advanced.to_stacks(),
-                table_advanced.to_stacks(),
+                template_advanced.to_stacks(4_096).expect("stack enumeration exceeded explicit limit"),
+                table_advanced.to_stacks(4_096).expect("stack enumeration exceeded explicit limit"),
             );
             return (template_advanced, table_profile);
         }
@@ -161,7 +161,7 @@ fn state_has_nonempty_accumulators(state: &BTreeMap<u32, ParserGSS>) -> bool {
 
 
 fn parser_stacks_only(gss: &ParserGSS) -> Vec<Vec<u32>> {
-    gss.to_stacks().into_iter().map(|(stack, _)| stack).collect()
+    gss.to_stacks(4_096).expect("stack enumeration exceeded explicit limit").into_iter().map(|(stack, _)| stack).collect()
 }
 
 
@@ -210,7 +210,7 @@ fn canonical_commit_state_for_equivalence_assert(
         .iter()
         .map(|(&tokenizer_state, gss)| {
             let mut stacks = gss
-                .to_stacks()
+                .to_stacks(4_096).expect("stack enumeration exceeded explicit limit")
                 .into_iter()
                 .map(|(stack, terminals_disallowed)| {
                     let disallowed = terminals_disallowed
@@ -1019,14 +1019,8 @@ fn apply_single_path_reduce_chain_fast(
     gss: &ParserGSS,
     terminal: u32,
 ) -> Option<ParserGSS> {
-    let mut top_first = SmallVec::<[u32; 16]>::new();
-    let acc = gss.single_path_top_first_and_acc(&mut top_first)?;
-    if top_first.len() > SINGLE_CONCRETE_STACK_EFFECT_MAX_DEPTH {
-        return None;
-    }
-
-    let mut stack = top_first.into_vec();
-    stack.reverse();
+    let (mut stack, acc) =
+        gss.try_single_stack_bounded(SINGLE_CONCRETE_STACK_EFFECT_MAX_DEPTH)?;
 
     loop {
         let state = *stack.last()?;
@@ -1112,7 +1106,10 @@ fn apply_single_path_reduce_chain_fast(
                                         .map(|shift| (shift.pop as usize, shift.pushes.as_slice())),
                                     SINGLE_CONCRETE_STACK_EFFECT_MAX_DEPTH,
                                 )?;
-                            out.extend(shifted.to_stacks());
+                            let shifted_stacks = shifted
+                                .to_stacks(shifts.len())
+                                .expect("stack-shift result exceeded its effect count");
+                            out.extend(shifted_stacks);
                         }
                         _ => return None,
                     }
@@ -3882,7 +3879,7 @@ mod tests {
             }]),
         ));
         assert_eq!(restored_common_top.top(), Some(&40));
-        let mut stacks = restored_common_top.into_gss().to_stacks();
+        let mut stacks = restored_common_top.into_gss().to_stacks(4_096).expect("stack enumeration exceeded explicit limit");
         stacks.sort_by(|left, right| left.0.cmp(&right.0));
         assert_eq!(
             stacks.into_iter().map(|(stack, _)| stack).collect::<Vec<_>>(),
@@ -4235,12 +4232,12 @@ nt start ::= item item? item?;
             "successful commit state mismatch: {context} token_id={token_id} bytes={bytes:?}\nfast_stacks={:#?}\ngeneral_stacks={:#?}",
             fast.state
                 .iter()
-                .map(|(&ts, gss)| (ts, gss.to_stacks()))
+                .map(|(&ts, gss)| (ts, gss.to_stacks(4_096).expect("stack enumeration exceeded explicit limit")))
                 .collect::<Vec<_>>(),
             general
                 .state
                 .iter()
-                .map(|(&ts, gss)| (ts, gss.to_stacks()))
+                .map(|(&ts, gss)| (ts, gss.to_stacks(4_096).expect("stack enumeration exceeded explicit limit")))
                 .collect::<Vec<_>>(),
         );
         assert_eq!(
@@ -4250,12 +4247,12 @@ nt start ::= item item? item?;
             profiled
                 .state
                 .iter()
-                .map(|(&ts, gss)| (ts, gss.to_stacks()))
+                .map(|(&ts, gss)| (ts, gss.to_stacks(4_096).expect("stack enumeration exceeded explicit limit")))
                 .collect::<Vec<_>>(),
             general
                 .state
                 .iter()
-                .map(|(&ts, gss)| (ts, gss.to_stacks()))
+                .map(|(&ts, gss)| (ts, gss.to_stacks(4_096).expect("stack enumeration exceeded explicit limit")))
                 .collect::<Vec<_>>(),
         );
 

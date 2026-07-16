@@ -135,7 +135,7 @@ impl<'a> ConstraintState<'a> {
     /// Each entry is (tokenizer_state, Vec<(stack_of_parser_states, disallowed_terminals)>).
     pub(crate) fn debug_parser_stacks(&self) -> Vec<(u32, Vec<(Vec<u32>, Vec<(u32, Vec<u32>)>)>)> {
         self.state.iter().map(|(&ts, gss)| {
-            let stacks = gss.to_stacks();
+            let stacks = gss.to_stacks(4_096).expect("stack enumeration exceeded explicit limit");
             let formatted: Vec<(Vec<u32>, Vec<(u32, Vec<u32>)>)> = stacks.into_iter().map(|(stack, acc)| {
                 let disallowed: Vec<(u32, Vec<u32>)> = acc.0.iter().map(|(&k, v)| {
                     (k, v.iter().copied().collect())

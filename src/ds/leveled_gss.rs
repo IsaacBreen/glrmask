@@ -1819,10 +1819,10 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> Eq for LeveledGSS<T, A>
 
 impl<T: Clone + Eq + Hash + std::fmt::Debug, A: Merge + Clone + Eq + Hash + std::fmt::Debug> std::fmt::Debug for LeveledGSS<T, A> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let stacks = self.to_stacks();
         f.debug_struct("LeveledGSS")
-            .field("num_stacks", &stacks.len())
-            .finish()
+            .field("top_values", &self.peek_values().len())
+            .field("max_depth", &self.max_depth())
+            .finish_non_exhaustive()
     }
 }
 
@@ -1999,95 +1999,23 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         LeveledGSS { inner }
     }
 
-    pub fn to_stacks(&self) -> Vec<(Vec<T>, A)> {
-        let mut res: Vec<(Vec<T>, A)> = Vec::new();
-
-        fn dfs_lower<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
-            l: &Lower<T>,
-            pref: &mut Vec<T>,
-            acc: &A,
-            out: &mut Vec<(Vec<T>, A)>,
-        ) {
-            if l.empty() {
-                let mut stack = pref.clone();
+    /// Materialize at most `max_stacks` concrete stacks.
+    ///
+    /// Returns `None` rather than silently truncating when the represented path
+    /// count exceeds the caller-selected limit. This is a diagnostic and test
+    /// API; production hot paths should operate on the shared GSS directly or
+    /// use a purpose-built bounded traversal.
+    pub fn to_stacks(&self, max_stacks: usize) -> Option<Vec<(Vec<T>, A)>> {
+        let mut stacks = Vec::new();
+        let complete = self.for_each_stack_top_first_bounded(
+            max_stacks,
+            |top_first, acc| {
+                let mut stack = top_first.to_vec();
                 stack.reverse();
-                out.push((stack, acc.clone()));
-            }
-            match l {
-                Lower::Segment(seg) => {
-                    // Push values top-to-bottom (reverse order since values[0]=deepest)
-                    for v in seg.values.iter().rev() {
-                        pref.push(v.clone());
-                    }
-                    dfs_lower(&seg.next, pref, acc, out);
-                    for _ in 0..seg.values.len() {
-                        pref.pop();
-                    }
-                }
-                Lower::General { children, .. } => {
-                    for (v, kids) in children.iter() {
-                        for child in kids.values() {
-                            pref.push(v.clone());
-                            dfs_lower(child, pref, acc, out);
-                            pref.pop();
-                        }
-                    }
-                }
-            }
-        }
-
-        fn dfs_upper<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
-            u: &Upper<T, A>,
-            pref: &mut Vec<T>,
-            out: &mut Vec<(Vec<T>, A)>,
-        ) {
-            match u {
-                Upper::Branch(b) => {
-                    if let Some(e) = &b.empty {
-                        let mut stack = pref.clone();
-                        stack.reverse();
-                        out.push((stack, e.clone()));
-                    }
-                    for (v, kids) in b.children.iter() {
-                        for child in kids.values() {
-                            pref.push(v.clone());
-                            dfs_upper(child, pref, out);
-                            pref.pop();
-                        }
-                    }
-                }
-                Upper::Interface(i) => {
-                    if i.inner.empty() {
-                        let mut stack = pref.clone();
-                        stack.reverse();
-                        out.push((stack, i.acc.clone()));
-                    }
-                    match &*i.inner {
-                        Lower::Segment(seg) => {
-                            for v in seg.values.iter().rev() {
-                                pref.push(v.clone());
-                            }
-                            dfs_lower(&seg.next, pref, &i.acc, out);
-                            for _ in 0..seg.values.len() {
-                                pref.pop();
-                            }
-                        }
-                        Lower::General { children, .. } => {
-                            for (v, kids) in children.iter() {
-                                for child in kids.values() {
-                                    pref.push(v.clone());
-                                    dfs_lower(child, pref, &i.acc, out);
-                                    pref.pop();
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        dfs_upper(&self.inner, &mut vec![], &mut res);
-        res
+                stacks.push((stack, acc.clone()));
+            },
+        );
+        complete.then_some(stacks)
     }
 
     /// Visit concrete stacks in top-first order without materializing the full
@@ -2250,15 +2178,17 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     ///
     /// This intentionally materializes stacks and is meant for validation and
     /// diagnostics, not production hot paths. `PartialEq` remains structural.
-    pub(crate) fn semantically_eq(&self, other: &Self) -> bool {
+    pub(crate) fn semantically_eq(&self, other: &Self, max_stacks: usize) -> Option<bool> {
         if self == other {
-            return true;
+            return Some(true);
         }
-        let left = self.to_stacks();
-        let right = other.to_stacks();
-        left.len() == right.len()
-            && left.iter().all(|entry| right.contains(entry))
-            && right.iter().all(|entry| left.contains(entry))
+        let left = self.to_stacks(max_stacks)?;
+        let right = other.to_stacks(max_stacks)?;
+        Some(
+            left.len() == right.len()
+                && left.iter().all(|entry| right.contains(entry))
+                && right.iter().all(|entry| left.contains(entry)),
+        )
     }
 
     /// Apply a set of stack effects by materializing the single concrete stack.
@@ -2304,15 +2234,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             return Some(Self::from_stacks(&empty));
         }
 
-        if self.max_depth() as usize > max_materialized_depth {
-            return None;
-        }
-
-        let mut stacks = self.to_stacks();
-        if stacks.len() != 1 {
-            return None;
-        }
-        let (stack, acc) = stacks.pop().unwrap();
+        let (stack, acc) = self.try_single_stack_bounded(max_materialized_depth)?;
 
         let mut out: Vec<(Vec<T>, A)> = Vec::new();
         for (pop, pushes) in effects {
@@ -2379,15 +2301,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         G: IntoIterator<Item = (usize, &'a [T])>,
         T: 'a,
     {
-        if self.max_depth() as usize > max_materialized_depth {
-            return None;
-        }
-
-        let mut stacks = self.to_stacks();
-        if stacks.len() != 1 {
-            return None;
-        }
-        let (stack, acc) = stacks.pop().unwrap();
+        let (stack, acc) = self.try_single_stack_bounded(max_materialized_depth)?;
 
         let mut out: Vec<(Vec<T>, A)> = Vec::new();
         for (guards, pop, pushes) in effects {
@@ -4310,6 +4224,21 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         self.path_count_at_most(2) <= 1
     }
 
+    /// Materialize the sole concrete stack only when its cached maximum depth
+    /// is within `max_depth`. The O(1) depth rejection happens before walking
+    /// any General-node chain, and the subsequent traversal rejects branching
+    /// immediately rather than enumerating alternative paths.
+    pub(crate) fn try_single_stack_bounded(&self, max_depth: usize) -> Option<(Vec<T>, A)> {
+        if self.max_depth() as usize > max_depth {
+            return None;
+        }
+        let mut top_first = SmallVec::<[T; 16]>::new();
+        let acc = self.single_path_top_first_and_acc(&mut top_first)?;
+        let mut stack = top_first.into_vec();
+        stack.reverse();
+        Some((stack, acc))
+    }
+
     pub fn single_path_top_first_and_acc(&self, out: &mut SmallVec<[T; 16]>) -> Option<A> {
         fn push_lower_path<T>(node: &Arc<Lower<T>>, out: &mut SmallVec<[T; 16]>) -> bool
         where
@@ -4760,8 +4689,11 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
 #[cfg(test)]
 mod tests {
-    use super::LeveledGSS;
-    use super::Merge;
+    use std::sync::Arc;
+
+    use super::{
+        CompactMap, CompactOrdMap, LeveledGSS, Lower, Merge, new_interface,
+    };
 
     #[derive(Clone, Debug, PartialEq, Eq, Hash)]
     struct TestAcc(u32);
@@ -4788,9 +4720,79 @@ mod tests {
             (vec![0_u32, 1, 7], TestAcc(1)),
         ]);
 
-        assert!(left.semantically_eq(&same));
-        assert!(same.semantically_eq(&left));
-        assert!(!left.semantically_eq(&different_acc));
+        assert!(left.semantically_eq(&same, 4_096).expect("semantic comparison exceeded explicit stack limit"));
+        assert!(same.semantically_eq(&left, 4_096).expect("semantic comparison exceeded explicit stack limit"));
+        assert!(!left.semantically_eq(&different_acc, 4_096).expect("semantic comparison exceeded explicit stack limit"));
+    }
+
+    #[test]
+    fn to_stacks_returns_none_instead_of_truncating() {
+        let gss = LeveledGSS::from_stacks(&[
+            (vec![0_u32, 1], TestAcc(1)),
+            (vec![0_u32, 2], TestAcc(2)),
+            (vec![0_u32, 3], TestAcc(3)),
+        ]);
+
+        assert!(gss.to_stacks(2).is_none());
+        assert_eq!(gss.to_stacks(3).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn bounded_single_stack_accepts_deterministic_general_chain() {
+        let floor = Arc::new(Lower::General {
+            children: CompactMap::new(),
+            empty: true,
+            max_depth: 0,
+        });
+        let lower_zero = Arc::new(Lower::General {
+            children: CompactMap::unit(0_u32, CompactOrdMap::unit(0, floor)),
+            empty: false,
+            max_depth: 1,
+        });
+        let lower_one = Arc::new(Lower::General {
+            children: CompactMap::unit(1_u32, CompactOrdMap::unit(1, lower_zero)),
+            empty: false,
+            max_depth: 2,
+        });
+        let gss = LeveledGSS {
+            inner: new_interface(lower_one, TestAcc(7)),
+        };
+
+        assert_eq!(
+            gss.try_single_stack_bounded(2),
+            Some((vec![0, 1], TestAcc(7)))
+        );
+        assert!(gss.try_single_stack_bounded(1).is_none());
+    }
+
+    #[test]
+    fn bounded_single_stack_rejects_very_deep_general_chain_in_constant_time() {
+        const DEPTH: u32 = 100_000;
+        let mut lower = Arc::new(Lower::General {
+            children: CompactMap::new(),
+            empty: true,
+            max_depth: 0,
+        });
+        for value in 0..DEPTH {
+            let child_depth = lower.max_depth();
+            lower = Arc::new(Lower::General {
+                children: CompactMap::unit(
+                    value,
+                    CompactOrdMap::unit(child_depth, lower),
+                ),
+                empty: false,
+                max_depth: child_depth + 1,
+            });
+        }
+        let gss = LeveledGSS {
+            inner: new_interface(lower, TestAcc(0)),
+        };
+
+        assert_eq!(gss.max_depth(), DEPTH);
+        assert!(gss.try_single_stack_bounded(256).is_none());
+
+        // Avoid recursively dropping a deliberately pathological 100k-node chain.
+        std::mem::forget(gss);
     }
 
     #[test]
@@ -4800,7 +4802,7 @@ mod tests {
             (vec![0_u32, 2, 8, 9], TestAcc(2)),
             (vec![0_u32, 2, 8, 10], TestAcc(2)),
         ]);
-        let expected = gss.to_stacks();
+        let expected = gss.to_stacks(4_096).expect("stack enumeration exceeded explicit limit");
         let mut actual = Vec::new();
         assert!(gss.for_each_stack_top_first_bounded(3, |top_first, acc| {
             let mut bottom_first = top_first.to_vec();
@@ -4830,11 +4832,11 @@ mod tests {
         ]);
 
         assert_eq!(
-            gss.isolate(Some(20)).to_stacks(),
+            gss.isolate(Some(20)).to_stacks(4_096).expect("stack enumeration exceeded explicit limit"),
             vec![(vec![0_u32, 10, 20], TestAcc(1))],
         );
         assert_eq!(
-            gss.isolate(Some(21)).to_stacks(),
+            gss.isolate(Some(21)).to_stacks(4_096).expect("stack enumeration exceeded explicit limit"),
             vec![(vec![0_u32, 10, 21], TestAcc(2))],
         );
     }
@@ -4848,7 +4850,7 @@ mod tests {
 
         assert_eq!(
             gss.apply_top_pure_shifts([(20_u32, 40_u32, false)])
-                .to_stacks(),
+                .to_stacks(4_096).expect("stack enumeration exceeded explicit limit"),
             vec![(vec![0_u32, 10, 20, 40], TestAcc(1))],
         );
     }
@@ -4858,7 +4860,7 @@ mod tests {
         let left = LeveledGSS::from_single_stack(vec![0_u32, 10, 20, 40], TestAcc(1));
         let right = LeveledGSS::from_single_stack(vec![0_u32, 46], TestAcc(2));
         let merged = left.merge(&right);
-        let stacks = merged.to_stacks();
+        let stacks = merged.to_stacks(4_096).expect("stack enumeration exceeded explicit limit");
 
         assert_eq!(stacks.len(), 2, "stacks={stacks:#?}");
         assert!(stacks.contains(&(vec![0_u32, 10, 20, 40], TestAcc(1))));
@@ -4870,7 +4872,7 @@ mod tests {
         let shifted = LeveledGSS::from_single_stack(vec![0_u32, 46], TestAcc(2));
         let base = LeveledGSS::from_single_stack(vec![0_u32, 10, 20], TestAcc(1));
         let absorbed = shifted.absorb_push_same_acc(40, &base);
-        let stacks = absorbed.to_stacks();
+        let stacks = absorbed.to_stacks(4_096).expect("stack enumeration exceeded explicit limit");
 
         assert_eq!(stacks.len(), 2, "stacks={stacks:#?}");
         assert!(stacks.contains(&(vec![0_u32, 10, 20, 40], TestAcc(1))));
@@ -4885,7 +4887,7 @@ mod tests {
         ]);
         let base = LeveledGSS::from_single_stack(vec![0_u32, 10, 20], TestAcc(1));
         let absorbed = shifted.absorb_push_same_acc(40, &base);
-        let stacks = absorbed.to_stacks();
+        let stacks = absorbed.to_stacks(4_096).expect("stack enumeration exceeded explicit limit");
 
         assert_eq!(stacks.len(), 3, "stacks={stacks:#?}");
         assert!(stacks.contains(&(vec![0_u32, 10, 20, 40], TestAcc(1))));
@@ -4909,7 +4911,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(actual, expected);
-        assert_eq!(actual.to_stacks(), expected.to_stacks());
+        assert_eq!(actual.to_stacks(4_096).expect("stack enumeration exceeded explicit limit"), expected.to_stacks(4_096).expect("stack enumeration exceeded explicit limit"));
     }
 
     #[test]
@@ -4925,8 +4927,8 @@ mod tests {
             .apply_shared_pop_push_single_branches(2, targets.iter())
             .unwrap();
 
-        let actual_stacks = actual.to_stacks();
-        let expected_stacks = expected.to_stacks();
+        let actual_stacks = actual.to_stacks(4_096).expect("stack enumeration exceeded explicit limit");
+        let expected_stacks = expected.to_stacks(4_096).expect("stack enumeration exceeded explicit limit");
         assert_eq!(actual_stacks.len(), expected_stacks.len());
         for expected_stack in expected_stacks {
             assert!(actual_stacks.contains(&expected_stack));
@@ -4951,7 +4953,7 @@ mod tests {
         let branched = LeveledGSS::from_stacks(&stacks);
 
         let summary = branched.summary();
-        let flattened = branched.to_stacks();
+        let flattened = branched.to_stacks(4_096).expect("stack enumeration exceeded explicit limit");
 
         assert_eq!(flattened.len(), 11, "flattened={flattened:#?}");
         assert_eq!(summary.top_values_count, 11, "summary={summary:#?} flattened={flattened:#?}");
@@ -5008,7 +5010,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            shifted.to_stacks(),
+            shifted.to_stacks(4_096).expect("stack enumeration exceeded explicit limit"),
             vec![(vec![0_u32, 1, 17, 47, 74, 131, 96], acc)]
         );
     }
@@ -5025,7 +5027,7 @@ mod tests {
         let shifted = gss.apply_top_pure_shifts([(131_u32, 96_u32, false)]);
 
         assert_eq!(
-            shifted.to_stacks(),
+            shifted.to_stacks(4_096).expect("stack enumeration exceeded explicit limit"),
             vec![(vec![0_u32, 1, 17, 47, 74, 131, 96], acc)]
         );
     }
@@ -5057,7 +5059,7 @@ mod tests {
             avg_ns, iterations
         );
         assert_eq!(
-            shifted.to_stacks(),
+            shifted.to_stacks(4_096).expect("stack enumeration exceeded explicit limit"),
             vec![(vec![0_u32, 1, 17, 47, 74, 131, 96], TestAcc(7))]
         );
     }
@@ -5080,8 +5082,8 @@ mod tests {
         let mut partitions = gss.partition_by_accumulator();
         partitions.sort_by_key(|(_, accumulator)| accumulator.0);
 
-        let mut first = partitions.remove(0).0.to_stacks();
-        let mut second = partitions.remove(0).0.to_stacks();
+        let mut first = partitions.remove(0).0.to_stacks(4_096).expect("stack enumeration exceeded explicit limit");
+        let mut second = partitions.remove(0).0.to_stacks(4_096).expect("stack enumeration exceeded explicit limit");
         first.sort();
         second.sort();
         assert_eq!(first, vec![(vec![1, 2], ()), (vec![4], ())]);
