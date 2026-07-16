@@ -353,8 +353,8 @@ mod tests {
             .merge(&advance_with_template(&template, right));
         let actual = advance_with_template(&template, merged);
 
-        let mut expected_stacks = expected.to_stacks();
-        let mut actual_stacks = actual.to_stacks();
+        let mut expected_stacks = expected.to_stacks(4_096).expect("stack enumeration exceeded explicit limit");
+        let mut actual_stacks = actual.to_stacks(4_096).expect("stack enumeration exceeded explicit limit");
         expected_stacks.sort_by(|a, b| a.0.cmp(&b.0));
         actual_stacks.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(actual_stacks, expected_stacks);

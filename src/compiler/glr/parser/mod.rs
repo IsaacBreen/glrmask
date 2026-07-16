@@ -218,7 +218,7 @@ fn normalized_concrete_stacks(
     gss: &ParserGSS,
 ) -> Vec<(Vec<u32>, TerminalsDisallowed)> {
     let mut normalized: Vec<(Vec<u32>, TerminalsDisallowed)> = Vec::new();
-    for (stack, acc) in gss.to_stacks() {
+    for (stack, acc) in gss.to_stacks(4_096).expect("stack enumeration exceeded explicit limit") {
         if let Some((_, existing_acc)) = normalized
             .iter_mut()
             .find(|(existing_stack, _)| *existing_stack == stack)
@@ -314,7 +314,7 @@ fn advance_concrete_stacks_reference(
 ) -> ParserGSS {
     let mut closure = BTreeMap::<Vec<u32>, TerminalsDisallowed>::new();
     let mut queue = VecDeque::<Vec<u32>>::new();
-    for (stack, acc) in before.to_stacks() {
+    for (stack, acc) in before.to_stacks(4_096).expect("stack enumeration exceeded explicit limit") {
         if merge_concrete_path_accumulator(&mut closure, stack.clone(), acc) {
             queue.push_back(stack);
         }
@@ -436,7 +436,7 @@ fn assert_advance_distributes_over_concrete_paths(
     token: TerminalID,
     actual: &ParserGSS,
 ) {
-    let concrete_paths = before.to_stacks();
+    let concrete_paths = before.to_stacks(4_096).expect("stack enumeration exceeded explicit limit");
     if concrete_paths.len() <= 1 {
         return;
     }
@@ -1902,14 +1902,7 @@ fn advance_reduce_branch(
 fn single_concrete_path_as_vstack(
     gss: &ParserGSS,
 ) -> Option<VirtualStack<u32, TerminalsDisallowed>> {
-    let mut top_first = SmallVec::<[u32; 16]>::new();
-    let acc = gss.single_path_top_first_and_acc(&mut top_first)?;
-    if top_first.len() > SINGLE_CONCRETE_STACK_EFFECT_MAX_DEPTH {
-        return None;
-    }
-
-    let mut stack = top_first.into_vec();
-    stack.reverse();
+    let (stack, acc) = gss.try_single_stack_bounded(SINGLE_CONCRETE_STACK_EFFECT_MAX_DEPTH)?;
     ParserGSS::from_single_stack(stack, acc).try_virtual_stack()
 }
 
@@ -2670,15 +2663,56 @@ pub(crate) fn stack_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: T
             simulated,
             "RowPresenceExact mismatch for terminal {token}: construction={:?} stacks={:?}",
             table.construction,
-            stack.to_stacks(),
+            stack.to_stacks(4_096).expect("stack enumeration exceeded explicit limit"),
         );
     }
     admitted
 }
 
+const EXACT_ADMISSION_KEY_MAX_STACKS: usize = 256;
+const EXACT_ADMISSION_KEY_MAX_DEPTH: u32 = 256;
+
+type ExactAdmissionStackKey = Vec<Vec<u32>>;
+type ExactAdmissionShape = LeveledGSS<u32, ()>;
+
+#[derive(PartialEq, Eq)]
+enum ExactAdmissionKey {
+    Stacks(ExactAdmissionStackKey),
+    Shape(ExactAdmissionShape),
+}
+
+struct ExactAdmissionVisitedAny {
+    key: ExactAdmissionKey,
+    terminals: BitSet,
+}
+
+fn exact_admission_stack_key(frontier: &ParserGSS) -> Option<ExactAdmissionStackKey> {
+    if frontier.max_depth() > EXACT_ADMISSION_KEY_MAX_DEPTH {
+        return None;
+    }
+    let mut key = frontier
+        .to_stacks(EXACT_ADMISSION_KEY_MAX_STACKS)?
+        .into_iter()
+        .map(|(stack, _)| stack)
+        .collect::<Vec<_>>();
+    key.sort();
+    key.dedup();
+    Some(key)
+}
+
+fn exact_admission_key(frontier: &ParserGSS) -> ExactAdmissionKey {
+    if let Some(stack_key) = exact_admission_stack_key(frontier) {
+        ExactAdmissionKey::Stacks(stack_key)
+    } else {
+        // Only pay to erase accumulators and compare the shared GSS shape when
+        // the explicit semantic key exceeds its path or depth budget.
+        ExactAdmissionKey::Shape(frontier.apply(|_| ()))
+    }
+}
+
 fn exact_admission_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> bool {
     let mut queue = VecDeque::<ParserGSS>::new();
-    let mut visited = FxHashSet::<Vec<Vec<u32>>>::default();
+    let mut visited = Vec::<ExactAdmissionKey>::new();
 
     for state in stack.peek_values() {
         exact_admission_enqueue_frontier(stack.isolate(Some(state)), &mut queue, &mut visited);
@@ -2759,7 +2793,7 @@ fn exact_admission_may_advance_on_any(
     }
 
     let mut queue = VecDeque::<(ParserGSS, BitSet)>::new();
-    let mut visited = FxHashMap::<Vec<Vec<u32>>, BitSet>::default();
+    let mut visited = Vec::<ExactAdmissionVisitedAny>::new();
 
     for state in stack.peek_values() {
         exact_admission_enqueue_frontier_any(
@@ -2938,7 +2972,7 @@ fn exact_admission_enqueue_reduce_any(
     rhs_len: usize,
     terminals: &BitSet,
     queue: &mut VecDeque<(ParserGSS, BitSet)>,
-    visited: &mut FxHashMap<Vec<Vec<u32>>, BitSet>,
+    visited: &mut Vec<ExactAdmissionVisitedAny>,
 ) {
     for (base, target, is_replace) in
         reduce_branches_from_isolated(table, isolated, nt, rhs_len)
@@ -2956,29 +2990,25 @@ fn exact_admission_enqueue_frontier_any(
     frontier: ParserGSS,
     terminals: &BitSet,
     queue: &mut VecDeque<(ParserGSS, BitSet)>,
-    visited: &mut FxHashMap<Vec<Vec<u32>>, BitSet>,
+    visited: &mut Vec<ExactAdmissionVisitedAny>,
 ) {
     if frontier.is_empty() || terminals.is_empty() {
         return;
     }
 
-    let mut key: Vec<Vec<u32>> = frontier
-        .to_stacks()
-        .into_iter()
-        .map(|(stack, _)| stack)
-        .collect();
-    key.sort();
-    key.dedup();
-
-    let new_terminals = if let Some(seen) = visited.get_mut(&key) {
-        let delta = terminals.difference(seen);
+    let key = exact_admission_key(&frontier);
+    let new_terminals = if let Some(seen) = visited.iter_mut().find(|seen| seen.key == key) {
+        let delta = terminals.difference(&seen.terminals);
         if delta.is_empty() {
             return;
         }
-        seen.union_with(&delta);
+        seen.terminals.union_with(&delta);
         delta
     } else {
-        visited.insert(key, terminals.clone());
+        visited.push(ExactAdmissionVisitedAny {
+            key,
+            terminals: terminals.clone(),
+        });
         terminals.clone()
     };
 
@@ -3018,7 +3048,7 @@ fn exact_admission_enqueue_reduce(
     nt: u32,
     rhs_len: usize,
     queue: &mut VecDeque<ParserGSS>,
-    visited: &mut FxHashSet<Vec<Vec<u32>>>,
+    visited: &mut Vec<ExactAdmissionKey>,
 ) {
     for (base, target, is_replace) in
         reduce_branches_from_isolated(table, isolated, nt, rhs_len)
@@ -3035,21 +3065,17 @@ fn exact_admission_enqueue_reduce(
 fn exact_admission_enqueue_frontier(
     frontier: ParserGSS,
     queue: &mut VecDeque<ParserGSS>,
-    visited: &mut FxHashSet<Vec<Vec<u32>>>,
+    visited: &mut Vec<ExactAdmissionKey>,
 ) {
     if frontier.is_empty() {
         return;
     }
-    let mut key: Vec<Vec<u32>> = frontier
-        .to_stacks()
-        .into_iter()
-        .map(|(stack, _)| stack)
-        .collect();
-    key.sort();
-    key.dedup();
-    if visited.insert(key) {
-        queue.push_back(frontier);
+    let key = exact_admission_key(&frontier);
+    if visited.contains(&key) {
+        return;
     }
+    visited.push(key);
+    queue.push_back(frontier);
 }
 
 fn stack_may_apply_guarded_shifts(stack: &ParserGSS, shifts: &[GuardedStackShift]) -> bool {
@@ -3061,15 +3087,7 @@ fn stack_may_apply_guarded_shifts(stack: &ParserGSS, shifts: &[GuardedStackShift
             .any(|shift| virtual_stack_may_apply_guarded_shift(&virtual_stack, shift));
     }
 
-    stack.to_stacks().into_iter().any(|(stack_values, acc)| {
-        let single = ParserGSS::from_single_stack(stack_values, acc);
-        let Some(virtual_stack) = single.try_virtual_stack() else {
-            return false;
-        };
-        shifts
-            .iter()
-            .any(|shift| virtual_stack_may_apply_guarded_shift(&virtual_stack, shift))
-    })
+    !apply_guarded_stack_shifts(stack.clone(), shifts, None).is_empty()
 }
 
 #[cfg(test)]
@@ -3263,13 +3281,13 @@ mod tests {
 
         let mut fast_stacks = try_advance_pop1_reduce_plus_stackshift_wave(&table, &before, token)
             .expect("fast path should match this wave")
-            .to_stacks();
-        let mut expected_stacks = expected.to_stacks();
+            .to_stacks(4_096).expect("stack enumeration exceeded explicit limit");
+        let mut expected_stacks = expected.to_stacks(4_096).expect("stack enumeration exceeded explicit limit");
         fast_stacks.sort_by(|left, right| left.0.cmp(&right.0));
         expected_stacks.sort_by(|left, right| left.0.cmp(&right.0));
         assert_eq!(fast_stacks, expected_stacks);
 
-        let mut actual_stacks = advance_stacks(&table, &before, token).to_stacks();
+        let mut actual_stacks = advance_stacks(&table, &before, token).to_stacks(4_096).expect("stack enumeration exceeded explicit limit");
         actual_stacks.sort_by(|left, right| left.0.cmp(&right.0));
         assert_eq!(actual_stacks, expected_stacks);
     }
@@ -3443,8 +3461,8 @@ mod tests {
             .merge(&advance_stacks(&table, &right, token));
         let actual = advance_stacks(&table, &merged, token);
 
-        let mut expected_stacks = expected.to_stacks();
-        let mut actual_stacks = actual.to_stacks();
+        let mut expected_stacks = expected.to_stacks(4_096).expect("stack enumeration exceeded explicit limit");
+        let mut actual_stacks = actual.to_stacks(4_096).expect("stack enumeration exceeded explicit limit");
         expected_stacks.sort_by(|a, b| a.0.cmp(&b.0));
         actual_stacks.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(actual_stacks, expected_stacks);
@@ -3478,8 +3496,8 @@ mod tests {
             .merge(&advance_stacks(&table, &right, token));
         let actual = advance_stacks(&table, &merged, token);
 
-        let mut expected_stacks = expected.to_stacks();
-        let mut actual_stacks = actual.to_stacks();
+        let mut expected_stacks = expected.to_stacks(4_096).expect("stack enumeration exceeded explicit limit");
+        let mut actual_stacks = actual.to_stacks(4_096).expect("stack enumeration exceeded explicit limit");
         expected_stacks.sort_by(|a, b| a.0.cmp(&b.0));
         actual_stacks.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(actual_stacks, expected_stacks);
@@ -3498,9 +3516,9 @@ mod tests {
         let actual = advance_stacks(table, &merged, token);
         let concrete_reference = advance_concrete_stacks_reference(table, &merged, token);
 
-        let mut expected_stacks = expected.to_stacks();
-        let mut actual_stacks = actual.to_stacks();
-        let mut reference_stacks = concrete_reference.to_stacks();
+        let mut expected_stacks = expected.to_stacks(4_096).expect("stack enumeration exceeded explicit limit");
+        let mut actual_stacks = actual.to_stacks(4_096).expect("stack enumeration exceeded explicit limit");
+        let mut reference_stacks = concrete_reference.to_stacks(4_096).expect("stack enumeration exceeded explicit limit");
         expected_stacks.sort_by(|a, b| a.0.cmp(&b.0));
         actual_stacks.sort_by(|a, b| a.0.cmp(&b.0));
         reference_stacks.sort_by(|a, b| a.0.cmp(&b.0));
@@ -3533,7 +3551,7 @@ mod tests {
             super::normalized_concrete_stacks(&actual),
             super::normalized_concrete_stacks(&expected),
             "{case}: before={:?}",
-            before.to_stacks(),
+            before.to_stacks(4_096).expect("stack enumeration exceeded explicit limit"),
         );
     }
 
@@ -3739,8 +3757,8 @@ mod tests {
                     action_rows[50] = vec![(token, Action::Shift(60, false))];
                     action_rows[51] = vec![(token, Action::Shift(60, false))];
 
-                    let left_stacks = left.to_stacks();
-                    let right_stacks = right.to_stacks();
+                    let left_stacks = left.to_stacks(4_096).expect("stack enumeration exceeded explicit limit");
+                    let right_stacks = right.to_stacks(4_096).expect("stack enumeration exceeded explicit limit");
                     let left_values = &left_stacks[0].0;
                     let right_values = &right_stacks[0].0;
                     let left_goto_from = left_values[left_values.len() - reduce_len - 1];
@@ -4013,8 +4031,8 @@ mod tests {
             (vec![0, 4, 5], acc),
         ]);
 
-        let mut actual_stacks = advance_stacks(&table, &before, token).to_stacks();
-        let mut expected_stacks = expected.to_stacks();
+        let mut actual_stacks = advance_stacks(&table, &before, token).to_stacks(4_096).expect("stack enumeration exceeded explicit limit");
+        let mut expected_stacks = expected.to_stacks(4_096).expect("stack enumeration exceeded explicit limit");
         actual_stacks.sort_by(|left, right| left.0.cmp(&right.0));
         expected_stacks.sort_by(|left, right| left.0.cmp(&right.0));
 
@@ -4099,8 +4117,8 @@ mod tests {
 
         for stack in [&stack_a, &stack_b] {
             let vstack = stack.try_virtual_stack().expect("expected virtual stack");
-            let mut indexed = apply_guarded_stack_shifts_to_vstack(&vstack, shifts, Some(index)).to_stacks();
-            let mut linear = apply_guarded_stack_shifts_to_vstack(&vstack, shifts, None).to_stacks();
+            let mut indexed = apply_guarded_stack_shifts_to_vstack(&vstack, shifts, Some(index)).to_stacks(4_096).expect("stack enumeration exceeded explicit limit");
+            let mut linear = apply_guarded_stack_shifts_to_vstack(&vstack, shifts, None).to_stacks(4_096).expect("stack enumeration exceeded explicit limit");
             indexed.sort_by(|left, right| left.0.cmp(&right.0));
             linear.sort_by(|left, right| left.0.cmp(&right.0));
             assert_eq!(indexed, linear);
@@ -4144,7 +4162,7 @@ pub(crate) fn stack_may_advance_on_any(
             "RowPresenceExact mismatch for terminal set {:?}: construction={:?} stacks={:?}",
             terminals.iter_ones().collect::<Vec<_>>(),
             table.construction,
-            stack.to_stacks(),
+            stack.to_stacks(4_096).expect("stack enumeration exceeded explicit limit"),
         );
     }
     admitted

@@ -624,29 +624,35 @@ fn raw_self_loop_subtree(
     RawSelfLoopSubtree::MarkAllTokens
 }
 
-fn dynamic_mask_state_key(state: &ConstraintState<'_>) -> DynamicMaskStateKey {
-    state
-        .state
-        .iter()
-        .map(|(&tokenizer_state, gss)| {
-            let mut paths = gss
-                .to_stacks()
-                .into_iter()
-                .map(|(stack, exclusions)| {
-                    let exclusion_entries = exclusions
-                        .0
-                        .iter()
-                        .map(|(&excluded_state, terminals)| {
-                            (excluded_state, terminals.iter().copied().collect::<Vec<_>>())
-                        })
-                        .collect::<Vec<_>>();
-                    (stack, exclusion_entries)
-                })
-                .collect::<Vec<_>>();
-            paths.sort_unstable();
-            (tokenizer_state, paths)
-        })
-        .collect()
+const DYNAMIC_MASK_CACHE_MAX_STACKS: usize = 4_096;
+const DYNAMIC_MASK_CACHE_MAX_DEPTH: u32 = 256;
+
+fn dynamic_mask_state_key(state: &ConstraintState<'_>) -> Option<DynamicMaskStateKey> {
+    let mut remaining = DYNAMIC_MASK_CACHE_MAX_STACKS;
+    let mut key = Vec::with_capacity(state.state.len());
+    for (&tokenizer_state, gss) in &state.state {
+        if gss.max_depth() > DYNAMIC_MASK_CACHE_MAX_DEPTH {
+            return None;
+        }
+        let stacks = gss.to_stacks(remaining)?;
+        remaining = remaining.checked_sub(stacks.len())?;
+        let mut paths = stacks
+            .into_iter()
+            .map(|(stack, exclusions)| {
+                let exclusion_entries = exclusions
+                    .0
+                    .iter()
+                    .map(|(&excluded_state, terminals)| {
+                        (excluded_state, terminals.iter().copied().collect::<Vec<_>>())
+                    })
+                    .collect::<Vec<_>>();
+                (stack, exclusion_entries)
+            })
+            .collect::<Vec<_>>();
+        paths.sort_unstable();
+        key.push((tokenizer_state, paths));
+    }
+    Some(key)
 }
 
 pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
@@ -685,7 +691,10 @@ fn fill_mask_dynamic_impl(
     let cache_key = dynamic_mask_state_key(state);
     let key_ms = key_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
-    if vocab.copy_cached_mask(&cache_key, buf) {
+    if cache_key
+        .as_ref()
+        .is_some_and(|cache_key| vocab.copy_cached_mask(cache_key, buf))
+    {
         if let Some(total_started_at) = total_started_at {
             eprintln!(
                 "[glrmask/profile][dynamic_mask] generation={} cache_hit=true key_ms={:.3} total_ms={:.3}",
@@ -1058,7 +1067,9 @@ fn fill_mask_dynamic_impl(
 
     update_special_token_mask(state, buf);
     update_eos_mask(state, buf);
-    vocab.cache_mask(cache_key, buf);
+    if let Some(cache_key) = cache_key {
+        vocab.cache_mask(cache_key, buf);
+    }
     if let Some(total_started_at) = total_started_at {
         eprintln!(
             "[glrmask/profile][dynamic_mask] generation={} cache_hit=false key_ms={:.3} work_items={} trie_edges={} lexer_execs={} subtree_marks={} subtree_tokens={} continuation_admitted={} continuation_traversed={} boundary_cache={} relevant_cache={} child_cache={} total_ms={:.3}",
@@ -1113,7 +1124,9 @@ mod tests {
         for depth in 0..=max_depth {
             let mut next = Vec::new();
             for (state, path) in frontier {
-                if !seen.insert(dynamic_mask_state_key(&state)) {
+                if let Some(key) = dynamic_mask_state_key(&state)
+                    && !seen.insert(key)
+                {
                     continue;
                 }
 
@@ -1610,7 +1623,7 @@ nt start ::= A C | B D;
         let paths = state
             .state
             .values()
-            .flat_map(|gss| gss.to_stacks())
+            .flat_map(|gss| gss.to_stacks(4_096).expect("stack enumeration exceeded explicit limit"))
             .collect::<Vec<_>>();
         assert!(paths.iter().any(|(_, exclusions)| exclusions.is_empty()));
         assert!(paths.iter().any(|(_, exclusions)| !exclusions.is_empty()));
