@@ -2026,6 +2026,10 @@ impl Constraint {
     }
 
     pub fn start(&self) -> ConstraintState<'_> {
+        self.start_with_rollback(0)
+    }
+
+    pub fn start_with_rollback(&self, max_rollback_tokens: usize) -> ConstraintState<'_> {
         let state = self.initial_state_map();
         let state = ConstraintState {
             constraint: self,
@@ -2034,6 +2038,8 @@ impl Constraint {
             generation: 0,
             mask_cache: Mutex::new(None),
             mask_scratch: Mutex::new(Default::default()),
+            max_rollback_tokens,
+            history: Default::default(),
         };
         state.prefill_mask_cache();
         state
@@ -2047,6 +2053,8 @@ impl Constraint {
             generation: 0,
             mask_cache: Mutex::new(None),
             mask_scratch: Mutex::new(Default::default()),
+            max_rollback_tokens: 0,
+            history: Default::default(),
         }
     }
 
