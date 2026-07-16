@@ -788,7 +788,7 @@ type MappedParserDwa = MappedArtifact<(DWA, ParserTopAccept)>;
 fn build_templates_for_compile(
     table: &GLRTable,
     analyzed_grammar: &AnalyzedGrammar,
-    ignore_terminal: Option<u32>,
+    _ignore_terminal: Option<u32>,
 ) -> (
     Templates,
     Vec<Option<Arc<crate::runtime::CommitTemplateDfas>>>,
@@ -797,11 +797,8 @@ fn build_templates_for_compile(
     let templates_started_at = Instant::now();
     let (characterizations, characterization_profile) =
         characterize_terminals_profiled(table, analyzed_grammar);
-    let (mut templates, template_profile) =
+    let (templates, template_profile) =
         Templates::from_characterizations_profiled(&characterizations);
-    if let Some(ignore_terminal) = ignore_terminal {
-        templates.install_identity_template(ignore_terminal);
-    }
     let mut template_dfas_by_terminal = vec![None; analyzed_grammar.num_terminals as usize];
     let commit_template_dfas_enabled = commit_template_dfas_enabled();
     let mut commit_template_dfas_built = 0usize;

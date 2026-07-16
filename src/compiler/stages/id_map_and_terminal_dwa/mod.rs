@@ -835,8 +835,13 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
         .into_iter()
         .map(|family| {
             let (automaton, id_map) = family.into_parts();
-            let TerminalAutomaton::Dwa(dwa) = automaton else {
-                panic!("terminal family builder returned a non-DWA automaton")
+            let dwa = match automaton {
+                TerminalAutomaton::Dwa(dwa) => dwa,
+                TerminalAutomaton::TokenDeterministicNwa(nwa)
+                | TerminalAutomaton::EpsilonNwa(nwa) => {
+                    crate::automata::weighted::determinize::determinize(&nwa)
+                        .expect("terminal family compatibility merge requires an acyclic NWA")
+                }
             };
             MappedArtifact::new(dwa, id_map)
         })
