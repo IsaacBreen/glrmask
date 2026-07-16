@@ -3627,6 +3627,12 @@ impl<'a> ConstraintState<'a> {
     ) -> Result<(), String> {
         let constraint = self.constraint;
         let bytes = token_bytes_for_id(constraint, token_id);
+        if bytes.is_none() && !constraint.has_special_token_id(token_id) {
+            return Err(format!(
+                "commit_token: token_id {token_id} not in vocabulary or special-token terminals"
+            ));
+        }
+        self.record_pre_commit_snapshot();
         let assertion_flags = commit_assertion_flags();
         let was_in_mask = snapshot_mask_membership(self, token_id, assertion_flags);
         let equivalence_reference = (assertion_flags & COMMIT_ASSERT_FAST_PATH_EQUIVALENCE != 0)
