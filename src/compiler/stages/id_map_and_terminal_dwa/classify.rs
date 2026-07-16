@@ -636,6 +636,37 @@ fn structural_boundary_lexical_partition_enabled() -> bool {
     })
 }
 
+fn terminal_expr_compile_cost(expr: &crate::automata::lexer::ast::Expr) -> usize {
+    use crate::automata::lexer::ast::Expr;
+
+    match expr {
+        Expr::U8Seq(bytes) => bytes.len().max(1),
+        Expr::U8Class(_) | Expr::Epsilon => 1,
+        // A precompiled DFA is already a substantial component even though its
+        // internal state count is intentionally opaque outside the lexer module.
+        Expr::Dfa(_) => 64,
+        Expr::Intersect { expr, intersect } | Expr::Exclude { expr, exclude: intersect } => {
+            4usize.saturating_mul(
+                terminal_expr_compile_cost(expr)
+                    .saturating_add(terminal_expr_compile_cost(intersect)),
+            )
+        }
+        Expr::Seq(parts) | Expr::Choice(parts) => 1usize.saturating_add(
+            parts
+                .iter()
+                .map(terminal_expr_compile_cost)
+                .sum::<usize>(),
+        ),
+        Expr::Repeat { expr, min, max } => {
+            let repetitions = max.unwrap_or_else(|| min.saturating_add(8)).max(*min).min(256);
+            1usize.saturating_add(
+                terminal_expr_compile_cost(expr).saturating_mul(repetitions.max(1)),
+            )
+        }
+        Expr::Shared(expr) => terminal_expr_compile_cost(expr),
+    }
+}
+
 
 /// Sub-classify a non-alphanumeric token into P0 (structural), P5 (short auxiliary),
 /// or P6 (long auxiliary).
@@ -717,7 +748,26 @@ pub(crate) fn classify_terminal_path_lengths(
             heuristic_two_plus.set(t2);
         }
     }
-    let use_direct_exact = heuristic_two_plus.count_ones() >= 1_000 && vocab.len() <= 20_000;
+    let candidate_count = heuristic_two_plus.count_ones();
+    let candidate_compile_cost = heuristic_two_plus
+        .iter()
+        .map(|terminal| {
+            tokenizer
+                .terminal_expr(terminal as u32)
+                .map_or(0, terminal_expr_compile_cost)
+        })
+        .sum::<usize>();
+    if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some() {
+        eprintln!(
+            "[glrmask/profile][terminal_path_candidate_cost] partition={} tokens={} candidates={} terminals={} estimated_compile_cost={}",
+            partition_label,
+            vocab.len(),
+            candidate_count,
+            nt,
+            candidate_compile_cost,
+        );
+    }
+    let use_direct_exact = true;
     let exact = if use_direct_exact {
         exact_terminal_path_two_plus(
             tokenizer,
