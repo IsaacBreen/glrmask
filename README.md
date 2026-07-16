@@ -238,11 +238,22 @@ The key design tradeoff is therefore deliberate: spend more work when a grammar 
 
 Compilation cost and online decoding cost should be measured separately. The design is aimed at workloads where a compiled grammar is reused across many mask queries or generation streams; a one-shot grammar may value compilation latency differently from a long-running serving workload.
 
-The v0.1 public benchmark is a bounded `make example-slow-all` comparison of the benchmark harness's `llguidance`, `glrmask`, `glrmask-native`, and `xgrammar` backends on one controlled machine. It is intentionally **not** the full benchmark corpus. Backend versions, machine details, exact methodology, failures or timeouts, and the measured results are recorded in [the v0.1 benchmark report](docs/benchmark-0.1.md).
+A 10,263-problem CFA engineering run measured the following runtime distribution on the exact **2,111,184 token positions** shared by GLRMask native and LLGuidance native:
 
-A separate [10,263-problem CFA full-corpus engineering report](docs/benchmark-full-corpus-2026-07-16.md) records a later coverage-aware run. It uses different framework coverage and multiple `glrmask-main` revisions, so it must not be read as a replacement for the bounded release-tag benchmark.
+| Paired TBM | GLRMask native | LLGuidance native |
+|---|---:|---:|
+| Median | **3.498 µs** | 13.718 µs |
+| p99 | **10.522 µs** | 250.070 µs |
+| p99.9 | **15.692 µs** | 957.235 µs |
+| Maximum | **49.539 µs** | 8,050.274 µs |
 
-The comparison is a performance measurement, not a declaration that one backend is semantic ground truth. Different constrained-decoding systems can intentionally expose different token-admissibility policies, so raw mask disagreements require separate correctness analysis.
+GLRMask native was faster at **99.31%** of those shared token positions. The tradeoff was ahead-of-time build cost: median successful build time was 50.963 ms for GLRMask native and 0.905 ms for LLGuidance native. GLRMask dynamic reduced median build time to 4.550 ms over its smaller measured cohort, but had a 23.122 ms p99 TBM.
+
+Read the [full 10,263-problem report](docs/benchmark-full-corpus-2026-07-16.md) for coverage, build failures, source revisions, methodology, discrepancy bounds, and interpretation limits. This was a resumed engineering run over three `glrmask-main` revisions, not the immutable public `v0.1.0` tag, and dynamic mode covered only the first 4,425 configured problems.
+
+The separate [v0.1 benchmark report](docs/benchmark-0.1.md) describes the bounded 195-problem release benchmark target. The two reports are not interchangeable.
+
+These comparisons are performance measurements, not declarations that one backend is semantic ground truth. Different constrained-decoding systems can intentionally expose different token-admissibility policies, so raw mask disagreements require separate correctness analysis.
 
 ## Other API features
 
