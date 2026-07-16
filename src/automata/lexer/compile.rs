@@ -255,6 +255,7 @@ fn split_top_level_group_ops(expr: &Expr) -> (Expr, Vec<Expr>, Vec<Expr>) {
 struct NestedGroupOpCache {
     compiled: FxHashMap<Expr, Arc<DFA>>,
     shared_duplicates: Option<Arc<SharedDuplicateNestedGroupOpCache>>,
+    allow_shared_initialization: bool,
     cache_hits: usize,
     cache_misses: usize,
     compiled_ms: f64,
@@ -306,19 +307,26 @@ fn materialize_nested_group_ops(expr: Expr, cache: &mut NestedGroupOpCache) -> E
             {
                 let started_at = Instant::now();
                 let was_ready = cell.get().is_some();
-                let compiled = Arc::clone(cell.get_or_init(|| {
-                    let mut nested_cache = NestedGroupOpCache {
-                        shared_duplicates: Some(Arc::clone(&shared)),
-                        ..NestedGroupOpCache::default()
-                    };
-                    Arc::new(compile_with_plan(
-                        build_exclusion_compile_plan_with_labels_and_cache(
-                            std::slice::from_ref(&expr),
-                            None,
-                            &mut nested_cache,
-                        ),
+                let compiled = if cache.allow_shared_initialization {
+                    Arc::clone(cell.get_or_init(|| {
+                        let mut nested_cache = NestedGroupOpCache {
+                            shared_duplicates: Some(Arc::clone(&shared)),
+                            allow_shared_initialization: true,
+                            ..NestedGroupOpCache::default()
+                        };
+                        Arc::new(compile_with_plan(
+                            build_exclusion_compile_plan_with_labels_and_cache(
+                                std::slice::from_ref(&expr),
+                                None,
+                                &mut nested_cache,
+                            ),
+                        ))
+                    }))
+                } else {
+                    Arc::clone(cell.get().expect(
+                        "shared nested group-op cache must be prewarmed before parallel compilation",
                     ))
-                }));
+                };
                 if was_ready {
                     cache.cache_hits += 1;
                 } else {
@@ -479,6 +487,7 @@ fn prewarm_shared_duplicate_nested_group_ops(
 
     let mut cache = NestedGroupOpCache {
         shared_duplicates: Some(Arc::clone(shared)),
+        allow_shared_initialization: true,
         ..NestedGroupOpCache::default()
     };
     for expr in duplicated {
@@ -4391,6 +4400,39 @@ mod tests {
 
         let components = super::compile_partition_components(&expressions, None, &partitions);
         assert_eq!(components.len(), expressions.len());
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "shared nested group-op cache must be prewarmed before parallel compilation"
+    )]
+    fn shared_nested_group_ops_cannot_initialize_from_partition_workers() {
+        let shared_nested = Expr::Exclude {
+            expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"abcdefghijklmnopqrstuvwxyz"))),
+            exclude: Box::new(Expr::U8Seq(b"x".to_vec())),
+        };
+        let expressions = (0..64u8)
+            .map(|suffix| {
+                Expr::Seq(vec![
+                    shared_nested.clone(),
+                    Expr::U8Seq(vec![b'0' + suffix % 10]),
+                ])
+            })
+            .collect::<Vec<_>>();
+        let partitions = (0..expressions.len() as u32).collect::<Vec<_>>();
+        let mut grouped = std::collections::BTreeMap::<u32, Vec<usize>>::new();
+        for (terminal, &partition) in partitions.iter().enumerate() {
+            grouped.entry(partition).or_default().push(terminal);
+        }
+        let shared = super::shared_duplicate_nested_group_op_cache(&expressions, &grouped)
+            .expect("the repeated nested exclusion should use the shared cache");
+
+        let _ = super::compile_terminal_ids_with_shared_duplicate_cache(
+            &expressions,
+            None,
+            &[0],
+            Some(&shared),
+        );
     }
 
     #[test]
