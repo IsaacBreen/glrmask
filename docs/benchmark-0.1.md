@@ -13,7 +13,7 @@ The target expands to 195 selected slow or problematic schemas and compares four
 - `glrmask-native`
 - `xgrammar`
 
-This is **not** the full benchmark dataset. A broader corpus run is separate follow-up work.
+This is **not** the full benchmark dataset. A broader corpus run is separate follow-up work. The later [10,263-problem CFA full-corpus report](benchmark-full-corpus-2026-07-16.md) is an engineering run with different framework coverage and multiple GLRMask revisions; it does not replace this bounded release benchmark.
 
 ## Benchmark status
 

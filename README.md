@@ -240,6 +240,8 @@ Compilation cost and online decoding cost should be measured separately. The des
 
 The v0.1 public benchmark is a bounded `make example-slow-all` comparison of the benchmark harness's `llguidance`, `glrmask`, `glrmask-native`, and `xgrammar` backends on one controlled machine. It is intentionally **not** the full benchmark corpus. Backend versions, machine details, exact methodology, failures or timeouts, and the measured results are recorded in [the v0.1 benchmark report](docs/benchmark-0.1.md).
 
+A separate [10,263-problem CFA full-corpus engineering report](docs/benchmark-full-corpus-2026-07-16.md) records a later coverage-aware run. It uses different framework coverage and multiple `glrmask-main` revisions, so it must not be read as a replacement for the bounded release-tag benchmark.
+
 The comparison is a performance measurement, not a declaration that one backend is semantic ground truth. Different constrained-decoding systems can intentionally expose different token-admissibility policies, so raw mask disagreements require separate correctness analysis.
 
 ## Other API features
