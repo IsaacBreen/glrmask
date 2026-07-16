@@ -1,6 +1,6 @@
 use crate::automata::lexer::Lexer;
 use std::sync::Mutex;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use crate::compiler::glr::parser::{ParserGSS, stacks_finished};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -58,6 +58,12 @@ impl CommitBuffers {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct StateSnapshot {
+    pub state: BTreeMap<u32, ParserGSS>,
+    pub generation: u64,
+}
+
 pub struct ConstraintState<'a> {
     pub(crate) constraint: &'a Constraint,
     pub(crate) state: BTreeMap<u32, ParserGSS>,
@@ -70,6 +76,10 @@ pub struct ConstraintState<'a> {
     pub(crate) mask_cache: Mutex<Option<MaskCacheData>>,
     /// Reusable scratch buffers for fill_mask to avoid per-call allocation.
     pub(crate) mask_scratch: Mutex<MaskScratch>,
+    /// Maximum number of token commits whose pre-commit states are retained.
+    pub(crate) max_rollback_tokens: usize,
+    /// Bounded pre-commit snapshots for token-level rollback.
+    pub(crate) history: VecDeque<StateSnapshot>,
 }
 
 impl<'a> Clone for ConstraintState<'a> {
@@ -81,6 +91,8 @@ impl<'a> Clone for ConstraintState<'a> {
             generation: self.generation,
             mask_cache: Mutex::new(None),
             mask_scratch: Mutex::new(MaskScratch::default()),
+            max_rollback_tokens: self.max_rollback_tokens,
+            history: self.history.clone(),
         }
     }
 }
@@ -107,6 +119,69 @@ enum GreedyTokenizationStep {
 }
 
 impl<'a> ConstraintState<'a> {
+    pub(crate) fn clone_without_history(&self) -> Self {
+        Self {
+            constraint: self.constraint,
+            state: self.state.clone(),
+            buffers: self.buffers.clone(),
+            generation: self.generation,
+            mask_cache: Mutex::new(None),
+            mask_scratch: Mutex::new(MaskScratch::default()),
+            max_rollback_tokens: 0,
+            history: VecDeque::new(),
+        }
+    }
+
+    pub(crate) fn record_pre_commit_snapshot(&mut self) {
+        if self.max_rollback_tokens == 0 {
+            return;
+        }
+        if self.history.len() == self.max_rollback_tokens {
+            self.history.pop_front();
+        }
+        self.history.push_back(StateSnapshot {
+            state: self.state.clone(),
+            generation: self.generation,
+        });
+    }
+
+    pub fn rollback(&mut self, num_tokens: usize) -> Result<(), String> {
+        if num_tokens == 0 {
+            return Ok(());
+        }
+        if num_tokens > self.history.len() {
+            return Err(format!(
+                "rollback requested {num_tokens} tokens but only {} are available",
+                self.history.len()
+            ));
+        }
+        let target_index = self.history.len() - num_tokens;
+        let snapshot = self.history[target_index].clone();
+        self.history.truncate(target_index);
+        self.state = snapshot.state;
+        self.generation = snapshot.generation;
+        self.buffers.clear_all();
+        *self.mask_cache.lock().unwrap() = None;
+        *self.mask_scratch.lock().unwrap() = MaskScratch::default();
+        Ok(())
+    }
+
+    pub fn validate_tokens(&self, tokens: &[u32]) -> Vec<u32> {
+        let mut cursor = self.clone_without_history();
+        let mut accepted = Vec::with_capacity(tokens.len());
+        for &token in tokens {
+            if cursor.commit_token(token).is_err() || cursor.is_failed() {
+                break;
+            }
+            accepted.push(token);
+        }
+        accepted
+    }
+
+    pub fn is_failed(&self) -> bool {
+        self.state.is_empty()
+    }
+
     pub fn is_complete(&self) -> bool {
         let initial_tsid = self.constraint.tokenizer.initial_state();
         let Some(stack) = self.state.get(&initial_tsid) else {
