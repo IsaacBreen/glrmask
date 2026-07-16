@@ -30,6 +30,7 @@ pub(crate) type DirectSparseWeightTokenSetCache = FxHashSet<usize>;
 pub(crate) type SeedTerminalDenseMasks = FxHashMap<(u32, TerminalID), DenseWords>;
 pub(crate) type FastDwaTransitions = Vec<FxHashMap<i32, (u32, Weight)>>;
 pub(crate) type FastTokenizerTransitions = Vec<Box<[u32; 256]>>;
+pub(crate) type FastTokenizerFinalizers = Vec<Box<[u32]>>;
 pub(crate) type TemplateDfasByTerminal = Vec<Option<Arc<CommitTemplateDfas>>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1124,6 +1125,10 @@ pub struct Constraint {
     /// Dense tokenizer transition lookup for commit-time byte scans.
     #[serde(skip)]
     pub(crate) tokenizer_fast_transitions: FastTokenizerTransitions,
+    /// Sparse accepting terminal ids for each tokenizer state. Dense BitSet
+    /// iteration is too expensive on commit-time scans when finalizers are sparse.
+    #[serde(skip)]
+    pub(crate) tokenizer_fast_finalizers: FastTokenizerFinalizers,
     /// Dense buf masks for "heavy" internal tokens (those with many buf entries).
     /// Indexed by internal token ID; None for light tokens.
     #[serde(skip)]

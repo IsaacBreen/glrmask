@@ -42,7 +42,11 @@ pub(super) fn execute_tokenizer_from_state_small(
 
 		tokenizer_state = next_state;
 		let width = index + 1;
-		for terminal in constraint.tokenizer.matched_terminals_iter(tokenizer_state) {
+		let finalizers = constraint
+			.tokenizer_fast_finalizers
+			.get(tokenizer_state as usize)
+			.map_or(&[][..], |finalizers| finalizers.as_ref());
+		for &terminal in finalizers {
 			if let Some((_, existing_width, existing_end_state)) =
 				matches.iter_mut().find(|(id, _, _)| *id == terminal)
 			{

@@ -193,6 +193,7 @@ impl RuntimePayloadV1 {
             seed_universe_dense: empty_dense_words(),
             dwa_fast_transitions: Vec::new(),
             tokenizer_fast_transitions: Vec::new(),
+            tokenizer_fast_finalizers: Vec::new(),
             heavy_token_dense_masks: Vec::new(),
             internal_token_buf_flat: Vec::new().into_boxed_slice(),
             internal_token_buf_offsets: Vec::new().into_boxed_slice(),

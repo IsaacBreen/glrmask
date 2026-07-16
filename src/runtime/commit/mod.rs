@@ -19,6 +19,7 @@ use crate::compiler::glr::parser::{
     stack_may_advance_on_any,
 };
 use crate::compiler::glr::table::{Action, GLRTable};
+use crate::ds::bitset::BitSet;
 use crate::runtime::constraint::Constraint;
 use crate::runtime::state::{CommitBuffers, ConstraintState};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -465,6 +466,17 @@ impl ActionableTerminals {
                 .any(|state_id| constraint.table.advance_row_allows(*state_id, terminal)),
         }
     }
+
+    fn intersects(&self, constraint: &Constraint, terminals: &BitSet) -> bool {
+        match self {
+            Self::SingleState(state_id) => {
+                constraint.table.advance_row_intersects(*state_id, terminals)
+            }
+            Self::ManyStates(states) => states
+                .iter()
+                .any(|state_id| constraint.table.advance_row_intersects(*state_id, terminals)),
+        }
+    }
 }
 
 impl InitialCommitScan {
@@ -499,6 +511,16 @@ fn is_actionable_terminal(
 ) -> bool {
     !actionable_terminals
         .is_some_and(|actionable| !actionable.contains(constraint, terminal))
+}
+
+fn has_actionable_terminal(
+    actionable_terminals: Option<&ActionableTerminals>,
+    constraint: &Constraint,
+    terminals: &BitSet,
+) -> bool {
+    actionable_terminals
+        .map(|actionable| actionable.intersects(constraint, terminals))
+        .unwrap_or_else(|| !terminals.is_empty())
 }
 
 fn collect_unique_actionable_matches(
@@ -991,6 +1013,81 @@ fn advance_terminal_match(
     (!advanced.is_empty()).then_some(advanced)
 }
 
+/// Advance a deterministic lexer continuation without materializing a
+/// `TokenizerExecResult`. Completed terminals are checked directly against the
+/// parser action row. When none are ignored or actionable, the only semantic
+/// effect is transporting token-start exclusions to the sole lexer end state.
+fn commit_bytes_direct_continuation_fast_path(
+    constraint: &Constraint,
+    state: &mut BTreeMap<u32, ParserGSS>,
+    bytes: &[u8],
+) -> Option<Result<(), String>> {
+    if bytes.len() < 4 || constraint.tokenizer.has_epsilon_transitions() || state.len() != 1 {
+        return None;
+    }
+
+    let (&start_state, gss) = state.iter().next().unwrap();
+    let actionable_terminals = ActionableTerminals::from_gss(constraint, gss);
+    let mut end_state = start_state;
+
+    for &byte in bytes {
+        end_state = constraint
+            .tokenizer_fast_transitions
+            .get(end_state as usize)
+            .map_or(u32::MAX, |transitions| transitions[byte as usize]);
+        if end_state == u32::MAX {
+            return Some(Err(
+                "commit rejected: no valid parser states remain".to_string(),
+            ));
+        }
+
+        let matched_terminals = constraint.tokenizer.matched_terminal_bitset(end_state);
+        let matched_ignore = constraint
+            .ignore_terminal
+            .is_some_and(|terminal| matched_terminals.contains(terminal as usize));
+        let matched_actionable = has_actionable_terminal(
+            actionable_terminals.as_ref(),
+            constraint,
+            matched_terminals,
+        );
+        if matched_ignore || matched_actionable {
+            return None;
+        }
+    }
+
+    if !end_state_may_advance(constraint, gss, end_state) {
+        return Some(Err(
+            "commit rejected: no valid parser states remain".to_string(),
+        ));
+    }
+
+    let accumulators_empty = gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty());
+    let (_, gss) = state.pop_first().unwrap();
+    let transported = if accumulators_empty {
+        gss
+    } else {
+        gss.apply_and_prune_no_promote(|td: &TerminalsDisallowed| {
+            if td.is_empty() {
+                return Some(TerminalsDisallowed::new());
+            }
+            let mut remapped = BTreeMap::new();
+            if let Some(disallowed) = td.get(&start_state) {
+                remapped.insert(end_state, disallowed.clone());
+            }
+            Some(TerminalsDisallowed(std::sync::Arc::new(remapped)))
+        })
+    };
+
+    let fused = transported.fuse(Some(1));
+    if fused.is_empty() {
+        return Some(Err(
+            "commit rejected: no valid parser states remain".to_string(),
+        ));
+    }
+    state.insert(end_state, fused);
+    Some(Ok(()))
+}
+
 /// Fast path for the common case: exactly 1 tokenizer state, the tokenizer
 /// produces exactly 1 non-ignored terminal match that consumes all bytes,
 /// and no pending end-state needs to be queued. This avoids:
@@ -1467,7 +1564,11 @@ fn choose_direct_linear_step(
         let width = index + 1;
         let mut chosen_at_width = false;
 
-        for terminal in constraint.tokenizer.matched_terminals_iter(tokenizer_state) {
+        let finalizers = constraint
+            .tokenizer_fast_finalizers
+            .get(tokenizer_state as usize)
+            .map_or(&[][..], |finalizers| finalizers.as_ref());
+        for &terminal in finalizers {
             let ignored = is_ignored_terminal(ignore_terminal, terminal);
             if !ignored {
                 if actionable_terminals.is_none() {
@@ -3108,6 +3209,10 @@ fn commit_bytes_impl(
 
     let ignore_terminal = constraint.ignore_terminal;
 
+    if let Some(result) = commit_bytes_direct_continuation_fast_path(constraint, state, bytes) {
+        return result;
+    }
+
     if state.len() == 1 {
         let (&tokenizer_state, _) = state.iter().next().unwrap();
         let exec_result = execute_tokenizer_from_state_small(constraint, bytes, tokenizer_state);
@@ -3666,6 +3771,121 @@ mod tests {
                 (tokenizer_state, stacks)
             })
             .collect()
+    }
+
+    #[test]
+    fn direct_continuation_fast_path_ignores_non_actionable_matches_exactly() {
+        let vocab = Vocab::new(vec![(0, b"abcd".to_vec())], None);
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                t A ::= "abcdef";
+                t B ::= "a";
+                t X ::= "x";
+                nt start ::= A | X B;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        assert!(!constraint.tokenizer.has_epsilon_transitions());
+
+        let bytes = vocab.entries.get(&0).unwrap();
+        let mut fast = constraint.start();
+        let mut general = constraint.start();
+        let exec_result = execute_tokenizer_from_state_small(
+            &constraint,
+            bytes,
+            *fast.state.keys().next().unwrap(),
+        );
+        assert!(
+            exec_result.matches.iter().any(|matched| matched.width == 1),
+            "test requires a completed non-actionable prefix match: {exec_result:?}",
+        );
+
+        let fast_result =
+            commit_bytes_direct_continuation_fast_path(&constraint, &mut fast.state, bytes)
+                .expect("direct continuation fast path should apply");
+        let general_result = commit_bytes_impl_profiled(
+            &constraint,
+            &mut general.state,
+            bytes,
+            &mut general.buffers,
+            None,
+            false,
+        );
+
+        assert_eq!(fast_result.is_ok(), general_result.is_ok());
+        assert_eq!(fast.state, general.state);
+    }
+
+    #[test]
+    fn direct_continuation_fast_path_transports_nonempty_accumulators_exactly() {
+        let vocab = Vocab::new(vec![(0, b"abcd".to_vec())], None);
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                t A ::= "abcdef";
+                t B ::= "a";
+                t X ::= "x";
+                nt start ::= A | X B;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        assert!(!constraint.tokenizer.has_epsilon_transitions());
+
+        let bytes = vocab.entries.get(&0).unwrap();
+        let mut fast = constraint.start();
+        let tokenizer_state = *fast.state.keys().next().unwrap();
+        let decorated = fast
+            .state
+            .get(&tokenizer_state)
+            .unwrap()
+            .apply(|td: &TerminalsDisallowed| td.with_insert(tokenizer_state, 12345));
+        fast.state.insert(tokenizer_state, decorated.clone());
+        let mut general = fast.clone();
+
+        let fast_result =
+            commit_bytes_direct_continuation_fast_path(&constraint, &mut fast.state, bytes)
+                .expect("direct continuation fast path should transport exclusions");
+        let general_result = commit_bytes_impl_profiled(
+            &constraint,
+            &mut general.state,
+            bytes,
+            &mut general.buffers,
+            None,
+            false,
+        );
+
+        assert_eq!(fast_result.is_ok(), general_result.is_ok());
+        assert_eq!(
+            canonical_commit_state(&fast.state),
+            canonical_commit_state(&general.state),
+        );
+    }
+
+    #[test]
+    fn direct_continuation_fast_path_defers_actionable_matches() {
+        let vocab = Vocab::new(vec![(0, b"abcd".to_vec())], None);
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                t A ::= "abcd";
+                nt start ::= A;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let mut state = constraint.start();
+        assert!(
+            commit_bytes_direct_continuation_fast_path(
+                &constraint,
+                &mut state.state,
+                vocab.entries.get(&0).unwrap(),
+            )
+            .is_none(),
+            "actionable terminal completion must fall through",
+        );
     }
 
     #[test]

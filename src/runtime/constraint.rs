@@ -23,6 +23,7 @@ use super::artifact::{
     DynamicMaskTrieEdge,
     DynamicMaskVocab,
     FastDwaTransitions,
+    FastTokenizerFinalizers,
     FastTokenizerTransitions,
     InternalTokenBufMasks,
     SeedTerminalDenseMasks,
@@ -259,6 +260,7 @@ impl Constraint {
         self.dynamic_mask_vocab
             .prebuild_continuation_partitions(&self.tokenizer, self.mask_len());
         self.tokenizer_fast_transitions = self.compute_tokenizer_fast_transitions();
+        self.tokenizer_fast_finalizers = self.compute_tokenizer_fast_finalizers();
     }
 
     #[inline]
@@ -893,6 +895,7 @@ impl Constraint {
         let weight_sparse_ms = 0.0;
         self.dwa_fast_transitions = fast_transitions;
         self.tokenizer_fast_transitions = tokenizer_fast_transitions;
+        self.tokenizer_fast_finalizers = self.compute_tokenizer_fast_finalizers();
         let derived_ms = derived_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let seed_started_at = profile.then(std::time::Instant::now);
         self.build_seed_dense_masks();
@@ -944,6 +947,23 @@ impl Constraint {
             (0..self.tokenizer.num_states()).map(build).collect()
         } else {
             (0..self.tokenizer.num_states()).into_par_iter().map(build).collect()
+        }
+    }
+
+    fn compute_tokenizer_fast_finalizers(&self) -> FastTokenizerFinalizers {
+        let build = |state| {
+            self.tokenizer
+                .matched_terminals_iter(state)
+                .collect::<Vec<_>>()
+                .into_boxed_slice()
+        };
+        if rayon::current_num_threads() == 1 {
+            (0..self.tokenizer.num_states()).map(build).collect()
+        } else {
+            (0..self.tokenizer.num_states())
+                .into_par_iter()
+                .map(build)
+                .collect()
         }
     }
 
