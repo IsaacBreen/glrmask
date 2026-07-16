@@ -69,7 +69,10 @@ impl OwnedDynamicState {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn dict_to_vocab(token_to_id: &Bound<'_, PyDict>) -> PyResult<glrmask::Vocab> {
+fn dict_to_vocab(
+    token_to_id: &Bound<'_, PyDict>,
+    eos_token_id: Option<u32>,
+) -> PyResult<glrmask::Vocab> {
     let mut entries = Vec::with_capacity(token_to_id.len());
     for (key, value) in token_to_id.iter() {
         let token_bytes = key
@@ -80,10 +83,13 @@ fn dict_to_vocab(token_to_id: &Bound<'_, PyDict>) -> PyResult<glrmask::Vocab> {
         let token_id: u32 = value.extract()?;
         entries.push((token_id, token_bytes));
     }
-    Ok(glrmask::Vocab::new(entries, None))
+    Ok(glrmask::Vocab::new(entries, eos_token_id))
 }
 
-fn id_to_bytes_dict_to_vocab(id_to_bytes: &Bound<'_, PyDict>) -> PyResult<glrmask::Vocab> {
+fn id_to_bytes_dict_to_vocab(
+    id_to_bytes: &Bound<'_, PyDict>,
+    eos_token_id: Option<u32>,
+) -> PyResult<glrmask::Vocab> {
     let mut entries = Vec::with_capacity(id_to_bytes.len());
     for (key, value) in id_to_bytes.iter() {
         let token_id: u32 = key.extract()?;
@@ -94,7 +100,7 @@ fn id_to_bytes_dict_to_vocab(id_to_bytes: &Bound<'_, PyDict>) -> PyResult<glrmas
             .to_vec();
         entries.push((token_id, token_bytes));
     }
-    Ok(glrmask::Vocab::new(entries, None))
+    Ok(glrmask::Vocab::new(entries, eos_token_id))
 }
 
 fn llama_cpp_to_vocab(llm: &Bound<'_, PyAny>) -> PyResult<glrmask::Vocab> {
@@ -452,14 +458,22 @@ pub struct PyVocab {
 #[pymethods]
 impl PyVocab {
     #[staticmethod]
-    fn from_dict(token_to_id: &Bound<'_, PyDict>) -> PyResult<Self> {
-        let vocab = dict_to_vocab(token_to_id)?;
+    #[pyo3(signature = (token_to_id, eos_token_id=None))]
+    fn from_dict(
+        token_to_id: &Bound<'_, PyDict>,
+        eos_token_id: Option<u32>,
+    ) -> PyResult<Self> {
+        let vocab = dict_to_vocab(token_to_id, eos_token_id)?;
         Ok(Self { inner: vocab })
     }
 
     #[staticmethod]
-    fn from_id_to_bytes(id_to_bytes: &Bound<'_, PyDict>) -> PyResult<Self> {
-        let vocab = id_to_bytes_dict_to_vocab(id_to_bytes)?;
+    #[pyo3(signature = (id_to_bytes, eos_token_id=None))]
+    fn from_id_to_bytes(
+        id_to_bytes: &Bound<'_, PyDict>,
+        eos_token_id: Option<u32>,
+    ) -> PyResult<Self> {
+        let vocab = id_to_bytes_dict_to_vocab(id_to_bytes, eos_token_id)?;
         Ok(Self { inner: vocab })
     }
 
