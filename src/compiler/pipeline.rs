@@ -260,6 +260,7 @@ pub(crate) struct CompilePhaseProfile {
     pub(crate) terminal_pm_joint_interned_ranges_before_reconcile: usize,
     pub(crate) terminal_pm_joint_interned_ranges: usize,
     pub(crate) internal_token_bytes_ms: f64,
+    pub(crate) terminal_run_collapse_ms: f64,
     pub(crate) parser_dwa_ms: f64,
     pub(crate) parser_dwa_interned_ranges: usize,
     pub(crate) possible_matches_interned_ranges: usize,
@@ -284,7 +285,7 @@ pub(crate) fn emit_compile_profile_summary(
         .unwrap_or_default();
 
     eprintln!(
-        "[glrmask/profile][compile] source={}{} prepare_ms={:.3} tokenizer_build_ms={:.3} tokenizer_final_states={} tokenizer_final_transitions={} analyze_grammar_ms={:.3} glr_table_ms={:.3} terminal_coloring_ms={:.3} disallowed_follows_ms={:.3} analysis_wall_ms={:.3} classify_ms={:.3} id_map_ms={:.3} terminal_dwa_ms={:.3} split_terminal_dwa_total_ms={:.3} global_merge_ms={:.3} templates_ms={:.3} compact_ms={:.3} possible_matches_vocab_equiv_ms={:.3} possible_matches_collect_ms={:.3} possible_matches_materialize_ms={:.3} shared_id_reconcile_ms={:.3} possible_matches_pipeline_ms={:.3} terminal_dwa_interned_ranges_before_pm_reconcile={} possible_matches_interned_ranges_before_pm_reconcile={} terminal_pm_joint_interned_ranges_before_reconcile={} terminal_pm_joint_interned_ranges={} internal_token_bytes_ms={:.3} parser_dwa_ms={:.3} parser_dwa_interned_ranges={} possible_matches_interned_ranges={} parser_pm_joint_interned_ranges={} finalize_ms={:.3} compile_ms={:.3} total_ms={:.3}",
+        "[glrmask/profile][compile] source={}{} prepare_ms={:.3} tokenizer_build_ms={:.3} tokenizer_final_states={} tokenizer_final_transitions={} analyze_grammar_ms={:.3} glr_table_ms={:.3} terminal_coloring_ms={:.3} disallowed_follows_ms={:.3} analysis_wall_ms={:.3} classify_ms={:.3} id_map_ms={:.3} terminal_dwa_ms={:.3} split_terminal_dwa_total_ms={:.3} global_merge_ms={:.3} templates_ms={:.3} compact_ms={:.3} possible_matches_vocab_equiv_ms={:.3} possible_matches_collect_ms={:.3} possible_matches_materialize_ms={:.3} shared_id_reconcile_ms={:.3} possible_matches_pipeline_ms={:.3} terminal_dwa_interned_ranges_before_pm_reconcile={} possible_matches_interned_ranges_before_pm_reconcile={} terminal_pm_joint_interned_ranges_before_reconcile={} terminal_pm_joint_interned_ranges={} internal_token_bytes_ms={:.3} terminal_run_collapse_ms={:.3} parser_dwa_ms={:.3} parser_dwa_interned_ranges={} possible_matches_interned_ranges={} parser_pm_joint_interned_ranges={} finalize_ms={:.3} compile_ms={:.3} total_ms={:.3}",
         source,
         import_fragment,
         profile.prepare_ms,
@@ -313,6 +314,7 @@ pub(crate) fn emit_compile_profile_summary(
         profile.terminal_pm_joint_interned_ranges_before_reconcile,
         profile.terminal_pm_joint_interned_ranges,
         profile.internal_token_bytes_ms,
+        profile.terminal_run_collapse_ms,
         profile.parser_dwa_ms,
         profile.parser_dwa_interned_ranges,
         profile.possible_matches_interned_ranges,
@@ -973,6 +975,7 @@ struct CompileDagResult {
     terminal_dwa_finished_ms: f64,
     templates_started_ms: f64,
     templates_finished_ms: f64,
+    terminal_run_collapse_ms: f64,
     prebuilt_parser_dwa: Option<(MappedParserDwa, f64, f64, f64)>,
 }
 
@@ -1212,7 +1215,7 @@ fn launch_parser_dag_if_ready<'scope>(
             analysis,
             ignore_terminal,
             terminal_coloring_ms,
-            terminal_dwas,
+            mut terminal_dwas,
             terminal_phase_profile,
             classify_ms,
             flat_trans_ms,
@@ -1234,6 +1237,22 @@ fn launch_parser_dag_if_ready<'scope>(
             templates_started_ms,
             templates_finished_ms,
         } = templates;
+
+        let terminal_run_collapse_started_at = Instant::now();
+        let terminal_run_collapse_profile =
+            crate::compiler::terminal_run_collapse::collapse_certified_terminal_runs(
+                &mut terminal_dwas,
+                &table,
+                &analysis.analyzed_grammar,
+                &templates,
+                vocab,
+            );
+        let terminal_run_collapse_ms = elapsed_ms(terminal_run_collapse_started_at);
+        debug_assert!(
+            terminal_run_collapse_ms + 0.001
+                >= terminal_run_collapse_profile.certificate_ms
+                    + terminal_run_collapse_profile.rewrite_ms
+        );
 
         let (templates, prebuilt_parser_dwa) = if dwa_pm_mode.does_terminal_reconcile() {
             (Some(templates), None)
@@ -1290,6 +1309,7 @@ fn launch_parser_dag_if_ready<'scope>(
             terminal_dwa_finished_ms,
             templates_started_ms,
             templates_finished_ms,
+            terminal_run_collapse_ms,
             prebuilt_parser_dwa,
         });
     });
@@ -1828,6 +1848,7 @@ let eager_possible_matches = env_flag_enabled("GLRMASK_EAGER_POSSIBLE_MATCHES");
             terminal_dwa_finished_ms,
             templates_started_ms,
             templates_finished_ms,
+            terminal_run_collapse_ms,
             prebuilt_parser_dwa,
         } = compile_dag_result
             .into_inner()
@@ -2051,6 +2072,7 @@ let eager_possible_matches = env_flag_enabled("GLRMASK_EAGER_POSSIBLE_MATCHES");
         );
         let internal_token_bytes_ms = elapsed_ms(internal_token_bytes_started_at);
 
+        profile.terminal_run_collapse_ms = terminal_run_collapse_ms;
         profile.parser_dwa_ms = parser_dwa_ms;
         profile.possible_matches_vocab_equiv_ms = cpm_profile.vocab_equiv_ms;
         profile.possible_matches_collect_ms = cpm_profile.possible_matches_collect_ms;

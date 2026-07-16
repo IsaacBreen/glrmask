@@ -141,6 +141,43 @@ nt start ::= 'a' ;
     combined_token_state.commit_token(2).unwrap();
 }
 
+#[test]
+fn certified_terminal_run_collapse_preserves_bounded_item_count() {
+    let vocab = Vocab::new(
+        vec![
+            (0, b"a".to_vec()),
+            (1, b"b".to_vec()),
+            (2, b"ab".to_vec()),
+            (3, b"aba".to_vec()),
+            (4, b"abab".to_vec()),
+        ],
+        None,
+    );
+    let grammar = r#"
+start start;
+t A ::= "a";
+t B ::= "b";
+nt item ::= A | B;
+nt start ::= item item? item?;
+"#;
+
+    let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
+    let mut state = constraint.start();
+    let initial = state.mask();
+    assert!(token_allowed(&initial, 2), "two items in one token must be admitted");
+    assert!(token_allowed(&initial, 3), "three items in one token must be admitted");
+    assert!(
+        !token_allowed(&initial, 4),
+        "four items must not be admitted by a grammar capped at three"
+    );
+
+    state.commit_token(2).unwrap();
+    let after_two = state.mask();
+    assert!(token_allowed(&after_two, 0));
+    assert!(token_allowed(&after_two, 1));
+    state.commit_token(0).unwrap();
+}
+
 fn byte_vocab_with_separator_token() -> (Vocab, u32) {
     let mut entries: Vec<(u32, Vec<u8>)> = (0u32..=255).map(|byte| (byte, vec![byte as u8])).collect();
     let separator_token_id = 256;

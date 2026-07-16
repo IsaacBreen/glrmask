@@ -1571,6 +1571,34 @@ nt start ::= A A;
     }
 
     #[test]
+    fn dynamic_mask_matches_certified_long_terminal_run() {
+        let vocab = Vocab::new(
+            vec![
+                (0, b"++++++++a".to_vec()),
+                (1, b"++++".to_vec()),
+                (2, b"a".to_vec()),
+            ],
+            None,
+        );
+        let grammar = r#"
+start start;
+t U ::= '+';
+nt start ::= U* 'a';
+"#;
+        let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
+        let mut state = constraint.start();
+
+        assert_dynamic_parity(&state);
+        assert!(token_allowed(&state.mask(), 0));
+        assert!(token_allowed(&state.mask(), 1));
+
+        state.commit_token(1).unwrap();
+        assert_dynamic_parity(&state);
+        assert!(token_allowed(&state.mask(), 2));
+        state.commit_token(2).unwrap();
+    }
+
+    #[test]
     fn dynamic_mask_handles_monolithic_json_number() {
         let vocab = Vocab::new(
             vec![
