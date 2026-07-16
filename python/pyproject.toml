@@ -5,8 +5,17 @@ build-backend = "maturin"
 [project]
 name = "glrmask"
 version = "0.1.0"
-requires-python = ">=3.8"
-description = "Fast grammar-constrained decoding for LLMs"
+requires-python = ">=3.9,<3.14"
+description = "Grammar-constrained token masking for LLM decoding"
+readme = "README.md"
+license = { text = "MIT OR Apache-2.0" }
+license-files = ["licenses/LICENSE-MIT", "licenses/LICENSE-APACHE"]
+dependencies = ["numpy>=1.21"]
+
+[project.urls]
+Repository = "https://github.com/IsaacBreen/shingleback"
 
 [tool.maturin]
 features = []
+python-source = "python"
+module-name = "glrmask._glrmask"

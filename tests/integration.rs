@@ -490,6 +490,11 @@ fn json_schema_optional_label_with_additional_tail_reaches_multiple_gss_paths() 
 
     let stacks = state.debug_parser_stacks();
     assert_eq!(unique_parser_path_count(&state), 2, "{stacks:?}");
+
+    // Preserve the public semantic oracle as well as the exact internal-path
+    // regression above: the multi-path witness must remain completable.
+    state.commit_token(4).unwrap();
+    assert!(state.is_finished());
 }
 
 #[test]

@@ -1,8 +1,9 @@
 # JSON Schema semantic deviations
 
-This document records intentional places where the JSON Schema importer does not
-fully enforce the source schema semantics. Each entry must include the reason and
-the expected impact.
+Shingleback v0.1 implements a pragmatic JSON Schema subset rather than claiming
+full specification conformance. Unsupported constructs may be rejected, and the
+intentional deviations below can broaden or restrict the accepted instance
+language. Each entry records the reason and expected impact.
 
 ## Patterned strings may drop expensive upper length bounds
 
@@ -13,7 +14,7 @@ regex-HIR complexity score is under
 `GLRMASK_JSON_SCHEMA_PATTERN_MAX_LENGTH_COMPLEXITY_LIMIT`; otherwise the importer
 keeps any cheap lower-bound check and drops the upper length envelope.
 
-This is a deliberate performance tradeoff. Combining a broad JSON-string length
+This is a deliberate compilation-cost tradeoff. Combining a broad JSON-string length
 counter with a complex string pattern can create very large terminal DFAs. One
 representative schema, `Github_hard---o62060`, contains:
 
@@ -36,12 +37,12 @@ properties for that branch.
 
 This is a deliberate grammar-size and build-time tradeoff. Fully interleaving
 fixed, additional, and pattern properties creates much larger unordered object
-state spaces. In production experiments on recursive, object-heavy schemas such
+state spaces. In benchmark and regression experiments on recursive, object-heavy schemas such
 as `Github_hard---o13029`, broad interleaving attempts caused severe build-time
 blowups and timeouts.
 
-Compared with full JSON Schema semantics and tools such as llguidance, this can
-reject objects where a non-fixed additional or pattern-matched property appears
+Compared with full JSON Schema semantics, this can reject objects where a
+non-fixed additional or pattern-matched property appears
 before a later fixed property that the same branch still expects. Discrepancies
 should only be classified under this deliberate deviation when acceptance truly
 depends on that non-fixed property appearing before a later fixed property. Do

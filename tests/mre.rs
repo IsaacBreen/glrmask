@@ -53,12 +53,15 @@ fn env_lock() -> MutexGuard<'static, ()> {
     ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn total_parser_stack_count(state: &glrmask::ConstraintState<'_>) -> usize {
-    state
+fn unique_parser_stack_count(state: &glrmask::ConstraintState<'_>) -> usize {
+    let mut stacks = state
         .debug_parser_stacks()
-        .iter()
-        .map(|(_, stacks)| stacks.len())
-        .sum()
+        .into_iter()
+        .flat_map(|(_, stacks)| stacks.into_iter().map(|(stack, _)| stack))
+        .collect::<Vec<_>>();
+    stacks.sort_unstable();
+    stacks.dedup();
+    stacks.len()
 }
 
 fn total_final_stack_count(stacks: &[(u32, Vec<Vec<u32>>)]) -> usize {
@@ -378,19 +381,17 @@ fn minimized_sp343_separator_wave_matches_profile_oracle() {
     let mut state = constraint.start();
     state.commit_bytes(prefix).unwrap();
 
-    assert!(
-        !state.has_parser_ambiguity(),
-        "recognizer-equivalent parser branches should be represented by one suffix state: {:?}",
+    assert_eq!(
+        unique_parser_stack_count(&state),
+        1,
+        "recognizer-equivalent lexer residuals should carry one parser stack: {:?}",
         state.debug_parser_stacks(),
     );
 
     let mask = state.mask();
     assert!(token_allowed(&mask, separator_token_id as usize));
 
-    let path_count = state.parser_path_count(1_000_000);
-    let stack_count = total_parser_stack_count(&state);
-    assert_eq!(path_count, 1);
-    assert_eq!(stack_count, 1);
+    assert_eq!(unique_parser_stack_count(&state), 1);
 
     let (advances, final_stacks, commit_profile) = state.commit_token_per_advance(separator_token_id).unwrap();
 
@@ -448,9 +449,10 @@ fn sp343_delete_only_subset_separator_wave_matches_cfa_oracle() {
     state.commit_bytes(prefix).unwrap();
 
     assert!(token_allowed(&state.mask(), separator_token_id as usize));
-    assert!(
-        !state.has_parser_ambiguity(),
-        "delete-only Snowplow subset should collapse like the minimized MRE: {:?}",
+    assert_eq!(
+        unique_parser_stack_count(&state),
+        1,
+        "delete-only Snowplow subset should keep one parser stack across lexer residuals: {:?}",
         state.debug_parser_stacks(),
     );
 
