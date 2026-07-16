@@ -1217,35 +1217,60 @@ impl DynamicMaskVocab {
 
         let source_started = std::time::Instant::now();
         let initial_state = tokenizer.initial_state();
-        let mut rank_cache = ContinuationNfaScanCache::new(tokenizer);
-        let mut ranked_source_states = (0..tokenizer.num_states())
-            .filter(|&state| state != initial_state && !tokenizer.is_end(state))
-            .map(|state| {
-                let config = rank_cache.config_for_raw_start(state);
-                let closure = &rank_cache.configs[config as usize];
-                let mut transitions = 0usize;
-                let mut non_self_transitions = 0usize;
-                let mut matched = std::collections::BTreeSet::<TerminalID>::new();
-                for &member in closure.iter() {
-                    matched.extend(tokenizer.matched_terminals_iter(member));
-                    for (_, target) in tokenizer.transitions_from(member) {
-                        transitions += 1;
-                        non_self_transitions += usize::from(target != member);
-                    }
+        let mut program_counts = vec![0u64; builder.programs.len()];
+        for &program in &token_programs {
+            if program != u16::MAX {
+                program_counts[program as usize] =
+                    program_counts[program as usize].saturating_add(1);
+            }
+        }
+        // A terminal match transfers control to an initial-state suffix
+        // program. Propagate root-token frequency down those shorter suffix
+        // edges so residual states reached after in-token boundaries are ranked
+        // alongside ordinary whole-token end states.
+        for program_id in (0..builder.programs.len()).rev() {
+            let count = program_counts[program_id];
+            if count == 0 {
+                continue;
+            }
+            for &(_, target) in builder.programs[program_id].branches.iter() {
+                let target = target as usize;
+                if target != program_id {
+                    program_counts[target] = program_counts[target].saturating_add(count);
                 }
-                (state, non_self_transitions, transitions, closure.len(), matched.len())
-            })
-            .filter(|&(_, non_self, transitions, _, matched)| {
-                non_self != 0 || transitions >= 64 || matched != 0
+            }
+        }
+        let mut source_scores = vec![0u64; tokenizer.num_states() as usize];
+        for (program_id, &count) in program_counts.iter().enumerate() {
+            if count == 0 {
+                continue;
+            }
+            for &state in builder.programs[program_id].end_states.iter() {
+                source_scores[state as usize] =
+                    source_scores[state as usize].saturating_add(count);
+            }
+        }
+        let mut ranked_source_states = (0..tokenizer.num_states())
+            .filter(|&state| state != initial_state && source_scores[state as usize] != 0)
+            .map(|state| {
+                (
+                    state,
+                    source_scores[state as usize],
+                    tokenizer.transitions_from(state).count(),
+                    tokenizer.matched_terminals_iter(state).count(),
+                    tokenizer
+                        .possible_future_terminals_iter(state)
+                        .count(),
+                )
             })
             .collect::<Vec<_>>();
         ranked_source_states.sort_unstable_by_key(
-            |&(state, non_self, transitions, closure, matched)| {
+            |&(state, score, transitions, matched, futures)| {
                 (
-                    std::cmp::Reverse(non_self),
+                    std::cmp::Reverse(score),
                     std::cmp::Reverse(transitions),
-                    std::cmp::Reverse(closure),
                     std::cmp::Reverse(matched),
+                    std::cmp::Reverse(futures),
                     state,
                 )
             },
@@ -1321,7 +1346,7 @@ impl DynamicMaskVocab {
             || std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
         {
             eprintln!(
-                "[glrmask/profile][dynamic_token_program_partition] programs={} roots={} suffixes={} branches={} tokens={} top_closed_sources={:?} sources={:?} source_roots={} register_ms={:.3} programs_ms={:.3} mapping_ms={:.3} source_ms={:.3} build_ms={:.3}",
+                "[glrmask/profile][dynamic_token_program_partition] programs={} roots={} suffixes={} branches={} tokens={} top_reachable_sources={:?} sources={:?} source_roots={} register_ms={:.3} programs_ms={:.3} mapping_ms={:.3} source_ms={:.3} build_ms={:.3}",
                 partition.programs.len(),
                 partition.root_programs.len(),
                 suffix_count,
