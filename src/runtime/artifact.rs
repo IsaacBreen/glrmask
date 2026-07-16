@@ -1285,9 +1285,11 @@ impl DynamicMaskVocab {
             .take(2)
             .map(|&(state, _, _, _, _)| state)
             .collect::<Vec<_>>();
-        if let Some(&(state, _, _, _, _)) = ranked_source_states
-            .iter()
-            .find(|&&(_, _, transitions, _, _)| transitions == 0)
+        if let Some(state) = (0..tokenizer.num_states())
+            .filter(|&state| state != initial_state)
+            .filter(|&state| tokenizer.transitions_from(state).next().is_none())
+            .filter(|&state| !tokenizer.is_end(state))
+            .min()
         {
             source_states.push(state);
         }
