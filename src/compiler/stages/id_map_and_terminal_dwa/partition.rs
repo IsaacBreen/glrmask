@@ -306,6 +306,38 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     let (l1_pair, l1_ms) = l1_result;
     let ((l2p_pair, l2p_boundary_ms), (l2p_single_l1_pair, l2p_single_ms), l2p_ms) =
         l2p_result;
+    if std::env::var_os("GLRMASK_PROFILE_L1_L2P_STATE_RELATION").is_some()
+        && let (Some(l1), Some(l2p)) = (l1_pair.as_ref(), l2p_pair.as_ref())
+    {
+        let l1_map = &l1.id_map.tokenizer_states;
+        let l2p_map = &l2p.id_map.tokenizer_states;
+        let l1_within_l2p = l1_map.internal_to_originals.iter().all(|members| {
+            members
+                .iter()
+                .filter_map(|&state| l2p_map.original_to_internal.get(state as usize).copied())
+                .filter(|&class| class != u32::MAX)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                <= 1
+        });
+        let l2p_within_l1 = l2p_map.internal_to_originals.iter().all(|members| {
+            members
+                .iter()
+                .filter_map(|&state| l1_map.original_to_internal.get(state as usize).copied())
+                .filter(|&class| class != u32::MAX)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                <= 1
+        });
+        eprintln!(
+            "[glrmask/profile][l1_l2p_state_relation] partition={} l1_classes={} l2p_classes={} l1_within_l2p={} l2p_within_l1={}",
+            partition_label,
+            l1_map.num_internal_ids(),
+            l2p_map.num_internal_ids(),
+            l1_within_l2p,
+            l2p_within_l1,
+        );
+    }
     let mut dominant_branch: Option<(f64, TerminalDwaPhaseProfile)> = None;
     if let Some(l1) = l1_pair.as_ref() {
         dominant_branch = Some((l1_ms, l1.profile));

@@ -245,6 +245,7 @@ pub(crate) fn build_global_max_length_state_map(
         &config,
         None,
         None,
+        None,
     );
 
     if compile_profile_enabled() {

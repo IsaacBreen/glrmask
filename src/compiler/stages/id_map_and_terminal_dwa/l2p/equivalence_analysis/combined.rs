@@ -13,7 +13,8 @@ use super::state_equivalence::{
     run_state_equivalence_pipeline, StateEquivalenceScope,
 };
 use super::state_equivalence::nfa::{
-    build_bounded_analysis_view, build_relevant_powerset_view,
+    PrebuiltSparsePowersetRefinement, build_bounded_analysis_view,
+    build_relevant_powerset_view,
 };
 use crate::ds::bitset::BitSet;
 use super::compat::TokenizerView;
@@ -52,6 +53,333 @@ fn deduplicate_tokens_by_byte_class<'a, S: AsRef<[u8]>>(
         representative_token_bytes,
         original_to_repr,
     }
+}
+
+/// Exact byte congruence induced by the active terminal languages themselves.
+///
+/// The enclosing tokenizer may retain transition distinctions from inactive
+/// terminal components. Those distinctions are unobservable to an L2P
+/// partition whose outputs are projected to `active_groups`. Recompiling only
+/// the active expressions yields the language product we actually observe.
+/// Two bytes in the same transition column of that DFA have identical action
+/// from every residual of every active terminal language, so replacing either
+/// byte by the other preserves all active-terminal match positions and future
+/// residuals. Follow constraints only filter terminal labels and therefore do
+/// not invalidate this byte congruence.
+fn active_terminal_language_byte_classes(
+    tokenizer: &Tokenizer,
+    active_groups: &[bool],
+) -> Option<[u8; 256]> {
+    let active_exprs = active_groups
+        .iter()
+        .enumerate()
+        .filter_map(|(terminal, &active)| {
+            active
+                .then(|| tokenizer.terminal_expr(terminal as u32).cloned())
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    if active_exprs.is_empty() {
+        return None;
+    }
+    let regex = crate::automata::lexer::compile::build_regex(&active_exprs);
+    let active_tokenizer = regex.into_tokenizer(
+        active_exprs.len() as u32,
+        Some(Arc::from(active_exprs)),
+    );
+    let active_view = TokenizerView::new(&active_tokenizer);
+    Some(super::compat::compute_byte_classes(active_view.dfa()))
+}
+
+fn active_terminal_language_tokenizer_and_follows(
+    tokenizer: &Tokenizer,
+    active_groups: &[bool],
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+) -> Option<(Tokenizer, BTreeMap<u32, BitSet>)> {
+    let active_global_ids = active_groups
+        .iter()
+        .enumerate()
+        .filter_map(|(terminal, &active)| active.then_some(terminal as u32))
+        .collect::<Vec<_>>();
+    let active_exprs = active_global_ids
+        .iter()
+        .map(|&terminal| tokenizer.terminal_expr(terminal).cloned())
+        .collect::<Option<Vec<_>>>()?;
+    if active_exprs.is_empty() {
+        return None;
+    }
+    let regex = crate::automata::lexer::compile::build_regex(&active_exprs);
+    let active_tokenizer = regex.into_tokenizer(
+        active_exprs.len() as u32,
+        Some(Arc::from(active_exprs)),
+    );
+    let mut local_disallowed = BTreeMap::<u32, BitSet>::new();
+    for (local_source, &global_source) in active_global_ids.iter().enumerate() {
+        let Some(global_row) = disallowed_follows.get(&global_source) else {
+            continue;
+        };
+        let mut local_row = BitSet::new(active_global_ids.len());
+        for (local_target, &global_target) in active_global_ids.iter().enumerate() {
+            if global_row.contains(global_target as usize) {
+                local_row.set(local_target);
+            }
+        }
+        if !local_row.is_zero() {
+            local_disallowed.insert(local_source as u32, local_row);
+        }
+    }
+    Some((active_tokenizer, local_disallowed))
+}
+
+fn projected_sparse_prepass_edges(
+    powerset: &super::state_equivalence::nfa::RelevantPowersetView,
+    relevant_bytes: &[bool; 256],
+    byte_to_class: Option<&[u8; 256]>,
+) -> (Vec<u32>, Vec<(u8, u32)>) {
+    let mut keep_byte = [false; 256];
+    if let Some(byte_to_class) = byte_to_class {
+        let class_count = byte_to_class
+            .iter()
+            .copied()
+            .max()
+            .map_or(0, |class| class as usize + 1);
+        let mut seen = vec![false; class_count];
+        for byte in 0..256usize {
+            if !relevant_bytes[byte] {
+                continue;
+            }
+            let class = byte_to_class[byte] as usize;
+            if !seen[class] {
+                seen[class] = true;
+                keep_byte[byte] = true;
+            }
+        }
+    } else {
+        keep_byte = *relevant_bytes;
+    }
+
+    let live = powerset
+        .states
+        .iter()
+        .map(|state| {
+            !state.finalizers.is_empty() || !state.possible_future_group_ids.is_empty()
+        })
+        .collect::<Vec<_>>();
+    let mut edge_offsets = Vec::with_capacity(powerset.states.len() + 1);
+    let mut edges = Vec::new();
+    edge_offsets.push(0u32);
+    for source in 0..powerset.states.len() {
+        if live[source] {
+            let start = powerset.edge_offsets[source] as usize;
+            let end = powerset.edge_offsets[source + 1] as usize;
+            edges.extend(
+                powerset.edges[start..end]
+                    .iter()
+                    .copied()
+                    .filter(|&(byte, target)| {
+                        keep_byte[byte as usize] && live[target as usize]
+                    }),
+            );
+        }
+        edge_offsets.push(edges.len() as u32);
+    }
+    (edge_offsets, edges)
+}
+
+fn byte_classes_on_state_quotient(
+    tokenizer: &TokenizerView,
+    state_map: &ManyToOneIdMap,
+) -> [u8; 256] {
+    let dfa = tokenizer.dfa();
+    let mut classes_by_column = HashMap::<Vec<u32>, u8>::new();
+    let mut byte_to_class = [0u8; 256];
+    let mut column = Vec::with_capacity(state_map.representative_original_ids.len());
+
+    for byte in 0..=u8::MAX {
+        column.clear();
+        for &representative in &state_map.representative_original_ids {
+            let target = dfa.trans(representative as usize, byte as usize);
+            column.push(if target == u32::MAX {
+                u32::MAX
+            } else {
+                state_map.original_to_internal[target as usize]
+            });
+        }
+        let next = classes_by_column.len() as u8;
+        byte_to_class[byte as usize] = *classes_by_column.entry(column.clone()).or_insert(next);
+    }
+
+    if std::env::var_os("GLRMASK_DUMP_ACTIVE_BYTE_CLASSES").is_some() {
+        let probes = b" abcxyz_AZ09\\\"";
+        eprintln!(
+            "[glrmask/dump][active_byte_classes] classes={} probes={:?}",
+            classes_by_column.len(),
+            probes
+                .iter()
+                .map(|&byte| (byte, byte_to_class[byte as usize]))
+                .collect::<Vec<_>>(),
+        );
+        for &(left, right) in &[(b'a', b'b'), (b'a', b'_'), (b'a', b'0')] {
+            let witness = state_map
+                .representative_original_ids
+                .iter()
+                .copied()
+                .find_map(|representative| {
+                    let left_target = dfa.trans(representative as usize, left as usize);
+                    let right_target = dfa.trans(representative as usize, right as usize);
+                    let left_class = if left_target == u32::MAX {
+                        u32::MAX
+                    } else {
+                        state_map.original_to_internal[left_target as usize]
+                    };
+                    let right_class = if right_target == u32::MAX {
+                        u32::MAX
+                    } else {
+                        state_map.original_to_internal[right_target as usize]
+                    };
+                    (left_class != right_class).then_some((
+                        representative,
+                        left_target,
+                        left_class,
+                        right_target,
+                        right_class,
+                    ))
+                });
+            eprintln!(
+                "[glrmask/dump][active_byte_class_witness] left={} right={} witness={:?}",
+                left, right, witness,
+            );
+        }
+    }
+
+    byte_to_class
+}
+
+/// Diagnostic oracle for the literal construction:
+///
+/// 1. start from the deterministic, active-terminal-filtered analysis DFA;
+/// 2. observe finalizers only (as the lexer DFA minimizer does);
+/// 3. delete bytes absent from this vocabulary partition;
+/// 4. compute the stable deterministic Moore quotient;
+/// 5. compare byte transition columns on that minimized quotient.
+pub(crate) fn literal_active_finalizer_minimized_byte_classes(
+    tokenizer: &TokenizerView,
+    relevant_bytes: &[bool; 256],
+) -> ([u8; 256], usize) {
+    let dfa = tokenizer.dfa();
+    let num_states = dfa.states.len();
+
+    let mut label_ids = HashMap::<Vec<usize>, u32>::new();
+    let mut classes = vec![0u32; num_states];
+    for (state, dfa_state) in dfa.states.iter().enumerate() {
+        let next = label_ids.len() as u32;
+        classes[state] = *label_ids
+            .entry(dfa_state.finalizers.clone())
+            .or_insert(next);
+    }
+
+    let active_bytes = relevant_bytes
+        .iter()
+        .enumerate()
+        .filter_map(|(byte, &active)| active.then_some(byte))
+        .collect::<Vec<_>>();
+
+    loop {
+        let mut by_signature = HashMap::<Vec<u32>, u32>::new();
+        let mut next_classes = vec![0u32; num_states];
+        let mut signature = Vec::with_capacity(1 + active_bytes.len());
+        for state in 0..num_states {
+            signature.clear();
+            signature.push(classes[state]);
+            for &byte in &active_bytes {
+                let target = dfa.trans(state, byte);
+                signature.push(if target == u32::MAX {
+                    u32::MAX
+                } else {
+                    classes[target as usize]
+                });
+            }
+            let next = by_signature.len() as u32;
+            next_classes[state] = *by_signature.entry(signature.clone()).or_insert(next);
+        }
+        if next_classes == classes {
+            break;
+        }
+        classes = next_classes;
+    }
+
+    let class_count = classes
+        .iter()
+        .copied()
+        .max()
+        .map_or(0, |class| class as usize + 1);
+    let mut representatives = vec![usize::MAX; class_count];
+    for (state, &class) in classes.iter().enumerate() {
+        representatives[class as usize] = representatives[class as usize].min(state);
+    }
+
+    let mut classes_by_column = HashMap::<Vec<u32>, u8>::new();
+    let mut byte_to_class = [0u8; 256];
+    let mut column = Vec::with_capacity(class_count);
+    for byte in 0..=u8::MAX {
+        column.clear();
+        if relevant_bytes[byte as usize] {
+            for &representative in &representatives {
+                let target = dfa.trans(representative, byte as usize);
+                column.push(if target == u32::MAX {
+                    u32::MAX
+                } else {
+                    classes[target as usize]
+                });
+            }
+        } else {
+            column.push(u32::MAX);
+        }
+        let next = classes_by_column.len() as u8;
+        byte_to_class[byte as usize] = *classes_by_column.entry(column.clone()).or_insert(next);
+    }
+
+    if std::env::var_os("GLRMASK_DUMP_ACTIVE_BYTE_CLASSES").is_some() {
+        let probes = b" abcxyz_AZ09\\\"";
+        eprintln!(
+            "[glrmask/dump][literal_active_byte_classes] classes={} probes={:?}",
+            classes_by_column.len(),
+            probes
+                .iter()
+                .map(|&byte| (byte, byte_to_class[byte as usize]))
+                .collect::<Vec<_>>(),
+        );
+        for &(left, right) in &[(b'a', b'b'), (b'a', b'_'), (b'a', b'0')] {
+            let witness = representatives.iter().copied().find_map(|representative| {
+                let left_target = dfa.trans(representative, left as usize);
+                let right_target = dfa.trans(representative, right as usize);
+                let left_class = if left_target == u32::MAX {
+                    u32::MAX
+                } else {
+                    classes[left_target as usize]
+                };
+                let right_class = if right_target == u32::MAX {
+                    u32::MAX
+                } else {
+                    classes[right_target as usize]
+                };
+                (left_class != right_class).then_some((
+                    representative,
+                    left_target,
+                    left_class,
+                    right_target,
+                    right_class,
+                    dfa.states[representative].finalizers.clone(),
+                ))
+            });
+            eprintln!(
+                "[glrmask/dump][literal_active_byte_class_witness] left={} right={} witness={:?}",
+                left, right, witness,
+            );
+        }
+    }
+
+    (byte_to_class, class_count)
 }
 
 fn build_state_map(
@@ -1624,21 +1952,30 @@ fn analyze_equivalences_impl(
 
         let token_dedup_started_at = Instant::now();
         let identity_byte_class: [u8; 256] = std::array::from_fn(|byte| byte as u8);
-        let dedup = deduplicate_tokens_by_byte_class(&prepared.token_bytes, &identity_byte_class);
+        let identity_dedup =
+            deduplicate_tokens_by_byte_class(&prepared.token_bytes, &identity_byte_class);
         let token_dedup_ms = token_dedup_started_at.elapsed().as_secs_f64() * 1000.0;
-        let max_token_len = dedup
+        let max_token_len = identity_dedup
             .representative_token_bytes
             .iter()
             .map(|token| token.len())
             .max()
             .unwrap_or(0);
         let mut relevant_bytes = [false; 256];
-        for token in &dedup.representative_token_bytes {
+        for token in &identity_dedup.representative_token_bytes {
             for &byte in *token {
                 relevant_bytes[byte as usize] = true;
             }
         }
-        let direct_token_bytes = dedup
+        let active_language_byte_classes = (partition_label == "p2"
+            && (std::env::var_os("GLRMASK_L2P_ACTIVE_LANGUAGE_BYTE_DEDUP").is_some()
+                || std::env::var_os("GLRMASK_L2P_ACTIVE_LANGUAGE_PREPASS_BYTES").is_some()))
+        .then(|| {
+            active_groups
+                .and_then(|groups| active_terminal_language_byte_classes(tokenizer, groups))
+        })
+        .flatten();
+        let direct_token_bytes = identity_dedup
             .representative_token_bytes
             .iter()
             .map(|token| token.len())
@@ -1653,6 +1990,84 @@ fn analyze_equivalences_impl(
             max_token_len,
             active_byte_count,
         );
+        let analysis_view_policy = l2p_nfa_analysis_view_policy();
+        let powerset_max_states = l2p_nfa_relevant_powerset_max_states();
+        let powerset_min_bounded_pairs = l2p_nfa_relevant_powerset_min_bounded_pairs();
+        let prepass_pair_estimate = prepared
+            .initial_states
+            .len()
+            .saturating_mul(identity_dedup.representative_token_bytes.len());
+        let should_probe_powerset = should_probe_l2p_nfa_powerset(
+            analysis_view_policy,
+            prepass_pair_estimate,
+            powerset_min_bounded_pairs,
+        );
+        let powerset_started_at = Instant::now();
+        let powerset_candidate = should_probe_powerset.then(|| {
+            build_relevant_powerset_view(tokenizer, &relevant_bytes, active_groups, None)
+        });
+        let powerset_build_ms = powerset_started_at.elapsed().as_secs_f64() * 1000.0;
+        let powerset_output_classes = powerset_candidate.as_ref().map(|powerset| {
+            let mut output_ids = HashMap::<(Vec<usize>, Vec<usize>), u32>::new();
+            powerset
+                .states
+                .iter()
+                .map(|state| {
+                    let key = (
+                        state.finalizers.clone(),
+                        state.possible_future_group_ids.clone(),
+                    );
+                    let next = output_ids.len() as u32;
+                    *output_ids.entry(key).or_insert(next)
+                })
+                .collect::<Vec<_>>()
+        });
+        let projected_prepass_edges = powerset_candidate.as_ref().and_then(|powerset| {
+            (partition_label == "p2"
+                && std::env::var_os("GLRMASK_L2P_PRUNE_INACTIVE_PREPASS").is_some())
+            .then(|| {
+                projected_sparse_prepass_edges(
+                    powerset,
+                    &relevant_bytes,
+                    std::env::var_os("GLRMASK_L2P_ACTIVE_LANGUAGE_PREPASS_BYTES")
+                        .is_some()
+                        .then_some(active_language_byte_classes.as_ref())
+                        .flatten(),
+                )
+            })
+        });
+        let prebuilt_nfa_refinement = powerset_candidate
+            .as_ref()
+            .zip(powerset_output_classes.as_ref())
+            .map(|(powerset, output_class_by_config)| PrebuiltSparsePowersetRefinement {
+                raw_start_to_view: powerset.raw_start_to_view.as_ref(),
+                configurations: powerset.configurations.as_ref(),
+                output_class_by_config,
+                edge_offsets: projected_prepass_edges
+                    .as_ref()
+                    .map_or(powerset.edge_offsets.as_slice(), |(offsets, _)| offsets.as_slice()),
+                edges: projected_prepass_edges
+                    .as_ref()
+                    .map_or(powerset.edges.as_slice(), |(_, edges)| edges.as_slice()),
+            });
+        if partition_label == "p2"
+            && std::env::var_os("GLRMASK_PROFILE_DIRECT_BOUNDED_PREPASS").is_some()
+            && let Some(prebuilt) = prebuilt_nfa_refinement.as_ref()
+        {
+            let direct_started_at = Instant::now();
+            let direct = prebuilt.compute_state_map(
+                tokenizer,
+                initial_state_map,
+                super::state_equivalence::nfa::RefinementDepth::Bounded(max_token_len),
+            );
+            eprintln!(
+                "[glrmask/profile][direct_bounded_prepass] partition={} max_token_len={} reps={} ms={:.3}",
+                partition_label,
+                max_token_len,
+                direct.num_internal_ids(),
+                direct_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
         let pipeline_config = resolve_l2p_pipeline_config(!max_length_skipped);
         let (tokenizer_states, pipeline_profile) = run_state_equivalence_pipeline(
             tokenizer,
@@ -1661,32 +2076,53 @@ fn analyze_equivalences_impl(
             active_groups,
             StateEquivalenceScope::L2p,
             &pipeline_config,
+            prebuilt_nfa_refinement.as_ref(),
             None,
             None,
         );
+        if partition_label == "p2"
+            && std::env::var_os("GLRMASK_PROFILE_RESTRICTED_ACTIVE_MASK_COMPARE").is_some()
+        {
+            let compare_started_at = Instant::now();
+            let unfiltered = super::state_equivalence::nfa::compute_state_map(
+                tokenizer,
+                &relevant_bytes,
+                None,
+                initial_state_map,
+                super::state_equivalence::nfa::RefinementDepth::Stable,
+            );
+            eprintln!(
+                "[glrmask/profile][restricted_active_mask_compare] partition={} active_terminals={} active_reps={} all_terminal_reps={} all_terminal_ms={:.3}",
+                partition_label,
+                active_groups.map_or(tokenizer.num_terminals() as usize, |active| active.iter().filter(|&&value| value).count()),
+                pipeline_profile.restricted_observation_reps,
+                unfiltered.num_internal_ids(),
+                compare_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
 
         let raw_pre_representatives = tokenizer_states
             .representative_original_ids
             .iter()
             .map(|&state| state as usize)
             .collect::<Vec<_>>();
+        let active_stable_state_map = if partition_label == "p2"
+            && std::env::var_os("GLRMASK_L2P_ACTIVE_QUOTIENT_VIEW").is_some()
+        {
+            prebuilt_nfa_refinement.as_ref().map(|prebuilt| {
+                prebuilt.compute_state_map(
+                    tokenizer,
+                    initial_state_map,
+                    super::state_equivalence::nfa::RefinementDepth::Stable,
+                )
+            })
+        } else {
+            None
+        };
         let analysis_view_started_at = Instant::now();
-        let analysis_view_policy = l2p_nfa_analysis_view_policy();
-        let powerset_max_states = l2p_nfa_relevant_powerset_max_states();
-        let powerset_min_bounded_pairs = l2p_nfa_relevant_powerset_min_bounded_pairs();
         let bounded_pair_estimate = raw_pre_representatives
             .len()
-            .saturating_mul(dedup.representative_token_bytes.len());
-        let should_probe_powerset = should_probe_l2p_nfa_powerset(
-            analysis_view_policy,
-            bounded_pair_estimate,
-            powerset_min_bounded_pairs,
-        );
-        let powerset_started_at = Instant::now();
-        let powerset_candidate = should_probe_powerset.then(|| {
-            build_relevant_powerset_view(tokenizer, &relevant_bytes, active_groups, None)
-        });
-        let powerset_build_ms = powerset_started_at.elapsed().as_secs_f64() * 1000.0;
+            .saturating_mul(identity_dedup.representative_token_bytes.len());
         let powerset_probed = powerset_candidate.is_some();
         let powerset_states = powerset_candidate
             .as_ref()
@@ -1698,15 +2134,24 @@ fn analyze_equivalences_impl(
             powerset_max_states,
         );
         let (analysis_view_owned, raw_start_to_view) = if use_powerset {
-            let powerset = powerset_candidate
-                .expect("powerset analysis policy must build a powerset candidate");
+            let powerset = if let Some(state_map) = active_stable_state_map.as_ref() {
+                build_relevant_powerset_view(
+                    tokenizer,
+                    &relevant_bytes,
+                    active_groups,
+                    Some(state_map),
+                )
+            } else {
+                powerset_candidate
+                    .expect("powerset analysis policy must build a powerset candidate")
+            };
             let raw_start_to_view = Arc::clone(&powerset.raw_start_to_view);
             (powerset.into_tokenizer_view(), raw_start_to_view)
         } else {
             let bounded = build_bounded_analysis_view(
                 tokenizer,
                 &raw_pre_representatives,
-                &dedup.representative_token_bytes,
+                &identity_dedup.representative_token_bytes,
                 active_groups,
             );
             let mut raw_start_to_view = vec![u32::MAX; tokenizer.num_states() as usize];
@@ -1715,8 +2160,8 @@ fn analyze_equivalences_impl(
             }
             (bounded.tokenizer_view, Arc::from(raw_start_to_view))
         };
-        let analysis_view_build_ms =
-            analysis_view_started_at.elapsed().as_secs_f64() * 1000.0;
+        let analysis_view_build_ms = powerset_build_ms
+            + analysis_view_started_at.elapsed().as_secs_f64() * 1000.0;
         if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some()
             || std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
@@ -1738,8 +2183,125 @@ fn analyze_equivalences_impl(
         let analysis_view = &analysis_view_owned;
 
         let byte_class_started_at = Instant::now();
-        let byte_to_class = super::compat::compute_byte_classes(analysis_view.dfa());
+        let byte_to_class = if partition_label == "p2"
+            && std::env::var_os("GLRMASK_L2P_LITERAL_ACTIVE_MINIMIZED_BYTE_CLASSES").is_some()
+        {
+            let (byte_to_class, minimized_states) =
+                literal_active_finalizer_minimized_byte_classes(analysis_view, &relevant_bytes);
+            if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
+                eprintln!(
+                    "[glrmask/profile][literal_active_minimized_byte_classes] partition={} view_states={} minimized_states={} byte_classes={}",
+                    partition_label,
+                    analysis_view.dfa().states.len(),
+                    minimized_states,
+                    byte_to_class.iter().copied().max().map_or(0, |class| class as usize + 1),
+                );
+            }
+            byte_to_class
+        } else if partition_label == "p2"
+            && std::env::var_os("GLRMASK_L2P_ACTIVE_MINIMIZED_BYTE_CLASSES").is_some()
+        {
+            let active_minimized_state_map =
+                super::state_equivalence::restricted_observation::compute_state_map(
+                    analysis_view,
+                    &relevant_bytes,
+                    None,
+                    None,
+                    true,
+                );
+            if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
+                eprintln!(
+                    "[glrmask/profile][active_minimized_byte_classes] partition={} view_states={} minimized_states={}",
+                    partition_label,
+                    analysis_view.dfa().states.len(),
+                    active_minimized_state_map.num_internal_ids(),
+                );
+            }
+            byte_classes_on_state_quotient(analysis_view, &active_minimized_state_map)
+        } else {
+            super::compat::compute_byte_classes(analysis_view.dfa())
+        };
         let byte_class_setup_ms = byte_class_started_at.elapsed().as_secs_f64() * 1000.0;
+
+        // The epsilon analysis view is already filtered to this partition's
+        // active terminals. Bytes in the same DFA byte class therefore induce
+        // exactly the same state transition from every analysis state. Token
+        // behaviour (including match positions and follow-aware suffixes) can
+        // only depend on the resulting byte-class sequence, so collapse those
+        // sequences before the expensive whole-vocabulary equivalence scan.
+        let token_byte_classes = active_language_byte_classes
+            .as_ref()
+            .unwrap_or(&byte_to_class);
+        let class_dedup = deduplicate_tokens_by_byte_class(
+            &identity_dedup.representative_token_bytes,
+            token_byte_classes,
+        );
+        if active_language_byte_classes.is_some()
+            && std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some()
+        {
+            eprintln!(
+                "[glrmask/profile][active_language_byte_dedup] partition={} identity_tokens={} canonical_tokens={} byte_classes={}",
+                partition_label,
+                identity_dedup.representative_token_bytes.len(),
+                class_dedup.representative_token_bytes.len(),
+                token_byte_classes
+                    .iter()
+                    .copied()
+                    .max()
+                    .map_or(0, |class| class as usize + 1),
+            );
+        }
+        let original_to_class_repr = identity_dedup
+            .original_to_repr
+            .iter()
+            .map(|&identity_repr| class_dedup.original_to_repr[identity_repr])
+            .collect::<Vec<_>>();
+        let dedup = TokenDedup {
+            representative_token_bytes: class_dedup.representative_token_bytes,
+            original_to_repr: original_to_class_repr,
+        };
+
+        if partition_label == "p2"
+            && std::env::var_os("GLRMASK_PROFILE_ACTIVE_LANGUAGE_TOKEN_PREQUOTIENT").is_some()
+            && let Some(active_groups) = active_groups
+            && let Some((active_tokenizer, local_disallowed)) =
+                active_terminal_language_tokenizer_and_follows(
+                    tokenizer,
+                    active_groups,
+                    effective_disallowed,
+                )
+        {
+            let active_view = TokenizerView::new(&active_tokenizer);
+            let active_byte_classes = super::compat::compute_byte_classes(active_view.dfa());
+            let active_dedup = deduplicate_tokens_by_byte_class(
+                &identity_dedup.representative_token_bytes,
+                &active_byte_classes,
+            );
+            let active_states = (0..active_view.dfa().states.len()).collect::<Vec<_>>();
+            let started_at = Instant::now();
+            let (active_classes, build_ms) =
+                vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter_profiled(
+                    &active_view,
+                    &active_dedup.representative_token_bytes,
+                    &active_states,
+                    &local_disallowed,
+                    Some(&active_byte_classes),
+                    None,
+                    None,
+                    None,
+                );
+            eprintln!(
+                "[glrmask/profile][active_language_token_prequotient] partition={} identity_tokens={} byte_canonical_tokens={} action_classes={} active_states={} active_terminals={} build_ms={:.3} total_ms={:.3}",
+                partition_label,
+                identity_dedup.representative_token_bytes.len(),
+                active_dedup.representative_token_bytes.len(),
+                active_classes.len(),
+                active_states.len(),
+                active_groups.iter().filter(|&&active| active).count(),
+                build_ms,
+                started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
 
         let follows_normalize_started_at = Instant::now();
         let normalized_disallowed_follows =
@@ -1754,7 +2316,9 @@ fn analyze_equivalences_impl(
         let mut query_view_states = preclass_view_states.clone();
         query_view_states.sort_unstable();
         query_view_states.dedup();
-        let vocab_first = dedup.representative_token_bytes.len() >= 512
+        let force_state_first = std::env::var_os("GLRMASK_L2P_FORCE_STATE_FIRST").is_some();
+        let vocab_first = !force_state_first
+            && dedup.representative_token_bytes.len() >= 512
             && query_view_states.len() >= 256;
         if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
             eprintln!(
@@ -2027,6 +2591,7 @@ fn analyze_equivalences_impl(
         active_groups,
         StateEquivalenceScope::L2p,
         &pipeline_config,
+        None,
         Some(&tokenizer_view),
         Some(&byte_to_class),
     );

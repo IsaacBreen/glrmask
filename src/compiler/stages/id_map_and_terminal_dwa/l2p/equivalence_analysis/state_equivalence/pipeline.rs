@@ -136,6 +136,7 @@ pub(crate) fn run_state_equivalence_pipeline(
     active_groups: Option<&[bool]>,
     scope: StateEquivalenceScope,
     config: &StateEquivalencePipelineConfig,
+    prebuilt_nfa_refinement: Option<&super::nfa::PrebuiltSparsePowersetRefinement<'_>>,
     kbounded_tokenizer_view: Option<&TokenizerView>,
     kbounded_byte_to_class: Option<&[u8; 256]>,
 ) -> (ManyToOneIdMap, StateEquivalencePipelineProfile) {
@@ -187,13 +188,21 @@ pub(crate) fn run_state_equivalence_pipeline(
                 );
                 let started_at = Instant::now();
                 current_state_map = if tokenizer.has_epsilon_transitions() {
-                    super::nfa::compute_state_map(
-                        tokenizer,
-                        statistic.relevant_bytes(),
-                        active_groups,
-                        Some(&current_state_map),
-                        super::nfa::RefinementDepth::Stable,
-                    )
+                    if let Some(prebuilt) = prebuilt_nfa_refinement {
+                        prebuilt.compute_state_map(
+                            tokenizer,
+                            Some(&current_state_map),
+                            super::nfa::RefinementDepth::Stable,
+                        )
+                    } else {
+                        super::nfa::compute_state_map(
+                            tokenizer,
+                            statistic.relevant_bytes(),
+                            active_groups,
+                            Some(&current_state_map),
+                            super::nfa::RefinementDepth::Stable,
+                        )
+                    }
                 } else {
                     let tokenizer_view = kbounded_tokenizer_view
                         .expect("L2P restricted observation requires the shared analysis view");
@@ -220,15 +229,26 @@ pub(crate) fn run_state_equivalence_pipeline(
                     StateEquivalenceScope::L2p => MaxLengthMode::KBoundedByteRestricted,
                 };
                 let started_at = Instant::now();
-                current_state_map = max_length::compute_state_map(
-                    tokenizer,
-                    &statistic,
-                    Some(&current_state_map),
-                    active_groups,
-                    mode,
-                    kbounded_tokenizer_view,
-                    kbounded_byte_to_class,
-                );
+                current_state_map = if tokenizer.has_epsilon_transitions()
+                    && matches!(scope, StateEquivalenceScope::L2p)
+                    && let Some(prebuilt) = prebuilt_nfa_refinement
+                {
+                    prebuilt.compute_state_map(
+                        tokenizer,
+                        Some(&current_state_map),
+                        super::nfa::RefinementDepth::Bounded(statistic.max_token_len()),
+                    )
+                } else {
+                    max_length::compute_state_map(
+                        tokenizer,
+                        &statistic,
+                        Some(&current_state_map),
+                        active_groups,
+                        mode,
+                        kbounded_tokenizer_view,
+                        kbounded_byte_to_class,
+                    )
+                };
                 record_max_length_profile(
                     &mut profile,
                     *kind,

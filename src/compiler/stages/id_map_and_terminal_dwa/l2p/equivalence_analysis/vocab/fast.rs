@@ -2008,7 +2008,13 @@ fn token_signature(
 
 // ----- DFS Trie Walk for Prefix Sharing -----
 
-const TRIE_CHUNK_SIZE: usize = 128;
+fn trie_chunk_size() -> usize {
+    std::env::var("GLRMASK_VOCAB_TRIE_CHUNK_SIZE")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or(128)
+}
 const TRIE_WALK_MIN_TOKENS: usize = 256;
 
 static TRIE_WALK_DISABLED: Lazy<bool> =
@@ -2210,8 +2216,13 @@ fn dfs_step(
         }
 
         let ns = next_state_raw as usize;
-        log.state_changes.push((i, old_state));
-        scratch.current_states[i] = ns;
+        if ns == old_state && dfa.finalizers[ns].is_empty() {
+            continue;
+        }
+        if ns != old_state {
+            log.state_changes.push((i, old_state));
+            scratch.current_states[i] = ns;
+        }
 
         let base = i * num_groups;
         for &gid in &dfa.finalizers[ns] {
@@ -2284,8 +2295,13 @@ fn dfs_step_profiled(
         }
 
         let ns = next_state_raw as usize;
-        log.state_changes.push((i, old_state));
-        scratch.current_states[i] = ns;
+        if ns == old_state && dfa.finalizers[ns].is_empty() {
+            continue;
+        }
+        if ns != old_state {
+            log.state_changes.push((i, old_state));
+            scratch.current_states[i] = ns;
+        }
 
         let base = i * num_groups;
         for &gid in &dfa.finalizers[ns] {
@@ -3419,7 +3435,7 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
             } else {
                 let scratch_pool = Arc::clone(&scratch_pool);
                 let chunk_results: Vec<(Vec<(usize, u64)>, TrieWalkChunkStats)> = sorted_indices
-                    .par_chunks(TRIE_CHUNK_SIZE)
+                    .par_chunks(trie_chunk_size())
                     .map_init(
                         || scratch_pool.checkout(batch.len(), num_groups),
                         |lease, chunk| {

@@ -30,6 +30,34 @@ pub(crate) struct RelevantPowersetView {
     pub(crate) configurations: Arc<[Box<[u32]>]>,
 }
 
+pub(crate) struct PrebuiltSparsePowersetRefinement<'a> {
+    pub(crate) raw_start_to_view: &'a [u32],
+    pub(crate) configurations: &'a [Box<[u32]>],
+    pub(crate) output_class_by_config: &'a [u32],
+    pub(crate) edge_offsets: &'a [u32],
+    pub(crate) edges: &'a [(u8, u32)],
+}
+
+impl PrebuiltSparsePowersetRefinement<'_> {
+    pub(crate) fn compute_state_map(
+        &self,
+        tokenizer: &Tokenizer,
+        initial_state_map: Option<&ManyToOneIdMap>,
+        depth: RefinementDepth,
+    ) -> ManyToOneIdMap {
+        compute_state_map_from_prebuilt_sparse_powerset(
+            tokenizer,
+            initial_state_map,
+            depth,
+            self.raw_start_to_view,
+            self.configurations,
+            self.output_class_by_config,
+            self.edge_offsets,
+            self.edges,
+        )
+    }
+}
+
 impl RelevantPowersetView {
     pub(crate) fn into_tokenizer_view(self) -> TokenizerView {
         let mut transitions = vec![u32::MAX; self.states.len() * 256];
@@ -318,7 +346,7 @@ pub(crate) fn build_relevant_powerset_view(
         }
     }
 
-    let states = if let Some(state_map) = state_map {
+    let states: Vec<FlatDfaState> = if let Some(state_map) = state_map {
         let closure_by_class = closure_by_class
             .as_ref()
             .expect("mapped powerset must retain representative closures");
@@ -379,6 +407,35 @@ pub(crate) fn build_relevant_powerset_view(
             })
             .collect()
     };
+    let mut edge_offsets = edge_offsets;
+    let mut edges = edges;
+    if active_groups.is_some() {
+        let active_dead = states
+            .iter()
+            .map(|state| {
+                state.finalizers.is_empty() && state.possible_future_group_ids.is_empty()
+            })
+            .collect::<Vec<_>>();
+        let mut projected_offsets = Vec::with_capacity(states.len() + 1);
+        let mut projected_edges = Vec::with_capacity(edges.len());
+        projected_offsets.push(0u32);
+        for source in 0..states.len() {
+            if !active_dead[source] {
+                let start = edge_offsets[source] as usize;
+                let end = edge_offsets[source + 1] as usize;
+                projected_edges.extend(
+                    edges[start..end]
+                        .iter()
+                        .copied()
+                        .filter(|&(_, target)| !active_dead[target as usize]),
+                );
+            }
+            projected_offsets.push(projected_edges.len() as u32);
+        }
+        edge_offsets = projected_offsets;
+        edges = projected_edges;
+    }
+
     RelevantPowersetView {
         states,
         start_state,

@@ -348,6 +348,230 @@ fn quotient_exact_duplicate_states(dwa: DWA) -> DWA {
 /// `disallowed_follows` is threaded explicitly for id_map building.
 ///
 /// Returns `None` if the vocab is empty.
+
+fn dump_weight_feasible_terminal_paths(
+    partition_label: &str,
+    dwa: &crate::automata::weighted_u32::dwa::DWA,
+    tokenizer: &Tokenizer,
+    id_map: &crate::compiler::stages::equiv_types::InternalIdMap,
+    vocab: &Vocab,
+    grammar: &AnalyzedGrammar,
+) {
+    #[derive(Clone)]
+    struct Witness {
+        labels: Vec<i32>,
+        weight: Weight,
+    }
+
+    fn visit(
+        dwa: &crate::automata::weighted_u32::dwa::DWA,
+        state: u32,
+        path: &mut Vec<i32>,
+        path_weight: Weight,
+        active: &mut [bool],
+        accepted: &mut Vec<Witness>,
+    ) {
+        let state_idx = state as usize;
+        assert!(!active[state_idx], "terminal DWA path diagnostic requires an acyclic DWA");
+        active[state_idx] = true;
+        let dwa_state = &dwa.states()[state_idx];
+        if let Some(final_weight) = &dwa_state.final_weight {
+            let accepted_weight = path_weight.intersection(final_weight);
+            if !accepted_weight.is_empty() {
+                accepted.push(Witness { labels: path.clone(), weight: accepted_weight });
+            }
+        }
+        for (&label, (target, edge_weight)) in &dwa_state.transitions {
+            let next_weight = path_weight.intersection(edge_weight);
+            if next_weight.is_empty() {
+                continue;
+            }
+            path.push(label);
+            visit(dwa, *target, path, next_weight, active, accepted);
+            path.pop();
+        }
+        active[state_idx] = false;
+    }
+
+    let mut accepted = Vec::new();
+    visit(
+        dwa,
+        dwa.start_state(),
+        &mut Vec::new(),
+        Weight::all(),
+        &mut vec![false; dwa.states().len()],
+        &mut accepted,
+    );
+    accepted.sort_by(|left, right| {
+        right.labels.len().cmp(&left.labels.len()).then_with(|| left.labels.cmp(&right.labels))
+    });
+    let max_len = accepted.first().map_or(0, |witness| witness.labels.len());
+    let max_count = accepted.iter().take_while(|witness| witness.labels.len() == max_len).count();
+    eprintln!(
+        "[glrmask/dump][l2p_paths] partition={} states={} accepted_words={} max_path_len={} max_path_words={}",
+        partition_label, dwa.states().len(), accepted.len(), max_len, max_count,
+    );
+
+    let mut adjacent_pairs = std::collections::BTreeSet::<(i32, i32)>::new();
+    for witness in &accepted {
+        adjacent_pairs.extend(witness.labels.windows(2).map(|pair| (pair[0], pair[1])));
+    }
+    for &(left, right) in &adjacent_pairs {
+        let name = |label: i32| {
+            grammar
+                .terminal_display_names
+                .get(label as usize)
+                .cloned()
+                .unwrap_or_else(|| format!("t{label}"))
+        };
+        eprintln!(
+            "[glrmask/dump][l2p_adjacent] partition={} left={} left_name={:?} right={} right_name={:?} reverse_present={}",
+            partition_label,
+            left,
+            name(left),
+            right,
+            name(right),
+            adjacent_pairs.contains(&(right, left)),
+        );
+    }
+
+    let mut max_depth_by_original_token = vec![0usize; vocab.entries.len()];
+    for witness in &accepted {
+        for (_, tokens) in witness.weight.0.range_values() {
+            for internal_token in tokens.iter() {
+                if let Some(originals) = id_map.vocab_tokens.internal_to_originals.get(internal_token as usize) {
+                    for &original in originals {
+                        if let Some(depth) = max_depth_by_original_token.get_mut(original as usize) {
+                            *depth = (*depth).max(witness.labels.len());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut depth_counts = std::collections::BTreeMap::<usize, usize>::new();
+    for &depth in &max_depth_by_original_token {
+        *depth_counts.entry(depth).or_default() += 1;
+    }
+    eprintln!(
+        "[glrmask/dump][l2p_token_depths] partition={} depth_counts={:?}",
+        partition_label, depth_counts,
+    );
+
+    let mut max_path_internal_tokens = std::collections::BTreeSet::<u32>::new();
+    for witness in accepted.iter().filter(|witness| witness.labels.len() == max_len) {
+        for (_, tokens) in witness.weight.0.range_values() {
+            max_path_internal_tokens.extend(tokens.iter());
+        }
+    }
+    let mut max_path_original_tokens = std::collections::BTreeSet::<u32>::new();
+    for internal_token in max_path_internal_tokens {
+        if let Some(originals) = id_map.vocab_tokens.internal_to_originals.get(internal_token as usize) {
+            max_path_original_tokens.extend(originals.iter().copied());
+        }
+    }
+    let max_path_token_sample = max_path_original_tokens.iter().copied().take(32).collect::<Vec<_>>();
+    eprintln!(
+        "[glrmask/dump][l2p_max_path_tokens] partition={} count={} token_id_sample={:?}",
+        partition_label,
+        max_path_original_tokens.len(),
+        max_path_token_sample,
+    );
+    if max_len >= 3 {
+        for original_token in max_path_original_tokens.iter().take(32) {
+            eprintln!(
+                "[glrmask/dump][l2p_max_path_token] partition={} token_id={} bytes={:?}",
+                partition_label,
+                original_token,
+                vocab.entries.get(original_token),
+            );
+        }
+    }
+    for (index, witness) in accepted.iter().filter(|witness| witness.labels.len() == max_len).take(64).enumerate() {
+        let label_names = witness.labels.iter().map(|&label| {
+            if label < 0 {
+                format!("special({label})")
+            } else {
+                grammar.terminal_display_names.get(label as usize).cloned().unwrap_or_else(|| format!("t{label}"))
+            }
+        }).collect::<Vec<_>>();
+        let witness_pair = witness.weight.0.range_values().next().and_then(|(tsids, tokens)| {
+            let tsid = *tsids.start();
+            let token = tokens.ranges().next().map(|range| *range.start())?;
+            Some((tsid, token))
+        });
+        let (tsid, internal_token, original_tokens, token_bytes) = match witness_pair {
+            Some((tsid, internal_token)) => {
+                let originals = id_map.vocab_tokens.internal_to_originals.get(internal_token as usize).cloned().unwrap_or_default();
+                let bytes = originals.first().and_then(|original| vocab.entries.get(original)).cloned();
+                (Some(tsid), Some(internal_token), originals, bytes)
+            }
+            None => (None, None, Vec::new(), None),
+        };
+        let raw_representative = tsid.and_then(|tsid| {
+            id_map
+                .tokenizer_states
+                .representative_original_ids
+                .get(tsid as usize)
+                .copied()
+        });
+        eprintln!(
+            "[glrmask/dump][l2p_path] partition={} rank={} len={} labels={:?} names={:?} tsid={:?} raw_representative={:?} internal_token={:?} original_tokens={:?} token_bytes={:?}",
+            partition_label, index, witness.labels.len(), witness.labels, label_names, tsid, raw_representative, internal_token, original_tokens, token_bytes,
+        );
+        if index == 0
+            && witness.labels.len() >= 3
+            && let (Some(raw), Some(bytes)) = (raw_representative, token_bytes.as_deref())
+        {
+            let first = tokenizer.execute_from_state_all_widths(bytes, raw);
+            let first_widths = first.matches.iter()
+                .filter(|matched| matched.id as i32 == witness.labels[0])
+                .map(|matched| matched.width)
+                .collect::<std::collections::BTreeSet<_>>();
+            eprintln!(
+                "[glrmask/dump][l2p_path_trace] stage=first raw={} label={} widths={:?} full_end_states={:?}",
+                raw, witness.labels[0], first_widths, first.end_state,
+            );
+            for first_width in first_widths {
+                let suffix = &bytes[first_width..];
+                for reset in tokenizer.deterministic_reset_states() {
+                    let second = tokenizer.execute_from_state_all_widths(suffix, reset);
+                    let second_widths = second.matches.iter()
+                        .filter(|matched| matched.id as i32 == witness.labels[1])
+                        .map(|matched| matched.width)
+                        .collect::<std::collections::BTreeSet<_>>();
+                    if second_widths.is_empty() {
+                        continue;
+                    }
+                    eprintln!(
+                        "[glrmask/dump][l2p_path_trace] stage=second first_width={} reset={} label={} widths={:?}",
+                        first_width, reset, witness.labels[1], second_widths,
+                    );
+                    for second_width in second_widths {
+                        let tail = &suffix[second_width..];
+                        for final_reset in tokenizer.deterministic_reset_states() {
+                            let third = tokenizer.execute_from_state_all_widths(tail, final_reset);
+                            let third_widths = third.matches.iter()
+                                .filter(|matched| matched.id as i32 == witness.labels[2])
+                                .map(|matched| matched.width)
+                                .collect::<std::collections::BTreeSet<_>>();
+                            let future_states = third.end_state.iter().copied()
+                                .filter(|&state| tokenizer.possible_future_terminals(state).contains(witness.labels[2] as usize))
+                                .collect::<Vec<_>>();
+                            if !third_widths.is_empty() || !future_states.is_empty() {
+                                eprintln!(
+                                    "[glrmask/dump][l2p_path_trace] stage=third first_width={} second_width={} final_reset={} tail_len={} label={} matched_widths={:?} future_states={:?}",
+                                    first_width, second_width, final_reset, tail.len(), witness.labels[2], third_widths, future_states,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     partition_label: &str,
     tokenizer: &Tokenizer,
@@ -376,6 +600,20 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     let total_started_at = Instant::now();
     let num_original_states = tokenizer.num_states() as usize;
     let num_active_terminals = active_terminals.iter().filter(|&&active| active).count();
+    if std::env::var_os("GLRMASK_DUMP_L2P_TERMINALS").is_some() {
+        for (terminal, &active) in active_terminals.iter().enumerate() {
+            if !active {
+                continue;
+            }
+            eprintln!(
+                "[glrmask/dump][l2p_terminal] partition={} terminal={} name={:?} expr={:?}",
+                partition_label,
+                terminal,
+                grammar.terminal_display_names.get(terminal),
+                tokenizer.terminal_expr(terminal as u32),
+            );
+        }
+    }
 
     let mut relevant_bytes = [false; 256];
     for bytes in vocab.entries.values() {
@@ -643,6 +881,58 @@ let strict_reference = reference_terminal_expansion
     // state/vocab equivalence pass must not be bypassed. Do not reintroduce
     // fast-sound, identity, lex-dedup, or similar shortcut id-map paths.
     let fast_sound_id_map_used = false;
+    if partition_label == "p2"
+        && std::env::var_os("GLRMASK_PROFILE_ACTIVE_ONLY_LEXER").is_some()
+    {
+        let active_exprs = analysis_active_terminals
+            .iter()
+            .enumerate()
+            .filter_map(|(terminal, &active)| {
+                active
+                    .then(|| tokenizer_for_build.terminal_expr(terminal as u32).cloned())
+                    .flatten()
+            })
+            .collect::<Vec<_>>();
+        let started_at = Instant::now();
+        let active_regex = crate::automata::lexer::compile::build_regex(&active_exprs);
+        let build_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+        let active_tokenizer = active_regex.into_tokenizer(
+            active_exprs.len() as u32,
+            Some(std::sync::Arc::from(active_exprs)),
+        );
+        let active_view = equivalence_analysis::compat::TokenizerView::new(&active_tokenizer);
+        let byte_classes = equivalence_analysis::compat::compute_byte_classes(active_view.dfa());
+        let (min_byte_classes, min_states) = equivalence_analysis::combined::literal_active_finalizer_minimized_byte_classes(
+            &active_view,
+            &relevant_bytes,
+        );
+        let mut groups = std::collections::BTreeMap::<u8, Vec<u8>>::new();
+        for byte in 0..=u8::MAX {
+            groups.entry(min_byte_classes[byte as usize]).or_default().push(byte);
+        }
+        eprintln!("[glrmask/dump][active_only_min_byte_classes] states={} classes={} groups={:?}", min_states, groups.len(), groups);
+        let mut canonical = std::collections::BTreeSet::<Vec<u8>>::new();
+        for bytes in vocab.entries.values() {
+            canonical.insert(
+                bytes
+                    .iter()
+                    .map(|&byte| byte_classes[byte as usize])
+                    .collect(),
+            );
+        }
+        eprintln!(
+            "[glrmask/profile][active_only_lexer] partition={} terminals={} states={} transitions={} byte_classes={} canonical_vocab={} build_ms={:.3}",
+            partition_label,
+            active_tokenizer.num_terminals(),
+            active_tokenizer.num_states(),
+            (0..active_tokenizer.num_states() as u32)
+                .map(|state| active_tokenizer.transitions_from(state).count())
+                .sum::<usize>(),
+            byte_classes.iter().copied().max().map_or(0, |class| class as usize + 1),
+            canonical.len(),
+            build_ms,
+        );
+    }
     // Keep raw lexer-state coordinates for the final scanner, but restrict
     // equivalence observations to this L2P partition's active terminals. With
     // TI enabled this is the representative mask, so all three equivalence
@@ -849,6 +1139,16 @@ let strict_reference = reference_terminal_expansion
                 .unwrap_or(false);
             let dwa = if skip_minimize { det } else { minimize_owned(det) };
             let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
+            if std::env::var_os("GLRMASK_DUMP_L2P_PATHS").is_some() && partition_label == "p2" {
+                dump_weight_feasible_terminal_paths(
+                    partition_label,
+                    &dwa,
+                    tokenizer_for_build,
+                    &simplified_id_map,
+                    vocab,
+                    grammar,
+                );
+            }
             let dwa_stats_before_compact = dwa.stats();
 
             (

@@ -184,6 +184,34 @@ pub(crate) fn compute_byte_classes(dfa: &FlatDfa) -> [u8; 256] {
 }
 
 impl FlatDfa {
+    /// Project transition topology to the language observed by the already
+    /// filtered state metadata.
+    ///
+    /// A state with neither an active finalizer nor an active future terminal
+    /// has empty language under the active terminal projection. Reaching that
+    /// state is therefore exactly equivalent to taking a dead transition.
+    /// Retaining its raw state id would let inactive-terminal-only topology
+    /// distinguish byte columns and state refinements after outputs had been
+    /// projected away.
+    fn project_filtered_dead_targets(
+        states: &[FlatDfaState],
+        transitions: &[u32],
+    ) -> Arc<[u32]> {
+        let active_dead = states
+            .iter()
+            .map(|state| {
+                state.finalizers.is_empty() && state.possible_future_group_ids.is_empty()
+            })
+            .collect::<Vec<_>>();
+        let mut projected = transitions.to_vec();
+        for target in &mut projected {
+            if *target != u32::MAX && active_dead[*target as usize] {
+                *target = u32::MAX;
+            }
+        }
+        Arc::from(projected)
+    }
+
     /// Get the transition target for a given state and byte.
     #[inline]
     pub fn trans(&self, state: usize, byte: usize) -> u32 {
@@ -251,10 +279,11 @@ impl FlatDfa {
             })
             .collect();
 
+        let transitions = Self::project_filtered_dead_targets(&states, &transitions);
         FlatDfa {
             states,
             start_state,
-            transitions: Arc::from(transitions),
+            transitions,
         }
     }
 
@@ -303,7 +332,8 @@ impl FlatDfa {
                 }
             })
             .collect();
-        FlatDfa { states, start_state, transitions: Arc::clone(flat_trans) }
+        let transitions = Self::project_filtered_dead_targets(&states, flat_trans);
+        FlatDfa { states, start_state, transitions }
     }
 
 }
