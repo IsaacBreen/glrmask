@@ -2157,6 +2157,7 @@ impl Constraint {
             .next_back()
             .copied()
             .into_iter()
+            .chain(self.eos_token_id)
             .chain(
                 self.special_token_terminals
                     .iter()
