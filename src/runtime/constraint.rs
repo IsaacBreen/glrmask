@@ -3217,6 +3217,14 @@ impl<'a> ConstraintState<'a> {
         super::dynamic_mask::fill_mask_dynamic(self, buf);
     }
 
+    pub(crate) fn fill_mask_dynamic_bounded(
+        &self,
+        buf: &mut [u32],
+        timeout_ms: u64,
+    ) -> Result<(), String> {
+        super::dynamic_mask::fill_mask_dynamic_bounded(self, buf, timeout_ms)
+    }
+
 }
 #[cfg(test)]
 mod dense_internal_token_mask_tests {

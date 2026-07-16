@@ -5,6 +5,7 @@
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use rustc_hash::FxHashMap;
 
@@ -83,6 +84,8 @@ const DYNAMIC_NFA_CONFIG_DEAD: u32 = u32::MAX - 1;
 
 struct DynamicNfaScanCache<'a> {
     constraint: &'a Constraint,
+    deadline: Option<Instant>,
+    max_collection_items: Option<usize>,
     epsilon_closures: Arc<[Box<[u32]>]>,
     config_ids: FxHashMap<Vec<u32>, u32>,
     configs: Vec<Box<[u32]>>,
@@ -91,9 +94,11 @@ struct DynamicNfaScanCache<'a> {
 }
 
 impl<'a> DynamicNfaScanCache<'a> {
-    fn new(constraint: &'a Constraint) -> Self {
+    fn new(constraint: &'a Constraint, deadline: Option<Instant>) -> Self {
         Self {
             constraint,
+            deadline,
+            max_collection_items: deadline.map(|_| 5_000_000),
             epsilon_closures: constraint.tokenizer.all_singleton_epsilon_closures(),
             config_ids: FxHashMap::default(),
             configs: Vec::new(),
@@ -105,36 +110,52 @@ impl<'a> DynamicNfaScanCache<'a> {
         }
     }
 
-    fn intern_config(&mut self, mut states: Vec<u32>) -> u32 {
+    fn check_growth(&self, current: usize, additional: usize) -> Result<(), String> {
+        if self.deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err("glrmask_dynamic mask generation timed out".to_owned());
+        }
+        if self.max_collection_items.is_some_and(|limit| {
+            current
+                .checked_add(additional)
+                .is_none_or(|next| next > limit)
+        }) {
+            return Err("glrmask_dynamic mask generation exceeded its work ceiling".to_owned());
+        }
+        Ok(())
+    }
+
+    fn intern_config(&mut self, mut states: Vec<u32>) -> Result<u32, String> {
+        self.check_growth(0, states.len())?;
         states.sort_unstable();
         states.dedup();
         if let Some(&id) = self.config_ids.get(states.as_slice()) {
-            return id;
+            return Ok(id);
         }
+        self.check_growth(self.configs.len(), 1)?;
         let id = self.configs.len() as u32;
         self.config_ids.insert(states.clone(), id);
         self.configs.push(states.into_boxed_slice());
         self.transitions.push(None);
-        id
+        Ok(id)
     }
 
-    fn config_for_raw_start(&mut self, state: u32) -> u32 {
+    fn config_for_raw_start(&mut self, state: u32) -> Result<u32, String> {
         let slot = state as usize;
         let cached = self.raw_start_config[slot];
         if cached != DYNAMIC_NFA_CONFIG_UNKNOWN {
-            return cached;
+            return Ok(cached);
         }
-        let config = self.intern_config(self.epsilon_closures[slot].to_vec());
+        let config = self.intern_config(self.epsilon_closures[slot].to_vec())?;
         self.raw_start_config[slot] = config;
-        config
+        Ok(config)
     }
 
-    fn step_config(&mut self, config: u32, byte: u8) -> Option<u32> {
+    fn step_config(&mut self, config: u32, byte: u8) -> Result<Option<u32>, String> {
         let config_index = config as usize;
         if let Some(row) = self.transitions[config_index].as_ref() {
             let cached = row[byte as usize];
             if cached != DYNAMIC_NFA_CONFIG_UNKNOWN {
-                return (cached != DYNAMIC_NFA_CONFIG_DEAD).then_some(cached);
+                return Ok((cached != DYNAMIC_NFA_CONFIG_DEAD).then_some(cached));
             }
         }
 
@@ -144,6 +165,7 @@ impl<'a> DynamicNfaScanCache<'a> {
                 let target = self.constraint.tokenizer_fast_transitions[state as usize]
                     [byte as usize];
                 if target != u32::MAX {
+                    self.check_growth(targets.len(), self.epsilon_closures[target as usize].len())?;
                     targets.extend_from_slice(&self.epsilon_closures[target as usize]);
                 }
             }
@@ -152,37 +174,39 @@ impl<'a> DynamicNfaScanCache<'a> {
         let target = if closed_targets.is_empty() {
             DYNAMIC_NFA_CONFIG_DEAD
         } else {
-            self.intern_config(closed_targets)
+            self.intern_config(closed_targets)?
         };
         let row = self.transitions[config_index]
             .get_or_insert_with(|| Box::new([DYNAMIC_NFA_CONFIG_UNKNOWN; 256]));
         row[byte as usize] = target;
-        (target != DYNAMIC_NFA_CONFIG_DEAD).then_some(target)
+        Ok((target != DYNAMIC_NFA_CONFIG_DEAD).then_some(target))
     }
 
-    fn execute_from_state_all_widths(&mut self, input: &[u8], start: u32) -> TokenizerExecResult {
-        let mut config = self.config_for_raw_start(start);
+    fn execute_from_state_all_widths(
+        &mut self,
+        input: &[u8],
+        start: u32,
+    ) -> Result<TokenizerExecResult, String> {
+        let mut config = self.config_for_raw_start(start)?;
         let mut matches = Vec::new();
         for (index, &byte) in input.iter().enumerate() {
-            let Some(next_config) = self.step_config(config, byte) else {
-                return TokenizerExecResult {
+            let Some(next_config) = self.step_config(config, byte)? else {
+                return Ok(TokenizerExecResult {
                     end_state: TokenizerStateSet::new(),
                     matches,
-                };
+                });
             };
             config = next_config;
             let width = index + 1;
             for &state in self.configs[config as usize].iter() {
-                matches.extend(
-                    self.constraint
-                        .tokenizer
-                        .matched_terminals_iter(state)
-                        .map(|id| TokenizerMatch {
-                            id,
-                            width,
-                            end_state: state,
-                        }),
-                );
+                for id in self.constraint.tokenizer.matched_terminals_iter(state) {
+                    self.check_growth(matches.len(), 1)?;
+                    matches.push(TokenizerMatch {
+                        id,
+                        width,
+                        end_state: state,
+                    });
+                }
             }
         }
         let mut end_state = TokenizerStateSet::new();
@@ -192,7 +216,7 @@ impl<'a> DynamicNfaScanCache<'a> {
                 .copied()
                 .filter(|&state| !self.constraint.tokenizer.is_end(state)),
         );
-        TokenizerExecResult { end_state, matches }
+        Ok(TokenizerExecResult { end_state, matches })
     }
 }
 
@@ -626,6 +650,34 @@ fn dynamic_mask_state_key(state: &ConstraintState<'_>) -> DynamicMaskStateKey {
 }
 
 pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
+    fill_mask_dynamic_impl(state, buf, None)
+        .expect("unbounded dynamic mask generation cannot time out");
+}
+
+pub(crate) fn fill_mask_dynamic_bounded(
+    state: &ConstraintState<'_>,
+    buf: &mut [u32],
+    timeout_ms: u64,
+) -> Result<(), String> {
+    fill_mask_dynamic_impl(
+        state,
+        buf,
+        Some(Instant::now() + Duration::from_millis(timeout_ms)),
+    )
+}
+
+fn fill_mask_dynamic_impl(
+    state: &ConstraintState<'_>,
+    buf: &mut [u32],
+    deadline: Option<Instant>,
+) -> Result<(), String> {
+    let check_deadline = || {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            Err("glrmask_dynamic mask generation timed out".to_owned())
+        } else {
+            Ok(())
+        }
+    };
     let vocab = &state.constraint.dynamic_mask_vocab;
     let profile = std::env::var_os("GLRMASK_PROFILE_DYNAMIC_MASK").is_some();
     let total_started_at = profile.then(std::time::Instant::now);
@@ -642,7 +694,7 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
                 total_started_at.elapsed().as_secs_f64() * 1000.0,
             );
         }
-        return;
+        return Ok(());
     }
 
     buf.fill(0);
@@ -651,7 +703,7 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
     let mut segment_stack = Vec::<(usize, u32, ParserStacks)>::with_capacity(8);
     let mut self_loop_cache = FxHashMap::<u32, U8Set>::default();
     let mut traversal_cache = DynamicTraversalCache::default();
-    let mut lexer_scan_cache = DynamicNfaScanCache::new(state.constraint);
+    let mut lexer_scan_cache = DynamicNfaScanCache::new(state.constraint, deadline);
     let tries = [vocab.trie.clone()];
     let mut continuation_partitions = Vec::new();
     let mut work_items = 0usize;
@@ -672,7 +724,9 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
     }
 
     for (&tokenizer_state, gss) in &state.state {
+        check_deadline()?;
         for (stacks, terminals_disallowed) in gss.partition_by_accumulator() {
+            check_deadline()?;
             let initial_prune_guard = InitialPruneGuard::new(
                 state.constraint,
                 tokenizer_state,
@@ -719,6 +773,7 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
             if initial_prune_guard.is_passed() {
                 let mut partition = vocab.cached_continuation_partition(tokenizer_state);
                 if partition.is_none()
+                    && deadline.is_none()
                     && lazy_continuation_builds_remaining != 0
                     && should_lazy_build_continuation_partition(
                         state.constraint,
@@ -738,6 +793,7 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
                     let mut admitted_groups = vec![false; partition.groups.len()];
                     let mut admitted_tokens = 0usize;
                     for (group_id, group) in partition.groups.iter().enumerate() {
+                        check_deadline()?;
                         let residual_admitted = group.end_states.iter().any(|&end_state| {
                             token_boundary_allowed_cached(
                                 state.constraint,
@@ -843,6 +899,7 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
     }
 
     while let Some(current) = traversal.pop() {
+        check_deadline()?;
         work_items += 1;
         let trie = &tries[current.trie_index];
         let node = trie.node(current.node);
@@ -918,6 +975,7 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
         }
 
         for edge in trie.children(current.node) {
+            check_deadline()?;
             if let Some(ContinuationFilter::Narrow {
                 partition_index,
                 required_groups,
@@ -943,9 +1001,11 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
             segment_stack.push((0usize, current.tokenizer_state, current.gss.clone()));
 
             while let Some((position, tokenizer_state, gss)) = segment_stack.pop() {
+                check_deadline()?;
                 lexer_executions += 1;
                 let execution = lexer_scan_cache
-                    .execute_from_state_all_widths(&segment[position..], tokenizer_state);
+                    .execute_from_state_all_widths(&segment[position..], tokenizer_state)?;
+                check_deadline()?;
 
                 for matched in &execution.matches {
                     debug_assert!(matched.width > 0);
@@ -1017,6 +1077,7 @@ pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
             total_started_at.elapsed().as_secs_f64() * 1000.0,
         );
     }
+    Ok(())
 }
 
 #[cfg(test)]
