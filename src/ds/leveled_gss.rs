@@ -4741,6 +4741,33 @@ mod tests {
     }
 
     #[test]
+    fn to_stacks_limit_stops_compressed_path_explosion() {
+        let mut lower = Arc::new(Lower::General {
+            children: CompactMap::new(),
+            empty: true,
+            max_depth: 0,
+        });
+        for depth in 0_u32..40 {
+            let mut children = CompactMap::new();
+            let child = CompactOrdMap::unit(depth, lower.clone());
+            children.insert(0_u32, child.clone());
+            children.insert(1_u32, child);
+            lower = Arc::new(Lower::General {
+                children,
+                empty: false,
+                max_depth: depth + 1,
+            });
+        }
+        let gss = LeveledGSS {
+            inner: new_interface(lower, TestAcc(0)),
+        };
+
+        // The DAG has only 41 Lower nodes but represents 2^40 concrete paths.
+        // The explicit limit must stop after discovering the third path.
+        assert!(gss.to_stacks(2).is_none());
+    }
+
+    #[test]
     fn bounded_single_stack_accepts_deterministic_general_chain() {
         let floor = Arc::new(Lower::General {
             children: CompactMap::new(),
