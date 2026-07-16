@@ -6,6 +6,7 @@
 
 use crate::automata::lexer::Lexer;
 pub(crate) mod classify;
+mod finalize_ignore;
 pub(crate) mod grammar_helpers;
 pub(crate) mod l1;
 pub(crate) mod l2p;
@@ -28,6 +29,7 @@ use crate::grammar::flat::TerminalID;
 use crate::Vocab;
 
 use classify::classify_vocab_char_type;
+use finalize_ignore::erase_ignore_after_ti;
 use grammar_helpers::{compute_always_allowed_follows, ignore_transparent_disallowed_follows};
 use l2p::equivalence_analysis::state_equivalence::{
     resolve_global_pipeline_config, run_state_equivalence_pipeline, StateEquivalenceScope,
@@ -714,16 +716,25 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
         .map(|(_, profile)| *profile)
         .max_by(|left, right| left.global_merge_ms.total_cmp(&right.global_merge_ms))
         .unwrap_or_default();
+    let post_ti_ignore_started_at = Instant::now();
+    let erase_family_ignore = |family: Option<(MappedArtifact<TerminalAutomaton>, TerminalDwaPhaseProfile)>| {
+        family.map(|(family, _)| {
+            let (automaton, id_map) = family.into_parts();
+            MappedArtifact::new(erase_ignore_after_ti(automaton, ignore_terminal), id_map)
+        })
+    };
     let terminal_families = TerminalDwaFamilies {
-        l1: l1_family.map(|(family, _)| family),
-        l2p: l2p_family.map(|(family, _)| family),
+        l1: erase_family_ignore(l1_family),
+        l2p: erase_family_ignore(l2p_family),
         special: None,
     };
+    let post_ti_ignore_ms = post_ti_ignore_started_at.elapsed().as_secs_f64() * 1000.0;
     let merge_ms = family_merge_wall_ms;
 
     let post_merge_bookkeeping_started_at = Instant::now();
     profile.add_assign(dominant_partition_profile);
     profile.add_assign(dominant_family_profile);
+    profile.terminal_dwa_ms += post_ti_ignore_ms;
     profile.global_merge_ms = if did_global_merge { merge_ms } else { 0.0 };
     let post_merge_bookkeeping_ms =
         post_merge_bookkeeping_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -735,6 +746,7 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
         + partition_build_wall_ms
         + partition_result_finalize_ms
         + merge_ms
+        + post_ti_ignore_ms
         + post_merge_bookkeeping_ms;
     let timing_residual_ms = (split_terminal_dwa_total_ms - accounted_wall_ms).max(0.0);
 
@@ -767,7 +779,7 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
             split_terminal_dwa_total_ms,
         );
         eprintln!(
-            "[glrmask/profile][split_terminal_dwa_wall] scheduler={} stage_setup_ms={:.3} partition_vocab_ms={:.3} shared_cache_setup_ms={:.3} partition_build_wall_ms={:.3} partition_result_finalize_ms={:.3} family_merge_wall_ms={:.3} global_merge_ms={:.3} post_merge_bookkeeping_ms={:.3} accounted_wall_ms={:.3} timing_residual_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][split_terminal_dwa_wall] scheduler={} stage_setup_ms={:.3} partition_vocab_ms={:.3} shared_cache_setup_ms={:.3} partition_build_wall_ms={:.3} partition_result_finalize_ms={:.3} family_merge_wall_ms={:.3} global_merge_ms={:.3} post_ti_ignore_ms={:.3} post_merge_bookkeeping_ms={:.3} accounted_wall_ms={:.3} timing_residual_ms={:.3} total_ms={:.3}",
             if serial_profile_partition_schedule { "serial_profile_1t" } else { "rayon" },
             stage_setup_ms,
             partition_vocab_ms,
@@ -776,6 +788,7 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
             partition_result_finalize_ms,
             family_merge_wall_ms,
             merge_ms,
+            post_ti_ignore_ms,
             post_merge_bookkeeping_ms,
             accounted_wall_ms,
             timing_residual_ms,
@@ -822,8 +835,13 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
         .into_iter()
         .map(|family| {
             let (automaton, id_map) = family.into_parts();
-            let TerminalAutomaton::Dwa(dwa) = automaton else {
-                panic!("terminal family builder returned a non-DWA automaton")
+            let dwa = match automaton {
+                TerminalAutomaton::Dwa(dwa) => dwa,
+                TerminalAutomaton::TokenDeterministicNwa(nwa)
+                | TerminalAutomaton::EpsilonNwa(nwa) => {
+                    crate::automata::weighted::determinize::determinize(&nwa)
+                        .expect("terminal family compatibility merge requires an acyclic NWA")
+                }
             };
             MappedArtifact::new(dwa, id_map)
         })

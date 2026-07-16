@@ -257,6 +257,7 @@ struct Branch {
 #[derive(Debug, Clone)]
 struct StateSummary {
     final_weight: Option<Weight>,
+    epsilon_branches: Vec<(u32, Weight)>,
     branches: Vec<Branch>,
 }
 
@@ -392,6 +393,16 @@ fn group_terminal_edges_by_target(
                 }
             }
         }
+        TerminalAutomaton::EpsilonNwa(nwa) => {
+            let Some(state) = nwa.states().get(state_id as usize) else {
+                return bundles_by_target;
+            };
+            for (&label, branches) in &state.transitions {
+                for (target, weight) in branches {
+                    add(*target, label, weight);
+                }
+            }
+        }
     }
 
     bundles_by_target
@@ -406,10 +417,25 @@ fn terminal_state_final_weight(
             .states()
             .get(state_id)
             .and_then(|state| state.final_weight.clone()),
-        TerminalAutomaton::TokenDeterministicNwa(nwa) => nwa
+        TerminalAutomaton::TokenDeterministicNwa(nwa)
+        | TerminalAutomaton::EpsilonNwa(nwa) => nwa
             .states()
             .get(state_id)
             .and_then(|state| state.final_weight.clone()),
+    }
+}
+
+fn terminal_state_epsilon_branches(
+    terminal_automaton: &TerminalAutomaton,
+    state_id: usize,
+) -> Vec<(u32, Weight)> {
+    match terminal_automaton {
+        TerminalAutomaton::EpsilonNwa(nwa) => nwa
+            .states()
+            .get(state_id)
+            .map(|state| state.epsilons.clone())
+            .unwrap_or_default(),
+        TerminalAutomaton::Dwa(_) | TerminalAutomaton::TokenDeterministicNwa(_) => Vec::new(),
     }
 }
 
@@ -471,6 +497,7 @@ fn build_state_summaries(
     let states = (0..state_count)
         .map(|state_id| StateSummary {
             final_weight: terminal_state_final_weight(terminal_automaton, state_id),
+            epsilon_branches: terminal_state_epsilon_branches(terminal_automaton, state_id),
             branches: std::mem::take(&mut branches_by_state[state_id]),
         })
         .collect();
@@ -2153,6 +2180,12 @@ fn compute_productive_terminal_states(summaries: &StateSummaries) -> Vec<bool> {
             worklist.push_back(state_id as u32);
         }
 
+        for (target, weight) in &state.epsilon_branches {
+            if !weight.is_empty() && (*target as usize) < states.len() {
+                reverse_edges[*target as usize].push(state_id as u32);
+            }
+        }
+
         for branch in &state.branches {
             if (branch.target as usize) < states.len()
                 && summaries
@@ -2354,7 +2387,10 @@ fn build_parser_nwa_from_terminal_dwa(
     let mut compose_detail = ParserDwaComposeDetailProfile {
         total_states: states.len(),
         productive_states: productive.iter().filter(|&&is_productive| is_productive).count(),
-        total_branches: states.iter().map(|state| state.branches.len()).sum(),
+        total_branches: states
+            .iter()
+            .map(|state| state.epsilon_branches.len() + state.branches.len())
+            .sum(),
         productive_branches: 0,
         unique_bundles: summaries.unique_bundles.len(),
         accepting_bundles: summaries.bundle_accepts.iter().filter(|&&accepts| accepts).count(),
@@ -2435,6 +2471,22 @@ fn build_parser_nwa_from_terminal_dwa(
         }
         let from = continuation_states[state_id];
         assert_ne!(from, u32::MAX, "missing parser-DWA continuation state");
+
+        for (target, weight) in &state.epsilon_branches {
+            let target_idx = *target as usize;
+            if weight.is_empty() || !productive.get(target_idx).copied().unwrap_or(false) {
+                continue;
+            }
+            let target_continuation = continuation_states[target_idx];
+            assert_ne!(
+                target_continuation,
+                u32::MAX,
+                "missing parser-DWA epsilon target continuation state",
+            );
+            arena.add_epsilon(from, target_continuation, weight.clone());
+            compose_detail.productive_branches += 1;
+            compose_detail.epsilon_edges_added += 1;
+        }
 
         for branch in &state.branches {
             let target_idx = branch.target as usize;

@@ -103,7 +103,7 @@ nt start ::= 'if' '(' 'true' ')' ;
 }
 
 #[test]
-fn glrm_initial_ignore_token_uses_a_noop_template() {
+fn glrm_initial_ignore_is_epsiloned_after_ti() {
     let vocab = Vocab::new(
         vec![
             (0, b" ".to_vec()),
@@ -136,7 +136,7 @@ nt start ::= 'a' ;
     let mut combined_token_state = constraint.start();
     assert!(
         token_allowed(&combined_token_state.mask(), 2),
-        "a token beginning with ignore then 'a' must traverse the labelled initial ignore edge"
+        "a token beginning with ignore then 'a' must survive post-TI ignore epsilon conversion"
     );
     combined_token_state.commit_token(2).unwrap();
 }

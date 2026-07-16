@@ -18,27 +18,32 @@ pub enum TerminalAutomaton {
     Dwa(DWA),
     /// An epsilon-free NWA that is deterministic over `(label, token)`.
     TokenDeterministicNwa(NWA),
+    /// A terminal NWA with weighted epsilon edges introduced only after all
+    /// terminal-interchangeability expansion is complete.
+    EpsilonNwa(NWA),
 }
 
 impl TerminalAutomaton {
     pub fn num_states(&self) -> usize {
         match self {
             Self::Dwa(dwa) => dwa.states().len(),
-            Self::TokenDeterministicNwa(nwa) => nwa.states().len(),
+            Self::TokenDeterministicNwa(nwa) | Self::EpsilonNwa(nwa) => nwa.states().len(),
         }
     }
 
     pub fn start_states(&self) -> Vec<u32> {
         match self {
             Self::Dwa(dwa) => vec![dwa.start_state()],
-            Self::TokenDeterministicNwa(nwa) => nwa.start_states().to_vec(),
+            Self::TokenDeterministicNwa(nwa) | Self::EpsilonNwa(nwa) => {
+                nwa.start_states().to_vec()
+            }
         }
     }
 
     pub fn stats(&self) -> DwaStats {
         match self {
             Self::Dwa(dwa) => dwa.stats(),
-            Self::TokenDeterministicNwa(nwa) => {
+            Self::TokenDeterministicNwa(nwa) | Self::EpsilonNwa(nwa) => {
                 let mut transition_pairs = 0usize;
                 let mut seen_weight_ptrs = BTreeSet::new();
                 let mut seen_rangeset_ptrs = BTreeSet::new();

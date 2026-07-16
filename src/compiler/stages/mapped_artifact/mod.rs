@@ -88,14 +88,14 @@ impl WeightRefs for TerminalAutomaton {
     fn weight_refs(&self) -> Vec<&Weight> {
         match self {
             Self::Dwa(dwa) => dwa.weight_refs(),
-            Self::TokenDeterministicNwa(nwa) => nwa.weight_refs(),
+            Self::TokenDeterministicNwa(nwa) | Self::EpsilonNwa(nwa) => nwa.weight_refs(),
         }
     }
 
     fn weight_refs_mut(&mut self) -> Vec<&mut Weight> {
         match self {
             Self::Dwa(dwa) => dwa.weight_refs_mut(),
-            Self::TokenDeterministicNwa(nwa) => nwa.weight_refs_mut(),
+            Self::TokenDeterministicNwa(nwa) | Self::EpsilonNwa(nwa) => nwa.weight_refs_mut(),
         }
     }
 }
