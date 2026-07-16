@@ -1,67 +1,61 @@
 # GLRMask
 
-**GLRMask: grammar-constrained token masking for context-free languages.**
+GLRMask is a grammar-constrained generation library designed for high-throughput decoding. It moves grammar and vocabulary analysis ahead of time wherever possible, minimizing work during generation and keeping next-token mask computation fast and predictable, especially at the tail and for complex grammars.
 
-GLRMask compiles a grammar together with an LLM vocabulary into an immutable `Constraint`, then produces the next-token mask for each decoding step and advances the constraint state as sampled tokens are committed. The Rust crate, PyPI distribution, and Python import are all named **`glrmask`**:
+Compile a grammar or JSON Schema against the exact byte vocabulary of a model, create one state for each generation stream, and query that state before every sample. A token is admitted only when appending its bytes leaves at least one valid completion under the constraint.
 
-```text
-Rust crate:    glrmask
-PyPI package:  glrmask
-Python import: glrmask
-```
+GLRMask provides:
 
-The core contract is tokenization-complete existential admissibility. For a current byte prefix `u`, a vocabulary token `v` with byte spelling `β(v)`, and compiled language `L`, the mask admits `v` exactly when some continuation `w` exists such that `u β(v) w ∈ L`. A token may therefore cross lexer-token or grammar-terminal boundaries and still be admissible.
+- EBNF and Lark grammar input;
+- a pragmatic JSON Schema subset for structured generation;
+- recursive and ambiguous context-free grammars;
+- token-level masking even when model tokens cross lexer or grammar boundaries;
+- reusable and serializable compiled constraints;
+- Python and Rust APIs.
 
-GLRMask supports general context-free grammars, not only regular languages, and moves much of the stack-dependent token-admissibility work out of the per-token mask query and into compilation.
+## Performance at a glance
 
-## What it supports
+A completed CFA engineering run covered 10,263 problems. On the exact 2,111,184 token positions shared by GLRMask native and LLGuidance native, the paired mask-plus-commit latency was:
 
-- **Tokenization-complete grammar-constrained masking.** For the compiled grammar and byte-backed vocabulary, a token is admitted exactly when appending its bytes leaves at least one completion in the compiled language.
-- **General context-free constraints.** Recursive and ambiguous grammar structure is supported through the parser-based compilation and runtime.
-- **Grammar inputs.** EBNF and Lark grammars are supported directly.
-- **JSON Schema.** A pragmatic JSON Schema subset is supported, with documented semantic deviations. Full JSON Schema conformance is **not** claimed.
-- **Compile once, run incrementally.** A compiled `Constraint` is immutable; `constraint.start()` creates mutable state for one generation stream.
-- **Serializable constraints.** Compiled constraints can be saved and loaded without recompiling the source grammar.
-- **Python and Rust APIs.** The same core compiler and runtime are exposed through the `glrmask` Rust crate and Python package.
+| Paired token latency | GLRMask native | LLGuidance native |
+|---|---:|---:|
+| Median | **3.498 µs** | 13.718 µs |
+| p99 | **10.522 µs** | 250.070 µs |
+| p99.9 | **15.692 µs** | 957.235 µs |
+| Maximum | **49.539 µs** | 8,050.274 µs |
+
+![Paired mask-plus-commit latency for GLRMask native and LLGuidance native on a logarithmic scale](docs/assets/paired-token-latency-2026-07-16.svg)
+
+GLRMask was faster at 99.31% of those shared token positions. The tradeoff was compilation time: median successful build time was 50.963 ms for GLRMask native and 0.905 ms for LLGuidance native.
+
+These are measurements from one recorded engineering run, not hardware-independent guarantees. The run used three GLRMask revisions rather than the immutable public v0.1.0 tag. See the [full benchmark report](docs/benchmark-full-corpus-2026-07-16.md) for coverage, build outcomes, methodology, discrepancy bounds, and interpretation limits.
 
 ## Installation
 
 ### Python
 
-Install the v0.1 release from PyPI:
-
 ```bash
 python -m pip install glrmask==0.1.0
 ```
 
-On platforms with a published wheel, `pip` installs the native extension directly. Building from source requires Python, a Rust toolchain, and the platform's native linker/build tools. From a source checkout:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install ./python
-```
-
-`pip` installs the Python runtime dependency (`numpy`) and uses Maturin in an isolated build environment when a source build is required.
+Published wheels contain the native extension. Building from source requires Python, a Rust toolchain, and the platform's native linker and build tools.
 
 ### Rust
-
-Add the v0.1 crate from crates.io:
 
 ```bash
 cargo add glrmask@0.1.0
 ```
 
-or add it directly to `Cargo.toml`:
+or add the dependency directly:
 
 ```toml
 [dependencies]
 glrmask = "0.1.0"
 ```
 
-## Minimal Python example
+## Python quickstart
 
-A vocabulary maps the exact token bytes used by the model to token IDs. Compile a grammar against that vocabulary, create a state, ask for the next-token mask, and commit the sampled token:
+A GLRMask vocabulary maps token IDs to the exact bytes emitted by the tokenizer. This example uses a deliberately small vocabulary; a real integration builds the mapping from the model tokenizer.
 
 ```python
 import glrmask
@@ -90,62 +84,42 @@ state.commit_token(2)
 assert state.is_finished()
 ```
 
-The Python `mask()` convenience method returns a Boolean NumPy array in original token-ID space. For serving code that already owns a mask buffer, `fill_mask(...)` is also available.
+In a model loop, apply the mask before sampling and then commit the sampled token:
 
-The same example is kept as an executable file:
-
-```bash
-python examples/python_quickstart.py
+```python
+mask = state.mask()
+logits[~mask] = -float("inf")
+token_id = sample(logits)
+state.commit_token(int(token_id))
 ```
 
-## Rust quickstart
+`mask()` returns a Boolean NumPy array in the original token-ID space. Serving code that already owns a packed mask buffer can use `fill_mask(...)` instead.
 
-The Rust API returns a packed `u32` bitmask. Bit `token_id % 32` in word `token_id / 32` indicates whether that token is currently admissible.
+The executable example is in [`examples/python_quickstart.py`](examples/python_quickstart.py).
 
-```rust
-use glrmask::{Constraint, Vocab};
+## Compilation modes
 
-fn token_allowed(mask: &[u32], token_id: usize) -> bool {
-    let word = token_id / 32;
-    word < mask.len() && ((mask[word] >> (token_id % 32)) & 1) != 0
-}
+GLRMask exposes two constraint types with the same basic state lifecycle:
 
-fn main() {
-    let vocab = Vocab::new(
-        vec![
-            (0, b"hello".to_vec()),
-            (1, b" ".to_vec()),
-            (2, b"world".to_vec()),
-        ],
-        None,
-    );
+| Mode | Compilation strategy | Runtime tradeoff | Best fit |
+|---|---|---|---|
+| `Constraint` | Performs extensive grammar and vocabulary analysis ahead of time | Fast, tightly bounded mask computation | Reused constraints and throughput-sensitive serving |
+| `DynamicConstraint` | Skips much of that precomputation | Faster startup, but slower and less predictable masks | One-shot constraints where initial latency dominates |
 
-    let constraint = Constraint::from_ebnf(
-        r#"start ::= "hello" " " "world""#,
-        &vocab,
-    )
-    .unwrap();
+In the full-corpus engineering run, `Constraint` had a 50.963 ms median successful build time and a 10.521 µs p99 mask-plus-commit latency. `DynamicConstraint` had a 4.550 ms median successful build time, but a 23.122 ms p99 mask-plus-commit latency over its smaller measured cohort.
 
-    let mut state = constraint.start();
-    assert!(token_allowed(&state.mask(), 0));
-    state.commit_token(0).unwrap();
-    assert!(token_allowed(&state.mask(), 1));
-    state.commit_token(1).unwrap();
-    assert!(token_allowed(&state.mask(), 2));
-    state.commit_token(2).unwrap();
-    assert!(state.is_finished());
-}
+The constructors are parallel:
+
+```python
+static = glrmask.Constraint.from_json_schema(schema, vocab)
+dynamic = glrmask.DynamicConstraint.from_json_schema(schema, vocab)
 ```
 
-The repository version can be run with:
-
-```bash
-cargo run --example ebnf
-```
+Choose based on the lifetime of the constraint, not compilation time alone. For constraints reused across requests or generation streams, the default ahead-of-time mode is normally the better fit.
 
 ## Structured output with JSON Schema
 
-JSON Schema input is useful for tool arguments and other structured outputs. This small example constrains one object field to an enum and shows the token mask changing as JSON fragments are committed:
+JSON Schema input is useful for tool arguments and other structured outputs:
 
 ```python
 import glrmask
@@ -173,127 +147,176 @@ state = constraint.start()
 
 assert state.mask().tolist() == [True, False, False, False]
 state.commit_token(0)
+
 assert state.mask().tolist() == [False, True, True, False]
 state.commit_token(1)
+
 assert state.mask().tolist() == [False, False, False, True]
 state.commit_token(3)
+
 assert state.is_finished()
 ```
 
-**JSON Schema support is a pragmatic subset, not full specification conformance.** Unsupported constructs may be rejected, and some documented cases deliberately broaden or restrict the accepted instances for tractability. In particular, some expensive patterned-string cases may drop an upper `maxLength` bound, and open-object lowering can impose ordering restrictions on additional or pattern-matched properties. Read [JSON Schema semantic deviations](docs/json-schema-semantic-deviations.md) before relying on exact equivalence to a source schema.
+JSON Schema support is deliberately pragmatic rather than fully specification-conformant. Unsupported constructs may be rejected, and some documented cases broaden or restrict the accepted instance language to keep compilation tractable. Review [JSON Schema semantic deviations](docs/json-schema-semantic-deviations.md) before relying on exact equivalence to a source schema.
 
-A small Rust JSON Schema example is also available:
+Run the Rust JSON Schema example with:
 
 ```bash
 cargo run --example json_schema
 ```
 
-## A genuinely context-free example
+## Token-level mask semantics
 
-The classic language `a^n b^n` for `n >= 1` is not regular. It requires matching an unbounded number of `a` symbols with the same number of following `b` symbols. A finite-state constraint cannot represent the language exactly for unbounded `n`; a context-free grammar can:
+Model tokens do not generally line up with lexer tokens or grammar terminals. A single model token may:
+
+- end partway through a grammar terminal;
+- complete several terminals;
+- cross lexer boundaries;
+- produce different terminal sequences from different lexer states.
+
+GLRMask defines admissibility over model tokens. Let `u` be the bytes generated so far, `v` a vocabulary token, `β(v)` its byte spelling, and `L` the compiled language. The mask admits `v` when some continuation `w` exists such that:
+
+```text
+u β(v) w ∈ L
+```
+
+The guarantee is therefore about completability: every admitted token preserves at least one path to a complete value accepted by the grammar or schema.
+
+## Context-free grammars
+
+GLRMask is not limited to regular constraints. It supports recursive and ambiguous context-free grammars.
+
+For example, the language `a^n b^n` for `n >= 1` requires the number of `b` symbols to match an unbounded number of preceding `a` symbols:
 
 ```text
 start ::= "a" start "b" | "a" "b"
 ```
 
-With vocabulary tokens `a` and `b`, after the first `b` is committed the grammar no longer admits another `a`; it must close exactly the number of recursive levels that were opened.
+After the first `b` is committed, another `a` is no longer admissible. Generation must close exactly the recursive depth already opened.
+
+Run the complete example with:
 
 ```bash
 cargo run --example context_free
 ```
 
-See [`examples/context_free.rs`](examples/context_free.rs) for the complete executable example.
+## Grammar inputs
 
-## Precompiled constraints and runtime state
-
-Compilation is vocabulary-specific: the compiler reasons about the actual token byte strings that may be sampled. A constraint built for one tokenizer vocabulary must not be reused with a different vocabulary.
-
-For repeated use, compile once and serialize the result:
-
-```rust
-let bytes = constraint.save();
-let restored = Constraint::load(&bytes).unwrap();
-let mut state = restored.start();
-```
-
-The repository also contains an execution-only runtime crate for loading versioned, vocabulary-specific runtime artifacts without carrying the grammar import and compilation pipeline into the serving process.
-
-## How it works
-
-At a high level, token validity depends on two interacting questions:
-
-1. **Lexical:** from the current lexer state, what grammar-terminal sequences can a candidate LLM token produce, including tokens that cross terminal boundaries?
-2. **Syntactic:** given the current parser stack, which of those terminal sequences can be accepted while keeping the grammar completable?
-
-`glrmask` resolves much of that interaction ahead of time:
-
-1. The input grammar is parsed and lowered, and the compiler builds lexical automata plus a GLR parser table.
-2. For the concrete LLM vocabulary, token bytes are related to the terminal sequences they can produce from relevant lexer states.
-3. The compiler combines that lexical information with the parser's per-terminal stack effects and builds a deterministic weighted automaton over parser-stack symbols (internally, the **Parser DWA**). Its Boolean weights encode the lexer-state/token pairs compatible with each path.
-4. At runtime, constraint state tracks the active lexer state or states together with reachable parser stacks. A mask query evaluates the compiled automaton against those stacks and materializes the surviving vocabulary tokens. Committing a token advances the lexical and parser state for the next step.
-
-The key design tradeoff is therefore deliberate: spend more work when a grammar and vocabulary are compiled so that repeated online mask queries can reuse a precomputed representation instead of reconstructing the same stack-dependent candidate behavior from scratch.
-
-## Performance and benchmarks
-
-Compilation cost and online decoding cost should be measured separately. The design is aimed at workloads where a compiled grammar is reused across many mask queries or generation streams; a one-shot grammar may value compilation latency differently from a long-running serving workload.
-
-A 10,263-problem CFA engineering run measured the following runtime distribution on the exact **2,111,184 token positions** shared by GLRMask native and LLGuidance native:
-
-| Paired TBM | GLRMask native | LLGuidance native |
-|---|---:|---:|
-| Median | **3.498 µs** | 13.718 µs |
-| p99 | **10.522 µs** | 250.070 µs |
-| p99.9 | **15.692 µs** | 957.235 µs |
-| Maximum | **49.539 µs** | 8,050.274 µs |
-
-GLRMask native was faster at **99.31%** of those shared token positions. The tradeoff was ahead-of-time build cost: median successful build time was 50.963 ms for GLRMask native and 0.905 ms for LLGuidance native. GLRMask dynamic reduced median build time to 4.550 ms over its smaller measured cohort, but had a 23.122 ms p99 TBM.
-
-Read the [full 10,263-problem report](docs/benchmark-full-corpus-2026-07-16.md) for coverage, build failures, source revisions, methodology, discrepancy bounds, and interpretation limits. This was a resumed engineering run over three `glrmask-main` revisions, not the immutable public `v0.1.0` tag, and dynamic mode covered only the first 4,425 configured problems.
-
-The separate [v0.1 benchmark report](docs/benchmark-0.1.md) describes the bounded 195-problem release benchmark target. The two reports are not interchangeable.
-
-These comparisons are performance measurements, not declarations that one backend is semantic ground truth. Different constrained-decoding systems can intentionally expose different token-admissibility policies, so raw mask disagreements require separate correctness analysis.
-
-## Other API features
-
-### Lark input
+The static and dynamic constraint types accept the same input formats:
 
 ```python
-constraint = glrmask.Constraint.from_lark(lark_source, vocab)
+from_ebnf = glrmask.Constraint.from_ebnf(ebnf_source, vocab)
+from_lark = glrmask.Constraint.from_lark(lark_source, vocab)
+from_schema = glrmask.Constraint.from_json_schema(schema_source, vocab)
 ```
 
-The Rust API provides the corresponding `Constraint::from_lark(...)` constructor.
-
-### Exact LLM token IDs
-
-EBNF, Lark, and GLRM grammars can match an exact LLM token ID with `@token(<id>)`:
+EBNF, Lark, and GLRM grammars can also match an exact model token ID with `@token(<id>)`:
 
 ```text
 start ::= "hello" @token(128009)
 ```
 
-A special-token atom is matched only by committing that exact token ID. Its byte spelling, when present in the vocabulary, does not implicitly match the atom as ordinary bytes.
+The atom matches only that token ID. Its byte spelling does not implicitly match the atom as ordinary grammar text.
 
-### State helpers
+## Reusing and serializing constraints
 
-Rust `ConstraintState` includes:
+Compiled constraints are immutable and vocabulary-specific. Build one constraint, then create an independent mutable state for each generation stream:
 
-- `mask()` / `fill_mask(...)`
-- `commit_token(token_id)`
-- `commit_tokens(&token_ids)`
-- `commit_bytes(bytes)`
-- `force()`
-- `is_complete()` / `is_finished()`
+```python
+constraint = glrmask.Constraint.from_ebnf(grammar, vocab)
 
-Python exposes the corresponding incremental operations, with `mask()` returning a Boolean NumPy array.
+state_a = constraint.start()
+state_b = constraint.start()
+```
+
+Constraints can be serialized and restored without recompiling the source grammar:
+
+```python
+artifact = constraint.save()
+restored = glrmask.Constraint.load(artifact, vocab)
+state = restored.start()
+```
+
+Do not load or reuse a compiled constraint with a different tokenizer vocabulary or token-to-byte mapping.
+
+The repository also contains an execution-only [`glrmask-runtime`](glrmask-runtime) crate for serving processes that load versioned runtime artifacts without carrying the grammar import and compilation pipeline.
+
+## Rust quickstart
+
+The Rust API returns a packed `u32` bitmask. Bit `token_id % 32` in word `token_id / 32` indicates whether a token is admitted.
+
+```rust
+use glrmask::{Constraint, Vocab};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let vocab = Vocab::new(
+        vec![
+            (0, b"hello".to_vec()),
+            (1, b" ".to_vec()),
+            (2, b"world".to_vec()),
+        ],
+        None,
+    );
+
+    let constraint = Constraint::from_ebnf(
+        r#"start ::= "hello" " " "world""#,
+        &vocab,
+    )?;
+
+    let mut state = constraint.start();
+    let mask = state.mask();
+    assert_ne!(mask[0] & 1, 0);
+    state.commit_token(0)?;
+
+    Ok(())
+}
+```
+
+The complete executable example is in [`examples/ebnf.rs`](examples/ebnf.rs):
+
+```bash
+cargo run --example ebnf
+```
+
+Compiled Rust constraints use `Constraint::save()` and `Constraint::load(...)` for serialization.
+
+## State API
+
+The main incremental operations are:
+
+- `mask()` or `fill_mask(...)` to produce the current token mask;
+- `commit_token(token_id)` or `commit_tokens(...)` to advance with sampled tokens;
+- `commit_bytes(...)` to advance directly with bytes;
+- `force()` to inspect a forced continuation;
+- `is_complete()` or `is_finished()` to test whether the current output can terminate.
+
+In v0.1, `is_finished()` is an alias of `is_complete()`.
+
+## Benchmark details
+
+Compilation latency and runtime latency are separate measurements. The default mode deliberately spends more time when a grammar and vocabulary are compiled so that repeated mask queries can reuse that work.
+
+The [10,263-problem full-corpus report](docs/benchmark-full-corpus-2026-07-16.md) records:
+
+- source revisions and framework coverage;
+- successful and failed builds;
+- build-time and time-to-first-mask distributions;
+- mask, commit, and combined per-token latency;
+- paired runtime comparisons;
+- token-mask discrepancy bounds;
+- artifact hashes and reproduction instructions.
+
+The separate [v0.1 benchmark report](docs/benchmark-0.1.md) describes a bounded 195-problem release benchmark target. The two reports use different scopes and should not be treated as interchangeable.
+
+Performance comparisons do not establish semantic equivalence or correctness. Constrained-decoding systems can intentionally expose different token-admissibility policies, so raw mask disagreements require separate language-level analysis.
 
 ## Limitations
 
-- **JSON Schema is not fully conformant.** It is a pragmatic subset with [documented semantic deviations](docs/json-schema-semantic-deviations.md); some unsupported constructs error, while some documented cases broaden or restrict semantics.
+- **JSON Schema is not fully specification-conformant.** GLRMask supports a pragmatic subset with [documented semantic deviations](docs/json-schema-semantic-deviations.md).
 - **Compiled constraints are vocabulary-specific.** Recompile when the tokenizer vocabulary or token-byte mapping changes.
-- **Benchmark results are environment-specific.** The [v0.1 benchmark](docs/benchmark-0.1.md) records one bounded benchmark target on one machine; it is not the full corpus or a hardware-independent guarantee.
-- **Serving-framework integrations are not part of v0.1.** GLRMask v0.1 ships the compiler/runtime library and public Rust/Python APIs. Direct integrations with serving systems such as vLLM are follow-up work.
+- **Compilation and mask latency are workload-dependent.** Grammar structure, schema features, vocabulary size, hardware, build configuration, and cache state can materially affect both.
+- **The full-corpus benchmark is an engineering run, not a release-tag benchmark.** It spans three measured GLRMask revisions and gives dynamic mode a smaller coverage cohort.
+- **Direct serving-framework integrations are not included in v0.1.** The release provides the compiler/runtime library and public Python and Rust APIs.
 
 ## Examples
 
