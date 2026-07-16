@@ -2675,14 +2675,14 @@ const EXACT_ADMISSION_KEY_MAX_DEPTH: u32 = 256;
 type ExactAdmissionStackKey = Vec<Vec<u32>>;
 type ExactAdmissionShape = LeveledGSS<u32, ()>;
 
-struct ExactAdmissionVisited {
-    shape: ExactAdmissionShape,
-    stack_key: Option<ExactAdmissionStackKey>,
+#[derive(PartialEq, Eq)]
+enum ExactAdmissionKey {
+    Stacks(ExactAdmissionStackKey),
+    Shape(ExactAdmissionShape),
 }
 
 struct ExactAdmissionVisitedAny {
-    shape: ExactAdmissionShape,
-    stack_key: Option<ExactAdmissionStackKey>,
+    key: ExactAdmissionKey,
     terminals: BitSet,
 }
 
@@ -2700,35 +2700,19 @@ fn exact_admission_stack_key(frontier: &ParserGSS) -> Option<ExactAdmissionStack
     Some(key)
 }
 
-fn exact_admission_shape(frontier: &ParserGSS) -> ExactAdmissionShape {
-    frontier.apply(|_| ())
-}
-
-fn exact_admission_visited_matches(
-    visited: &ExactAdmissionVisited,
-    shape: &ExactAdmissionShape,
-    stack_key: Option<&ExactAdmissionStackKey>,
-) -> bool {
-    stack_key
-        .zip(visited.stack_key.as_ref())
-        .is_some_and(|(left, right)| left == right)
-        || &visited.shape == shape
-}
-
-fn exact_admission_visited_any_matches(
-    visited: &ExactAdmissionVisitedAny,
-    shape: &ExactAdmissionShape,
-    stack_key: Option<&ExactAdmissionStackKey>,
-) -> bool {
-    stack_key
-        .zip(visited.stack_key.as_ref())
-        .is_some_and(|(left, right)| left == right)
-        || &visited.shape == shape
+fn exact_admission_key(frontier: &ParserGSS) -> ExactAdmissionKey {
+    if let Some(stack_key) = exact_admission_stack_key(frontier) {
+        ExactAdmissionKey::Stacks(stack_key)
+    } else {
+        // Only pay to erase accumulators and compare the shared GSS shape when
+        // the explicit semantic key exceeds its path or depth budget.
+        ExactAdmissionKey::Shape(frontier.apply(|_| ()))
+    }
 }
 
 fn exact_admission_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> bool {
     let mut queue = VecDeque::<ParserGSS>::new();
-    let mut visited = Vec::<ExactAdmissionVisited>::new();
+    let mut visited = Vec::<ExactAdmissionKey>::new();
 
     for state in stack.peek_values() {
         exact_admission_enqueue_frontier(stack.isolate(Some(state)), &mut queue, &mut visited);
@@ -3012,11 +2996,8 @@ fn exact_admission_enqueue_frontier_any(
         return;
     }
 
-    let shape = exact_admission_shape(&frontier);
-    let stack_key = exact_admission_stack_key(&frontier);
-    let new_terminals = if let Some(seen) = visited.iter_mut().find(|seen| {
-        exact_admission_visited_any_matches(seen, &shape, stack_key.as_ref())
-    }) {
+    let key = exact_admission_key(&frontier);
+    let new_terminals = if let Some(seen) = visited.iter_mut().find(|seen| seen.key == key) {
         let delta = terminals.difference(&seen.terminals);
         if delta.is_empty() {
             return;
@@ -3025,8 +3006,7 @@ fn exact_admission_enqueue_frontier_any(
         delta
     } else {
         visited.push(ExactAdmissionVisitedAny {
-            shape,
-            stack_key,
+            key,
             terminals: terminals.clone(),
         });
         terminals.clone()
@@ -3068,7 +3048,7 @@ fn exact_admission_enqueue_reduce(
     nt: u32,
     rhs_len: usize,
     queue: &mut VecDeque<ParserGSS>,
-    visited: &mut Vec<ExactAdmissionVisited>,
+    visited: &mut Vec<ExactAdmissionKey>,
 ) {
     for (base, target, is_replace) in
         reduce_branches_from_isolated(table, isolated, nt, rhs_len)
@@ -3085,20 +3065,16 @@ fn exact_admission_enqueue_reduce(
 fn exact_admission_enqueue_frontier(
     frontier: ParserGSS,
     queue: &mut VecDeque<ParserGSS>,
-    visited: &mut Vec<ExactAdmissionVisited>,
+    visited: &mut Vec<ExactAdmissionKey>,
 ) {
     if frontier.is_empty() {
         return;
     }
-    let shape = exact_admission_shape(&frontier);
-    let stack_key = exact_admission_stack_key(&frontier);
-    if visited
-        .iter()
-        .any(|seen| exact_admission_visited_matches(seen, &shape, stack_key.as_ref()))
-    {
+    let key = exact_admission_key(&frontier);
+    if visited.contains(&key) {
         return;
     }
-    visited.push(ExactAdmissionVisited { shape, stack_key });
+    visited.push(key);
     queue.push_back(frontier);
 }
 
