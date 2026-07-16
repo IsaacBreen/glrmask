@@ -198,6 +198,50 @@ fn add_target_contribution_profiled(
     }
 }
 
+#[inline]
+fn push_target_contribution_profiled(
+    contribs: &mut TargetContribs,
+    target: u32,
+    add: Weight,
+    detail: Option<&mut ParserDwaDeterminizeDetail>,
+) {
+    if add.is_empty() {
+        return;
+    }
+    let before = contribs.len();
+    contribs.push((target, add));
+    if let Some(detail) = detail {
+        detail.target_contribution_pushes += 1;
+        detail.record_target_contrib_len(before, contribs.len());
+    }
+}
+
+#[inline]
+fn merge_sorted_target_contributions(
+    contribs: &mut TargetContribs,
+    mut detail: Option<&mut ParserDwaDeterminizeDetail>,
+) {
+    if contribs.len() < 2 {
+        return;
+    }
+    let mut write = 0usize;
+    for read in 1..contribs.len() {
+        if contribs[write].0 == contribs[read].0 {
+            let merged = contribs[write].1.union(&contribs[read].1);
+            contribs[write].1 = merged;
+            if let Some(detail) = detail.as_mut() {
+                detail.target_contribution_merges += 1;
+            }
+        } else {
+            write += 1;
+            if write != read {
+                contribs[write] = contribs[read].clone();
+            }
+        }
+    }
+    contribs.truncate(write + 1);
+}
+
 fn extend_target_contribs(dst: &mut TargetContribs, src: &TargetContribs) {
     for (target, weight) in src {
         add_target_contribution(dst, *target, weight.clone());
@@ -232,7 +276,7 @@ struct DeterminizedDwaWithSupports {
 
 #[derive(Debug, Clone)]
 struct CachedClosure {
-    canon: Vec<(u32, Weight)>,
+    to_state: u32,
     edge_weight: Weight,
 }
 
@@ -1072,9 +1116,20 @@ fn determinize_with_supports(
     supports[0] = canon_buf.iter().map(|(state_id, _)| *state_id).collect();
 
     let mut subset_map: FxHashMap<Vec<(u32, usize)>, u32> = FxHashMap::default();
-    let mut worklist: VecDeque<Vec<(u32, Weight)>> = VecDeque::new();
-    subset_map.insert(subset_key(&canon_buf), dwa.start_state());
-    worklist.push_back(canon_buf.clone());
+    // Singleton determinized subsets dominate parser-NWA transitions. Keep an
+    // exact pointer-identity front cache so repeated singleton hits do not
+    // allocate a one-element Vec and hash it through the generic subset map.
+    // The structural subset map remains authoritative for non-singletons.
+    let mut singleton_subsets: FxHashMap<(u32, usize), u32> = FxHashMap::default();
+    let start_key = subset_key(&canon_buf);
+    subset_map.insert(start_key, dwa.start_state());
+    if let [(state_id, weight)] = canon_buf.as_slice() {
+        singleton_subsets.insert((*state_id, weight.ptr_key()), dwa.start_state());
+    }
+    // Carry the already-known DWA state ID with each queued subset. Rebuilding
+    // and hashing the subset key merely to recover `from_state` was pure work.
+    let mut worklist: VecDeque<(u32, Vec<(u32, Weight)>)> = VecDeque::new();
+    worklist.push_back((dwa.start_state(), canon_buf.clone()));
 
     let dense_label_limit = dense_positive_label_limit.map(|n| n as usize).unwrap_or(0);
     let mut dense_raw_targets: Vec<TargetContribs> =
@@ -1099,12 +1154,10 @@ fn determinize_with_supports(
     // and compute final weights in parallel after the main loop.
     let mut deferred_final_entries: Vec<(u32, Vec<(u32, Weight)>)> = Vec::new();
 
-    while let Some(subset_entries) = worklist.pop_front() {
+    while let Some((from_state, subset_entries)) = worklist.pop_front() {
         if let Some(detail) = detail.as_mut() {
             detail.states_processed += 1;
-            detail.subset_key_constructions += 1;
         }
-        let from_state = subset_map[&subset_key(&subset_entries)];
 
         // Save subset entries for deferred parallel final weight computation.
         // Only save entries whose NWA states have final weights.
@@ -1146,7 +1199,12 @@ fn determinize_with_supports(
                     } else {
                         sparse_raw_targets.entry(label).or_default()
                     };
-                    add_target_contribution_profiled(
+                    // Append first, then merge equal targets once after the
+                    // label's contributions have been collected and sorted.
+                    // The old insertion-time linear search paid O(k) per edge
+                    // even though large parser workloads overwhelmingly have
+                    // distinct targets within a label bucket.
+                    push_target_contribution_profiled(
                         target_weights,
                         *target,
                         next_weight,
@@ -1176,6 +1234,7 @@ fn determinize_with_supports(
             }
             let sort_started = detail.as_ref().map(|_| Instant::now());
             contribs.sort_unstable_by_key(|(state_id, _)| *state_id);
+            merge_sorted_target_contributions(&mut contribs, detail.as_mut());
             if let (Some(detail), Some(started_at)) = (detail.as_mut(), sort_started) {
                 detail.contribution_sort_ms += elapsed_ms(started_at);
             }
@@ -1183,14 +1242,9 @@ fn determinize_with_supports(
             if contribs.len() == 1 {
                 let (only_state, only_weight) = &contribs[0];
                 if nwa.states()[*only_state as usize].epsilons.is_empty() {
-                    let key_started = detail.as_ref().map(|_| Instant::now());
-                    key_buf.clear();
-                    key_buf.push((*only_state, only_weight.ptr_key()));
-                    if let (Some(detail), Some(started_at)) = (detail.as_mut(), key_started) {
-                        detail.post_closure_subset_key_ms += elapsed_ms(started_at);
-                    }
+                    let singleton_key = (*only_state, only_weight.ptr_key());
                     let subset_lookup_started = detail.as_ref().map(|_| Instant::now());
-                    let to_state = if let Some(existing) = subset_map.get(&key_buf).copied() {
+                    let to_state = if let Some(existing) = singleton_subsets.get(&singleton_key).copied() {
                         if let Some(detail) = detail.as_mut() {
                             detail.subset_intern_hits += 1;
                         }
@@ -1200,8 +1254,9 @@ fn determinize_with_supports(
                             detail.subset_intern_misses += 1;
                         }
                         let new_state = dwa.add_state();
-                        subset_map.insert(key_buf.clone(), new_state);
-                        worklist.push_back(vec![(*only_state, only_weight.clone())]);
+                        subset_map.insert(vec![singleton_key], new_state);
+                        singleton_subsets.insert(singleton_key, new_state);
+                        worklist.push_back((new_state, vec![(*only_state, only_weight.clone())]));
                         supports.push(vec![*only_state]);
                         new_state
                     };
@@ -1232,92 +1287,117 @@ fn determinize_with_supports(
             }
 
             let closure_lookup_started = detail.as_ref().map(|_| Instant::now());
-            let closure_entry = closure_cache.entry(pre_closure_key.clone());
+            let cached = closure_cache.get(&pre_closure_key).cloned();
             if let (Some(detail), Some(started_at)) = (detail.as_mut(), closure_lookup_started) {
                 detail.closure_lookup_ms += elapsed_ms(started_at);
             }
-            let cached = match closure_entry {
-                Entry::Occupied(entry) => {
-                    if let Some(detail) = detail.as_mut() {
-                        detail.closure_cache_hits += 1;
-                    }
-                    entry.into_mut()
+            if let Some(cached) = cached {
+                if let Some(detail) = detail.as_mut() {
+                    detail.closure_cache_hits += 1;
                 }
-                Entry::Vacant(entry) => {
-                    if let Some(detail) = detail.as_mut() {
-                        detail.closure_cache_misses += 1;
-                    }
-                    let edge_weight_started = detail.as_ref().map(|_| Instant::now());
-                    let edge_weight =
-                        union_cache.union_all(contribs.iter().map(|(_, weight)| weight));
-                    if let (Some(detail), Some(started_at)) =
-                        (detail.as_mut(), edge_weight_started)
-                    {
-                        detail.edge_weight_union_ms += elapsed_ms(started_at);
-                    }
-                    if edge_weight.is_empty() {
-                        return;
-                    }
-                    let mut target_subset: FxHashMap<u32, Weight> = contribs
-                        .iter()
-                        .map(|(state_id, weight)| (*state_id, weight.clone()))
-                        .collect();
-                    let closure_started = detail.as_ref().map(|_| Instant::now());
-                    local_epsilon_closure(
-                        nwa,
-                        &mut weight_by_state,
-                        &mut closure_queue,
-                        &mut target_subset,
-                    );
-                    if let (Some(detail), Some(started_at)) = (detail.as_mut(), closure_started) {
-                        detail.local_epsilon_closure_miss_ms += elapsed_ms(started_at);
-                    }
-                    if target_subset.is_empty() {
-                        return;
-                    }
-                    let mut canon: Vec<(u32, Weight)> = target_subset
-                        .iter()
-                        .filter(|(_, w)| !w.is_empty())
-                        .map(|(id, w)| (*id, w.clone()))
-                        .collect();
-                    canon.sort_unstable_by_key(|(state_id, _)| *state_id);
-                    if canon.is_empty() {
-                        return;
-                    }
-                    entry.insert(CachedClosure { canon, edge_weight })
+                let add_transition_started = detail.as_ref().map(|_| Instant::now());
+                dwa.add_transition(from_state, label, cached.to_state, cached.edge_weight);
+                if let (Some(detail), Some(started_at)) = (detail.as_mut(), add_transition_started) {
+                    detail.add_transition_ms += elapsed_ms(started_at);
                 }
-            };
+                return;
+            }
 
-            let subset_key_started = detail.as_ref().map(|_| Instant::now());
-            key_buf.clear();
-            key_buf.extend(cached.canon.iter().map(|(sid, w)| (*sid, w.ptr_key())));
             if let Some(detail) = detail.as_mut() {
-                detail.subset_key_constructions += 1;
+                detail.closure_cache_misses += 1;
             }
-            if let (Some(detail), Some(started_at)) = (detail.as_mut(), subset_key_started) {
-                detail.post_closure_subset_key_ms += elapsed_ms(started_at);
+            let edge_weight_started = detail.as_ref().map(|_| Instant::now());
+            let edge_weight = union_cache.union_all(contribs.iter().map(|(_, weight)| weight));
+            if let (Some(detail), Some(started_at)) = (detail.as_mut(), edge_weight_started) {
+                detail.edge_weight_union_ms += elapsed_ms(started_at);
             }
+            if edge_weight.is_empty() {
+                return;
+            }
+            let mut target_subset: FxHashMap<u32, Weight> = contribs
+                .iter()
+                .map(|(state_id, weight)| (*state_id, weight.clone()))
+                .collect();
+            let closure_started = detail.as_ref().map(|_| Instant::now());
+            local_epsilon_closure(
+                nwa,
+                &mut weight_by_state,
+                &mut closure_queue,
+                &mut target_subset,
+            );
+            if let (Some(detail), Some(started_at)) = (detail.as_mut(), closure_started) {
+                detail.local_epsilon_closure_miss_ms += elapsed_ms(started_at);
+            }
+            if target_subset.is_empty() {
+                return;
+            }
+            let mut canon: Vec<(u32, Weight)> = target_subset
+                .iter()
+                .filter(|(_, w)| !w.is_empty())
+                .map(|(id, w)| (*id, w.clone()))
+                .collect();
+            canon.sort_unstable_by_key(|(state_id, _)| *state_id);
+            if canon.is_empty() {
+                return;
+            }
+
             let subset_lookup_started = detail.as_ref().map(|_| Instant::now());
-            let to_state = if let Some(existing) = subset_map.get(&key_buf).copied() {
-                if let Some(detail) = detail.as_mut() {
-                    detail.subset_intern_hits += 1;
+            let to_state = if let [(only_state, only_weight)] = canon.as_slice() {
+                let singleton_key = (*only_state, only_weight.ptr_key());
+                if let Some(existing) = singleton_subsets.get(&singleton_key).copied() {
+                    if let Some(detail) = detail.as_mut() {
+                        detail.subset_intern_hits += 1;
+                    }
+                    existing
+                } else {
+                    if let Some(detail) = detail.as_mut() {
+                        detail.subset_intern_misses += 1;
+                    }
+                    let new_state = dwa.add_state();
+                    subset_map.insert(vec![singleton_key], new_state);
+                    singleton_subsets.insert(singleton_key, new_state);
+                    worklist.push_back((new_state, canon.clone()));
+                    supports.push(vec![*only_state]);
+                    new_state
                 }
-                existing
             } else {
+                let subset_key_started = detail.as_ref().map(|_| Instant::now());
+                key_buf.clear();
+                key_buf.extend(canon.iter().map(|(sid, w)| (*sid, w.ptr_key())));
                 if let Some(detail) = detail.as_mut() {
-                    detail.subset_intern_misses += 1;
+                    detail.subset_key_constructions += 1;
                 }
-                let new_state = dwa.add_state();
-                subset_map.insert(key_buf.clone(), new_state);
-                worklist.push_back(cached.canon.clone());
-                supports.push(cached.canon.iter().map(|(sid, _)| *sid).collect());
-                new_state
+                if let (Some(detail), Some(started_at)) = (detail.as_mut(), subset_key_started) {
+                    detail.post_closure_subset_key_ms += elapsed_ms(started_at);
+                }
+                if let Some(existing) = subset_map.get(&key_buf).copied() {
+                    if let Some(detail) = detail.as_mut() {
+                        detail.subset_intern_hits += 1;
+                    }
+                    existing
+                } else {
+                    if let Some(detail) = detail.as_mut() {
+                        detail.subset_intern_misses += 1;
+                    }
+                    let new_state = dwa.add_state();
+                    subset_map.insert(key_buf.clone(), new_state);
+                    worklist.push_back((new_state, canon.clone()));
+                    supports.push(canon.iter().map(|(sid, _)| *sid).collect());
+                    new_state
+                }
             };
             if let (Some(detail), Some(started_at)) = (detail.as_mut(), subset_lookup_started) {
                 detail.subset_map_lookup_ms += elapsed_ms(started_at);
             }
+            closure_cache.insert(
+                pre_closure_key.clone(),
+                CachedClosure {
+                    to_state,
+                    edge_weight: edge_weight.clone(),
+                },
+            );
             let add_transition_started = detail.as_ref().map(|_| Instant::now());
-            dwa.add_transition(from_state, label, to_state, cached.edge_weight.clone());
+            dwa.add_transition(from_state, label, to_state, edge_weight);
             if let (Some(detail), Some(started_at)) = (detail.as_mut(), add_transition_started) {
                 detail.add_transition_ms += elapsed_ms(started_at);
             }
@@ -1507,9 +1587,13 @@ fn determinize_parser_dwa_with_fallbacks(
     canon_buf.sort_unstable_by_key(|(state_id, _)| *state_id);
 
     let mut subset_map: FxHashMap<Vec<(u32, usize)>, u32> = FxHashMap::default();
-    let mut worklist: VecDeque<Vec<(u32, Weight)>> = VecDeque::new();
+    let mut singleton_subsets: FxHashMap<(u32, usize), u32> = FxHashMap::default();
     subset_map.insert(subset_key(&canon_buf), result.start_state());
-    worklist.push_back(canon_buf.clone());
+    if let [(state_id, weight)] = canon_buf.as_slice() {
+        singleton_subsets.insert((*state_id, weight.ptr_key()), result.start_state());
+    }
+    let mut worklist: VecDeque<(u32, Vec<(u32, Weight)>)> = VecDeque::new();
+    worklist.push_back((result.start_state(), canon_buf.clone()));
 
     let mut dense_raw_targets: Vec<TargetContribs> =
         (0..dense_label_limit).map(|_| TargetContribs::new()).collect();
@@ -1525,13 +1609,11 @@ fn determinize_parser_dwa_with_fallbacks(
     let mut detail =
         ParserDwaDeterminizeDetail::enabled().then(ParserDwaDeterminizeDetail::default);
 
-    while let Some(subset_entries) = worklist.pop_front() {
+    while let Some((from_state, subset_entries)) = worklist.pop_front() {
         dense_default_all_raw_targets.clear();
         if let Some(detail) = detail.as_mut() {
             detail.states_processed += 1;
-            detail.subset_key_constructions += 1;
         }
-        let from_state = subset_map[&subset_key(&subset_entries)];
 
         final_contributions.clear();
         let scan_started = detail.as_ref().map(|_| Instant::now());
@@ -1698,31 +1780,44 @@ fn determinize_parser_dwa_with_fallbacks(
                 return;
             }
 
-            key_buf.clear();
-            if let Some(detail) = detail.as_mut() {
-                detail.subset_key_constructions += 1;
-            }
-            if contribs.len() == 1 {
-                let (only_state, only_weight) = &contribs[0];
-                key_buf.push((*only_state, only_weight.ptr_key()));
+            let to_state = if let [(only_state, only_weight)] = contribs.as_slice() {
+                let singleton_key = (*only_state, only_weight.ptr_key());
+                if let Some(existing) = singleton_subsets.get(&singleton_key).copied() {
+                    if let Some(detail) = detail.as_mut() {
+                        detail.subset_intern_hits += 1;
+                    }
+                    existing
+                } else {
+                    if let Some(detail) = detail.as_mut() {
+                        detail.subset_intern_misses += 1;
+                    }
+                    let new_state = result.add_state();
+                    subset_map.insert(vec![singleton_key], new_state);
+                    singleton_subsets.insert(singleton_key, new_state);
+                    worklist.push_back((new_state, contribs.into_iter().collect()));
+                    new_state
+                }
             } else {
+                key_buf.clear();
                 key_buf.extend(contribs.iter().map(|(sid, w)| (*sid, w.ptr_key())));
-            }
-
-            let to_state = if let Some(existing) = subset_map.get(&key_buf).copied() {
                 if let Some(detail) = detail.as_mut() {
-                    detail.subset_intern_hits += 1;
+                    detail.subset_key_constructions += 1;
                 }
-                existing
-            } else {
-                if let Some(detail) = detail.as_mut() {
-                    detail.subset_intern_misses += 1;
+                if let Some(existing) = subset_map.get(&key_buf).copied() {
+                    if let Some(detail) = detail.as_mut() {
+                        detail.subset_intern_hits += 1;
+                    }
+                    existing
+                } else {
+                    if let Some(detail) = detail.as_mut() {
+                        detail.subset_intern_misses += 1;
+                    }
+                    let new_state = result.add_state();
+                    subset_map.insert(key_buf.clone(), new_state);
+                    let next_entries: Vec<(u32, Weight)> = contribs.into_iter().collect();
+                    worklist.push_back((new_state, next_entries));
+                    new_state
                 }
-                let new_state = result.add_state();
-                subset_map.insert(key_buf.clone(), new_state);
-                let next_entries: Vec<(u32, Weight)> = contribs.into_iter().collect();
-                worklist.push_back(next_entries);
-                new_state
             };
 
             result.add_transition(from_state, label, to_state, edge_weight);
@@ -2206,6 +2301,54 @@ fn build_parser_nwa_from_terminal_dwa(
     let state_prep_started_at = Instant::now();
     let summaries = build_state_summaries(terminal_dwa, grammar, &templates);
     let productive = compute_productive_terminal_states(&summaries);
+    if std::env::var_os("GLRMASK_PROFILE_PARSER_CONTROL_DAG").is_some() {
+        let mut indegree = vec![0usize; summaries.states.len()];
+        let mut edge_count = 0usize;
+        for (source, state) in summaries.states.iter().enumerate() {
+            if !productive[source] {
+                continue;
+            }
+            for branch in &state.branches {
+                let target = branch.target as usize;
+                if target < productive.len() && productive[target] {
+                    indegree[target] += 1;
+                    edge_count += 1;
+                }
+            }
+        }
+        let mut queue = VecDeque::new();
+        let mut depth = vec![0usize; summaries.states.len()];
+        for state in 0..summaries.states.len() {
+            if productive[state] && indegree[state] == 0 {
+                queue.push_back(state);
+            }
+        }
+        let mut visited = 0usize;
+        let mut max_depth = 0usize;
+        while let Some(source) = queue.pop_front() {
+            visited += 1;
+            max_depth = max_depth.max(depth[source]);
+            for branch in &summaries.states[source].branches {
+                let target = branch.target as usize;
+                if target >= productive.len() || !productive[target] {
+                    continue;
+                }
+                depth[target] = depth[target].max(depth[source] + 1);
+                indegree[target] -= 1;
+                if indegree[target] == 0 {
+                    queue.push_back(target);
+                }
+            }
+        }
+        let productive_count = productive.iter().filter(|&&value| value).count();
+        eprintln!(
+            "[glrmask/profile][parser_control_dag] productive_states={} edges={} acyclic={} max_depth={}",
+            productive_count,
+            edge_count,
+            visited == productive_count,
+            max_depth,
+        );
+    }
     let state_prep_ms = elapsed_ms(state_prep_started_at);
     let states = &summaries.states;
     let compose_detail_enabled = parser_dwa_compose_detail_enabled();
