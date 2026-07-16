@@ -1472,9 +1472,12 @@ pub struct LeveledGSS<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
     inner: Arc<Upper<T, A>>,
 }
 
-/// A mutable view of the top portion of a GSS as a flat stack of values.
-/// Works when the top of the GSS is a deterministic chain (single-child Segments
-/// and single-child Generals).
+/// A mutable view of the top Segment prefix of a GSS as a flat stack of values.
+///
+/// This deliberately does not walk a single-child General chain during
+/// construction: without cached deterministic-prefix length, doing so could make
+/// `try_virtual_stack` an unbounded linear operation. Short single-path General
+/// chains are handled by the separately depth-bounded flat-stack fast path.
 ///
 /// Instead of extracting all states upfront, this keeps a reference to the
 /// original chain and only tracks pushed states (from goto operations).
