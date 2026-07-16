@@ -671,6 +671,17 @@ impl PyDynamicConstraintState {
         Ok(())
     }
 
+    fn fill_mask_bounded(
+        &self,
+        mut bitmask: PyReadwriteArray1<i32>,
+        timeout_ms: u64,
+    ) -> PyResult<()> {
+        let buf = bitmask_u32_view(&mut bitmask)?;
+        self.inner.with_dependent(|_owner, state| {
+            string_result(state.fill_mask_bounded(buf, timeout_ms))
+        })
+    }
+
     fn force(&self) -> Vec<u32> {
         self.inner.with_dependent(|_owner, state| state.force())
     }

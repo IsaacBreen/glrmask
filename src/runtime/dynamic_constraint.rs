@@ -251,6 +251,10 @@ impl<'a> DynamicConstraintState<'a> {
         self.inner.fill_mask_dynamic(buf);
     }
 
+    pub fn fill_mask_bounded(&self, buf: &mut [u32], timeout_ms: u64) -> Result<(), String> {
+        self.inner.fill_mask_dynamic_bounded(buf, timeout_ms)
+    }
+
     pub fn force(&self) -> Vec<u32> {
         self.inner.force_dynamic()
     }
