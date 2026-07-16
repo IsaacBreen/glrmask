@@ -872,6 +872,8 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
 ) -> Vec<usize> {
     use std::collections::{hash_map::Entry, HashMap};
 
+    let profile_timing = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
+    let total_started_at = profile_timing.then(std::time::Instant::now);
     let dfa = tokenizer.dfa();
 
     const NONE_STATE: u32 = u32::MAX;
@@ -946,6 +948,19 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
     let follow_contexts = FollowContextTable::new(num_groups, follow_rows);
     let future_group_hashes_by_context =
         build_future_group_hashes_by_context(&dfa_future_groups, &follow_contexts);
+    if profile_timing {
+        eprintln!(
+            "[glrmask/profile][token_state_equiv] phase=setup states={} tokens={} dfa_states={} num_groups={} follow_contexts={} compact={} byte_classes={} elapsed_ms={:.3}",
+            states.len(),
+            tokens.len(),
+            num_dfa_states,
+            num_groups,
+            follow_contexts.num_contexts(),
+            use_compact,
+            num_bc,
+            total_started_at.unwrap().elapsed().as_secs_f64() * 1000.0,
+        );
+    }
     let mut sorted_indices: Vec<usize> = (0..tokens.len()).collect();
     sorted_indices.par_sort_unstable_by(|&a, &b| tokens[a].as_ref().cmp(tokens[b].as_ref()));
 
@@ -1022,6 +1037,17 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
             },
         )
         .collect();
+    if profile_timing {
+        eprintln!(
+            "[glrmask/profile][token_state_equiv] phase=suffix_hashes_done states={} tokens={} batches={} batch_size={} token_bytes={} elapsed_ms={:.3}",
+            states.len(),
+            total_tokens,
+            batches.len(),
+            batch_size,
+            sorted_tokens.iter().map(|token| token.len()).sum::<usize>(),
+            total_started_at.unwrap().elapsed().as_secs_f64() * 1000.0,
+        );
+    }
 
     let common_prefix_len = |a: &[u8], b: &[u8]| -> usize {
         let len = a.len().min(b.len());
@@ -1054,7 +1080,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
     let mut tokens_tested = 0usize;
     let mut batches_processed = 0usize;
     let batch_scratch_pool = StateBatchScratchPool::default();
-    for batch_indices in &batches {
+    for (batch_ordinal, batch_indices) in batches.iter().enumerate() {
         if active_indices.is_empty() {
             break;
         }
@@ -1067,6 +1093,19 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
         let batch_len = batch_indices.len();
         if batch_len == 0 {
             continue;
+        }
+        let batch_started_at = profile_timing.then(std::time::Instant::now);
+        if profile_timing {
+            eprintln!(
+                "[glrmask/profile][token_state_equiv] phase=batch_start batch={} states={} active_states={} groups={} batch_tokens={} batch_bytes={} elapsed_ms={:.3}",
+                batch_ordinal,
+                states.len(),
+                active_indices.len(),
+                group_sizes.len(),
+                batch_len,
+                batch_indices.iter().map(|&idx| sorted_tokens[idx].len()).sum::<usize>(),
+                total_started_at.unwrap().elapsed().as_secs_f64() * 1000.0,
+            );
         }
         tokens_tested += batch_len;
 
@@ -1280,6 +1319,16 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                 },
             )
             .collect();
+        if profile_timing {
+            eprintln!(
+                "[glrmask/profile][token_state_equiv] phase=batch_hashes_done batch={} active_states={} hashes={} batch_ms={:.3} elapsed_ms={:.3}",
+                batch_ordinal,
+                active_indices.len(),
+                batch_hashes.len(),
+                batch_started_at.unwrap().elapsed().as_secs_f64() * 1000.0,
+                total_started_at.unwrap().elapsed().as_secs_f64() * 1000.0,
+            );
+        }
 
         batches_processed += 1;
         let previous_active_indices = std::mem::take(&mut active_indices);
@@ -1356,6 +1405,17 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                 active_indices.push(state_idx);
             }
         }
+        if profile_timing {
+            eprintln!(
+                "[glrmask/profile][token_state_equiv] phase=batch_done batch={} groups={} next_active_states={} tokens_tested={} batch_ms={:.3} elapsed_ms={:.3}",
+                batch_ordinal,
+                num_groups,
+                active_indices.len(),
+                tokens_tested,
+                batch_started_at.unwrap().elapsed().as_secs_f64() * 1000.0,
+                total_started_at.unwrap().elapsed().as_secs_f64() * 1000.0,
+            );
+        }
 
         // All tokens must be processed before early-stop convergence is trusted.
         let min_tokens_met = tokens_tested >= total_tokens;
@@ -1394,6 +1454,18 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
         }
 
         prev_groups = num_groups;
+    }
+
+    if profile_timing {
+        eprintln!(
+            "[glrmask/profile][token_state_equiv] phase=done states={} tokens={} groups={} batches_processed={} tokens_tested={} total_ms={:.3}",
+            states.len(),
+            total_tokens,
+            group_sizes.len(),
+            batches_processed,
+            tokens_tested,
+            total_started_at.unwrap().elapsed().as_secs_f64() * 1000.0,
+        );
     }
 
     let num_groups = group_ids.iter().copied().max().map(|v| v + 1).unwrap_or(0);

@@ -3,11 +3,12 @@
 //! Cyclic inputs are rejected and must be handled by the caller.
 
 use std::collections::{VecDeque, hash_map::Entry as HashMapEntry};
+use std::hash::{Hash, Hasher};
 use std::time::Instant;
 use std::sync::Arc;
 
 use rayon::prelude::*;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use smallvec::SmallVec;
 
 use super::dwa::DWA;
@@ -284,10 +285,253 @@ fn intern_determinized_singleton(
     (state, false)
 }
 
+#[derive(Default)]
+struct ScopedMultiwayUnionCache {
+    entries: FxHashMap<Box<[Weight]>, Weight>,
+    hits: usize,
+    misses: usize,
+}
+
+impl ScopedMultiwayUnionCache {
+    fn union_all<'a>(&mut self, weights: impl IntoIterator<Item = &'a Weight>) -> Weight {
+        let mut operands = SmallVec::<[Weight; 8]>::new();
+        for weight in weights {
+            if weight.is_full() {
+                return Weight::all();
+            }
+            if !weight.is_empty() {
+                operands.push(weight.clone());
+            }
+        }
+        match operands.len() {
+            0 => return Weight::empty(),
+            1 => return operands.pop().unwrap(),
+            _ => {}
+        }
+
+        operands.sort_unstable_by_key(Weight::ptr_key);
+        operands.dedup_by_key(|weight| weight.ptr_key());
+        if operands.len() == 1 {
+            return operands.pop().unwrap();
+        }
+
+        if let Some(existing) = self.entries.get(operands.as_slice()) {
+            self.hits += 1;
+            return existing.clone();
+        }
+        self.misses += 1;
+        let key = operands.into_vec().into_boxed_slice();
+        let result = Weight::union_all_direct(key.iter());
+        self.entries.insert(key, result.clone());
+        result
+    }
+}
+
 fn determinize_profile_enabled() -> bool {
     std::env::var("GLRMASK_PROFILE_DETERMINIZE")
         .map(|value| value == "1")
         .unwrap_or(false)
+}
+
+fn nwa_topological_order(nwa: &NWA) -> Option<Vec<usize>> {
+    let n = nwa.states().len();
+    let mut indegree = vec![0usize; n];
+    for state in nwa.states() {
+        for (target, _) in state.transitions.values().flatten() {
+            let target = *target as usize;
+            if target >= n {
+                return None;
+            }
+            indegree[target] += 1;
+        }
+        for (target, _) in &state.epsilons {
+            let target = *target as usize;
+            if target >= n {
+                return None;
+            }
+            indegree[target] += 1;
+        }
+    }
+
+    let mut topo: Vec<usize> = indegree
+        .iter()
+        .enumerate()
+        .filter_map(|(state_id, &degree)| (degree == 0).then_some(state_id))
+        .collect();
+    let mut head = 0usize;
+    while head < topo.len() {
+        let state_id = topo[head];
+        head += 1;
+        for (target, _) in nwa.states()[state_id].transitions.values().flatten() {
+            let target = *target as usize;
+            indegree[target] -= 1;
+            if indegree[target] == 0 {
+                topo.push(target);
+            }
+        }
+        for (target, _) in &nwa.states()[state_id].epsilons {
+            let target = *target as usize;
+            indegree[target] -= 1;
+            if indegree[target] == 0 {
+                topo.push(target);
+            }
+        }
+    }
+    (topo.len() == n).then_some(topo)
+}
+
+/// Exact token domains from which each NWA state can accept some suffix.
+fn nwa_future_live_domains(nwa: &NWA) -> Option<Vec<Weight>> {
+    let topo = nwa_topological_order(nwa)?;
+    let mut future_live = vec![Weight::empty(); nwa.states().len()];
+    let mut cache = ScopedWeightOpCache::default();
+
+    for &state_id in topo.iter().rev() {
+        let state = &nwa.states()[state_id];
+        let mut live_parts = Vec::<Weight>::new();
+
+        if let Some(final_weight) = state.final_weight.as_ref() {
+            if !final_weight.is_empty() {
+                live_parts.push(final_weight.clone());
+            }
+        }
+
+        for branches in state.transitions.values() {
+            for (target, weight) in branches {
+                let target_live = &future_live[*target as usize];
+                let contribution = if target_live.is_full() {
+                    weight.clone()
+                } else if target_live.is_empty() {
+                    Weight::empty()
+                } else {
+                    cache.intersection(weight, target_live)
+                };
+                if !contribution.is_empty() {
+                    live_parts.push(contribution);
+                }
+            }
+        }
+
+        for (target, weight) in &state.epsilons {
+            let target_live = &future_live[*target as usize];
+            let live_contribution = if target_live.is_full() {
+                weight.clone()
+            } else if target_live.is_empty() {
+                Weight::empty()
+            } else {
+                cache.intersection(weight, target_live)
+            };
+            if !live_contribution.is_empty() {
+                live_parts.push(live_contribution);
+            }
+        }
+
+        future_live[state_id] = Weight::union_all(live_parts.iter());
+    }
+
+    Some(future_live)
+}
+
+/// The exact path-weight domain observable by one determinization expansion.
+///
+/// Subsets are epsilon-closed before they enter the worklist. The expansion
+/// loop therefore observes one subset entry only by intersecting its path
+/// weight with that state's labeled outgoing edge weights. If two path weights
+/// agree on the union of those edge weights, every raw labeled contribution is
+/// exactly equal. Final weights are deliberately excluded: they are computed
+/// independently from the full subset after expansion.
+fn nwa_labeled_transition_domains(nwa: &NWA) -> Vec<Weight> {
+    nwa.states()
+        .iter()
+        .map(|state| {
+            Weight::union_all(
+                state
+                    .transitions
+                    .values()
+                    .flatten()
+                    .map(|(_, weight)| weight),
+            )
+        })
+        .collect()
+}
+
+fn transition_expansion_key(
+    subset_entries: &[(u32, Weight)],
+    labeled_transition_domains: &[Weight],
+    cache: &mut ScopedWeightOpCache,
+) -> Box<[(u32, Weight)]> {
+    let mut expansion_key = Vec::<(u32, Weight)>::with_capacity(subset_entries.len());
+    for (state_id, path_weight) in subset_entries {
+        let domain = &labeled_transition_domains[*state_id as usize];
+        let restricted = if domain.is_full() {
+            path_weight.clone()
+        } else if domain.is_empty() {
+            continue;
+        } else {
+            cache.intersection(path_weight, domain)
+        };
+        if !restricted.is_empty() {
+            expansion_key.push((*state_id, restricted));
+        }
+    }
+    expansion_key.into_boxed_slice()
+}
+
+/// Push each NWA edge weight backward through the exact token domain from
+/// which its target can still reach acceptance.
+///
+/// For acyclic NWAs this is a language-preserving trim: a token coordinate
+/// outside `future_live[target]` cannot contribute to any accepted suffix from
+/// that target, so retaining it on an incoming edge only creates dead path
+/// weight distinctions during subset construction.
+pub(crate) fn push_nwa_weights_to_future_live(nwa: &mut NWA) -> Option<bool> {
+    let future_live = nwa_future_live_domains(nwa)?;
+    let mut cache = ScopedWeightOpCache::default();
+    let mut changed = false;
+
+    for state in nwa.states_mut() {
+        for branches in state.transitions.values_mut() {
+            for (target, weight) in branches.iter_mut() {
+                let target_live = &future_live[*target as usize];
+                let pushed = if target_live.is_full() {
+                    weight.clone()
+                } else if target_live.is_empty() {
+                    Weight::empty()
+                } else {
+                    cache.intersection(weight, target_live)
+                };
+                if pushed != *weight {
+                    *weight = pushed.clone();
+                    changed = true;
+                }
+            }
+            let old_len = branches.len();
+            branches.retain(|(_, weight)| !weight.is_empty());
+            changed |= branches.len() != old_len;
+        }
+        state.transitions.retain(|_, branches| !branches.is_empty());
+
+        for (target, weight) in &mut state.epsilons {
+            let target_live = &future_live[*target as usize];
+            let pushed = if target_live.is_full() {
+                weight.clone()
+            } else if target_live.is_empty() {
+                Weight::empty()
+            } else {
+                cache.intersection(weight, target_live)
+            };
+            if pushed != *weight {
+                *weight = pushed.clone();
+                changed = true;
+            }
+        }
+        let old_epsilon_len = state.epsilons.len();
+        state.epsilons.retain(|(_, weight)| !weight.is_empty());
+        changed |= state.epsilons.len() != old_epsilon_len;
+
+    }
+
+    Some(changed)
 }
 
 pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
@@ -330,11 +574,34 @@ fn determinize_impl_with_options(
     group_transition_weights: bool,
     profile: bool,
 ) -> Result<DWA, GlrMaskError> {
+    let cache_expansions = std::env::var_os("GLRMASK_EXPERIMENTAL_DETERMINIZE_EXPANSION_CACHE")
+        .is_some();
+    determinize_impl_with_options_and_cache(
+        nwa,
+        direct_single_target_enabled,
+        group_transition_weights,
+        profile,
+        cache_expansions,
+    )
+}
+
+fn determinize_impl_with_options_and_cache(
+    nwa: &NWA,
+    direct_single_target_enabled: bool,
+    group_transition_weights: bool,
+    profile: bool,
+    cache_expansions: bool,
+) -> Result<DWA, GlrMaskError> {
     if !nwa.is_acyclic() {
         return Err(GlrMaskError::Compilation(
             "weighted determinization currently supports only acyclic NWAs".into(),
         ));
     }
+
+    let profile_expansion_keys = profile
+        && std::env::var_os("GLRMASK_PROFILE_DETERMINIZE_EXPANSION_KEYS").is_some();
+    let labeled_transition_domains =
+        (profile_expansion_keys || cache_expansions).then(|| nwa_labeled_transition_domains(nwa));
 
     let weight_group_build_started_at = profile.then(Instant::now);
     let weight_grouped_transitions = group_transition_weights.then(|| build_weight_grouped_transitions(nwa));
@@ -413,6 +680,9 @@ fn determinize_impl_with_options(
     // for the lifetime of this determinization, so a local exact cache avoids
     // thread-local memo overhead on the heavily reused intersection pairs.
     let mut scoped_determinize_weight_cache = ScopedWeightOpCache::default();
+    let mut scoped_multiway_union_cache = ScopedMultiwayUnionCache::default();
+    let determinize_started_at = profile.then(Instant::now);
+    let mut processed_states = 0usize;
     let mut profile_subset_entries = 0usize;
     let mut profile_max_subset_entries = 0usize;
     let mut profile_raw_transition_visits = 0usize;
@@ -438,11 +708,107 @@ fn determinize_impl_with_options(
     let mut profile_normalize_ms = 0.0;
     let mut profile_canonicalize_ms = 0.0;
     let mut profile_subset_lookup_ms = 0.0;
+    let mut profile_subset_len_buckets = [0usize; 8];
+    let mut profile_full_path_weights = 0usize;
+    let mut profile_topology_variants = FxHashMap::<u64, usize>::default();
+    let mut profile_topology_variant_excess = 0usize;
+    let mut profile_max_topology_variants = 0usize;
+    let mut profile_expansion_weight_cache = ScopedWeightOpCache::default();
+    let mut profile_expansion_variants = FxHashMap::<Box<[(u32, Weight)]>, usize>::default();
+    let mut profile_expansion_variant_excess = 0usize;
+    let mut profile_max_expansion_variants = 0usize;
+    let mut expansion_cache = FxHashMap::<Box<[(u32, Weight)]>, Arc<[(i32, u32, Weight)]>>::default();
+    let mut profile_expansion_cache_hits = 0usize;
+    let mut profile_expansion_cache_misses = 0usize;
 
     while let Some((from_state, subset_entries)) = worklist.pop_front() {
+        processed_states += 1;
+        if profile && processed_states % 25_000 == 0 {
+            eprintln!(
+                "[glrmask/profile][determinize_progress] processed_states={} discovered_states={} queued_states={} transitions={} subset_entries={} multiway_union_entries={} multiway_union_hits={} multiway_union_misses={} topology_hashes={} topology_variant_excess={} max_topology_variants={} expansion_keys={} expansion_variant_excess={} max_expansion_variants={} expansion_cache_entries={} expansion_cache_hits={} expansion_cache_misses={} elapsed_ms={:.3}",
+                processed_states,
+                subset_map.len(),
+                worklist.len(),
+                dwa.num_transitions(),
+                profile_subset_entries,
+                scoped_multiway_union_cache.entries.len(),
+                scoped_multiway_union_cache.hits,
+                scoped_multiway_union_cache.misses,
+                profile_topology_variants.len(),
+                profile_topology_variant_excess,
+                profile_max_topology_variants,
+                profile_expansion_variants.len(),
+                profile_expansion_variant_excess,
+                profile_max_expansion_variants,
+                expansion_cache.len(),
+                profile_expansion_cache_hits,
+                profile_expansion_cache_misses,
+                determinize_started_at.unwrap().elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        let expansion_key = labeled_transition_domains.as_ref().map(|domains| {
+            transition_expansion_key(
+                subset_entries.as_ref(),
+                domains,
+                &mut profile_expansion_weight_cache,
+            )
+        });
         if profile {
             profile_subset_entries += subset_entries.len();
             profile_max_subset_entries = profile_max_subset_entries.max(subset_entries.len());
+            let bucket = match subset_entries.len() {
+                0 => 0,
+                1 => 1,
+                2 => 2,
+                3..=4 => 3,
+                5..=8 => 4,
+                9..=16 => 5,
+                17..=32 => 6,
+                _ => 7,
+            };
+            profile_subset_len_buckets[bucket] += 1;
+            profile_full_path_weights += subset_entries
+                .iter()
+                .filter(|(_, weight)| weight.is_full())
+                .count();
+
+            let mut topology_hasher = FxHasher::default();
+            for (state_id, _) in subset_entries.iter() {
+                state_id.hash(&mut topology_hasher);
+            }
+            let topology_hash = topology_hasher.finish();
+            let variants = profile_topology_variants.entry(topology_hash).or_default();
+            if *variants > 0 {
+                profile_topology_variant_excess += 1;
+            }
+            *variants += 1;
+            profile_max_topology_variants = profile_max_topology_variants.max(*variants);
+
+            if profile_expansion_keys && let Some(expansion_key) = expansion_key.as_ref() {
+                let variants = profile_expansion_variants
+                    .entry(expansion_key.clone())
+                    .or_default();
+                if *variants > 0 {
+                    profile_expansion_variant_excess += 1;
+                }
+                *variants += 1;
+                profile_max_expansion_variants =
+                    profile_max_expansion_variants.max(*variants);
+            }
+        }
+
+        if cache_expansions {
+            let expansion_key = expansion_key
+                .as_ref()
+                .expect("expansion caching requires labeled transition domains");
+            if let Some(cached_transitions) = expansion_cache.get(expansion_key.as_ref()) {
+                profile_expansion_cache_hits += 1;
+                for (label, to_state, edge_weight) in cached_transitions.iter() {
+                    dwa.add_transition(from_state, *label, *to_state, edge_weight.clone());
+                }
+                continue;
+            }
+            profile_expansion_cache_misses += 1;
         }
         // Final weight computation is deferred to after the main loop
         // and parallelized across all states.
@@ -651,20 +1017,43 @@ fn determinize_impl_with_options(
                 if profile {
                     profile_direct_multi_target_labels += 1;
                 }
+                let combine_started_at = profile.then(Instant::now);
                 let mut sorted_targets = target_contributions;
                 sorted_targets.sort_unstable_by_key(|(dst, _)| *dst);
                 let mut next_key: Vec<(u32, Weight)> =
                     Vec::with_capacity(sorted_targets.len());
-                for (dst, weight) in sorted_targets {
-                    if let Some((last_dst, last_weight)) = next_key.last_mut() {
-                        if *last_dst == dst {
-                            *last_weight = last_weight.union(&weight);
-                            continue;
-                        }
+                let mut group_start = 0usize;
+                while group_start < sorted_targets.len() {
+                    let dst = sorted_targets[group_start].0;
+                    let mut group_end = group_start + 1;
+                    while group_end < sorted_targets.len()
+                        && sorted_targets[group_end].0 == dst
+                    {
+                        group_end += 1;
                     }
+                    let weight = if group_end == group_start + 1 {
+                        sorted_targets[group_start].1.clone()
+                    } else {
+                        scoped_multiway_union_cache.union_all(
+                            sorted_targets[group_start..group_end]
+                                .iter()
+                                .map(|(_, weight)| weight),
+                        )
+                    };
                     next_key.push((dst, weight));
+                    group_start = group_end;
                 }
-                let edge_weight = Weight::union_all(next_key.iter().map(|(_, weight)| weight));
+                if let Some(combine_started_at) = combine_started_at {
+                    profile_combine_ms += combine_started_at.elapsed().as_secs_f64() * 1000.0;
+                }
+
+                let edge_union_started_at = profile.then(Instant::now);
+                let edge_weight = scoped_multiway_union_cache
+                    .union_all(next_key.iter().map(|(_, weight)| weight));
+                if let Some(edge_union_started_at) = edge_union_started_at {
+                    profile_edge_union_ms +=
+                        edge_union_started_at.elapsed().as_secs_f64() * 1000.0;
+                }
                 debug_assert!(!edge_weight.is_empty());
 
                 let subset_lookup_started_at = profile.then(Instant::now);
@@ -786,12 +1175,55 @@ fn determinize_impl_with_options(
 
             dwa.add_transition(from_state, label, to_state, edge_weight);
         }
+
+        if cache_expansions {
+            let expansion_key = expansion_key
+                .expect("expansion caching requires labeled transition domains");
+            let transitions: Arc<[(i32, u32, Weight)]> = dwa.states()[from_state as usize]
+                .transitions
+                .iter()
+                .map(|(&label, (to_state, edge_weight))| {
+                    (label, *to_state, edge_weight.clone())
+                })
+                .collect::<Vec<_>>()
+                .into();
+            let replaced = expansion_cache.insert(expansion_key, transitions);
+            debug_assert!(replaced.is_none());
+        }
     }
 
     if profile {
         eprintln!(
-            "[glrmask/profile][determinize_scoped_weight_cache] intersections={}",
+            "[glrmask/profile][determinize_scoped_weight_cache] intersections={} multiway_union_entries={} multiway_union_hits={} multiway_union_misses={}",
             scoped_determinize_weight_cache.intersection_entry_count(),
+            scoped_multiway_union_cache.entries.len(),
+            scoped_multiway_union_cache.hits,
+            scoped_multiway_union_cache.misses,
+        );
+        eprintln!(
+            "[glrmask/profile][determinize_expansion_cache] enabled={} entries={} hits={} misses={}",
+            cache_expansions,
+            expansion_cache.len(),
+            profile_expansion_cache_hits,
+            profile_expansion_cache_misses,
+        );
+        eprintln!(
+            "[glrmask/profile][determinize_subset_shapes] len_0={} len_1={} len_2={} len_3_4={} len_5_8={} len_9_16={} len_17_32={} len_gt_32={} full_path_weights={} topology_hashes={} topology_variant_excess={} max_topology_variants={} expansion_keys={} expansion_variant_excess={} max_expansion_variants={}",
+            profile_subset_len_buckets[0],
+            profile_subset_len_buckets[1],
+            profile_subset_len_buckets[2],
+            profile_subset_len_buckets[3],
+            profile_subset_len_buckets[4],
+            profile_subset_len_buckets[5],
+            profile_subset_len_buckets[6],
+            profile_subset_len_buckets[7],
+            profile_full_path_weights,
+            profile_topology_variants.len(),
+            profile_topology_variant_excess,
+            profile_max_topology_variants,
+            profile_expansion_variants.len(),
+            profile_expansion_variant_excess,
+            profile_max_expansion_variants,
         );
     }
 
@@ -985,6 +1417,19 @@ mod tests {
         )))
     }
 
+    fn two_tsid_tokens(left: impl IntoIterator<Item = u32>, right: impl IntoIterator<Item = u32>) -> Weight {
+        Weight::from_per_tsid_token_sets([
+            (
+                0,
+                RangeSetBlaze::from_iter(left.into_iter().map(|value| value..=value)),
+            ),
+            (
+                1,
+                RangeSetBlaze::from_iter(right.into_iter().map(|value| value..=value)),
+            ),
+        ])
+    }
+
     #[test]
     fn determinize_unions_duplicate_label_target_contributions() {
         let mut nwa = NWA::new(1, 2);
@@ -1021,6 +1466,38 @@ mod tests {
 
         let dwa = determinize(&nwa).unwrap();
         assert_eq!(dwa.eval_word(&[7]), tokens(0..=6));
+    }
+
+    #[test]
+    fn direct_multi_target_multiway_union_matches_generic_determinization() {
+        let mut nwa = NWA::new(2, 32);
+        let start = nwa.add_state();
+        let left = nwa.add_state();
+        let right = nwa.add_state();
+        nwa.set_start_states(vec![start]);
+
+        for offset in 0..12u32 {
+            nwa.add_transition(
+                start,
+                7,
+                left,
+                two_tsid_tokens([offset, offset + 12], [offset + 1, offset + 13]),
+            );
+        }
+        for offset in 0..9u32 {
+            nwa.add_transition(
+                start,
+                7,
+                right,
+                two_tsid_tokens([offset + 2], [offset + 16, offset + 20]),
+            );
+        }
+        nwa.set_final_weight(left, Weight::all());
+        nwa.set_final_weight(right, Weight::all());
+
+        let fast = determinize_impl_with_options(&nwa, true, true, false).unwrap();
+        let generic = determinize_impl_with_options(&nwa, false, false, false).unwrap();
+        assert_eq!(find_difference(&fast, &generic).unwrap(), None);
     }
 
     #[test]
@@ -1074,6 +1551,184 @@ mod tests {
                 "grouped case {case}",
             );
         }
+    }
+
+    #[test]
+    fn future_live_push_preserves_determinized_language_across_acyclic_cases() {
+        for case in 0u32..64 {
+            let mut nwa = NWA::new(1, 11);
+            let states: Vec<u32> = (0..7).map(|_| nwa.add_state()).collect();
+            nwa.set_start_states(vec![states[0]]);
+
+            for from in 0..6usize {
+                for to in (from + 1)..7usize {
+                    if (case + (from * 13 + to * 17) as u32) % 4 == 0 {
+                        continue;
+                    }
+                    let label = ((case + (from * 5 + to * 3) as u32) % 5) as i32;
+                    let first = (case + (from * 7 + to * 11) as u32) % 10;
+                    let second = (first + 1 + case % 4) % 11;
+                    nwa.add_transition(states[from], label, states[to], tokens([first, second]));
+                    if (case + from as u32 + to as u32) % 6 == 0 {
+                        let extra = (second + 3) % 12;
+                        nwa.add_transition(states[from], label, states[to], tokens([extra]));
+                    }
+                    if to > from + 1 && (case + from as u32 * 3 + to as u32) % 9 == 0 {
+                        nwa.add_epsilon(states[from], states[to], tokens([first]));
+                    }
+                }
+            }
+
+            for state in 0..7usize {
+                if (case + state as u32) % 3 == 0 {
+                    let first = (case + state as u32 * 2) % 11;
+                    nwa.set_final_weight(states[state], tokens([first, (first + 2) % 12]));
+                }
+            }
+
+            let baseline = determinize_impl_with_options(&nwa, true, true, false).unwrap();
+            let mut pushed = nwa.clone();
+            assert!(push_nwa_weights_to_future_live(&mut pushed).is_some());
+            let optimized = determinize_impl_with_options(&pushed, true, true, false).unwrap();
+            assert_eq!(
+                find_difference(&baseline, &optimized).unwrap(),
+                None,
+                "case {case}",
+            );
+        }
+    }
+
+    #[test]
+    fn future_live_push_removes_dead_token_domains_from_incoming_edges() {
+        let mut nwa = NWA::new(1, 3);
+        let start = nwa.add_state();
+        let left = nwa.add_state();
+        let right = nwa.add_state();
+        let accept = nwa.add_state();
+        nwa.set_start_states(vec![start]);
+        nwa.add_transition(start, 1, left, tokens([0, 1]));
+        nwa.add_transition(start, 1, right, tokens([0, 1]));
+        nwa.add_transition(left, 2, accept, tokens([0]));
+        nwa.add_transition(right, 2, accept, tokens([1]));
+        nwa.set_final_weight(accept, Weight::all());
+
+        let baseline = determinize(&nwa).unwrap();
+        assert_eq!(push_nwa_weights_to_future_live(&mut nwa), Some(true));
+        let optimized = determinize(&nwa).unwrap();
+        assert_eq!(find_difference(&baseline, &optimized).unwrap(), None);
+
+        let branches = &nwa.states()[start as usize].transitions[&1];
+        assert_eq!(branches[0].1, tokens([0]));
+        assert_eq!(branches[1].1, tokens([1]));
+    }
+
+    #[test]
+    fn expansion_cache_preserves_determinized_language_across_acyclic_cases() {
+        for case in 0u32..96 {
+            let mut nwa = NWA::new(2, 15);
+            let states: Vec<u32> = (0..8).map(|_| nwa.add_state()).collect();
+            nwa.set_start_states(vec![states[0]]);
+
+            for from in 0..7usize {
+                for to in (from + 1)..8usize {
+                    if (case + (from * 11 + to * 19) as u32) % 5 == 0 {
+                        continue;
+                    }
+                    let label = ((case + (from * 7 + to * 3) as u32) % 6) as i32;
+                    let left_a = (case + (from * 5 + to * 13) as u32) % 14;
+                    let left_b = (left_a + 1 + case % 5) % 16;
+                    let right_a = (case * 3 + (from * 17 + to * 7) as u32) % 15;
+                    let right_b = (right_a + 2 + case % 4) % 16;
+                    nwa.add_transition(
+                        states[from],
+                        label,
+                        states[to],
+                        two_tsid_tokens([left_a, left_b], [right_a, right_b]),
+                    );
+                    if (case + from as u32 * 2 + to as u32) % 7 == 0 {
+                        nwa.add_transition(
+                            states[from],
+                            label,
+                            states[to],
+                            two_tsid_tokens(
+                                [(left_b + 3) % 16],
+                                [(right_b + 5) % 16],
+                            ),
+                        );
+                    }
+                    if to > from + 1 && (case + from as u32 + to as u32 * 2) % 11 == 0 {
+                        nwa.add_epsilon(
+                            states[from],
+                            states[to],
+                            two_tsid_tokens([left_a], [right_a]),
+                        );
+                    }
+                }
+            }
+
+            for state in 0..8usize {
+                if (case + state as u32) % 3 != 1 {
+                    let left = (case + state as u32 * 3) % 16;
+                    let right = (case * 2 + state as u32 * 5) % 16;
+                    nwa.set_final_weight(
+                        states[state],
+                        two_tsid_tokens([left], [right]),
+                    );
+                }
+            }
+
+            let baseline =
+                determinize_impl_with_options_and_cache(&nwa, true, true, false, false).unwrap();
+            let cached =
+                determinize_impl_with_options_and_cache(&nwa, true, true, false, true).unwrap();
+            assert_eq!(
+                find_difference(&baseline, &cached).unwrap(),
+                None,
+                "case {case}",
+            );
+        }
+    }
+
+    #[test]
+    fn expansion_cache_reuses_final_only_weight_variants_exactly() {
+        let mut nwa = NWA::new(1, 1);
+        let start = nwa.add_state();
+        let continuation = nwa.add_state();
+        let final_only = nwa.add_state();
+        let accept = nwa.add_state();
+        nwa.set_start_states(vec![start]);
+
+        nwa.add_transition(start, 1, continuation, Weight::all());
+        nwa.add_transition(start, 1, final_only, tokens([0]));
+        nwa.add_transition(start, 2, continuation, Weight::all());
+        nwa.add_transition(start, 2, final_only, tokens([1]));
+        nwa.add_transition(continuation, 3, accept, Weight::all());
+        nwa.set_final_weight(final_only, Weight::all());
+        nwa.set_final_weight(accept, Weight::all());
+
+        let domains = nwa_labeled_transition_domains(&nwa);
+        let mut cache = ScopedWeightOpCache::default();
+        let left_key = transition_expansion_key(
+            &[(continuation, Weight::all()), (final_only, tokens([0]))],
+            &domains,
+            &mut cache,
+        );
+        let right_key = transition_expansion_key(
+            &[(continuation, Weight::all()), (final_only, tokens([1]))],
+            &domains,
+            &mut cache,
+        );
+        assert_eq!(left_key, right_key);
+
+        let baseline =
+            determinize_impl_with_options_and_cache(&nwa, true, true, false, false).unwrap();
+        let cached =
+            determinize_impl_with_options_and_cache(&nwa, true, true, false, true).unwrap();
+        assert_eq!(find_difference(&baseline, &cached).unwrap(), None);
+        assert_eq!(cached.eval_word(&[1]), tokens([0]));
+        assert_eq!(cached.eval_word(&[2]), tokens([1]));
+        assert_eq!(cached.eval_word(&[1, 3]), Weight::all());
+        assert_eq!(cached.eval_word(&[2, 3]), Weight::all());
     }
 
     #[test]

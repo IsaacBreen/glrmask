@@ -2,6 +2,10 @@ use serde_json::json;
 use std::{env, ffi::OsString, process::Command, sync::Mutex};
 
 use super::ast::StringSchema;
+use super::config::{JsonSchemaConfig, QuoteMerge};
+use super::load::load_document;
+use super::lower::lower_document;
+use super::lower::find_repeated_single_byte_terminal_hazards;
 use super::preflight::{swap_allow_large_test_override, swap_max_nodes_test_override};
 use super::{
     GLRMASK_JSON_SCHEMA_SPLIT_LITERAL_TERMINALS_ENV, lower_exact_subtractions_enabled,
@@ -13,7 +17,9 @@ use crate::automata::lexer::Lexer;
 use crate::compiler::grammar::transforms::prepare_grammar_transforms_only;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::{Action, GLRTable, TableAmbiguityKind};
-use crate::grammar::ast::{lower, GrammarExpr, NamedGrammar, Quantifier};
+use crate::grammar::ast::{
+    lower, resolved_named_terminal_exprs, GrammarExpr, NamedGrammar, NamedRule, Quantifier,
+};
 use crate::grammar::factoring::factor_named_grammar;
 use crate::grammar::glrm::{from_glrm, to_glrm};
 use crate::dump_json_schema_grammar_glrm;
@@ -8514,3 +8520,234 @@ fn open_anyof_discriminator_fastpath_does_not_reorder_declared_properties() {
     assert!(!schema_accepts_bytes(&schema, br#"{"kind": "a", "payload": "x"}"#));
     lower(&grammar).unwrap();
 }
+
+#[test]
+fn repeated_single_byte_terminal_hazard_is_exact_and_respects_max_threshold() {
+    let grammar = NamedGrammar {
+        rules: vec![
+            NamedRule {
+                name: "ONE".to_string(),
+                expr: GrammarExpr::RawRegex(r"[A-Za-z0-9/_*\-]".to_string()),
+                is_terminal: true,
+                is_internal: false,
+            },
+            NamedRule {
+                name: "MANY".to_string(),
+                expr: GrammarExpr::RawRegex(r"[A-Za-z0-9/_*\-]+".to_string()),
+                is_terminal: true,
+                is_internal: false,
+            },
+            NamedRule {
+                name: "repeat_unbounded".to_string(),
+                expr: GrammarExpr::Quantified(
+                    Box::new(GrammarExpr::Ref("ONE".to_string())),
+                    Quantifier::ZeroPlus,
+                ),
+                is_terminal: false,
+                is_internal: false,
+            },
+            NamedRule {
+                name: "repeat_ten".to_string(),
+                expr: GrammarExpr::Quantified(
+                    Box::new(GrammarExpr::Ref("ONE".to_string())),
+                    Quantifier::Range(0, Some(10)),
+                ),
+                is_terminal: false,
+                is_internal: false,
+            },
+            NamedRule {
+                name: "repeat_nine".to_string(),
+                expr: GrammarExpr::Quantified(
+                    Box::new(GrammarExpr::Ref("ONE".to_string())),
+                    Quantifier::Range(0, Some(9)),
+                ),
+                is_terminal: false,
+                is_internal: false,
+            },
+            NamedRule {
+                name: "repeat_multi".to_string(),
+                expr: GrammarExpr::Quantified(
+                    Box::new(GrammarExpr::Ref("MANY".to_string())),
+                    Quantifier::ZeroPlus,
+                ),
+                is_terminal: false,
+                is_internal: false,
+            },
+        ],
+        start: "repeat_unbounded".to_string(),
+        ignore: None,
+        lexer_partitions: Default::default(),
+        lexer_literal_partitions: Default::default(),
+        default_lexer_partition: None,
+    };
+    let resolved = resolved_named_terminal_exprs(&grammar).unwrap();
+    let hazards = find_repeated_single_byte_terminal_hazards(&grammar, &resolved);
+
+    assert_eq!(hazards.len(), 2, "hazards: {hazards:#?}");
+    assert_eq!(hazards[0].rule_name, "repeat_unbounded");
+    assert_eq!(hazards[1].rule_name, "repeat_ten");
+    for hazard in hazards {
+        assert_eq!(hazard.terminal_name, "ONE");
+        assert!(hazard.alphanumeric_bytes.len() >= 10);
+        assert!(hazard.problematic_bytes.contains(&b'/'));
+        assert!(hazard.problematic_bytes.contains(&b'-'));
+        assert!(hazard.problematic_bytes.contains(&b'*'));
+    }
+}
+
+#[test]
+fn json_min_length_without_max_avoids_repeated_single_char_terminal_shape() {
+    let grammar = schema_to_named_grammar(&json!({
+        "type": "object",
+        "properties": {
+            "roleArn": {
+                "type": "string",
+                "minLength": 20
+            }
+        },
+        "required": ["roleArn"],
+        "additionalProperties": false
+    }))
+    .unwrap();
+    let resolved = resolved_named_terminal_exprs(&grammar).unwrap();
+    let hazards = find_repeated_single_byte_terminal_hazards(&grammar, &resolved);
+
+    assert!(hazards.is_empty(), "hazards: {hazards:#?}");
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("json_string_char_unbounded_20_close"), "{glrm}");
+    assert!(!glrm.contains("json_string_char_exact_1_1*"), "{glrm}");
+}
+
+#[test]
+fn unbounded_string_length_lowering_preserves_minimum_semantics_without_single_char_repetition() {
+    for min_length in [0usize, 1, 20, 1_000] {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "value": {
+                    "type": "string",
+                    "minLength": min_length
+                }
+            },
+            "required": ["value"],
+            "additionalProperties": false
+        });
+        let grammar = schema_to_named_grammar(&schema).unwrap();
+        let resolved = resolved_named_terminal_exprs(&grammar).unwrap();
+        let hazards = find_repeated_single_byte_terminal_hazards(&grammar, &resolved);
+        assert!(hazards.is_empty(), "minLength={min_length}: {hazards:#?}");
+
+        let short = format!(r#"{{"value": "{}"}}"#, "a".repeat(min_length.saturating_sub(1)));
+        let exact = format!(r#"{{"value": "{}"}}"#, "a".repeat(min_length));
+        let long_slashes = format!(r#"{{"value": "{}"}}"#, "/".repeat(min_length + 256));
+        assert_eq!(
+            schema_accepts_bytes(&schema, short.as_bytes()),
+            min_length == 0,
+            "minLength={min_length} short={short:?}"
+        );
+        assert!(schema_accepts_bytes(&schema, exact.as_bytes()));
+        assert!(schema_accepts_bytes(&schema, long_slashes.as_bytes()));
+        assert!(schema_accepts_bytes(
+            &schema,
+            format!(r#"{{"value": "{}\n"}}"#, "x".repeat(min_length)).as_bytes()
+        ));
+    }
+}
+
+#[test]
+fn large_unbounded_min_length_uses_existing_exact_chunking_then_unbounded_close_tail() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "value": {"type": "string", "minLength": 1_000}
+        },
+        "required": ["value"],
+        "additionalProperties": false
+    });
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    let resolved = resolved_named_terminal_exprs(&grammar).unwrap();
+    let hazards = find_repeated_single_byte_terminal_hazards(&grammar, &resolved);
+
+    assert!(hazards.is_empty(), "hazards: {hazards:#?}\n{glrm}");
+    assert!(glrm.contains("json_string_char_exact_50_"), "{glrm}");
+    assert!(glrm.contains("{20} json_string_char_unbounded_0_close_"), "{glrm}");
+    assert!(!glrm.contains("json_string_char_exact_1_1*"), "{glrm}");
+    assert!(!glrm.contains("JSON_STRING_CHAR{1000,}"), "{glrm}");
+}
+
+#[test]
+fn unbounded_string_length_lowering_respects_generic_quote_merge_policy() {
+    for (merge_open, merge_close) in [(false, false), (false, true), (true, false), (true, true)] {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "value": {"type": "string", "minLength": 20}
+            },
+            "required": ["value"],
+            "additionalProperties": false
+        });
+        let document = load_document(&schema).unwrap();
+        let mut config = JsonSchemaConfig::default();
+        config.value_merging.generic = QuoteMerge {
+            merge_open,
+            merge_close,
+        };
+        let grammar = lower_document(&document, config).unwrap();
+        let glrm = to_glrm(&grammar);
+        let unbounded_rule = grammar
+            .rules
+            .iter()
+            .find(|rule| rule.name.contains("json_string_char_unbounded"))
+            .expect("unbounded terminal must be emitted");
+        fn count_quote_literals(expr: &GrammarExpr) -> usize {
+            match expr {
+                GrammarExpr::Literal(bytes) => usize::from(bytes.as_slice() == b"\""),
+                GrammarExpr::Grouped(inner) | GrammarExpr::Quantified(inner, _) => {
+                    count_quote_literals(inner)
+                }
+                GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
+                    parts.iter().map(count_quote_literals).sum()
+                }
+                GrammarExpr::Exclude { expr, exclude } => {
+                    count_quote_literals(expr) + count_quote_literals(exclude)
+                }
+                GrammarExpr::Intersect { expr, intersect } => {
+                    count_quote_literals(expr) + count_quote_literals(intersect)
+                }
+                GrammarExpr::SeparatedSequence { items, separator, .. } => {
+                    count_quote_literals(separator)
+                        + items
+                            .iter()
+                            .map(|(item, _)| count_quote_literals(item))
+                            .sum::<usize>()
+                }
+                GrammarExpr::ExprNFA(expr_nfa) => {
+                    expr_nfa.symbols.iter().map(count_quote_literals).sum()
+                }
+                GrammarExpr::Epsilon
+                | GrammarExpr::Ref(_)
+                | GrammarExpr::SpecialToken(_)
+                | GrammarExpr::CharClass { .. }
+                | GrammarExpr::RawRegex(_)
+                | GrammarExpr::LexerDfa(_)
+                | GrammarExpr::AnyByte => 0,
+            }
+        }
+        assert_eq!(
+            count_quote_literals(&unbounded_rule.expr),
+            usize::from(merge_open) + usize::from(merge_close),
+            "open={merge_open} close={merge_close} {glrm}"
+        );
+        let lowered = lower(&grammar).unwrap();
+        let constraint = crate::compiler::compile_owned(lowered, &byte_vocab());
+        let accepts = |input: &[u8]| {
+            let mut state = constraint.start();
+            state.commit_bytes(input).is_ok() && state.is_complete()
+        };
+        assert!(accepts(br#"{"value": "////////////////////"}"#));
+        assert!(!accepts(br#"{"value": "///////////////////"}"#));
+    }
+}
+
+

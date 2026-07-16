@@ -1222,7 +1222,19 @@ pub(crate) fn try_merge_id_maps_and_token_deterministic_nwa(
     num_tokenizer_states: usize,
     max_token_id: u32,
 ) -> Option<(NWA, InternalIdMap, TerminalDwaPhaseProfile)> {
+    let profiling = compile_profile_enabled();
+    if profiling {
+        eprintln!(
+            "[glrmask/profile][token_nwa_merge_phase] phase=enter inputs={} tokenizer_states={} max_token_id={}",
+            inputs.len(),
+            num_tokenizer_states,
+            max_token_id,
+        );
+    }
     if inputs.len() < 2 || !inputs_have_disjoint_token_domains(inputs, max_token_id) {
+        if profiling {
+            eprintln!("[glrmask/profile][token_nwa_merge_phase] phase=not_applicable");
+        }
         return None;
     }
 
@@ -1231,6 +1243,12 @@ pub(crate) fn try_merge_id_maps_and_token_deterministic_nwa(
         .filter(|source| *source < inputs.len());
     let id_map_refs: Vec<&InternalIdMap> = inputs.iter().map(|input| &input.id_map).collect();
     let id_map_started_at = Instant::now();
+    if profiling {
+        eprintln!(
+            "[glrmask/profile][token_nwa_merge_phase] phase=id_map_start fast_disjoint={}",
+            fast_disjoint_terminal_nwa_id_map_enabled(),
+        );
+    }
     let (global_id_map, direct_local_to_global_token_maps, precomputed_tsid_maps) =
         if fast_disjoint_terminal_nwa_id_map_enabled() {
             let (id_map, direct_maps, tsid_maps) = build_unified_global_id_map_disjoint_fast(
@@ -1246,17 +1264,31 @@ pub(crate) fn try_merge_id_maps_and_token_deterministic_nwa(
             (id_map, direct_maps, None)
         };
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
+    if profiling {
+        eprintln!(
+            "[glrmask/profile][token_nwa_merge_phase] phase=id_map_done elapsed_ms={:.3} global_tsids={} global_tokens={}",
+            id_map_ms,
+            global_id_map.num_tsids(),
+            global_id_map.num_internal_tokens(),
+        );
+    }
+    let tsid_maps_started_at = Instant::now();
     let all_tsid_maps: Vec<Vec<Vec<u32>>> = precomputed_tsid_maps.unwrap_or_else(|| {
         inputs
             .iter()
             .map(|input| build_local_to_global_tsid_map(&input.id_map, &global_id_map))
             .collect()
     });
+    if profiling {
+        eprintln!(
+            "[glrmask/profile][token_nwa_merge_phase] phase=tsid_maps_done elapsed_ms={:.3}",
+            tsid_maps_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
     let primary_tsid_blocks = primary_tsid_source
         .and_then(|source| contiguous_tsid_blocks(&all_tsid_maps[source]));
 
     let remap_started_at = Instant::now();
-    let profiling = compile_profile_enabled();
     let mut global_nwa = NWA::new(
         global_id_map.num_tsids(),
         global_id_map.max_internal_token_id(),
@@ -1415,13 +1447,32 @@ pub(crate) fn try_merge_id_maps_and_token_deterministic_nwa(
             fuse_start_ms += started_at.elapsed().as_secs_f64() * 1000.0;
         }
     }
+    if profiling {
+        eprintln!(
+            "[glrmask/profile][token_nwa_merge_phase] phase=inputs_remapped elapsed_ms={:.3} states={} transitions={}",
+            remap_started_at.elapsed().as_secs_f64() * 1000.0,
+            global_nwa.num_states(),
+            global_nwa.num_transitions(),
+        );
+    }
     let started_at = profiling.then(Instant::now);
     global_nwa.set_start_states(vec![combined_start.expect("at least one input")]);
     let (mut global_nwa, state_sources) = prune_unreachable_nwa_with_sources(global_nwa, state_sources);
     let prune_ms = started_at.map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0).unwrap_or(0.0);
+    if profiling {
+        eprintln!(
+            "[glrmask/profile][token_nwa_merge_phase] phase=prune_done elapsed_ms={:.3} states={} transitions={}",
+            prune_ms,
+            global_nwa.num_states(),
+            global_nwa.num_transitions(),
+        );
+    }
     let mut source_quotient_ms = 0.0;
     let mut refine_ms = 0.0;
     if quotient_token_deterministic_terminal_nwa_by_source_enabled() {
+        if profiling {
+            eprintln!("[glrmask/profile][token_nwa_merge_phase] phase=source_quotient_start");
+        }
         let started_at = profiling.then(Instant::now);
         global_nwa = quotient_disjoint_source_nwa_owned(global_nwa, &state_sources)
             .expect("token-deterministic source quotient failed");
@@ -1437,12 +1488,22 @@ pub(crate) fn try_merge_id_maps_and_token_deterministic_nwa(
             }
         }
     } else if minimize_token_deterministic_terminal_nwa_enabled() {
+        if profiling {
+            eprintln!("[glrmask/profile][token_nwa_merge_phase] phase=refine_start");
+        }
         let started_at = profiling.then(Instant::now);
         global_nwa = minimize_token_deterministic_nwa_owned(global_nwa)
             .expect("token-deterministic terminal NWA minimization failed");
         if let Some(started_at) = started_at {
             refine_ms = started_at.elapsed().as_secs_f64() * 1000.0;
         }
+    }
+    if profiling {
+        eprintln!(
+            "[glrmask/profile][token_nwa_merge_phase] phase=post_refine_done source_quotient_ms={:.3} refine_ms={:.3}",
+            source_quotient_ms,
+            refine_ms,
+        );
     }
     debug_assert!(global_nwa.is_acyclic());
     debug_assert!(global_nwa.states().iter().all(|state| state.epsilons.is_empty()));

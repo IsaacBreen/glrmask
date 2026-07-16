@@ -396,7 +396,9 @@ fn token_length_stats(tokens: &[&[u8]]) -> TokenLengthStats {
 ///
 /// Scanning raw states in ascending order assigns dense IDs in the same order
 /// as the generic `BTreeSet` path: each class is ordered by its first raw
-/// member, and that member is also the retained raw representative.
+/// member. The retained raw representative must still come from the selected
+/// preclass, because epsilon bounded-analysis views seed exactly those
+/// representatives rather than every raw member of the quotient.
 fn compose_raw_quotient_state_map(
     pre_state_map: &ManyToOneIdMap,
     final_representative_for_preclass: &[usize],
@@ -424,7 +426,8 @@ fn compose_raw_quotient_state_map(
             let next = internal_to_originals.len() as u32;
             final_key_to_internal[final_key] = next;
             internal_to_originals.push(Vec::new());
-            representative_original_ids.push(raw_state as u32);
+            representative_original_ids
+                .push(pre_state_map.representative_original_ids[final_key]);
             next
         } else {
             final_key_to_internal[final_key]
@@ -1897,6 +1900,21 @@ mod prepass_selection_tests {
     };
     use crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::shared::representative_tokens_for_vocab_classes;
     use std::sync::Arc;
+
+    #[test]
+    fn composed_raw_quotient_retains_a_seeded_preclass_representative() {
+        let pre_state_map = ManyToOneIdMap {
+            original_to_internal: vec![0, 1, 0, 1],
+            internal_to_originals: vec![vec![0, 2], vec![1, 3]],
+            representative_original_ids: vec![2, 3],
+        };
+
+        let composed = compose_raw_quotient_state_map(&pre_state_map, &[1, 1]);
+
+        assert_eq!(composed.original_to_internal, vec![0, 0, 0, 0]);
+        assert_eq!(composed.internal_to_originals, vec![vec![0, 1, 2, 3]]);
+        assert_eq!(composed.representative_original_ids, vec![3]);
+    }
 
     fn partition_from_representatives<T: Ord + Copy>(
         values: &[T],

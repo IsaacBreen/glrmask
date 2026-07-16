@@ -20,16 +20,20 @@ pub(crate) use terminal_interchangeability::with_ti_pool;
 pub(crate) use terminal_interchangeability::SharedTiTokenizerOutputCache;
 
 use std::cell::Cell;
-use std::collections::BTreeMap;
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BinaryHeap, VecDeque};
 use std::sync::OnceLock;
 use std::time::Instant;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
-use crate::automata::weighted::determinize::determinize;
+use crate::automata::weighted::determinize::{
+    determinize, push_nwa_weights_to_future_live,
+};
 use crate::automata::weighted::minimize::{
     PointwiseClassOrder, minimize_owned, minimize_owned_with_pointwise_class_order,
 };
 use crate::automata::weighted::nwa::NWA;
+use crate::automata::weighted_u32::minimize_token_deterministic_nwa::minimize_token_deterministic_nwa_owned;
 use crate::automata::weighted_u32::dwa::DWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::possible_matches::PossibleMatchesComputer;
@@ -48,6 +52,7 @@ use super::types::{
 use nwa_builder::{build_nwa_via_trie_walk, internal_vocab_entries, seed_root_nodes};
 use terminal_interchangeability::{
     active_terminals_for_partition, binary_transport_modes_from_witnesses,
+    bounded_root_prefilter_proves_no_ti_pairs,
     canonicalize_transport_mode_states, coalesced_disallowed_follows,
     discover_one_round_with_transport_witnesses_in_context, fold_one_round_partition,
     expand_representative_dwa_after_minimization, partition_has_merges,
@@ -62,6 +67,605 @@ use postprocess::{
 
 fn l2p_timing_profile_enabled() -> bool {
     compile_profile_enabled() || std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some()
+}
+
+#[derive(Clone)]
+struct NwaPathSample {
+    labels: Vec<i32>,
+    weight: Weight,
+}
+
+fn next_nwa_sample_random(state: &mut u64) -> u64 {
+    let mut x = *state;
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+    *state = x;
+    x.wrapping_mul(0x2545_f491_4f6c_dd1d)
+}
+
+struct NwaPathQueueEntry {
+    estimated_total_labels: usize,
+    labels_len: usize,
+    serial: usize,
+    state: u32,
+    labels: Vec<i32>,
+    weight: Weight,
+}
+
+impl PartialEq for NwaPathQueueEntry {
+    fn eq(&self, other: &Self) -> bool {
+        (self.estimated_total_labels, self.labels_len, self.serial)
+            == (other.estimated_total_labels, other.labels_len, other.serial)
+    }
+}
+
+impl Eq for NwaPathQueueEntry {}
+
+impl PartialOrd for NwaPathQueueEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for NwaPathQueueEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        (other.estimated_total_labels, other.labels_len, other.serial)
+            .cmp(&(self.estimated_total_labels, self.labels_len, self.serial))
+    }
+}
+
+fn nwa_label_distances_to_accept(nwa: &NWA) -> Option<(Vec<usize>, Vec<Option<usize>>)> {
+    let n = nwa.states().len();
+    let mut indegree = vec![0usize; n];
+    for state in nwa.states() {
+        for (dst, _) in &state.epsilons {
+            let dst = *dst as usize;
+            if dst >= n {
+                return None;
+            }
+            indegree[dst] += 1;
+        }
+        for (dst, _) in state.transitions.values().flatten() {
+            let dst = *dst as usize;
+            if dst >= n {
+                return None;
+            }
+            indegree[dst] += 1;
+        }
+    }
+
+    let mut topo = Vec::with_capacity(n);
+    let mut queue = VecDeque::new();
+    for (state, &degree) in indegree.iter().enumerate() {
+        if degree == 0 {
+            queue.push_back(state);
+        }
+    }
+    while let Some(state) = queue.pop_front() {
+        topo.push(state);
+        for (dst, _) in &nwa.states()[state].epsilons {
+            let dst = *dst as usize;
+            indegree[dst] -= 1;
+            if indegree[dst] == 0 {
+                queue.push_back(dst);
+            }
+        }
+        for (dst, _) in nwa.states()[state].transitions.values().flatten() {
+            let dst = *dst as usize;
+            indegree[dst] -= 1;
+            if indegree[dst] == 0 {
+                queue.push_back(dst);
+            }
+        }
+    }
+    if topo.len() != n {
+        return None;
+    }
+
+    const INF: usize = usize::MAX / 4;
+    let mut min_distance = vec![INF; n];
+    let mut max_distance = vec![None; n];
+    for &state in topo.iter().rev() {
+        let nwa_state = &nwa.states()[state];
+        if nwa_state
+            .final_weight
+            .as_ref()
+            .is_some_and(|weight| !weight.is_empty())
+        {
+            min_distance[state] = 0;
+            max_distance[state] = Some(0);
+        }
+        for (dst, weight) in &nwa_state.epsilons {
+            if !weight.is_empty() {
+                min_distance[state] = min_distance[state].min(min_distance[*dst as usize]);
+                if let Some(target_max) = max_distance[*dst as usize] {
+                    max_distance[state] = Some(max_distance[state].map_or(target_max, |current: usize| current.max(target_max)));
+                }
+            }
+        }
+        for (dst, weight) in nwa_state.transitions.values().flatten() {
+            if !weight.is_empty() && min_distance[*dst as usize] != INF {
+                min_distance[state] = min_distance[state]
+                    .min(min_distance[*dst as usize].saturating_add(1));
+                if let Some(target_max) = max_distance[*dst as usize] {
+                    let candidate = target_max.saturating_add(1);
+                    max_distance[state] = Some(max_distance[state].map_or(candidate, |current: usize| current.max(candidate)));
+                }
+            }
+        }
+    }
+    Some((min_distance, max_distance))
+}
+
+fn shortest_accepted_nwa_path_from(
+    nwa: &NWA,
+    min_labels_to_accept: &[usize],
+    max_labels_to_accept: &[Option<usize>],
+    min_required_labels: usize,
+    state: u32,
+    labels: Vec<i32>,
+    weight: Weight,
+) -> (Option<NwaPathSample>, usize) {
+    const INF: usize = usize::MAX / 4;
+    const EXPANSION_LIMIT: usize = 100_000;
+    let remaining = min_labels_to_accept[state as usize];
+    if remaining == INF
+        || weight.is_empty()
+        || max_labels_to_accept[state as usize]
+            .is_none_or(|max_remaining| labels.len().saturating_add(max_remaining) < min_required_labels)
+    {
+        return (None, 0);
+    }
+
+    let mut heap = BinaryHeap::new();
+    let mut serial = 0usize;
+    heap.push(NwaPathQueueEntry {
+        estimated_total_labels: labels
+            .len()
+            .saturating_add(remaining)
+            .max(min_required_labels),
+        labels_len: labels.len(),
+        serial,
+        state,
+        labels,
+        weight,
+    });
+    serial += 1;
+    let mut expansions = 0usize;
+
+    while let Some(entry) = heap.pop() {
+        if expansions >= EXPANSION_LIMIT {
+            break;
+        }
+        expansions += 1;
+        let state = &nwa.states()[entry.state as usize];
+        if entry.labels_len >= min_required_labels
+            && let Some(final_weight) = state.final_weight.as_ref()
+        {
+            let accepted_weight = entry.weight.intersection(final_weight);
+            if !accepted_weight.is_empty() {
+                return (
+                    Some(NwaPathSample {
+                        labels: entry.labels,
+                        weight: accepted_weight,
+                    }),
+                    expansions,
+                );
+            }
+        }
+
+        for (dst, edge_weight) in &state.epsilons {
+            let remaining = min_labels_to_accept[*dst as usize];
+            if remaining == INF
+                || max_labels_to_accept[*dst as usize].is_none_or(|max_remaining| {
+                    entry.labels_len.saturating_add(max_remaining) < min_required_labels
+                })
+            {
+                continue;
+            }
+            let next_weight = entry.weight.intersection(edge_weight);
+            if next_weight.is_empty() {
+                continue;
+            }
+            heap.push(NwaPathQueueEntry {
+                estimated_total_labels: entry
+                    .labels_len
+                    .saturating_add(remaining)
+                    .max(min_required_labels),
+                labels_len: entry.labels_len,
+                serial,
+                state: *dst,
+                labels: entry.labels.clone(),
+                weight: next_weight,
+            });
+            serial += 1;
+        }
+        for (&label, branches) in &state.transitions {
+            for (dst, edge_weight) in branches {
+                let remaining = min_labels_to_accept[*dst as usize];
+                if remaining == INF
+                    || max_labels_to_accept[*dst as usize].is_none_or(|max_remaining| {
+                        entry
+                            .labels_len
+                            .saturating_add(1)
+                            .saturating_add(max_remaining)
+                            < min_required_labels
+                    })
+                {
+                    continue;
+                }
+                let next_weight = entry.weight.intersection(edge_weight);
+                if next_weight.is_empty() {
+                    continue;
+                }
+                let mut labels = entry.labels.clone();
+                labels.push(label);
+                let labels_len = entry.labels_len + 1;
+                heap.push(NwaPathQueueEntry {
+                    estimated_total_labels: labels_len
+                        .saturating_add(remaining)
+                        .max(min_required_labels),
+                    labels_len,
+                    serial,
+                    state: *dst,
+                    labels,
+                    weight: next_weight,
+                });
+                serial += 1;
+            }
+        }
+    }
+
+    (None, expansions)
+}
+
+fn sample_accepted_nwa_paths(nwa: &NWA, sample_count: usize) -> (Vec<NwaPathSample>, usize, usize) {
+    let Some((min_labels_to_accept, max_labels_to_accept)) = nwa_label_distances_to_accept(nwa) else {
+        return (Vec::new(), 0, 0);
+    };
+    const INF: usize = usize::MAX / 4;
+    let mut seeds = Vec::<(u32, Vec<i32>, Weight)>::new();
+
+    for &start in nwa.start_states() {
+        let state = &nwa.states()[start as usize];
+        if state
+            .final_weight
+            .as_ref()
+            .is_some_and(|weight| !weight.is_empty())
+        {
+            seeds.push((start, Vec::new(), Weight::all()));
+        }
+        for (dst, weight) in &state.epsilons {
+            if !weight.is_empty() && min_labels_to_accept[*dst as usize] != INF {
+                seeds.push((*dst, Vec::new(), weight.clone()));
+            }
+        }
+        for (&label, branches) in &state.transitions {
+            for (dst, weight) in branches {
+                if !weight.is_empty() && min_labels_to_accept[*dst as usize] != INF {
+                    seeds.push((*dst, vec![label], weight.clone()));
+                }
+            }
+        }
+    }
+
+    let seed_count = seeds.len();
+    let mut rng = 0x9e37_79b9_7f4a_7c15u64;
+    for index in (1..seeds.len()).rev() {
+        let swap_index = (next_nwa_sample_random(&mut rng) as usize) % (index + 1);
+        seeds.swap(index, swap_index);
+    }
+
+    let mut samples = Vec::with_capacity(sample_count);
+    let mut expansions = 0usize;
+    let target_lengths = [1usize, 2, 3, 4, 5, 6, 8, 10, 12, 16];
+    let samples_per_target = sample_count.div_ceil(target_lengths.len());
+
+    for &min_required_labels in &target_lengths {
+        let target_start_count = samples.len();
+        for (state, labels, weight) in &seeds {
+            if samples.len() >= sample_count
+                || samples.len().saturating_sub(target_start_count) >= samples_per_target
+            {
+                break;
+            }
+            let (sample, used_expansions) = shortest_accepted_nwa_path_from(
+                nwa,
+                &min_labels_to_accept,
+                &max_labels_to_accept,
+                min_required_labels,
+                *state,
+                labels.clone(),
+                weight.clone(),
+            );
+            expansions += used_expansions;
+            let Some(sample) = sample else {
+                continue;
+            };
+            let duplicate = samples.iter().any(|existing: &NwaPathSample| {
+                existing.labels == sample.labels && existing.weight == sample.weight
+            });
+            if !duplicate {
+                samples.push(sample);
+            }
+        }
+    }
+
+    if samples.len() < sample_count {
+        for (state, labels, weight) in &seeds {
+            if samples.len() >= sample_count {
+                break;
+            }
+            let (sample, used_expansions) = shortest_accepted_nwa_path_from(
+                nwa,
+                &min_labels_to_accept,
+                &max_labels_to_accept,
+                1,
+                *state,
+                labels.clone(),
+                weight.clone(),
+            );
+            expansions += used_expansions;
+            let Some(sample) = sample else {
+                continue;
+            };
+            let duplicate = samples.iter().any(|existing: &NwaPathSample| {
+                existing.labels == sample.labels && existing.weight == sample.weight
+            });
+            if !duplicate {
+                samples.push(sample);
+            }
+        }
+    }
+
+    (samples, seed_count, expansions)
+}
+
+fn render_nwa_sample_token(bytes: &[u8]) -> String {
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return format!("{text:?}");
+    }
+    let mut escaped = String::new();
+    for &byte in bytes {
+        match byte {
+            b'\\' => escaped.push_str("\\\\"),
+            b'\n' => escaped.push_str("\\n"),
+            b'\r' => escaped.push_str("\\r"),
+            b'\t' => escaped.push_str("\\t"),
+            0x20..=0x7e => escaped.push(byte as char),
+            _ => escaped.push_str(&format!("\\x{byte:02x}")),
+        }
+    }
+    format!("bytes{escaped:?}")
+}
+
+fn dump_l2p_nwa_path_samples(
+    partition_label: &str,
+    nwa: &NWA,
+    grammar: &AnalyzedGrammar,
+    id_map: &crate::compiler::stages::equiv_types::InternalIdMap,
+    vocab: &Vocab,
+) {
+    let requested_partition = std::env::var("GLRMASK_DUMP_L2P_NWA_PATHS").ok();
+    if requested_partition.as_deref() != Some(partition_label) {
+        return;
+    }
+    let sample_count = std::env::var("GLRMASK_DUMP_L2P_NWA_PATH_COUNT")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(50);
+    let token_sample_count = std::env::var("GLRMASK_DUMP_L2P_NWA_TOKEN_COUNT")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(8);
+
+    let (samples, root_seed_count, expansions) = sample_accepted_nwa_paths(nwa, sample_count);
+    eprintln!(
+        "[glrmask/dump][l2p_nwa_path_summary] partition={} requested={} emitted={} root_seed_count={} expansions={} sampling=root_branch_and_min_terminal_length_stratified token_examples=shortest_bytes nwa_states={} nwa_transitions={}",
+        partition_label,
+        sample_count,
+        samples.len(),
+        root_seed_count,
+        expansions,
+        nwa.num_states(),
+        nwa.num_transitions(),
+    );
+
+    for (sample_index, sample) in samples.iter().enumerate() {
+        let terminal_names: Vec<&str> = sample
+            .labels
+            .iter()
+            .map(|&label| {
+                if label >= 0 {
+                    grammar
+                        .terminal_display_names
+                        .get(label as usize)
+                        .map(String::as_str)
+                        .unwrap_or("<unknown-terminal>")
+                } else {
+                    "<negative-label>"
+                }
+            })
+            .collect();
+
+        let mut tsid_count = 0usize;
+        let mut tsid_ranges = Vec::new();
+        let mut candidate_tokens = BTreeMap::<u32, (usize, u32, Vec<(u32, u32)>)>::new();
+        if sample.weight.is_full() {
+            for (&original_token, bytes) in vocab.entries.iter() {
+                candidate_tokens.insert(original_token, (bytes.len(), u32::MAX, Vec::new()));
+            }
+        } else {
+            for (tsid_start, tsid_end, internal_tokens) in sample.weight.range_entries() {
+                tsid_count = tsid_count.saturating_add((tsid_end - tsid_start + 1) as usize);
+                if tsid_ranges.len() < 12 {
+                    tsid_ranges.push((tsid_start, tsid_end));
+                }
+                for token_range in internal_tokens.ranges() {
+                    for internal_token in token_range {
+                        let Some(original_tokens) = id_map
+                            .vocab_tokens
+                            .internal_to_originals
+                            .get(internal_token as usize)
+                        else {
+                            continue;
+                        };
+                        for &original_token in original_tokens {
+                            let Some(bytes) = vocab.entries.get(&original_token) else {
+                                continue;
+                            };
+                            let entry = candidate_tokens.entry(original_token).or_insert_with(|| {
+                                (bytes.len(), internal_token, Vec::new())
+                            });
+                            if entry.2.len() < 3
+                                && !entry.2.contains(&(tsid_start, tsid_end))
+                            {
+                                entry.2.push((tsid_start, tsid_end));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut shortest_tokens: Vec<_> = candidate_tokens.into_iter().collect();
+        shortest_tokens.sort_unstable_by(|(left_id, left), (right_id, right)| {
+            (left.0, vocab.entries.get(left_id), left_id)
+                .cmp(&(right.0, vocab.entries.get(right_id), right_id))
+        });
+        shortest_tokens.truncate(token_sample_count);
+        let shortest_tokens: Vec<String> = shortest_tokens
+            .into_iter()
+            .map(|(original_token, (_, internal_token, tsid_examples))| {
+                let bytes = vocab
+                    .entries
+                    .get(&original_token)
+                    .expect("sampled original token must exist in vocab");
+                format!(
+                    "id={} token={} bytes={:?} internal={} tsids={:?}",
+                    original_token,
+                    render_nwa_sample_token(bytes),
+                    bytes,
+                    internal_token,
+                    tsid_examples,
+                )
+            })
+            .collect();
+
+        eprintln!(
+            "[glrmask/dump][l2p_nwa_path] partition={} sample={} terminal_count={} terminals={:?} weight_full={} tsid_count={} tsid_ranges={:?} shortest_tokens={:?}",
+            partition_label,
+            sample_index,
+            sample.labels.len(),
+            terminal_names,
+            sample.weight.is_full(),
+            tsid_count,
+            tsid_ranges,
+            shortest_tokens,
+        );
+    }
+}
+
+fn validate_token_deterministic_nwa(nwa: &NWA) -> bool {
+    let dump_overlaps = std::env::var_os("GLRMASK_DUMP_PREMINIMIZE_OVERLAPS").is_some();
+    let epsilon_states = nwa.states().iter().filter(|state| !state.epsilons.is_empty()).count();
+    let epsilon_edges = nwa.states().iter().map(|state| state.epsilons.len()).sum::<usize>();
+    if epsilon_edges != 0 {
+        if dump_overlaps {
+            let mut dumped = 0usize;
+            for (state_id, state) in nwa.states().iter().enumerate() {
+                for (dst, weight) in &state.epsilons {
+                    if dumped >= 16 {
+                        break;
+                    }
+                    eprintln!(
+                        "[glrmask/profile][l2p_preminimize_epsilon] state={} dst={} weight_ranges={} target_eq_source={}",
+                        state_id,
+                        dst,
+                        weight.num_ranges(),
+                        nwa.states()[*dst as usize] == *state,
+                    );
+                    dumped += 1;
+                }
+                if dumped >= 16 {
+                    break;
+                }
+            }
+            eprintln!(
+                "[glrmask/profile][l2p_preminimize_epsilon_summary] epsilon_states={} epsilon_edges={}",
+                epsilon_states, epsilon_edges,
+            );
+            for (state_id, state) in nwa.states().iter().enumerate().filter(|(_, state)| !state.epsilons.is_empty()) {
+                eprintln!(
+                    "[glrmask/profile][l2p_preminimize_epsilon_state] state={} is_start={} final={} labeled_branches={} epsilon_edges={}",
+                    state_id,
+                    nwa.start_states().contains(&(state_id as u32)),
+                    state.final_weight.as_ref().is_some_and(|weight| !weight.is_empty()),
+                    state.transitions.values().map(Vec::len).sum::<usize>(),
+                    state.epsilons.len(),
+                );
+            }
+        }
+    }
+    let mut overlap_pairs = 0usize;
+    let mut overlap_states = 0usize;
+    let mut dumped = 0usize;
+    let mut overlap_target_frequency = BTreeMap::<u32, usize>::new();
+    for (state_id, state) in nwa.states().iter().enumerate() {
+        let mut state_has_overlap = false;
+        for (&label, branches) in &state.transitions {
+            for left in 0..branches.len() {
+                for right in left + 1..branches.len() {
+                    let overlap = branches[left].1.intersection(&branches[right].1);
+                    if !overlap.is_empty() {
+                        overlap_pairs += 1;
+                        state_has_overlap = true;
+                        *overlap_target_frequency.entry(branches[left].0).or_default() += 1;
+                        *overlap_target_frequency.entry(branches[right].0).or_default() += 1;
+                        if dump_overlaps && dumped < 16 {
+                            eprintln!(
+                                "[glrmask/profile][l2p_preminimize_overlap] state={} label={} left_dst={} right_dst={} left_ranges={} right_ranges={} overlap_ranges={} left_target_eq_right_target={}",
+                                state_id,
+                                label,
+                                branches[left].0,
+                                branches[right].0,
+                                branches[left].1.num_ranges(),
+                                branches[right].1.num_ranges(),
+                                overlap.num_ranges(),
+                                nwa.states()[branches[left].0 as usize]
+                                    == nwa.states()[branches[right].0 as usize],
+                            );
+                            dumped += 1;
+                        }
+                    }
+                }
+            }
+        }
+        overlap_states += usize::from(state_has_overlap);
+    }
+    if dump_overlaps {
+        eprintln!(
+            "[glrmask/profile][l2p_preminimize_overlap_summary] overlap_states={} overlap_pairs={}",
+            overlap_states, overlap_pairs,
+        );
+        let mut frequent_targets: Vec<_> = overlap_target_frequency.into_iter().collect();
+        frequent_targets.sort_unstable_by_key(|(_, count)| std::cmp::Reverse(*count));
+        for (target, count) in frequent_targets.into_iter().take(16) {
+            let state = &nwa.states()[target as usize];
+            eprintln!(
+                "[glrmask/profile][l2p_preminimize_overlap_target] target={} overlap_mentions={} final={} final_ranges={} labels={} labeled_branches={} epsilon_edges={}",
+                target,
+                count,
+                state.final_weight.as_ref().is_some_and(|weight| !weight.is_empty()),
+                state.final_weight.as_ref().map_or(0, Weight::num_ranges),
+                state.transitions.len(),
+                state.transitions.values().map(Vec::len).sum::<usize>(),
+                state.epsilons.len(),
+            );
+        }
+    }
+    epsilon_edges == 0 && overlap_pairs == 0
 }
 
 thread_local! {
@@ -440,6 +1044,22 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         if l2p_terminal_interchangeability_enabled_for_partition(partition_label) {
             let mut active = active_terminals.to_vec();
             let mut classes = singleton_partition(&active);
+            // Epsilon TI over a directional global quotient can make the exact
+            // powerset topology enormous even when the root observation already
+            // rules out every terminal swap. Check a bounded subset of the same
+            // root-reachable mapped powerset relation first. This is rejection
+            // only: any surviving pair still takes the unchanged exact path.
+            if global_state_quotient.as_ref().is_some_and(|quotient| {
+                bounded_root_prefilter_proves_no_ti_pairs(
+                    tokenizer,
+                    &active,
+                    &relevant_bytes,
+                    quotient,
+                    ignore_terminal,
+                )
+            }) {
+                (Some(classes), Some(Vec::new()), 1, 0, None)
+            } else {
             // Always use the byte-level exact discovery oracle. When the global
             // token-position quotient C is available (p7/p8), build discovery
             // evidence over C representatives; otherwise over raw states.
@@ -491,12 +1111,33 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
                 additional_merged_members,
                 raw_observations,
             )
+            }
         } else {
             (None, None, 0, 0, None)
         };
     let ti_discovery_ms = ti_discovery_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
+    if std::env::var_os("GLRMASK_DUMP_TI_CLASSES").is_some()
+        && let Some(partition) = terminal_partition.as_ref()
+    {
+        for (&representative, members) in partition {
+            if members.len() <= 1 {
+                continue;
+            }
+            eprintln!(
+                "[glrmask/dump][ti_class] partition={} representative={} representative_name={:?} members={:?} member_names={:?}",
+                partition_label,
+                representative,
+                grammar.terminal_display_names[representative as usize],
+                members,
+                members
+                    .iter()
+                    .map(|&terminal| grammar.terminal_display_names[terminal as usize].as_str())
+                    .collect::<Vec<_>>(),
+            );
+        }
+    }
     let reference_terminal_expansion = terminal_partition
         .as_ref()
         .is_some_and(|partition| partition_has_merges(partition));
@@ -562,6 +1203,64 @@ let strict_reference = reference_terminal_expansion
         .as_ref()
         .or(token_path_disallowed_follows)
         .unwrap_or(disallowed_follows);
+
+    if std::env::var_os("GLRMASK_DUMP_L2P_FOLLOW_PAIRS").is_some()
+        && partition_label == "p6"
+    {
+        let target_names = [
+            "json_string_char_upto_32_51",
+            "json_string_char_exact_1_1",
+            "json_string_char_upto_63_2",
+        ];
+        let target_ids = target_names
+            .iter()
+            .filter_map(|&name| {
+                grammar
+                    .terminal_display_names
+                    .iter()
+                    .position(|candidate| candidate == name)
+                    .map(|id| (name, id as u32))
+            })
+            .collect::<Vec<_>>();
+        let is_disallowed = |rows: &BTreeMap<u32, BitSet>, left: u32, right: u32| {
+            rows.get(&left)
+                .is_some_and(|row| row.contains(right as usize))
+        };
+        let representative_of = |terminal: u32| {
+            terminal_partition.as_ref().and_then(|partition| {
+                partition
+                    .iter()
+                    .find_map(|(&representative, members)| {
+                        members.contains(&terminal).then_some(representative)
+                    })
+            })
+        };
+        for &(left_name, left) in &target_ids {
+            for &(right_name, right) in &target_ids {
+                let normalized_disallowed = normalized_token_path_disallowed_follows
+                    .and_then(|rows| rows.get(left as usize))
+                    .is_some_and(|row| row.contains(right as usize));
+                eprintln!(
+                    "[glrmask/dump][l2p_follow_pair] partition={} left={} left_name={:?} left_rep={:?} right={} right_name={:?} right_rep={:?} raw_disallowed={} token_path_disallowed={} normalized_disallowed={} coalesced_disallowed={} final_disallowed={}",
+                    partition_label,
+                    left,
+                    left_name,
+                    representative_of(left),
+                    right,
+                    right_name,
+                    representative_of(right),
+                    is_disallowed(disallowed_follows, left, right),
+                    token_path_disallowed_follows
+                        .is_some_and(|rows| is_disallowed(rows, left, right)),
+                    normalized_disallowed,
+                    coalesced_disallowed_follows
+                        .as_ref()
+                        .is_some_and(|rows| is_disallowed(rows, left, right)),
+                    is_disallowed(equivalence_disallowed_follows, left, right),
+                );
+            }
+        }
+    }
     // The representative core begins after TI discovery/coalescing. It includes
     // ordinary representative-only equivalence through representative DWA
     // compaction, but deliberately excludes replay and post-DWA expansion.
@@ -635,6 +1334,15 @@ let strict_reference = reference_terminal_expansion
     let mut ti_transport_coordinate_quotient_ms = 0.0;
 
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
+    if l2p_timing_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][l2p_phase] partition={} phase=id_map_done elapsed_ms={:.3} tsids={} internal_tokens={}",
+            partition_label,
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+            simplified_id_map.num_tsids(),
+            simplified_id_map.num_internal_tokens(),
+        );
+    }
 
     // tsid_fallback is independent of the NWA build / postprocess /
     // determinize / minimize pipeline: it only feeds into the final
@@ -702,6 +1410,15 @@ let strict_reference = reference_terminal_expansion
                     .collect(),
             );
             let vocab_tree_ms = vocab_tree_started_at.elapsed().as_secs_f64() * 1000.0;
+            if l2p_timing_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][l2p_phase] partition={} phase=vocab_tree_done elapsed_ms={:.3} phase_ms={:.3} internal_vocab={}",
+                    partition_label,
+                    total_started_at.elapsed().as_secs_f64() * 1000.0,
+                    vocab_tree_ms,
+                    internal_vocab_count,
+                );
+            }
 
             // ---- Step 4: Possible matches (lazy via computer) ----
             let mut pm_computer = PossibleMatchesComputer::new(tokenizer_for_build);
@@ -724,6 +1441,17 @@ let strict_reference = reference_terminal_expansion
             let trie_build_started_at = Instant::now();
             let roots = seed_root_nodes(tokenizer, &mut nwa, start_state, &simplified_id_map);
             seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
+            if l2p_timing_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][l2p_phase] partition={} phase=seed_done elapsed_ms={:.3} phase_ms={:.3} roots={} nwa_states={} nwa_transitions={}",
+                    partition_label,
+                    total_started_at.elapsed().as_secs_f64() * 1000.0,
+                    seed_ms,
+                    roots.entries.len(),
+                    nwa.num_states(),
+                    nwa.num_transitions(),
+                );
+            }
             let build_profile = build_nwa_via_trie_walk(
                 tokenizer_for_build,
                 terminal_coloring,
@@ -739,42 +1467,212 @@ let strict_reference = reference_terminal_expansion
                 representative_core_output_labels.as_deref(),
             );
             let trie_build_ms = trie_build_started_at.elapsed().as_secs_f64() * 1000.0;
+            if l2p_timing_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][l2p_phase] partition={} phase=nwa_build_done elapsed_ms={:.3} phase_ms={:.3} nwa_states={} nwa_transitions={}",
+                    partition_label,
+                    total_started_at.elapsed().as_secs_f64() * 1000.0,
+                    trie_build_ms,
+                    nwa.num_states(),
+                    nwa.num_transitions(),
+                );
+            }
 
             let always_allowed_ms = 0.0;
             let nwa_states_after_build = nwa.states().len();
 
+            if std::env::var("GLRMASK_DUMP_L2P_NWA_PATH_STAGE").ok().as_deref()
+                == Some("pre_collapse")
+            {
+                dump_l2p_nwa_path_samples(
+                    partition_label,
+                    &nwa,
+                    grammar,
+                    &simplified_id_map,
+                    vocab,
+                );
+            }
+
             let collapse_started_at = Instant::now();
-            collapse_always_allowed(
-                &mut nwa,
-                always_allowed_follows,
-                grammar.num_terminals as usize,
-            );
+            let skip_collapse = std::env::var("GLRMASK_SKIP_L2P_COLLAPSE_ALWAYS_ALLOWED")
+                .ok()
+                .is_some_and(|value| {
+                    let value = value.trim();
+                    value.is_empty() || value == "1" || value.eq_ignore_ascii_case("true")
+                });
+            if !skip_collapse {
+                collapse_always_allowed(
+                    &mut nwa,
+                    always_allowed_follows,
+                    grammar.num_terminals as usize,
+                );
+            }
             let collapse_ms = collapse_started_at.elapsed().as_secs_f64() * 1000.0;
             let nwa_states_after_collapse = nwa.states().len();
+            if l2p_timing_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][l2p_phase] partition={} phase=collapse_done elapsed_ms={:.3} phase_ms={:.3} nwa_states={} nwa_transitions={}",
+                    partition_label,
+                    total_started_at.elapsed().as_secs_f64() * 1000.0,
+                    collapse_ms,
+                    nwa.num_states(),
+                    nwa.num_transitions(),
+                );
+            }
 
             let disallowed_started_at = Instant::now();
-            apply_disallowed_follow_constraints(
-                &mut nwa,
-                equivalence_disallowed_follows,
-                grammar.num_terminals as usize,
-                ignore_terminal,
-            );
+            let skip_disallowed_follows = std::env::var("GLRMASK_SKIP_L2P_DISALLOWED_FOLLOWS")
+                .map(|value| {
+                    let trimmed = value.trim();
+                    trimmed.is_empty() || trimmed == "1" || trimmed.eq_ignore_ascii_case("true")
+                })
+                .unwrap_or(false);
+            if !skip_disallowed_follows {
+                apply_disallowed_follow_constraints(
+                    &mut nwa,
+                    equivalence_disallowed_follows,
+                    grammar.num_terminals as usize,
+                    ignore_terminal,
+                );
+            }
             let disallowed_ms = disallowed_started_at.elapsed().as_secs_f64() * 1000.0;
             let nwa_states_after_disallowed = nwa.states().len();
+            if l2p_timing_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][l2p_phase] partition={} phase=disallowed_done elapsed_ms={:.3} phase_ms={:.3} skipped={} nwa_states={} nwa_transitions={}",
+                    partition_label,
+                    total_started_at.elapsed().as_secs_f64() * 1000.0,
+                    disallowed_ms,
+                    skip_disallowed_follows,
+                    nwa.num_states(),
+                    nwa.num_transitions(),
+                );
+            }
 
             let prune_started_at = Instant::now();
             prune_non_coreachable_states(&mut nwa);
             let prune_ms = prune_started_at.elapsed().as_secs_f64() * 1000.0;
             let nwa_states_after_prune = nwa.states().len();
+            if l2p_timing_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][l2p_phase] partition={} phase=prune_done elapsed_ms={:.3} phase_ms={:.3} nwa_states={} nwa_transitions={}",
+                    partition_label,
+                    total_started_at.elapsed().as_secs_f64() * 1000.0,
+                    prune_ms,
+                    nwa.num_states(),
+                    nwa.num_transitions(),
+                );
+            }
 
             let canonicalize_started_at = Instant::now();
             canonicalize_acyclic_nwa(&mut nwa);
             let canonicalize_ms = canonicalize_started_at.elapsed().as_secs_f64() * 1000.0;
-            let nwa_states_after_canonicalize = nwa.states().len();
+            let mut nwa_states_after_canonicalize = nwa.states().len();
+            if l2p_timing_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][l2p_phase] partition={} phase=canonicalize_done elapsed_ms={:.3} phase_ms={:.3} nwa_states={} nwa_transitions={}",
+                    partition_label,
+                    total_started_at.elapsed().as_secs_f64() * 1000.0,
+                    canonicalize_ms,
+                    nwa.num_states(),
+                    nwa.num_transitions(),
+                );
+            }
+
+            if std::env::var_os("GLRMASK_EXPERIMENTAL_PUSH_L2P_NWA_FUTURE_LIVE").is_some() {
+                let push_started_at = Instant::now();
+                let before_states = nwa.num_states();
+                let before_transitions = nwa.num_transitions();
+                let changed = push_nwa_weights_to_future_live(&mut nwa)
+                    .expect("acyclic L2P NWA future-live push unexpectedly found a cycle");
+                let push_ms = push_started_at.elapsed().as_secs_f64() * 1000.0;
+                let recanonicalize_started_at = Instant::now();
+                if changed {
+                    canonicalize_acyclic_nwa(&mut nwa);
+                }
+                let recanonicalize_ms =
+                    recanonicalize_started_at.elapsed().as_secs_f64() * 1000.0;
+                nwa_states_after_canonicalize = nwa.states().len();
+                if l2p_timing_profile_enabled() {
+                    eprintln!(
+                        "[glrmask/profile][l2p_future_live_push] partition={} changed={} states={}->{} transitions={}->{} push_ms={:.3} recanonicalize_ms={:.3}",
+                        partition_label,
+                        changed,
+                        before_states,
+                        nwa.num_states(),
+                        before_transitions,
+                        nwa.num_transitions(),
+                        push_ms,
+                        recanonicalize_ms,
+                    );
+                }
+            }
+
+            if std::env::var("GLRMASK_DUMP_L2P_NWA_PATH_STAGE").ok().as_deref()
+                != Some("pre_collapse")
+            {
+                dump_l2p_nwa_path_samples(
+                    partition_label,
+                    &nwa,
+                    grammar,
+                    &simplified_id_map,
+                    vocab,
+                );
+            }
+
+            if l2p_timing_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][l2p_phase] partition={} phase=determinize_start elapsed_ms={:.3} nwa_states={} nwa_transitions={}",
+                    partition_label,
+                    total_started_at.elapsed().as_secs_f64() * 1000.0,
+                    nwa.num_states(),
+                    nwa.num_transitions(),
+                );
+            }
+
+            if std::env::var_os("GLRMASK_EXPERIMENTAL_PREMINIMIZE_L2P_TOKEN_NWA").is_some() {
+                let preminimize_started_at = Instant::now();
+                let before_states = nwa.num_states();
+                let before_transitions = nwa.num_transitions();
+                let token_deterministic = validate_token_deterministic_nwa(&nwa);
+                if token_deterministic {
+                    nwa = minimize_token_deterministic_nwa_owned(nwa)
+                        .expect("validated acyclic L2P token NWA minimization failed");
+                }
+                if l2p_timing_profile_enabled() {
+                    eprintln!(
+                        "[glrmask/profile][l2p_preminimize_token_nwa] partition={} token_deterministic={} states={}->{} transitions={}->{} total_ms={:.3}",
+                        partition_label,
+                        token_deterministic,
+                        before_states,
+                        nwa.num_states(),
+                        before_transitions,
+                        nwa.num_transitions(),
+                        preminimize_started_at.elapsed().as_secs_f64() * 1000.0,
+                    );
+                }
+            }
 
             let determinize_started_at = Instant::now();
             let det = determinize(&nwa).expect("L2+ terminal NWA determinization failed");
             let determinize_ms = determinize_started_at.elapsed().as_secs_f64() * 1000.0;
+            if l2p_timing_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][l2p_phase] partition={} phase=determinize_done elapsed_ms={:.3} phase_ms={:.3} dwa_states={} dwa_transitions={}",
+                    partition_label,
+                    total_started_at.elapsed().as_secs_f64() * 1000.0,
+                    determinize_ms,
+                    det.num_states(),
+                    det.num_transitions(),
+                );
+                eprintln!(
+                    "[glrmask/profile][l2p_phase] partition={} phase=minimize_start elapsed_ms={:.3} dwa_states={} dwa_transitions={}",
+                    partition_label,
+                    total_started_at.elapsed().as_secs_f64() * 1000.0,
+                    det.num_states(),
+                    det.num_transitions(),
+                );
+            }
 
             let minimize_started_at = Instant::now();
             let skip_minimize = std::env::var("GLRMASK_SKIP_L2P_MINIMIZE")
@@ -786,6 +1684,16 @@ let strict_reference = reference_terminal_expansion
             let dwa = if skip_minimize { det } else { minimize_owned(det) };
             let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
             let dwa_stats_before_compact = dwa.stats();
+            if l2p_timing_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][l2p_phase] partition={} phase=minimize_done elapsed_ms={:.3} phase_ms={:.3} dwa_states={} dwa_transitions={}",
+                    partition_label,
+                    total_started_at.elapsed().as_secs_f64() * 1000.0,
+                    minimize_ms,
+                    dwa.num_states(),
+                    dwa.num_transitions(),
+                );
+            }
 
             (
                 dwa,

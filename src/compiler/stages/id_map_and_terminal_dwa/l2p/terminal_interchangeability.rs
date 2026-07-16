@@ -352,11 +352,27 @@ impl<'a> SparseSwappedOutputIds<'a> {
 /// destination for every real state. Keeping only real edges is exact: all
 /// omitted bytes share that one default.
 #[derive(Debug)]
+struct LabelledReverseEdges {
+    offsets: Vec<u32>,
+    edges: Vec<(u8, u32)>,
+}
+
+impl LabelledReverseEdges {
+    #[inline]
+    fn predecessors(&self, destination: usize) -> &[(u8, u32)] {
+        let start = self.offsets[destination] as usize;
+        let end = self.offsets[destination + 1] as usize;
+        &self.edges[start..end]
+    }
+}
+
+#[derive(Debug)]
 struct RestrictedTopology {
     bytes: Vec<u8>,
     edge_offsets: Vec<u32>,
     edges: Vec<(u8, u32)>,
     reverse_predecessors: Arc<[Vec<u32>]>,
+    labelled_reverse_edges: OnceLock<LabelledReverseEdges>,
     observed_destinations: Arc<[bool]>,
     /// Number of raw tokenizer states. Transport witnesses must retain this
     /// external scanner coordinate even when discovery runs on a quotient.
@@ -492,6 +508,7 @@ impl RestrictedTopology {
             edge_offsets,
             edges,
             reverse_predecessors: reverse_predecessors.into(),
+            labelled_reverse_edges: OnceLock::new(),
             observed_destinations: observed_destinations.into(),
             raw_state_count,
             raw_representative_by_state,
@@ -568,6 +585,7 @@ impl RestrictedTopology {
             edge_offsets,
             edges: view.edges,
             reverse_predecessors: reverse_predecessors.into(),
+            labelled_reverse_edges: OnceLock::new(),
             observed_destinations: observed_destinations.into(),
             raw_state_count,
             raw_representative_by_state: Some(raw_representative_by_state.into()),
@@ -610,6 +628,33 @@ impl RestrictedTopology {
 
     fn reverse_predecessors(&self) -> Arc<[Vec<u32>]> {
         Arc::clone(&self.reverse_predecessors)
+    }
+
+    fn labelled_reverse_edges(&self) -> &LabelledReverseEdges {
+        self.labelled_reverse_edges.get_or_init(|| {
+            let state_count = self.state_count();
+            let mut counts = vec![0u32; state_count];
+            for source in 0..state_count {
+                for &(_, destination) in self.edges_from(source) {
+                    counts[destination as usize] += 1;
+                }
+            }
+            let mut offsets = Vec::with_capacity(state_count + 1);
+            offsets.push(0u32);
+            for count in counts {
+                offsets.push(offsets.last().copied().unwrap() + count);
+            }
+            let mut next_offset = offsets[..state_count].to_vec();
+            let mut edges = vec![(0u8, 0u32); self.edges.len()];
+            for source in 0..state_count {
+                for &(byte, destination) in self.edges_from(source) {
+                    let offset = &mut next_offset[destination as usize];
+                    edges[*offset as usize] = (byte, source as u32);
+                    *offset += 1;
+                }
+            }
+            LabelledReverseEdges { offsets, edges }
+        })
     }
 
     #[inline]
@@ -1430,6 +1475,285 @@ fn rooted_candidate_groups_from_signatures(
             .push(terminal);
     }
     groups.into_values().collect()
+}
+
+#[derive(Debug)]
+struct BoundedRootPrefilterResult {
+    remaining_pairs: usize,
+    rounds: usize,
+    configs: usize,
+    observed_configs: usize,
+    edges: usize,
+    limit_hit: bool,
+}
+
+/// Exact necessary root condition evaluated before building the full epsilon
+/// TI powerset over a global scanner-state quotient.
+///
+/// The TI characterization reads destination outputs along every enabled-byte
+/// word from the common initial state. At any destination reached by such a
+/// word, an interchangeable terminal pair must have equal membership in both
+/// frozen output families: otherwise the identity and transposed sides already
+/// differ on that word and later refinement cannot repair the split.
+///
+/// This routine explores only the first `max_rounds` of the *same mapped NFA
+/// powerset transition relation* used by `build_relevant_powerset_view` and
+/// eliminates candidate pairs on those definitely-observed destinations. It is
+/// therefore a rejection-only prefilter. A surviving pair always falls through
+/// to the ordinary exact TI solver; only an empty pair set can bypass full
+/// topology construction.
+fn bounded_mapped_root_prefilter(
+    tokenizer: &Tokenizer,
+    active_terminals: &[bool],
+    relevant_bytes: &[bool; 256],
+    state_map: &ManyToOneIdMap,
+    ignore_terminal: Option<TerminalID>,
+    max_rounds: usize,
+    max_configs: usize,
+    max_edges: usize,
+) -> BoundedRootPrefilterResult {
+    let candidates = active_terminals
+        .iter()
+        .enumerate()
+        .filter_map(|(terminal, &active)| active.then_some(terminal as TerminalID))
+        .filter(|&terminal| Some(terminal) != ignore_terminal)
+        .collect::<Vec<_>>();
+    let mut possible_pairs = (0..candidates.len())
+        .flat_map(|left| ((left + 1)..candidates.len()).map(move |right| (left, right)))
+        .collect::<Vec<_>>();
+    if possible_pairs.is_empty() || max_rounds == 0 {
+        return BoundedRootPrefilterResult {
+            remaining_pairs: possible_pairs.len(),
+            rounds: 0,
+            configs: 1,
+            observed_configs: 0,
+            edges: 0,
+            limit_hit: false,
+        };
+    }
+
+    let terminal_count = tokenizer.num_terminals() as usize;
+    let mut candidate_index = vec![u8::MAX; terminal_count];
+    assert!(
+        candidates.len() <= u64::BITS as usize,
+        "bounded root TI prefilter supports at most 64 candidate terminals",
+    );
+    for (index, &terminal) in candidates.iter().enumerate() {
+        candidate_index[terminal as usize] = index as u8;
+    }
+
+    let class_count = state_map.representative_original_ids.len();
+    let mut closure_by_class = Vec::<Box<[u32]>>::with_capacity(class_count);
+    let mut finalizer_mask_by_class = Vec::<u64>::with_capacity(class_count);
+    let mut future_mask_by_class = Vec::<u64>::with_capacity(class_count);
+    for &representative in &state_map.representative_original_ids {
+        let closure = tokenizer
+            .execute_from_state_end_only(&[], representative)
+            .to_vec()
+            .into_boxed_slice();
+        let mut finalizer_mask = 0u64;
+        let mut future_mask = 0u64;
+        for &raw_state in closure.iter() {
+            for terminal in tokenizer.matched_terminals_iter(raw_state) {
+                let index = candidate_index[terminal as usize];
+                if index != u8::MAX {
+                    finalizer_mask |= 1u64 << index;
+                }
+            }
+            for terminal in tokenizer.possible_future_terminals_iter(raw_state) {
+                let index = candidate_index[terminal as usize];
+                if index != u8::MAX {
+                    future_mask |= 1u64 << index;
+                }
+            }
+        }
+        closure_by_class.push(closure);
+        finalizer_mask_by_class.push(finalizer_mask);
+        future_mask_by_class.push(future_mask);
+    }
+
+    let root_class = state_map.original_to_internal[tokenizer.initial_state_id() as usize];
+    let mut config_ids = FxHashMap::<Vec<u32>, u32>::default();
+    config_ids.insert(vec![root_class], 0);
+    let mut configs = vec![vec![root_class].into_boxed_slice()];
+    let mut frontier = vec![0u32];
+    let mut observed = vec![false];
+    let bytes = relevant_bytes
+        .iter()
+        .enumerate()
+        .filter_map(|(byte, &relevant)| relevant.then_some(byte as u8))
+        .collect::<Vec<_>>();
+    let mut edge_count = 0usize;
+    let mut observed_count = 0usize;
+    let mut rounds = 0usize;
+    let mut limit_hit = false;
+
+    'rounds: for _ in 0..max_rounds {
+        if frontier.is_empty() || possible_pairs.is_empty() {
+            break;
+        }
+        let mut next_frontier = Vec::<u32>::new();
+        let mut newly_observed = Vec::<u32>::new();
+        for state in frontier {
+            let config = configs[state as usize].clone();
+            let mut visit_target = |mut target_config: Vec<u32>| -> bool {
+                if edge_count >= max_edges {
+                    limit_hit = true;
+                    return false;
+                }
+                target_config.sort_unstable();
+                target_config.dedup();
+                let next_id = configs.len() as u32;
+                let (target, is_new) = match config_ids.entry(target_config) {
+                    Entry::Occupied(entry) => (*entry.get(), false),
+                    Entry::Vacant(entry) => {
+                        if configs.len() >= max_configs {
+                            limit_hit = true;
+                            return false;
+                        }
+                        let target = next_id;
+                        configs.push(entry.key().clone().into_boxed_slice());
+                        observed.push(false);
+                        entry.insert(target);
+                        (target, true)
+                    }
+                };
+                edge_count += 1;
+                if is_new {
+                    next_frontier.push(target);
+                }
+                if !observed[target as usize] {
+                    observed[target as usize] = true;
+                    observed_count += 1;
+                    newly_observed.push(target);
+                }
+                true
+            };
+
+            if config.len() == 1 && closure_by_class[config[0] as usize].len() == 1 {
+                let raw_source = closure_by_class[config[0] as usize][0];
+                for (byte, raw_target) in tokenizer.transitions_from(raw_source) {
+                    if !relevant_bytes[byte as usize] {
+                        continue;
+                    }
+                    let targets = tokenizer.execute_from_state_end_only(&[], raw_target);
+                    if !targets.is_empty() {
+                        if !visit_target(
+                            targets
+                                .iter()
+                                .map(|&raw_state| {
+                                    state_map.original_to_internal[raw_state as usize]
+                                })
+                                .collect(),
+                        ) {
+                            break;
+                        }
+                    }
+                }
+            } else {
+                let source_states = config
+                    .iter()
+                    .map(|&class| state_map.representative_original_ids[class as usize])
+                    .collect::<Vec<_>>();
+                for &byte in &bytes {
+                    let targets = tokenizer.step_all(&source_states, byte);
+                    if !targets.is_empty() {
+                        if !visit_target(
+                            targets
+                                .iter()
+                                .map(|&raw_state| {
+                                    state_map.original_to_internal[raw_state as usize]
+                                })
+                                .collect(),
+                        ) {
+                            break;
+                        }
+                    }
+                }
+            }
+            drop(visit_target);
+            if limit_hit {
+                break 'rounds;
+            }
+        }
+        for state in newly_observed {
+            let mut finalizer_mask = 0u64;
+            let mut future_mask = 0u64;
+            for &class in configs[state as usize].iter() {
+                finalizer_mask |= finalizer_mask_by_class[class as usize];
+                future_mask |= future_mask_by_class[class as usize];
+            }
+            possible_pairs.retain(|&(left, right)| {
+                ((finalizer_mask >> left) & 1) == ((finalizer_mask >> right) & 1)
+                    && ((future_mask >> left) & 1) == ((future_mask >> right) & 1)
+            });
+        }
+        frontier = next_frontier;
+        rounds += 1;
+    }
+
+    BoundedRootPrefilterResult {
+        remaining_pairs: possible_pairs.len(),
+        rounds,
+        configs: configs.len(),
+        observed_configs: observed_count,
+        edges: edge_count,
+        limit_hit,
+    }
+}
+
+pub(crate) fn bounded_root_prefilter_proves_no_ti_pairs(
+    tokenizer: &Tokenizer,
+    active_terminals: &[bool],
+    relevant_bytes: &[bool; 256],
+    global_state_quotient: &GlobalScannerStateQuotient,
+    ignore_terminal: Option<TerminalID>,
+) -> bool {
+    let candidate_count = active_terminals
+        .iter()
+        .enumerate()
+        .filter(|&(terminal, active)| *active && Some(terminal as TerminalID) != ignore_terminal)
+        .count();
+    if !tokenizer.has_epsilon_transitions() || candidate_count > u64::BITS as usize {
+        return false;
+    }
+    let max_rounds = std::env::var("GLRMASK_TI_BOUNDED_ROOT_PREFILTER_ROUNDS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(16);
+    let max_configs = std::env::var("GLRMASK_TI_BOUNDED_ROOT_PREFILTER_MAX_CONFIGS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(100_000);
+    let max_edges = std::env::var("GLRMASK_TI_BOUNDED_ROOT_PREFILTER_MAX_EDGES")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(2_000_000);
+    let started_at = Instant::now();
+    let result = bounded_mapped_root_prefilter(
+        tokenizer,
+        active_terminals,
+        relevant_bytes,
+        global_state_quotient.as_many_to_one(),
+        ignore_terminal,
+        max_rounds,
+        max_configs,
+        max_edges,
+    );
+    if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
+        eprintln!(
+            "[glrmask/profile][ti_bounded_root_prefilter] candidates={} rounds={} configs={} observed_configs={} edges={} remaining_pairs={} limit_hit={} total_ms={:.3}",
+            candidate_count,
+            result.rounds,
+            result.configs,
+            result.observed_configs,
+            result.edges,
+            result.remaining_pairs,
+            result.limit_hit,
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    result.remaining_pairs == 0
 }
 
 fn rooted_candidate_groups(
@@ -5835,6 +6159,195 @@ impl InterchangeabilityDfa {
         classes
     }
 
+    /// Compute the exact combined identity/swapped fixed point directly by
+    /// partition refinement on the disjoint union of both deterministic
+    /// restricted topologies.
+    ///
+    /// Canonical round one already partitions states by their complete sparse
+    /// byte/output rows. From that point onward Moore refinement only splits by
+    /// destination classes. The coarsest stable refinement of the same initial
+    /// partition is unique, so a labelled-predecessor worklist computes exactly
+    /// the same fixed point without one whole-graph pass per tokenizer depth.
+    fn canonical_combined_stable_interchange_map(
+        &mut self,
+        left: TerminalID,
+        right: TerminalID,
+    ) -> Option<InterchangeMap> {
+        self.ensure_canonical_identity_round(1);
+        let identity_round_one = self.canonical_rounds[1].classes.clone();
+        let mut outputs = SwappedOutputIds::new(
+            &self.output_pairs,
+            &self.output_pair_lookup,
+            left as usize,
+            right as usize,
+        );
+        let swapped_round_one = self.canonical_swapped_round(
+            &self.canonical_rounds[0].classes,
+            &self.canonical_rounds[0].classes,
+            &self.canonical_rounds[1],
+            &mut outputs,
+        );
+        if !rooted_class_set_still_possible_u32(
+            &identity_round_one,
+            &swapped_round_one,
+            self.topology.initial_state,
+            self.topology.real_state_count,
+        ) {
+            return None;
+        }
+
+        let state_count = self.state_count();
+        let combined_state_count = state_count * 2;
+        let mut class_for_state = Vec::with_capacity(combined_state_count);
+        class_for_state.extend_from_slice(&identity_round_one);
+        class_for_state.extend_from_slice(&swapped_round_one);
+        let initial_class_count = class_for_state
+            .iter()
+            .copied()
+            .max()
+            .map_or(0usize, |class| class as usize + 1);
+        let mut members_by_class = vec![Vec::<u32>::new(); initial_class_count];
+        for (state, &class) in class_for_state.iter().enumerate() {
+            members_by_class[class as usize].push(state as u32);
+        }
+
+        // Both copies of the synthetic dead state have the same frozen output
+        // and no explicit edges, so they share one class throughout. Missing
+        // byte edges all target that class. As in ordinary DFA Hopcroft
+        // refinement, its preimage is the complement of the explicit non-dead
+        // preimages and need not be materialized.
+        let dead_state = self.dead_state();
+        let dead_class = class_for_state[dead_state] as usize;
+        debug_assert_eq!(
+            class_for_state[dead_state],
+            class_for_state[state_count + dead_state],
+        );
+
+        // The identity and swapped copies have exactly the same restricted
+        // topology. Cache its labelled reverse relation once on the shared
+        // topology and add the side offset while visiting a splitter. Exact
+        // pair checks then avoid rebuilding two copies of every sparse edge.
+        let reverse_edges = self.topology.labelled_reverse_edges();
+
+        let mut queue = VecDeque::<usize>::new();
+        let mut queued = vec![false; initial_class_count];
+        for class in 0..initial_class_count {
+            if class != dead_class {
+                queue.push_back(class);
+                queued[class] = true;
+            }
+        }
+        let mut incoming_by_byte: [Vec<u32>; 256] = std::array::from_fn(|_| Vec::new());
+        let mut touched_bytes = Vec::<u8>::new();
+        let mut source_marks = vec![0u32; combined_state_count];
+        let mut mark_epoch = 0u32;
+        let mut class_counts = vec![0usize; initial_class_count];
+        let mut touched_classes = Vec::<usize>::new();
+
+        while let Some(splitter) = queue.pop_front() {
+            queued[splitter] = false;
+            if members_by_class[splitter].is_empty() {
+                continue;
+            }
+            touched_bytes.clear();
+            for &destination in &members_by_class[splitter] {
+                let destination = destination as usize;
+                let side_base = destination / state_count * state_count;
+                let raw_destination = destination % state_count;
+                for &(byte, source) in reverse_edges.predecessors(raw_destination) {
+                    let incoming = &mut incoming_by_byte[byte as usize];
+                    if incoming.is_empty() {
+                        touched_bytes.push(byte);
+                    }
+                    incoming.push((side_base + source as usize) as u32);
+                }
+            }
+
+            for &byte in &touched_bytes {
+                let sources = &incoming_by_byte[byte as usize];
+                mark_epoch = mark_epoch.wrapping_add(1);
+                if mark_epoch == 0 {
+                    source_marks.fill(0);
+                    mark_epoch = 1;
+                }
+                touched_classes.clear();
+                for &source in sources {
+                    let source = source as usize;
+                    if source_marks[source] == mark_epoch {
+                        continue;
+                    }
+                    source_marks[source] = mark_epoch;
+                    let class = class_for_state[source] as usize;
+                    if class_counts[class] == 0 {
+                        touched_classes.push(class);
+                    }
+                    class_counts[class] += 1;
+                }
+
+                for &class in &touched_classes {
+                    let marked_count = class_counts[class];
+                    class_counts[class] = 0;
+                    let class_len = members_by_class[class].len();
+                    if marked_count == 0 || marked_count == class_len {
+                        continue;
+                    }
+                    let old_members = std::mem::take(&mut members_by_class[class]);
+                    let mut marked = Vec::with_capacity(marked_count);
+                    let mut unmarked = Vec::with_capacity(class_len - marked_count);
+                    for state in old_members {
+                        if source_marks[state as usize] == mark_epoch {
+                            marked.push(state);
+                        } else {
+                            unmarked.push(state);
+                        }
+                    }
+
+                    let combined_dead = dead_state as u32;
+                    let contains_dead_marked = marked.binary_search(&combined_dead).is_ok();
+                    let contains_dead_unmarked = unmarked.binary_search(&combined_dead).is_ok();
+                    let was_queued = queued[class];
+                    let (retained, moved) = if contains_dead_marked {
+                        (marked, unmarked)
+                    } else if contains_dead_unmarked {
+                        (unmarked, marked)
+                    } else if was_queued || marked.len() >= unmarked.len() {
+                        (marked, unmarked)
+                    } else {
+                        (unmarked, marked)
+                    };
+                    members_by_class[class] = retained;
+                    for &state in &members_by_class[class] {
+                        class_for_state[state as usize] = class as u32;
+                    }
+                    let new_class = members_by_class.len();
+                    for &state in &moved {
+                        class_for_state[state as usize] = new_class as u32;
+                    }
+                    members_by_class.push(moved);
+                    queued.push(false);
+                    class_counts.push(0);
+
+                    // If the old block was already pending, its existing queue
+                    // entry handles the retained half and the new half must also
+                    // be queued. Otherwise Hopcroft's smaller-half theorem is
+                    // sufficient. The dead-containing half is always retained.
+                    if was_queued || class == dead_class {
+                        queued[new_class] = true;
+                        queue.push_back(new_class);
+                    } else {
+                        queued[new_class] = true;
+                        queue.push_back(new_class);
+                    }
+                }
+                incoming_by_byte[byte as usize].clear();
+            }
+        }
+
+        let identity_classes = &class_for_state[..state_count];
+        let swapped_classes = &class_for_state[state_count..];
+        self.interchange_map_from_classes(identity_classes, swapped_classes)
+    }
+
     /// Exact necessary first-round condition for a terminal swap. Round one
     /// depends only on frozen destination outputs, so a swap can change only
     /// source rows with an enabled edge into a state mentioning either terminal.
@@ -5995,21 +6508,40 @@ impl InterchangeabilityDfa {
     /// Collision-free exact refinement. This deliberately recomputes every
     /// raw restricted state each round: an earlier incremental cone shortcut
     /// was not a sufficient proof of cross-side partition stabilization.
-    fn canonical_interchange_map(&mut self, left: TerminalID, right: TerminalID) -> Option<InterchangeMap> {
-        if let Some(map) = self.canonical_quotient_interchange_map(left, right) {
+    fn canonical_interchange_map(
+        &mut self,
+        left: TerminalID,
+        right: TerminalID,
+    ) -> Option<InterchangeMap> {
+        // The quotient proof needs the complete identity fixed-point history.
+        // Do not build that history merely to try the quotient: most exact
+        // fallback pairs become impossible after only a handful of rounds.
+        // Once another pair has already forced stabilization, retain the
+        // quotient fast path exactly as before.
+        if self.canonical_stable_round.is_some()
+            && let Some(map) = self.canonical_quotient_interchange_map(left, right)
+        {
             return Some(map);
+        }
+        if std::env::var_os("GLRMASK_TI_DISABLE_COMBINED_REFINEMENT").is_none() {
+            return self.canonical_combined_stable_interchange_map(left, right);
         }
         let pair_started_at = Instant::now();
         let profile_pair = std::env::var_os("GLRMASK_PROFILE_L2P_TI_CANONICAL_PAIRS").is_some();
-        let stable_round = self.ensure_canonical_identity_stable_round();
+        // Own the small frozen-output lookup for this fallback so lazy identity
+        // round construction can mutably extend `self.canonical_rounds` between
+        // swapped rounds without holding an immutable borrow of `self`.
+        let output_pairs = Arc::clone(&self.output_pairs);
+        let output_pair_lookup = self.output_pair_lookup.clone();
         let mut outputs = SwappedOutputIds::new(
-            &self.output_pairs,
-            &self.output_pair_lookup,
+            &output_pairs,
+            &output_pair_lookup,
             left as usize,
             right as usize,
         );
         let mut swapped_previous = self.canonical_rounds[0].classes.clone();
-        for round in 1..=stable_round {
+        for round in 1..=self.state_count().saturating_mul(2).max(1) {
+            self.ensure_canonical_identity_round(round);
             let identity_previous = &self.canonical_rounds[round - 1].classes;
             let identity = &self.canonical_rounds[round];
             let swapped_next = self.canonical_swapped_round(
@@ -6052,10 +6584,17 @@ impl InterchangeabilityDfa {
                 }
                 return self.interchange_map_from_classes(&identity.classes, &swapped_next);
             }
+            if same_equality_partition_u32(identity_previous, &identity.classes) {
+                self.canonical_stable_round = Some(round);
+                drop(outputs);
+                return self.reference_interchange_map(left, right);
+            }
             swapped_previous = swapped_next;
         }
-        drop(outputs);
-        self.reference_interchange_map(left, right)
+        panic!(
+            "canonical terminal interchangeability characterization did not stabilize within {} rounds",
+            self.state_count().saturating_mul(2).max(1),
+        );
     }
 
     fn canonical_identity_map(&mut self) -> InterchangeMap {
@@ -8026,14 +8565,32 @@ pub(crate) fn coalesced_disallowed_follows(
     // of its members.  Testing each successor class against that intersection
     // avoids a hash-map update for every raw edge, while retaining the exact
     // all-member-pair relation.
-    let classes = partition
-        .iter()
-        .map(|(&representative, members)| (representative, members))
-        .collect::<Vec<_>>();
+    // `partition` covers only TI-active terminals. The representative core
+    // still emits every raw terminal outside that partition, so those labels
+    // must remain present in the follow relation as implicit singleton classes.
+    // Omitting them makes missing rows/columns read as "allowed everywhere".
+    let mut covered = vec![false; num_terminals];
+    let mut classes = Vec::<(TerminalID, Vec<TerminalID>)>::with_capacity(num_terminals);
+    for (&representative, members) in partition {
+        let members = members.iter().copied().collect::<Vec<_>>();
+        for &member in &members {
+            if (member as usize) < covered.len() {
+                covered[member as usize] = true;
+            }
+        }
+        classes.push((representative, members));
+    }
+    for (terminal, &is_covered) in covered.iter().enumerate() {
+        if !is_covered {
+            classes.push((terminal as TerminalID, vec![terminal as TerminalID]));
+        }
+    }
+    classes.sort_unstable_by_key(|(representative, _)| *representative);
+
     let empty = BitSet::new(num_terminals);
     let mut coalesced = BTreeMap::new();
 
-    for &(representative, members) in &classes {
+    for (representative, members) in &classes {
         let mut members = members.iter();
         let Some(&first_member) = members.next() else {
             continue;
@@ -8054,15 +8611,15 @@ pub(crate) fn coalesced_disallowed_follows(
         }
 
         let mut row = BitSet::new(num_terminals);
-        for &(successor_representative, successor_members) in &classes {
+        for (successor_representative, successor_members) in &classes {
             if successor_members
                 .iter()
                 .all(|&member| common_successors.contains(member as usize))
             {
-                row.set(successor_representative as usize);
+                row.set(*successor_representative as usize);
             }
         }
-        coalesced.insert(representative as u32, row);
+        coalesced.insert(*representative as u32, row);
     }
 
     coalesced
@@ -10142,6 +10699,42 @@ mod tests {
     }
 
     #[test]
+    fn coalesced_disallowed_follows_preserves_out_of_partition_raw_terminals() {
+        let partition = BTreeMap::from([
+            (0, BTreeSet::from([0, 1])),
+            (2, BTreeSet::from([2])),
+        ]);
+        let mut original = BTreeMap::new();
+        let row = |successors: &[usize]| {
+            let mut bits = BitSet::new(5);
+            for &successor in successors {
+                bits.set(successor);
+            }
+            bits
+        };
+        original.insert(0, row(&[3, 4]));
+        original.insert(1, row(&[3, 4]));
+        original.insert(2, row(&[3]));
+        original.insert(3, row(&[0, 1, 2, 4]));
+        original.insert(4, row(&[0, 1, 3]));
+
+        let coalesced = coalesced_disallowed_follows(&partition, &original, 5);
+
+        // Raw labels 3 and 4 are outside the TI-active partition and therefore
+        // remain exact singleton predecessor/successor classes.
+        assert!(coalesced[&0].contains(3));
+        assert!(coalesced[&0].contains(4));
+        assert!(coalesced[&2].contains(3));
+        assert!(!coalesced[&2].contains(4));
+        assert!(coalesced[&3].contains(0));
+        assert!(coalesced[&3].contains(2));
+        assert!(coalesced[&3].contains(4));
+        assert!(coalesced[&4].contains(0));
+        assert!(coalesced[&4].contains(3));
+        assert!(!coalesced[&4].contains(2));
+    }
+
+    #[test]
     fn folding_memberships_requires_only_current_classes_and_round() {
         let active = [true, true, true, true];
         let initial = singleton_partition(&active);
@@ -10468,6 +11061,7 @@ mod tests {
             edge_offsets: vec![0, 0, 0, 0],
             edges: Vec::new(),
             reverse_predecessors: Arc::from([Vec::new(), Vec::new()]),
+            labelled_reverse_edges: OnceLock::new(),
             observed_destinations: Arc::from([false, false, false]),
             raw_state_count: 1,
             raw_representative_by_state: Some(Arc::from([0, u32::MAX])),
@@ -10576,6 +11170,68 @@ mod tests {
                 .all(|map| map.len() == tokenizer.num_states() as usize),
             "C-coordinate TI transport must remain in raw scanner coordinates",
         );
+    }
+
+    #[test]
+    fn bounded_mapped_root_prefilter_matches_full_root_condition_at_fixpoint() {
+        let tokenizer =
+            crate::automata::lexer::tokenizer::arbitrary_epsilon_l1_test_tokenizer();
+        let vocab = crate::Vocab::new(
+            vec![
+                (0, b"a".to_vec()),
+                (1, b"b".to_vec()),
+                (2, b"aa".to_vec()),
+                (3, b"ba".to_vec()),
+            ],
+            None,
+        );
+        let (global_state_quotient, _) = crate::compiler::stages::id_map_and_terminal_dwa::l2p::
+            equivalence_analysis::state_equivalence::global_token_position::
+            compute_global_token_position_state_quotient(&tokenizer, &vocab);
+        let active = [true, true];
+
+        for relevant_bytes in [
+            [true; 256],
+            {
+                let mut bytes = [false; 256];
+                bytes[b'a' as usize] = true;
+                bytes
+            },
+            {
+                let mut bytes = [false; 256];
+                bytes[b'b' as usize] = true;
+                bytes
+            },
+        ] {
+            let topology = RestrictedTopology::new_with_global_state_quotient(
+                &tokenizer,
+                &relevant_bytes,
+                &global_state_quotient,
+            );
+            let (full_groups, _) = rooted_candidate_groups(
+                &tokenizer,
+                &[0, 1],
+                &topology,
+            );
+            let full_pairs = full_groups
+                .iter()
+                .map(|group| group.len() * group.len().saturating_sub(1) / 2)
+                .sum::<usize>();
+            let bounded = bounded_mapped_root_prefilter(
+                &tokenizer,
+                &active,
+                &relevant_bytes,
+                global_state_quotient.as_many_to_one(),
+                None,
+                usize::MAX,
+                usize::MAX,
+                usize::MAX,
+            );
+            assert_eq!(
+                bounded.remaining_pairs, full_pairs,
+                "bounded mapped root traversal must converge to the full topology root condition",
+            );
+        }
     }
 
     #[test]
@@ -10754,6 +11410,60 @@ mod tests {
                 let mut canonical = InterchangeabilityDfa::new(&tokenizer, &active, &[true; 256]);
                 let mut reference = InterchangeabilityDfa::new(&tokenizer, &active, &[true; 256]);
                 assert_eq!(canonical.interchange_map(left, right), reference.reference_interchange_map(left, right), "canonical refinement disagreed with hash reference for {left} <-> {right}");
+            }
+        }
+    }
+
+    #[test]
+    fn combined_stable_refinement_matches_hash_reference_on_random_literal_topologies() {
+        fn next_u32(seed: &mut u64) -> u32 {
+            *seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (*seed >> 32) as u32
+        }
+
+        for case in 0..96u64 {
+            let mut seed = 0xa076_1d64_78bd_642f ^ case;
+            let terminal_count = 3 + next_u32(&mut seed) as usize % 6;
+            let expressions = (0..terminal_count)
+                .map(|_| {
+                    let len = 1 + next_u32(&mut seed) as usize % 7;
+                    let literal = (0..len)
+                        .map(|_| b'a' + (next_u32(&mut seed) % 5) as u8)
+                        .collect::<Vec<_>>();
+                    Expr::U8Seq(literal)
+                })
+                .collect::<Vec<_>>();
+            let tokenizer = tokenizer(expressions);
+            let active = vec![true; terminal_count];
+            let mut relevant_bytes = [false; 256];
+            match case % 4 {
+                0 => relevant_bytes.fill(true),
+                1 => {
+                    relevant_bytes[b'a' as usize] = true;
+                    relevant_bytes[b'c' as usize] = true;
+                    relevant_bytes[b'e' as usize] = true;
+                }
+                2 => {
+                    relevant_bytes[b'b' as usize] = true;
+                    relevant_bytes[b'd' as usize] = true;
+                }
+                _ => relevant_bytes[b'x' as usize] = true,
+            }
+
+            for left in 0..terminal_count as TerminalID {
+                for right in left + 1..terminal_count as TerminalID {
+                    let mut combined =
+                        InterchangeabilityDfa::new(&tokenizer, &active, &relevant_bytes);
+                    let mut reference =
+                        InterchangeabilityDfa::new(&tokenizer, &active, &relevant_bytes);
+                    assert_eq!(
+                        combined.canonical_combined_stable_interchange_map(left, right),
+                        reference.reference_interchange_map(left, right),
+                        "combined refinement disagreed with hash reference for case={case} pair={left}<->{right}",
+                    );
+                }
             }
         }
     }

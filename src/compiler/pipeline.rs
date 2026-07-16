@@ -178,6 +178,17 @@ fn elapsed_ms(started_at: Instant) -> f64 {
     started_at.elapsed().as_secs_f64() * 1000.0
 }
 
+fn emit_compile_phase_done(name: &str, started_at: Instant, compile_started_at: Instant) {
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][compile_phase] name={} elapsed_ms={:.3} finished_ms={:.3}",
+            name,
+            elapsed_ms(started_at),
+            elapsed_ms(compile_started_at),
+        );
+    }
+}
+
 fn compile_thread_count() -> Option<usize> {
     if let Some(value) = std::env::var("GLRMASK_COMPILE_THREADS")
         .ok()
@@ -430,11 +441,12 @@ fn lexer_partition_ids_with_options(
                     .map(|partition| format!("named:{partition}"))
                     .unwrap_or_else(|| "default".to_string())
             };
-            *ids_by_key.entry(key).or_insert_with(|| {
+            let partition_id = *ids_by_key.entry(key.clone()).or_insert_with(|| {
                 let id = next_id;
                 next_id += 1;
                 id
-            })
+            });
+            partition_id
         })
         .collect()
 }
@@ -1477,6 +1489,7 @@ fn compile_prepared_with_profile_and_table_construction(
                 let possible_matches_tokenizer = Arc::clone(&tokenizer_lane.tokenizer);
                 let compile_started_for_cpm = compile_started_for_tokenizer.clone();
                 scope.spawn(move |_| {
+                    let possible_matches_started_at = Instant::now();
                     let possible_matches_started_ms = elapsed_ms(compile_started_for_cpm.clone());
                     let result = cpm::compute_constraint_possible_matches_for_vocab(
                         &possible_matches_tokenizer,
@@ -1484,6 +1497,11 @@ fn compile_prepared_with_profile_and_table_construction(
                         cpm::ConstraintPossibleMatchesConfig,
                     );
                     let possible_matches_finished_ms = elapsed_ms(compile_started_for_cpm);
+                    emit_compile_phase_done(
+                        "possible_matches",
+                        possible_matches_started_at,
+                        compile_started_for_tokenizer.clone(),
+                    );
                     *cpm_result_ref
                         .lock()
                         .expect("possible-matches result slot poisoned") = Some((
@@ -1628,6 +1646,7 @@ fn compile_prepared_with_profile_and_table_construction(
                     let templates_analyzed_grammar = Arc::clone(&glr_analyzed_grammar);
                     let compile_started_for_templates = compile_started_for_glr;
                     scope.spawn(move |scope| {
+                        let templates_started_at = Instant::now();
                         let templates_started_ms = elapsed_ms(compile_started_for_templates.clone());
                         let (templates, template_dfas_by_terminal, templates_ms) =
                             build_templates_for_compile(
@@ -1636,6 +1655,11 @@ fn compile_prepared_with_profile_and_table_construction(
                                 prepared_grammar_ref.ignore_terminal,
                             );
                         let templates_finished_ms = elapsed_ms(compile_started_for_templates.clone());
+                        emit_compile_phase_done(
+                            "templates",
+                            templates_started_at,
+                            compile_started_for_templates.clone(),
+                        );
                         parser_state_ref
                             .lock()
                             .expect("parser DAG join state poisoned")
@@ -1697,6 +1721,8 @@ fn compile_prepared_with_profile_and_table_construction(
                 );
             });
         });
+
+        emit_compile_phase_done("compile_dag_scope", analysis_started_at, compile_started_at);
 
         let (cpm_result, possible_matches_started_ms, possible_matches_finished_ms) = cpm_result
             .into_inner()
@@ -1776,7 +1802,13 @@ fn compile_prepared_with_profile_and_table_construction(
                 let _ = possible_matches.compact_dimensions_fast();
             }
             profile.compact_ms += elapsed_ms(compact_started_at);
+            emit_compile_phase_done(
+                "possible_matches_precompact",
+                compact_started_at,
+                compile_started_at,
+            );
         }
+        let artifact_range_counts_started_at = Instant::now();
         let terminal_dwa_interned_ranges_before_pm_reconcile =
             terminal_family_interned_range_count(&terminal_dwas);
         let possible_matches_interned_ranges_before_pm_reconcile =
@@ -1786,6 +1818,11 @@ fn compile_prepared_with_profile_and_table_construction(
                 &terminal_dwas,
                 possible_matches.artifact(),
             );
+        emit_compile_phase_done(
+            "pre_reconcile_range_counts",
+            artifact_range_counts_started_at,
+            compile_started_at,
+        );
 
         let (mut parser_dwa, parser_dwa_ms) = if let Some((
             parser_dwa,
@@ -1884,6 +1921,11 @@ fn compile_prepared_with_profile_and_table_construction(
             };
             (parser_dwa, elapsed_ms(parser_dwa_started_at))
         };
+        emit_compile_phase_done(
+            "parser_dwa_ready",
+            analysis_started_at,
+            compile_started_at,
+        );
         if compile_profile_enabled() {
             if let Some((parser_dwa_started_ms, parser_dwa_finished_ms)) = parser_dag_timing {
                 let overlap_ms = possible_matches_finished_ms.min(parser_dwa_finished_ms)
@@ -1915,6 +1957,7 @@ fn compile_prepared_with_profile_and_table_construction(
             &terminal_dwas,
             possible_matches.artifact(),
         );
+        let parser_pm_reconcile_phase_started_at = Instant::now();
 
         // Parser-family union may choose a different but equivalent internal ID
         // numbering from the reconciled terminal families.  Always make the
@@ -1933,7 +1976,13 @@ fn compile_prepared_with_profile_and_table_construction(
         parser_dwa = MappedArtifact::new(parser_dwa_artifact, internal_ids.clone());
         possible_matches =
             MappedArtifact::new(possible_matches_artifact, internal_ids.clone());
+        emit_compile_phase_done(
+            "parser_possible_matches_reconcile",
+            parser_pm_reconcile_phase_started_at,
+            compile_started_at,
+        );
 
+        let final_range_counts_started_at = Instant::now();
         let parser_dwa_interned_ranges =
             count_interned_ranges_for_weights(parser_dwa.artifact().weight_refs()).total_ranges();
         let (possible_matches_interned_ranges, parser_pm_joint_interned_ranges) = {
@@ -1945,6 +1994,11 @@ fn compile_prepared_with_profile_and_table_construction(
             )
         };
         let (parser_dwa, ParserTopAccept(parser_top_accept)) = parser_dwa.into_artifact();
+        emit_compile_phase_done(
+            "final_range_counts",
+            final_range_counts_started_at,
+            compile_started_at,
+        );
 
         let internal_token_bytes_started_at = Instant::now();
         let internal_token_bytes = cpm::build_internal_token_bytes_from_groups(
@@ -1952,6 +2006,11 @@ fn compile_prepared_with_profile_and_table_construction(
             &internal_ids.vocab_tokens.internal_to_originals,
         );
         let internal_token_bytes_ms = elapsed_ms(internal_token_bytes_started_at);
+        emit_compile_phase_done(
+            "internal_token_bytes",
+            internal_token_bytes_started_at,
+            compile_started_at,
+        );
 
         profile.parser_dwa_ms = parser_dwa_ms;
         profile.possible_matches_vocab_equiv_ms = cpm_profile.vocab_equiv_ms;
@@ -2036,6 +2095,7 @@ fn compile_prepared_with_profile_and_table_construction(
             final_mask_mapping: crate::runtime::mask_mapping::FinalMaskMapping::default(),
         });
         profile.finalize_ms = elapsed_ms(finalize_started_at);
+        emit_compile_phase_done("finalize", finalize_started_at, compile_started_at);
         profile.compile_ms = elapsed_ms(compile_started_at);
 
         (constraint, profile)

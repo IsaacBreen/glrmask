@@ -1717,6 +1717,54 @@ fn compile_partition_components(
                     dfa_transition_count(&dfa),
                     started_at.elapsed().as_secs_f64() * 1000.0,
                 );
+                if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_COMPONENTS").is_some() {
+                    for &terminal_id in &terminal_ids {
+                        let terminal_started_at = Instant::now();
+                        let terminal_dfa = compile_terminal_ids(exprs, visible_labels, &[terminal_id]);
+                        let label = visible_labels
+                            .and_then(|labels| labels.get(terminal_id))
+                            .map(String::as_str)
+                            .unwrap_or("<unlabelled>");
+                        let mut same_target_runs = 0usize;
+                        let mut distinct_target_edges = 0usize;
+                        let mut max_out = 0usize;
+                        let mut max_runs = 0usize;
+                        for state in terminal_dfa.states() {
+                            let mut previous: Option<(u8, u32)> = None;
+                            let mut state_runs = 0usize;
+                            let mut state_targets = FxHashSet::default();
+                            max_out = max_out.max(state.transitions.len());
+                            for (byte, &target) in state.transitions.iter() {
+                                state_targets.insert(target);
+                                if previous.is_none_or(|(previous_byte, previous_target)| {
+                                    previous_target != target || previous_byte.checked_add(1) != Some(byte)
+                                }) {
+                                    same_target_runs += 1;
+                                    state_runs += 1;
+                                }
+                                previous = Some((byte, target));
+                            }
+                            distinct_target_edges += state_targets.len();
+                            max_runs = max_runs.max(state_runs);
+                        }
+                        eprintln!(
+                            "[glrmask/profile][tokenizer_component] partition={} terminal={} label={:?} states={} transitions={} same_target_runs={} distinct_target_edges={} transition_per_run={:.3} transition_per_distinct_target={:.3} avg_out={:.3} max_out={} max_runs={} total_ms={:.3}",
+                            partition,
+                            terminal_id,
+                            label,
+                            terminal_dfa.num_states(),
+                            dfa_transition_count(&terminal_dfa),
+                            same_target_runs,
+                            distinct_target_edges,
+                            dfa_transition_count(&terminal_dfa) as f64 / same_target_runs.max(1) as f64,
+                            dfa_transition_count(&terminal_dfa) as f64 / distinct_target_edges.max(1) as f64,
+                            dfa_transition_count(&terminal_dfa) as f64 / terminal_dfa.num_states().max(1) as f64,
+                            max_out,
+                            max_runs,
+                            terminal_started_at.elapsed().as_secs_f64() * 1000.0,
+                        );
+                    }
+                }
             }
             LexerComponent { terminal_ids, dfa }
         })

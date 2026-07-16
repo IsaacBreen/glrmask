@@ -551,6 +551,14 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
             Some(&shared_classify_cache),
         )
         .map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0));
+        if compile_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][partition_return] label={} elapsed_ms={:.3} has_result={}",
+                label,
+                started_at.elapsed().as_secs_f64() * 1000.0,
+                result.is_some(),
+            );
+        }
         (result, idx)
     };
     let serial_profile_partition_schedule = compile_profile_uses_serial_partition_schedule();
@@ -571,6 +579,13 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
         };
     let partition_build_wall_ms =
         partition_build_started_at.elapsed().as_secs_f64() * 1000.0;
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][partition_collect_done] elapsed_ms={:.3} results={}",
+            partition_build_wall_ms,
+            partition_results.len(),
+        );
+    }
 
 
     let partition_result_finalize_started_at = Instant::now();
@@ -644,11 +659,23 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
     let (l1_family, l2p_family) = rayon::join(
         || {
             (!l1_pairs.is_empty()).then(|| {
+                if compile_profile_enabled() {
+                    eprintln!(
+                        "[glrmask/profile][terminal_family_merge_phase] family=l1 phase=start inputs={}",
+                        l1_pairs.len(),
+                    );
+                }
                 let family = merge::merge_id_maps_and_terminal_dwas(
                     l1_pairs,
                     num_tokenizer_states,
                     max_token_id,
                 );
+                if compile_profile_enabled() {
+                    eprintln!(
+                        "[glrmask/profile][terminal_family_merge_phase] family=l1 phase=done elapsed_ms={:.3}",
+                        family_merge_started_at.elapsed().as_secs_f64() * 1000.0,
+                    );
+                }
                 let profile = family.profile;
                 (
                     MappedArtifact::new(TerminalAutomaton::Dwa(family.dwa), family.id_map),
@@ -658,6 +685,12 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
         },
         || {
             (!l2p_pairs.is_empty()).then(|| {
+                if compile_profile_enabled() {
+                    eprintln!(
+                        "[glrmask/profile][terminal_family_merge_phase] family=l2p phase=start inputs={}",
+                        l2p_pairs.len(),
+                    );
+                }
                 if let Some((nwa, id_map, profile)) =
                     merge::try_merge_id_maps_and_token_deterministic_nwa(
                         &l2p_pairs,
@@ -665,6 +698,12 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
                         max_token_id,
                     )
                 {
+                    if compile_profile_enabled() {
+                        eprintln!(
+                            "[glrmask/profile][terminal_family_merge_phase] family=l2p phase=done_token_nwa elapsed_ms={:.3}",
+                            family_merge_started_at.elapsed().as_secs_f64() * 1000.0,
+                        );
+                    }
                     return (
                         MappedArtifact::new(TerminalAutomaton::TokenDeterministicNwa(nwa), id_map),
                         profile,
@@ -675,6 +714,12 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
                     num_tokenizer_states,
                     max_token_id,
                 );
+                if compile_profile_enabled() {
+                    eprintln!(
+                        "[glrmask/profile][terminal_family_merge_phase] family=l2p phase=done_dwa elapsed_ms={:.3}",
+                        family_merge_started_at.elapsed().as_secs_f64() * 1000.0,
+                    );
+                }
                 let profile = family.profile;
                 (
                     MappedArtifact::new(TerminalAutomaton::Dwa(family.dwa), family.id_map),

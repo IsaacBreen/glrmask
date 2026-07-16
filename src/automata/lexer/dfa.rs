@@ -376,6 +376,44 @@ impl DFA {
             .any(|state| !state.epsilon_transitions.is_empty())
     }
 
+    /// Minimum number of consumed bytes needed to reach any accepting state.
+    /// Epsilon transitions have zero cost and byte transitions have unit cost.
+    pub(crate) fn min_match_byte_len(&self) -> Option<usize> {
+        let mut distance = vec![usize::MAX; self.states.len()];
+        let mut queue = std::collections::VecDeque::new();
+        if self.states.is_empty() {
+            return None;
+        }
+        distance[0] = 0;
+        queue.push_front(0u32);
+
+        while let Some(state_id) = queue.pop_front() {
+            let state_index = state_id as usize;
+            let current_distance = distance[state_index];
+            let state = &self.states[state_index];
+            if !state.finalizers.is_empty() {
+                return Some(current_distance);
+            }
+
+            for &target in &state.epsilon_transitions {
+                let target_index = target as usize;
+                if current_distance < distance[target_index] {
+                    distance[target_index] = current_distance;
+                    queue.push_front(target);
+                }
+            }
+            let next_distance = current_distance.saturating_add(1);
+            for (_, &target) in state.transitions.iter() {
+                let target_index = target as usize;
+                if next_distance < distance[target_index] {
+                    distance[target_index] = next_distance;
+                    queue.push_back(target);
+                }
+            }
+        }
+        None
+    }
+
     pub(super) fn epsilon_closure(&self, roots: &[u32]) -> SmallVec<[u32; 1]> {
         if roots.iter().all(|&root| {
             self.states

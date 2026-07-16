@@ -130,6 +130,36 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
             shared_classify_cache,
         )
     });
+    if std::env::var_os("GLRMASK_DUMP_L2P_ROUTING").is_some() {
+        let l2p_terminals = l2p_mask
+            .iter()
+            .enumerate()
+            .filter_map(|(terminal, &active)| active.then_some(terminal))
+            .collect::<Vec<_>>();
+        eprintln!(
+            "[glrmask/dump][l2p_terminals] partition={} ids={:?} names={:?}",
+            partition_label,
+            l2p_terminals,
+            l2p_terminals
+                .iter()
+                .map(|&terminal| grammar.terminal_display_names[terminal].as_str())
+                .collect::<Vec<_>>(),
+        );
+        if let Some(split) = l2p_vocab_split.as_ref() {
+            for (&token_id, bytes) in split.boundary_vocab(vocab).entries.iter() {
+                eprintln!(
+                    "[glrmask/dump][l2p_token] partition={} route=boundary token_id={} bytes={:?}",
+                    partition_label, token_id, bytes,
+                );
+            }
+            for (&token_id, bytes) in split.single_vocab(vocab).entries.iter() {
+                eprintln!(
+                    "[glrmask/dump][l2p_token] partition={} route=single token_id={} bytes={:?}",
+                    partition_label, token_id, bytes,
+                );
+            }
+        }
+    }
     let has_split_l1 = l2p_vocab_split
         .as_ref()
         .is_some_and(|split| split.single_tokens != 0);

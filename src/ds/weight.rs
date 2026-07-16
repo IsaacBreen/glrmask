@@ -1416,6 +1416,21 @@ fn union_all_multiway(weights: &[&Weight]) -> Weight {
         return builder.finish();
     }
 
+    // Determinization frequently unions many weights over a deliberately small
+    // compact TSID coordinate (dozens or low hundreds of TSIDs). In that shape,
+    // sweeping every distinct outer-range boundary repeatedly rebuilds the same
+    // active token-set unions. Expand only the small coordinate, canonicalize
+    // the operand set once per TSID, and reuse identical token-set combinations
+    // across TSIDs. The cap prevents this path from turning large sparse TSID
+    // domains into dense work.
+    const DENSE_TSID_MULTIWAY_MAX_SPAN: u64 = 512;
+    let min_tsid = all_entries.first().map_or(0, |entry| entry.start);
+    let max_tsid = all_entries.iter().map(|entry| entry.end).max().unwrap_or(min_tsid);
+    let tsid_span = u64::from(max_tsid) - u64::from(min_tsid) + 1;
+    if tsid_span <= DENSE_TSID_MULTIWAY_MAX_SPAN {
+        return union_all_multiway_dense_tsid(all_entries, min_tsid, max_tsid);
+    }
+
     // The compact rescan path avoids tree-map overhead for the small common
     // case; the event sweep avoids pathological repeated scans for larger
     // overlapping unions.
@@ -1424,6 +1439,40 @@ fn union_all_multiway(weights: &[&Weight]) -> Weight {
         return union_all_multiway_rescan(all_entries);
     }
     union_all_multiway_incremental(all_entries)
+}
+
+fn union_all_multiway_dense_tsid(
+    all_entries: Vec<WeightRangeEntry>,
+    min_tsid: u32,
+    max_tsid: u32,
+) -> Weight {
+    let span = (u64::from(max_tsid) - u64::from(min_tsid) + 1) as usize;
+    let mut tokens_by_tsid = (0..span)
+        .map(|_| SmallVec::<[SharedTokenSet; 8]>::new())
+        .collect::<Vec<_>>();
+    for entry in all_entries {
+        for tsid in entry.start..=entry.end {
+            tokens_by_tsid[(tsid - min_tsid) as usize].push(Arc::clone(&entry.tokens));
+        }
+    }
+
+    let mut token_union_cache: FxHashMap<Vec<usize>, SharedTokenSet> = FxHashMap::default();
+    let mut builder = CompactRangeBuilder::new();
+    for (offset, active_tokens) in tokens_by_tsid.iter_mut().enumerate() {
+        if active_tokens.is_empty() {
+            builder.flush();
+            continue;
+        }
+        active_tokens.sort_unstable_by_key(|tokens| Arc::as_ptr(tokens) as usize);
+        active_tokens.dedup_by_key(|tokens| Arc::as_ptr(tokens) as usize);
+        if let Some(tokens) = union_active_token_sets(active_tokens, &mut token_union_cache) {
+            let tsid = min_tsid + offset as u32;
+            builder.push(tsid, tsid, tokens);
+        } else {
+            builder.flush();
+        }
+    }
+    builder.finish()
 }
 
 fn union_all_multiway_rescan(mut all_entries: Vec<WeightRangeEntry>) -> Weight {
