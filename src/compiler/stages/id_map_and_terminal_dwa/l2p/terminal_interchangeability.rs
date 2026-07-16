@@ -4677,6 +4677,7 @@ impl InterchangeabilityDfa {
         terminal: TerminalID,
     ) -> SmallVec<[usize; 8]> {
         let mut cone = SmallVec::<[usize; 8]>::new();
+        let mut seen = vec![false; quotient.representative_by_class.len()];
         for destinations in [
             &self.finalizer_states_by_terminal[terminal as usize],
             &self.future_finalizer_states_by_terminal[terminal as usize],
@@ -4684,7 +4685,8 @@ impl InterchangeabilityDfa {
             for &destination in destinations {
                 for &source in &self.reverse_predecessors[destination as usize] {
                     let class = quotient.class_for_state[source as usize] as usize;
-                    if !cone.contains(&class) {
+                    if !seen[class] {
+                        seen[class] = true;
                         cone.push(class);
                     }
                 }
@@ -4696,7 +4698,8 @@ impl InterchangeabilityDfa {
             next += 1;
             for &predecessor in &quotient.reverse_predecessors[class] {
                 let predecessor = predecessor as usize;
-                if !cone.contains(&predecessor) {
+                if !seen[predecessor] {
+                    seen[predecessor] = true;
                     cone.push(predecessor);
                 }
             }
@@ -5130,9 +5133,9 @@ impl InterchangeabilityDfa {
             output: u64,
         }
 
-        let mut index_by_class = SmallVec::<[(usize, usize); 8]>::new();
+        let mut index_by_class = vec![usize::MAX; quotient.representative_by_class.len()];
         for (index, &class) in cone.iter().enumerate() {
-            index_by_class.push((class, index));
+            index_by_class[class] = index;
         }
         let mut rows = SmallVec::<[SmallVec<[GenericEdge; 8]>; 8]>::new();
         let mut root_flags = SmallVec::<[bool; 8]>::new();
@@ -5145,10 +5148,8 @@ impl InterchangeabilityDfa {
             for &(byte, destination) in self.topology.edges_from(state) {
                 let destination = destination as usize;
                 let target_class = quotient.class_for_state[destination] as usize;
-                let internal_target = index_by_class
-                    .iter()
-                    .find(|(seen_class, _)| *seen_class == target_class)
-                    .map(|(_, index)| *index);
+                let target_index = index_by_class[target_class];
+                let internal_target = (target_index != usize::MAX).then_some(target_index);
                 let pair = &self.output_pairs[self.output_pair_by_state[destination] as usize];
                 row.push(GenericEdge {
                     byte,
@@ -7674,9 +7675,7 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
         } else {
             candidate_groups
         };
-        let candidate_groups = if petal_batch_enabled
-            && dfa.topology.raw_representative_by_state.is_none()
-        {
+        let candidate_groups = if petal_batch_enabled {
             dfa.ensure_support_quotient();
             let quotient = dfa
                 .support_quotient
@@ -7699,7 +7698,7 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                 for &terminal in &candidate_group {
                     membership[terminal as usize] = true;
                 }
-                let pair_stats = (candidate_group.len() >= 64)
+                let pair_stats = (candidate_group.len() >= 8)
                     .then(|| dfa.generic_output_pair_stats(&membership));
                 let mut by_code =
                     BTreeMap::<SmallVec<[u64; 8]>, Vec<TerminalID>>::new();
@@ -8134,11 +8133,17 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
         // round. Hold the memo borrow once instead of entering the RefCell for
         // every candidate pair (a get plus a possible insert per miss).
         let mut first_round_memo = context.first_round_memo.borrow_mut();
+        let max_empty_pivots = std::env::var("GLRMASK_TI_MAX_EMPTY_PIVOTS")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(1);
         for initial_group in candidate_groups {
             let mut unresolved = initial_group;
+            let mut consecutive_empty_pivots = 0usize;
             while !unresolved.is_empty() {
                 let representative = unresolved[0];
                 let mut next_unresolved = Vec::with_capacity(unresolved.len().saturating_sub(1));
+                let mut accepted_this_pivot = 0usize;
                 for &terminal in &unresolved[1..] {
                     let output_pair_started_at = profile_timing.then(Instant::now);
                     let memo_key = if representative <= terminal {
@@ -8239,6 +8244,7 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                         }
                     };
                     if let Some(map) = map {
+                        accepted_this_pivot += 1;
                         let storage_started_at = profile_timing.then(Instant::now);
                         accepted_representative_members += 1;
                         result
@@ -8258,6 +8264,23 @@ pub(crate) fn discover_one_round_with_transport_witnesses_in_context(
                     } else {
                         next_unresolved.push(terminal);
                     }
+                }
+                if accepted_this_pivot == 0 {
+                    consecutive_empty_pivots += 1;
+                } else {
+                    consecutive_empty_pivots = 0;
+                }
+                // Pairwise TI is an optimization-only merge finder.  After
+                // generic group refinement, a long run of pivots that merge
+                // nobody is the singleton-heavy quadratic tail. Bound that
+                // unproductive search deterministically while preserving
+                // productive classes: any pivot that merges a member resets
+                // the budget. Unchecked terminals simply remain singleton.
+                if !dfa.exact_pair_fallback_enabled()
+                    && max_empty_pivots > 0
+                    && consecutive_empty_pivots >= max_empty_pivots
+                {
+                    break;
                 }
                 unresolved = next_unresolved;
             }
