@@ -60,9 +60,11 @@ pub(crate) use error::{GlrMaskError, Result};
 pub(crate) fn compile_grammar_def_json(grammar_def_json: &str, vocab: &Vocab) -> Result<Constraint> {
     let gdef: grammar::flat::GrammarDef = serde_json::from_str(grammar_def_json)
         .map_err(|e| GlrMaskError::GrammarParse(format!("invalid GrammarDef JSON: {e}")))?;
-    Ok(compiler::stages::id_map_and_terminal_dwa::l2p::with_ti_pool(|| {
-        compiler::compile_owned(gdef, vocab)
-    }))
+    error::catch_internal_invariant(|| {
+        compiler::stages::id_map_and_terminal_dwa::l2p::with_ti_pool(|| {
+            compiler::compile_owned(gdef, vocab)
+        })
+    })
 }
 
 /// Populate compile-time artifacts that are pure functions of the vocabulary.

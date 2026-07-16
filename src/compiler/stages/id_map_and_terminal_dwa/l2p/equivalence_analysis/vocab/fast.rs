@@ -23,10 +23,6 @@ use crate::compiler::stages::id_map_and_terminal_dwa::types::compile_profile_ena
 
 pub type VocabEquivalenceResult = BTreeSet<Vec<usize>>;
 
-fn conservative_singleton_vocab_equivalence(num_tokens: usize) -> VocabEquivalenceResult {
-    (0..num_tokens).map(|token| vec![token]).collect()
-}
-
 type EdgeList = SmallVec<[(usize, usize); 4]>;
 
 struct DagNode {
@@ -3228,14 +3224,18 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
     shared_analysis_dfa_cache: Option<&SharedVocabAnalysisDfaCache>,
 ) -> (VocabEquivalenceResult, f64) {
     let input_state_count = tokenizer.dfa().states.len();
-    if initial_states.iter().any(|&state| state >= input_state_count) {
-        // An invalid/sentinel state cannot justify merging any vocabulary
-        // entries.  Preserve correctness by declining all equivalence merges
-        // rather than indexing with a leaked u32::MAX mapping.
-        return (
-            conservative_singleton_vocab_equivalence(strings.len()),
-            0.0,
-        );
+    if let Some((position, &state)) = initial_states
+        .iter()
+        .enumerate()
+        .find(|(_, state)| **state >= input_state_count)
+    {
+        crate::error::fail_internal_invariant(format!(
+            "vocabulary-equivalence input state is outside the analysis-view domain: \
+             position={position} state={state} state_count={input_state_count} \
+             sentinel={} token_count={}",
+            state == u32::MAX as usize,
+            strings.len(),
+        ));
     }
 
     let profiling = compile_profile_enabled();
@@ -3314,11 +3314,21 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
     } else {
         (&dfa, initial_states_for_dfa, None)
     };
-    if initial_states_ref.iter().any(|&state| state >= dfa_ref.num_states) {
-        return (
-            conservative_singleton_vocab_equivalence(strings.len()),
-            build_dfa_ms,
-        );
+    if let Some((position, &state)) = initial_states_ref
+        .iter()
+        .enumerate()
+        .find(|(_, state)| **state >= dfa_ref.num_states)
+    {
+        crate::error::fail_internal_invariant(format!(
+            "vocabulary-equivalence state remapping produced an invalid compact-DFA coordinate: \
+             position={position} state={state} compact_state_count={} source_state_count={} \
+             compacted={} sentinel={} token_count={}",
+            dfa_ref.num_states,
+            dfa.num_states,
+            compact_to_original.is_some(),
+            state == u32::MAX as usize,
+            strings.len(),
+        ));
     }
     let compacted_states = compact_to_original.map_or(dfa.num_states, |states| states.len());
     let num_tokens = strings.len();
@@ -3817,27 +3827,53 @@ mod shared_base_tests {
     }
 
     #[test]
-    fn invalid_sentinel_initial_state_falls_back_to_singletons() {
+    fn invalid_sentinel_initial_state_is_a_structured_invariant_error() {
         let view = TokenizerView {
             flat_dfa: sample_dfa(),
         };
         let tokens: Vec<&[u8]> = vec![b"a", b"b", b"aa"];
         let disallowed = BTreeMap::<u32, BitSet>::new();
-        let result = find_vocab_equivalence_classes_with_group_filter(
-            &view,
-            &tokens,
-            &[u32::MAX as usize],
-            &disallowed,
-            None,
-            None,
-            None,
-            None,
-        );
+        let error = crate::error::catch_internal_invariant(|| {
+            find_vocab_equivalence_classes_with_group_filter(
+                &view,
+                &tokens,
+                &[u32::MAX as usize],
+                &disallowed,
+                None,
+                None,
+                None,
+                None,
+            )
+        })
+        .expect_err("an unmapped raw-start sentinel must fail compilation");
 
-        assert_eq!(
-            result,
-            BTreeSet::from([vec![0usize], vec![1usize], vec![2usize]])
-        );
+        assert!(matches!(error, crate::error::Error::InternalInvariant(_)));
+        assert!(error.to_string().contains("sentinel=true"));
+    }
+
+    #[test]
+    fn dead_transition_sentinel_remains_a_valid_dfa_edge_encoding() {
+        let view = TokenizerView {
+            flat_dfa: sample_dfa(),
+        };
+        assert!(view.dfa().transitions.iter().any(|&target| target == u32::MAX));
+
+        let tokens: Vec<&[u8]> = vec![b"a", b"b", b"aa"];
+        let disallowed = BTreeMap::<u32, BitSet>::new();
+        let result = crate::error::catch_internal_invariant(|| {
+            find_vocab_equivalence_classes_with_group_filter(
+                &view,
+                &tokens,
+                &[0],
+                &disallowed,
+                None,
+                None,
+                None,
+                None,
+            )
+        });
+
+        assert!(result.is_ok(), "dead transitions are not invalid state coordinates");
     }
 
     #[test]

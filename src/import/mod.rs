@@ -96,22 +96,22 @@ fn compile_from_source(
         let parse_started_at = std::time::Instant::now();
         let grammar = lower_factored_named_grammar(source, parse, transform)?;
         let import_ms = parse_started_at.elapsed().as_secs_f64() * 1000.0;
-        let (constraint, profile) = compile_owned_profiled_with_table_construction(
-            grammar,
-            vocab,
-            default_table_construction,
-        );
+        let (constraint, profile) = crate::error::catch_internal_invariant(|| {
+            compile_owned_profiled_with_table_construction(
+                grammar,
+                vocab,
+                default_table_construction,
+            )
+        })?;
         emit_compile_profile_summary(Some(source_kind), Some(import_ms), &profile);
         emit_import_phase_end("compile_from_source", compile_from_source_started_at);
         return Ok(constraint);
     }
 
     let grammar = lower_factored_named_grammar(source, parse, transform)?;
-    let constraint = compile_owned_with_table_construction(
-        grammar,
-        vocab,
-        default_table_construction,
-    );
+    let constraint = crate::error::catch_internal_invariant(|| {
+        compile_owned_with_table_construction(grammar, vocab, default_table_construction)
+    })?;
     emit_import_phase_end("compile_from_source", compile_from_source_started_at);
     Ok(constraint)
 }
