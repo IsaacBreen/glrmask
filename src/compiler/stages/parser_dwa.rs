@@ -6,12 +6,14 @@ use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
 use crate::Vocab;
+use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::dwa::DWA;
+use crate::automata::weighted::equivalence::find_difference;
 use crate::automata::weighted::minimize::minimize;
 use crate::automata::weighted::nwa::{NWA, NwaBody};
 use crate::automata::weighted::terminal_automaton::TerminalAutomaton;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
-use crate::compiler::glr::labels::DEFAULT_LABEL;
+use crate::compiler::glr::labels::{DEFAULT_LABEL, is_negative_label, negative_to_positive_label};
 use crate::compiler::glr::table::{Action, AdmissionPolicy, GLRTable};
 use crate::grammar::flat::TerminalID;
 use crate::compiler::stages::equiv_types::InternalIdMap;
@@ -1995,6 +1997,1373 @@ fn dwa_to_nwa(dwa: &DWA) -> NWA {
     nwa
 }
 
+#[inline]
+fn weight_template_component(_component: &Weight, terminal_weight: &Weight) -> Weight {
+    // `Templates::by_terminal_nwa` stores structural skeletons whose live
+    // transitions/finals deliberately carry `Weight::empty()` placeholders.
+    // Instantiation replaces every live placeholder with the terminal weight;
+    // it does not intersect with the placeholder value.
+    terminal_weight.clone()
+}
+
+fn merge_residual_weight(
+    residuals: &mut FxHashMap<u32, Weight>,
+    target: u32,
+    add: Weight,
+) {
+    if add.is_empty() {
+        return;
+    }
+    residuals
+        .entry(target)
+        .and_modify(|existing| *existing = existing.union(&add))
+        .or_insert(add);
+}
+
+fn suffix_dwa_step(dwa: &DWA, state_id: u32, label: i32) -> Option<(u32, Weight)> {
+    let state = dwa.states().get(state_id as usize)?;
+    state
+        .transitions
+        .get(&label)
+        .cloned()
+        .or_else(|| state.transitions.get(&DEFAULT_LABEL).cloned())
+}
+
+/// Append the exact preimage of one weighted terminal template against an
+/// already-compiled suffix DWA. Only the template prefix is copied. Push
+/// labels are discharged locally into residual suffix states; the suffix itself
+/// is referenced through the copy that the caller already appended once for
+/// the whole control-state branch.
+fn append_weighted_template_preimage(
+    arena: &mut NWA,
+    template: &NWA,
+    terminal_weight: &Weight,
+    suffix: &DWA,
+    suffix_offset: u32,
+    num_parser_states: u32,
+) -> Option<NwaBody> {
+    if terminal_weight.is_empty()
+        || template.states().is_empty()
+        || suffix.states().is_empty()
+        || !template.is_acyclic()
+        || !suffix.is_acyclic()
+    {
+        return None;
+    }
+
+    // Compute residual suffix states through epsilon and push edges only.
+    // Positive read edges remain as the visible preimage prefix.
+    let state_count = template.states().len();
+    let mut predecessors = vec![Vec::<u32>::new(); state_count];
+    let mut outdegree = vec![0usize; state_count];
+    for (source, state) in template.states().iter().enumerate() {
+        for (target, weight) in &state.epsilons {
+            if !weight.is_empty() && (*target as usize) < state_count {
+                predecessors[*target as usize].push(source as u32);
+                outdegree[source] += 1;
+            }
+        }
+        for (&label, targets) in &state.transitions {
+            if !is_negative_label(label) {
+                continue;
+            }
+            for (target, weight) in targets {
+                if !weight.is_empty() && (*target as usize) < state_count {
+                    predecessors[*target as usize].push(source as u32);
+                    outdegree[source] += 1;
+                }
+            }
+        }
+    }
+
+    let mut queue = VecDeque::new();
+    for (state_id, &degree) in outdegree.iter().enumerate() {
+        if degree == 0 {
+            queue.push_back(state_id as u32);
+        }
+    }
+    let mut reverse_topo = Vec::with_capacity(state_count);
+    while let Some(state_id) = queue.pop_front() {
+        reverse_topo.push(state_id);
+        for &predecessor in &predecessors[state_id as usize] {
+            outdegree[predecessor as usize] -= 1;
+            if outdegree[predecessor as usize] == 0 {
+                queue.push_back(predecessor);
+            }
+        }
+    }
+    if reverse_topo.len() != state_count {
+        return None;
+    }
+
+    let mut residuals = vec![FxHashMap::<u32, Weight>::default(); state_count];
+    for state_id in reverse_topo {
+        let index = state_id as usize;
+        let state = &template.states()[index];
+
+        if let Some(final_weight) = state.final_weight.as_ref() {
+            let weighted = weight_template_component(final_weight, terminal_weight);
+            merge_residual_weight(&mut residuals[index], suffix.start_state(), weighted);
+        }
+
+        for (target, edge_weight) in &state.epsilons {
+            let weighted_edge = weight_template_component(edge_weight, terminal_weight);
+            if weighted_edge.is_empty() {
+                continue;
+            }
+            let tail = residuals[*target as usize].clone();
+            for (suffix_state, tail_weight) in tail {
+                merge_residual_weight(
+                    &mut residuals[index],
+                    suffix_state,
+                    weighted_edge.intersection(&tail_weight),
+                );
+            }
+        }
+
+        for (&label, targets) in &state.transitions {
+            if !is_negative_label(label) {
+                continue;
+            }
+            let pushed_label = negative_to_positive_label(label);
+            for (target, edge_weight) in targets {
+                let weighted_edge = weight_template_component(edge_weight, terminal_weight);
+                if weighted_edge.is_empty() {
+                    continue;
+                }
+                let tail = residuals[*target as usize].clone();
+                for (suffix_state, tail_weight) in tail {
+                    let path_weight = weighted_edge.intersection(&tail_weight);
+                    if path_weight.is_empty() {
+                        continue;
+                    }
+
+                    if suffix.states()[suffix_state as usize]
+                        .final_weight
+                        .as_ref()
+                        .is_some_and(|weight| !weight.is_empty())
+                    {
+                        merge_residual_weight(
+                            &mut residuals[index],
+                            suffix_state,
+                            path_weight.clone(),
+                        );
+                    }
+
+                    if let Some((next_state, transition_weight)) =
+                        suffix_dwa_step(suffix, suffix_state, pushed_label)
+                    {
+                        merge_residual_weight(
+                            &mut residuals[index],
+                            next_state,
+                            path_weight.intersection(&transition_weight),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    let template_offset = arena.states().len() as u32;
+    for _ in 0..state_count {
+        arena.add_state();
+    }
+
+    for (source, state) in template.states().iter().enumerate() {
+        let output_source = template_offset + source as u32;
+        for (target, edge_weight) in &state.epsilons {
+            let weighted = weight_template_component(edge_weight, terminal_weight);
+            if !weighted.is_empty() {
+                arena.add_epsilon(output_source, template_offset + *target, weighted);
+            }
+        }
+
+        let explicit_positive = state
+            .transitions
+            .keys()
+            .filter(|&&label| label >= 0 && label != DEFAULT_LABEL)
+            .copied()
+            .collect::<Vec<_>>();
+
+        for (&label, targets) in &state.transitions {
+            if is_negative_label(label) {
+                continue;
+            }
+            if label == DEFAULT_LABEL {
+                for parser_state in 0..num_parser_states {
+                    let parser_label = parser_state as i32;
+                    if explicit_positive.binary_search(&parser_label).is_ok() {
+                        continue;
+                    }
+                    for (target, edge_weight) in targets {
+                        let weighted = weight_template_component(edge_weight, terminal_weight);
+                        if !weighted.is_empty() {
+                            arena.add_transition(
+                                output_source,
+                                parser_label,
+                                template_offset + *target,
+                                weighted,
+                            );
+                        }
+                    }
+                }
+                continue;
+            }
+
+            for (target, edge_weight) in targets {
+                let weighted = weight_template_component(edge_weight, terminal_weight);
+                if !weighted.is_empty() {
+                    arena.add_transition(
+                        output_source,
+                        label,
+                        template_offset + *target,
+                        weighted,
+                    );
+                }
+            }
+        }
+
+        for (suffix_state, residual_weight) in &residuals[source] {
+            if !residual_weight.is_empty() {
+                arena.add_epsilon(
+                    output_source,
+                    suffix_offset + *suffix_state,
+                    residual_weight.clone(),
+                );
+            }
+        }
+    }
+
+    Some(NwaBody {
+        start_states: template
+            .start_states()
+            .iter()
+            .map(|state| template_offset + *state)
+            .collect(),
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+enum SharedPrefixAtom {
+    Local(u32),
+    External(u32),
+}
+
+#[derive(Clone, Debug, Default)]
+struct SharedPrefixState {
+    final_weight: Option<Weight>,
+    transitions: BTreeMap<i32, Vec<(u32, Weight)>>,
+    epsilons: Vec<(SharedPrefixAtom, Weight)>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct SharedPrefixNwa {
+    states: Vec<SharedPrefixState>,
+    start_states: Vec<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct SharedPrefixStateKey {
+    final_weight: Option<Weight>,
+    transitions: Vec<(i32, Vec<(u32, Weight)>)>,
+    epsilons: Vec<(SharedPrefixAtom, Weight)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct TemplateShapeStateKey {
+    is_final: bool,
+    transitions: Vec<(i32, Vec<u32>)>,
+    epsilons: Vec<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct TemplateShapeKey {
+    start_states: Vec<u32>,
+    states: Vec<TemplateShapeStateKey>,
+}
+
+fn template_shape_key(template: &NWA) -> TemplateShapeKey {
+    TemplateShapeKey {
+        start_states: template.start_states().to_vec(),
+        states: template
+            .states()
+            .iter()
+            .map(|state| TemplateShapeStateKey {
+                is_final: state.final_weight.is_some(),
+                transitions: state
+                    .transitions
+                    .iter()
+                    .map(|(&label, targets)| {
+                        (label, targets.iter().map(|(target, _)| *target).collect())
+                    })
+                    .collect(),
+                epsilons: state.epsilons.iter().map(|(target, _)| *target).collect(),
+            })
+            .collect(),
+    }
+}
+
+fn build_template_shape_index(
+    templates: &Templates,
+) -> (FxHashMap<TerminalID, usize>, Vec<TerminalID>) {
+    let mut shape_ids = FxHashMap::<TemplateShapeKey, usize>::default();
+    let mut terminal_to_shape = FxHashMap::<TerminalID, usize>::default();
+    let mut representatives = Vec::<TerminalID>::new();
+
+    for (&terminal, template) in &templates.by_terminal_nwa {
+        let key = template_shape_key(template);
+        let shape_id = match shape_ids.entry(key) {
+            Entry::Occupied(occupied) => *occupied.get(),
+            Entry::Vacant(vacant) => {
+                let shape_id = representatives.len();
+                vacant.insert(shape_id);
+                representatives.push(terminal);
+                shape_id
+            }
+        };
+        terminal_to_shape.insert(terminal, shape_id);
+    }
+
+    (terminal_to_shape, representatives)
+}
+
+impl SharedPrefixNwa {
+    fn add_state(&mut self) -> u32 {
+        let state = self.states.len() as u32;
+        self.states.push(SharedPrefixState::default());
+        state
+    }
+
+    fn add_epsilon(&mut self, from: u32, to: SharedPrefixAtom, weight: Weight) {
+        if !weight.is_empty() {
+            self.states[from as usize].epsilons.push((to, weight));
+        }
+    }
+
+    fn add_transition(&mut self, from: u32, label: i32, to: u32, weight: Weight) {
+        if !weight.is_empty() {
+            self.states[from as usize]
+                .transitions
+                .entry(label)
+                .or_default()
+                .push((to, weight));
+        }
+    }
+}
+
+/// Exact bottom-up structural quotient of the acyclic local prefix graph.
+/// Template instances are often globally distinct while sharing large weighted
+/// suffix fragments. Canonicalizing those fragments before subset construction
+/// prevents local state IDs alone from manufacturing distinct determinized
+/// subsets.
+fn canonicalize_shared_prefix_nwa(prefix: &mut SharedPrefixNwa) -> Option<usize> {
+    let count = prefix.states.len();
+    if count <= 1 {
+        return Some(count);
+    }
+
+    let mut predecessors = vec![Vec::<usize>::new(); count];
+    let mut outdegree = vec![0usize; count];
+    for (source, state) in prefix.states.iter().enumerate() {
+        for targets in state.transitions.values() {
+            for (target, _) in targets {
+                let target = *target as usize;
+                if target >= count {
+                    return None;
+                }
+                predecessors[target].push(source);
+                outdegree[source] += 1;
+            }
+        }
+        for (target, _) in &state.epsilons {
+            if let SharedPrefixAtom::Local(target) = *target {
+                let target = target as usize;
+                if target >= count {
+                    return None;
+                }
+                predecessors[target].push(source);
+                outdegree[source] += 1;
+            }
+        }
+    }
+
+    let mut queue = VecDeque::new();
+    for (state_id, &degree) in outdegree.iter().enumerate() {
+        if degree == 0 {
+            queue.push_back(state_id);
+        }
+    }
+    let mut reverse_topo = Vec::with_capacity(count);
+    while let Some(target) = queue.pop_front() {
+        reverse_topo.push(target);
+        for &source in &predecessors[target] {
+            outdegree[source] -= 1;
+            if outdegree[source] == 0 {
+                queue.push_back(source);
+            }
+        }
+    }
+    if reverse_topo.len() != count {
+        return None;
+    }
+
+    let mut canonical = vec![u32::MAX; count];
+    let mut intern = FxHashMap::<SharedPrefixStateKey, u32>::default();
+    for state_id in reverse_topo {
+        {
+            let state = &mut prefix.states[state_id];
+            for targets in state.transitions.values_mut() {
+                for (target, _) in targets.iter_mut() {
+                    let mapped = canonical[*target as usize];
+                    debug_assert_ne!(mapped, u32::MAX);
+                    *target = mapped;
+                }
+                targets.sort_unstable_by(|(left_target, left_weight), (right_target, right_weight)| {
+                    left_target
+                        .cmp(right_target)
+                        .then_with(|| left_weight.ptr_key().cmp(&right_weight.ptr_key()))
+                });
+            }
+            for (target, _) in &mut state.epsilons {
+                if let SharedPrefixAtom::Local(local) = target {
+                    let mapped = canonical[*local as usize];
+                    debug_assert_ne!(mapped, u32::MAX);
+                    *local = mapped;
+                }
+            }
+            state.epsilons.sort_unstable_by(|(left_atom, left_weight), (right_atom, right_weight)| {
+                left_atom
+                    .cmp(right_atom)
+                    .then_with(|| left_weight.ptr_key().cmp(&right_weight.ptr_key()))
+            });
+        }
+
+        let state = &prefix.states[state_id];
+        let key = SharedPrefixStateKey {
+            final_weight: state.final_weight.clone(),
+            transitions: state
+                .transitions
+                .iter()
+                .map(|(&label, targets)| (label, targets.clone()))
+                .collect(),
+            epsilons: state.epsilons.clone(),
+        };
+        canonical[state_id] = match intern.entry(key) {
+            Entry::Occupied(occupied) => *occupied.get(),
+            Entry::Vacant(vacant) => {
+                let representative = state_id as u32;
+                vacant.insert(representative);
+                representative
+            }
+        };
+    }
+
+    for start in &mut prefix.start_states {
+        *start = canonical[*start as usize];
+    }
+    prefix.start_states.sort_unstable();
+    prefix.start_states.dedup();
+    Some(intern.len())
+}
+
+/// Shared-suffix counterpart of `append_weighted_template_preimage`. The
+/// compiled suffix lives in one global DWA arena; residual push paths point to
+/// those immutable states directly instead of copying the suffix graph into
+/// every predecessor control state.
+fn append_weighted_template_preimage_shared(
+    prefix: &mut SharedPrefixNwa,
+    template: &NWA,
+    terminal_weight: &Weight,
+    suffix_arena: &DWA,
+    suffix_start: u32,
+) -> Option<Vec<u32>> {
+    if terminal_weight.is_empty()
+        || template.states().is_empty()
+        || suffix_arena.states().is_empty()
+        || (suffix_start as usize) >= suffix_arena.states().len()
+        || !template.is_acyclic()
+    {
+        return None;
+    }
+
+    let state_count = template.states().len();
+    let mut predecessors = vec![Vec::<u32>::new(); state_count];
+    let mut outdegree = vec![0usize; state_count];
+    for (source, state) in template.states().iter().enumerate() {
+        for (target, weight) in &state.epsilons {
+            if (*target as usize) < state_count && !weight.is_empty() {
+                predecessors[*target as usize].push(source as u32);
+                outdegree[source] += 1;
+            }
+        }
+        for (&label, targets) in &state.transitions {
+            if !is_negative_label(label) {
+                continue;
+            }
+            for (target, weight) in targets {
+                if (*target as usize) < state_count && !weight.is_empty() {
+                    predecessors[*target as usize].push(source as u32);
+                    outdegree[source] += 1;
+                }
+            }
+        }
+    }
+
+    let mut queue = VecDeque::new();
+    for (state_id, &degree) in outdegree.iter().enumerate() {
+        if degree == 0 {
+            queue.push_back(state_id as u32);
+        }
+    }
+    let mut reverse_topo = Vec::with_capacity(state_count);
+    while let Some(state_id) = queue.pop_front() {
+        reverse_topo.push(state_id);
+        for &predecessor in &predecessors[state_id as usize] {
+            outdegree[predecessor as usize] -= 1;
+            if outdegree[predecessor as usize] == 0 {
+                queue.push_back(predecessor);
+            }
+        }
+    }
+    if reverse_topo.len() != state_count {
+        return None;
+    }
+
+    let mut residuals = vec![FxHashMap::<u32, Weight>::default(); state_count];
+    for state_id in reverse_topo {
+        let index = state_id as usize;
+        let state = &template.states()[index];
+
+        if state.final_weight.is_some() {
+            merge_residual_weight(
+                &mut residuals[index],
+                suffix_start,
+                terminal_weight.clone(),
+            );
+        }
+
+        for (target, _) in &state.epsilons {
+            let tail = residuals[*target as usize].clone();
+            for (suffix_state, tail_weight) in tail {
+                merge_residual_weight(
+                    &mut residuals[index],
+                    suffix_state,
+                    terminal_weight.intersection(&tail_weight),
+                );
+            }
+        }
+
+        for (&label, targets) in &state.transitions {
+            if !is_negative_label(label) {
+                continue;
+            }
+            let pushed_label = negative_to_positive_label(label);
+            for (target, _) in targets {
+                let tail = residuals[*target as usize].clone();
+                for (suffix_state, tail_weight) in tail {
+                    let path_weight = terminal_weight.intersection(&tail_weight);
+                    if path_weight.is_empty() {
+                        continue;
+                    }
+
+                    if suffix_arena.states()[suffix_state as usize]
+                        .final_weight
+                        .as_ref()
+                        .is_some_and(|weight| !weight.is_empty())
+                    {
+                        merge_residual_weight(
+                            &mut residuals[index],
+                            suffix_state,
+                            path_weight.clone(),
+                        );
+                    }
+                    if let Some((next_state, transition_weight)) =
+                        suffix_dwa_step(suffix_arena, suffix_state, pushed_label)
+                    {
+                        merge_residual_weight(
+                            &mut residuals[index],
+                            next_state,
+                            path_weight.intersection(&transition_weight),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    let offset = prefix.states.len() as u32;
+    for _ in 0..state_count {
+        prefix.add_state();
+    }
+    for (source, state) in template.states().iter().enumerate() {
+        let output_source = offset + source as u32;
+        for (target, _) in &state.epsilons {
+            prefix.add_epsilon(
+                output_source,
+                SharedPrefixAtom::Local(offset + *target),
+                terminal_weight.clone(),
+            );
+        }
+        for (&label, targets) in &state.transitions {
+            if is_negative_label(label) {
+                continue;
+            }
+            for (target, _) in targets {
+                prefix.add_transition(
+                    output_source,
+                    label,
+                    offset + *target,
+                    terminal_weight.clone(),
+                );
+            }
+        }
+        for (suffix_state, residual_weight) in &residuals[source] {
+            prefix.add_epsilon(
+                output_source,
+                SharedPrefixAtom::External(*suffix_state),
+                residual_weight.clone(),
+            );
+        }
+    }
+
+    Some(
+        template
+            .start_states()
+            .iter()
+            .map(|state| offset + *state)
+            .collect(),
+    )
+}
+
+type SharedSubset = Vec<(SharedPrefixAtom, Weight)>;
+type SharedSubsetKey = Vec<(SharedPrefixAtom, usize)>;
+
+fn merge_shared_atom_weight(
+    weights: &mut FxHashMap<SharedPrefixAtom, Weight>,
+    atom: SharedPrefixAtom,
+    add: Weight,
+) -> bool {
+    if add.is_empty() {
+        return false;
+    }
+    match weights.entry(atom) {
+        Entry::Vacant(vacant) => {
+            vacant.insert(add);
+            true
+        }
+        Entry::Occupied(mut occupied) => {
+            let updated = occupied.get().union(&add);
+            if updated == *occupied.get() {
+                false
+            } else {
+                *occupied.get_mut() = updated;
+                true
+            }
+        }
+    }
+}
+
+fn shared_subset_key(entries: &SharedSubset) -> SharedSubsetKey {
+    entries
+        .iter()
+        .map(|(atom, weight)| (*atom, weight.ptr_key()))
+        .collect()
+}
+
+fn close_shared_prefix_subset(
+    prefix: &SharedPrefixNwa,
+    mut weights: FxHashMap<SharedPrefixAtom, Weight>,
+) -> SharedSubset {
+    if weights.keys().all(|atom| match *atom {
+        SharedPrefixAtom::Local(state_id) => prefix.states[state_id as usize].epsilons.is_empty(),
+        SharedPrefixAtom::External(_) => true,
+    }) {
+        let mut entries = weights
+            .into_iter()
+            .filter(|(_, weight)| !weight.is_empty())
+            .collect::<Vec<_>>();
+        entries.sort_unstable_by_key(|(atom, _)| *atom);
+        return entries;
+    }
+
+    let mut queue = VecDeque::new();
+    let mut queued = FxHashMap::<SharedPrefixAtom, bool>::default();
+    for &atom in weights.keys() {
+        queue.push_back(atom);
+        queued.insert(atom, true);
+    }
+
+    while let Some(atom) = queue.pop_front() {
+        queued.insert(atom, false);
+        let SharedPrefixAtom::Local(state_id) = atom else {
+            continue;
+        };
+        let Some(path_weight) = weights.get(&atom).cloned() else {
+            continue;
+        };
+        let Some(state) = prefix.states.get(state_id as usize) else {
+            continue;
+        };
+        for (target, edge_weight) in &state.epsilons {
+            let contribution = path_weight.intersection(edge_weight);
+            if merge_shared_atom_weight(&mut weights, *target, contribution)
+                && !queued.get(target).copied().unwrap_or(false)
+            {
+                queued.insert(*target, true);
+                queue.push_back(*target);
+            }
+        }
+    }
+
+    let mut entries = weights
+        .into_iter()
+        .filter(|(_, weight)| !weight.is_empty())
+        .collect::<Vec<_>>();
+    entries.sort_unstable_by_key(|(atom, _)| *atom);
+    entries
+}
+
+fn shared_atom_final_weight<'a>(
+    prefix: &'a SharedPrefixNwa,
+    arena: &'a DWA,
+    atom: SharedPrefixAtom,
+) -> Option<&'a Weight> {
+    match atom {
+        SharedPrefixAtom::Local(state_id) => prefix
+            .states
+            .get(state_id as usize)
+            .and_then(|state| state.final_weight.as_ref()),
+        SharedPrefixAtom::External(state_id) => arena
+            .states()
+            .get(state_id as usize)
+            .and_then(|state| state.final_weight.as_ref()),
+    }
+}
+
+fn collect_shared_explicit_labels(
+    prefix: &SharedPrefixNwa,
+    arena: &DWA,
+    subset: &SharedSubset,
+) -> Vec<i32> {
+    let mut labels = std::collections::BTreeSet::new();
+    for (atom, _) in subset {
+        match *atom {
+            SharedPrefixAtom::Local(state_id) => {
+                if let Some(state) = prefix.states.get(state_id as usize) {
+                    labels.extend(
+                        state
+                            .transitions
+                            .keys()
+                            .copied()
+                            .filter(|label| *label != DEFAULT_LABEL),
+                    );
+                }
+            }
+            SharedPrefixAtom::External(state_id) => {
+                if let Some(state) = arena.states().get(state_id as usize) {
+                    labels.extend(
+                        state
+                            .transitions
+                            .keys()
+                            .copied()
+                            .filter(|label| *label != DEFAULT_LABEL),
+                    );
+                }
+            }
+        }
+    }
+    labels.into_iter().collect()
+}
+
+fn add_shared_atom_step_contributions(
+    prefix: &SharedPrefixNwa,
+    arena: &DWA,
+    atom: SharedPrefixAtom,
+    path_weight: &Weight,
+    label: Option<i32>,
+    contributions: &mut FxHashMap<SharedPrefixAtom, Weight>,
+) {
+    match atom {
+        SharedPrefixAtom::Local(state_id) => {
+            let Some(state) = prefix.states.get(state_id as usize) else {
+                return;
+            };
+            let targets = match label {
+                Some(label) => state
+                    .transitions
+                    .get(&label)
+                    .or_else(|| state.transitions.get(&DEFAULT_LABEL)),
+                None => state.transitions.get(&DEFAULT_LABEL),
+            };
+            let Some(targets) = targets else {
+                return;
+            };
+            for (target, edge_weight) in targets {
+                let contribution = path_weight.intersection(edge_weight);
+                merge_shared_atom_weight(
+                    contributions,
+                    SharedPrefixAtom::Local(*target),
+                    contribution,
+                );
+            }
+        }
+        SharedPrefixAtom::External(state_id) => {
+            let Some(state) = arena.states().get(state_id as usize) else {
+                return;
+            };
+            let transition = match label {
+                Some(label) => state
+                    .transitions
+                    .get(&label)
+                    .or_else(|| state.transitions.get(&DEFAULT_LABEL)),
+                None => state.transitions.get(&DEFAULT_LABEL),
+            };
+            let Some((target, edge_weight)) = transition else {
+                return;
+            };
+            let contribution = path_weight.intersection(edge_weight);
+            merge_shared_atom_weight(
+                contributions,
+                SharedPrefixAtom::External(*target),
+                contribution,
+            );
+        }
+    }
+}
+
+fn advance_shared_subset(
+    prefix: &SharedPrefixNwa,
+    arena: &DWA,
+    subset: &SharedSubset,
+    label: Option<i32>,
+) -> Option<(SharedSubset, Weight)> {
+    let mut contributions = FxHashMap::<SharedPrefixAtom, Weight>::default();
+    for (atom, path_weight) in subset {
+        add_shared_atom_step_contributions(
+            prefix,
+            arena,
+            *atom,
+            path_weight,
+            label,
+            &mut contributions,
+        );
+    }
+    if contributions.is_empty() {
+        return None;
+    }
+    let edge_weight = Weight::union_all(contributions.values());
+    if edge_weight.is_empty() {
+        return None;
+    }
+    let closed = close_shared_prefix_subset(prefix, contributions);
+    (!closed.is_empty()).then_some((closed, edge_weight))
+}
+
+fn shared_subset_has_default(
+    prefix: &SharedPrefixNwa,
+    arena: &DWA,
+    subset: &SharedSubset,
+) -> bool {
+    subset.iter().any(|(atom, _)| match *atom {
+        SharedPrefixAtom::Local(state_id) => prefix.states[state_id as usize]
+            .transitions
+            .contains_key(&DEFAULT_LABEL),
+        SharedPrefixAtom::External(state_id) => arena.states()[state_id as usize]
+            .transitions
+            .contains_key(&DEFAULT_LABEL),
+    })
+}
+
+/// Process every explicit label in one scan when the active subset contains no
+/// fallback transitions. The former path first collected ~30k labels and then
+/// rescanned every active atom once per label, which is catastrophic for the
+/// wide parser rows in the Vercel schema.
+fn advance_shared_subset_all_explicit_no_defaults(
+    prefix: &SharedPrefixNwa,
+    arena: &DWA,
+    subset: &SharedSubset,
+) -> Vec<(i32, SharedSubset, Weight)> {
+    let profile = std::env::var("GLRMASK_PROFILE_SHARED_SUFFIX_GROUP_LABELS")
+        .map(|value| value == "1")
+        .unwrap_or(false);
+    let started_at = Instant::now();
+    let mut by_label = BTreeMap::<i32, FxHashMap<SharedPrefixAtom, Weight>>::new();
+
+    for (atom, path_weight) in subset {
+        match *atom {
+            SharedPrefixAtom::Local(state_id) => {
+                let state = &prefix.states[state_id as usize];
+                debug_assert!(!state.transitions.contains_key(&DEFAULT_LABEL));
+                for (&label, targets) in &state.transitions {
+                    debug_assert_ne!(label, DEFAULT_LABEL);
+                    let contributions = by_label.entry(label).or_default();
+                    for (target, edge_weight) in targets {
+                        merge_shared_atom_weight(
+                            contributions,
+                            SharedPrefixAtom::Local(*target),
+                            path_weight.intersection(edge_weight),
+                        );
+                    }
+                }
+            }
+            SharedPrefixAtom::External(state_id) => {
+                let state = &arena.states()[state_id as usize];
+                debug_assert!(!state.transitions.contains_key(&DEFAULT_LABEL));
+                for (&label, (target, edge_weight)) in &state.transitions {
+                    debug_assert_ne!(label, DEFAULT_LABEL);
+                    merge_shared_atom_weight(
+                        by_label.entry(label).or_default(),
+                        SharedPrefixAtom::External(*target),
+                        path_weight.intersection(edge_weight),
+                    );
+                }
+            }
+        }
+    }
+
+    if profile {
+        eprintln!(
+            "[glrmask/profile][parser_shared_suffix_group_labels] phase=scan labels={} subset_atoms={} elapsed_ms={:.3}",
+            by_label.len(),
+            subset.len(),
+            elapsed_ms(started_at),
+        );
+    }
+
+    let mut result = Vec::with_capacity(by_label.len());
+    for (index, (label, contributions)) in by_label.into_iter().enumerate() {
+        if contributions.is_empty() {
+            continue;
+        }
+        let edge_weight = Weight::union_all(contributions.values());
+        if edge_weight.is_empty() {
+            continue;
+        }
+        let closed = close_shared_prefix_subset(prefix, contributions);
+        if !closed.is_empty() {
+            result.push((label, closed, edge_weight));
+        }
+        if profile && (index + 1) % 2_000 == 0 {
+            eprintln!(
+                "[glrmask/profile][parser_shared_suffix_group_labels] phase=close processed={} results={} elapsed_ms={:.3}",
+                index + 1,
+                result.len(),
+                elapsed_ms(started_at),
+            );
+        }
+    }
+    if profile {
+        eprintln!(
+            "[glrmask/profile][parser_shared_suffix_group_labels] phase=done results={} elapsed_ms={:.3}",
+            result.len(),
+            elapsed_ms(started_at),
+        );
+    }
+    result
+}
+
+fn shared_subset_final_weight(
+    prefix: &SharedPrefixNwa,
+    arena: &DWA,
+    subset: &SharedSubset,
+) -> Weight {
+    let contributions = subset
+        .iter()
+        .filter_map(|(atom, path_weight)| {
+            shared_atom_final_weight(prefix, arena, *atom)
+                .map(|final_weight| path_weight.intersection(final_weight))
+                .filter(|weight| !weight.is_empty())
+        })
+        .collect::<Vec<_>>();
+    Weight::union_all(contributions.iter())
+}
+
+fn intern_shared_subset(
+    arena: &mut DWA,
+    subset_map: &mut FxHashMap<SharedSubsetKey, u32>,
+    worklist: &mut VecDeque<(u32, SharedSubset)>,
+    subset: SharedSubset,
+    allow_external_alias: bool,
+) -> u32 {
+    if allow_external_alias && subset.len() == 1 {
+        if let (SharedPrefixAtom::External(state_id), _) = &subset[0] {
+            return *state_id;
+        }
+    }
+
+    let key = shared_subset_key(&subset);
+    if let Some(&existing) = subset_map.get(&key) {
+        return existing;
+    }
+    let state = arena.add_state();
+    subset_map.insert(key, state);
+    worklist.push_back((state, subset));
+    state
+}
+
+/// Determinize a local preimage prefix while treating previously compiled DWA
+/// states as immutable external atoms. New subset states are appended to the
+/// same arena, so predecessor control states reference suffix states by ID
+/// instead of recursively copying their graphs.
+fn determinize_shared_prefix(prefix: &SharedPrefixNwa, arena: &mut DWA) -> Option<u32> {
+    if prefix.start_states.is_empty() {
+        return None;
+    }
+
+    let mut start_seed = FxHashMap::<SharedPrefixAtom, Weight>::default();
+    for &start in &prefix.start_states {
+        merge_shared_atom_weight(
+            &mut start_seed,
+            SharedPrefixAtom::Local(start),
+            Weight::all(),
+        );
+    }
+    let start_subset = close_shared_prefix_subset(prefix, start_seed);
+    if start_subset.is_empty() {
+        return None;
+    }
+
+    let profile = compile_profile_enabled();
+    if profile && prefix.states.len() >= 10_000 {
+        let mut explicit_labels = rustc_hash::FxHashSet::<i32>::default();
+        let mut explicit_edges = 0usize;
+        let mut default_atoms = 0usize;
+        let mut local_atoms = 0usize;
+        let mut external_atoms = 0usize;
+        for (atom, _) in &start_subset {
+            match *atom {
+                SharedPrefixAtom::Local(state_id) => {
+                    local_atoms += 1;
+                    let transitions = &prefix.states[state_id as usize].transitions;
+                    default_atoms += usize::from(transitions.contains_key(&DEFAULT_LABEL));
+                    for &label in transitions.keys() {
+                        if label != DEFAULT_LABEL {
+                            explicit_labels.insert(label);
+                            explicit_edges += 1;
+                        }
+                    }
+                }
+                SharedPrefixAtom::External(state_id) => {
+                    external_atoms += 1;
+                    let transitions = &arena.states()[state_id as usize].transitions;
+                    default_atoms += usize::from(transitions.contains_key(&DEFAULT_LABEL));
+                    for &label in transitions.keys() {
+                        if label != DEFAULT_LABEL {
+                            explicit_labels.insert(label);
+                            explicit_edges += 1;
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "[glrmask/profile][parser_shared_suffix_start_subset] prefix_states={} subset_atoms={} local_atoms={} external_atoms={} explicit_labels={} explicit_edges={} default_atoms={}",
+            prefix.states.len(),
+            start_subset.len(),
+            local_atoms,
+            external_atoms,
+            explicit_labels.len(),
+            explicit_edges,
+            default_atoms,
+        );
+    }
+
+    let mut subset_map = FxHashMap::<SharedSubsetKey, u32>::default();
+    let mut worklist = VecDeque::<(u32, SharedSubset)>::new();
+    let started_at = Instant::now();
+    let arena_states_at_start = arena.states().len();
+    let arena_transitions_at_start = arena.num_transitions();
+    let mut processed = 0usize;
+    let start = intern_shared_subset(
+        arena,
+        &mut subset_map,
+        &mut worklist,
+        start_subset,
+        false,
+    );
+
+    while let Some((from_state, subset)) = worklist.pop_front() {
+        processed += 1;
+        if profile && prefix.states.len() >= 3_000 && processed % 1_000 == 0 {
+            eprintln!(
+                "[glrmask/profile][parser_shared_suffix_determinize_progress] processed={} interned={} queued={} current_subset_atoms={} prefix_states={} new_arena_states={} new_arena_transitions={} elapsed_ms={:.3}",
+                processed,
+                subset_map.len(),
+                worklist.len(),
+                subset.len(),
+                prefix.states.len(),
+                arena.states().len().saturating_sub(arena_states_at_start),
+                arena.num_transitions().saturating_sub(arena_transitions_at_start),
+                elapsed_ms(started_at),
+            );
+        }
+        let final_weight = shared_subset_final_weight(prefix, arena, &subset);
+        if !final_weight.is_empty() {
+            arena.set_final_weight(from_state, final_weight.clone());
+        }
+
+        if !shared_subset_has_default(prefix, arena, &subset) {
+            for (label, next_subset, mut edge_weight) in
+                advance_shared_subset_all_explicit_no_defaults(prefix, arena, &subset)
+            {
+                if !final_weight.is_empty() {
+                    edge_weight = edge_weight.difference(&final_weight);
+                }
+                if edge_weight.is_empty() {
+                    continue;
+                }
+                let target = intern_shared_subset(
+                    arena,
+                    &mut subset_map,
+                    &mut worklist,
+                    next_subset,
+                    true,
+                );
+                arena.add_transition(from_state, label, target, edge_weight);
+            }
+        } else {
+            let labels = collect_shared_explicit_labels(prefix, arena, &subset);
+            let default_step = advance_shared_subset(prefix, arena, &subset, None);
+
+            for label in labels {
+                let Some((next_subset, mut edge_weight)) =
+                    advance_shared_subset(prefix, arena, &subset, Some(label))
+                else {
+                    continue;
+                };
+                if !final_weight.is_empty() {
+                    edge_weight = edge_weight.difference(&final_weight);
+                }
+                if edge_weight.is_empty() {
+                    continue;
+                }
+                let target = intern_shared_subset(
+                    arena,
+                    &mut subset_map,
+                    &mut worklist,
+                    next_subset,
+                    true,
+                );
+                arena.add_transition(from_state, label, target, edge_weight);
+            }
+
+            if let Some((next_subset, mut edge_weight)) = default_step {
+                if !final_weight.is_empty() {
+                    edge_weight = edge_weight.difference(&final_weight);
+                }
+                if !edge_weight.is_empty() {
+                    let target = intern_shared_subset(
+                        arena,
+                        &mut subset_map,
+                        &mut worklist,
+                        next_subset,
+                        true,
+                    );
+                    arena.add_transition(from_state, DEFAULT_LABEL, target, edge_weight);
+                }
+            }
+        }
+    }
+
+    Some(start)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct SharedDwaStateKey {
+    final_weight: Option<Weight>,
+    transitions: Vec<(i32, u32, Weight)>,
+}
+
+/// Exact structural hash-consing for the acyclic states appended by one
+/// shared-prefix determinization. Targets are canonicalized first, so states
+/// with identical weighted futures merge across different control nodes.
+fn canonicalize_new_shared_dwa_states(
+    arena: &mut DWA,
+    new_start: usize,
+    root: u32,
+    intern: &mut FxHashMap<SharedDwaStateKey, u32>,
+) -> Option<(u32, usize)> {
+    let end = arena.states().len();
+    if new_start >= end {
+        return Some((root, 0));
+    }
+
+    let new_count = end - new_start;
+    let mut predecessors = vec![Vec::<usize>::new(); new_count];
+    let mut outdegree = vec![0usize; new_count];
+    for state_id in new_start..end {
+        for (target, _) in arena.states()[state_id].transitions.values() {
+            let target = *target as usize;
+            if target >= new_start && target < end {
+                predecessors[target - new_start].push(state_id - new_start);
+                outdegree[state_id - new_start] += 1;
+            }
+        }
+    }
+
+    let mut queue = VecDeque::new();
+    for (local_id, &degree) in outdegree.iter().enumerate() {
+        if degree == 0 {
+            queue.push_back(local_id);
+        }
+    }
+    let mut reverse_topo = Vec::with_capacity(new_count);
+    while let Some(local_id) = queue.pop_front() {
+        reverse_topo.push(local_id);
+        for &predecessor in &predecessors[local_id] {
+            outdegree[predecessor] -= 1;
+            if outdegree[predecessor] == 0 {
+                queue.push_back(predecessor);
+            }
+        }
+    }
+    if reverse_topo.len() != new_count {
+        return None;
+    }
+
+    let mut canonical = vec![u32::MAX; new_count];
+    let mut unique_new = 0usize;
+    for local_id in reverse_topo {
+        let state_id = new_start + local_id;
+        let state = &arena.states()[state_id];
+        let transitions = state
+            .transitions
+            .iter()
+            .map(|(&label, (target, weight))| {
+                let target_usize = *target as usize;
+                let canonical_target = if target_usize >= new_start && target_usize < end {
+                    let mapped = canonical[target_usize - new_start];
+                    debug_assert_ne!(mapped, u32::MAX);
+                    mapped
+                } else {
+                    *target
+                };
+                (label, canonical_target, weight.clone())
+            })
+            .collect::<Vec<_>>();
+        let key = SharedDwaStateKey {
+            final_weight: state.final_weight.clone(),
+            transitions,
+        };
+
+        if let Some(&existing) = intern.get(&key) {
+            canonical[local_id] = existing;
+            continue;
+        }
+
+        let canonical_state = state_id as u32;
+        canonical[local_id] = canonical_state;
+        unique_new += 1;
+        let state = &mut arena.states_mut()[state_id];
+        for (target, _) in state.transitions.values_mut() {
+            let target_usize = *target as usize;
+            if target_usize >= new_start && target_usize < end {
+                *target = canonical[target_usize - new_start];
+            }
+        }
+        intern.insert(key, canonical_state);
+    }
+
+    let canonical_root = if (root as usize) >= new_start && (root as usize) < end {
+        canonical[root as usize - new_start]
+    } else {
+        root
+    };
+    Some((canonical_root, unique_new))
+}
+
+
+fn compact_shared_suffix_arena(
+    arena: &mut DWA,
+    compiled_starts: &mut [Option<u32>],
+    intern: &mut FxHashMap<SharedDwaStateKey, u32>,
+) -> (usize, usize) {
+    let old_states = arena.states().to_vec();
+    if old_states.is_empty() {
+        intern.clear();
+        return (0, 0);
+    }
+
+    let old_state_count = old_states.len();
+    let old_transition_count: usize = old_states
+        .iter()
+        .map(|state| state.transitions.len())
+        .sum();
+    let mut reachable = vec![false; old_state_count];
+    let mut queue = VecDeque::new();
+    for start in compiled_starts.iter().flatten().copied() {
+        let start = start as usize;
+        if start < old_state_count && !reachable[start] {
+            reachable[start] = true;
+            queue.push_back(start);
+        }
+    }
+
+    while let Some(state_id) = queue.pop_front() {
+        for (target, weight) in old_states[state_id].transitions.values() {
+            let target = *target as usize;
+            if weight.is_empty() || target >= old_state_count || reachable[target] {
+                continue;
+            }
+            reachable[target] = true;
+            queue.push_back(target);
+        }
+    }
+
+    let mut remap = vec![u32::MAX; old_state_count];
+    let mut new_states = Vec::with_capacity(reachable.iter().filter(|&&live| live).count());
+    for (old_id, state) in old_states.iter().enumerate() {
+        if reachable[old_id] {
+            remap[old_id] = new_states.len() as u32;
+            new_states.push(state.clone());
+        }
+    }
+    for state in &mut new_states {
+        state.transitions.retain(|_, (target, weight)| {
+            if weight.is_empty() || (*target as usize) >= remap.len() {
+                return false;
+            }
+            let mapped = remap[*target as usize];
+            if mapped == u32::MAX {
+                return false;
+            }
+            *target = mapped;
+            true
+        });
+    }
+    for start in compiled_starts.iter_mut().flatten() {
+        *start = remap[*start as usize];
+        debug_assert_ne!(*start, u32::MAX);
+    }
+
+    let new_start = compiled_starts
+        .iter()
+        .flatten()
+        .copied()
+        .next()
+        .unwrap_or(0);
+    *arena = DWA::from_parts(new_states, new_start);
+
+    intern.clear();
+    for (state_id, state) in arena.states().iter().enumerate() {
+        let key = SharedDwaStateKey {
+            final_weight: state.final_weight.clone(),
+            transitions: state
+                .transitions
+                .iter()
+                .map(|(&label, (target, weight))| (label, *target, weight.clone()))
+                .collect(),
+        };
+        intern.insert(key, state_id as u32);
+    }
+
+    let new_transition_count = arena.num_transitions();
+    (
+        old_state_count.saturating_sub(arena.states().len()),
+        old_transition_count.saturating_sub(new_transition_count),
+    )
+}
+
 fn compute_productive_terminal_states(summaries: &StateSummaries) -> Vec<bool> {
     let states = &summaries.states;
     let mut reverse_edges: Vec<Vec<u32>> = vec![Vec::new(); states.len()];
@@ -2035,6 +3404,423 @@ fn compute_productive_terminal_states(summaries: &StateSummaries) -> Vec<bool> {
     }
 
     productive
+}
+
+fn productive_control_reverse_topo(
+    summaries: &StateSummaries,
+    productive: &[bool],
+) -> Option<Vec<usize>> {
+    let mut predecessors = vec![Vec::<usize>::new(); summaries.states.len()];
+    let mut outdegree = vec![0usize; summaries.states.len()];
+    let mut productive_count = 0usize;
+
+    for (source, state) in summaries.states.iter().enumerate() {
+        if !productive[source] {
+            continue;
+        }
+        productive_count += 1;
+        for branch in &state.branches {
+            let target = branch.target as usize;
+            if target >= productive.len()
+                || !productive[target]
+                || !summaries
+                    .bundle_accepts
+                    .get(branch.bundle_id)
+                    .copied()
+                    .unwrap_or(false)
+            {
+                continue;
+            }
+            predecessors[target].push(source);
+            outdegree[source] += 1;
+        }
+    }
+
+    let mut queue = VecDeque::new();
+    for (state_id, &degree) in outdegree.iter().enumerate() {
+        if productive[state_id] && degree == 0 {
+            queue.push_back(state_id);
+        }
+    }
+
+    let mut reverse_topo = Vec::with_capacity(productive_count);
+    while let Some(target) = queue.pop_front() {
+        reverse_topo.push(target);
+        for &source in &predecessors[target] {
+            outdegree[source] -= 1;
+            if outdegree[source] == 0 {
+                queue.push_back(source);
+            }
+        }
+    }
+
+    (reverse_topo.len() == productive_count).then_some(reverse_topo)
+}
+
+/// Experimental exact parser compiler for acyclic terminal-control graphs.
+///
+/// Compile control states from sinks to starts. For one source state, each
+/// already-compiled target suffix is copied only once, while terminal templates
+/// are pushed through that suffix individually before they are unioned and
+/// determinized. This deliberately avoids the current eager multi-terminal
+/// bundle product, which is the source of the million-state Vercel parser NWA.
+fn try_build_bottom_up_parser_dwa(
+    terminal_automaton: &TerminalAutomaton,
+    grammar: &AnalyzedGrammar,
+    templates: &Templates,
+    num_parser_states: u32,
+) -> Option<DWA> {
+    let profile = compile_profile_enabled();
+    let total_started_at = Instant::now();
+    let summaries = build_state_summaries(terminal_automaton, grammar, templates);
+    let productive = compute_productive_terminal_states(&summaries);
+    let reverse_topo = productive_control_reverse_topo(&summaries, &productive)?;
+
+    let mut compiled = vec![None::<DWA>; summaries.states.len()];
+    let mut total_local_nwa_states = 0usize;
+    let mut total_local_dwa_states = 0usize;
+    let mut max_local_nwa_states = 0usize;
+    let mut max_local_dwa_states = 0usize;
+
+    for &state_id in &reverse_topo {
+        let state_started_at = Instant::now();
+        let state = &summaries.states[state_id];
+        let mut local = NWA::new(0, 0);
+        let root = local.add_state();
+        local.set_start_states(vec![root]);
+        if let Some(final_weight) = state
+            .final_weight
+            .as_ref()
+            .filter(|weight| !weight.is_empty())
+        {
+            local.set_final_weight(root, final_weight.clone());
+        }
+
+        for branch in &state.branches {
+            let target = branch.target as usize;
+            if target >= productive.len()
+                || !productive[target]
+                || !summaries
+                    .bundle_accepts
+                    .get(branch.bundle_id)
+                    .copied()
+                    .unwrap_or(false)
+            {
+                continue;
+            }
+
+            let suffix = compiled[target].as_ref()?;
+            if !suffix.is_acyclic() {
+                return None;
+            }
+            let suffix_offset = local.states().len() as u32;
+            local.append_with_body(&dwa_to_nwa(suffix));
+
+            let bundle = summaries.unique_bundles.get(branch.bundle_id)?;
+            for (&terminal, terminal_weight) in bundle {
+                let Some(template) = templates.by_terminal_nwa.get(&terminal) else {
+                    continue;
+                };
+                let Some(body) = append_weighted_template_preimage(
+                    &mut local,
+                    template,
+                    terminal_weight,
+                    suffix,
+                    suffix_offset,
+                    num_parser_states,
+                ) else {
+                    continue;
+                };
+                for start in body.start_states {
+                    local.add_epsilon(root, start, Weight::all());
+                }
+            }
+        }
+
+        if !local.is_acyclic() {
+            return None;
+        }
+        total_local_nwa_states += local.states().len();
+        max_local_nwa_states = max_local_nwa_states.max(local.states().len());
+
+        let local_nwa_states = local.states().len();
+        let local_nwa_transitions = local.num_transitions();
+        let determinize_started_at = Instant::now();
+        let mut dwa = determinize(&local).ok()?;
+        let determinize_ms = elapsed_ms(determinize_started_at);
+        subtract_final_weights_from_outgoing_dwa(&mut dwa);
+        total_local_dwa_states += dwa.states().len();
+        max_local_dwa_states = max_local_dwa_states.max(dwa.states().len());
+        if profile {
+            eprintln!(
+                "[glrmask/profile][parser_bottom_up_state] control_state={} branches={} local_nwa_states={} local_nwa_transitions={} dwa_states={} dwa_transitions={} determinize_ms={:.3} total_ms={:.3}",
+                state_id,
+                state.branches.len(),
+                local_nwa_states,
+                local_nwa_transitions,
+                dwa.states().len(),
+                dwa.num_transitions(),
+                determinize_ms,
+                elapsed_ms(state_started_at),
+            );
+        }
+        compiled[state_id] = Some(dwa);
+    }
+
+    let productive_starts = summaries
+        .start_states
+        .iter()
+        .copied()
+        .filter(|state| productive.get(*state as usize).copied().unwrap_or(false))
+        .collect::<Vec<_>>();
+    let result = match productive_starts.as_slice() {
+        [] => return None,
+        [only] => compiled[*only as usize].take()?,
+        starts => {
+            let mut union = NWA::new(0, 0);
+            let mut union_starts = Vec::new();
+            for &start in starts {
+                let body = union.append_with_body(&dwa_to_nwa(compiled[start as usize].as_ref()?));
+                union_starts.extend(body.start_states);
+            }
+            union.set_start_states(union_starts);
+            let mut dwa = determinize(&union).ok()?;
+            subtract_final_weights_from_outgoing_dwa(&mut dwa);
+            dwa
+        }
+    };
+
+    if profile {
+        eprintln!(
+            "[glrmask/profile][parser_bottom_up] control_states={} total_local_nwa_states={} max_local_nwa_states={} total_local_dwa_states={} max_local_dwa_states={} result_states={} result_transitions={} total_ms={:.3}",
+            reverse_topo.len(),
+            total_local_nwa_states,
+            max_local_nwa_states,
+            total_local_dwa_states,
+            max_local_dwa_states,
+            result.states().len(),
+            result.num_transitions(),
+            elapsed_ms(total_started_at),
+        );
+    }
+
+    Some(result)
+}
+
+fn try_build_shared_suffix_parser_dwa(
+    terminal_automaton: &TerminalAutomaton,
+    grammar: &AnalyzedGrammar,
+    templates: &Templates,
+) -> Option<DWA> {
+    let profile = compile_profile_enabled();
+    let total_started_at = Instant::now();
+    let summaries = build_state_summaries(terminal_automaton, grammar, templates);
+    let productive = compute_productive_terminal_states(&summaries);
+    let reverse_topo = productive_control_reverse_topo(&summaries, &productive)?;
+    let (terminal_to_shape, shape_representatives) = build_template_shape_index(templates);
+
+    // Start from a truly empty arena. Each compiled control-state language is
+    // represented only by its start-state ID inside this one persistent DWA.
+    let mut arena = DWA::from_parts(Vec::new(), 0);
+    let mut state_intern = FxHashMap::<SharedDwaStateKey, u32>::default();
+    let mut compiled_starts = vec![None::<u32>; summaries.states.len()];
+    let mut total_prefix_states = 0usize;
+    let mut total_new_dwa_states = 0usize;
+    let mut total_unique_new_dwa_states = 0usize;
+    let mut max_prefix_states = 0usize;
+    let mut max_new_dwa_states = 0usize;
+
+    for &state_id in &reverse_topo {
+        let state_started_at = Instant::now();
+        let state = &summaries.states[state_id];
+        let mut prefix = SharedPrefixNwa::default();
+        let root = prefix.add_state();
+        prefix.start_states.push(root);
+        if let Some(final_weight) = state
+            .final_weight
+            .as_ref()
+            .filter(|weight| !weight.is_empty())
+        {
+            prefix.states[root as usize].final_weight = Some(final_weight.clone());
+        }
+
+        let mut grouped_template_weights = BTreeMap::<(u32, usize), Weight>::new();
+        let mut raw_weighted_templates = 0usize;
+        for branch in &state.branches {
+            let target = branch.target as usize;
+            if target >= productive.len()
+                || !productive[target]
+                || !summaries
+                    .bundle_accepts
+                    .get(branch.bundle_id)
+                    .copied()
+                    .unwrap_or(false)
+            {
+                continue;
+            }
+            let suffix_start = compiled_starts[target]?;
+            let bundle = summaries.unique_bundles.get(branch.bundle_id)?;
+            for (&terminal, terminal_weight) in bundle {
+                let Some(&shape_id) = terminal_to_shape.get(&terminal) else {
+                    continue;
+                };
+                raw_weighted_templates += 1;
+                grouped_template_weights
+                    .entry((suffix_start, shape_id))
+                    .and_modify(|existing| *existing = existing.union(terminal_weight))
+                    .or_insert_with(|| terminal_weight.clone());
+            }
+        }
+
+        let grouped_weighted_templates = grouped_template_weights.len();
+        for ((suffix_start, shape_id), terminal_weight) in grouped_template_weights {
+            let representative = *shape_representatives.get(shape_id)?;
+            let template = templates.by_terminal_nwa.get(&representative)?;
+            let Some(template_starts) = append_weighted_template_preimage_shared(
+                    &mut prefix,
+                    template,
+                    &terminal_weight,
+                    &arena,
+                    suffix_start,
+                ) else {
+                continue;
+            };
+            for start in template_starts {
+                prefix.add_epsilon(
+                    root,
+                    SharedPrefixAtom::Local(start),
+                    Weight::all(),
+                );
+            }
+        }
+
+        let arena_states_before = arena.states().len();
+        let arena_transitions_before = arena.num_transitions();
+        let prefix_states = prefix.states.len();
+        let prefix_canonicalize_started_at = Instant::now();
+        let prefix_canonical_states = canonicalize_shared_prefix_nwa(&mut prefix)?;
+        let prefix_canonicalize_ms = elapsed_ms(prefix_canonicalize_started_at);
+        if profile {
+            eprintln!(
+                "[glrmask/profile][parser_shared_suffix_state_begin] control_state={} branches={} prefix_states={} prefix_canonical_states={} prefix_canonicalize_ms={:.3} arena_states={} canonical_states={}",
+                state_id,
+                state.branches.len(),
+                prefix_states,
+                prefix_canonical_states,
+                prefix_canonicalize_ms,
+                arena.states().len(),
+                state_intern.len(),
+            );
+        }
+        let raw_start = determinize_shared_prefix(&prefix, &mut arena)?;
+        let new_dwa_states = arena.states().len() - arena_states_before;
+        let new_dwa_transitions = arena.num_transitions() - arena_transitions_before;
+        let canonicalize_started_at = Instant::now();
+        let (start, unique_new_dwa_states) = canonicalize_new_shared_dwa_states(
+            &mut arena,
+            arena_states_before,
+            raw_start,
+            &mut state_intern,
+        )?;
+        let canonicalize_ms = elapsed_ms(canonicalize_started_at);
+        compiled_starts[state_id] = Some(start);
+
+        let mut arena_compact_ms = 0.0;
+        let mut arena_compact_removed_states = 0usize;
+        let mut arena_compact_removed_transitions = 0usize;
+        if false
+            && arena.num_transitions() >= 1_000_000
+            && arena.states().len() > state_intern.len().saturating_add(256)
+        {
+            let compact_started_at = Instant::now();
+            (arena_compact_removed_states, arena_compact_removed_transitions) =
+                compact_shared_suffix_arena(
+                    &mut arena,
+                    &mut compiled_starts,
+                    &mut state_intern,
+                );
+            arena_compact_ms = elapsed_ms(compact_started_at);
+        }
+
+        total_prefix_states += prefix_states;
+        total_new_dwa_states += new_dwa_states;
+        total_unique_new_dwa_states += unique_new_dwa_states;
+        max_prefix_states = max_prefix_states.max(prefix_states);
+        max_new_dwa_states = max_new_dwa_states.max(new_dwa_states);
+        if profile {
+            eprintln!(
+                "[glrmask/profile][parser_shared_suffix_state] control_state={} branches={} raw_weighted_templates={} grouped_weighted_templates={} prefix_states={} new_dwa_states={} unique_new_dwa_states={} new_dwa_transitions={} canonicalize_ms={:.3} arena_compact_ms={:.3} arena_compact_removed_states={} arena_compact_removed_transitions={} arena_states={} canonical_states={} arena_transitions={} total_ms={:.3}",
+                state_id,
+                state.branches.len(),
+                raw_weighted_templates,
+                grouped_weighted_templates,
+                prefix_states,
+                new_dwa_states,
+                unique_new_dwa_states,
+                new_dwa_transitions,
+                canonicalize_ms,
+                arena_compact_ms,
+                arena_compact_removed_states,
+                arena_compact_removed_transitions,
+                arena.states().len(),
+                state_intern.len(),
+                arena.num_transitions(),
+                elapsed_ms(state_started_at),
+            );
+        }
+    }
+
+    let productive_starts = summaries
+        .start_states
+        .iter()
+        .copied()
+        .filter(|state| productive.get(*state as usize).copied().unwrap_or(false))
+        .collect::<Vec<_>>();
+    let final_start = match productive_starts.as_slice() {
+        [] => return None,
+        [only] => compiled_starts[*only as usize]?,
+        starts => {
+            let mut prefix = SharedPrefixNwa::default();
+            let root = prefix.add_state();
+            prefix.start_states.push(root);
+            for &start in starts {
+                prefix.add_epsilon(
+                    root,
+                    SharedPrefixAtom::External(compiled_starts[start as usize]?),
+                    Weight::all(),
+                );
+            }
+            let arena_states_before = arena.states().len();
+            let raw_start = determinize_shared_prefix(&prefix, &mut arena)?;
+            canonicalize_new_shared_dwa_states(
+                &mut arena,
+                arena_states_before,
+                raw_start,
+                &mut state_intern,
+            )?
+            .0
+        }
+    };
+
+    arena.set_start_state(final_start);
+    let result = trim_unreachable_dwa(arena);
+    if profile {
+        eprintln!(
+            "[glrmask/profile][parser_shared_suffix] control_states={} total_prefix_states={} max_prefix_states={} total_new_dwa_states={} total_unique_new_dwa_states={} max_new_dwa_states={} canonical_states={} result_states={} result_transitions={} acyclic={} total_ms={:.3}",
+            reverse_topo.len(),
+            total_prefix_states,
+            max_prefix_states,
+            total_new_dwa_states,
+            total_unique_new_dwa_states,
+            max_new_dwa_states,
+            state_intern.len(),
+            result.states().len(),
+            result.num_transitions(),
+            result.is_acyclic(),
+            elapsed_ms(total_started_at),
+        );
+    }
+    Some(result)
 }
 
 fn append_weighted_template_redirecting_finals(
@@ -2432,6 +4218,65 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     let total_started_at = Instant::now();
     let minimize_skipped = false;
     let profiling_enabled = compile_profile_enabled();
+
+    if std::env::var("GLRMASK_SHARED_SUFFIX_PARSER_DWA")
+        .map(|value| value == "1")
+        .unwrap_or(false)
+    {
+        let shared_started_at = Instant::now();
+        if let Some(result) =
+            try_build_shared_suffix_parser_dwa(terminal_dwa, grammar, &templates)
+        {
+            if profiling_enabled {
+                eprintln!(
+                    "[glrmask/profile][parser_dwa_detail] mode=shared_suffix states={} transitions={} acyclic={} total_ms={:.3}",
+                    result.states().len(),
+                    result.num_transitions(),
+                    result.is_acyclic(),
+                    elapsed_ms(shared_started_at),
+                );
+            }
+            return result;
+        }
+        if profiling_enabled {
+            eprintln!("[glrmask/profile][parser_shared_suffix] result=fallback");
+        }
+    }
+
+    let assert_bottom_up = std::env::var("GLRMASK_ASSERT_BOTTOM_UP_PARSER_DWA")
+        .map(|value| value == "1")
+        .unwrap_or(false);
+    let mut bottom_up_candidate = None;
+    if std::env::var("GLRMASK_BOTTOM_UP_PARSER_DWA")
+        .map(|value| value == "1")
+        .unwrap_or(false)
+    {
+        let bottom_up_started_at = Instant::now();
+        if let Some(result) = try_build_bottom_up_parser_dwa(
+            terminal_dwa,
+            grammar,
+            &templates,
+            num_parser_states,
+        ) {
+            if profiling_enabled {
+                eprintln!(
+                    "[glrmask/profile][parser_dwa_detail] mode=bottom_up states={} transitions={} acyclic={} total_ms={:.3}",
+                    result.states().len(),
+                    result.num_transitions(),
+                    result.is_acyclic(),
+                    elapsed_ms(bottom_up_started_at),
+                );
+            }
+            if !assert_bottom_up {
+                return result;
+            }
+            bottom_up_candidate = Some(result);
+        }
+        if profiling_enabled {
+            eprintln!("[glrmask/profile][parser_bottom_up] result=fallback");
+        }
+    }
+
     let (terminal_dwa_transition_count, terminal_dwa_interned_ranges) = if profiling_enabled {
         let stats = terminal_dwa.stats();
         (stats.transitions, stats.interned_ranges)
@@ -2534,6 +4379,41 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
             )
         };
 
+    if std::env::var_os("GLRMASK_PROFILE_PARSER_DWA_ACYCLIC").is_some() {
+        eprintln!(
+            "[glrmask/profile][parser_dwa_acyclic] states={} transitions={} acyclic={}",
+            minimized.states().len(),
+            minimized.num_transitions(),
+            minimized.is_acyclic(),
+        );
+    }
+
+    if profiling_enabled {
+        let default_edges = minimized
+            .states()
+            .iter()
+            .filter(|state| state.transitions.contains_key(&DEFAULT_LABEL))
+            .count();
+        let positive_edges = minimized
+            .states()
+            .iter()
+            .map(|state| {
+                state
+                    .transitions
+                    .keys()
+                    .filter(|&&label| label >= 0 && label != DEFAULT_LABEL)
+                    .count()
+            })
+            .sum::<usize>();
+        eprintln!(
+            "[glrmask/profile][parser_dwa_row_shape] states={} transitions={} states_with_default={} positive_edges={}",
+            minimized.states().len(),
+            minimized.num_transitions(),
+            default_edges,
+            positive_edges,
+        );
+    }
+
     if profiling_enabled {
         eprintln!(
             "[glrmask/profile][parser_dwa_detail] terminal_dwa_states={} terminal_dwa_transitions={} terminal_dwa_interned_ranges={} parser_nwa_states={} parser_nwa_start_states={} pre_minimize_states={} pre_minimize_transitions={} post_minimize_states={} post_minimize_transitions={} minimize_skipped={} state_prep_ms={:.3} compose_state_ms={:.3} parser_nwa_build_ms={:.3} resolve_negative_ms={:.3} support_determinize_ms={:.3} guaranteed_read_rewrites={} guaranteed_read_ms={:.3} possible_outgoing_ms={:.3} default_opt_ms={:.3} subtract_final_ms={:.3} fallback_determinize_ms={:.3} minimize_ms={:.3} total_ms={:.3}",
@@ -2561,6 +4441,20 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
             minimize_ms,
             elapsed_ms(total_started_at),
         );
+    }
+
+    if let Some(candidate) = bottom_up_candidate {
+        match find_difference(&candidate, &minimized) {
+            Ok(None) => eprintln!("[glrmask/profile][parser_bottom_up_equivalence] equivalent=true"),
+            Ok(Some(word)) => eprintln!(
+                "[glrmask/profile][parser_bottom_up_equivalence] equivalent=false witness={word:?} candidate_weight={:?} reference_weight={:?}",
+                candidate.eval_word(&word),
+                minimized.eval_word(&word),
+            ),
+            Err(error) => eprintln!(
+                "[glrmask/profile][parser_bottom_up_equivalence] error={error}"
+            ),
+        }
     }
 
     minimized
