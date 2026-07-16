@@ -396,6 +396,44 @@ impl InitialPruneGuard {
         }
     }
 
+    fn allows_token_program(
+        &self,
+        constraint: &Constraint,
+        program: &super::artifact::DynamicTokenProgram,
+    ) -> bool {
+        let Self::Pending {
+            blocked,
+            actionable_states,
+            ..
+        } = self
+        else {
+            return true;
+        };
+
+        let mut saw_actionable = false;
+        let mut previous_terminal = None;
+        for &(terminal, _) in program.branches.iter() {
+            if previous_terminal == Some(terminal) {
+                continue;
+            }
+            previous_terminal = Some(terminal);
+            if Some(terminal) == constraint.ignore_terminal
+                || !terminal_is_actionable_from_states(
+                    constraint,
+                    actionable_states,
+                    terminal,
+                )
+            {
+                continue;
+            }
+            saw_actionable = true;
+            if !blocked.contains(&terminal) {
+                return true;
+            }
+        }
+        !saw_actionable
+    }
+
     /// Advance the original token-start lexer branch through a trie segment.
     /// Parser resets caused by terminal matches elsewhere in the dynamic walk
     /// deliberately do not affect this guard: commit evaluates its initial
@@ -524,6 +562,38 @@ fn token_program_accepts(
     });
     program_cache.results.insert(key, accepted);
     accepted
+}
+
+fn source_token_program_accepts(
+    constraint: &Constraint,
+    partition: &DynamicTokenProgramPartition,
+    source_partition: &super::artifact::DynamicSourceTokenProgramPartition,
+    program_id: u16,
+    stacks: &ParserStacks,
+    traversal_cache: &mut DynamicTraversalCache,
+    program_cache: &mut DynamicTokenProgramCache,
+) -> bool {
+    let program = &source_partition.programs[program_id as usize];
+    if program.accept {
+        return true;
+    }
+
+    program.end_states.iter().any(|&end_state| {
+        token_boundary_allowed_cached(constraint, end_state, stacks, traversal_cache)
+    }) || program.branches.iter().any(|&(terminal, suffix)| {
+        let Some(advanced) = parser_child_cached(constraint, stacks, terminal, traversal_cache)
+        else {
+            return false;
+        };
+        token_program_accepts(
+            constraint,
+            partition,
+            suffix,
+            &advanced,
+            traversal_cache,
+            program_cache,
+        )
+    })
 }
 
 fn token_boundary_allowed(
@@ -828,14 +898,16 @@ fn fill_mask_dynamic_impl(
                 );
             }
             if tokenizer_state == initial_tsid
-                && initial_prune_guard.is_passed()
                 && let Some(program_partition) = vocab.initial_token_program_partition()
             {
                 let mut accepted_programs = vec![false; program_partition.programs.len()];
                 for &program in program_partition.root_programs.iter() {
                     check_deadline()?;
                     token_program_groups_evaluated += 1;
-                    if token_program_accepts(
+                    if initial_prune_guard.allows_token_program(
+                        state.constraint,
+                        &program_partition.programs[program as usize],
+                    ) && token_program_accepts(
                         state.constraint,
                         &program_partition,
                         u32::from(program),
@@ -850,6 +922,42 @@ fn fill_mask_dynamic_impl(
                 for (word, programs) in buf
                     .iter_mut()
                     .zip(program_partition.token_programs.chunks(32))
+                {
+                    let mut accepted_bits = 0u32;
+                    for (bit, &program) in programs.iter().enumerate() {
+                        let accepted = program != u16::MAX
+                            && accepted_programs[program as usize];
+                        accepted_bits |= u32::from(accepted) << bit;
+                    }
+                    *word |= accepted_bits;
+                }
+                continue;
+            }
+            if initial_prune_guard.is_passed()
+                && let Some(program_partition) = vocab.initial_token_program_partition()
+                && let Some(source_partition) =
+                    program_partition.source_partition(tokenizer_state)
+            {
+                let mut accepted_programs = vec![false; source_partition.programs.len()];
+                for &program in source_partition.root_programs.iter() {
+                    check_deadline()?;
+                    token_program_groups_evaluated += 1;
+                    if source_token_program_accepts(
+                        state.constraint,
+                        &program_partition,
+                        source_partition,
+                        program,
+                        &stacks,
+                        &mut traversal_cache,
+                        &mut token_program_cache,
+                    ) {
+                        accepted_programs[program as usize] = true;
+                        token_program_groups_admitted += 1;
+                    }
+                }
+                for (word, programs) in buf
+                    .iter_mut()
+                    .zip(source_partition.token_programs.chunks(32))
                 {
                     let mut accepted_bits = 0u32;
                     for (bit, &program) in programs.iter().enumerate() {
@@ -981,7 +1089,7 @@ fn fill_mask_dynamic_impl(
     // not just for the seed that selected the partition. Once any partition has
     // filled part of the output mask, an otherwise-unfiltered seed can skip
     // leaves and complete subtrees that are already globally admitted.
-    if continuation_groups_admitted != 0 {
+    if continuation_groups_admitted != 0 || token_program_groups_admitted != 0 {
         for work in &mut traversal {
             if work.continuation_filter.is_none() {
                 work.continuation_filter = Some(ContinuationFilter::AlreadyMarked);

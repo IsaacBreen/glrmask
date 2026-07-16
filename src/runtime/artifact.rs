@@ -355,7 +355,16 @@ pub(crate) struct DynamicTokenProgramPartition {
     pub(crate) programs: Box<[DynamicTokenProgram]>,
     pub(crate) root_programs: Box<[u16]>,
     pub(crate) token_programs: Box<[u16]>,
+    pub(crate) source_partitions: Box<[DynamicSourceTokenProgramPartition]>,
     pub(crate) token_count: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct DynamicSourceTokenProgramPartition {
+    pub(crate) source_state: u32,
+    pub(crate) programs: Box<[DynamicTokenProgram]>,
+    pub(crate) root_programs: Box<[u16]>,
+    pub(crate) token_programs: Box<[u16]>,
 }
 
 const CONTINUATION_NFA_CONFIG_UNKNOWN: u32 = u32::MAX;
@@ -628,6 +637,73 @@ impl<'tok> InitialTokenProgramBuilder<'tok> {
     fn program_for_suffix(&self, suffix: u32) -> u32 {
         self.program_by_suffix[suffix as usize]
     }
+
+    fn source_program_for_suffix(
+        &self,
+        scan_cache: &mut ContinuationNfaScanCache<'_>,
+        source_config: u32,
+        suffix_id: u32,
+        suffix_bytes: &mut Vec<(u8, u32)>,
+    ) -> DynamicTokenProgram {
+        suffix_bytes.clear();
+        let mut cursor = suffix_id;
+        while cursor != 0 {
+            let node = self.suffix_nodes[cursor as usize];
+            suffix_bytes.push(node);
+            cursor = node.1;
+        }
+
+        let mut config = source_config;
+        let mut accept = suffix_id == 0
+            && scan_cache.configs[config as usize]
+                .iter()
+                .any(|&state| state == self.initial_state);
+        let mut branches = Vec::new();
+        let mut alive = true;
+        for &(byte, rest) in suffix_bytes.iter() {
+            let Some(next_config) = scan_cache.step_config(config, byte) else {
+                alive = false;
+                break;
+            };
+            config = next_config;
+            let program = self.program_by_suffix[rest as usize];
+            debug_assert_ne!(program, u32::MAX);
+            for &state in scan_cache.configs[config as usize].iter() {
+                branches.extend(
+                    self.tokenizer
+                        .matched_terminals_iter(state)
+                        .map(|terminal| (terminal, program)),
+                );
+            }
+        }
+        branches.sort_unstable();
+        branches.dedup();
+
+        let mut end_states = if alive {
+            scan_cache.configs[config as usize]
+                .iter()
+                .copied()
+                .filter(|&state| {
+                    if state == self.initial_state {
+                        accept = true;
+                        false
+                    } else {
+                        !self.tokenizer.is_end(state)
+                    }
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        end_states.sort_unstable();
+        end_states.dedup();
+
+        DynamicTokenProgram {
+            accept,
+            end_states: end_states.into_boxed_slice(),
+            branches: branches.into_boxed_slice(),
+        }
+    }
 }
 
 impl DynamicContinuationPartition {
@@ -648,6 +724,19 @@ impl DynamicContinuationPartition {
     #[inline]
     pub(crate) fn subtree_groups(&self, node: u32) -> u128 {
         self.subtree_groups[node as usize]
+    }
+}
+
+impl DynamicTokenProgramPartition {
+    #[inline]
+    pub(crate) fn source_partition(
+        &self,
+        source_state: u32,
+    ) -> Option<&DynamicSourceTokenProgramPartition> {
+        self.source_partitions
+            .binary_search_by_key(&source_state, |partition| partition.source_state)
+            .ok()
+            .map(|index| &self.source_partitions[index])
     }
 }
 
@@ -1110,7 +1199,7 @@ impl DynamicMaskVocab {
         let mut token_programs = vec![u16::MAX; max_token_id.saturating_add(1)];
         let mut root_programs = FxHashSet::<u16>::default();
         let mut token_count = 0usize;
-        for ((canonical_token_id, _), suffix) in entries.iter().zip(suffix_roots) {
+        for ((canonical_token_id, _), &suffix) in entries.iter().zip(&suffix_roots) {
             let program = builder.program_for_suffix(suffix);
             let program = u16::try_from(program)
                 .expect("dynamic root token-program count exceeded u16");
@@ -1126,6 +1215,95 @@ impl DynamicMaskVocab {
         root_programs.sort_unstable();
         let mapping_ms = mapping_started.elapsed().as_secs_f64() * 1000.0;
 
+        let source_started = std::time::Instant::now();
+        let initial_state = tokenizer.initial_state();
+        let mut rank_cache = ContinuationNfaScanCache::new(tokenizer);
+        let mut ranked_source_states = (0..tokenizer.num_states())
+            .filter(|&state| state != initial_state && !tokenizer.is_end(state))
+            .map(|state| {
+                let config = rank_cache.config_for_raw_start(state);
+                let closure = &rank_cache.configs[config as usize];
+                let mut transitions = 0usize;
+                let mut non_self_transitions = 0usize;
+                let mut matched = std::collections::BTreeSet::<TerminalID>::new();
+                for &member in closure.iter() {
+                    matched.extend(tokenizer.matched_terminals_iter(member));
+                    for (_, target) in tokenizer.transitions_from(member) {
+                        transitions += 1;
+                        non_self_transitions += usize::from(target != member);
+                    }
+                }
+                (state, non_self_transitions, transitions, closure.len(), matched.len())
+            })
+            .filter(|&(_, non_self, transitions, _, matched)| {
+                non_self != 0 || transitions >= 64 || matched != 0
+            })
+            .collect::<Vec<_>>();
+        ranked_source_states.sort_unstable_by_key(
+            |&(state, non_self, transitions, closure, matched)| {
+                (
+                    std::cmp::Reverse(non_self),
+                    std::cmp::Reverse(transitions),
+                    std::cmp::Reverse(closure),
+                    std::cmp::Reverse(matched),
+                    state,
+                )
+            },
+        );
+        let mut source_states = ranked_source_states
+            .iter()
+            .take(2)
+            .map(|&(state, _, _, _, _)| state)
+            .collect::<Vec<_>>();
+        source_states.sort_unstable();
+        let source_partitions = source_states
+            .par_iter()
+            .map(|&source_state| {
+                let mut scan_cache = ContinuationNfaScanCache::new(tokenizer);
+                let source_config = scan_cache.config_for_raw_start(source_state);
+                let mut suffix_bytes = Vec::<(u8, u32)>::new();
+                let mut interned = FxHashMap::<DynamicTokenProgram, u16>::default();
+                let mut programs = Vec::<DynamicTokenProgram>::new();
+                let mut source_token_programs = vec![u16::MAX; token_programs.len()];
+                let mut source_root_programs = FxHashSet::<u16>::default();
+
+                for ((canonical_token_id, _), &suffix) in entries.iter().zip(&suffix_roots) {
+                    let program = builder.source_program_for_suffix(
+                        &mut scan_cache,
+                        source_config,
+                        suffix,
+                        &mut suffix_bytes,
+                    );
+                    let program_id = if let Some(&program_id) = interned.get(&program) {
+                        program_id
+                    } else {
+                        let program_id = u16::try_from(programs.len())
+                            .expect("dynamic source root token-program count exceeded u16");
+                        programs.push(program.clone());
+                        interned.insert(program, program_id);
+                        program_id
+                    };
+                    source_root_programs.insert(program_id);
+                    if let Some(token_ids) = self.token_ids(*canonical_token_id) {
+                        for &token_id in token_ids {
+                            source_token_programs[token_id as usize] = program_id;
+                        }
+                    }
+                }
+
+                let mut source_root_programs =
+                    source_root_programs.into_iter().collect::<Vec<_>>();
+                source_root_programs.sort_unstable();
+                DynamicSourceTokenProgramPartition {
+                    source_state,
+                    programs: programs.into_boxed_slice(),
+                    root_programs: source_root_programs.into_boxed_slice(),
+                    token_programs: source_token_programs.into_boxed_slice(),
+                }
+            })
+            .collect::<Vec<_>>();
+        let source_program_ms = source_started.elapsed().as_secs_f64() * 1000.0;
+
         let suffix_count = builder.suffix_nodes.len();
         let branch_count = builder
             .programs
@@ -1136,21 +1314,30 @@ impl DynamicMaskVocab {
             programs: builder.programs.into_boxed_slice(),
             root_programs: root_programs.into_boxed_slice(),
             token_programs: token_programs.into_boxed_slice(),
+            source_partitions: source_partitions.into_boxed_slice(),
             token_count,
         };
         if std::env::var_os("GLRMASK_PROFILE_DYNAMIC_MASK").is_some()
             || std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
         {
             eprintln!(
-                "[glrmask/profile][dynamic_token_program_partition] programs={} roots={} suffixes={} branches={} tokens={} register_ms={:.3} programs_ms={:.3} mapping_ms={:.3} build_ms={:.3}",
+                "[glrmask/profile][dynamic_token_program_partition] programs={} roots={} suffixes={} branches={} tokens={} top_closed_sources={:?} sources={:?} source_roots={} register_ms={:.3} programs_ms={:.3} mapping_ms={:.3} source_ms={:.3} build_ms={:.3}",
                 partition.programs.len(),
                 partition.root_programs.len(),
                 suffix_count,
                 branch_count,
                 partition.token_count,
+                ranked_source_states.iter().take(16).copied().collect::<Vec<_>>(),
+                source_states,
+                partition
+                    .source_partitions
+                    .iter()
+                    .map(|source| source.root_programs.len())
+                    .sum::<usize>(),
                 register_ms,
                 programs_ms,
                 mapping_ms,
+                source_program_ms,
                 started.elapsed().as_secs_f64() * 1000.0,
             );
         }
