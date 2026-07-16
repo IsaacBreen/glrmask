@@ -1275,12 +1275,24 @@ impl DynamicMaskVocab {
                 )
             },
         );
+        // Cover both broad consuming residuals and epsilon-only residuals.
+        // The latter can have no raw transitions of their own while their
+        // epsilon closure still fans out across the full lexer. Selecting only
+        // by the raw-state tie breakers misses exactly those expensive seeds.
         let mut source_states = ranked_source_states
             .iter()
+            .filter(|&&(_, _, transitions, _, _)| transitions != 0)
             .take(2)
             .map(|&(state, _, _, _, _)| state)
             .collect::<Vec<_>>();
+        if let Some(&(state, _, _, _, _)) = ranked_source_states
+            .iter()
+            .find(|&&(_, _, transitions, _, _)| transitions == 0)
+        {
+            source_states.push(state);
+        }
         source_states.sort_unstable();
+        source_states.dedup();
         let source_partitions = source_states
             .par_iter()
             .map(|&source_state| {

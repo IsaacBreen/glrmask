@@ -938,10 +938,36 @@ fn fill_mask_dynamic_impl(
                 && let Some(source_partition) =
                     program_partition.source_partition(tokenizer_state)
             {
+                // Earlier seeds usually admit almost the entire vocabulary.
+                // Determine which source programs still own at least one unset
+                // token before performing any parser queries. This keeps later
+                // residual seeds proportional to the remaining mask holes,
+                // rather than to all source-program equivalence classes.
+                let mut needed_programs = vec![false; source_partition.programs.len()];
+                for (&word, programs) in buf
+                    .iter()
+                    .zip(source_partition.token_programs.chunks(32))
+                {
+                    let mut missing = !word;
+                    while missing != 0 {
+                        let bit = missing.trailing_zeros() as usize;
+                        if let Some(&program) = programs.get(bit)
+                            && program != u16::MAX
+                        {
+                            needed_programs[program as usize] = true;
+                        }
+                        missing &= missing - 1;
+                    }
+                }
+
                 let mut accepted_programs = vec![false; source_partition.programs.len()];
-                for &program in source_partition.root_programs.iter() {
+                for (program, needed) in needed_programs.into_iter().enumerate() {
+                    if !needed {
+                        continue;
+                    }
                     check_deadline()?;
                     token_program_groups_evaluated += 1;
+                    let program = program as u16;
                     if source_token_program_accepts(
                         state.constraint,
                         &program_partition,
