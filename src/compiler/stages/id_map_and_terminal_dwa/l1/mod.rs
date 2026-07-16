@@ -844,6 +844,9 @@ pub(crate) fn l1_generic_nfa_token_bounded_view_enabled(
     state_count: usize,
     vocab_count: usize,
 ) -> bool {
+    if std::env::var_os("GLRMASK_EXPERIMENTAL_FORCE_L1_TOKEN_BOUNDED_VIEW").is_some() {
+        return true;
+    }
     // The token-bounded topology is exact and dramatically cheaper than
     // arbitrary relevant-byte closure when the real token language barely
     // creates any virtual epsilon-closure configurations. Its construction can

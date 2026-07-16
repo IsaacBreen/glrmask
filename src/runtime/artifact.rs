@@ -7,6 +7,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::automata::lexer::{Lexer, tokenizer::Tokenizer};
 use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
 use crate::automata::weighted::dwa::DWA;
+use crate::automata::weighted::terminal_automaton::TerminalAutomaton;
 use crate::compiler::glr::table::GLRTable;
 use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::ds::u8set::U8Set;
@@ -998,6 +999,13 @@ pub(crate) struct CommitTemplateDfas {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Constraint {
     pub(crate) parser_dwa: DWA,
+    /// Experimental exact runtime interpretation of the precompiled L2P
+    /// terminal DWA. When present, the ordinary parser DWA contains only the
+    /// remaining families; mask generation interprets this small terminal DWA
+    /// directly against the current parser GSS without traversing vocabulary
+    /// bytes dynamically.
+    #[serde(skip, default)]
+    pub(crate) interpreted_l2p_terminal_dwa: Option<TerminalAutomaton>,
     /// Exact depth-one parser acceptance kept separate from the deeper parser
     /// DWA. Keys are encoded parser-state labels; values are already the
     /// transition/final-weight intersection for accepting after that one

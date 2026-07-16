@@ -152,6 +152,7 @@ impl RuntimePayloadV1 {
     ) -> Constraint {
         Constraint {
             parser_dwa: self.parser_dwa,
+            interpreted_l2p_terminal_dwa: None,
             parser_top_accept,
             table: self.table,
             terminal_display_names: self.terminal_display_names,

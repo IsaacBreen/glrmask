@@ -3,6 +3,7 @@ pub(crate) mod queue;
 
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::compiler::glr::labels::{encode_positive_label, DEFAULT_LABEL};
+use crate::compiler::glr::parser::{advance_stacks, ParserGSS};
 use crate::ds::leveled_gss::{LeveledGSS, Merge};
 use crate::ds::weight::Weight;
 use crate::runtime::constraint::DenseToBufProfileStats;
@@ -1037,6 +1038,14 @@ impl<'a> ConstraintState<'a> {
             return DenseMaskAcc::from_dense_arc(internal_tsid, Arc::clone(base));
         }
 
+        if std::env::var_os("GLRMASK_EXPERIMENTAL_PANIC_ON_PM_SEED_USE").is_some() {
+            panic!(
+                "possible-matches seed pruning used: tokenizer_state={} blocked_terminals={}",
+                original_tokenizer_state,
+                disallowed_in_state.len(),
+            );
+        }
+
         // TerminalsDisallowed remains keyed by ORIGINAL tokenizer state because
         // it describes tokenizer futures accumulated by the GLR parser.
         //
@@ -1378,6 +1387,168 @@ impl<'a> ConstraintState<'a> {
         if let Some(cache_data) = cache.as_mut() {
             cache_data.generation = self.generation;
         }
+    }
+
+    fn fill_interpreted_l2p_terminal_dwa(&self, buf: &mut [u32]) {
+        use crate::automata::weighted::terminal_automaton::TerminalAutomaton;
+
+        let Some(terminal_automaton) = self.constraint.interpreted_l2p_terminal_dwa.as_ref() else {
+            return;
+        };
+        let acyclic = match terminal_automaton {
+            TerminalAutomaton::Dwa(dwa) => dwa.is_acyclic(),
+            TerminalAutomaton::TokenDeterministicNwa(nwa) => nwa.is_acyclic(),
+        };
+        debug_assert!(acyclic, "interpreted L2P terminal automaton must be acyclic");
+        if !acyclic || self.constraint.internal_token_dense_words == 0 {
+            return;
+        }
+
+        #[derive(Clone)]
+        struct Work {
+            terminal_state: u32,
+            parser_gss: ParserGSS,
+            acc: DenseMaskAcc,
+        }
+
+        let precomputed = &self.constraint.weight_token_dense_masks;
+        let mut merged = vec![0u64; self.constraint.internal_token_dense_words];
+
+        let mut seed_accs = Vec::<(ParserGSS, DenseMaskAcc)>::new();
+        for (&original_tokenizer_state, gss) in &self.state {
+            let internal_tsid = self
+                .constraint
+                .internal_tsid_for_state(original_tokenizer_state);
+            for (stack, terminals_disallowed) in gss.to_stacks() {
+                let actionable_states = stack
+                    .last()
+                    .copied()
+                    .into_iter()
+                    .collect::<SmallVec<[u32; 1]>>();
+                let Some(acc) = self.terminals_disallowed_to_dense_acc(
+                    &terminals_disallowed,
+                    original_tokenizer_state,
+                    internal_tsid,
+                    actionable_states.as_slice(),
+                ) else {
+                    continue;
+                };
+                seed_accs.push((
+                    ParserGSS::from_single_stack(stack, TerminalsDisallowed::new()),
+                    acc,
+                ));
+            }
+        }
+
+        let advance_terminal = |parser_gss: &ParserGSS, terminal: u32| {
+            if self.constraint.ignore_terminal == Some(terminal) {
+                parser_gss.clone()
+            } else {
+                advance_stacks(&self.constraint.table, parser_gss, terminal)
+            }
+        };
+
+        match terminal_automaton {
+            TerminalAutomaton::Dwa(dwa) => {
+                let mut work = Vec::<Work>::new();
+                for (parser_gss, acc) in seed_accs {
+                    work.push(Work {
+                        terminal_state: dwa.start_state(),
+                        parser_gss,
+                        acc,
+                    });
+                }
+                while let Some(current) = work.pop() {
+                    let Some(state) = dwa.states().get(current.terminal_state as usize) else {
+                        continue;
+                    };
+                    if let Some(final_weight) = state.final_weight.as_ref() {
+                        current
+                            .acc
+                            .or_intersection_into_merged(final_weight, precomputed, &mut merged);
+                    }
+                    for (&label, &(target, ref edge_weight)) in &state.transitions {
+                        if label < 0 || edge_weight.is_empty() {
+                            continue;
+                        }
+                        let Some(next_acc) =
+                            current.acc.intersect_with_weight(edge_weight, precomputed)
+                        else {
+                            continue;
+                        };
+                        let next_parser_gss = advance_terminal(&current.parser_gss, label as u32);
+                        if !next_parser_gss.is_empty() {
+                            work.push(Work {
+                                terminal_state: target,
+                                parser_gss: next_parser_gss,
+                                acc: next_acc,
+                            });
+                        }
+                    }
+                }
+            }
+            TerminalAutomaton::TokenDeterministicNwa(nwa) => {
+                let mut work = Vec::<Work>::new();
+                for (parser_gss, acc) in seed_accs {
+                    for &start_state in nwa.start_states() {
+                        work.push(Work {
+                            terminal_state: start_state,
+                            parser_gss: parser_gss.clone(),
+                            acc: acc.clone(),
+                        });
+                    }
+                }
+                while let Some(current) = work.pop() {
+                    let Some(state) = nwa.states().get(current.terminal_state as usize) else {
+                        continue;
+                    };
+                    if let Some(final_weight) = state.final_weight.as_ref() {
+                        current
+                            .acc
+                            .or_intersection_into_merged(final_weight, precomputed, &mut merged);
+                    }
+                    for &(target, ref edge_weight) in &state.epsilons {
+                        let Some(next_acc) =
+                            current.acc.intersect_with_weight(edge_weight, precomputed)
+                        else {
+                            continue;
+                        };
+                        work.push(Work {
+                            terminal_state: target,
+                            parser_gss: current.parser_gss.clone(),
+                            acc: next_acc,
+                        });
+                    }
+                    for (&label, branches) in &state.transitions {
+                        if label < 0 {
+                            continue;
+                        }
+                        let next_parser_gss = advance_terminal(&current.parser_gss, label as u32);
+                        if next_parser_gss.is_empty() {
+                            continue;
+                        }
+                        for &(target, ref edge_weight) in branches {
+                            if edge_weight.is_empty() {
+                                continue;
+                            }
+                            let Some(next_acc) =
+                                current.acc.intersect_with_weight(edge_weight, precomputed)
+                            else {
+                                continue;
+                            };
+                            work.push(Work {
+                                terminal_state: target,
+                                parser_gss: next_parser_gss.clone(),
+                                acc: next_acc,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        self.constraint
+            .or_internal_dense_to_buf_fast(&merged, buf, false);
     }
 
     fn fill_mask_uncached(&self, buf: &mut [u32]) {
@@ -1937,7 +2108,10 @@ impl<'a> ConstraintState<'a> {
     }
 
     pub fn fill_mask(&self, buf: &mut [u32]) {
-        if !self.try_fill_mask_from_cache(buf) {
+        if self.constraint.interpreted_l2p_terminal_dwa.is_some() {
+            self.fill_mask_uncached(buf);
+            self.fill_interpreted_l2p_terminal_dwa(buf);
+        } else if !self.try_fill_mask_from_cache(buf) {
             self.fill_mask_uncached(buf);
         }
         assert_dynamic_mask_equivalence(self, buf);
@@ -1951,6 +2125,14 @@ impl<'a> ConstraintState<'a> {
 
     pub(crate) fn fill_mask_profiled(&self, buf: &mut [u32]) -> MaskProfile {
         let total_start = Instant::now();
+        if self.constraint.interpreted_l2p_terminal_dwa.is_some() {
+            self.fill_mask_uncached(buf);
+            self.fill_interpreted_l2p_terminal_dwa(buf);
+            return MaskProfile {
+                total_ns: elapsed_ns(total_start),
+                ..MaskProfile::default()
+            };
+        }
         if self.try_fill_mask_from_cache(buf) {
             return MaskProfile {
                 total_ns: elapsed_ns(total_start),

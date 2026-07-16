@@ -1,5 +1,5 @@
 use crate::automata::lexer::Lexer;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -164,6 +164,154 @@ fn dwa_possible_matches_mode() -> DwaPossibleMatchesMode {
             DwaPossibleMatchesMode::ParserReconcile
         }
     }
+}
+
+fn interpret_l2p_terminal_dwa_enabled() -> bool {
+    std::env::var_os("GLRMASK_EXPERIMENTAL_INTERPRET_L2P_TERMINAL_DWA").is_some()
+}
+
+fn derive_possible_matches_from_terminal_automaton(
+    automaton: &TerminalAutomaton,
+) -> BTreeMap<u32, Weight> {
+    fn merge_weight(slot: &mut Weight, incoming: &Weight) -> bool {
+        if incoming.is_empty() {
+            return false;
+        }
+        let merged = slot.union(incoming);
+        if merged == *slot {
+            false
+        } else {
+            *slot = merged;
+            true
+        }
+    }
+
+    let (state_count, start_states) = match automaton {
+        TerminalAutomaton::Dwa(dwa) => (dwa.states().len(), vec![dwa.start_state()]),
+        TerminalAutomaton::TokenDeterministicNwa(nwa) => {
+            (nwa.states().len(), nwa.start_states().to_vec())
+        }
+    };
+    let mut domains = vec![Weight::empty(); state_count];
+    let mut queue = VecDeque::new();
+    let mut queued = vec![false; state_count];
+    for start in start_states {
+        let start = start as usize;
+        if start >= state_count {
+            continue;
+        }
+        domains[start] = Weight::all();
+        if !queued[start] {
+            queued[start] = true;
+            queue.push_back(start);
+        }
+    }
+
+    let mut by_terminal = BTreeMap::<u32, Weight>::new();
+    while let Some(source) = queue.pop_front() {
+        queued[source] = false;
+        let source_domain = domains[source].clone();
+        if source_domain.is_empty() {
+            continue;
+        }
+
+        let mut propagate = |label: Option<i32>, target: u32, edge_weight: &Weight| {
+            let target = target as usize;
+            if target >= state_count || edge_weight.is_empty() {
+                return;
+            }
+            let traversed = source_domain.intersection(edge_weight);
+            if traversed.is_empty() {
+                return;
+            }
+            if let Some(label) = label.filter(|label| *label >= 0) {
+                let slot = by_terminal.entry(label as u32).or_insert_with(Weight::empty);
+                merge_weight(slot, &traversed);
+            }
+            if merge_weight(&mut domains[target], &traversed) && !queued[target] {
+                queued[target] = true;
+                queue.push_back(target);
+            }
+        };
+
+        match automaton {
+            TerminalAutomaton::Dwa(dwa) => {
+                for (&label, &(target, ref edge_weight)) in &dwa.states()[source].transitions {
+                    propagate(Some(label), target, edge_weight);
+                }
+            }
+            TerminalAutomaton::TokenDeterministicNwa(nwa) => {
+                let state = &nwa.states()[source];
+                for &(target, ref edge_weight) in &state.epsilons {
+                    propagate(None, target, edge_weight);
+                }
+                for (&label, branches) in &state.transitions {
+                    for &(target, ref edge_weight) in branches {
+                        propagate(Some(label), target, edge_weight);
+                    }
+                }
+            }
+        }
+    }
+    by_terminal.retain(|_, weight| !weight.is_empty());
+    by_terminal
+}
+
+fn derive_possible_matches_from_terminal_families(
+    families: &TerminalDwaFamilies,
+) -> BTreeMap<u32, Weight> {
+    let mut result = BTreeMap::<u32, Weight>::new();
+    for family in [&families.l1, &families.l2p].into_iter().flatten() {
+        for (terminal, weight) in derive_possible_matches_from_terminal_automaton(family.artifact()) {
+            result
+                .entry(terminal)
+                .and_modify(|existing| *existing = existing.union(&weight))
+                .or_insert(weight);
+        }
+    }
+    result
+}
+
+fn assert_terminal_automata_possible_matches_exact(
+    families: &TerminalDwaFamilies,
+    expected: &BTreeMap<u32, Weight>,
+) {
+    let derived = derive_possible_matches_from_terminal_families(families);
+    let terminals = derived
+        .keys()
+        .chain(expected.keys())
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let mut differing = Vec::new();
+    let mut derived_has_extra = 0usize;
+    let mut expected_has_extra = 0usize;
+    let mut both_directions = 0usize;
+    for terminal in terminals {
+        let derived_weight = derived.get(&terminal).cloned().unwrap_or_else(Weight::empty);
+        let expected_weight = expected
+            .get(&terminal)
+            .cloned()
+            .unwrap_or_else(Weight::empty);
+        if derived_weight != expected_weight {
+            let derived_extra = !derived_weight.difference(&expected_weight).is_empty();
+            let expected_extra = !expected_weight.difference(&derived_weight).is_empty();
+            derived_has_extra += usize::from(derived_extra);
+            expected_has_extra += usize::from(expected_extra);
+            both_directions += usize::from(derived_extra && expected_extra);
+            differing.push(terminal);
+        }
+    }
+    eprintln!(
+        "[glrmask/experimental][terminal_automata_possible_matches] derived_terminals={} expected_terminals={} differing_terminals={} derived_has_extra={} expected_has_extra={} both_directions={} first_differing={:?}",
+        derived.len(),
+        expected.len(),
+        differing.len(),
+        derived_has_extra,
+        expected_has_extra,
+        both_directions,
+        differing.iter().take(32).collect::<Vec<_>>(),
+    );
+    assert!(differing.is_empty(), "terminal-automata-derived possible matches differ");
 }
 
 pub(crate) fn compile_profile_summary_enabled() -> bool {
@@ -1459,7 +1607,12 @@ fn compile_prepared_with_profile_and_table_construction(
         let mut profile = CompilePhaseProfile::default();
 
         let analysis_started_at = Instant::now();
-        let dwa_pm_mode = dwa_possible_matches_mode();
+        let interpret_l2p_terminal_dwa = interpret_l2p_terminal_dwa_enabled();
+        let dwa_pm_mode = if interpret_l2p_terminal_dwa {
+            DwaPossibleMatchesMode::TerminalReconcile
+        } else {
+            dwa_possible_matches_mode()
+        };
         let use_terminal_coloring = terminal_coloring_enabled();
         let terminal_state = Mutex::new(TerminalDagJoinState::default());
         let parser_state = Mutex::new(ParserDagJoinState::default());
@@ -1818,6 +1971,7 @@ fn compile_prepared_with_profile_and_table_construction(
                 possible_matches.artifact(),
             );
 
+        let mut interpreted_l2p_terminal_dwa: Option<MappedArtifact<TerminalAutomaton>> = None;
         let (mut parser_dwa, parser_dwa_ms) = if let Some((
             parser_dwa,
             parser_dwa_ms,
@@ -1903,6 +2057,30 @@ fn compile_prepared_with_profile_and_table_construction(
                 );
                 possible_matches =
                     MappedArtifact::new(possible_matches_artifact, reconciled_ids);
+
+                if env_flag_enabled("GLRMASK_EXPERIMENTAL_ASSERT_PM_FROM_TERMINAL_AUTOMATA") {
+                    assert_terminal_automata_possible_matches_exact(
+                        &terminal_dwas,
+                        possible_matches.artifact(),
+                    );
+                }
+
+                if interpret_l2p_terminal_dwa {
+                    if let Some(mapped_l2p) = terminal_dwas.l2p.take() {
+                        let (automaton, id_map) = mapped_l2p.into_parts();
+                        let acyclic = match &automaton {
+                            TerminalAutomaton::Dwa(dwa) => dwa.is_acyclic(),
+                            TerminalAutomaton::TokenDeterministicNwa(nwa) => nwa.is_acyclic(),
+                        };
+                        if acyclic {
+                            interpreted_l2p_terminal_dwa =
+                                Some(MappedArtifact::new(automaton, id_map));
+                        } else {
+                            terminal_dwas.l2p = Some(MappedArtifact::new(automaton, id_map));
+                        }
+                    }
+                }
+
                 build_and_merge_parser_dwa_families(
                     &terminal_dwas,
                     &table,
@@ -1950,20 +2128,47 @@ fn compile_prepared_with_profile_and_table_construction(
         // Parser-family union may choose a different but equivalent internal ID
         // numbering from the reconciled terminal families.  Always make the
         // parser/possible-match relationship explicit instead of relying on
-        // coincidentally identical numbering.
+        // coincidentally identical numbering. The experimental interpreted L2P
+        // automaton participates in the same reconciliation so its weights use
+        // exactly the final runtime TSID/token space.
         let shared_id_reconcile_started_at = Instant::now();
-        let mut parser_pm_pair = MappedArtifact::from((parser_dwa, possible_matches));
-        shared_id_reconcile_ms += elapsed_ms(shared_id_reconcile_started_at);
-        if dwa_pm_mode.does_parser_compact() {
-            let compact_started_at = Instant::now();
-            parser_pm_pair.compact_dimensions();
-            profile.compact_ms += elapsed_ms(compact_started_at);
-        }
-        let ((parser_dwa_artifact, possible_matches_artifact), internal_ids) =
-            parser_pm_pair.into_parts();
-        parser_dwa = MappedArtifact::new(parser_dwa_artifact, internal_ids.clone());
-        possible_matches =
-            MappedArtifact::new(possible_matches_artifact, internal_ids.clone());
+        let (new_parser_dwa, new_possible_matches, interpreted_l2p_terminal_dwa, internal_ids) =
+            if let Some(interpreted_l2p) = interpreted_l2p_terminal_dwa {
+                let parser_l2p_pair = MappedArtifact::from((parser_dwa, interpreted_l2p));
+                let mut all = MappedArtifact::from((parser_l2p_pair, possible_matches));
+                shared_id_reconcile_ms += elapsed_ms(shared_id_reconcile_started_at);
+                if dwa_pm_mode.does_parser_compact() {
+                    let compact_started_at = Instant::now();
+                    all.compact_dimensions();
+                    profile.compact_ms += elapsed_ms(compact_started_at);
+                }
+                let (((parser_artifact, l2p_artifact), possible_matches_artifact), internal_ids) =
+                    all.into_parts();
+                (
+                    MappedArtifact::new(parser_artifact, internal_ids.clone()),
+                    MappedArtifact::new(possible_matches_artifact, internal_ids.clone()),
+                    Some(l2p_artifact),
+                    internal_ids,
+                )
+            } else {
+                let mut parser_pm_pair = MappedArtifact::from((parser_dwa, possible_matches));
+                shared_id_reconcile_ms += elapsed_ms(shared_id_reconcile_started_at);
+                if dwa_pm_mode.does_parser_compact() {
+                    let compact_started_at = Instant::now();
+                    parser_pm_pair.compact_dimensions();
+                    profile.compact_ms += elapsed_ms(compact_started_at);
+                }
+                let ((parser_dwa_artifact, possible_matches_artifact), internal_ids) =
+                    parser_pm_pair.into_parts();
+                (
+                    MappedArtifact::new(parser_dwa_artifact, internal_ids.clone()),
+                    MappedArtifact::new(possible_matches_artifact, internal_ids.clone()),
+                    None,
+                    internal_ids,
+                )
+            };
+        parser_dwa = new_parser_dwa;
+        possible_matches = new_possible_matches;
 
         let parser_dwa_interned_ranges =
             count_interned_ranges_for_weights(parser_dwa.artifact().weight_refs()).total_ranges();
@@ -2011,6 +2216,7 @@ fn compile_prepared_with_profile_and_table_construction(
         let special_token_terminals = collect_special_token_terminals(&prepared_grammar);
         let constraint = finalize_constraint(Constraint {
             parser_dwa,
+            interpreted_l2p_terminal_dwa,
             parser_top_accept,
             table,
             terminal_display_names: analyzed_grammar.terminal_display_names.clone(),

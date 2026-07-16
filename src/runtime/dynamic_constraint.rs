@@ -84,6 +84,7 @@ impl DynamicConstraint {
             .unwrap_or(0);
         let mut inner = Constraint {
             parser_dwa: DWA::new(payload.tokenizer.num_states(), max_token_id),
+            interpreted_l2p_terminal_dwa: None,
             parser_top_accept: BTreeMap::new(),
             table: payload.table,
             terminal_display_names: payload.terminal_display_names,

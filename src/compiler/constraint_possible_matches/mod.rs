@@ -2219,6 +2219,27 @@ fn compute_constraint_possible_matches_with_artifacts(
     let ordered_vocab = artifacts.ordered_vocab;
     let trie = artifacts.trie;
 
+    if std::env::var_os("GLRMASK_EXPERIMENTAL_SKIP_GLOBAL_POSSIBLE_MATCHES").is_some() {
+        let possible_matches_id_map = InternalIdMap {
+            tokenizer_states: ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+                vec![u32::MAX; tokenizer.num_states() as usize],
+                0,
+            ),
+            vocab_tokens: ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+                vec![u32::MAX; original_token_count],
+                0,
+            ),
+        };
+        return ConstraintPossibleMatchesComputation {
+            mapped_possible_matches: MappedArtifact::new(
+                RuntimePossibleMatchesByTerminal::new(),
+                possible_matches_id_map,
+            ),
+            runtime_dynamic_vocab,
+            profile: ConstraintPossibleMatchesProfile::default(),
+        };
+    }
+
     let structured_dispatch = tokenizer.has_deterministic_dispatch();
     let dispatch_start = structured_dispatch.then(|| tokenizer.start_state());
     let trie_build_states: Vec<u32> = (0..tokenizer.num_states())
