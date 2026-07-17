@@ -1102,19 +1102,25 @@ fn fill_mask_dynamic_impl(
                 // residual seeds proportional to the remaining mask holes,
                 // rather than to all source-program equivalence classes.
                 let mut needed_programs = vec![false; source_partition.programs.len()];
-                for (&word, programs) in buf
-                    .iter()
-                    .zip(source_partition.token_programs.chunks(32))
-                {
-                    let mut missing = !word;
-                    while missing != 0 {
-                        let bit = missing.trailing_zeros() as usize;
-                        if let Some(&program) = programs.get(bit)
-                            && program != u16::MAX
-                        {
-                            needed_programs[program as usize] = true;
+                if source_partition.source_states.len() > 1 {
+                    for &program in source_partition.root_programs.iter() {
+                        needed_programs[program as usize] = true;
+                    }
+                } else {
+                    for (&word, programs) in buf
+                        .iter()
+                        .zip(source_partition.token_programs.chunks(32))
+                    {
+                        let mut missing = !word;
+                        while missing != 0 {
+                            let bit = missing.trailing_zeros() as usize;
+                            if let Some(&program) = programs.get(bit)
+                                && program != u16::MAX
+                            {
+                                needed_programs[program as usize] = true;
+                            }
+                            missing &= missing - 1;
                         }
-                        missing &= missing - 1;
                     }
                 }
 
