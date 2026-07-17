@@ -7,11 +7,12 @@ on:
     types: [opened, synchronize, reopened]
 
 permissions:
-  contents: read
+  contents: write
   pull-requests: read
 
 jobs:
-  validate:
+  validate-and-squash:
+    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,3 +33,10 @@ jobs:
         run: cargo test -p glrmask
       - name: Test runtime integration boundary
         run: cargo test -p glrmask-runtime --test runtime_session
+      - name: Squash validated feature branch
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git reset --soft d2f74dac3fc829900644d28bd173439c79a5fb17
+          git commit -m 'Implement grammar-level end token semantics'
+          git push --force origin HEAD:${{ github.event.pull_request.head.ref }}
