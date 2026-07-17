@@ -146,24 +146,24 @@ impl<'a> ConstraintState<'a> {
         }).collect()
     }
 
-    pub fn force(&self) -> Vec<u32> {
-        self.force_impl(false)
+    pub fn forced(&self) -> Vec<u32> {
+        self.forced_impl(false)
     }
 
-    pub(crate) fn force_dynamic(&self) -> Vec<u32> {
-        self.force_impl(true)
+    pub(crate) fn forced_dynamic(&self) -> Vec<u32> {
+        self.forced_impl(true)
     }
 
-    fn force_impl(&self, dynamic: bool) -> Vec<u32> {
+    fn forced_impl(&self, dynamic: bool) -> Vec<u32> {
         if self.is_complete() {
             return Vec::new();
         }
 
-        self.force_by_bytes(dynamic)
-            .unwrap_or_else(|| self.single_token_force(dynamic))
+        self.forced_by_bytes(dynamic)
+            .unwrap_or_else(|| self.single_token_forced(dynamic))
     }
 
-    fn mask_for_force(&self, dynamic: bool) -> Vec<u32> {
+    fn mask_for_forced(&self, dynamic: bool) -> Vec<u32> {
         if dynamic {
             let mut mask = vec![0u32; self.constraint.mask_len()];
             self.fill_mask_dynamic(&mut mask);
@@ -173,18 +173,18 @@ impl<'a> ConstraintState<'a> {
         }
     }
 
-    fn force_by_bytes(&self, dynamic: bool) -> Option<Vec<u32>> {
+    fn forced_by_bytes(&self, dynamic: bool) -> Option<Vec<u32>> {
         let forced_bytes = self.compute_forced_byte_prefix(dynamic);
         let tokens = self.tokenize_forced_with_stop(&forced_bytes);
         (!tokens.is_empty()).then_some(tokens)
     }
 
-    fn single_token_force(&self, dynamic: bool) -> Vec<u32> {
+    fn single_token_forced(&self, dynamic: bool) -> Vec<u32> {
         let mut forced = Vec::new();
         let mut cursor = self.clone();
 
         loop {
-            let mask = cursor.mask_for_force(dynamic);
+            let mask = cursor.mask_for_forced(dynamic);
             let Some(token) = single_allowed_token(&mask) else {
                 break;
             };
@@ -217,7 +217,7 @@ impl<'a> ConstraintState<'a> {
                 break;
             }
 
-            let mask = cursor.mask_for_force(dynamic);
+            let mask = cursor.mask_for_forced(dynamic);
             if let Some(eos_id) = eos {
                 if is_token_set(&mask, eos_id) {
                     break;

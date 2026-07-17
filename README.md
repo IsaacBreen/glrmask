@@ -136,7 +136,7 @@ print(llm.detokenize(generated).decode())
 
 ### With forced tokens
 
-`force()` returns a deterministic continuation without advancing the constraint. Each returned token is committed to both the model and the constraint.
+`forced()` returns a deterministic continuation without advancing the constraint. Each returned token is committed to both the model and the constraint.
 
 ```python
 llm.reset()
@@ -159,7 +159,7 @@ while token != llm.token_eos() and len(generated) < MAX_OUTPUT_TOKENS:
     if token == llm.token_eos():
         break
 
-    for token in state.force():
+    for token in state.forced():
         llm.eval([token])
         state.commit_token(token)
         generated.append(token)
