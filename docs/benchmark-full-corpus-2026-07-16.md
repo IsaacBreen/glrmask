@@ -183,10 +183,10 @@ The raw run remains unchanged. On the machine holding the run directory, regener
 
 ```bash
 cd constraint-framework-analysis
-python -m scripts.aggregate_full_corpus_run 'TEMP/run 16-jul-26'
+python -m scripts.aggregate_full_corpus_run 'results/run 16-jul-26'
 ```
 
-Derived artifacts are under `TEMP/run 16-jul-26/derived/`:
+Derived artifacts are under `results/run 16-jul-26/derived/`:
 
 - `aggregate-problems.jsonl.zst`: one compact machine-readable record per problem;
 - `aggregate-summary.json`: all reported distributions, coverage, failures, outliers, and discrepancy bounds;
