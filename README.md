@@ -85,15 +85,29 @@ python -m pip install glrmask==0.1.0 llama-cpp-python torch
 ```
 
 ```python
+import ctypes
 import numpy as np
-from llama_cpp import Llama
+import llama_cpp
 from torch import from_numpy
 from torch.distributions import Categorical
 
 import glrmask
 
 
-llm = Llama(model_path="model.gguf", logits_all=True)
+llm = llama_cpp.Llama(model_path="model.gguf", logits_all=True)
+llama_vocab = llama_cpp.llama_model_get_vocab(llm.model)
+tokens = range(llm.n_vocab())
+end_token_ids = [
+    token for token in tokens
+    if llama_cpp.llama_vocab_is_eog(llama_vocab, token)
+]
+end_tokens = set(end_token_ids)
+
+def token_bytes(token):
+    size = -llama_cpp.llama_token_to_piece(llama_vocab, token, None, 0, 0, False)
+    buffer = ctypes.create_string_buffer(size)
+    length = llama_cpp.llama_token_to_piece(llama_vocab, token, buffer, size, 0, False)
+    return buffer.raw[:length]
 
 get_logits = lambda: llm.scores[llm.n_tokens - 1]
 sample = lambda logits: Categorical(logits=from_numpy(logits)).sample().item()
@@ -118,7 +132,7 @@ for _ in range(MAX_OUTPUT_TOKENS):
     llm.eval([token])
     generated.append(token)
 
-    if token == llm.token_eos():
+    if token in end_tokens:
         break
 
 print(llm.detokenize(generated).decode())
@@ -127,10 +141,22 @@ print(llm.detokenize(generated).decode())
 ### With GLRMask
 
 ```python
-vocab = glrmask.Vocab.from_llama_cpp(llm)
+vocab = glrmask.Vocab.from_id_to_bytes({
+    token: token_bytes(token)
+    for token in tokens
+    if token not in end_tokens
+    and not (
+        llama_cpp.llama_vocab_get_attr(llama_vocab, token)
+        & (llama_cpp.LLAMA_TOKEN_ATTR_CONTROL | llama_cpp.LLAMA_TOKEN_ATTR_UNUSED)
+    )
+})
 
 schema = '{"type":"string","enum":["positive","negative","neutral"]}'
-constraint = glrmask.Constraint.from_json_schema(schema, vocab)
+constraint = glrmask.Constraint.from_json_schema(
+    schema,
+    vocab,
+    end_token_ids=end_token_ids,
+)
 
 llm.reset()
 llm.eval(input_tokens)
@@ -140,7 +166,7 @@ generated = []
 
 for _ in range(MAX_OUTPUT_TOKENS):
     logits = get_logits()
-    mask = state.mask()
+    mask = state.mask(llm.n_vocab())
     logits[~mask] = -np.inf
 
     token = sample(logits)
@@ -148,7 +174,7 @@ for _ in range(MAX_OUTPUT_TOKENS):
     state.commit_token(token)
     generated.append(token)
 
-    if token == llm.token_eos():
+    if token in end_tokens:
         break
 
 print(llm.detokenize(generated).decode())
@@ -167,7 +193,7 @@ generated = []
 
 for _ in range(MAX_OUTPUT_TOKENS):
     logits = get_logits()
-    mask = state.mask()
+    mask = state.mask(llm.n_vocab())
     logits[~mask] = -np.inf
 
     token = sample(logits)
@@ -175,7 +201,7 @@ for _ in range(MAX_OUTPUT_TOKENS):
     state.commit_token(token)
     generated.append(token)
 
-    if token == llm.token_eos():
+    if token in end_tokens:
         break
 
     for token in state.forced():
@@ -183,8 +209,11 @@ for _ in range(MAX_OUTPUT_TOKENS):
         state.commit_token(token)
         generated.append(token)
 
-        if token == llm.token_eos():
+        if token in end_tokens:
             break
+
+    if state.is_finished():
+        break
 
 print(llm.detokenize(generated).decode())
 ```
@@ -220,7 +249,17 @@ Use `@token(<id>)` in EBNF, Lark, or GLRM grammars to match a model token by ID:
 start ::= "hello" @token(128009)
 ```
 
-GLRMask normally masks the vocabulary's EOS token until the constraint is complete. If EOS is referenced explicitly with `@token(...)`, the grammar controls when it is allowed.
+JSON Schema constraints can append exact end-token terminals with `end_token_ids`:
+
+```python
+constraint = glrmask.Constraint.from_json_schema(
+    schema,
+    vocab,
+    end_token_ids=[128009],
+)
+```
+
+The state becomes complete only after one of those token IDs is committed.
 
 ## Serialization
 

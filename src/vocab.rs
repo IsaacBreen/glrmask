@@ -6,7 +6,6 @@ use std::sync::{Arc, Mutex};
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Vocab {
     pub entries: Arc<BTreeMap<u32, Vec<u8>>>,
-    pub eos_token_id: Option<u32>,
     #[serde(skip)]
     compiler_cache: VocabCompilerCache,
 }
@@ -27,7 +26,14 @@ pub(crate) trait VocabDerivedArtifact: Any + Send + Sync {}
 impl fmt::Debug for VocabCompilerCache {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("VocabCompilerCache")
-            .field("entries", &self.artifacts.lock().map(|artifacts| artifacts.len()).unwrap_or(0))
+            .field(
+                "entries",
+                &self
+                    .artifacts
+                    .lock()
+                    .map(|artifacts| artifacts.len())
+                    .unwrap_or(0),
+            )
             .finish()
     }
 }
@@ -36,7 +42,6 @@ impl fmt::Debug for Vocab {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Vocab")
             .field("entries", &self.entries)
-            .field("eos_token_id", &self.eos_token_id)
             .finish()
     }
 }
@@ -45,28 +50,15 @@ impl Clone for Vocab {
     fn clone(&self) -> Self {
         Self {
             entries: Arc::clone(&self.entries),
-            eos_token_id: self.eos_token_id,
             compiler_cache: VocabCompilerCache::default(),
         }
     }
 }
 
 impl Vocab {
-    const EOS_BYTES: &[u8] = b"<|endoftext|>";
-
-    pub fn new(entries: Vec<(u32, Vec<u8>)>, eos_token_id: Option<u32>) -> Self {
-        let entries: BTreeMap<u32, Vec<u8>> = entries.into_iter().collect();
-
-        let eos_token_id = eos_token_id.or_else(|| {
-            entries
-                .iter()
-                .find(|(_, bytes)| bytes.as_slice() == Self::EOS_BYTES)
-                .map(|(token_id, _)| *token_id)
-        });
-
+    pub fn new(entries: Vec<(u32, Vec<u8>)>) -> Self {
         Self {
-            entries: Arc::new(entries),
-            eos_token_id,
+            entries: Arc::new(entries.into_iter().collect()),
             compiler_cache: VocabCompilerCache::default(),
         }
     }
@@ -80,7 +72,9 @@ impl Vocab {
     }
 
     pub fn max_token_id(&self) -> u32 {
-        self.entries.last_key_value().map_or(0, |(&token_id, _)| token_id)
+        self.entries
+            .last_key_value()
+            .map_or(0, |(&token_id, _)| token_id)
     }
 
     pub(crate) fn vocab_derived_cache_get<T: VocabDerivedArtifact>(&self) -> Option<Arc<T>> {

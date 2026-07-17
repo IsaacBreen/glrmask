@@ -68,13 +68,11 @@ fn vocab(entries: &[&str]) -> Vocab {
             .iter()
             .enumerate()
             .map(|(id, text)| (id as u32, text.as_bytes().to_vec()))
-            .collect(),
-        None,
-    )
+            .collect())
 }
 
 fn bytes_vocab() -> Vocab {
-    Vocab::new((0u8..=255).map(|b| (b as u32, vec![b])).collect(), None)
+    Vocab::new((0u8..=255).map(|b| (b as u32, vec![b])).collect())
 }
 
 fn with_stable_ti_env<T>(f: impl FnOnce() -> T) -> T {
@@ -1287,9 +1285,7 @@ fn special_token_vocab() -> Vocab {
             (2, b"SPEC".to_vec()),
             (3, b"SPECIAL".to_vec()),
             (7, b"SPECIAL".to_vec()),
-        ],
-        None,
-    )
+        ])
 }
 
 fn assert_special_token_sequence(constraint: &Constraint) {
@@ -1338,7 +1334,7 @@ fn ebnf_and_lark_accept_special_token_atoms() {
 
 #[test]
 fn byte_less_special_token_extends_mask_token_space() {
-    let vocab = Vocab::new(Vec::new(), None);
+    let vocab = Vocab::new(Vec::new());
     let constraint = with_stable_ti_env(|| {
         Constraint::from_glrm_grammar(
             r#"
@@ -1371,7 +1367,7 @@ fn grammar_def_json_supports_special_token_terminals() {
     });
     let constraint = Constraint::compile_grammar_def_json(
         &grammar.to_string(),
-        &Vocab::new(Vec::new(), None),
+        &Vocab::new(Vec::new()),
     )
     .unwrap();
     assert_eq!(allowed(&constraint.start().mask()), vec![100]);
@@ -1420,8 +1416,8 @@ fn special_token_static_dynamic_and_serialized_constraints_agree() {
 }
 
 #[test]
-fn named_special_terminal_and_explicit_special_eos_are_parser_controlled() {
-    let vocab = Vocab::new(vec![(0, b"a".to_vec())], Some(100));
+fn named_special_terminal_and_explicit_end_token_are_parser_controlled() {
+    let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
     let grammar = r#"
         start start;
         t END ::= @token(100);
@@ -1454,9 +1450,7 @@ fn special_token_commit_unions_special_and_byte_paths() {
             (0, b"x".to_vec()),
             (1, b"z".to_vec()),
             (7, b"a".to_vec()),
-        ],
-        None,
-    );
+        ]);
     let grammar = r#"
         start start;
         nt start ::= "a" @token(7) | "x" "a" "z";
@@ -1482,7 +1476,7 @@ fn special_token_commit_unions_special_and_byte_paths() {
 
 #[test]
 fn special_token_commit_profiling_entry_points_preserve_semantics() {
-    let vocab = Vocab::new(vec![(0, b"a".to_vec())], None);
+    let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
     let constraint = with_stable_ti_env(|| {
         Constraint::from_glrm_grammar(
             r#"
@@ -1521,7 +1515,7 @@ fn special_token_cannot_be_configured_as_ignore_terminal() {
             t SPECIAL ::= @token(100);
             nt start ::= "a";
         "#,
-        &Vocab::new(vec![(0, b"a".to_vec())], None),
+        &Vocab::new(vec![(0, b"a".to_vec())]),
     )
     .unwrap_err();
     assert!(error.to_string().contains("cannot be the ignore terminal"));
@@ -1535,7 +1529,7 @@ fn special_token_atoms_compose_in_parser_choices_and_repetition() {
                 start start;
                 nt start ::= (@token(100) | @token(101))+;
             "#,
-            &Vocab::new(Vec::new(), None),
+            &Vocab::new(Vec::new()),
         )
         .unwrap()
     });

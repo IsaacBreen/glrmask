@@ -169,7 +169,7 @@ impl L2pVocabBoundarySplit {
                 break;
             }
         }
-        Vocab::new(entries, None)
+        Vocab::new(entries)
     }
 
     pub(crate) fn boundary_vocab(&self, vocab: &Vocab) -> Vocab {
@@ -4379,9 +4379,7 @@ mod tests {
                 (0, b" xyz ".to_vec()),
                 (1, b"c".to_vec()),
                 (2, b"ab".to_vec()),
-            ],
-            None,
-        );
+            ]);
 
         let lengths = classify_terminal_path_lengths(
             "test",
@@ -4422,7 +4420,7 @@ mod tests {
             expressions.len() as u32,
             Some(Arc::from(expressions.into_boxed_slice())),
         );
-        let vocab = Vocab::new(vec![(0, b"a c".to_vec())], None);
+        let vocab = Vocab::new(vec![(0, b"a c".to_vec())]);
         let mut after_a = BitSet::all(3);
         after_a.clear(1);
         let mut after_space = BitSet::all(3);
@@ -4479,9 +4477,7 @@ mod tests {
                 (2, b"az".to_vec()),
                 (3, b"xyc".to_vec()),
                 (4, b"q".to_vec()),
-            ],
-            None,
-        );
+            ]);
         let mut blocked_after_ab = BitSet::new(num_terminals);
         blocked_after_ab.set(1);
         let disallowed = BTreeMap::from([(0u32, blocked_after_ab)]);
@@ -4532,9 +4528,7 @@ mod tests {
                 (3, b"cdey".to_vec()),
                 (4, b"xyab".to_vec()),
                 (5, b"zz".to_vec()),
-            ],
-            None,
-        );
+            ]);
         let mut blocked = BitSet::new(num_terminals);
         blocked.set(1);
         let disallowed = BTreeMap::from([(0u32, blocked)]);
@@ -4567,7 +4561,7 @@ mod tests {
                 expressions.len() as u32,
                 Some(Arc::from(expressions.into_boxed_slice())),
             );
-        let vocab = Vocab::new(vec![(0, b"++++++++a".to_vec())], None);
+        let vocab = Vocab::new(vec![(0, b"++++++++a".to_vec())]);
         let active = BitSet::all(2);
         let disallowed = BTreeMap::new();
         let bytesets = SharedClassifyBytesets::build(&tokenizer, tokenizer.num_terminals());
@@ -4620,9 +4614,7 @@ mod tests {
                         format!("t{terminal:02}t{next:02}").into_bytes(),
                     )
                 })
-                .collect(),
-            None,
-        );
+                .collect());
         let active = BitSet::all(70);
         let disallowed = BTreeMap::new();
         let bytesets = SharedClassifyBytesets::build(&tokenizer, tokenizer.num_terminals());

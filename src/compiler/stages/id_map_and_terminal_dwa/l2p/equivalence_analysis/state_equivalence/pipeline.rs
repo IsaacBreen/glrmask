@@ -336,9 +336,7 @@ mod tests {
                 (1, b"b".to_vec()),
                 (2, b"ab".to_vec()),
                 (3, b"ba".to_vec()),
-            ],
-            None,
-        );
+            ]);
         let restricted_only = StateEquivalencePipelineConfig {
             passes: vec![StateEquivalencePassKind::RestrictedObservation],
         };

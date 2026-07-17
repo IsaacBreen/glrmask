@@ -33,7 +33,7 @@ fn build_small_vocab() -> Vocab {
         next_id += 1;
     }
 
-    Vocab::new(entries, None)
+    Vocab::new(entries)
 }
 
 /// Schema reproducing the o6363 Artifact pattern:

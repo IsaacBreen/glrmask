@@ -3340,9 +3340,7 @@ mod dense_internal_token_mask_tests {
                 (1, b"b".to_vec()),
                 (2, b"ab".to_vec()),
                 (3, b"ba".to_vec()),
-            ],
-            None,
-        );
+            ]);
         let mut constraint = Constraint::from_glrm_grammar(
             r#"
                 start start;
@@ -3422,7 +3420,7 @@ mod dense_internal_token_mask_tests {
                 entries.push((alias * 64 + byte_index, vec![(byte_index + 32) as u8]));
             }
         }
-        let vocab = Vocab::new(entries, None);
+        let vocab = Vocab::new(entries);
         let mut grammar = String::from("start start;\n");
         for byte_index in 0u32..64 {
             let literal = serde_json::to_string(&((byte_index + 32) as u8 as char).to_string())

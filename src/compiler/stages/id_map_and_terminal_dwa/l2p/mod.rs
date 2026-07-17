@@ -1432,9 +1432,7 @@ nt S ::= TRUE | FALSE | NULL;
                 (2, b" null".to_vec()),
                 (3, b"[true".to_vec()),
                 (4, b" -".to_vec()),
-            ],
-            None,
-        );
+            ]);
 
         let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
         let _structural = EnvVarGuard::set("GLRMASK_STRUCTURAL_BOUNDARY_LEXICAL_PARTITION", "1");
@@ -1460,9 +1458,7 @@ nt S ::= QUOTE IDENT;
                 (0, b"\"A".to_vec()),
                 (1, b"\"Z".to_vec()),
                 (2, b"\"_".to_vec()),
-            ],
-            None,
-        );
+            ]);
 
         let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
         let _structural = EnvVarGuard::set("GLRMASK_STRUCTURAL_BOUNDARY_LEXICAL_PARTITION", "1");
@@ -1482,9 +1478,7 @@ nt S ::= QUOTE IDENT;
                 (0, b"\"red\"".to_vec()),
                 (1, b"\"blue\"".to_vec()),
                 (2, b"\"green\"".to_vec()),
-            ],
-            None,
-        );
+            ]);
 
         let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
         let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
@@ -1516,9 +1510,7 @@ nt S ::= A | B | C;
                 (0, b"x".to_vec()),
                 (1, b"xx".to_vec()),
                 (2, b"z".to_vec()),
-            ],
-            None,
-        );
+            ]);
 
         let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
         let _adaptive = EnvVarGuard::set("GLRMASK_LEXER_ADAPTIVE", "0");
@@ -1549,9 +1541,7 @@ nt S ::= QUOTE IDENT;
                 (0, b"\"A".to_vec()),
                 (1, b"\"Z".to_vec()),
                 (2, b"\"_".to_vec()),
-            ],
-            None,
-        );
+            ]);
 
         let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
         let _adaptive = EnvVarGuard::set("GLRMASK_LEXER_ADAPTIVE", "0");
@@ -1585,7 +1575,7 @@ t FROM ::= /_a_/;
 t CLASS ::= /_b_/;
 nt S ::= FROM V | SPACE V SPACE CLASS;
 "#;
-        let vocab = Vocab::new(vec![(0, b" !".to_vec()), (1, b" _".to_vec())], None);
+        let vocab = Vocab::new(vec![(0, b" !".to_vec()), (1, b" _".to_vec())]);
 
         let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
         let _enabled = EnvVarGuard::set("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY", "0");
