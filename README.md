@@ -6,9 +6,7 @@ GLRMask is a grammar-constrained generation library for high-throughput LLM deco
 
 Measured with MaskBench on the JSONSchemaBench corpus, using the Llama 3 vocabulary on an Intel Core i7-13620H under Ubuntu 24.04/WSL2.
 
-> **Preliminary:** this engineering run spans three GLRMask revisions. The comparisons below use only coverage-matched GLRMask and LLGuidance observations; see the [full benchmark report](docs/benchmark-full-corpus-2026-07-16.md) for methodology and limitations.
-
-GLRMask shifts work into ahead-of-time compilation. In this run, that made compilation substantially slower than LLGuidance, while keeping mask generation in the low-microsecond range across the measured distribution and widening the latency advantage in the tail.
+> **Preliminary:** these timings are not yet accurate and should not be relied on.
 
 ### Mask-generation latency
 
@@ -20,16 +18,6 @@ GLRMask shifts work into ahead-of-time compilation. In this run, that made compi
   </picture>
 </p>
 
-<p align="center"><em>Full paired tail over 2,122,307 shared finite token positions. The lower panel is LLGuidance latency divided by GLRMask latency.</em></p>
-
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-mask-summary-2026-07-16-dark.webp">
-    <source media="(prefers-color-scheme: light)" srcset="docs/assets/benchmark-mask-summary-2026-07-16.webp">
-    <img src="docs/assets/benchmark-mask-summary-2026-07-16.webp" alt="Mask-generation latency percentile summary for GLRMask and LLGuidance" width="88%">
-  </picture>
-</p>
-
 | Latency | GLRMask | LLGuidance |
 |---|---:|---:|
 | Mean | **1.743 µs** | 24.179 µs |
@@ -38,8 +26,6 @@ GLRMask shifts work into ahead-of-time compilation. In this run, that made compi
 | p99.9 | **7.673 µs** | 950.700 µs |
 | p99.99 | **11.556 µs** | 2,771.304 µs |
 | Maximum | **28.565 µs** | 8,041.301 µs |
-
-The figure gives a fuller percentile view; the table preserves the headline values exactly. Lower is better.
 
 ### Compilation time
 
@@ -59,7 +45,7 @@ The figure gives a fuller percentile view; the table preserves the headline valu
 | p99.9 | 2,221.152 ms | **42.989 ms** |
 | Maximum | 6,440.287 ms | **239.964 ms** |
 
-Compilation values use the 8,956 problems on which both frameworks built successfully. Lower is better.
+See the [full benchmark report](docs/benchmark-full-corpus-2026-07-16.md) for methodology.
 
 ## Installation
 
@@ -86,10 +72,8 @@ glrmask = "0.1.0"
 
 ## Python quickstart
 
-This example also requires llama-cpp-python and PyTorch:
-
 ```bash
-python -m pip install llama-cpp-python torch
+python -m pip install glrmask==0.1.0 llama-cpp-python torch
 ```
 
 ```python
@@ -164,7 +148,7 @@ print(llm.detokenize(generated).decode())
 
 ### With forced tokens
 
-`forced()` returns a deterministic continuation without advancing the constraint. Each returned token is committed to both the model and the constraint.
+`forced()` returns the token IDs that can be emitted without sampling. It does not advance the state.
 
 ```python
 llm.reset()
@@ -172,9 +156,8 @@ llm.eval(input_tokens)
 
 state = constraint.start()
 generated = []
-token = None
 
-while token != llm.token_eos() and len(generated) < MAX_OUTPUT_TOKENS:
+for _ in range(MAX_OUTPUT_TOKENS):
     logits = get_logits()
     mask = state.mask()
     logits[~mask] = -np.inf
@@ -200,77 +183,20 @@ print(llm.detokenize(generated).decode())
 
 ## Compilation modes
 
-`Constraint` performs grammar and vocabulary analysis ahead of time and is intended for constraints reused across requests.
+`Constraint` and `DynamicConstraint` have the same interface and produce identical masks. `Constraint` is optimized for per-token latency; `DynamicConstraint` is optimized for cold-start latency.
 
-`DynamicConstraint` compiles faster but performs more work during each mask query. It is intended for one-off constraints where startup latency matters more than runtime latency.
+On a cache miss, use `DynamicConstraint` immediately while a builder compiles and caches `Constraint`. To hot-swap an active request, start a state from the compiled `Constraint` and replay the generated token IDs.
 
 | Mode | Median compilation | p99 TBM | Maximum TBM |
 |---|---:|---:|---:|
 | `Constraint` | 50.963 ms | **10.521 µs** | **49.539 µs** |
 | `DynamicConstraint` | **4.550 ms** | 23.122 ms | 323.609 ms |
 
-Dynamic mode was measured on a smaller cohort.
-
-```python
-static = glrmask.Constraint.from_json_schema(schema, vocab)
-dynamic = glrmask.DynamicConstraint.from_json_schema(schema, vocab)
-```
-
 ## JSON Schema
 
-GLRMask implements a pragmatic subset of JSON Schema. Unsupported constructs may be rejected, and some documented cases broaden or restrict the accepted instance language. See [JSON Schema semantic deviations](docs/json-schema-semantic-deviations.md).
+GLRMask implements a pragmatic subset of JSON Schema. Unsupported constructs may be rejected. See [JSON Schema semantic deviations](docs/json-schema-semantic-deviations.md).
 
-## Rust quickstart
-
-The Rust API returns a packed `u32` bitmask. Bit `token_id % 32` in word `token_id / 32` indicates whether a token is admitted.
-
-```rust
-use glrmask::{Constraint, Vocab};
-
-fn token_allowed(mask: &[u32], token_id: usize) -> bool {
-    let word = token_id / 32;
-    word < mask.len() && ((mask[word] >> (token_id % 32)) & 1) != 0
-}
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let vocab = Vocab::new(
-        vec![
-            (0, b"hello".to_vec()),
-            (1, b" ".to_vec()),
-            (2, b"world".to_vec()),
-        ],
-        None,
-    );
-
-    let constraint = Constraint::from_ebnf(
-        r#"start ::= "hello" " " "world""#,
-        &vocab,
-    )?;
-
-    let mut state = constraint.start();
-
-    assert!(token_allowed(&state.mask(), 0));
-    state.commit_token(0)?;
-
-    assert!(token_allowed(&state.mask(), 1));
-    state.commit_token(1)?;
-
-    assert!(token_allowed(&state.mask(), 2));
-    state.commit_token(2)?;
-
-    assert!(state.is_finished());
-
-    Ok(())
-}
-```
-
-Run the repository example with:
-
-```bash
-cargo run --example ebnf
-```
-
-## Other inputs and serialization
+## Other grammar formats
 
 Lark grammars use the corresponding constructor:
 
@@ -278,11 +204,17 @@ Lark grammars use the corresponding constructor:
 constraint = glrmask.Constraint.from_lark(lark_source, vocab)
 ```
 
-EBNF, Lark, and GLRM grammars can match an exact model token ID with `@token(<id>)`:
+## Special tokens
+
+Use `@token(<id>)` in EBNF, Lark, or GLRM grammars to match a model token by ID:
 
 ```text
 start ::= "hello" @token(128009)
 ```
+
+GLRMask normally masks the vocabulary's EOS token until the constraint is complete. If EOS is referenced explicitly with `@token(...)`, the grammar controls when it is allowed.
+
+## Serialization
 
 Compiled constraints can be serialized and restored:
 
@@ -293,15 +225,6 @@ state = restored.start()
 ```
 
 Rust provides `Constraint::save()` and `Constraint::load(...)`.
-
-The [`glrmask-runtime`](glrmask-runtime) crate loads versioned runtime artifacts without including the grammar import and compilation pipeline.
-
-## Limitations
-
-- GLRMask implements a pragmatic subset of JSON Schema with [documented semantic deviations](docs/json-schema-semantic-deviations.md).
-- Compilation time and mask latency depend on the grammar, schema, vocabulary, hardware, build configuration, and cache state.
-- The full benchmark spans three GLRMask revisions, and dynamic mode was measured on a smaller cohort.
-- Direct integrations with serving frameworks are not included in v0.1.
 
 ## License
 
