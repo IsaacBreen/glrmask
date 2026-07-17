@@ -1,4 +1,4 @@
-name: Temporary EOS grammar migration runner
+name: Temporary EOS grammar validation runner
 
 on:
   pull_request:
@@ -7,12 +7,11 @@ on:
     types: [opened, synchronize, reopened]
 
 permissions:
-  contents: write
+  contents: read
   pull-requests: read
 
 jobs:
-  migrate-test-commit:
-    if: github.actor != 'github-actions[bot]'
+  validate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,92 +21,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - name: Apply migration
-        id: migrate
-        continue-on-error: true
-        run: |
-          set -o pipefail
-          {
-            sed -i 's/if len(commas) == 1:/if len(commas) in (1, 2):/; s/elif len(commas) > 1:/elif len(commas) > 2:/' scripts/agent_eos_core.py
-            python3 - <<'PY'
-          from pathlib import Path
-          path = Path('scripts/agent_eos_core.py')
-          text = path.read_text()
-          text = text.replace(
-              '        raise RuntimeError(f"forbidden {forbidden} remains in {hits}")',
-              '        print(f"pending cleanup for {forbidden}: {hits}")',
-          )
-          path.write_text(text)
-          PY
-            python3 scripts/agent_eos_core.py
-            python3 scripts/agent_eos_cleanup.py
-            python3 scripts/agent_eos_api.py
-            cargo fmt --all
-          } 2>&1 | tee /tmp/agent-eos-migration.log
-      - name: Upload migration failure
-        if: steps.migrate.outcome == 'failure'
-        uses: actions/upload-artifact@v4
-        with:
-          name: agent-eos-migration-log
-          path: |
-            /tmp/agent-eos-migration.log
-            src/runtime/mask/mod.rs
-      - name: Stop after migration failure
-        if: steps.migrate.outcome == 'failure'
-        run: exit 1
+      - name: Check formatting
+        run: cargo fmt --all --check
       - name: Verify no EOS runtime metadata remains
         run: |
           ! grep -R -n -E 'eos_token_id|EOS_BYTES|update_eos_mask|finalize_eos_ns|eos_allowed' --include='*.rs' --exclude-dir=.git --exclude-dir=target .
       - name: Check workspace libraries and binaries
-        id: check
-        continue-on-error: true
-        run: |
-          set -o pipefail
-          cargo check --workspace 2>&1 | tee /tmp/agent-eos-check.log
-      - name: Upload compiler failure
-        if: steps.check.outcome == 'failure'
-        uses: actions/upload-artifact@v4
-        with:
-          name: agent-eos-check-log
-          path: /tmp/agent-eos-check.log
-      - name: Stop after compiler failure
-        if: steps.check.outcome == 'failure'
-        run: exit 1
+        run: cargo check --workspace
       - name: Test compiler crate
-        id: test
-        continue-on-error: true
-        run: |
-          set -o pipefail
-          cargo test -p glrmask 2>&1 | tee /tmp/agent-eos-test.log
-      - name: Upload compiler-crate test failure
-        if: steps.test.outcome == 'failure'
-        uses: actions/upload-artifact@v4
-        with:
-          name: agent-eos-test-log
-          path: /tmp/agent-eos-test.log
-      - name: Stop after compiler-crate test failure
-        if: steps.test.outcome == 'failure'
-        run: exit 1
+        run: cargo test -p glrmask
       - name: Test runtime integration boundary
-        id: runtime_test
-        continue-on-error: true
-        run: |
-          set -o pipefail
-          cargo test -p glrmask-runtime --test runtime_session 2>&1 | tee /tmp/agent-eos-runtime-test.log
-      - name: Upload runtime test failure
-        if: steps.runtime_test.outcome == 'failure'
-        uses: actions/upload-artifact@v4
-        with:
-          name: agent-eos-runtime-test-log
-          path: /tmp/agent-eos-runtime-test.log
-      - name: Stop after runtime test failure
-        if: steps.runtime_test.outcome == 'failure'
-        run: exit 1
-      - name: Commit validated source changes to feature branch
-        run: |
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add -A
-          git diff --cached --stat
-          git commit -m 'Implement grammar-level end token semantics'
-          git push origin HEAD:${{ github.event.pull_request.head.ref }}
+        run: cargo test -p glrmask-runtime --test runtime_session
