@@ -655,10 +655,8 @@ fn remap_token_set_with_injective_map(
             mapped.insert(common_token);
         }
     }
-    // Keep the generic remapper's sharing boundary: it creates a fresh token
-    // set per source-weight remap and shares only within that weight. Global
-    // interning here changes serialized artifact layout even though masks are
-    // equivalent.
+    // The injective path is already cheap, so retain its local cache and avoid
+    // paying for a global prepass on small one-to-one maps.
     let mapped = Arc::new(mapped);
     cache.insert(key, Arc::clone(&mapped));
     mapped
@@ -684,6 +682,40 @@ fn remap_token_set_with_general_map(
     let mapped = Arc::new(mapped);
     cache.insert(key, Arc::clone(&mapped));
     mapped
+}
+
+fn remap_token_set_with_disjoint_runs(
+    tokens: &SharedTokenSet,
+    token_map: &DisjointRunLocalMap,
+    cache: &mut HashMap<usize, SharedTokenSet>,
+) -> SharedTokenSet {
+    let key = Arc::as_ptr(tokens) as usize;
+    if let Some(mapped) = cache.get(&key) {
+        return Arc::clone(mapped);
+    }
+
+    let mapped = remap_token_set_with_disjoint_runs_uncached(tokens, token_map);
+    cache.insert(key, Arc::clone(&mapped));
+    mapped
+}
+
+fn remap_token_set_with_disjoint_runs_uncached(
+    tokens: &SharedTokenSet,
+    token_map: &DisjointRunLocalMap,
+) -> SharedTokenSet {
+    // A common refinement partitions each local token class into disjoint
+    // destination runs. Insert those runs directly instead of inserting every
+    // destination token one at a time. RangeSetBlaze canonicalizes adjacency
+    // and, for non-monotone maps, the final destination order.
+    let mut mapped = RangeSetBlaze::new();
+    for local_token in tokens.iter() {
+        if let Some(runs) = token_map.runs_by_local.get(local_token as usize) {
+            for &(start, end) in runs {
+                mapped.ranges_insert(start..=end);
+            }
+        }
+    }
+    Arc::new(mapped)
 }
 
 fn remap_weight_with_injective_maps(
@@ -745,6 +777,8 @@ fn remap_weight_with_disjoint_tsid_runs(
     weight: &Weight,
     tsid_map: &DisjointRunLocalMap,
     token_map: Option<&InjectiveLocalMap>,
+    token_run_map: Option<&DisjointRunLocalMap>,
+    precomputed_token_sets: Option<&FxHashMap<usize, SharedTokenSet>>,
     local_to_common_tokens: &[Vec<u32>],
     token_cache: &mut HashMap<usize, SharedTokenSet>,
 ) -> Option<Weight> {
@@ -759,6 +793,14 @@ fn remap_weight_with_disjoint_tsid_runs(
     for (local_start, local_end, tokens) in weight.range_entries() {
         let mapped_tokens = if let Some(token_map) = token_map {
             remap_token_set_with_injective_map(tokens, token_map, token_cache)
+        } else if let Some(precomputed_token_sets) = precomputed_token_sets {
+            let key = Arc::as_ptr(tokens) as usize;
+            precomputed_token_sets
+                .get(&key)
+                .cloned()
+                .expect("precomputed token remap must cover every source token set")
+        } else if let Some(token_run_map) = token_run_map {
+            remap_token_set_with_disjoint_runs(tokens, token_run_map, token_cache)
         } else {
             remap_token_set_with_general_map(tokens, local_to_common_tokens, token_cache)
         };
@@ -783,18 +825,23 @@ fn remap_weights_with_maps(
     local_to_common_tokens: &[Vec<u32>],
     common_tsid_count: usize,
 ) {
+    let profiling = std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
+    let total_started_at = profiling.then(Instant::now);
     let tsid_map = InjectiveLocalMap::from_local_to_common(local_to_common_tsids, common_tsid_count);
     let tsid_run_map =
         DisjointRunLocalMap::from_local_to_common(local_to_common_tsids, common_tsid_count);
+    let common_token_count = local_to_common_tokens
+        .iter()
+        .flatten()
+        .copied()
+        .max()
+        .map_or(0, |maximum| maximum as usize + 1);
     let token_map = InjectiveLocalMap::from_local_to_common(
         local_to_common_tokens,
-        local_to_common_tokens
-            .iter()
-            .flatten()
-            .copied()
-            .max()
-            .map_or(0, |maximum| maximum as usize + 1),
+        common_token_count,
     );
+    let token_run_map =
+        DisjointRunLocalMap::from_local_to_common(local_to_common_tokens, common_token_count);
     let mut unique_by_ptr = HashMap::<usize, usize>::new();
     let mut unique_weights = Vec::<Weight>::new();
     let mut weight_to_unique = Vec::with_capacity(weights.len());
@@ -808,7 +855,78 @@ fn remap_weights_with_maps(
         weight_to_unique.push(unique);
     }
 
-    let remap_one = |weight: &Weight| match (&tsid_map, &token_map) {
+    let precompute_started_at = profiling.then(Instant::now);
+    let precomputed_token_sets = if tsid_run_map.is_some()
+        && let Some(token_run_map) = token_run_map.as_ref()
+    {
+        let mut source_by_ptr = FxHashMap::<usize, SharedTokenSet>::default();
+        for weight in &unique_weights {
+            for (_, _, tokens) in weight.range_entries() {
+                source_by_ptr
+                    .entry(Arc::as_ptr(tokens) as usize)
+                    .or_insert_with(|| Arc::clone(tokens));
+            }
+        }
+        let sources = source_by_ptr.into_iter().collect::<Vec<_>>();
+        let remapped = if sources.len() >= PARALLEL_UNIQUE_WEIGHT_THRESHOLD
+            && rayon::current_num_threads() > 1
+        {
+            sources
+                .par_iter()
+                .map(|(key, tokens)| {
+                    (
+                        *key,
+                        remap_token_set_with_disjoint_runs_uncached(tokens, token_run_map),
+                    )
+                })
+                .collect::<Vec<_>>()
+        } else {
+            sources
+                .iter()
+                .map(|(key, tokens)| {
+                    (
+                        *key,
+                        remap_token_set_with_disjoint_runs_uncached(tokens, token_run_map),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        Some(remapped.into_iter().collect::<FxHashMap<_, _>>())
+    } else {
+        None
+    };
+    let precompute_ms = precompute_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+
+    let token_set_profile = profiling.then(|| {
+        let mut seen = BTreeSet::new();
+        let mut total_refs = 0usize;
+        let mut unique_local_tokens = 0usize;
+        let mut unique_local_ranges = 0usize;
+        for weight in &unique_weights {
+            for (_, _, tokens) in weight.range_entries() {
+                total_refs += 1;
+                let key = Arc::as_ptr(tokens) as usize;
+                if seen.insert(key) {
+                    unique_local_tokens += tokens.len() as usize;
+                    unique_local_ranges += tokens.ranges().count();
+                }
+            }
+        }
+        (
+            total_refs,
+            seen.len(),
+            unique_local_tokens,
+            unique_local_ranges,
+        )
+    });
+
+    let remap_one =
+        |weight: &Weight,
+         precomputed_token_sets: Option<&FxHashMap<usize, SharedTokenSet>>| match (
+            &tsid_map, &token_map,
+        ) {
         (Some(tsid_map), Some(token_map)) if !weight.is_full() => {
             let mut token_cache = HashMap::<usize, SharedTokenSet>::new();
             remap_weight_with_injective_maps(weight, tsid_map, token_map, &mut token_cache)
@@ -822,6 +940,8 @@ fn remap_weights_with_maps(
                         weight,
                         tsid_run_map,
                         token_map.as_ref(),
+                        token_run_map.as_ref(),
+                        precomputed_token_sets,
                         local_to_common_tokens,
                         &mut token_cache,
                     )
@@ -844,16 +964,76 @@ fn remap_weights_with_maps(
     };
 
     const PARALLEL_UNIQUE_WEIGHT_THRESHOLD: usize = 256;
+    let unique_remap_started_at = profiling.then(Instant::now);
     let remapped_unique: Vec<Weight> = if unique_weights.len() >= PARALLEL_UNIQUE_WEIGHT_THRESHOLD
         && rayon::current_num_threads() > 1
     {
-        unique_weights.par_iter().map(remap_one).collect()
+        unique_weights
+            .par_iter()
+            .map(|weight| remap_one(weight, precomputed_token_sets.as_ref()))
+            .collect()
     } else {
-        unique_weights.iter().map(remap_one).collect()
+        unique_weights
+            .iter()
+            .map(|weight| remap_one(weight, precomputed_token_sets.as_ref()))
+            .collect()
     };
+    let unique_remap_ms = unique_remap_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+
+    if std::env::var_os("GLRMASK_VALIDATE_GLOBAL_TOKEN_REMAP_CACHE").is_some()
+        && precomputed_token_sets.is_some()
+    {
+        let reference: Vec<Weight> = if unique_weights.len() >= PARALLEL_UNIQUE_WEIGHT_THRESHOLD
+            && rayon::current_num_threads() > 1
+        {
+            unique_weights
+                .par_iter()
+                .map(|weight| remap_one(weight, None))
+                .collect()
+        } else {
+            unique_weights
+                .iter()
+                .map(|weight| remap_one(weight, None))
+                .collect()
+        };
+        for (index, (candidate, reference)) in
+            remapped_unique.iter().zip(reference.iter()).enumerate()
+        {
+            assert_eq!(
+                candidate, reference,
+                "global token remap cache changed unique weight {index}"
+            );
+        }
+        eprintln!(
+            "[glrmask/validate][global_token_remap_cache] unique_weights={} token_sets={} exact=true",
+            unique_weights.len(),
+            precomputed_token_sets.as_ref().map_or(0, FxHashMap::len),
+        );
+    }
 
     for (weight, unique) in weights.iter_mut().zip(weight_to_unique) {
         **weight = remapped_unique[unique].clone();
+    }
+    if let Some(total_started_at) = total_started_at {
+        let (token_set_refs, unique_token_sets, unique_local_tokens, unique_local_ranges) =
+            token_set_profile.unwrap_or_default();
+        eprintln!(
+            "[glrmask/profile][token_run_reconcile] weights={} unique_weights={} token_set_refs={} unique_token_sets={} unique_local_tokens={} unique_local_ranges={} tsid_map={} tsid_run_map={} token_map={} token_run_map={} precomputed_token_sets={} precompute_ms={precompute_ms:.3} unique_remap_ms={unique_remap_ms:.3} total_ms={:.3}",
+            weights.len(),
+            unique_weights.len(),
+            token_set_refs,
+            unique_token_sets,
+            unique_local_tokens,
+            unique_local_ranges,
+            tsid_map.is_some(),
+            tsid_run_map.is_some(),
+            token_map.is_some(),
+            token_run_map.is_some(),
+            precomputed_token_sets.as_ref().map_or(0, FxHashMap::len),
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
     }
 }
 
@@ -1108,6 +1288,26 @@ mod tests {
         );
 
         assert_eq!(entries_key(&fast), entries_key(&general));
+    }
+
+    #[test]
+    fn disjoint_run_token_remap_matches_general_for_split_reordered_ids() {
+        let tokens = Arc::new(RangeSetBlaze::from_iter([0..=2, 4..=4]));
+        let token_map = vec![vec![4, 5], vec![0, 1], vec![2, 3], vec![], vec![7, 8, 9]];
+        let run_map =
+            DisjointRunLocalMap::from_local_to_common(&token_map, 10).expect("disjoint runs");
+        assert!(!run_map.destination_order_is_monotone);
+
+        let fast = remap_token_set_with_disjoint_runs(&tokens, &run_map, &mut HashMap::new());
+        let general = remap_token_set_with_general_map(&tokens, &token_map, &mut HashMap::new());
+
+        assert_eq!(fast.as_ref(), general.as_ref());
+        assert_eq!(
+            fast.ranges()
+                .map(|range| (*range.start(), *range.end()))
+                .collect::<Vec<_>>(),
+            vec![(0, 5), (7, 9)],
+        );
     }
 
     #[test]
