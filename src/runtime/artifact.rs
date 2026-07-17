@@ -1498,10 +1498,12 @@ impl DynamicMaskVocab {
             }
         };
 
+        let full_source_started = std::time::Instant::now();
         let mut source_partitions = full_source_specs
             .par_iter()
             .map(build_full_source_partition)
             .collect::<Vec<_>>();
+        let full_source_ms = full_source_started.elapsed().as_secs_f64() * 1000.0;
         let full_partitions_by_state = source_partitions
             .iter()
             .filter_map(|partition| {
@@ -1510,15 +1512,14 @@ impl DynamicMaskVocab {
             })
             .collect::<FxHashMap<_, _>>();
 
-        let derived_source_partitions = derived_source_plans
-            .par_iter()
-            .map(|&(source_state, base_state, different_first_bytes, _)| {
-                let base = full_partitions_by_state[&base_state];
+        let base_program_ids_by_state = full_partitions_by_state
+            .iter()
+            .map(|(&state, partition)| {
                 assert!(
-                    base.programs.len() < DYNAMIC_SOURCE_PROGRAM_ID_MASK as usize,
+                    partition.programs.len() < DYNAMIC_SOURCE_PROGRAM_ID_MASK as usize,
                     "dynamic source base program count exceeded overlay encoding",
                 );
-                let base_program_ids = base
+                let program_ids = partition
                     .programs
                     .iter()
                     .cloned()
@@ -1531,21 +1532,38 @@ impl DynamicMaskVocab {
                         )
                     })
                     .collect::<FxHashMap<_, _>>();
+                (state, program_ids)
+            })
+            .collect::<FxHashMap<_, _>>();
+        let mut entries_by_first_byte = (0..256)
+            .map(|_| Vec::<usize>::new())
+            .collect::<Vec<_>>();
+        let mut empty_entry_indices = Vec::<usize>::new();
+        for (entry_index, (_, bytes)) in entries.iter().enumerate() {
+            if let Some(&byte) = bytes.first() {
+                entries_by_first_byte[byte as usize].push(entry_index);
+            } else {
+                empty_entry_indices.push(entry_index);
+            }
+        }
+
+        let derived_source_started = std::time::Instant::now();
+        let derived_source_partitions = derived_source_plans
+            .par_iter()
+            .map(|&(source_state, base_state, different_first_bytes, _)| {
+                let base_program_ids = &base_program_ids_by_state[&base_state];
                 let mut programs = Vec::<DynamicTokenProgram>::new();
                 let mut interned = FxHashMap::<DynamicTokenProgram, u16>::default();
-                // u16::MAX means "inherit the base partition's program".
+                // u16::MAX means "inherit the base partition's token program".
                 let mut source_token_programs = vec![u16::MAX; token_programs.len()];
+                let mut source_root_programs = FxHashSet::<u16>::default();
                 let mut scan_cache = ContinuationNfaScanCache::new(tokenizer);
                 let source_config = scan_cache.config_for_raw_start(source_state);
                 let mut suffix_bytes = Vec::<(u8, u32)>::new();
 
-                for ((canonical_token_id, bytes), &suffix) in entries.iter().zip(&suffix_roots) {
-                    let needs_patch = bytes
-                        .first()
-                        .is_none_or(|&byte| different_first_bytes.contains(byte));
-                    if !needs_patch {
-                        continue;
-                    }
+                let mut patch_entry = |entry_index: usize| {
+                    let (canonical_token_id, _) = &entries[entry_index];
+                    let suffix = suffix_roots[entry_index];
                     let program = builder.source_program_for_suffix(
                         &mut scan_cache,
                         source_config,
@@ -1567,20 +1585,27 @@ impl DynamicMaskVocab {
                         interned.insert(program, program_id);
                         program_id
                     };
+                    if program_id < DYNAMIC_SOURCE_BASE_PROGRAM_FLAG {
+                        source_root_programs.insert(program_id);
+                    }
                     if let Some(token_ids) = self.token_ids(*canonical_token_id) {
                         for &token_id in token_ids {
                             source_token_programs[token_id as usize] = program_id;
                         }
                     }
+                };
+
+                for &entry_index in &empty_entry_indices {
+                    patch_entry(entry_index);
+                }
+                for byte in different_first_bytes.iter() {
+                    for &entry_index in &entries_by_first_byte[byte as usize] {
+                        patch_entry(entry_index);
+                    }
                 }
 
-                let mut source_root_programs = source_token_programs
-                    .iter()
-                    .copied()
-                    .filter(|&program| program < DYNAMIC_SOURCE_BASE_PROGRAM_FLAG)
-                    .collect::<FxHashSet<_>>()
-                    .into_iter()
-                    .collect::<Vec<_>>();
+                let mut source_root_programs =
+                    source_root_programs.into_iter().collect::<Vec<_>>();
                 source_root_programs.sort_unstable();
                 DynamicSourceTokenProgramPartition {
                     source_states: vec![source_state].into_boxed_slice(),
@@ -1591,6 +1616,7 @@ impl DynamicMaskVocab {
                 }
             })
             .collect::<Vec<_>>();
+        let derived_source_ms = derived_source_started.elapsed().as_secs_f64() * 1000.0;
         source_partitions.extend(derived_source_partitions);
         source_partitions.sort_unstable_by(|left, right| {
             left.source_states.cmp(&right.source_states)
@@ -1622,7 +1648,7 @@ impl DynamicMaskVocab {
                     .collect::<Vec<_>>(),
             );
             eprintln!(
-                "[glrmask/profile][dynamic_token_program_partition] programs={} roots={} suffixes={} branches={} tokens={} top_reachable_sources={:?} sources={:?} source_roots={} register_ms={:.3} programs_ms={:.3} mapping_ms={:.3} source_ms={:.3} build_ms={:.3}",
+                "[glrmask/profile][dynamic_token_program_partition] programs={} roots={} suffixes={} branches={} tokens={} top_reachable_sources={:?} sources={:?} source_roots={} register_ms={:.3} programs_ms={:.3} mapping_ms={:.3} source_full_ms={:.3} source_derived_ms={:.3} source_ms={:.3} build_ms={:.3}",
                 partition.programs.len(),
                 partition.root_programs.len(),
                 suffix_count,
@@ -1653,6 +1679,8 @@ impl DynamicMaskVocab {
                 register_ms,
                 programs_ms,
                 mapping_ms,
+                full_source_ms,
+                derived_source_ms,
                 source_program_ms,
                 started.elapsed().as_secs_f64() * 1000.0,
             );
