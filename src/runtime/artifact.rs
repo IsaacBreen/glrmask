@@ -361,7 +361,7 @@ pub(crate) struct DynamicTokenProgramPartition {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct DynamicSourceTokenProgramPartition {
-    pub(crate) source_state: u32,
+    pub(crate) source_states: Box<[u32]>,
     pub(crate) programs: Box<[DynamicTokenProgram]>,
     pub(crate) root_programs: Box<[u16]>,
     pub(crate) token_programs: Box<[u16]>,
@@ -733,10 +733,19 @@ impl DynamicTokenProgramPartition {
         &self,
         source_state: u32,
     ) -> Option<&DynamicSourceTokenProgramPartition> {
-        self.source_partitions
-            .binary_search_by_key(&source_state, |partition| partition.source_state)
-            .ok()
-            .map(|index| &self.source_partitions[index])
+        self.source_partitions.iter().find(|partition| {
+            partition.source_states.as_ref() == [source_state]
+        })
+    }
+
+    pub(crate) fn combined_source_partition_starting_at(
+        &self,
+        source_state: u32,
+    ) -> Option<&DynamicSourceTokenProgramPartition> {
+        self.source_partitions.iter().find(|partition| {
+            partition.source_states.len() > 1
+                && partition.source_states.first() == Some(&source_state)
+        })
     }
 }
 
@@ -1324,11 +1333,28 @@ impl DynamicMaskVocab {
         }
         source_states.sort_unstable();
         source_states.dedup();
-        let source_partitions = source_states
+        let mut source_specs = Vec::<Vec<u32>>::new();
+        if let Some(&primary) = source_states
+            .iter()
+            .find(|&&state| tokenizer.transitions_from(state).next().is_some())
+        {
+            source_specs.push(vec![primary]);
+        }
+        if source_states.len() > 1 {
+            source_specs.push(source_states.clone());
+        }
+        source_specs.sort();
+        source_specs.dedup();
+        let source_partitions = source_specs
             .par_iter()
-            .map(|&source_state| {
+            .map(|source_states| {
                 let mut scan_cache = ContinuationNfaScanCache::new(tokenizer);
-                let source_config = scan_cache.config_for_raw_start(source_state);
+                let mut source_closure = Vec::<u32>::new();
+                for &source_state in source_states {
+                    let config = scan_cache.config_for_raw_start(source_state);
+                    source_closure.extend_from_slice(&scan_cache.configs[config as usize]);
+                }
+                let source_config = scan_cache.intern_config(source_closure);
                 let mut suffix_bytes = Vec::<(u8, u32)>::new();
                 let mut interned = FxHashMap::<DynamicTokenProgram, u16>::default();
                 let mut programs = Vec::<DynamicTokenProgram>::new();
@@ -1363,7 +1389,7 @@ impl DynamicMaskVocab {
                     source_root_programs.into_iter().collect::<Vec<_>>();
                 source_root_programs.sort_unstable();
                 DynamicSourceTokenProgramPartition {
-                    source_state,
+                    source_states: source_states.clone().into_boxed_slice(),
                     programs: programs.into_boxed_slice(),
                     root_programs: source_root_programs.into_boxed_slice(),
                     token_programs: source_token_programs.into_boxed_slice(),
@@ -1396,7 +1422,7 @@ impl DynamicMaskVocab {
                 branch_count,
                 partition.token_count,
                 ranked_source_states.iter().take(16).copied().collect::<Vec<_>>(),
-                source_states,
+                source_specs,
                 partition
                     .source_partitions
                     .iter()

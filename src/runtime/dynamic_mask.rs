@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::automata::lexer::Lexer;
 use crate::automata::lexer::tokenizer::{
@@ -15,8 +15,9 @@ use crate::automata::lexer::tokenizer::{
 };
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::compiler::glr::parser::{
-    advance_stacks, stack_may_advance_on_any, ParserGSS,
+    advance_stacks, stack_admissible_terminals, stack_may_advance_on_any, ParserGSS,
 };
+use crate::ds::bitset::BitSet;
 use crate::ds::leveled_gss::LeveledGSS;
 use crate::ds::u8set::U8Set;
 use crate::grammar::flat::TerminalID;
@@ -30,7 +31,7 @@ type ParserStacks = LeveledGSS<u32, ()>;
 
 #[derive(Default)]
 struct DynamicTraversalCache {
-    boundary: FxHashMap<(u32, usize), (ParserStacks, bool)>,
+    admissible_terminals: FxHashMap<usize, (ParserStacks, BitSet)>,
     lexer_relevant: FxHashMap<(u32, usize), (ParserStacks, bool)>,
     parser_children: FxHashMap<(usize, TerminalID), (ParserStacks, Option<ParserStacks>)>,
 }
@@ -621,16 +622,40 @@ fn token_boundary_allowed_cached(
     stacks: &ParserStacks,
     cache: &mut DynamicTraversalCache,
 ) -> bool {
-    let key = (tokenizer_state, stacks.ptr_key());
-    if let Some((cached_stacks, result)) = cache.boundary.get(&key) {
-        debug_assert!(cached_stacks.ptr_eq(stacks));
-        return *result;
+    let accessible = constraint
+        .tokenizer
+        .tokens_accessible_from_state(tokenizer_state);
+    if constraint
+        .ignore_terminal
+        .is_some_and(|terminal| accessible.contains(terminal as usize))
+    {
+        return true;
     }
-    let result = token_boundary_allowed(constraint, tokenizer_state, stacks);
-    cache
-        .boundary
-        .insert(key, (stacks.clone(), result));
-    result
+
+    let key = stacks.ptr_key();
+    let admitted = if let Some((cached_stacks, admitted)) =
+        cache.admissible_terminals.get(&key)
+    {
+        debug_assert!(cached_stacks.ptr_eq(stacks));
+        admitted
+    } else {
+        let parser_gss = with_empty_accumulators(stacks);
+        let candidates = BitSet::all(accessible.len());
+        let admitted = stack_admissible_terminals(
+            &constraint.table,
+            &parser_gss,
+            &candidates,
+        );
+        cache
+            .admissible_terminals
+            .insert(key, (stacks.clone(), admitted));
+        &cache
+            .admissible_terminals
+            .get(&key)
+            .expect("admissible terminal cache insertion must be visible")
+            .1
+    };
+    !admitted.is_disjoint(accessible)
 }
 
 fn lexer_state_relevant_cached(
@@ -789,6 +814,15 @@ pub(crate) fn fill_mask_dynamic_bounded(
     )
 }
 
+#[inline]
+fn same_parser_stack_language(left: &ParserStacks, right: &ParserStacks) -> bool {
+    left.ptr_eq(right)
+        || left
+            .single_interface_lower_id()
+            .zip(right.single_interface_lower_id())
+            .is_some_and(|(left, right)| left == right)
+}
+
 fn fill_mask_dynamic_impl(
     state: &ConstraintState<'_>,
     buf: &mut [u32],
@@ -830,6 +864,7 @@ fn fill_mask_dynamic_impl(
     let mut self_loop_cache = FxHashMap::<u32, U8Set>::default();
     let mut traversal_cache = DynamicTraversalCache::default();
     let mut token_program_cache = DynamicTokenProgramCache::default();
+    let mut handled_source_seeds = FxHashSet::<(u32, usize)>::default();
     let mut lexer_scan_cache = DynamicNfaScanCache::new(state.constraint, deadline);
     let tries = [vocab.trie.clone()];
     let mut continuation_partitions = Vec::new();
@@ -856,6 +891,12 @@ fn fill_mask_dynamic_impl(
         check_deadline()?;
         for (stacks, terminals_disallowed) in gss.partition_by_accumulator() {
             check_deadline()?;
+            let stack_identity = stacks.single_interface_lower_id();
+            if stack_identity.is_some_and(|identity| {
+                handled_source_seeds.contains(&(tokenizer_state, identity))
+            }) {
+                continue;
+            }
             let initial_prune_guard = InitialPruneGuard::new(
                 state.constraint,
                 tokenizer_state,
@@ -937,9 +978,47 @@ fn fill_mask_dynamic_impl(
             }
             if initial_prune_guard.is_passed()
                 && let Some(program_partition) = vocab.initial_token_program_partition()
-                && let Some(source_partition) =
-                    program_partition.source_partition(tokenizer_state)
             {
+                let mut combined_states = Vec::<u32>::new();
+                let mut selected_source_partition =
+                    program_partition.source_partition(tokenizer_state);
+                if let Some(identity) = stack_identity
+                    && let Some(combined) = program_partition
+                        .combined_source_partition_starting_at(tokenizer_state)
+                {
+                    let mut matches = true;
+                    for &other_state in combined.source_states.iter().skip(1) {
+                        let Some(other_gss) = state.state.get(&other_state) else {
+                            matches = false;
+                            break;
+                        };
+                        let other_matches = other_gss
+                            .partition_by_accumulator()
+                            .into_iter()
+                            .any(|(other_stacks, other_disallowed)| {
+                                other_stacks.single_interface_lower_id() == Some(identity)
+                                    && InitialPruneGuard::new(
+                                        state.constraint,
+                                        other_state,
+                                        &other_stacks,
+                                        &other_disallowed,
+                                    )
+                                    .is_passed()
+                                    && same_parser_stack_language(&stacks, &other_stacks)
+                            });
+                        if !other_matches {
+                            matches = false;
+                            break;
+                        }
+                        combined_states.push(other_state);
+                    }
+                    if matches {
+                        selected_source_partition = Some(combined);
+                    } else {
+                        combined_states.clear();
+                    }
+                }
+                if let Some(source_partition) = selected_source_partition {
                 // Earlier seeds usually admit almost the entire vocabulary.
                 // Determine which source programs still own at least one unset
                 // token before performing any parser queries. This keeps later
@@ -995,7 +1074,13 @@ fn fill_mask_dynamic_impl(
                     }
                     *word |= accepted_bits;
                 }
-                continue;
+                    if let Some(identity) = stack_identity {
+                        for other_state in combined_states {
+                            handled_source_seeds.insert((other_state, identity));
+                        }
+                    }
+                    continue;
+                }
             }
             if initial_prune_guard.is_passed() {
                 let mut partition = vocab.cached_continuation_partition(tokenizer_state);
@@ -1303,7 +1388,7 @@ fn fill_mask_dynamic_impl(
             token_program_cache.results.len(),
             continuation_groups_admitted,
             continuation_groups_traversed,
-            traversal_cache.boundary.len(),
+            traversal_cache.admissible_terminals.len(),
             traversal_cache.lexer_relevant.len(),
             traversal_cache.parser_children.len(),
             total_started_at.elapsed().as_secs_f64() * 1000.0,

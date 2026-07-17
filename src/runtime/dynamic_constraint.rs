@@ -14,7 +14,7 @@ use crate::runtime::{
 };
 
 const DYNAMIC_CONSTRAINT_MAGIC: [u8; 8] = *b"GLRDYN\0\0";
-const DYNAMIC_CONSTRAINT_VERSION: u16 = 4;
+const DYNAMIC_CONSTRAINT_VERSION: u16 = 5;
 const DYNAMIC_CONSTRAINT_HEADER_LEN: usize = DYNAMIC_CONSTRAINT_MAGIC.len() + 2 + 8;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
