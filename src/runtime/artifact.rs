@@ -1329,42 +1329,23 @@ impl DynamicMaskVocab {
                 )
             },
         );
-        // Compile one broad consuming residual and one exact union with the
-        // first live epsilon-only residual. Compiling every structurally broad
-        // state duplicates the full-vocabulary scan dozens of times and adds
-        // build cost without helping a mask that only contains a few live seeds.
-        let primary_source = (0..tokenizer.num_states())
-            .filter(|&state| state != initial_state)
-            .filter(|&state| tokenizer.transitions_from(state).count() >= 128)
-            .filter(|&state| tokenizer.matched_terminals_iter(state).count() >= 5)
-            .filter(|&state| {
-                tokenizer
-                    .possible_future_terminals_iter(state)
-                    .count()
-                    >= 9
-            })
-            .max_by_key(|&state| {
-                (
-                    source_scores[state as usize],
-                    tokenizer.matched_terminals_iter(state).count(),
-                    tokenizer.transitions_from(state).count(),
-                    std::cmp::Reverse(state),
-                )
-            })
-            .or_else(|| {
-                ranked_source_states
-                    .iter()
-                    .find(|&&(_, _, transitions, _, _)| transitions != 0)
-                    .map(|&(state, _, _, _, _)| state)
-            });
+        // A small number of broad residuals account for most expensive tail
+        // masks. Compile the five highest-coverage consuming states in parallel
+        // rather than relying on one hand-shaped residual selector.
+        let broad_sources = ranked_source_states
+            .iter()
+            .filter(|&&(_, _, transitions, _, _)| transitions >= 128)
+            .take(5)
+            .map(|&(state, _, _, _, _)| state)
+            .collect::<Vec<_>>();
         let epsilon_source = (0..tokenizer.num_states())
             .filter(|&state| state != initial_state)
             .filter(|&state| tokenizer.transitions_from(state).next().is_none())
             .filter(|&state| !tokenizer.is_end(state))
             .min();
         let mut source_specs = Vec::<Vec<u32>>::new();
-        if let Some(primary) = primary_source {
-            source_specs.push(vec![primary]);
+        source_specs.extend(broad_sources.iter().map(|&source| vec![source]));
+        if let Some(&primary) = broad_sources.first() {
             if let Some(epsilon) = epsilon_source {
                 source_specs.push(vec![epsilon, primary]);
             }
