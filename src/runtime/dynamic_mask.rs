@@ -23,7 +23,8 @@ use crate::ds::u8set::U8Set;
 use crate::grammar::flat::TerminalID;
 
 use super::artifact::{
-    Constraint, DynamicMaskStateKey, DynamicMaskTrie, DynamicTokenProgramPartition,
+    Constraint, DYNAMIC_SOURCE_BASE_PROGRAM_FLAG, DYNAMIC_SOURCE_PROGRAM_ID_MASK,
+    DynamicMaskStateKey, DynamicMaskTrie, DynamicTokenProgramPartition,
 };
 use super::state::ConstraintState;
 
@@ -1105,7 +1106,6 @@ fn fill_mask_dynamic_impl(
                     let mut needed_programs = vec![false; source_partition.programs.len()];
                     let mut needed_base_programs = base_source_partition
                         .map(|base| vec![false; base.programs.len()]);
-
                     // Combined residual unions are selected because all
                     // participating seeds are live and compatible. Scanning the
                     // output mask to rediscover their roots is pure overhead.
@@ -1113,6 +1113,14 @@ fn fill_mask_dynamic_impl(
                     if source_partition.source_states.len() > 1 {
                         for &program in source_partition.root_programs.iter() {
                             needed_programs[program as usize] = true;
+                        }
+                        if let (Some(base), Some(needed_base)) = (
+                            base_source_partition,
+                            needed_base_programs.as_mut(),
+                        ) {
+                            for &program in base.root_programs.iter() {
+                                needed_base[program as usize] = true;
+                            }
                         }
                     } else {
                         for (word_index, (&word, programs)) in buf
@@ -1124,17 +1132,24 @@ fn fill_mask_dynamic_impl(
                             while missing != 0 {
                                 let bit = missing.trailing_zeros() as usize;
                                 if let Some(&program) = programs.get(bit) {
-                                    if program != u16::MAX {
-                                        needed_programs[program as usize] = true;
-                                    } else if let (Some(base), Some(needed_base)) = (
-                                        base_source_partition,
-                                        needed_base_programs.as_mut(),
-                                    ) {
-                                        let token_index = word_index * 32 + bit;
-                                        let base_program = base.token_programs[token_index];
-                                        if base_program != u16::MAX {
-                                            needed_base[base_program as usize] = true;
+                                    if program == u16::MAX {
+                                        if let (Some(base), Some(needed_base)) = (
+                                            base_source_partition,
+                                            needed_base_programs.as_mut(),
+                                        ) {
+                                            let token_index = word_index * 32 + bit;
+                                            let base_program = base.token_programs[token_index];
+                                            if base_program != u16::MAX {
+                                                needed_base[base_program as usize] = true;
+                                            }
                                         }
+                                    } else if program & DYNAMIC_SOURCE_BASE_PROGRAM_FLAG != 0 {
+                                        if let Some(needed_base) = needed_base_programs.as_mut() {
+                                            needed_base[(program & DYNAMIC_SOURCE_PROGRAM_ID_MASK)
+                                                as usize] = true;
+                                        }
+                                    } else {
+                                        needed_programs[program as usize] = true;
                                     }
                                 }
                                 missing &= missing - 1;
@@ -1232,18 +1247,26 @@ fn fill_mask_dynamic_impl(
                     {
                         let mut accepted_bits = 0u32;
                         for (bit, &program) in programs.iter().enumerate() {
-                            let accepted = if program != u16::MAX {
-                                accepted_programs[program as usize]
-                            } else if let (Some(base), Some(accepted_base)) = (
-                                base_source_partition,
-                                accepted_base_programs.as_ref(),
-                            ) {
-                                let token_index = word_index * 32 + bit;
-                                let base_program = base.token_programs[token_index];
-                                base_program != u16::MAX
-                                    && accepted_base[base_program as usize]
+                            let accepted = if program == u16::MAX {
+                                if let (Some(base), Some(accepted_base)) = (
+                                    base_source_partition,
+                                    accepted_base_programs.as_ref(),
+                                ) {
+                                    let token_index = word_index * 32 + bit;
+                                    let base_program = base.token_programs[token_index];
+                                    base_program != u16::MAX
+                                        && accepted_base[base_program as usize]
+                                } else {
+                                    false
+                                }
+                            } else if program & DYNAMIC_SOURCE_BASE_PROGRAM_FLAG != 0 {
+                                accepted_base_programs.as_ref().is_some_and(|accepted_base| {
+                                    accepted_base[(program
+                                        & DYNAMIC_SOURCE_PROGRAM_ID_MASK)
+                                        as usize]
+                                })
                             } else {
-                                false
+                                accepted_programs[program as usize]
                             };
                             accepted_bits |= u32::from(accepted) << bit;
                         }

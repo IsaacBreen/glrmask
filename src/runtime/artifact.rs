@@ -372,6 +372,10 @@ pub(crate) struct DynamicSourceTokenProgramPartition {
     pub(crate) token_programs: Box<[u16]>,
 }
 
+pub(crate) const DYNAMIC_SOURCE_BASE_PROGRAM_FLAG: u16 = 1 << 15;
+pub(crate) const DYNAMIC_SOURCE_PROGRAM_ID_MASK: u16 =
+    DYNAMIC_SOURCE_BASE_PROGRAM_FLAG - 1;
+
 const CONTINUATION_NFA_CONFIG_UNKNOWN: u32 = u32::MAX;
 const CONTINUATION_NFA_CONFIG_DEAD: u32 = u32::MAX - 1;
 
@@ -1509,6 +1513,24 @@ impl DynamicMaskVocab {
         let derived_source_partitions = derived_source_plans
             .par_iter()
             .map(|&(source_state, base_state, different_first_bytes, _)| {
+                let base = full_partitions_by_state[&base_state];
+                assert!(
+                    base.programs.len() < DYNAMIC_SOURCE_PROGRAM_ID_MASK as usize,
+                    "dynamic source base program count exceeded overlay encoding",
+                );
+                let base_program_ids = base
+                    .programs
+                    .iter()
+                    .cloned()
+                    .enumerate()
+                    .map(|(program_id, program)| {
+                        (
+                            program,
+                            u16::try_from(program_id)
+                                .expect("dynamic source base program count exceeded u16"),
+                        )
+                    })
+                    .collect::<FxHashMap<_, _>>();
                 let mut programs = Vec::<DynamicTokenProgram>::new();
                 let mut interned = FxHashMap::<DynamicTokenProgram, u16>::default();
                 // u16::MAX means "inherit the base partition's program".
@@ -1530,11 +1552,17 @@ impl DynamicMaskVocab {
                         suffix,
                         &mut suffix_bytes,
                     );
-                    let program_id = if let Some(&program_id) = interned.get(&program) {
+                    let program_id = if let Some(&base_program) = base_program_ids.get(&program) {
+                        DYNAMIC_SOURCE_BASE_PROGRAM_FLAG | base_program
+                    } else if let Some(&program_id) = interned.get(&program) {
                         program_id
                     } else {
                         let program_id = u16::try_from(programs.len())
                             .expect("dynamic source patch program count exceeded u16");
+                        assert!(
+                            program_id < DYNAMIC_SOURCE_BASE_PROGRAM_FLAG,
+                            "dynamic source patch program count exceeded overlay encoding",
+                        );
                         programs.push(program.clone());
                         interned.insert(program, program_id);
                         program_id
@@ -1549,7 +1577,7 @@ impl DynamicMaskVocab {
                 let mut source_root_programs = source_token_programs
                     .iter()
                     .copied()
-                    .filter(|&program| program != u16::MAX)
+                    .filter(|&program| program < DYNAMIC_SOURCE_BASE_PROGRAM_FLAG)
                     .collect::<FxHashSet<_>>()
                     .into_iter()
                     .collect::<Vec<_>>();
