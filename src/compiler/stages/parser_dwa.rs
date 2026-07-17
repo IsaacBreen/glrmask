@@ -7,6 +7,7 @@ use smallvec::SmallVec;
 
 use crate::Vocab;
 use crate::automata::weighted::dwa::DWA;
+use crate::automata::weighted::equivalence::find_difference;
 use crate::automata::weighted::minimize::minimize;
 use crate::automata::weighted::nwa::{NWA, NwaBody};
 use crate::automata::weighted::terminal_automaton::TerminalAutomaton;
@@ -1675,10 +1676,11 @@ fn determinize_with_supports(
     DeterminizedDwaWithSupports { dwa, supports }
 }
 
-fn determinize_parser_dwa_with_fallbacks(
+fn determinize_parser_dwa_with_fallbacks_impl(
     dwa: &DWA,
     possible_by_state: &[PossibleOutgoingIds],
     num_parser_states: u32,
+    normalize_singletons: bool,
 ) -> DWA {
     fn subset_key(entries: &[(u32, Weight)]) -> Vec<(u32, usize)> {
         entries.iter().map(|(sid, w)| (*sid, w.ptr_key())).collect()
@@ -1697,11 +1699,24 @@ fn determinize_parser_dwa_with_fallbacks(
     canon_buf.sort_unstable_by_key(|(state_id, _)| *state_id);
 
     let mut subset_map: FxHashMap<Vec<(u32, usize)>, u32> = FxHashMap::default();
-    let mut singleton_subsets: FxHashMap<(u32, usize), u32> = FxHashMap::default();
+    // A singleton weighted subset `(q, w)` denotes `w ∩ L(q)`. The incoming
+    // transition already carries `w`, so the destination can always be the
+    // same canonical state for `L(q)` with residual `all`. Keeping `w` in the
+    // state key duplicates rows for different accumulated token sets and was
+    // the dominant cost of fallback determinization on large grammars.
+    let mut normalized_singleton_subsets: FxHashMap<u32, u32> = FxHashMap::default();
+    let mut weighted_singleton_subsets: FxHashMap<(u32, usize), u32> = FxHashMap::default();
+    let normalized_singleton_weight = Weight::all();
+    let normalized_singleton_key = normalized_singleton_weight.ptr_key();
     let start_key = subset_key(&canon_buf);
     subset_map.insert(start_key, result.start_state());
     if let [(state_id, weight)] = canon_buf.as_slice() {
-        singleton_subsets.insert((*state_id, weight.ptr_key()), result.start_state());
+        if normalize_singletons && weight.is_full() {
+            normalized_singleton_subsets.insert(*state_id, result.start_state());
+        } else {
+            weighted_singleton_subsets
+                .insert((*state_id, weight.ptr_key()), result.start_state());
+        }
     }
     let mut worklist: VecDeque<(u32, Vec<(u32, Weight)>)> = VecDeque::new();
     worklist.push_back((result.start_state(), canon_buf.clone()));
@@ -1752,7 +1767,9 @@ fn determinize_parser_dwa_with_fallbacks(
         // state has no DEFAULT edge. In that case every output transition stays
         // singleton, so staging contributions by label and running the generic
         // subset path is pure overhead.
-        if let [(dwa_state_id, path_weight)] = subset_entries.as_slice()
+        if normalize_singletons
+            && let [(dwa_state_id, path_weight)] = subset_entries.as_slice()
+            && path_weight.is_full()
             && let Some(state) = dwa.states().get(*dwa_state_id as usize)
             && !state.transitions.contains_key(&DEFAULT_LABEL)
         {
@@ -1764,23 +1781,18 @@ fn determinize_parser_dwa_with_fallbacks(
             for (&label, (target, transition_weight)) in &mut rewritten {
                 if let Some(detail) = detail.as_mut() {
                     detail.outgoing_transitions_scanned += 1;
-                    detail.intersection_calls += 1;
                 }
                 let input_target = *target;
-                let next_weight = if path_weight.is_full() {
-                    transition_weight.clone()
-                } else {
-                    intersection_cache.intersection(path_weight, transition_weight)
-                };
-                if next_weight.is_empty() {
+                if transition_weight.is_empty() {
                     remove.push(label);
                     continue;
                 }
                 if let Some(detail) = detail.as_mut() {
                     detail.nonempty_intersections += 1;
                 }
-                let singleton_key = (input_target, next_weight.ptr_key());
-                let to_state = if let Some(existing) = singleton_subsets.get(&singleton_key).copied() {
+                let to_state = if let Some(existing) =
+                    normalized_singleton_subsets.get(&input_target).copied()
+                {
                     if let Some(detail) = detail.as_mut() {
                         detail.subset_intern_hits += 1;
                     }
@@ -1790,13 +1802,15 @@ fn determinize_parser_dwa_with_fallbacks(
                         detail.subset_intern_misses += 1;
                     }
                     let new_state = result.add_state();
-                    subset_map.insert(vec![singleton_key], new_state);
-                    singleton_subsets.insert(singleton_key, new_state);
-                    worklist.push_back((new_state, vec![(input_target, next_weight.clone())]));
+                    subset_map.insert(vec![(input_target, normalized_singleton_key)], new_state);
+                    normalized_singleton_subsets.insert(input_target, new_state);
+                    worklist.push_back((
+                        new_state,
+                        vec![(input_target, normalized_singleton_weight.clone())],
+                    ));
                     new_state
                 };
                 *target = to_state;
-                *transition_weight = next_weight;
             }
             for label in remove {
                 rewritten.remove(&label);
@@ -1949,21 +1963,42 @@ fn determinize_parser_dwa_with_fallbacks(
             }
 
             let to_state = if let [(only_state, only_weight)] = contribs.as_slice() {
-                let singleton_key = (*only_state, only_weight.ptr_key());
-                if let Some(existing) = singleton_subsets.get(&singleton_key).copied() {
-                    if let Some(detail) = detail.as_mut() {
-                        detail.subset_intern_hits += 1;
+                if normalize_singletons {
+                    if let Some(existing) = normalized_singleton_subsets.get(only_state).copied() {
+                        if let Some(detail) = detail.as_mut() {
+                            detail.subset_intern_hits += 1;
+                        }
+                        existing
+                    } else {
+                        if let Some(detail) = detail.as_mut() {
+                            detail.subset_intern_misses += 1;
+                        }
+                        let new_state = result.add_state();
+                        subset_map.insert(vec![(*only_state, normalized_singleton_key)], new_state);
+                        normalized_singleton_subsets.insert(*only_state, new_state);
+                        worklist.push_back((
+                            new_state,
+                            vec![(*only_state, normalized_singleton_weight.clone())],
+                        ));
+                        new_state
                     }
-                    existing
                 } else {
-                    if let Some(detail) = detail.as_mut() {
-                        detail.subset_intern_misses += 1;
+                    let singleton_key = (*only_state, only_weight.ptr_key());
+                    if let Some(existing) = weighted_singleton_subsets.get(&singleton_key).copied() {
+                        if let Some(detail) = detail.as_mut() {
+                            detail.subset_intern_hits += 1;
+                        }
+                        existing
+                    } else {
+                        if let Some(detail) = detail.as_mut() {
+                            detail.subset_intern_misses += 1;
+                        }
+                        let new_state = result.add_state();
+                        subset_map.insert(vec![singleton_key], new_state);
+                        weighted_singleton_subsets.insert(singleton_key, new_state);
+                        worklist.push_back((new_state, contribs.into_iter().collect()));
+                        new_state
                     }
-                    let new_state = result.add_state();
-                    subset_map.insert(vec![singleton_key], new_state);
-                    singleton_subsets.insert(singleton_key, new_state);
-                    worklist.push_back((new_state, contribs.into_iter().collect()));
-                    new_state
                 }
             } else {
                 key_buf.clear();
@@ -2021,6 +2056,19 @@ fn determinize_parser_dwa_with_fallbacks(
     }
 
     result
+}
+
+fn determinize_parser_dwa_with_fallbacks(
+    dwa: &DWA,
+    possible_by_state: &[PossibleOutgoingIds],
+    num_parser_states: u32,
+) -> DWA {
+    determinize_parser_dwa_with_fallbacks_impl(
+        dwa,
+        possible_by_state,
+        num_parser_states,
+        true,
+    )
 }
 
 fn optimize_parser_dwa_defaults(
@@ -2846,11 +2894,42 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     let subtract_final_ms = elapsed_ms(subtract_final_started_at);
 
     let fallback_determinize_started_at = Instant::now();
-    parser_dwa_pre_minimize = determinize_parser_dwa_with_fallbacks(
+    let normalized_fallback_started_at = Instant::now();
+    let normalized_fallback = determinize_parser_dwa_with_fallbacks(
         &parser_dwa_pre_minimize,
         &possible_by_state,
         num_parser_states,
     );
+    let normalized_fallback_ms = elapsed_ms(normalized_fallback_started_at);
+    if std::env::var_os("GLRMASK_VALIDATE_FALLBACK_SINGLETON_NORMALIZATION").is_some() {
+        let reference_started_at = Instant::now();
+        let reference = determinize_parser_dwa_with_fallbacks_impl(
+            &parser_dwa_pre_minimize,
+            &possible_by_state,
+            num_parser_states,
+            false,
+        );
+        let reference_ms = elapsed_ms(reference_started_at);
+        let equivalence_started_at = Instant::now();
+        let difference = find_difference(&normalized_fallback, &reference)
+            .expect("fallback singleton validation requires acyclic parser DWAs");
+        let equivalence_ms = elapsed_ms(equivalence_started_at);
+        assert!(
+            difference.is_none(),
+            "normalized parser fallback DWA differs from the legacy weighted-singleton DWA on labels {:?}",
+            difference,
+        );
+        if profiling_enabled {
+            eprintln!(
+                "[glrmask/profile][fallback_singleton_normalization] normalized_states={} normalized_transitions={} reference_states={} reference_transitions={} normalized_ms={normalized_fallback_ms:.3} reference_ms={reference_ms:.3} equivalence_ms={equivalence_ms:.3} result=equivalent",
+                normalized_fallback.num_states(),
+                normalized_fallback.num_transitions(),
+                reference.num_states(),
+                reference.num_transitions(),
+            );
+        }
+    }
+    parser_dwa_pre_minimize = normalized_fallback;
     if collapse_immediate_acceptance {
         parser_dwa_pre_minimize = collapse_final_leaf_targets(parser_dwa_pre_minimize);
     }
@@ -2920,12 +2999,41 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
 mod tests {
     use range_set_blaze::RangeSetBlaze;
 
-    use super::{collapse_final_leaf_targets, subtract_final_weights_from_outgoing_dwa_impl};
+    use super::{
+        PossibleOutgoingIds, collapse_final_leaf_targets,
+        determinize_parser_dwa_with_fallbacks, subtract_final_weights_from_outgoing_dwa_impl,
+    };
     use crate::automata::weighted::dwa::DWA;
+    use crate::compiler::glr::labels::DEFAULT_LABEL;
     use crate::ds::weight::Weight;
 
     fn weight(tokens: std::ops::RangeInclusive<u32>) -> Weight {
         Weight::from_token_set_for_tsid(0, RangeSetBlaze::from_iter([tokens]))
+    }
+
+    fn eval_with_default(dwa: &DWA, word: &[i32]) -> Weight {
+        let mut state_id = dwa.start_state();
+        let mut accumulated = Weight::all();
+        for &label in word {
+            let Some((target, edge_weight)) = dwa.states()[state_id as usize]
+                .transitions
+                .get(&label)
+                .or_else(|| dwa.states()[state_id as usize].transitions.get(&DEFAULT_LABEL))
+            else {
+                return Weight::empty();
+            };
+            accumulated = accumulated.intersection(edge_weight);
+            if accumulated.is_empty() {
+                return accumulated;
+            }
+            state_id = *target;
+        }
+        dwa.states()[state_id as usize]
+            .final_weight
+            .as_ref()
+            .map_or_else(Weight::empty, |final_weight| {
+                accumulated.intersection(final_weight)
+            })
     }
 
     #[test]
@@ -2952,6 +3060,71 @@ mod tests {
             assert_eq!(serial_state.final_weight, parallel_state.final_weight);
             assert_eq!(serial_state.transitions, parallel_state.transitions);
         }
+    }
+
+    #[test]
+    fn fallback_determinization_reuses_singleton_source_states() {
+        let mut source = DWA::new(1, 31);
+        let middle = source.add_state();
+        let leaf = source.add_state();
+        source.add_transition(source.start_state(), 10, middle, weight(0..=15));
+        source.add_transition(source.start_state(), 11, middle, weight(8..=23));
+        source.set_final_weight(middle, weight(4..=19));
+        source.add_transition(middle, 12, leaf, weight(2..=27));
+        source.set_final_weight(leaf, weight(6..=25));
+
+        let possible = (0..source.states().len())
+            .map(|_| PossibleOutgoingIds::Empty)
+            .collect::<Vec<_>>();
+        let determinized = determinize_parser_dwa_with_fallbacks(&source, &possible, 32);
+
+        for word in [
+            vec![],
+            vec![10],
+            vec![11],
+            vec![10, 12],
+            vec![11, 12],
+            vec![12],
+        ] {
+            assert_eq!(
+                determinized.eval_word(&word),
+                source.eval_word(&word),
+                "word={word:?}",
+            );
+        }
+        assert_eq!(determinized.states().len(), source.states().len());
+    }
+
+    #[test]
+    fn fallback_determinization_combines_explicit_and_default_branches() {
+        let mut source = DWA::new(1, 31);
+        let explicit = source.add_state();
+        let fallback = source.add_state();
+        source.add_transition(source.start_state(), 7, explicit, weight(0..=15));
+        source.add_transition(
+            source.start_state(),
+            DEFAULT_LABEL,
+            fallback,
+            weight(8..=23),
+        );
+        source.set_final_weight(explicit, weight(0..=5));
+        source.set_final_weight(fallback, weight(12..=27));
+
+        let possible = vec![
+            PossibleOutgoingIds::All,
+            PossibleOutgoingIds::Empty,
+            PossibleOutgoingIds::Empty,
+        ];
+        let determinized = determinize_parser_dwa_with_fallbacks(&source, &possible, 32);
+
+        let explicit_result = weight(0..=5);
+        let fallback_result = weight(12..=23);
+        assert_eq!(
+            eval_with_default(&determinized, &[7]),
+            explicit_result.union(&fallback_result),
+        );
+        assert_eq!(eval_with_default(&determinized, &[8]), fallback_result);
+        assert_eq!(determinized.eval_word(&[DEFAULT_LABEL]), weight(12..=23));
     }
 
     #[test]
