@@ -33,6 +33,7 @@ pub const CASES: &[BenchCase] = &[
     BenchCase { id: "kubernetes_kb_543_normalized", cfa_name: "Kubernetes---kb_543_Normalized", cfa_build_seconds: 0.092518, schema: include_str!("../data/kubernetes_kb_543_normalized.schema.json") },
     BenchCase { id: "github_easy_o53115", cfa_name: "Github_easy---o53115", cfa_build_seconds: 0.147971, schema: r#"{"$schema":"http://json-schema.org/draft-07/schema#","title":"Resource types","type":"object","properties":{"id":{"type":"integer","description":"Resource type ID","minimum":0},"abbrev":{"type":"string","description":"Resource type abbreviation","maxLength":10},"description":{"type":"string","description":"Resource type description","maxLength":50}},"required":["id","abbrev","description"]}"# },
     BenchCase { id: "github_easy_o9857", cfa_name: "Github_easy---o9857", cfa_build_seconds: 0.338005, schema: r#"{"$schema":"http://json-schema.org/draft-04/schema#","additionalProperties":false,"properties":{"email":{"_format":"email","maxLength":1024,"type":"string"},"token":{"minLength":1,"type":"string"}},"required":["email","token"],"type":"object"}"# },
+    BenchCase { id: "github_hard_o21074", cfa_name: "Github_hard---o21074", cfa_build_seconds: 6.440287, schema: include_str!("../data/github_hard_o21074.schema.json") },
     BenchCase { id: "github_ultra_o62058", cfa_name: "Github_ultra---o62058", cfa_build_seconds: 1.221666, schema: include_str!("../data/github_ultra_o62058.schema.json") },
 ];
 
