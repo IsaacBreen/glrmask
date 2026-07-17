@@ -18,6 +18,14 @@ Measured with MaskBench on the JSONSchemaBench corpus, using the Llama 3 vocabul
   </picture>
 </p>
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-mask-summary-2026-07-16-dark.webp">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/benchmark-mask-summary-2026-07-16.webp">
+    <img src="docs/assets/benchmark-mask-summary-2026-07-16.webp" alt="Mask-generation latency percentile summary for GLRMask and LLGuidance" width="88%">
+  </picture>
+</p>
+
 | Latency | GLRMask | LLGuidance |
 |---|---:|---:|
 | Mean | **1.743 µs** | 24.179 µs |
