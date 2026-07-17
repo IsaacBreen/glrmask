@@ -6,29 +6,48 @@ GLRMask is a grammar-constrained generation library for high-throughput LLM deco
 
 Measured with MaskBench on the JSONSchemaBench corpus, using the Llama 3 vocabulary on an Intel Core i7-13620H under Ubuntu 24.04/WSL2.
 
-> **Preliminary:** these timings are not yet accurate and should not be relied on.
+> **Preliminary:** this engineering run spans three GLRMask revisions. The comparisons below use only coverage-matched GLRMask and LLGuidance observations; see the [full benchmark report](docs/benchmark-full-corpus-2026-07-16.md) for methodology and limitations.
 
-### Mask generation latency
+GLRMask shifts work into ahead-of-time compilation. In this run, that made compilation substantially slower than LLGuidance, while keeping mask generation in the low-microsecond range across the measured distribution and widening the latency advantage in the tail.
+
+### Mask-generation latency
+
+<p align="center">
+  <img src="docs/assets/benchmark-mask-tail-2026-07-16.webp" alt="Mask-generation latency tail curves for GLRMask and LLGuidance, with GLRMask speedup by exceedance probability" width="100%">
+</p>
+
+<p align="center"><em>Full paired tail over 2,122,307 shared finite token positions. The lower panel is LLGuidance latency divided by GLRMask latency.</em></p>
+
+<p align="center">
+  <img src="docs/assets/benchmark-mask-summary-2026-07-16.webp" alt="Mask-generation latency percentile summary for GLRMask and LLGuidance" width="88%">
+</p>
 
 | Latency | GLRMask | LLGuidance |
 |---|---:|---:|
-| Median | **1.440 µs** | 12.197 µs |
-| p99 | **5.172 µs** | 246.788 µs |
-| p99.9 | **7.675 µs** | 950.309 µs |
+| Mean | **1.743 µs** | 24.179 µs |
+| Median | **1.440 µs** | 12.205 µs |
+| p99 | **5.171 µs** | 247.306 µs |
+| p99.9 | **7.673 µs** | 950.700 µs |
+| p99.99 | **11.556 µs** | 2,771.304 µs |
 | Maximum | **28.565 µs** | 8,041.301 µs |
 
-![Mask generation latency for GLRMask and LLGuidance on a logarithmic scale](docs/assets/mask-generation-latency-2026-07-16.svg)
+The figure gives a fuller percentile view; the table preserves the headline values exactly. Lower is better.
 
 ### Compilation time
 
-| Latency | GLRMask | LLGuidance |
+<p align="center">
+  <img src="docs/assets/benchmark-compilation-summary-2026-07-16.webp" alt="Compilation-time percentile summary for GLRMask and LLGuidance" width="88%">
+</p>
+
+| Compilation time | GLRMask | LLGuidance |
 |---|---:|---:|
-| Median | 50.963 ms | **0.905 ms** |
-| p99 | 565.006 ms | **11.810 ms** |
-| p99.9 | 2,217.617 ms | **42.986 ms** |
+| Mean | 86.698 ms | **1.527 ms** |
+| Median | 50.963 ms | **0.904 ms** |
+| p99 | 565.257 ms | **11.711 ms** |
+| p99.9 | 2,221.152 ms | **42.989 ms** |
 | Maximum | 6,440.287 ms | **239.964 ms** |
 
-See the [full benchmark report](docs/benchmark-full-corpus-2026-07-16.md) for the complete setup and results.
+Compilation values use the 8,956 problems on which both frameworks built successfully. Lower is better.
 
 ## Installation
 

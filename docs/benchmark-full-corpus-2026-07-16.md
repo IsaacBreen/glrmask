@@ -74,7 +74,19 @@ The 1,286 joint failures are concentrated in unsupported comparison-boundary sch
 
 ## Build time and TTFM
 
-Times are milliseconds over successful builds for each framework's actual coverage.
+The framework-specific tables use each framework's actual successful-build coverage. The README comparison first restricts both frameworks to their shared successful-build cohort.
+
+### Coverage-matched native build comparison
+
+The README comparison uses the **8,956 problems on which both GLRMask native and LLGuidance native built successfully**, so every value has the same problem denominator.
+
+| Compilation time | GLRMask native | LLGuidance native |
+|---|---:|---:|
+| Mean | 86.698 ms | **1.527 ms** |
+| Median | 50.963 ms | **0.904 ms** |
+| p99 | 565.257 ms | **11.711 ms** |
+| p99.9 | 2,221.152 ms | **42.989 ms** |
+| Maximum | 6,440.287 ms | **239.964 ms** |
 
 ### Build time
 
@@ -115,6 +127,19 @@ Microseconds. These are each framework's valid measured token populations, so th
 | GLRMask native | 2,127,718 | 1.440 | 2.954 | 3.629 | 5.172 | 7.675 | 28.565 | 0 |
 | GLRMask dynamic | 1,175,725 | 53.549 | 8,150.759 | 15,903.389 | 23,097.303 | 55,387.264 | 323,576.983 | 219,233 |
 | LLGuidance native | 2,129,162 | 12.197 | 35.854 | 48.600 | 246.788 | 950.309 | 8,041.301 | 1,478 |
+
+### Coverage-matched native mask-generation comparison
+
+The README figures and exact-value table use **2,122,307 shared finite token positions**. At every included position, both GLRMask native and LLGuidance native have a finite mask-generation measurement.
+
+| Latency | GLRMask native | LLGuidance native |
+|---|---:|---:|
+| Mean | **1.743 µs** | 24.179 µs |
+| Median | **1.440 µs** | 12.205 µs |
+| p99 | **5.171 µs** | 247.306 µs |
+| p99.9 | **7.673 µs** | 950.700 µs |
+| p99.99 | **11.556 µs** | 2,771.304 µs |
+| Maximum | **28.565 µs** | 8,041.301 µs |
 
 ### Commit
 
@@ -175,7 +200,9 @@ The high native-versus-LLGuidance disagreement rate is a major semantic finding,
 
 ## Plot audit
 
-The eight pre-existing plots were generated in CFA's global chunk mode over all 130 chunks. Their labels do not expose the framework-coverage change or dynamic denominator. They were preserved unchanged but **quarantined from publication**. This report uses coverage-labelled tables generated from the validated aggregate. No replacement plot was necessary.
+The eight pre-existing plots were generated in CFA's global chunk mode over all 130 chunks. Their labels do not expose the framework-coverage change or dynamic denominator. They remain preserved unchanged but **quarantined from publication**.
+
+The three README figures are replacements generated directly from `aggregate-problems.jsonl.zst`. They use only coverage-matched GLRMask-native and LLGuidance-native observations: 2,122,307 shared finite mask positions for the two mask figures, and 8,956 shared successful builds for the compilation figure. They do not reuse the quarantined plots' denominators.
 
 ## Reproduction and artifacts
 
