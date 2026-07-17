@@ -1,21 +1,26 @@
 name: Render dark-mode benchmark plots
 
 on:
-  push:
+  pull_request:
     branches:
-      - fix/dark-mode-benchmark-plots-20260717
-    paths:
-      - .github/workflows/render-dark-mode-benchmark-plots.yml
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
 
 permissions:
   contents: write
 
 jobs:
   render:
+    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
           fetch-depth: 0
 
       - uses: actions/setup-python@v5
@@ -55,16 +60,10 @@ jobs:
                   + 0.0722 * rgb[:, :, 2]
               )
 
-              # Reverse the neutral scale into GitHub's dark canvas: white
-              # becomes the page background, while black text and marks become
-              # GitHub's light foreground. This preserves antialiasing and the
-              # hatch/solid distinction in the summary figures.
               neutral = chroma <= 18.0
               t = np.clip(luminance / 255.0, 0.0, 1.0)[..., None]
               neutral_rgb = background * t + foreground * (1.0 - t)
 
-              # Keep colored series distinct, but raise dark colors enough to
-              # remain legible against the dark canvas.
               colored_rgb = rgb.copy()
               colored_luminance = luminance / 255.0
               lift = np.clip(
@@ -125,4 +124,4 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add README.md docs/assets/*-dark.webp
           git commit -m "Add dark-mode benchmark figures"
-          git push origin HEAD:fix/dark-mode-benchmark-plots-20260717
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
