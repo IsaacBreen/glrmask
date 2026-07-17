@@ -931,7 +931,12 @@ fn fill_mask_dynamic_impl(
     let mut token_program_groups_evaluated = 0usize;
     let mut token_program_groups_admitted = 0usize;
     let mut token_program_acceptance_cache_hits = 0usize;
-    let mut lazy_continuation_builds_remaining = 1usize;
+    // Building a whole-vocabulary continuation partition is compile work,
+    // never decoding-loop work. A cold partition costs milliseconds to tens of
+    // milliseconds, while direct traversal of the same narrow residual is
+    // usually sub-millisecond. Runtime may use cached/prebuilt partitions, but
+    // it must not construct one inside a timed mask call.
+    let lazy_continuation_builds_remaining = 0usize;
     if profile {
         eprintln!(
             "[glrmask/profile][dynamic_mask_config] tokenizer_states={} epsilon={} fast_transition_rows={}",
@@ -1292,7 +1297,6 @@ fn fill_mask_dynamic_impl(
                         &mut traversal_cache,
                     )
                 {
-                    lazy_continuation_builds_remaining -= 1;
                     partition = vocab.cached_or_build_continuation_partition(
                         &state.constraint.tokenizer,
                         tokenizer_state,
