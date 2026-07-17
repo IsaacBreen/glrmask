@@ -16,20 +16,29 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.ref }}
           repository: ${{ github.event.pull_request.head.repo.full_name }}
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - name: Build contact sheet
         run: |
+          mkdir -p preview
+          git show origin/main:docs/assets/benchmark-mask-tail-2026-07-16.webp > preview/original-tail-light.webp
+          git show origin/main:docs/assets/benchmark-mask-tail-2026-07-16-dark.webp > preview/original-tail-dark.webp
           python -m pip install --disable-pip-version-check pillow
           python <<'PY'
           from pathlib import Path
           from PIL import Image, ImageDraw, ImageFont
 
           assets = Path('docs/assets')
+          preview = Path('preview')
           files = [
-              ('Tail — light', assets / 'benchmark-mask-tail-2026-07-16.webp'),
-              ('Tail — dark', assets / 'benchmark-mask-tail-2026-07-16-dark.webp'),
+              ('Original tail — light', preview / 'original-tail-light.webp'),
+              ('Original tail — dark', preview / 'original-tail-dark.webp'),
+              ('Current tail — light', assets / 'benchmark-mask-tail-2026-07-16.webp'),
+              ('Current tail — dark', assets / 'benchmark-mask-tail-2026-07-16-dark.webp'),
+              ('Mask summary — light', assets / 'benchmark-mask-summary-2026-07-16.webp'),
+              ('Mask summary — dark', assets / 'benchmark-mask-summary-2026-07-16-dark.webp'),
               ('Compilation — light', assets / 'benchmark-compilation-summary-2026-07-16.webp'),
               ('Compilation — dark', assets / 'benchmark-compilation-summary-2026-07-16-dark.webp'),
           ]
@@ -54,13 +63,12 @@ jobs:
               y += label_h
               sheet.paste(image, (pad, y))
               y += image.height + pad
-          Path('preview').mkdir()
-          sheet.save('preview/contact-sheet.png')
+          sheet.save(preview / 'contact-sheet.png')
           for _label, path in files:
-              Image.open(path).convert('RGB').save(Path('preview') / (path.stem + '.png'))
+              Image.open(path).convert('RGB').save(preview / (path.stem + '.png'))
           PY
       - uses: actions/upload-artifact@v4
         with:
-          name: benchmark-plot-preview
+          name: benchmark-plot-preview-source
           path: preview/
           retention-days: 1
