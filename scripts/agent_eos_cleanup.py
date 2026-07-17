@@ -101,7 +101,28 @@ elif "eos_unchanged" in text:
     raise RuntimeError("unexpected eos_unchanged cache layout")
 path.write_text(text)
 
-for forbidden in ("eos_token_id", "EOS_BYTES", "update_eos_mask", "finalize_eos_ns"):
+wasm_path = ROOT / "glrmask-wasm/src/lib.rs"
+wasm = wasm_path.read_text()
+old_wasm = '''/// Whether end-of-sequence is currently grammatically admissible.
+#[unsafe(no_mangle)]
+pub extern "C" fn glrmask_eos_allowed(handle: u32) -> u32 {
+    with_session_mut(handle, |session| u32::from(session.inner.eos_allowed())).unwrap_or(0)
+}
+
+'''
+if old_wasm in wasm:
+    wasm = wasm.replace(old_wasm, "", 1)
+elif "eos_allowed" in wasm:
+    raise RuntimeError("unexpected WASM eos_allowed layout")
+wasm_path.write_text(wasm)
+
+for forbidden in (
+    "eos_token_id",
+    "EOS_BYTES",
+    "update_eos_mask",
+    "finalize_eos_ns",
+    "eos_allowed",
+):
     hits = []
     for rust in ROOT.rglob("*.rs"):
         if forbidden in rust.read_text():
