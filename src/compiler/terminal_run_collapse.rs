@@ -488,7 +488,7 @@ nt start ::= item item? item?;
         let table = GLRTable::build(&grammar);
         let (characterizations, _) = characterize_terminals_profiled(&table, &grammar);
         let templates = Templates::from_characterizations(&characterizations);
-        let vocab = Vocab::new(vec![(0, b"a".to_vec())], None);
+        let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
         let terminal_a = (0..grammar.num_terminals)
             .find(|&terminal| grammar.terminal_display_name(terminal) == "A")
             .expect("terminal A");

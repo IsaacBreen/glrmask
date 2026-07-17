@@ -2111,7 +2111,6 @@ let eager_possible_matches = env_flag_enabled("GLRMASK_EAGER_POSSIBLE_MATCHES");
             original_token_to_internal: internal_ids.vocab_tokens.original_to_internal.clone(),
             internal_token_to_tokens: internal_ids.vocab_tokens.internal_to_originals_vecs(),
             template_dfas_by_terminal,
-            eos_token_id: vocab.eos_token_id,
             token_bytes,
             internal_token_bytes,
             token_bytes_dense: Vec::new(),

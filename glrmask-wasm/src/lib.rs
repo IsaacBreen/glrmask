@@ -211,10 +211,15 @@ pub extern "C" fn glrmask_commit(handle: u32, token_id: u32) -> u32 {
     }
 }
 
-/// Whether end-of-sequence is currently grammatically admissible.
+/// Return 1 when the session has consumed a complete constrained input.
 #[unsafe(no_mangle)]
-pub extern "C" fn glrmask_eos_allowed(handle: u32) -> u32 {
-    with_session_mut(handle, |session| u32::from(session.inner.eos_allowed())).unwrap_or(0)
+pub extern "C" fn glrmask_is_finished(handle: u32) -> u32 {
+    clear_error();
+    let Some(finished) = with_session_mut(handle, |session| session.inner.is_finished()) else {
+        set_error("invalid glrmask session handle");
+        return 0;
+    };
+    u32::from(finished)
 }
 
 /// Restore a session to its artifact's initial parser/lexer state.

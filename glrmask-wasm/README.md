@@ -30,7 +30,7 @@ glrmask_session_free(handle)
 glrmask_mask(handle) -> pointer
 glrmask_mask_len(handle) -> u32 words
 glrmask_commit(handle, token_id) -> 1 | 0
-glrmask_eos_allowed(handle) -> 1 | 0
+glrmask_is_finished(handle) -> 1 | 0
 glrmask_reset(handle) -> 1 | 0
 glrmask_last_error_ptr() -> pointer
 glrmask_last_error_len() -> bytes

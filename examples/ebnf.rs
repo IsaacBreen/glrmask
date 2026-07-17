@@ -11,9 +11,7 @@ fn main() {
             (0, b"hello".to_vec()),
             (1, b" ".to_vec()),
             (2, b"world".to_vec()),
-        ],
-        None,
-    );
+        ]);
 
     let constraint = Constraint::from_ebnf(
         r#"start ::= "hello" " " "world""#,

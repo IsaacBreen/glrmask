@@ -21,7 +21,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use numpy::{PyArray1, PyReadwriteArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBytes, PyDict};
+use pyo3::types::{PyBytes, PyDict};
 use self_cell::self_cell;
 use std::sync::Arc;
 use glrmask::__private::{
@@ -78,7 +78,7 @@ fn dict_to_vocab(token_to_id: &Bound<'_, PyDict>) -> PyResult<glrmask::Vocab> {
         let token_id: u32 = value.extract()?;
         entries.push((token_id, token_bytes));
     }
-    Ok(glrmask::Vocab::new(entries, None))
+    Ok(glrmask::Vocab::new(entries))
 }
 
 fn id_to_bytes_dict_to_vocab(id_to_bytes: &Bound<'_, PyDict>) -> PyResult<glrmask::Vocab> {
@@ -92,26 +92,7 @@ fn id_to_bytes_dict_to_vocab(id_to_bytes: &Bound<'_, PyDict>) -> PyResult<glrmas
             .to_vec();
         entries.push((token_id, token_bytes));
     }
-    Ok(glrmask::Vocab::new(entries, None))
-}
-
-fn llama_cpp_to_vocab(llm: &Bound<'_, PyAny>) -> PyResult<glrmask::Vocab> {
-    let n_vocab: u32 = llm.call_method0("n_vocab")?.extract()?;
-    let eos_token_id: u32 = llm.call_method0("token_eos")?.extract()?;
-    let kwargs = PyDict::new(llm.py());
-    kwargs.set_item("special", true)?;
-
-    let mut entries = Vec::with_capacity(n_vocab as usize);
-    for token_id in 0..n_vocab {
-        let token_bytes = llm
-            .call_method("detokenize", (vec![token_id],), Some(&kwargs))?
-            .downcast_into::<PyBytes>()?
-            .as_bytes()
-            .to_vec();
-        entries.push((token_id, token_bytes));
-    }
-
-    Ok(glrmask::Vocab::new(entries, Some(eos_token_id)))
+    Ok(glrmask::Vocab::new(entries))
 }
 
 fn constraint_result<T, E: std::fmt::Display>(result: Result<T, E>) -> PyResult<T> {
@@ -121,9 +102,9 @@ fn constraint_result<T, E: std::fmt::Display>(result: Result<T, E>) -> PyResult<
 fn words_to_bool_array<'py>(
     py: Python<'py>,
     words: &[u32],
-    max_token: u32,
+    token_count: usize,
 ) -> Bound<'py, PyArray1<bool>> {
-    let n = (max_token + 1) as usize;
+    let n = token_count;
     let n_full_words = n / 32;
     let remainder = n % 32;
     let mut bools = vec![false; n];
@@ -144,6 +125,17 @@ fn words_to_bool_array<'py>(
         }
     }
     PyArray1::from_vec(py, bools)
+}
+
+fn resolved_mask_size(max_token: u32, requested: Option<usize>) -> PyResult<usize> {
+    let minimum = max_token as usize + 1;
+    let size = requested.unwrap_or(minimum);
+    if size < minimum {
+        return Err(PyValueError::new_err(format!(
+            "mask size {size} is smaller than the constraint token range {minimum}"
+        )));
+    }
+    Ok(size)
 }
 
 fn bitmask_u32_view<'a, 'py>(
@@ -218,7 +210,6 @@ fn mask_profile_to_dict<'py>(
     dict.set_item("finalize_ns", profile.finalize_ns)?;
     dict.set_item("finalize_zero_ns", profile.finalize_zero_ns)?;
     dict.set_item("finalize_dense_to_buf_ns", profile.finalize_dense_to_buf_ns)?;
-    dict.set_item("finalize_eos_ns", profile.finalize_eos_ns)?;
     dict.set_item("finalize_cache_ns", profile.finalize_cache_ns)?;
     dict.set_item("delta_prev_available", profile.delta_prev_available)?;
     dict.set_item("delta_added_bits", profile.delta_added_bits)?;
@@ -461,11 +452,6 @@ impl PyVocab {
         Ok(Self { inner: vocab })
     }
 
-    #[staticmethod]
-    fn from_llama_cpp(llm: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let vocab = llama_cpp_to_vocab(llm)?;
-        Ok(Self { inner: vocab })
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -533,9 +519,18 @@ impl PyConstraint {
 #[pymethods]
 impl PyConstraint {
     #[staticmethod]
-    fn from_json_schema(schema: &str, vocab: &PyVocab) -> PyResult<Self> {
+    #[pyo3(signature = (schema, vocab, end_token_ids=None))]
+    fn from_json_schema(
+        schema: &str,
+        vocab: &PyVocab,
+        end_token_ids: Option<Vec<u32>>,
+    ) -> PyResult<Self> {
         Self::from_constraint_result(
-            glrmask::Constraint::from_json_schema(schema, &vocab.inner),
+            glrmask::Constraint::from_json_schema_with_end_tokens(
+                schema,
+                &vocab.inner,
+                end_token_ids.as_deref().unwrap_or(&[]),
+            ),
             vocab,
         )
     }
@@ -614,9 +609,18 @@ impl PyDynamicConstraint {
 #[pymethods]
 impl PyDynamicConstraint {
     #[staticmethod]
-    fn from_json_schema(schema: &str, vocab: &PyVocab) -> PyResult<Self> {
+    #[pyo3(signature = (schema, vocab, end_token_ids=None))]
+    fn from_json_schema(
+        schema: &str,
+        vocab: &PyVocab,
+        end_token_ids: Option<Vec<u32>>,
+    ) -> PyResult<Self> {
         Self::from_constraint_result(
-            glrmask::DynamicConstraint::from_json_schema(schema, &vocab.inner),
+            glrmask::DynamicConstraint::from_json_schema_with_end_tokens(
+                schema,
+                &vocab.inner,
+                end_token_ids.as_deref().unwrap_or(&[]),
+            ),
             vocab,
         )
     }
@@ -721,9 +725,17 @@ impl PyDynamicConstraintState {
             .with_dependent(|_owner, state| state.is_finished())
     }
 
-    fn mask<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
-        let words = self.inner.with_dependent(|_owner, state| state.mask());
-        Ok(words_to_bool_array(py, &words, self.max_token))
+    #[pyo3(signature = (size=None))]
+    fn mask<'py>(
+        &self,
+        py: Python<'py>,
+        size: Option<usize>,
+    ) -> PyResult<Bound<'py, PyArray1<bool>>> {
+        let size = resolved_mask_size(self.max_token, size)?;
+        let mut words = vec![0u32; size.div_ceil(32)];
+        self.inner
+            .with_dependent(|_owner, state| state.fill_mask(&mut words));
+        Ok(words_to_bool_array(py, &words, size))
     }
 }
 
@@ -740,9 +752,17 @@ pub struct PyConstraintState {
 
 #[pymethods]
 impl PyConstraintState {
-    fn mask<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<bool>>> {
-        let words = self.inner.with_dependent(|_owner, state| state.mask());
-        Ok(words_to_bool_array(py, &words, self.max_token))
+    #[pyo3(signature = (size=None))]
+    fn mask<'py>(
+        &self,
+        py: Python<'py>,
+        size: Option<usize>,
+    ) -> PyResult<Bound<'py, PyArray1<bool>>> {
+        let size = resolved_mask_size(self.max_token, size)?;
+        let mut words = vec![0u32; size.div_ceil(32)];
+        self.inner
+            .with_dependent(|_owner, state| state.fill_mask(&mut words));
+        Ok(words_to_bool_array(py, &words, size))
     }
 
     fn fill_mask(&self, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<()> {

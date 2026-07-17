@@ -16,6 +16,6 @@ t BOOL ::= "true";
 t X ::= "x";
 nt S ::= X KEY X | X ITEM BOOL | BOOL KEY BOOL | BOOL ITEM X;
 "#;
-    let vocab = Vocab::new(vec![(0, b" t".to_vec())], None);
+    let vocab = Vocab::new(vec![(0, b" t".to_vec())]);
     Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
 }

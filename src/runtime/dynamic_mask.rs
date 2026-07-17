@@ -339,24 +339,6 @@ fn should_lazy_build_continuation_partition(
     })
 }
 
-fn update_eos_mask(state: &ConstraintState<'_>, buf: &mut [u32]) {
-    let Some(token_id) = state.constraint.eos_token_id else {
-        return;
-    };
-    if state.constraint.has_special_token_id(token_id) {
-        return;
-    }
-    let word = token_id as usize / 32;
-    let bit = token_id % 32;
-    let Some(slot) = buf.get_mut(word) else {
-        return;
-    };
-    *slot &= !(1u32 << bit);
-    if state.is_complete() {
-        *slot |= 1u32 << bit;
-    }
-}
-
 fn update_special_token_mask(state: &ConstraintState<'_>, buf: &mut [u32]) {
     let mut previous_token_id = None;
     for special in &state.constraint.special_token_terminals {
@@ -881,6 +863,10 @@ fn fill_mask_dynamic_impl(
     buf: &mut [u32],
     deadline: Option<Instant>,
 ) -> Result<(), String> {
+    let required = state.constraint.mask_len();
+    assert!(buf.len() >= required, "mask buffer is smaller than constraint mask");
+    let (buf, tail) = buf.split_at_mut(required);
+    tail.fill(0);
     let check_deadline = || {
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             Err("glrmask_dynamic mask generation timed out".to_owned())
@@ -1571,7 +1557,6 @@ fn fill_mask_dynamic_impl(
     }
 
     update_special_token_mask(state, buf);
-    update_eos_mask(state, buf);
     if let Some(cache_key) = cache_key {
         vocab.cache_mask(cache_key, buf);
     }
@@ -1678,9 +1663,7 @@ mod tests {
                 (3, b"ab".to_vec()),
                 (4, b"aab".to_vec()),
                 (5, b"aaa".to_vec()),
-            ],
-            None,
-        );
+            ]);
         let grammar = r#"
 start start;
 t A ::= 'a'+;
@@ -1705,9 +1688,7 @@ nt start ::= A B | A;
     #[test]
     fn dynamic_mask_trie_is_rebuilt_after_load() {
         let vocab = Vocab::new(
-            vec![(0, b"a".to_vec()), (1, b"b".to_vec()), (2, b"ab".to_vec())],
-            None,
-        );
+            vec![(0, b"a".to_vec()), (1, b"b".to_vec()), (2, b"ab".to_vec())]);
         let grammar = r#"
 start start;
 t A ::= 'a';
@@ -1727,9 +1708,7 @@ nt start ::= A B;
                 (1, b"b".to_vec()),
                 (7, b"a".to_vec()),
                 (12, b"ab".to_vec()),
-            ],
-            None,
-        );
+            ]);
         let grammar = r#"
 start start;
 t A ::= 'a';
@@ -1759,9 +1738,7 @@ nt start ::= A B;
                 (2, b"b".to_vec()),
                 (3, b" b".to_vec()),
                 (4, b"  b".to_vec()),
-            ],
-            None,
-        );
+            ]);
         let grammar = r#"
 start start;
 ignore WS;
@@ -1807,9 +1784,7 @@ nt start ::= A B;
                 (17, b"a ".to_vec()),
                 (18, b" a ".to_vec()),
                 (19, b"ab c".to_vec()),
-            ],
-            None,
-        );
+            ]);
         let grammar = r#"
 start start;
 ignore WS;
@@ -1844,9 +1819,7 @@ nt start ::= item item? item?;
                 (2, b"ab".to_vec()),
                 (3, b" ".to_vec()),
                 (4, b" a".to_vec()),
-            ],
-            None,
-        );
+            ]);
         let grammar = r#"
 start start;
 ignore WS;
@@ -1886,9 +1859,7 @@ nt start ::= item item? item?;
             .into_iter()
             .enumerate()
             .map(|(id, word)| (id as u32, word.as_bytes().to_vec()))
-            .collect(),
-            None,
-        );
+            .collect());
         let languages = (1u32..1u32 << WORDS.len())
             .filter(|mask| mask.count_ones() <= 2)
             .collect::<Vec<_>>();
@@ -1982,9 +1953,7 @@ nt start ::= item item? item?;
                 (8, b"b c".to_vec()),
                 (9, b" aa".to_vec()),
                 (10, b" bb".to_vec()),
-            ],
-            None,
-        );
+            ]);
         let grammar = r#"
 start start;
 ignore WS;
@@ -2023,9 +1992,7 @@ nt start ::= A B C | B A C | A C | B C;
                 (1, b"aa".to_vec()),
                 (2, b"aaa".to_vec()),
                 (3, b"aaaa".to_vec()),
-            ],
-            None,
-        );
+            ]);
         let grammar = r#"
 start start;
 t A ::= 'a'+;
@@ -2062,9 +2029,7 @@ nt start ::= A A;
                 (3, b"\\\"".to_vec()),
                 (4, b"\"a".to_vec()),
                 (5, b"a\"".to_vec()),
-            ],
-            None,
-        );
+            ]);
         let constraint =
             Constraint::from_json_schema(r#"{"type":"string"}"#, &vocab).unwrap();
 
@@ -2086,9 +2051,7 @@ nt start ::= A A;
                 (0, b"++++++++a".to_vec()),
                 (1, b"++++".to_vec()),
                 (2, b"a".to_vec()),
-            ],
-            None,
-        );
+            ]);
         let grammar = r#"
 start start;
 t U ::= '+';
@@ -2119,9 +2082,7 @@ nt start ::= U* 'a';
                 (5, b".".to_vec()),
                 (6, b"e".to_vec()),
                 (7, b"+".to_vec()),
-            ],
-            None,
-        );
+            ]);
         let constraint =
             Constraint::from_json_schema(r#"{"type":"number"}"#, &vocab).unwrap();
 
@@ -2142,9 +2103,7 @@ nt start ::= U* 'a';
                 (1, b"b".to_vec()),
                 (2, b"c".to_vec()),
                 (3, b"ab".to_vec()),
-            ],
-            None,
-        );
+            ]);
         let grammar = r#"
 start start;
 t A ::= 'a' | 'ab';
@@ -2181,9 +2140,7 @@ nt start ::= A C | B D;
                 (2, b"b".to_vec()),
                 (3, b"bc".to_vec()),
                 (4, b"c".to_vec()),
-            ],
-            None,
-        );
+            ]);
         let grammar = r#"
 start start;
 t A ::= 'a' | 'ab';
@@ -2211,9 +2168,7 @@ nt start ::= A B;
                 (2, b"abc".to_vec()),
                 (3, b"bc".to_vec()),
                 (4, b"c".to_vec()),
-            ],
-            None,
-        );
+            ]);
         let grammar = r#"
 start start;
 t A ::= 'a' | 'abc';

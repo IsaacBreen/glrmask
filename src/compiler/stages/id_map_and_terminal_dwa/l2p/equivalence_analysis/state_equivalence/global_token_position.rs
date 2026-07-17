@@ -1616,9 +1616,7 @@ mod tests {
             entries
                 .iter()
                 .map(|&(token, bytes)| (token, bytes.to_vec()))
-                .collect(),
-            None,
-        )
+                .collect())
     }
 
     #[test]
