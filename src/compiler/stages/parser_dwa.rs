@@ -1506,9 +1506,7 @@ fn determinize_with_supports(
     {
         use rayon::prelude::*;
         let detail_enabled = detail.is_some();
-        let intern_final_groups =
-            std::env::var_os("GLRMASK_EXPERIMENTAL_INTERN_FINAL_GROUPS").is_some();
-        let final_weights_by_signature: Vec<Option<Weight>> = if intern_final_groups {
+        let final_weights_by_signature: Vec<Option<Weight>> = {
             let intern_started_at = Instant::now();
             let mut component_ids = FxHashMap::<(usize, Vec<usize>), usize>::default();
             let mut components = Vec::<(Weight, SmallVec<[Weight; 4]>)>::new();
@@ -1604,55 +1602,6 @@ fn determinize_with_supports(
                 );
             }
             results
-        } else {
-            let final_weights_by_signature: Vec<(SmallVec<[Weight; 4]>, f64, f64)> =
-                final_signature_groups
-                    .par_iter()
-                    .map_init(ScopedWeightOpCache::default, |weight_ops, final_groups| {
-                        let mut path_union_ms = 0.0;
-                        let mut intersection_ms = 0.0;
-                        let final_contributions: SmallVec<[Weight; 4]> = final_groups
-                            .iter()
-                            .filter_map(|(final_w, path_weights)| {
-                                let pw_union = if detail_enabled {
-                                    let path_union_started = Instant::now();
-                                    let pw_union = weight_ops.union_all(path_weights.iter());
-                                    path_union_ms += elapsed_ms(path_union_started);
-                                    pw_union
-                                } else {
-                                    weight_ops.union_all(path_weights.iter())
-                                };
-                                let contribution = if detail_enabled {
-                                    let intersection_started = Instant::now();
-                                    let contribution = weight_ops.intersection(&pw_union, final_w);
-                                    intersection_ms += elapsed_ms(intersection_started);
-                                    contribution
-                                } else {
-                                    weight_ops.intersection(&pw_union, final_w)
-                                };
-                                (!contribution.is_empty()).then_some(contribution)
-                            })
-                            .collect();
-                        (final_contributions, path_union_ms, intersection_ms)
-                    })
-                    .collect();
-            final_weights_by_signature
-                .into_iter()
-                .map(|(final_contributions, path_union_ms, intersection_ms)| {
-                    if let Some(detail) = detail.as_mut() {
-                        detail.final_path_union_ms += path_union_ms;
-                        detail.final_intersection_ms += intersection_ms;
-                    }
-                    let output_union_started = detail.as_ref().map(|_| Instant::now());
-                    let final_weight = union_cache.union_all(final_contributions.iter());
-                    if let (Some(detail), Some(started_at)) =
-                        (detail.as_mut(), output_union_started)
-                    {
-                        detail.final_output_union_ms += elapsed_ms(started_at);
-                    }
-                    (!final_weight.is_empty()).then_some(final_weight)
-                })
-                .collect()
         };
         for (state_id, signature_id) in final_jobs {
             if let Some(weight) = &final_weights_by_signature[signature_id] {
@@ -2311,10 +2260,7 @@ fn subtract_final_weights_from_outgoing_dwa_impl(dwa: &mut DWA, parallel: bool) 
 }
 
 fn subtract_final_weights_from_outgoing_dwa(dwa: &mut DWA) {
-    subtract_final_weights_from_outgoing_dwa_impl(
-        dwa,
-        std::env::var_os("GLRMASK_EXPERIMENTAL_PARALLEL_FINAL_SUBTRACTION").is_some(),
-    );
+    subtract_final_weights_from_outgoing_dwa_impl(dwa, rayon::current_num_threads() > 1);
 }
 
 fn dwa_to_nwa(dwa: &DWA) -> NWA {
