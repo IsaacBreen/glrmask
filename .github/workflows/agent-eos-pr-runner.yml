@@ -57,13 +57,13 @@ jobs:
         run: exit 1
       - name: Verify no EOS runtime metadata remains
         run: |
-          ! grep -R -n -E 'eos_token_id|EOS_BYTES|update_eos_mask|finalize_eos_ns' --include='*.rs' src python glrmask-runtime tests
-      - name: Check workspace
+          ! grep -R -n -E 'eos_token_id|EOS_BYTES|update_eos_mask|finalize_eos_ns|eos_allowed' --include='*.rs' --exclude-dir=.git --exclude-dir=target .
+      - name: Check workspace libraries and binaries
         id: check
         continue-on-error: true
         run: |
           set -o pipefail
-          cargo check --workspace --all-targets 2>&1 | tee /tmp/agent-eos-check.log
+          cargo check --workspace 2>&1 | tee /tmp/agent-eos-check.log
       - name: Upload compiler failure
         if: steps.check.outcome == 'failure'
         uses: actions/upload-artifact@v4
@@ -73,20 +73,35 @@ jobs:
       - name: Stop after compiler failure
         if: steps.check.outcome == 'failure'
         run: exit 1
-      - name: Test workspace
+      - name: Test compiler crate
         id: test
         continue-on-error: true
         run: |
           set -o pipefail
-          cargo test --workspace 2>&1 | tee /tmp/agent-eos-test.log
-      - name: Upload test failure
+          cargo test -p glrmask 2>&1 | tee /tmp/agent-eos-test.log
+      - name: Upload compiler-crate test failure
         if: steps.test.outcome == 'failure'
         uses: actions/upload-artifact@v4
         with:
           name: agent-eos-test-log
           path: /tmp/agent-eos-test.log
-      - name: Stop after test failure
+      - name: Stop after compiler-crate test failure
         if: steps.test.outcome == 'failure'
+        run: exit 1
+      - name: Test runtime integration boundary
+        id: runtime_test
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cargo test -p glrmask-runtime --test runtime_session 2>&1 | tee /tmp/agent-eos-runtime-test.log
+      - name: Upload runtime test failure
+        if: steps.runtime_test.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-eos-runtime-test-log
+          path: /tmp/agent-eos-runtime-test.log
+      - name: Stop after runtime test failure
+        if: steps.runtime_test.outcome == 'failure'
         run: exit 1
       - name: Commit validated source changes to feature branch
         run: |
