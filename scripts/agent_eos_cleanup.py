@@ -116,6 +116,32 @@ elif "eos_allowed" in wasm:
     raise RuntimeError("unexpected WASM eos_allowed layout")
 wasm_path.write_text(wasm)
 
+runtime_python_path = ROOT / "python-runtime/src/lib.rs"
+runtime_python = runtime_python_path.read_text()
+old_runtime_python = '''    fn eos_allowed(&self) -> bool {
+        self.inner.eos_allowed()
+    }
+
+'''
+compact_runtime_python = '''    fn eos_allowed(&self) -> bool { self.inner.eos_allowed() }
+
+'''
+if old_runtime_python in runtime_python:
+    runtime_python = runtime_python.replace(old_runtime_python, "", 1)
+elif compact_runtime_python in runtime_python:
+    runtime_python = runtime_python.replace(compact_runtime_python, "", 1)
+elif "eos_allowed" in runtime_python:
+    raise RuntimeError("unexpected Python runtime eos_allowed layout")
+runtime_python_path.write_text(runtime_python)
+
+roundtrip_path = ROOT / "glrmask-runtime/examples/roundtrip.rs"
+roundtrip = roundtrip_path.read_text()
+roundtrip = roundtrip.replace(
+    '    println!("roundtrip-ok eos_allowed={}", session.eos_allowed());\n',
+    '    println!("roundtrip-ok is_finished={}", session.is_finished());\n',
+)
+roundtrip_path.write_text(roundtrip)
+
 for forbidden in (
     "eos_token_id",
     "EOS_BYTES",
