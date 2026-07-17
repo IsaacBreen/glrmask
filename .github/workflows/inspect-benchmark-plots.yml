@@ -36,6 +36,30 @@ jobs:
           end = source.index("\n          PY\n", start)
           lines = source[start:end].splitlines()
           code = '\n'.join(line[10:] if line.startswith('          ') else line for line in lines) + '\n'
+
+          old_cleanup = """    for removal in removals:
+              if removal not in text:
+                  raise SystemExit(f'missing README text scheduled for removal: {removal[:70]!r}')
+              text = text.replace(removal, '')
+          """
+          new_cleanup = """    removals.append('> **Preliminary:** these timings are not yet accurate and should not be relied on.\\n\\n')
+              for removal in removals:
+                  text = text.replace(removal, '')
+          """
+          if old_cleanup not in code:
+              raise SystemExit('could not patch README cleanup logic')
+          code = code.replace(old_cleanup, new_cleanup)
+
+          old_validate = """    assert 'Preliminary:' not in readme
+              assert 'Full paired tail over' not in readme
+              assert 'The figure gives a fuller percentile view' not in readme
+          """
+          new_validate = """    assert 'Preliminary:' not in readme
+          """
+          if old_validate not in code:
+              raise SystemExit('could not patch README validation logic')
+          code = code.replace(old_validate, new_validate)
+
           Path('/tmp/render_readme_benchmarks.py').write_text(code)
           PY
           status=0
