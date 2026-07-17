@@ -1,0 +1,44 @@
+name: Temporary EOS grammar migration runner
+
+on:
+  pull_request:
+    branches:
+      - agent/eos-grammar-runner
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  migrate-test-commit:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Apply migration
+        run: |
+          python3 scripts/agent_eos_core.py
+          python3 scripts/agent_eos_api.py
+          cargo fmt --all
+      - name: Verify no EOS runtime metadata remains
+        run: |
+          ! grep -R -n -E 'eos_token_id|EOS_BYTES|update_eos_mask|finalize_eos_ns' --include='*.rs' src python glrmask-runtime tests
+      - name: Check workspace
+        run: cargo check --workspace --all-targets
+      - name: Test workspace
+        run: cargo test --workspace
+      - name: Commit validated source changes to feature branch
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git diff --cached --stat
+          git commit -m 'Implement grammar-level end token semantics'
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
