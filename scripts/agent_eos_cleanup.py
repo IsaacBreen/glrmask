@@ -142,6 +142,15 @@ roundtrip = roundtrip.replace(
 )
 roundtrip_path.write_text(roundtrip)
 
+for rust_include in ROOT.rglob("*.rsinc"):
+    include = rust_include.read_text()
+    if "Vocab::new(" not in include:
+        continue
+    updated = include.replace("], None)", "])")
+    if updated == include:
+        raise RuntimeError(f"unmigrated Vocab::new call in {rust_include.relative_to(ROOT)}")
+    rust_include.write_text(updated)
+
 for forbidden in (
     "eos_token_id",
     "EOS_BYTES",
