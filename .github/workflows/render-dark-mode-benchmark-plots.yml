@@ -1,0 +1,128 @@
+name: Render dark-mode benchmark plots
+
+on:
+  push:
+    branches:
+      - fix/dark-mode-benchmark-plots-20260717
+    paths:
+      - .github/workflows/render-dark-mode-benchmark-plots.yml
+
+permissions:
+  contents: write
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Render dark variants and update README
+        run: |
+          python -m pip install --disable-pip-version-check pillow numpy
+          python <<'PY'
+          from pathlib import Path
+          import numpy as np
+          from PIL import Image
+
+          assets = Path("docs/assets")
+          names = [
+              "benchmark-mask-tail-2026-07-16",
+              "benchmark-mask-summary-2026-07-16",
+              "benchmark-compilation-summary-2026-07-16",
+          ]
+
+          background = np.array([13.0, 17.0, 23.0], dtype=np.float32)
+          foreground = np.array([230.0, 237.0, 243.0], dtype=np.float32)
+
+          for name in names:
+              source = assets / f"{name}.webp"
+              target = assets / f"{name}-dark.webp"
+              image = Image.open(source).convert("RGB")
+              rgb = np.asarray(image, dtype=np.float32)
+
+              channel_max = rgb.max(axis=2)
+              channel_min = rgb.min(axis=2)
+              chroma = channel_max - channel_min
+              luminance = (
+                  0.2126 * rgb[:, :, 0]
+                  + 0.7152 * rgb[:, :, 1]
+                  + 0.0722 * rgb[:, :, 2]
+              )
+
+              # Reverse the neutral scale into GitHub's dark canvas: white
+              # becomes the page background, while black text and marks become
+              # GitHub's light foreground. This preserves antialiasing and the
+              # hatch/solid distinction in the summary figures.
+              neutral = chroma <= 18.0
+              t = np.clip(luminance / 255.0, 0.0, 1.0)[..., None]
+              neutral_rgb = background * t + foreground * (1.0 - t)
+
+              # Keep colored series distinct, but raise dark colors enough to
+              # remain legible against the dark canvas.
+              colored_rgb = rgb.copy()
+              colored_luminance = luminance / 255.0
+              lift = np.clip(
+                  (0.62 - colored_luminance) / np.maximum(1.0 - colored_luminance, 1e-6),
+                  0.0,
+                  1.0,
+              )[..., None]
+              colored_rgb = colored_rgb + lift * (255.0 - colored_rgb)
+
+              output = np.where(neutral[..., None], neutral_rgb, colored_rgb)
+              output = np.clip(output, 0, 255).astype(np.uint8)
+              Image.fromarray(output, "RGB").save(target, "WEBP", lossless=True, method=6)
+
+          readme = Path("README.md")
+          text = readme.read_text()
+
+          replacements = {
+              '''<p align="center">
+            <img src="docs/assets/benchmark-mask-tail-2026-07-16.webp" alt="Mask-generation latency tail curves for GLRMask and LLGuidance, with GLRMask speedup by exceedance probability" width="100%">
+          </p>''': '''<p align="center">
+            <picture>
+              <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-mask-tail-2026-07-16-dark.webp">
+              <source media="(prefers-color-scheme: light)" srcset="docs/assets/benchmark-mask-tail-2026-07-16.webp">
+              <img src="docs/assets/benchmark-mask-tail-2026-07-16.webp" alt="Mask-generation latency tail curves for GLRMask and LLGuidance, with GLRMask speedup by exceedance probability" width="100%">
+            </picture>
+          </p>''',
+              '''<p align="center">
+            <img src="docs/assets/benchmark-mask-summary-2026-07-16.webp" alt="Mask-generation latency percentile summary for GLRMask and LLGuidance" width="88%">
+          </p>''': '''<p align="center">
+            <picture>
+              <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-mask-summary-2026-07-16-dark.webp">
+              <source media="(prefers-color-scheme: light)" srcset="docs/assets/benchmark-mask-summary-2026-07-16.webp">
+              <img src="docs/assets/benchmark-mask-summary-2026-07-16.webp" alt="Mask-generation latency percentile summary for GLRMask and LLGuidance" width="88%">
+            </picture>
+          </p>''',
+              '''<p align="center">
+            <img src="docs/assets/benchmark-compilation-summary-2026-07-16.webp" alt="Compilation-time percentile summary for GLRMask and LLGuidance" width="88%">
+          </p>''': '''<p align="center">
+            <picture>
+              <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-compilation-summary-2026-07-16-dark.webp">
+              <source media="(prefers-color-scheme: light)" srcset="docs/assets/benchmark-compilation-summary-2026-07-16.webp">
+              <img src="docs/assets/benchmark-compilation-summary-2026-07-16.webp" alt="Compilation-time percentile summary for GLRMask and LLGuidance" width="88%">
+            </picture>
+          </p>''',
+          }
+
+          for old, new in replacements.items():
+              if text.count(old) != 1:
+                  raise SystemExit(f"expected exactly one README block: {old.splitlines()[1].strip()}")
+              text = text.replace(old, new)
+
+          readme.write_text(text)
+          PY
+
+      - name: Commit generated files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md docs/assets/*-dark.webp
+          git commit -m "Add dark-mode benchmark figures"
+          git push origin HEAD:fix/dark-mode-benchmark-plots-20260717
