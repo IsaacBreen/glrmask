@@ -1096,108 +1096,159 @@ fn fill_mask_dynamic_impl(
                     }
                 }
                 if let Some(source_partition) = selected_source_partition {
-                // Earlier seeds usually admit almost the entire vocabulary.
-                // Determine which source programs still own at least one unset
-                // token before performing any parser queries. This keeps later
-                // residual seeds proportional to the remaining mask holes,
-                // rather than to all source-program equivalence classes.
-                let mut needed_programs = vec![false; source_partition.programs.len()];
-                if source_partition.source_states.len() > 1 {
-                    for &program in source_partition.root_programs.iter() {
-                        needed_programs[program as usize] = true;
-                    }
-                } else {
-                    for (&word, programs) in buf
-                        .iter()
-                        .zip(source_partition.token_programs.chunks(32))
-                    {
-                        let mut missing = !word;
-                        while missing != 0 {
-                            let bit = missing.trailing_zeros() as usize;
-                            if let Some(&program) = programs.get(bit)
-                                && program != u16::MAX
-                            {
-                                needed_programs[program as usize] = true;
-                            }
-                            missing &= missing - 1;
-                        }
-                    }
-                }
+                    // A derived source partition stores only exact token
+                    // overrides. All other tokens inherit the corresponding
+                    // program from its full base partition.
+                    let base_source_partition = source_partition
+                        .base_source_state
+                        .and_then(|base_state| program_partition.source_partition(base_state));
+                    let mut needed_programs = vec![false; source_partition.programs.len()];
+                    let mut needed_base_programs = base_source_partition
+                        .map(|base| vec![false; base.programs.len()]);
 
-                let needed_count = needed_programs
-                    .iter()
-                    .filter(|&&needed| needed)
-                    .count();
-                let cache_full_acceptance = needed_count * 4
-                    >= source_partition.root_programs.len() * 3;
-                let mut accepted_programs = vec![false; source_partition.programs.len()];
-                let cache_hit = cache_full_acceptance
-                    && vocab.copy_cached_program_acceptance(
-                        &source_partition.source_states,
-                        &stacks,
-                        &mut accepted_programs,
-                    );
-                if cache_hit {
-                    token_program_acceptance_cache_hits += 1;
-                } else if cache_full_acceptance {
-                    for &program in source_partition.root_programs.iter() {
-                        check_deadline()?;
-                        token_program_groups_evaluated += 1;
-                        if source_token_program_accepts(
-                            state.constraint,
-                            &program_partition,
-                            source_partition,
-                            program,
-                            &stacks,
-                            &mut traversal_cache,
-                            &mut token_program_cache,
-                        ) {
-                            accepted_programs[program as usize] = true;
+                    // Combined residual unions are selected because all
+                    // participating seeds are live and compatible. Scanning the
+                    // output mask to rediscover their roots is pure overhead.
+                    // Single-source partitions remain proportional to mask holes.
+                    if source_partition.source_states.len() > 1 {
+                        for &program in source_partition.root_programs.iter() {
+                            needed_programs[program as usize] = true;
+                        }
+                    } else {
+                        for (word_index, (&word, programs)) in buf
+                            .iter()
+                            .zip(source_partition.token_programs.chunks(32))
+                            .enumerate()
+                        {
+                            let mut missing = !word;
+                            while missing != 0 {
+                                let bit = missing.trailing_zeros() as usize;
+                                if let Some(&program) = programs.get(bit) {
+                                    if program != u16::MAX {
+                                        needed_programs[program as usize] = true;
+                                    } else if let (Some(base), Some(needed_base)) = (
+                                        base_source_partition,
+                                        needed_base_programs.as_mut(),
+                                    ) {
+                                        let token_index = word_index * 32 + bit;
+                                        let base_program = base.token_programs[token_index];
+                                        if base_program != u16::MAX {
+                                            needed_base[base_program as usize] = true;
+                                        }
+                                    }
+                                }
+                                missing &= missing - 1;
+                            }
                         }
                     }
-                    vocab.cache_program_acceptance(
-                        &source_partition.source_states,
-                        &stacks,
-                        &accepted_programs,
-                    );
-                } else {
-                    for (program, needed) in needed_programs.iter().copied().enumerate() {
-                        if !needed {
-                            continue;
+
+                    let mut evaluate_source_programs = |
+                        partition: &super::artifact::DynamicSourceTokenProgramPartition,
+                        needed: &[bool],
+                    | -> Result<Vec<bool>, String> {
+                        let needed_count = needed.iter().filter(|&&needed| needed).count();
+                        if needed_count == 0 {
+                            return Ok(vec![false; partition.programs.len()]);
                         }
-                        check_deadline()?;
-                        token_program_groups_evaluated += 1;
-                        let program = program as u16;
-                        if source_token_program_accepts(
-                            state.constraint,
-                            &program_partition,
-                            source_partition,
-                            program,
-                            &stacks,
-                            &mut traversal_cache,
-                            &mut token_program_cache,
-                        ) {
-                            accepted_programs[program as usize] = true;
+                        let cache_full_acceptance = needed_count * 4
+                            >= partition.root_programs.len() * 3;
+                        let mut accepted = vec![false; partition.programs.len()];
+                        let cache_hit = cache_full_acceptance
+                            && vocab.copy_cached_program_acceptance(
+                                &partition.source_states,
+                                &stacks,
+                                &mut accepted,
+                            );
+                        if cache_hit {
+                            token_program_acceptance_cache_hits += 1;
+                        } else if cache_full_acceptance {
+                            for &program in partition.root_programs.iter() {
+                                check_deadline()?;
+                                token_program_groups_evaluated += 1;
+                                if source_token_program_accepts(
+                                    state.constraint,
+                                    &program_partition,
+                                    partition,
+                                    program,
+                                    &stacks,
+                                    &mut traversal_cache,
+                                    &mut token_program_cache,
+                                ) {
+                                    accepted[program as usize] = true;
+                                }
+                            }
+                            vocab.cache_program_acceptance(
+                                &partition.source_states,
+                                &stacks,
+                                &accepted,
+                            );
+                        } else {
+                            for (program, needed) in needed.iter().copied().enumerate() {
+                                if !needed {
+                                    continue;
+                                }
+                                check_deadline()?;
+                                token_program_groups_evaluated += 1;
+                                let program = program as u16;
+                                if source_token_program_accepts(
+                                    state.constraint,
+                                    &program_partition,
+                                    partition,
+                                    program,
+                                    &stacks,
+                                    &mut traversal_cache,
+                                    &mut token_program_cache,
+                                ) {
+                                    accepted[program as usize] = true;
+                                }
+                            }
                         }
+                        token_program_groups_admitted += accepted
+                            .iter()
+                            .zip(needed)
+                            .filter(|&(&accepted, &needed)| accepted && needed)
+                            .count();
+                        Ok(accepted)
+                    };
+
+                    let accepted_programs = evaluate_source_programs(
+                        source_partition,
+                        &needed_programs,
+                    )?;
+                    let accepted_base_programs = if let (
+                        Some(base),
+                        Some(needed_base_programs),
+                    ) = (base_source_partition, needed_base_programs.as_deref())
+                    {
+                        Some(evaluate_source_programs(base, needed_base_programs)?)
+                    } else {
+                        None
+                    };
+
+                    for (word_index, (word, programs)) in buf
+                        .iter_mut()
+                        .zip(source_partition.token_programs.chunks(32))
+                        .enumerate()
+                    {
+                        let mut accepted_bits = 0u32;
+                        for (bit, &program) in programs.iter().enumerate() {
+                            let accepted = if program != u16::MAX {
+                                accepted_programs[program as usize]
+                            } else if let (Some(base), Some(accepted_base)) = (
+                                base_source_partition,
+                                accepted_base_programs.as_ref(),
+                            ) {
+                                let token_index = word_index * 32 + bit;
+                                let base_program = base.token_programs[token_index];
+                                base_program != u16::MAX
+                                    && accepted_base[base_program as usize]
+                            } else {
+                                false
+                            };
+                            accepted_bits |= u32::from(accepted) << bit;
+                        }
+                        *word |= accepted_bits;
                     }
-                }
-                token_program_groups_admitted += accepted_programs
-                    .iter()
-                    .zip(&needed_programs)
-                    .filter(|&(&accepted, &needed)| accepted && needed)
-                    .count();
-                for (word, programs) in buf
-                    .iter_mut()
-                    .zip(source_partition.token_programs.chunks(32))
-                {
-                    let mut accepted_bits = 0u32;
-                    for (bit, &program) in programs.iter().enumerate() {
-                        let accepted = program != u16::MAX
-                            && accepted_programs[program as usize];
-                        accepted_bits |= u32::from(accepted) << bit;
-                    }
-                    *word |= accepted_bits;
-                }
                     if let Some(identity) = stack_identity {
                         for other_state in combined_states {
                             handled_source_seeds.insert((other_state, identity));
