@@ -556,9 +556,7 @@ mod tests {
                     (0, b"a".to_vec()),
                     (1, b"b".to_vec()),
                     (2, b"ab".to_vec()),
-                ],
-                None,
-            ),
+                ]),
         )
         .expect("test constraint should compile");
         let terminal_a = constraint
@@ -842,44 +840,6 @@ fn enqueue_parser_state_transition(
     );
 }
 
-fn update_eos_mask(
-    buf: &mut [u32],
-    eos_token_id: Option<u32>,
-    is_complete: bool,
-    eos_is_special: bool,
-) {
-    if eos_is_special {
-        return;
-    }
-    let Some(eos_token_id) = eos_token_id else {
-        return;
-    };
-
-    let word = eos_token_id as usize / 32;
-    let bit = eos_token_id as usize % 32;
-
-    let Some(slot) = buf.get_mut(word) else {
-        return;
-    };
-
-    *slot &= !(1u32 << bit);
-
-    if is_complete {
-        *slot |= 1u32 << bit;
-    }
-}
-
-fn eos_mask_bit(buf: &[u32], eos_token_id: Option<u32>) -> bool {
-    let Some(eos_token_id) = eos_token_id else {
-        return false;
-    };
-    let word = eos_token_id as usize / 32;
-    let bit = eos_token_id as usize % 32;
-    buf.get(word)
-        .map(|slot| (*slot & (1u32 << bit)) != 0)
-        .unwrap_or(false)
-}
-
 impl<'a> ConstraintState<'a> {
     fn try_fill_mask_single_path_direct(&self, buf: &mut [u32]) -> bool {
         if mask_inner_profile_enabled() || mask_delta_profile_enabled() {
@@ -1041,15 +1001,6 @@ impl<'a> ConstraintState<'a> {
                 &mut output_scratch,
             );
         }
-
-        update_eos_mask(
-            buf,
-            self.constraint.eos_token_id,
-            self.is_complete(),
-            self.constraint
-                .eos_token_id
-                .is_some_and(|token_id| self.constraint.has_special_token_id(token_id)),
-        );
 
         if direct_buf_dirty {
             self.store_mask_cache_reuse_dense(buf);
@@ -1530,14 +1481,6 @@ impl<'a> ConstraintState<'a> {
 
         if self.state.is_empty() || parser_dwa.states().is_empty() {
             buf.fill(0);
-            update_eos_mask(
-                buf,
-                self.constraint.eos_token_id,
-                self.is_complete(),
-                self.constraint
-                    .eos_token_id
-                    .is_some_and(|token_id| self.constraint.has_special_token_id(token_id)),
-            );
             self.store_mask_cache(buf, &[]);
             return total_start.map(|start| MaskProfile {
                 total_ns: elapsed_ns(start),
@@ -1871,35 +1814,10 @@ impl<'a> ConstraintState<'a> {
         // the bug is in the seed/DWA mask construction logic itself and must
         // be fixed there. Hiding the mismatch with a second-pass filter is not
         // allowed. This note is intentional and must NEVER EVER be removed.
-
-        let eos_is_special = self
-            .constraint
-            .eos_token_id
-            .is_some_and(|token_id| self.constraint.has_special_token_id(token_id));
-        let eos_unchanged = eos_is_special
-            || (reuse_existing_cache_dense
-                && eos_mask_bit(buf, self.constraint.eos_token_id) == self.is_complete());
-        if !eos_unchanged {
-            let eos_start = profile.as_ref().map(|_| Instant::now());
-            update_eos_mask(
-                buf,
-                self.constraint.eos_token_id,
-                self.is_complete(),
-                eos_is_special,
-            );
-            if let (Some(profile), Some(start)) = (profile.as_mut(), eos_start) {
-                profile.finalize_eos_ns += elapsed_ns(start);
-            }
-        }
-
         let cache_start = profile.as_ref().map(|_| Instant::now());
         if can_use_merged_cache {
             if reuse_existing_cache_dense {
-                if eos_unchanged {
-                    self.touch_mask_cache_generation();
-                } else {
-                    self.store_mask_cache_reuse_dense(buf);
-                }
+                self.touch_mask_cache_generation();
             } else {
                 self.store_mask_cache(buf, &merged);
             }
@@ -1937,7 +1855,7 @@ impl<'a> ConstraintState<'a> {
                 + profile.finalize_ns;
             let other_ns = profile.total_ns.saturating_sub(accounted_ns);
             let line = format!(
-                "[glrmask/debug][mask_inner] queue_mode={:?} total_ns={} seed_decompose_ns={} queue_pop_ns={} loop_decompose_ns={} transition_lookup_ns={} transition_apply_ns={} transition_apply_intersect_ns={} transition_apply_gss_ns={} token_accumulation_ns={} enqueue_merge_ns={} queue_lookup_ns={} queue_merge_ns={} queue_insert_ns={} insert_without_merge_count={} fuse_ns={} finalize_ns={} finalize_zero_ns={} finalize_dense_to_buf_ns={} finalize_eos_ns={} finalize_cache_ns={} delta_prev_available={} delta_added_bits={} delta_removed_bits={} delta_unchanged_words={} delta_unchanged_bits={} delta_added_cost={} delta_removed_cost={} delta_copy_cost_words={} delta_scratch_estimated_cost={} delta_estimated_cost={} delta_estimated_savings={} delta_used_seed={} delta_added_word_group_hits={} delta_added_word_group_entries={} delta_removed_word_group_hits={} delta_removed_word_group_entries={} delta_added_byte_group_hits={} delta_added_byte_group_entries={} delta_removed_byte_group_hits={} delta_removed_byte_group_entries={} delta_added_token_iterations={} delta_added_token_entries={} delta_removed_token_iterations={} delta_removed_token_entries={} finalize_equal_dense_copy_seed={} finalize_delta_replay={} finalize_scratch_rebuild={} dense_words_visited={} dense_complement_path_used={} dense_normal_full_word_hits={} dense_normal_group_complement_hits={} dense_complement_full_word_hits={} dense_complement_full_byte_groups={} dense_complement_full_nibble_groups={} dense_complement_remaining_bits={} dense_normal_token_iterations={} dense_complement_token_iterations={} dense_normal_sparse_entries={} dense_normal_group_complement_sparse_entries={} dense_complement_sparse_entries={} dense_complement_heavy_dense_clears={} dense_complement_max_sparse_span={} dense_group_or_sparse_entries={} dense_group_andnot_sparse_entries={} dense_group_sparse_groups={} dense_group_sparse_total_entries={} dense_group_sparse_max_entries={} dense_group_dense_storage_words={} dense_raw_token_sparse_entries={} other_ns={} enqueue_calls={} merge_hits={} popped_items={} parser_dwa_transitions_enqueued={}",
+                "[glrmask/debug][mask_inner] queue_mode={:?} total_ns={} seed_decompose_ns={} queue_pop_ns={} loop_decompose_ns={} transition_lookup_ns={} transition_apply_ns={} transition_apply_intersect_ns={} transition_apply_gss_ns={} token_accumulation_ns={} enqueue_merge_ns={} queue_lookup_ns={} queue_merge_ns={} queue_insert_ns={} insert_without_merge_count={} fuse_ns={} finalize_ns={} finalize_zero_ns={} finalize_dense_to_buf_ns={} finalize_cache_ns={} delta_prev_available={} delta_added_bits={} delta_removed_bits={} delta_unchanged_words={} delta_unchanged_bits={} delta_added_cost={} delta_removed_cost={} delta_copy_cost_words={} delta_scratch_estimated_cost={} delta_estimated_cost={} delta_estimated_savings={} delta_used_seed={} delta_added_word_group_hits={} delta_added_word_group_entries={} delta_removed_word_group_hits={} delta_removed_word_group_entries={} delta_added_byte_group_hits={} delta_added_byte_group_entries={} delta_removed_byte_group_hits={} delta_removed_byte_group_entries={} delta_added_token_iterations={} delta_added_token_entries={} delta_removed_token_iterations={} delta_removed_token_entries={} finalize_equal_dense_copy_seed={} finalize_delta_replay={} finalize_scratch_rebuild={} dense_words_visited={} dense_complement_path_used={} dense_normal_full_word_hits={} dense_normal_group_complement_hits={} dense_complement_full_word_hits={} dense_complement_full_byte_groups={} dense_complement_full_nibble_groups={} dense_complement_remaining_bits={} dense_normal_token_iterations={} dense_complement_token_iterations={} dense_normal_sparse_entries={} dense_normal_group_complement_sparse_entries={} dense_complement_sparse_entries={} dense_complement_heavy_dense_clears={} dense_complement_max_sparse_span={} dense_group_or_sparse_entries={} dense_group_andnot_sparse_entries={} dense_group_sparse_groups={} dense_group_sparse_total_entries={} dense_group_sparse_max_entries={} dense_group_dense_storage_words={} dense_raw_token_sparse_entries={} other_ns={} enqueue_calls={} merge_hits={} popped_items={} parser_dwa_transitions_enqueued={}",
                 mask_queue_mode(),
                 profile.total_ns,
                 profile.seed_decompose_ns,
@@ -1957,7 +1875,6 @@ impl<'a> ConstraintState<'a> {
                 profile.finalize_ns,
                 profile.finalize_zero_ns,
                 profile.finalize_dense_to_buf_ns,
-                profile.finalize_eos_ns,
                 profile.finalize_cache_ns,
                 profile.delta_prev_available,
                 profile.delta_added_bits,
@@ -2055,10 +1972,14 @@ impl<'a> ConstraintState<'a> {
     }
 
     pub fn fill_mask(&self, buf: &mut [u32]) {
-        if !self.try_fill_mask_from_cache(buf) {
-            self.fill_mask_uncached(buf);
+        let required = self.constraint.mask_len();
+        assert!(buf.len() >= required, "mask buffer is smaller than constraint mask");
+        let (mask, tail) = buf.split_at_mut(required);
+        tail.fill(0);
+        if !self.try_fill_mask_from_cache(mask) {
+            self.fill_mask_uncached(mask);
         }
-        assert_dynamic_mask_equivalence(self, buf);
+        assert_dynamic_mask_equivalence(self, mask);
     }
 
     pub(crate) fn fill_mask_timed_ns(&self, buf: &mut [u32]) -> u64 {
@@ -2068,6 +1989,10 @@ impl<'a> ConstraintState<'a> {
     }
 
     pub(crate) fn fill_mask_profiled(&self, buf: &mut [u32]) -> MaskProfile {
+        let required = self.constraint.mask_len();
+        assert!(buf.len() >= required, "mask buffer is smaller than constraint mask");
+        let (buf, tail) = buf.split_at_mut(required);
+        tail.fill(0);
         let total_start = Instant::now();
         if self.try_fill_mask_from_cache(buf) {
             return MaskProfile {

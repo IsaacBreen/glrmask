@@ -207,7 +207,6 @@ impl<'a> ConstraintState<'a> {
     }
 
     fn compute_forced_byte_prefix(&self, dynamic: bool) -> Vec<u8> {
-        let eos = self.constraint.eos_token_id;
         let mut bytes = Vec::new();
         let mut cursor = self.clone();
         const MAX_FORCED_BYTES: usize = 10_000;
@@ -218,12 +217,6 @@ impl<'a> ConstraintState<'a> {
             }
 
             let mask = cursor.mask_for_forced(dynamic);
-            if let Some(eos_id) = eos {
-                if is_token_set(&mask, eos_id) {
-                    break;
-                }
-            }
-
             match cursor.forced_first_byte(&mask) {
                 ForcedFirstByte::Unique(byte) => {
                     bytes.push(byte);
@@ -316,12 +309,6 @@ impl<'a> ConstraintState<'a> {
             GreedyTokenizationStep::NoMatch
         }
     }
-}
-
-fn is_token_set(mask: &[u32], token_id: u32) -> bool {
-    let word_index = token_id as usize / 32;
-    let bit = token_id % 32;
-    mask.get(word_index).is_some_and(|word| word & (1 << bit) != 0)
 }
 
 fn single_allowed_token(mask: &[u32]) -> Option<u32> {

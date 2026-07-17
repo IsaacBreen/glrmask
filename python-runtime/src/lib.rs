@@ -87,8 +87,6 @@ impl PyRuntimeConstraintState {
 
     fn is_finished(&self) -> bool { self.inner.is_finished() }
 
-    fn eos_allowed(&self) -> bool { self.inner.eos_allowed() }
-
     fn reset(&mut self) { self.inner.reset(); }
 }
 

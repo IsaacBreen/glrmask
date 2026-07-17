@@ -4,7 +4,7 @@ use serde_json::{json, Map, Value};
 
 fn make_byte_vocab() -> Vocab {
     let entries: Vec<(u32, Vec<u8>)> = (0u32..=255).map(|byte| (byte, vec![byte as u8])).collect();
-    Vocab::new(entries, None)
+    Vocab::new(entries)
 }
 
 fn ordered_name(position: usize, stem: &str) -> String {

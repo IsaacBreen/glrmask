@@ -13,21 +13,16 @@ parent `glrmask` crate.
 ## Artifact boundary
 
 `RuntimeArtifact` uses a versioned envelope. The current outer format version is
-**3**, whose payload is the epsilon-capable **RuntimePayloadV2** execution contract:
+**5**, whose payload is the **RuntimePayloadV3** execution contract:
 
 ```text
-GLRMASK\0 | u16 outer format version | u64 payload length | RuntimePayloadV2
+GLRMASK\0 | u16 outer format version | u64 payload length | RuntimePayloadV3
 ```
 
-RuntimePayloadV2 holds only persistent execution inputs: parser DWA, GLR table,
-lexer/tokenizer, terminal matches, vocabulary maps, token bytes, and EOS metadata.
-All dense masks, lookup tables, and other acceleration caches are rebuilt after load.
-The envelope makes version rejection explicit and lets a later artifact representation
-change without changing the browser session API.
-
-Version 2 / RuntimePayloadV1 artifacts remain loadable. They are restricted to
-deterministic lexers. Version 3 is required when the tokenizer contains epsilon edges,
-so a version-2 runtime rejects the artifact rather than silently treating an NFA as a DFA.
+RuntimePayloadV3 holds only persistent execution inputs: parser DWA, GLR table,
+lexer/tokenizer, terminal matches, vocabulary maps, token bytes, and exact-token
+terminals. All dense masks, lookup tables, and other acceleration caches are rebuilt
+after load. Older artifact versions are rejected explicitly and must be recompiled.
 
 ## Loaded constraint and session API
 
@@ -41,7 +36,7 @@ let mut session = runtime.start();
 let mut words = vec![0; runtime.mask_len()];
 session.fill_mask(&mut words);
 session.commit_token(token_id)?;
-let eos_ok = session.eos_allowed();
+let finished = session.is_finished();
 session.reset();
 ```
 

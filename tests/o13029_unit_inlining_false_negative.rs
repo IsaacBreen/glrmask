@@ -15,7 +15,7 @@ fn token_allowed(mask: &[u32], token_id: u32) -> bool {
 fn byte_vocab_with_disputed_token() -> Vocab {
     let mut entries: Vec<(u32, Vec<u8>)> = (0u32..=255).map(|byte| (byte, vec![byte as u8])).collect();
     entries.push((DISPUTED_TOKEN_ID, DISPUTED_TOKEN_BYTES.to_vec()));
-    Vocab::new(entries, None)
+    Vocab::new(entries)
 }
 
 #[test]

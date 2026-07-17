@@ -2642,7 +2642,7 @@ mod tests {
             (5, b"x".to_vec()),
             (6, b"ab".to_vec()),
         ];
-        let vocab = Vocab::new(entries.clone(), None);
+        let vocab = Vocab::new(entries.clone());
         let computation = compute_constraint_possible_matches_for_vocab(
             &tokenizer,
             &vocab,
@@ -2709,9 +2709,7 @@ mod tests {
                 (4, b"b".to_vec()),
                 (5, b"ba".to_vec()),
                 (6, b"x".to_vec()),
-            ],
-            None,
-        );
+            ]);
         let artifacts = get_ordered_vocab_trie_artifacts_for_vocab(&vocab).0;
         let raw_states = (0..tokenizer.num_states()).collect::<Vec<_>>();
         let sparse = collect_sparse_root_possible_matches(
@@ -2776,7 +2774,7 @@ mod tests {
         );
         assert!(tokenizer.has_epsilon_transitions());
 
-        let vocab = Vocab::new(vec![(0, vec![128]), (1, vec![129])], None);
+        let vocab = Vocab::new(vec![(0, vec![128]), (1, vec![129])]);
         let full_artifacts = get_ordered_vocab_trie_artifacts_for_vocab(&vocab).0;
         let classes = compute_pm_vocab_equivalence_map(
             &tokenizer,

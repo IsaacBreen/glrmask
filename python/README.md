@@ -46,4 +46,7 @@ state.commit_token(2)
 assert state.is_finished()
 ```
 
+Pass a token count to `state.mask(size)` to pad the returned Boolean mask with
+`False` entries up to a model's full logits size.
+
 The mask is tokenization-complete for the compiled byte language: a vocabulary token is admitted when appending its bytes leaves at least one valid completion, even when the token crosses grammar-terminal boundaries.

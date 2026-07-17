@@ -79,9 +79,7 @@ fn glrm_ignore_prefix_token_is_mask_commit_equivalent() {
             (3, b"true".to_vec()),
             (4, b")".to_vec()),
             (5, b" ".to_vec()),
-        ],
-        None,
-    );
+        ]);
     let grammar = r#"
 start start;
 ignore WS;
@@ -109,9 +107,7 @@ fn glrm_initial_ignore_is_epsiloned_after_ti() {
             (0, b" ".to_vec()),
             (1, b"a".to_vec()),
             (2, b" a".to_vec()),
-        ],
-        None,
-    );
+        ]);
     let grammar = r#"
 start start;
 ignore WS;
@@ -150,9 +146,7 @@ fn certified_terminal_run_collapse_preserves_bounded_item_count() {
             (2, b"ab".to_vec()),
             (3, b"aba".to_vec()),
             (4, b"abab".to_vec()),
-        ],
-        None,
-    );
+        ]);
     let grammar = r#"
 start start;
 t A ::= "a";
@@ -182,7 +176,7 @@ fn byte_vocab_with_separator_token() -> (Vocab, u32) {
     let mut entries: Vec<(u32, Vec<u8>)> = (0u32..=255).map(|byte| (byte, vec![byte as u8])).collect();
     let separator_token_id = 256;
     entries.push((separator_token_id, b" \"".to_vec()));
-    (Vocab::new(entries, None), separator_token_id)
+    (Vocab::new(entries), separator_token_id)
 }
 
 #[test]
@@ -203,9 +197,7 @@ t json_char ::= /(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\x
         vec![
             (token_id, b" \\\"".to_vec()),
             (end_of_text, b"<|endoftext|>".to_vec()),
-        ],
-        Some(end_of_text),
-    );
+        ]);
 
     let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
     let mut state = constraint.start();
@@ -224,9 +216,7 @@ fn glrm_dumped_constrained_terminal_space_escaped_quote_gap_one_token_vocab() {
     let vocab = Vocab::new(
         vec![
             (token_id, b"a \\\"".to_vec()),
-        ],
-        None,
-    );
+        ]);
 
     let grammar = r####"
         start s;
@@ -286,7 +276,7 @@ fn glrm_dumped_constrained_terminal_space_escaped_quote_gap_one_token_vocab() {
 #[test]
 fn bounded_repeat_suffix_must_not_greedily_drop_suffix_path() {
     let token_id = 0u32;
-    let vocab = Vocab::new(vec![(token_id, b"aa".to_vec())], None);
+    let vocab = Vocab::new(vec![(token_id, b"aa".to_vec())]);
 
     let grammar = r####"
         start s;
@@ -317,9 +307,7 @@ fn optional_choice_allows_viable_prefix_before_required_suffix() {
             (token_a, b"a".to_vec()),
             (token_b, b"b".to_vec()),
             (token_ab, b"ab".to_vec()),
-        ],
-        None,
-    );
+        ]);
 
     let grammar = r####"
         start s;
@@ -361,7 +349,7 @@ fn chunk16_bounded_service_name_allows_spaces_token_after_open_quote() {
         "required": ["serviceName"]
     }"#;
     let prefix = br#"{"serviceName": ""#;
-    let vocab = Vocab::new(vec![(0, vec![b' '; 24])], None);
+    let vocab = Vocab::new(vec![(0, vec![b' '; 24])]);
 
     let constraint = Constraint::from_json_schema(schema, &vocab).unwrap();
     let table_ambiguities = constraint.table_ambiguous_actions();
@@ -546,7 +534,7 @@ fn kb304_nullable_enum_bare_quote_requires_canonical_separator_space() {
     }"#;
     let token_id = 22u32;
     let token_bytes = b"\"";
-    let vocab = Vocab::new(vec![(token_id, token_bytes.to_vec())], None);
+    let vocab = Vocab::new(vec![(token_id, token_bytes.to_vec())]);
     let constraint = Constraint::from_json_schema(schema, &vocab).unwrap();
 
     let invalid_prefix = br#"{"apiVersion":"#;

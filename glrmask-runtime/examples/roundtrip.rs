@@ -21,5 +21,5 @@ fn main() {
         println!("step={step} words={} token={token}", mask.len());
         session.commit_token(token).expect("commit mask member");
     }
-    println!("roundtrip-ok eos_allowed={}", session.eos_allowed());
+    println!("roundtrip-ok is_finished={}", session.is_finished());
 }
