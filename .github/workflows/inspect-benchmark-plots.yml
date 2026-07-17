@@ -53,7 +53,7 @@ jobs:
             git diff --cached --check
             git commit -m "Polish README benchmark figures"
           else
-            git add TEMP-render.log TEMP-render-status.txt
+            git add -f TEMP-render.log TEMP-render-status.txt
             git commit -m "Record benchmark render failure"
           fi
           git push origin HEAD:${{ github.event.pull_request.head.ref }}
