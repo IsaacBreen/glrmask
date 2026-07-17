@@ -1420,33 +1420,6 @@ fn special_token_static_dynamic_and_serialized_constraints_agree() {
 }
 
 #[test]
-fn plain_eos_mask_and_commit_agree() {
-    let vocab = Vocab::new(vec![(0, b"a".to_vec())], Some(100));
-    let constraint = with_stable_ti_env(|| Constraint::from_ebnf(r#"start ::= "a""#, &vocab).unwrap());
-    let dynamic = DynamicConstraint::from_ebnf(r#"start ::= "a""#, &vocab).unwrap();
-
-    let mut early = constraint.start();
-    assert_eq!(allowed(&early.mask()), vec![0]);
-    assert!(early.commit_token(100).is_err());
-
-    let mut state = constraint.start();
-    state.commit_token(0).unwrap();
-    assert!(state.is_finished());
-    assert_eq!(allowed(&state.mask()), vec![100]);
-    state.commit_token(100).unwrap();
-    assert!(state.is_finished());
-
-    let mut early_dynamic = dynamic.start();
-    assert!(early_dynamic.commit_token(100).is_err());
-
-    let mut dynamic_state = dynamic.start();
-    dynamic_state.commit_token(0).unwrap();
-    assert_eq!(allowed(&dynamic_state.mask()), vec![100]);
-    dynamic_state.commit_token(100).unwrap();
-    assert!(dynamic_state.is_finished());
-}
-
-#[test]
 fn named_special_terminal_and_explicit_special_eos_are_parser_controlled() {
     let vocab = Vocab::new(vec![(0, b"a".to_vec())], Some(100));
     let grammar = r#"

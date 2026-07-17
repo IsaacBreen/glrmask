@@ -21,11 +21,11 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use numpy::{PyArray1, PyReadwriteArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBytes, PyDict};
+use pyo3::types::{PyBytes, PyDict};
 use self_cell::self_cell;
 use std::sync::Arc;
 use glrmask::__private::{
-    ConstraintExt as _, ConstraintStateExt as _, VocabExt as _,
+    ConstraintExt as _, ConstraintStateExt as _, DynamicConstraintExt as _, VocabExt as _,
 };
 
 // ---------------------------------------------------------------------------
@@ -81,12 +81,8 @@ fn dict_to_vocab(token_to_id: &Bound<'_, PyDict>) -> PyResult<glrmask::Vocab> {
     Ok(glrmask::Vocab::new(entries, None))
 }
 
-fn id_to_bytes_dict_to_vocab(
-    id_to_bytes: &Bound<'_, PyDict>,
-    eos_token_id: Option<u32>,
-) -> PyResult<(glrmask::Vocab, Option<u32>)> {
+fn id_to_bytes_dict_to_vocab(id_to_bytes: &Bound<'_, PyDict>) -> PyResult<glrmask::Vocab> {
     let mut entries = Vec::with_capacity(id_to_bytes.len());
-    let mut max_token = eos_token_id;
     for (key, value) in id_to_bytes.iter() {
         let token_id: u32 = key.extract()?;
         let token_bytes = value
@@ -94,10 +90,9 @@ fn id_to_bytes_dict_to_vocab(
             .map_err(|_| PyValueError::new_err("vocab values must be Python bytes"))?
             .as_bytes()
             .to_vec();
-        max_token = Some(max_token.map_or(token_id, |current| current.max(token_id)));
         entries.push((token_id, token_bytes));
     }
-    Ok((glrmask::Vocab::new(entries, eos_token_id), max_token))
+    Ok(glrmask::Vocab::new(entries, None))
 }
 
 fn constraint_result<T, E: std::fmt::Display>(result: Result<T, E>) -> PyResult<T> {
@@ -431,7 +426,6 @@ fn advance_trace_step_to_dict<'py>(
 #[derive(Clone)]
 pub struct PyVocab {
     inner: glrmask::Vocab,
-    max_token: u32,
 }
 
 #[pymethods]
@@ -439,58 +433,13 @@ impl PyVocab {
     #[staticmethod]
     fn from_dict(token_to_id: &Bound<'_, PyDict>) -> PyResult<Self> {
         let vocab = dict_to_vocab(token_to_id)?;
-        let max_token = vocab.max_token_id().max(vocab.eos_token_id.unwrap_or(0));
-        Ok(Self { inner: vocab, max_token })
+        Ok(Self { inner: vocab })
     }
 
     #[staticmethod]
-    #[pyo3(signature = (id_to_bytes, eos_token_id=None, vocab_size=None))]
-    fn from_id_to_bytes(
-        id_to_bytes: &Bound<'_, PyDict>,
-        eos_token_id: Option<u32>,
-        vocab_size: Option<u32>,
-    ) -> PyResult<Self> {
-        let (vocab, inferred_max) = id_to_bytes_dict_to_vocab(id_to_bytes, eos_token_id)?;
-        let max_token = match vocab_size {
-            Some(0) => return Err(PyValueError::new_err("vocab_size must be positive")),
-            Some(size) => {
-                let max_token = size - 1;
-                if inferred_max.is_some_and(|token| token > max_token) {
-                    return Err(PyValueError::new_err(
-                        "vocabulary token id is outside vocab_size",
-                    ));
-                }
-                max_token
-            }
-            None => inferred_max.unwrap_or(0),
-        };
-        Ok(Self { inner: vocab, max_token })
-    }
-
-    #[staticmethod]
-    fn from_llama_cpp(llm: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let vocab_size: u32 = llm.call_method0("n_vocab")?.extract()?;
-        if vocab_size == 0 {
-            return Err(PyValueError::new_err("llama.cpp vocabulary is empty"));
-        }
-        let eos_token_id: u32 = llm.call_method0("token_eos")?.extract()?;
-        let mut entries = Vec::with_capacity(vocab_size as usize);
-
-        for token_id in 0..vocab_size {
-            let value = llm.call_method1("detokenize", ([token_id],))?;
-            let token_bytes = value
-                .downcast::<PyBytes>()
-                .map_err(|_| PyValueError::new_err("llama.cpp detokenize must return bytes"))?
-                .as_bytes();
-            if !token_bytes.is_empty() {
-                entries.push((token_id, token_bytes.to_vec()));
-            }
-        }
-
-        Ok(Self {
-            inner: glrmask::Vocab::new(entries, Some(eos_token_id)),
-            max_token: vocab_size - 1,
-        })
+    fn from_id_to_bytes(id_to_bytes: &Bound<'_, PyDict>) -> PyResult<Self> {
+        let vocab = id_to_bytes_dict_to_vocab(id_to_bytes)?;
+        Ok(Self { inner: vocab })
     }
 }
 
@@ -509,10 +458,10 @@ pub struct PyConstraint {
 impl PyConstraint {
     fn from_constraint_result<E: std::fmt::Display>(
         constraint: Result<glrmask::Constraint, E>,
-        vocab: &PyVocab,
+        _vocab: &PyVocab,
     ) -> PyResult<Self> {
         let constraint = constraint_result(constraint)?;
-        let max_token = vocab.max_token;
+        let max_token = constraint.max_original_token_id().unwrap_or(0);
         Ok(Self {
             inner: Arc::new(constraint),
             max_token,
@@ -626,10 +575,10 @@ pub struct PyDynamicConstraint {
 impl PyDynamicConstraint {
     fn from_constraint_result<E: std::fmt::Display>(
         constraint: Result<glrmask::DynamicConstraint, E>,
-        vocab: &PyVocab,
+        _vocab: &PyVocab,
     ) -> PyResult<Self> {
         let constraint = constraint_result(constraint)?;
-        let max_token = vocab.max_token;
+        let max_token = constraint.max_original_token_id().unwrap_or(0);
         Ok(Self {
             inner: Arc::new(constraint),
             max_token,

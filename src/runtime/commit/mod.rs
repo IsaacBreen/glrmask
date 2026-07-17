@@ -14,7 +14,6 @@ use crate::compiler::glr::parser::{
     advance_stacks,
     advance_stacks_profiled,
     advance_stacks_owned,
-    stacks_finished,
     AdvanceProfile,
     stack_may_advance_on,
     stack_may_advance_on_any,
@@ -461,38 +460,12 @@ fn finish_token_commit(state: &BTreeMap<u32, ParserGSS>) -> Result<(), String> {
     }
 }
 
-fn plain_eos_allowed(
-    constraint: &Constraint,
-    state: &BTreeMap<u32, ParserGSS>,
-    token_id: u32,
-) -> Option<bool> {
-    if constraint.eos_token_id != Some(token_id) || constraint.has_special_token_id(token_id) {
-        return None;
-    }
-
-    let initial_state = constraint.tokenizer.initial_state();
-    Some(
-        state
-            .get(&initial_state)
-            .is_some_and(|stack| !stack.is_empty() && stacks_finished(&constraint.table, stack)),
-    )
-}
-
 fn commit_token_impl(
     constraint: &Constraint,
     state: &mut BTreeMap<u32, ParserGSS>,
     buffers: &mut CommitBuffers,
     token_id: u32,
 ) -> Result<(), String> {
-    if let Some(allowed) = plain_eos_allowed(constraint, state, token_id) {
-        if allowed {
-            return Ok(());
-        }
-        state.clear();
-        buffers.clear_all();
-        return Err("commit rejected: no valid parser states remain".to_owned());
-    }
-
     let bytes = token_bytes_for_id(constraint, token_id);
     let has_special = constraint.has_special_token_id(token_id);
     if bytes.is_none() && !has_special {
@@ -522,14 +495,6 @@ fn commit_token_no_fast_path_reference(
     state: &mut BTreeMap<u32, ParserGSS>,
     token_id: u32,
 ) -> Result<(), String> {
-    if let Some(allowed) = plain_eos_allowed(constraint, state, token_id) {
-        if allowed {
-            return Ok(());
-        }
-        state.clear();
-        return Err("commit rejected: no valid parser states remain".to_owned());
-    }
-
     let bytes = token_bytes_for_id(constraint, token_id);
     let has_special = constraint.has_special_token_id(token_id);
     if bytes.is_none() && !has_special {
@@ -3737,28 +3702,6 @@ impl<'a> ConstraintState<'a> {
 
     pub(crate) fn commit_token_profiled(&mut self, token_id: u32) -> Result<CommitProfile, String> {
         let constraint = self.constraint;
-        if let Some(allowed) = plain_eos_allowed(constraint, &self.state, token_id) {
-            let assertion_flags = commit_assertion_flags();
-            let was_in_mask = snapshot_mask_membership(self, token_id, assertion_flags);
-            if !allowed {
-                self.state.clear();
-                self.buffers.clear_all();
-            }
-            self.generation += 1;
-            assert_commit_oracles(
-                constraint,
-                token_id,
-                token_bytes_for_id(constraint, token_id),
-                was_in_mask,
-                None,
-                &self.state,
-                allowed,
-            );
-            return allowed
-                .then(CommitProfile::default)
-                .ok_or_else(|| "commit rejected: no valid parser states remain".to_owned());
-        }
-
         let bytes = token_bytes_for_id(constraint, token_id);
         let has_special = constraint.has_special_token_id(token_id);
         if bytes.is_none() && !has_special {
@@ -3816,29 +3759,6 @@ impl<'a> ConstraintState<'a> {
         token_id: u32,
     ) -> Result<(Vec<PerAdvanceEntry>, Vec<(u32, Vec<Vec<u32>>)>, CommitProfile), String> {
         let constraint = self.constraint;
-        if let Some(allowed) = plain_eos_allowed(constraint, &self.state, token_id) {
-            let assertion_flags = commit_assertion_flags();
-            let was_in_mask = snapshot_mask_membership(self, token_id, assertion_flags);
-            if !allowed {
-                self.state.clear();
-                self.buffers.clear_all();
-            }
-            let result = allowed
-                .then(|| (Vec::new(), final_stacks(&self.state), CommitProfile::default()))
-                .ok_or_else(|| "commit rejected: no valid parser states remain".to_owned());
-            self.generation += 1;
-            assert_commit_oracles(
-                constraint,
-                token_id,
-                token_bytes_for_id(constraint, token_id),
-                was_in_mask,
-                None,
-                &self.state,
-                result.is_ok(),
-            );
-            return result;
-        }
-
         let bytes = token_bytes_for_id(constraint, token_id);
         let has_special = constraint.has_special_token_id(token_id);
         if bytes.is_none() && !has_special {
