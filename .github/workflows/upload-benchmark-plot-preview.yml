@@ -1,0 +1,66 @@
+name: Upload benchmark plot preview
+
+on:
+  pull_request:
+    branches: [main]
+    types: [synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build contact sheet
+        run: |
+          python -m pip install --disable-pip-version-check pillow
+          python <<'PY'
+          from pathlib import Path
+          from PIL import Image, ImageDraw, ImageFont
+
+          assets = Path('docs/assets')
+          files = [
+              ('Tail — light', assets / 'benchmark-mask-tail-2026-07-16.webp'),
+              ('Tail — dark', assets / 'benchmark-mask-tail-2026-07-16-dark.webp'),
+              ('Compilation — light', assets / 'benchmark-compilation-summary-2026-07-16.webp'),
+              ('Compilation — dark', assets / 'benchmark-compilation-summary-2026-07-16-dark.webp'),
+          ]
+          width = 1400
+          pad = 36
+          label_h = 54
+          font = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 28)
+          panels = []
+          total_h = pad
+          for label, path in files:
+              image = Image.open(path).convert('RGB')
+              target_w = width - 2 * pad
+              target_h = round(image.height * target_w / image.width)
+              image = image.resize((target_w, target_h), Image.Resampling.LANCZOS)
+              panels.append((label, image))
+              total_h += label_h + target_h + pad
+          sheet = Image.new('RGB', (width, total_h), '#20242b')
+          draw = ImageDraw.Draw(sheet)
+          y = pad
+          for label, image in panels:
+              draw.text((pad, y), label, font=font, fill='#f0f3f6')
+              y += label_h
+              sheet.paste(image, (pad, y))
+              y += image.height + pad
+          Path('preview').mkdir()
+          sheet.save('preview/contact-sheet.png')
+          for _label, path in files:
+              Image.open(path).convert('RGB').save(Path('preview') / (path.stem + '.png'))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-plot-preview
+          path: preview/
+          retention-days: 1
