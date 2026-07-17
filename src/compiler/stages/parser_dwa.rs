@@ -2212,7 +2212,31 @@ fn optimize_parser_dwa_defaults(
     }
 }
 
-fn subtract_final_weights_from_outgoing_dwa(dwa: &mut DWA) {
+fn subtract_final_weights_from_outgoing_dwa_impl(dwa: &mut DWA, parallel: bool) {
+    if parallel {
+        use rayon::prelude::*;
+
+        dwa.states_mut().par_iter_mut().for_each_init(
+            ScopedWeightOpCache::default,
+            |weight_ops, state| {
+                let Some(final_weight) = state.final_weight.clone() else {
+                    return;
+                };
+                if final_weight.is_empty() {
+                    return;
+                }
+                state.transitions.retain(|_, (_, weight)| {
+                    let new_weight = weight_ops.difference(weight, &final_weight);
+                    if new_weight != *weight {
+                        *weight = new_weight;
+                    }
+                    !weight.is_empty()
+                });
+            },
+        );
+        return;
+    }
+
     let mut weight_ops = ScopedWeightOpCache::default();
     for state_id in 0..dwa.states().len() {
         let Some(final_weight) = dwa.states()[state_id].final_weight.clone() else {
@@ -2236,6 +2260,13 @@ fn subtract_final_weights_from_outgoing_dwa(dwa: &mut DWA) {
             state.transitions.remove(&label);
         }
     }
+}
+
+fn subtract_final_weights_from_outgoing_dwa(dwa: &mut DWA) {
+    subtract_final_weights_from_outgoing_dwa_impl(
+        dwa,
+        std::env::var_os("GLRMASK_EXPERIMENTAL_PARALLEL_FINAL_SUBTRACTION").is_some(),
+    );
 }
 
 fn dwa_to_nwa(dwa: &DWA) -> NWA {
@@ -2781,7 +2812,37 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     let default_opt_ms = elapsed_ms(default_opt_started_at);
 
     let subtract_final_started_at = Instant::now();
+    let validate_parallel_subtraction =
+        std::env::var_os("GLRMASK_VALIDATE_PARALLEL_FINAL_SUBTRACTION").is_some();
+    let serial_reference = validate_parallel_subtraction.then(|| parser_dwa_pre_minimize.clone());
     subtract_final_weights_from_outgoing_dwa(&mut parser_dwa_pre_minimize);
+    if let Some(mut serial_reference) = serial_reference {
+        subtract_final_weights_from_outgoing_dwa_impl(&mut serial_reference, false);
+        assert_eq!(
+            parser_dwa_pre_minimize.start_state(),
+            serial_reference.start_state(),
+            "parallel final subtraction changed the DWA start state",
+        );
+        assert_eq!(
+            parser_dwa_pre_minimize.states().len(),
+            serial_reference.states().len(),
+            "parallel final subtraction changed the DWA state count",
+        );
+        for (parallel_state, serial_state) in parser_dwa_pre_minimize
+            .states()
+            .iter()
+            .zip(serial_reference.states())
+        {
+            assert_eq!(
+                parallel_state.final_weight, serial_state.final_weight,
+                "parallel final subtraction changed a final weight",
+            );
+            assert_eq!(
+                parallel_state.transitions, serial_state.transitions,
+                "parallel final subtraction changed a transition row",
+            );
+        }
+    }
     let subtract_final_ms = elapsed_ms(subtract_final_started_at);
 
     let fallback_determinize_started_at = Instant::now();
@@ -2859,12 +2920,38 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
 mod tests {
     use range_set_blaze::RangeSetBlaze;
 
-    use super::collapse_final_leaf_targets;
+    use super::{collapse_final_leaf_targets, subtract_final_weights_from_outgoing_dwa_impl};
     use crate::automata::weighted::dwa::DWA;
     use crate::ds::weight::Weight;
 
     fn weight(tokens: std::ops::RangeInclusive<u32>) -> Weight {
         Weight::from_token_set_for_tsid(0, RangeSetBlaze::from_iter([tokens]))
+    }
+
+    #[test]
+    fn parallel_final_subtraction_matches_serial_rows() {
+        let mut source = DWA::new(1, 31);
+        let left = source.add_state();
+        let right = source.add_state();
+        source.set_final_weight(source.start_state(), weight(4..=11));
+        source.add_transition(source.start_state(), 1, left, weight(0..=15));
+        source.add_transition(source.start_state(), 2, right, weight(8..=20));
+        source.set_final_weight(left, weight(0..=3));
+        source.add_transition(left, 3, right, weight(0..=9));
+        source.set_final_weight(right, weight(16..=23));
+        source.add_transition(right, 4, left, weight(12..=27));
+
+        let mut serial = source.clone();
+        let mut parallel = source;
+        subtract_final_weights_from_outgoing_dwa_impl(&mut serial, false);
+        subtract_final_weights_from_outgoing_dwa_impl(&mut parallel, true);
+
+        assert_eq!(serial.start_state(), parallel.start_state());
+        assert_eq!(serial.states().len(), parallel.states().len());
+        for (serial_state, parallel_state) in serial.states().iter().zip(parallel.states()) {
+            assert_eq!(serial_state.final_weight, parallel_state.final_weight);
+            assert_eq!(serial_state.transitions, parallel_state.transitions);
+        }
     }
 
     #[test]
