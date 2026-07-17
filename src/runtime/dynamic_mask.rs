@@ -877,6 +877,7 @@ fn fill_mask_dynamic_impl(
     let mut continuation_groups_traversed = 0usize;
     let mut token_program_groups_evaluated = 0usize;
     let mut token_program_groups_admitted = 0usize;
+    let mut token_program_acceptance_cache_hits = 0usize;
     let mut lazy_continuation_builds_remaining = 1usize;
     if profile {
         eprintln!(
@@ -943,25 +944,49 @@ fn fill_mask_dynamic_impl(
             if tokenizer_state == initial_tsid
                 && let Some(program_partition) = vocab.initial_token_program_partition()
             {
+                let source_states = [initial_tsid];
                 let mut accepted_programs = vec![false; program_partition.programs.len()];
-                for &program in program_partition.root_programs.iter() {
-                    check_deadline()?;
-                    token_program_groups_evaluated += 1;
-                    if initial_prune_guard.allows_token_program(
-                        state.constraint,
-                        &program_partition.programs[program as usize],
-                    ) && token_program_accepts(
-                        state.constraint,
-                        &program_partition,
-                        u32::from(program),
+                if vocab.copy_cached_program_acceptance(
+                    &source_states,
+                    &stacks,
+                    &mut accepted_programs,
+                ) {
+                    token_program_acceptance_cache_hits += 1;
+                } else {
+                    for &program in program_partition.root_programs.iter() {
+                        check_deadline()?;
+                        token_program_groups_evaluated += 1;
+                        if token_program_accepts(
+                            state.constraint,
+                            &program_partition,
+                            u32::from(program),
+                            &stacks,
+                            &mut traversal_cache,
+                            &mut token_program_cache,
+                        ) {
+                            accepted_programs[program as usize] = true;
+                        }
+                    }
+                    vocab.cache_program_acceptance(
+                        &source_states,
                         &stacks,
-                        &mut traversal_cache,
-                        &mut token_program_cache,
-                    ) {
-                        accepted_programs[program as usize] = true;
-                        token_program_groups_admitted += 1;
+                        &accepted_programs,
+                    );
+                }
+                for &program in program_partition.root_programs.iter() {
+                    if accepted_programs[program as usize]
+                        && !initial_prune_guard.allows_token_program(
+                            state.constraint,
+                            &program_partition.programs[program as usize],
+                        )
+                    {
+                        accepted_programs[program as usize] = false;
                     }
                 }
+                token_program_groups_admitted += accepted_programs
+                    .iter()
+                    .filter(|&&accepted| accepted)
+                    .count();
                 for (word, programs) in buf
                     .iter_mut()
                     .zip(program_partition.token_programs.chunks(32))
@@ -1041,27 +1066,68 @@ fn fill_mask_dynamic_impl(
                     }
                 }
 
+                let needed_count = needed_programs
+                    .iter()
+                    .filter(|&&needed| needed)
+                    .count();
+                let cache_full_acceptance = needed_count * 4
+                    >= source_partition.root_programs.len() * 3;
                 let mut accepted_programs = vec![false; source_partition.programs.len()];
-                for (program, needed) in needed_programs.into_iter().enumerate() {
-                    if !needed {
-                        continue;
-                    }
-                    check_deadline()?;
-                    token_program_groups_evaluated += 1;
-                    let program = program as u16;
-                    if source_token_program_accepts(
-                        state.constraint,
-                        &program_partition,
-                        source_partition,
-                        program,
+                let cache_hit = cache_full_acceptance
+                    && vocab.copy_cached_program_acceptance(
+                        &source_partition.source_states,
                         &stacks,
-                        &mut traversal_cache,
-                        &mut token_program_cache,
-                    ) {
-                        accepted_programs[program as usize] = true;
-                        token_program_groups_admitted += 1;
+                        &mut accepted_programs,
+                    );
+                if cache_hit {
+                    token_program_acceptance_cache_hits += 1;
+                } else if cache_full_acceptance {
+                    for &program in source_partition.root_programs.iter() {
+                        check_deadline()?;
+                        token_program_groups_evaluated += 1;
+                        if source_token_program_accepts(
+                            state.constraint,
+                            &program_partition,
+                            source_partition,
+                            program,
+                            &stacks,
+                            &mut traversal_cache,
+                            &mut token_program_cache,
+                        ) {
+                            accepted_programs[program as usize] = true;
+                        }
+                    }
+                    vocab.cache_program_acceptance(
+                        &source_partition.source_states,
+                        &stacks,
+                        &accepted_programs,
+                    );
+                } else {
+                    for (program, needed) in needed_programs.iter().copied().enumerate() {
+                        if !needed {
+                            continue;
+                        }
+                        check_deadline()?;
+                        token_program_groups_evaluated += 1;
+                        let program = program as u16;
+                        if source_token_program_accepts(
+                            state.constraint,
+                            &program_partition,
+                            source_partition,
+                            program,
+                            &stacks,
+                            &mut traversal_cache,
+                            &mut token_program_cache,
+                        ) {
+                            accepted_programs[program as usize] = true;
+                        }
                     }
                 }
+                token_program_groups_admitted += accepted_programs
+                    .iter()
+                    .zip(&needed_programs)
+                    .filter(|&(&accepted, &needed)| accepted && needed)
+                    .count();
                 for (word, programs) in buf
                     .iter_mut()
                     .zip(source_partition.token_programs.chunks(32))
@@ -1375,7 +1441,7 @@ fn fill_mask_dynamic_impl(
     }
     if let Some(total_started_at) = total_started_at {
         eprintln!(
-            "[glrmask/profile][dynamic_mask] generation={} cache_hit=false key_ms={:.3} work_items={} trie_edges={} lexer_execs={} subtree_marks={} subtree_tokens={} token_program_evaluated={} token_program_admitted={} token_program_cache={} continuation_admitted={} continuation_traversed={} boundary_cache={} relevant_cache={} child_cache={} total_ms={:.3}",
+            "[glrmask/profile][dynamic_mask] generation={} cache_hit=false key_ms={:.3} work_items={} trie_edges={} lexer_execs={} subtree_marks={} subtree_tokens={} token_program_evaluated={} token_program_admitted={} token_program_acceptance_cache_hits={} token_program_cache={} continuation_admitted={} continuation_traversed={} boundary_cache={} relevant_cache={} child_cache={} total_ms={:.3}",
             state.generation,
             key_ms,
             work_items,
@@ -1385,6 +1451,7 @@ fn fill_mask_dynamic_impl(
             subtree_mark_tokens,
             token_program_groups_evaluated,
             token_program_groups_admitted,
+            token_program_acceptance_cache_hits,
             token_program_cache.results.len(),
             continuation_groups_admitted,
             continuation_groups_traversed,

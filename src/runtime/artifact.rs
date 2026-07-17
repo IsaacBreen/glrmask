@@ -9,6 +9,7 @@ use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
 use crate::automata::weighted::dwa::DWA;
 use crate::compiler::glr::table::GLRTable;
 use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
+use crate::ds::leveled_gss::LeveledGSS;
 use crate::ds::u8set::U8Set;
 use crate::ds::weight::Weight;
 use crate::grammar::flat::TerminalID;
@@ -755,6 +756,16 @@ struct DynamicMaskCacheEntry {
     mask: Arc<[u32]>,
 }
 
+#[derive(Debug)]
+struct DynamicProgramAcceptanceCacheEntry {
+    source_states: Box<[u32]>,
+    // Retaining the immutable GSS keeps its lower-node pointer alive, so the
+    // pointer-derived identity cannot be reused for a different stack while
+    // this cache entry exists.
+    stacks: LeveledGSS<u32, ()>,
+    accepted_programs: Arc<[bool]>,
+}
+
 /// Canonical semantic snapshot of a dynamic-mask residual. Flattening the GSS
 /// deliberately removes representation-only Arc identities and accumulator
 /// node organization, so equivalent residuals reached after different token
@@ -782,6 +793,8 @@ pub(crate) struct DynamicMaskVocab {
     initial_token_program_partition:
         Arc<OnceLock<Arc<DynamicTokenProgramPartition>>>,
     mask_cache: Arc<Mutex<Vec<DynamicMaskCacheEntry>>>,
+    program_acceptance_cache:
+        Arc<Mutex<Vec<DynamicProgramAcceptanceCacheEntry>>>,
 }
 
 impl DynamicMaskVocab {
@@ -816,6 +829,7 @@ impl DynamicMaskVocab {
             continuation_entries: Arc::new(OnceLock::new()),
             initial_token_program_partition: Arc::new(OnceLock::new()),
             mask_cache: Arc::new(Mutex::new(Vec::new())),
+            program_acceptance_cache: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -830,6 +844,7 @@ impl DynamicMaskVocab {
             continuation_entries: Arc::new(OnceLock::new()),
             initial_token_program_partition: Arc::new(OnceLock::new()),
             mask_cache: Arc::new(Mutex::new(Vec::new())),
+            program_acceptance_cache: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -847,6 +862,7 @@ impl DynamicMaskVocab {
             continuation_entries: Arc::new(OnceLock::new()),
             initial_token_program_partition: Arc::new(OnceLock::new()),
             mask_cache: Arc::new(Mutex::new(Vec::new())),
+            program_acceptance_cache: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -1313,35 +1329,53 @@ impl DynamicMaskVocab {
                 )
             },
         );
-        // Cover both broad consuming residuals and epsilon-only residuals.
-        // The latter can have no raw transitions of their own while their
-        // epsilon closure still fans out across the full lexer. Selecting only
-        // by the raw-state tie breakers misses exactly those expensive seeds.
-        let mut source_states = ranked_source_states
-            .iter()
-            .filter(|&&(_, _, transitions, _, _)| transitions != 0)
-            .take(1)
-            .map(|&(state, _, _, _, _)| state)
-            .collect::<Vec<_>>();
-        if let Some(state) = (0..tokenizer.num_states())
+        // The largest dynamic tails come from broad token-boundary residuals
+        // that can consume most bytes while already matching several terminals.
+        // Some of these states are reached only after committed tokens and are
+        // therefore invisible to initial-program reachability scores. Select
+        // the structural class directly rather than relying on root frequency.
+        let mut source_states = (0..tokenizer.num_states())
             .filter(|&state| state != initial_state)
-            .filter(|&state| tokenizer.transitions_from(state).next().is_none())
-            .filter(|&state| !tokenizer.is_end(state))
-            .min()
+            .filter(|&state| tokenizer.transitions_from(state).count() >= 128)
+            .filter(|&state| tokenizer.matched_terminals_iter(state).count() >= 5)
+            .filter(|&state| {
+                tokenizer
+                    .possible_future_terminals_iter(state)
+                    .count()
+                    >= 9
+            })
+            .filter(|&state| {
+                source_scores[state as usize] != 0
+                    || tokenizer.matched_terminals_iter(state).count() >= 6
+            })
+            .collect::<Vec<_>>();
+        if source_states.is_empty()
+            && let Some(&(state, _, _, _, _)) = ranked_source_states
+                .iter()
+                .find(|&&(_, _, transitions, _, _)| transitions != 0)
         {
             source_states.push(state);
         }
+        let epsilon_source = (0..tokenizer.num_states())
+            .filter(|&state| state != initial_state)
+            .filter(|&state| tokenizer.transitions_from(state).next().is_none())
+            .filter(|&state| !tokenizer.is_end(state))
+            .min();
         source_states.sort_unstable();
         source_states.dedup();
-        let mut source_specs = Vec::<Vec<u32>>::new();
-        if let Some(&primary) = source_states
+
+        let mut source_specs = source_states
             .iter()
-            .find(|&&state| tokenizer.transitions_from(state).next().is_some())
-        {
-            source_specs.push(vec![primary]);
-        }
-        if source_states.len() > 1 {
-            source_specs.push(source_states.clone());
+            .copied()
+            .map(|state| vec![state])
+            .collect::<Vec<_>>();
+        if let (Some(epsilon_source), Some(&primary)) = (
+            epsilon_source,
+            source_states
+                .iter()
+                .max_by_key(|&&state| source_scores[state as usize]),
+        ) {
+            source_specs.push(vec![epsilon_source, primary]);
         }
         source_specs.sort();
         source_specs.dedup();
@@ -1421,8 +1455,19 @@ impl DynamicMaskVocab {
                 suffix_count,
                 branch_count,
                 partition.token_count,
-                ranked_source_states.iter().take(16).copied().collect::<Vec<_>>(),
-                source_specs,
+                ranked_source_states.iter().take(32).copied().collect::<Vec<_>>(),
+                source_states
+                    .iter()
+                    .map(|&state| (
+                        state,
+                        source_scores[state as usize],
+                        tokenizer.transitions_from(state).count(),
+                        tokenizer.matched_terminals_iter(state).count(),
+                        tokenizer
+                            .possible_future_terminals_iter(state)
+                            .count(),
+                    ))
+                    .collect::<Vec<_>>(),
                 partition
                     .source_partitions
                     .iter()
@@ -1666,6 +1711,62 @@ impl DynamicMaskVocab {
         partitions.extend(built);
     }
 
+    pub(crate) fn copy_cached_program_acceptance(
+        &self,
+        source_states: &[u32],
+        stacks: &LeveledGSS<u32, ()>,
+        accepted_programs: &mut [bool],
+    ) -> bool {
+        let Some(lower_id) = stacks.single_interface_lower_id() else {
+            return false;
+        };
+        let cache = self
+            .program_acceptance_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(entry) = cache.iter().rev().find(|entry| {
+            entry.source_states.as_ref() == source_states
+                && entry.stacks.single_interface_lower_id() == Some(lower_id)
+        }) else {
+            return false;
+        };
+        if entry.accepted_programs.len() != accepted_programs.len() {
+            return false;
+        }
+        accepted_programs.copy_from_slice(&entry.accepted_programs);
+        true
+    }
+
+    pub(crate) fn cache_program_acceptance(
+        &self,
+        source_states: &[u32],
+        stacks: &LeveledGSS<u32, ()>,
+        accepted_programs: &[bool],
+    ) {
+        const MAX_DYNAMIC_PROGRAM_ACCEPTANCE_CACHE_ENTRIES: usize = 64;
+        let Some(lower_id) = stacks.single_interface_lower_id() else {
+            return;
+        };
+        let mut cache = self
+            .program_acceptance_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if cache.iter().any(|entry| {
+            entry.source_states.as_ref() == source_states
+                && entry.stacks.single_interface_lower_id() == Some(lower_id)
+        }) {
+            return;
+        }
+        if cache.len() == MAX_DYNAMIC_PROGRAM_ACCEPTANCE_CACHE_ENTRIES {
+            cache.remove(0);
+        }
+        cache.push(DynamicProgramAcceptanceCacheEntry {
+            source_states: source_states.into(),
+            stacks: stacks.clone(),
+            accepted_programs: Arc::from(accepted_programs),
+        });
+    }
+
     pub(crate) fn copy_cached_mask(
         &self,
         state: &DynamicMaskStateKey,
@@ -1716,6 +1817,7 @@ impl Default for DynamicMaskVocab {
             continuation_entries: Arc::new(OnceLock::new()),
             initial_token_program_partition: Arc::new(OnceLock::new()),
             mask_cache: Arc::new(Mutex::new(Vec::new())),
+            program_acceptance_cache: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
