@@ -1239,10 +1239,10 @@ fn commit_bytes_and_commit_tokens_agree() {
 }
 
 #[test]
-fn force_reports_deterministic_prefix() {
+fn forced_reports_deterministic_prefix() {
     let constraint = ebnf(&["a", "b", "c"], r#"start ::= "a" "b" ("c")?"#);
     let mut state = constraint.start();
-    assert_eq!(state.force(), vec![0, 1, 2]);
+    assert_eq!(state.forced(), vec![0, 1, 2]);
 
     state.commit_tokens(&[0, 1]).unwrap();
     assert!(state.is_finished());

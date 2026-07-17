@@ -255,8 +255,8 @@ impl<'a> DynamicConstraintState<'a> {
         self.inner.fill_mask_dynamic_bounded(buf, timeout_ms)
     }
 
-    pub fn force(&self) -> Vec<u32> {
-        self.inner.force_dynamic()
+    pub fn forced(&self) -> Vec<u32> {
+        self.inner.forced_dynamic()
     }
 
     pub fn is_complete(&self) -> bool {
@@ -325,9 +325,9 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_force_uses_dynamic_masks() {
+    fn dynamic_forced_uses_dynamic_masks() {
         let vocab = Vocab::new(vec![(0, b"a".to_vec())], None);
         let constraint = DynamicConstraint::from_ebnf("start ::= 'a'", &vocab).unwrap();
-        assert_eq!(constraint.start().force(), vec![0]);
+        assert_eq!(constraint.start().forced(), vec![0]);
     }
 }

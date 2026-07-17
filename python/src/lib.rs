@@ -682,8 +682,8 @@ impl PyDynamicConstraintState {
         })
     }
 
-    fn force(&self) -> Vec<u32> {
-        self.inner.with_dependent(|_owner, state| state.force())
+    fn forced(&self) -> Vec<u32> {
+        self.inner.with_dependent(|_owner, state| state.forced())
     }
 
     fn is_complete(&self) -> bool {
@@ -748,8 +748,8 @@ impl PyConstraintState {
             .with_dependent_mut(|_owner, state| string_result(state.commit_bytes(data)))
     }
 
-    fn force(&self) -> Vec<u32> {
-        self.inner.with_dependent(|_owner, state| state.force())
+    fn forced(&self) -> Vec<u32> {
+        self.inner.with_dependent(|_owner, state| state.forced())
     }
 
     fn is_complete(&self) -> bool {
