@@ -146,7 +146,7 @@ fn parser_effect_for_power(
         table,
         grammar,
         &terminal_dwa,
-        templates.clone(),
+        templates,
         vocab,
         id_map,
         false,
@@ -183,6 +183,8 @@ fn certify_caps(
         let mut previous = parser_effect_for_power(
             terminal, 1, table, grammar, templates, vocab, id_map,
         );
+        let verify_stabilization = cfg!(debug_assertions)
+            || std::env::var_os("GLRMASK_VERIFY_TERMINAL_RUN_CERTIFICATES").is_some();
         let mut pending_cap = None;
 
         for exponent in 2..=max_exponent {
@@ -212,6 +214,10 @@ fn certify_caps(
             } else {
                 let cap = exponent - 1;
                 if equal && cap <= MAX_CERTIFIED_CAP && usize::from(max_run) > cap {
+                    if !verify_stabilization {
+                        caps.insert(terminal, cap as u8);
+                        break;
+                    }
                     pending_cap = Some(cap);
                 }
             }

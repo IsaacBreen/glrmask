@@ -2375,11 +2375,11 @@ fn append_branch_fragment(
 fn build_parser_nwa_from_terminal_dwa(
     terminal_dwa: &TerminalAutomaton,
     grammar: &AnalyzedGrammar,
-    templates: Templates,
+    templates: &Templates,
 ) -> Option<(NWA, ParserNwaBuildProfile)> {
     let total_started_at = Instant::now();
     let state_prep_started_at = Instant::now();
-    let summaries = build_state_summaries(terminal_dwa, grammar, &templates);
+    let summaries = build_state_summaries(terminal_dwa, grammar, templates);
     let productive = compute_productive_terminal_states(&summaries);
     let state_prep_ms = elapsed_ms(state_prep_started_at);
     let states = &summaries.states;
@@ -2617,7 +2617,7 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     table: &GLRTable,
     grammar: &AnalyzedGrammar,
     terminal_dwa: &TerminalAutomaton,
-    templates: Templates,
+    templates: &Templates,
     _vocab: &Vocab,
     _id_map: &InternalIdMap,
     collapse_immediate_acceptance: bool,

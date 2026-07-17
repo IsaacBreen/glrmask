@@ -984,7 +984,7 @@ fn build_parser_dwa_for_terminal_family(
     family: Option<&MappedArtifact<TerminalAutomaton>>,
     table: &GLRTable,
     grammar: &AnalyzedGrammar,
-    templates: Templates,
+    templates: &Templates,
     vocab: &Vocab,
     collapse_immediate_acceptance: bool,
 ) -> Option<MappedArtifact<DWA>> {
@@ -1052,8 +1052,6 @@ fn build_and_merge_parser_dwa_families(
     vocab: &Vocab,
 ) -> MappedParserDwa {
     let collapse_immediate_acceptance = !tokenizer.has_epsilon_transitions();
-    let l1_templates = templates.clone();
-    let special_templates = templates.clone();
     let (l1_parser, l2p_parser) = rayon::join(
         || {
             build_parser_dwa_for_terminal_family(
@@ -1061,7 +1059,7 @@ fn build_and_merge_parser_dwa_families(
                 terminal_dwas.l1.as_ref(),
                 table,
                 grammar,
-                l1_templates,
+                &templates,
                 vocab,
                 collapse_immediate_acceptance,
             )
@@ -1072,7 +1070,7 @@ fn build_and_merge_parser_dwa_families(
                 terminal_dwas.l2p.as_ref(),
                 table,
                 grammar,
-                templates,
+                &templates,
                 vocab,
                 collapse_immediate_acceptance,
             )
@@ -1083,7 +1081,7 @@ fn build_and_merge_parser_dwa_families(
         terminal_dwas.special.as_ref(),
         table,
         grammar,
-        special_templates,
+        &templates,
         vocab,
         collapse_immediate_acceptance,
     );
