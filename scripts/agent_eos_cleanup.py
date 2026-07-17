@@ -70,6 +70,35 @@ if start >= 0:
     if end < 0:
         raise RuntimeError("EOS finalization block has no cache boundary")
     text = text[:start] + text[end:]
+
+old_cache = '''        if can_use_merged_cache {
+            if reuse_existing_cache_dense {
+                if eos_unchanged {
+                    self.touch_mask_cache_generation();
+                } else {
+                    self.store_mask_cache_reuse_dense(buf);
+                }
+            } else {
+                self.store_mask_cache(buf, &merged);
+            }
+        } else {
+            self.store_mask_cache_reuse_dense(buf);
+        }
+'''
+new_cache = '''        if can_use_merged_cache {
+            if reuse_existing_cache_dense {
+                self.touch_mask_cache_generation();
+            } else {
+                self.store_mask_cache(buf, &merged);
+            }
+        } else {
+            self.store_mask_cache_reuse_dense(buf);
+        }
+'''
+if old_cache in text:
+    text = text.replace(old_cache, new_cache, 1)
+elif "eos_unchanged" in text:
+    raise RuntimeError("unexpected eos_unchanged cache layout")
 path.write_text(text)
 
 for forbidden in ("eos_token_id", "EOS_BYTES", "update_eos_mask", "finalize_eos_ns"):
