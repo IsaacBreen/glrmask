@@ -10,10 +10,7 @@ import glrmask
 
 llm = Llama(model_path="model.gguf", logits_all=True)
 
-vocab = glrmask.Vocab.from_id_to_bytes({
-    token: llm.detokenize([token], special=True)
-    for token in range(llm.n_vocab())
-})
+vocab = glrmask.Vocab.from_llama_cpp(llm)
 
 schema = '{"type":"string","enum":["positive","negative","neutral"]}'
 constraint = glrmask.Constraint.from_json_schema(schema, vocab)
