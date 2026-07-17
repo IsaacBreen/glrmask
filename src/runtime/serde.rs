@@ -11,7 +11,7 @@ use crate::runtime::{Constraint, SpecialTokenTerminal};
 
 const CONSTRAINT_MAGIC: [u8; 8] = *b"GLRCONS\0";
 const LEGACY_CONSTRAINT_VERSION: u16 = 1;
-const CONSTRAINT_VERSION: u16 = 2;
+const CONSTRAINT_VERSION: u16 = 3;
 const CONSTRAINT_HEADER_LEN: usize = CONSTRAINT_MAGIC.len() + 2 + 8;
 
 /// Exact serialized field order of the historical direct-`Constraint` v1
@@ -31,7 +31,6 @@ struct ConstraintPayloadV1 {
     internal_tsid_to_states: Vec<Vec<u32>>,
     original_token_to_internal: Vec<u32>,
     internal_token_to_tokens: Vec<Vec<u32>>,
-    eos_token_id: Option<u32>,
     token_bytes: Arc<BTreeMap<u32, Vec<u8>>>,
     internal_token_bytes: BTreeMap<u32, Vec<u8>>,
     word_group_sparse_total_entries: usize,
@@ -51,7 +50,6 @@ impl From<&Constraint> for ConstraintPayloadV1 {
             internal_tsid_to_states: constraint.internal_tsid_to_states.clone(),
             original_token_to_internal: constraint.original_token_to_internal.clone(),
             internal_token_to_tokens: constraint.internal_token_to_tokens.clone(),
-            eos_token_id: constraint.eos_token_id,
             token_bytes: Arc::clone(&constraint.token_bytes),
             internal_token_bytes: constraint.internal_token_bytes.clone(),
             word_group_sparse_total_entries: constraint.word_group_sparse_total_entries,
@@ -72,7 +70,6 @@ impl ConstraintPayloadV1 {
             internal_tsid_to_states: self.internal_tsid_to_states,
             original_token_to_internal: self.original_token_to_internal,
             internal_token_to_tokens: self.internal_token_to_tokens,
-            eos_token_id: self.eos_token_id,
             token_bytes: self.token_bytes,
             internal_token_bytes: self.internal_token_bytes,
         }
@@ -100,7 +97,6 @@ struct RuntimePayloadV1 {
     internal_tsid_to_states: Vec<Vec<u32>>,
     original_token_to_internal: Vec<u32>,
     internal_token_to_tokens: Vec<Vec<u32>>,
-    eos_token_id: Option<u32>,
     token_bytes: Arc<BTreeMap<u32, Vec<u8>>>,
     internal_token_bytes: BTreeMap<u32, Vec<u8>>,
 }
@@ -134,7 +130,6 @@ impl From<&Constraint> for RuntimePayloadV1 {
             internal_tsid_to_states: constraint.internal_tsid_to_states.clone(),
             original_token_to_internal: constraint.original_token_to_internal.clone(),
             internal_token_to_tokens: constraint.internal_token_to_tokens.clone(),
-            eos_token_id: constraint.eos_token_id,
             token_bytes: constraint.token_bytes.clone(),
             internal_token_bytes: constraint.internal_token_bytes.clone(),
         }
@@ -165,7 +160,6 @@ impl RuntimePayloadV1 {
             template_dfas_by_terminal: Vec::new(),
             original_token_to_internal: self.original_token_to_internal,
             internal_token_to_tokens: self.internal_token_to_tokens,
-            eos_token_id: self.eos_token_id,
             token_bytes: self.token_bytes,
             internal_token_bytes: self.internal_token_bytes,
             token_bytes_dense: Vec::new(),
@@ -383,16 +377,14 @@ mod tests {
                 nt start ::= A B;
             "#,
             &Vocab::new(
-                vec![(0, b"a".to_vec()), (1, b"b".to_vec()), (2, b"ab".to_vec())],
-                None,
-            ),
+                vec![(0, b"a".to_vec()), (1, b"b".to_vec()), (2, b"ab".to_vec())]),
         )
         .unwrap()
     }
 
     #[test]
     fn runtime_payload_v2_preserves_top_accept_and_v1_rejects_it() {
-        let vocab = crate::Vocab::new(vec![(0, b"a".to_vec())], None);
+        let vocab = crate::Vocab::new(vec![(0, b"a".to_vec())]);
         let mut constraint = Constraint::from_lark(
             r#"
                 start: "a"
@@ -424,7 +416,7 @@ mod tests {
                 start start;
                 nt start ::= @token(100);
             "#,
-            &Vocab::new(Vec::new(), None),
+            &Vocab::new(Vec::new()),
         )
         .unwrap();
 
@@ -456,7 +448,7 @@ mod tests {
                 t A ::= "a";
                 nt start ::= A;
             "#,
-            &Vocab::new(vec![(0, b"a".to_vec())], None),
+            &Vocab::new(vec![(0, b"a".to_vec())]),
         )
         .unwrap();
         let legacy = bincode::serialize(&ConstraintPayloadV1::from(&legacy_constraint)).unwrap();

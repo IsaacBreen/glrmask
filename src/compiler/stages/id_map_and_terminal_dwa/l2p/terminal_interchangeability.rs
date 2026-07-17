@@ -12496,9 +12496,7 @@ mod tests {
                 (1, b"b".to_vec()),
                 (2, b"aa".to_vec()),
                 (3, b"ba".to_vec()),
-            ],
-            None,
-        );
+            ]);
         let (global_state_quotient, _) = crate::compiler::stages::id_map_and_terminal_dwa::l2p::
             equivalence_analysis::state_equivalence::global_token_position::
             compute_global_token_position_state_quotient(&tokenizer, &vocab);

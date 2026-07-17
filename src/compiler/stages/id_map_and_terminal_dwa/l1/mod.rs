@@ -5497,9 +5497,7 @@ mod generic_nfa_tests {
                 (6, b"ba".to_vec()),
                 (7, b"bb".to_vec()),
                 (8, b"x".to_vec()),
-            ],
-            None,
-        );
+            ]);
         let active = [true, true];
         let (optimized_id_map, order, _, _, _) =
             build_l1_generic_nfa_fallback_id_map(&tokenizer, &vocab, None);
@@ -5560,9 +5558,7 @@ mod generic_nfa_tests {
                 (5, b"ba".to_vec()),
                 (6, b"bb".to_vec()),
                 (7, b"x".to_vec()),
-            ],
-            None,
-        );
+            ]);
         let subset_vocab = Vocab::new(
             vec![
                 (0, b"".to_vec()),
@@ -5572,9 +5568,7 @@ mod generic_nfa_tests {
                 (4, b"b".to_vec()),
                 (5, b"ba".to_vec()),
                 (6, b"bb".to_vec()),
-            ],
-            None,
-        );
+            ]);
         let active = [true, true];
         let raw_states = (0..tokenizer.num_states() as usize).collect::<Vec<_>>();
         let full_tokens = full_vocab
@@ -5672,9 +5666,7 @@ mod generic_nfa_tests {
                 (1, b"a".to_vec()),
                 (2, b"b".to_vec()),
                 (3, b"aa".to_vec()),
-            ],
-            None,
-        );
+            ]);
         let active = [true, true];
 
         let (mut fallback_id_map, fallback_order, _, _, _) =
@@ -6010,9 +6002,7 @@ mod packed_suffix_product_tests {
                 (3, b"b".to_vec()),
                 (4, b"bb".to_vec()),
                 (5, b"x".to_vec()),
-            ],
-            None,
-        );
+            ]);
         let active_terminals = vec![true; expressions.len()];
         let flat_trans: Arc<[u32]> = build_flat_transition_table(&tokenizer).into();
         let (id_map, order, _, _, exact_profile_reuse) = build_l1_id_map(
@@ -6113,9 +6103,7 @@ mod packed_suffix_product_tests {
         assert!(tokenizer.has_deterministic_dispatch());
 
         let vocab = Vocab::new(
-            vec![(0, b"".to_vec()), (1, b"a".to_vec())],
-            None,
-        );
+            vec![(0, b"".to_vec()), (1, b"a".to_vec())]);
         let active_terminals = vec![true, false];
         let flat_trans: Arc<[u32]> = build_flat_transition_table(&tokenizer).into();
         let (id_map, order, _, _, exact_profile_reuse) = build_l1_id_map(
@@ -6229,9 +6217,7 @@ mod packed_suffix_product_tests {
                 (8, b"bb".to_vec()),
                 (9, b"c".to_vec()),
                 (10, b"cab".to_vec()),
-            ],
-            None,
-        );
+            ]);
         let active_terminals = vec![true, false, true, true];
         let order = l1_identity_vocab_order(&vocab);
         let flat_trans = build_flat_transition_table(&tokenizer);

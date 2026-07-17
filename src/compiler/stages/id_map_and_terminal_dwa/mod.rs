@@ -114,7 +114,7 @@ fn vocab_from_token_partitions(vocab: &Vocab, token_partitions: Vec<Vec<u32>>) -
                 .into_iter()
                 .filter_map(|token_id| vocab.entries.get(&token_id).map(|bytes| (token_id, bytes.clone())))
                 .collect();
-            Vocab::new(entries, None)
+            Vocab::new(entries)
         })
         .collect::<Vec<_>>()
         .into()
@@ -143,7 +143,7 @@ fn build_char_type_sub_vocabs(vocab: &Vocab) -> Arc<[Vocab]> {
         .into_iter()
         .enumerate()
         .map(|(idx, entries)| {
-            let vocab = Vocab::new(entries, None);
+            let vocab = Vocab::new(entries);
             classify::cache_vocab_classification_facts(
                 &vocab,
                 partition_bytes[idx],

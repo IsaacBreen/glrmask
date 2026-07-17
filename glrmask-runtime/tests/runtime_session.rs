@@ -35,9 +35,7 @@ fn tiny_constraint() -> Constraint {
 
 fn tiny_constraint_with_adaptive(adaptive: Option<bool>) -> Constraint {
     let vocab = Vocab::new(
-        vec![(0, b"a".to_vec()), (1, b"b".to_vec())],
-        None,
-    );
+        vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
     with_lexer_adaptive(adaptive, || {
         Constraint::from_glrm_grammar(
             r#"
@@ -56,9 +54,7 @@ fn tiny_constraint_with_adaptive(adaptive: Option<bool>) -> Constraint {
 
 fn legacy_tiny_constraint() -> Constraint {
     let vocab = Vocab::new(
-        vec![(0, b"a".to_vec()), (1, b"b".to_vec())],
-        None,
-    );
+        vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
     with_lexer_adaptive(None, || {
         Constraint::from_glrm_grammar(
             r#"
@@ -125,7 +121,7 @@ fn legacy_v1_envelope_rejects_epsilon_payload() {
 
 #[test]
 fn runtime_artifact_preserves_special_llm_token_terminals() {
-    let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())], None);
+    let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
     let compiled = Constraint::from_glrm_grammar(
         r#"
             start start;

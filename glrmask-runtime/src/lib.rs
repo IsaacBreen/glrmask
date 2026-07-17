@@ -25,7 +25,7 @@ pub use runtime::{Constraint, ConstraintState};
 pub const ARTIFACT_MAGIC: [u8; 8] = *b"GLRMASK\0";
 pub const LEGACY_ARTIFACT_VERSION: u16 = 2;
 pub const V2_ARTIFACT_VERSION: u16 = 3;
-pub const ARTIFACT_VERSION: u16 = 4;
+pub const ARTIFACT_VERSION: u16 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeArtifact {
@@ -177,8 +177,6 @@ impl Session {
     pub fn commit_token_timed_ns(&mut self, token_id: u32) -> std::result::Result<u64, String> {
         self.state.commit_token_timed_ns(token_id)
     }
-
-    pub fn eos_allowed(&self) -> bool { self.state.is_complete() }
 
     pub fn is_finished(&self) -> bool { self.state.is_finished() }
 

@@ -1201,7 +1201,6 @@ pub struct Constraint {
     /// final internal token ids.
     #[serde(default)]
     pub(crate) internal_token_to_tokens: Vec<Vec<u32>>,
-    pub(crate) eos_token_id: Option<u32>,
     pub(crate) token_bytes: Arc<BTreeMap<u32, Vec<u8>>>,
     #[serde(default)]
     pub(crate) internal_token_bytes: BTreeMap<u32, Vec<u8>>,

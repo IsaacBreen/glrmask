@@ -7,7 +7,7 @@ fn make_vocab(entries: &[&str]) -> Vocab {
         .enumerate()
         .map(|(i, s)| (i as u32, s.as_bytes().to_vec()))
         .collect();
-    Vocab::new(entries, None)
+    Vocab::new(entries)
 }
 
 #[test]

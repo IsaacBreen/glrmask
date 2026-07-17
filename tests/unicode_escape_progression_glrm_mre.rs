@@ -30,7 +30,7 @@ t esc ::= /\\u0/;
 
 #[test]
 fn glrm_unicode_escape_progression_allows_bare_u() {
-    let vocab = Vocab::new(vec![(0u32, br#"\u"#.to_vec())], None);
+    let vocab = Vocab::new(vec![(0u32, br#"\u"#.to_vec())]);
     let constraint = Constraint::from_glrm_grammar(GLRM_UNICODE_ESCAPE_PROGRESS_MRE, &vocab).unwrap();
     let state = constraint.start();
 
@@ -40,7 +40,7 @@ fn glrm_unicode_escape_progression_allows_bare_u() {
 
 #[test]
 fn glrm_unicode_escape_progression_rejects_u_c() {
-    let vocab = Vocab::new(vec![(0u32, br#"\uC"#.to_vec())], None);
+    let vocab = Vocab::new(vec![(0u32, br#"\uC"#.to_vec())]);
     let constraint = Constraint::from_glrm_grammar(GLRM_UNICODE_ESCAPE_PROGRESS_MRE, &vocab).unwrap();
     let state = constraint.start();
 
@@ -50,7 +50,7 @@ fn glrm_unicode_escape_progression_rejects_u_c() {
 
 #[test]
 fn glrm_unicode_escape_progression_accepts_bare_u_without_full_vocab_continuation() {
-    let vocab = Vocab::new(vec![(0u32, br#"\u"#.to_vec()), (1u32, b"0".to_vec())], None);
+    let vocab = Vocab::new(vec![(0u32, br#"\u"#.to_vec()), (1u32, b"0".to_vec())]);
     let constraint = Constraint::from_glrm_grammar(GLRM_UNICODE_ESCAPE_PROGRESS_MRE, &vocab).unwrap();
     let mut state = constraint.start();
 
@@ -61,7 +61,7 @@ fn glrm_unicode_escape_progression_accepts_bare_u_without_full_vocab_continuatio
 
 #[test]
 fn glrm_unicode_escape_progression_accepts_bare_u_with_only_dead_continuation() {
-    let vocab = Vocab::new(vec![(0u32, br#"\u"#.to_vec()), (1u32, b"C".to_vec())], None);
+    let vocab = Vocab::new(vec![(0u32, br#"\u"#.to_vec()), (1u32, b"C".to_vec())]);
     let constraint = Constraint::from_glrm_grammar(GLRM_UNICODE_ESCAPE_PROGRESS_MRE, &vocab).unwrap();
     let mut state = constraint.start();
 
@@ -72,7 +72,7 @@ fn glrm_unicode_escape_progression_accepts_bare_u_with_only_dead_continuation() 
 
 #[test]
 fn structured_glrm_unicode_escape_progression_rejects_bare_backslash() {
-    let vocab = Vocab::new(vec![(0u32, br#"\\"#.to_vec())], None);
+    let vocab = Vocab::new(vec![(0u32, br#"\\"#.to_vec())]);
     let constraint = Constraint::from_glrm_grammar(GLRM_UNICODE_ESCAPE_PROGRESS_STRUCTURED_MRE, &vocab).unwrap();
     let state = constraint.start();
 
@@ -85,7 +85,7 @@ fn structured_glrm_unicode_escape_progression_rejects_bare_backslash() {
 
 #[test]
 fn structured_glrm_unicode_escape_progression_allows_bare_u() {
-    let vocab = Vocab::new(vec![(0u32, br#"\u"#.to_vec())], None);
+    let vocab = Vocab::new(vec![(0u32, br#"\u"#.to_vec())]);
     let constraint = Constraint::from_glrm_grammar(GLRM_UNICODE_ESCAPE_PROGRESS_STRUCTURED_MRE, &vocab).unwrap();
     let state = constraint.start();
 
@@ -95,7 +95,7 @@ fn structured_glrm_unicode_escape_progression_allows_bare_u() {
 
 #[test]
 fn structured_glrm_trailing_backslash_byte_prefix_is_accepted() {
-    let vocab = Vocab::new(vec![(0u32, b" \"\\".to_vec())], None);
+    let vocab = Vocab::new(vec![(0u32, b" \"\\".to_vec())]);
     let constraint = Constraint::from_glrm_grammar(GLRM_TRAILING_BACKSLASH_ONE_TOKEN_MRE, &vocab).unwrap();
     let mut state = constraint.start();
 

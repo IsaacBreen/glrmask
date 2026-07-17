@@ -3,7 +3,7 @@ use glrmask::__private::ConstraintExt as _;
 use serde_json::json;
 
 fn bytes_vocab() -> Vocab {
-    Vocab::new((0u8..=255).map(|b| (b as u32, vec![b])).collect(), None)
+    Vocab::new((0u8..=255).map(|b| (b as u32, vec![b])).collect())
 }
 
 const BAD_FAMILY: [(&str, &str); 8] = [

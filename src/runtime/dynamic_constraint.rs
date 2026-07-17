@@ -11,7 +11,7 @@ use crate::Vocab;
 use crate::runtime::{Constraint, ConstraintState, DynamicMaskVocab, SpecialTokenTerminal};
 
 const DYNAMIC_CONSTRAINT_MAGIC: [u8; 8] = *b"GLRDYN\0\0";
-const DYNAMIC_CONSTRAINT_VERSION: u16 = 2;
+const DYNAMIC_CONSTRAINT_VERSION: u16 = 3;
 const DYNAMIC_CONSTRAINT_HEADER_LEN: usize = DYNAMIC_CONSTRAINT_MAGIC.len() + 2 + 8;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -20,7 +20,6 @@ struct DynamicConstraintPayloadV1 {
     terminal_display_names: Vec<String>,
     tokenizer: Tokenizer,
     ignore_terminal: Option<TerminalID>,
-    eos_token_id: Option<u32>,
     token_bytes: Arc<BTreeMap<u32, Vec<u8>>>,
 }
 
@@ -56,7 +55,6 @@ impl DynamicConstraint {
                 terminal_display_names,
                 tokenizer,
                 ignore_terminal,
-                eos_token_id: vocab.eos_token_id,
                 token_bytes: Arc::clone(&vocab.entries),
             },
             special_token_terminals,
@@ -106,7 +104,6 @@ impl DynamicConstraint {
             template_dfas_by_terminal: Vec::new(),
             original_token_to_internal: Vec::new(),
             internal_token_to_tokens: Vec::new(),
-            eos_token_id: payload.eos_token_id,
             token_bytes: payload.token_bytes,
             internal_token_bytes: BTreeMap::new(),
             token_bytes_dense: Vec::new(),
@@ -158,7 +155,6 @@ impl DynamicConstraint {
                 terminal_display_names: self.inner.terminal_display_names.clone(),
                 tokenizer: self.inner.tokenizer.clone(),
                 ignore_terminal: self.inner.ignore_terminal,
-                eos_token_id: self.inner.eos_token_id,
                 token_bytes: Arc::clone(&self.inner.token_bytes),
             },
             special_token_terminals: self.inner.special_token_terminals.clone(),
@@ -286,9 +282,7 @@ mod tests {
                 (2, b"ab".to_vec()),
                 (3, b"aa".to_vec()),
                 (4, b" ".to_vec()),
-            ],
-            None,
-        )
+            ])
     }
 
     #[test]
@@ -326,7 +320,7 @@ mod tests {
 
     #[test]
     fn dynamic_forced_uses_dynamic_masks() {
-        let vocab = Vocab::new(vec![(0, b"a".to_vec())], None);
+        let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
         let constraint = DynamicConstraint::from_ebnf("start ::= 'a'", &vocab).unwrap();
         assert_eq!(constraint.start().forced(), vec![0]);
     }

@@ -36,9 +36,7 @@ fn minimized_vocab() -> Vocab {
         vec![
             (OPENING_TOKEN_ID, OPENING_TOKEN_BYTES.to_vec()),
             (QUOTE_TOKEN_ID, QUOTE_TOKEN_BYTES.to_vec()),
-        ],
-        None,
-    )
+        ])
 }
 
 fn assert_quote_mask_commit_alignment(constraint: &Constraint) {

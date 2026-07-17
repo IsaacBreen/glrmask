@@ -23,9 +23,7 @@ fn load_llama3_vocab() -> Vocab {
         id_to_hex
             .into_iter()
             .map(|(token_id, hex)| (token_id, hex_to_bytes(&hex)))
-            .collect(),
-        None,
-    )
+            .collect())
 }
 
 fn main() {

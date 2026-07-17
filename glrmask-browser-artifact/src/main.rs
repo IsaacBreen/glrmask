@@ -54,7 +54,7 @@ fn load_gpt_style_vocab(tokenizer_path: &Path) -> Result<Vocab, String> {
             .collect::<Result<Vec<_>, _>>()?;
         entries.push((id, bytes));
     }
-    Ok(Vocab::new(entries, None))
+    Ok(Vocab::new(entries))
 }
 
 fn story_json_grammar() -> String {

@@ -3990,9 +3990,7 @@ mod tests {
                 (0, b"a".to_vec()),
                 (1, b"b".to_vec()),
                 (2, b"ab".to_vec()),
-            ],
-            None,
-        );
+            ]);
         let grammar = r#"
 start start;
 t A ::= "a";
@@ -4041,9 +4039,7 @@ nt start ::= item item? item?;
             .into_iter()
             .enumerate()
             .map(|(id, word)| (id as u32, word.as_bytes().to_vec()))
-            .collect(),
-            None,
-        );
+            .collect());
         let languages = (1u32..1u32 << WORDS.len())
             .filter(|mask| mask.count_ones() <= 2)
             .collect::<Vec<_>>();
@@ -4136,9 +4132,7 @@ nt start ::= item item? item?;
     #[test]
     fn rejected_public_commits_enter_fail_state() {
         let vocab = Vocab::new(
-            vec![(0, b"a".to_vec()), (1, b"b".to_vec())],
-            None,
-        );
+            vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
         let constraint = Constraint::from_glrm_grammar(
             r#"
                 start start;
@@ -4267,9 +4261,7 @@ nt start ::= item item? item?;
                 .iter()
                 .enumerate()
                 .map(|(id, word)| (id as u32, word.as_bytes().to_vec()))
-                .collect(),
-            None,
-        );
+                .collect());
         let languages = (1u32..1u32 << WORDS.len())
             .filter(|mask| mask.count_ones() <= 2)
             .collect::<Vec<_>>();
@@ -4345,9 +4337,7 @@ nt start ::= item item? item?;
                 (4, b"ba".to_vec()),
                 (5, b"bc".to_vec()),
                 (6, b"abc".to_vec()),
-            ],
-            None,
-        );
+            ]);
         let constraint = Constraint::from_glrm_grammar(
             r#"
                 start start;
@@ -4423,9 +4413,7 @@ nt start ::= item item? item?;
                 (8, b" a ".to_vec()),
                 (9, b"abc".to_vec()),
                 (10, b"aab".to_vec()),
-            ],
-            None,
-        );
+            ]);
         let grammar = crate::grammar::glrm::from_glrm(
             r#"
                 start start;
@@ -4541,7 +4529,7 @@ nt start ::= item item? item?;
 
     #[test]
     fn epsilon_full_width_terminal_with_empty_accumulators_uses_fast_path() {
-        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())], None);
+        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
         let grammar = crate::grammar::glrm::from_glrm(
             r#"
                 start start;
