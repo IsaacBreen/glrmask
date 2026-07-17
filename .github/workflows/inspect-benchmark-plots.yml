@@ -1,0 +1,49 @@
+name: Inspect benchmark plots
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+      - name: Inspect tail plot
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq tesseract-ocr
+          python -m pip install --disable-pip-version-check pillow pytesseract numpy
+          python <<'PY'
+          from PIL import Image
+          import numpy as np
+          import pytesseract
+          from pytesseract import Output
+          from collections import Counter
+
+          for suffix in ('', '-dark'):
+              path = f'docs/assets/benchmark-mask-tail-2026-07-16{suffix}.webp'
+              im = Image.open(path).convert('RGB')
+              print(f'IMAGE {path} size={im.size}')
+              arr = np.asarray(im)
+              q = (arr // 8 * 8).reshape(-1, 3)
+              print('TOP COLORS')
+              for color, count in Counter(map(tuple, q)).most_common(20):
+                  print(color, count)
+              data = pytesseract.image_to_data(im, output_type=Output.DICT, config='--psm 11')
+              print('OCR TOKENS')
+              for i, text in enumerate(data['text']):
+                  text = text.strip()
+                  if not text:
+                      continue
+                  key = text.lower()
+                  if any(term in key for term in ('sample', 'maximum', 'llguidance', 'glrmask', '0.01', 'mask', 'latency', 'exceedance', '361', '8.041', '28.565')):
+                      print(text, data['left'][i], data['top'][i], data['width'][i], data['height'][i], data['conf'][i])
+          PY
