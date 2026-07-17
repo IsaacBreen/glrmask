@@ -1505,59 +1505,154 @@ fn determinize_with_supports(
     {
         use rayon::prelude::*;
         let detail_enabled = detail.is_some();
-        let final_weights_by_signature: Vec<(SmallVec<[Weight; 4]>, f64, f64)> =
-            final_signature_groups
-                .par_iter()
-                .map_init(ScopedWeightOpCache::default, |weight_ops, final_groups| {
-                    let mut path_union_ms = 0.0;
-                    let mut intersection_ms = 0.0;
-                    let final_contributions: SmallVec<[Weight; 4]> = final_groups
+        let intern_final_groups =
+            std::env::var_os("GLRMASK_EXPERIMENTAL_INTERN_FINAL_GROUPS").is_some();
+        let final_weights_by_signature: Vec<Option<Weight>> = if intern_final_groups {
+            let intern_started_at = Instant::now();
+            let mut component_ids = FxHashMap::<(usize, Vec<usize>), usize>::default();
+            let mut components = Vec::<(Weight, SmallVec<[Weight; 4]>)>::new();
+            let signature_components = final_signature_groups
+                .iter()
+                .map(|groups| {
+                    groups
                         .iter()
-                        .filter_map(|(final_w, path_weights)| {
-                            let pw_union = if detail_enabled {
-                                let path_union_started = Instant::now();
-                                let pw_union = weight_ops.union_all(path_weights.iter());
-                                path_union_ms += elapsed_ms(path_union_started);
-                                pw_union
+                        .map(|(final_w, path_weights)| {
+                            let key = (
+                                final_w.ptr_key(),
+                                path_weights.iter().map(Weight::ptr_key).collect::<Vec<_>>(),
+                            );
+                            if let Some(&component_id) = component_ids.get(&key) {
+                                component_id
                             } else {
-                                weight_ops.union_all(path_weights.iter())
-                            };
-                            let contribution = if detail_enabled {
-                                let intersection_started = Instant::now();
-                                let contribution = weight_ops.intersection(&pw_union, final_w);
-                                intersection_ms += elapsed_ms(intersection_started);
-                                contribution
-                            } else {
-                                weight_ops.intersection(&pw_union, final_w)
-                            };
-                            (!contribution.is_empty()).then_some(contribution)
+                                let component_id = components.len();
+                                component_ids.insert(key, component_id);
+                                components.push((final_w.clone(), path_weights.clone()));
+                                component_id
+                            }
                         })
-                        .collect();
-                    (final_contributions, path_union_ms, intersection_ms)
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            let intern_ms = elapsed_ms(intern_started_at);
+            let component_results: Vec<(Option<Weight>, f64, f64)> = components
+                .par_iter()
+                .map_init(ScopedWeightOpCache::default, |weight_ops, (final_w, path_weights)| {
+                    let path_started = detail_enabled.then(Instant::now);
+                    let path_union = weight_ops.union_all(path_weights.iter());
+                    let path_ms = path_started.map(elapsed_ms).unwrap_or(0.0);
+                    let intersection_started = detail_enabled.then(Instant::now);
+                    let contribution = weight_ops.intersection(&path_union, final_w);
+                    let intersection_ms = intersection_started.map(elapsed_ms).unwrap_or(0.0);
+                    (
+                        (!contribution.is_empty()).then_some(contribution),
+                        path_ms,
+                        intersection_ms,
+                    )
                 })
                 .collect();
-        let mut final_weights_by_signature = final_weights_by_signature;
-        let final_weights_by_signature: Vec<Option<Weight>> = final_weights_by_signature
-            .drain(..)
-            .map(|(final_contributions, path_union_ms, intersection_ms)| {
-                if let Some(detail) = detail.as_mut() {
-                    detail.final_path_union_ms += path_union_ms;
-                    detail.final_intersection_ms += intersection_ms;
-                }
-                let output_union_started = detail.as_ref().map(|_| Instant::now());
-                let final_weight = union_cache.union_all(final_contributions.iter());
-                if let (Some(detail), Some(started_at)) =
-                    (detail.as_mut(), output_union_started)
-                {
-                    detail.final_output_union_ms += elapsed_ms(started_at);
-                }
-                if final_weight.is_empty() {
-                    None
-                } else {
-                    Some(final_weight)
-                }
-            })
-            .collect();
+            if let Some(detail) = detail.as_mut() {
+                detail.final_path_union_ms +=
+                    component_results.iter().map(|(_, ms, _)| *ms).sum::<f64>();
+                detail.final_intersection_ms +=
+                    component_results.iter().map(|(_, _, ms)| *ms).sum::<f64>();
+            }
+            let output_started_at = Instant::now();
+            let results = signature_components
+                .par_iter()
+                .map(|component_ids| {
+                    let weight = Weight::union_all(
+                        component_ids
+                            .iter()
+                            .filter_map(|&component_id| component_results[component_id].0.as_ref()),
+                    );
+                    (!weight.is_empty()).then_some(weight)
+                })
+                .collect::<Vec<_>>();
+            if std::env::var_os("GLRMASK_VALIDATE_INTERNED_FINAL_GROUPS").is_some() {
+                let reference = final_signature_groups
+                    .iter()
+                    .map(|final_groups| {
+                        let contributions = final_groups
+                            .iter()
+                            .filter_map(|(final_w, path_weights)| {
+                                let path_union = Weight::union_all(path_weights.iter());
+                                let contribution = path_union.intersection(final_w);
+                                (!contribution.is_empty()).then_some(contribution)
+                            })
+                            .collect::<SmallVec<[Weight; 4]>>();
+                        let result = Weight::union_all(contributions.iter());
+                        (!result.is_empty()).then_some(result)
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    results, reference,
+                    "interned parser final-weight components changed the weighted language",
+                );
+            }
+            if let Some(detail) = detail.as_mut() {
+                detail.final_output_union_ms += elapsed_ms(output_started_at);
+            }
+            if compile_profile_enabled() {
+                let total_components = signature_components.iter().map(Vec::len).sum::<usize>();
+                eprintln!(
+                    "[glrmask/profile][parser_final_group_intern] signatures={} total_components={} unique_components={} intern_ms={:.3}",
+                    signature_components.len(),
+                    total_components,
+                    components.len(),
+                    intern_ms,
+                );
+            }
+            results
+        } else {
+            let final_weights_by_signature: Vec<(SmallVec<[Weight; 4]>, f64, f64)> =
+                final_signature_groups
+                    .par_iter()
+                    .map_init(ScopedWeightOpCache::default, |weight_ops, final_groups| {
+                        let mut path_union_ms = 0.0;
+                        let mut intersection_ms = 0.0;
+                        let final_contributions: SmallVec<[Weight; 4]> = final_groups
+                            .iter()
+                            .filter_map(|(final_w, path_weights)| {
+                                let pw_union = if detail_enabled {
+                                    let path_union_started = Instant::now();
+                                    let pw_union = weight_ops.union_all(path_weights.iter());
+                                    path_union_ms += elapsed_ms(path_union_started);
+                                    pw_union
+                                } else {
+                                    weight_ops.union_all(path_weights.iter())
+                                };
+                                let contribution = if detail_enabled {
+                                    let intersection_started = Instant::now();
+                                    let contribution = weight_ops.intersection(&pw_union, final_w);
+                                    intersection_ms += elapsed_ms(intersection_started);
+                                    contribution
+                                } else {
+                                    weight_ops.intersection(&pw_union, final_w)
+                                };
+                                (!contribution.is_empty()).then_some(contribution)
+                            })
+                            .collect();
+                        (final_contributions, path_union_ms, intersection_ms)
+                    })
+                    .collect();
+            final_weights_by_signature
+                .into_iter()
+                .map(|(final_contributions, path_union_ms, intersection_ms)| {
+                    if let Some(detail) = detail.as_mut() {
+                        detail.final_path_union_ms += path_union_ms;
+                        detail.final_intersection_ms += intersection_ms;
+                    }
+                    let output_union_started = detail.as_ref().map(|_| Instant::now());
+                    let final_weight = union_cache.union_all(final_contributions.iter());
+                    if let (Some(detail), Some(started_at)) =
+                        (detail.as_mut(), output_union_started)
+                    {
+                        detail.final_output_union_ms += elapsed_ms(started_at);
+                    }
+                    (!final_weight.is_empty()).then_some(final_weight)
+                })
+                .collect()
+        };
         for (state_id, signature_id) in final_jobs {
             if let Some(weight) = &final_weights_by_signature[signature_id] {
                 dwa.set_final_weight(state_id, weight.clone());
