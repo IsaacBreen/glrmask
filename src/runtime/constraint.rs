@@ -289,14 +289,34 @@ impl Constraint {
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
         let total_started_at = profile.then(std::time::Instant::now);
         let started_at = profile.then(std::time::Instant::now);
+        let preserved_token_program_partition = self
+            .dynamic_mask_vocab
+            .initial_token_program_partition();
         self.table.rebuild_guarded_shift_index();
         let guarded_shift_ms = started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let started_at = profile.then(std::time::Instant::now);
         if !self.dynamic_mask_vocab.is_initialized() {
             self.dynamic_mask_vocab = self.build_dynamic_mask_vocab();
+            if let Some(partition) = preserved_token_program_partition {
+                self.dynamic_mask_vocab
+                    .install_initial_token_program_partition(partition);
+            }
         }
         let dynamic_vocab_ms = started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let started_at = profile.then(std::time::Instant::now);
+        let prebuild_dynamic_token_programs = std::env::var("GLRMASK_PREBUILD_DYNAMIC_TOKEN_PROGRAMS")
+            .map(|value| {
+                let normalized = value.trim().to_ascii_lowercase();
+                !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
+            })
+            .unwrap_or(true);
+        if prebuild_dynamic_token_programs {
+            self.dynamic_mask_vocab
+                .prebuild_initial_token_program_partition(&self.tokenizer, self.mask_len());
+        }
+        let token_program_ms = started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let started_at = profile.then(std::time::Instant::now);
         let prebuild_dynamic_continuations = std::env::var("GLRMASK_PREBUILD_DYNAMIC_CONTINUATION_PARTITIONS")
@@ -317,9 +337,10 @@ impl Constraint {
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         if let Some(total_started_at) = total_started_at {
             eprintln!(
-                "[glrmask/profile][dynamic_runtime_finalize] guarded_shift_ms={:.3} dynamic_vocab_ms={:.3} continuation_ms={:.3} tokenizer_fast_ms={:.3} total_ms={:.3}",
+                "[glrmask/profile][dynamic_runtime_finalize] guarded_shift_ms={:.3} dynamic_vocab_ms={:.3} token_program_ms={:.3} continuation_ms={:.3} tokenizer_fast_ms={:.3} total_ms={:.3}",
                 guarded_shift_ms,
                 dynamic_vocab_ms,
+                token_program_ms,
                 continuation_ms,
                 tokenizer_fast_ms,
                 total_started_at.elapsed().as_secs_f64() * 1000.0,

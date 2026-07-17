@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::automata::lexer::Lexer;
 use crate::automata::lexer::tokenizer::{
@@ -15,22 +15,84 @@ use crate::automata::lexer::tokenizer::{
 };
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::compiler::glr::parser::{
-    advance_stacks, stack_may_advance_on, stack_may_advance_on_any, ParserGSS,
+    advance_stacks, stack_admissible_terminals, stack_may_advance_on_any, ParserGSS,
 };
+use crate::ds::bitset::BitSet;
 use crate::ds::leveled_gss::LeveledGSS;
 use crate::ds::u8set::U8Set;
 use crate::grammar::flat::TerminalID;
 
-use super::artifact::{Constraint, DynamicMaskStateKey, DynamicMaskTrie};
+use super::artifact::{
+    Constraint, DYNAMIC_SOURCE_BASE_PROGRAM_FLAG, DYNAMIC_SOURCE_PROGRAM_ID_MASK,
+    DynamicMaskStateKey, DynamicMaskTrie, DynamicTokenProgramPartition,
+};
 use super::state::ConstraintState;
 
 type ParserStacks = LeveledGSS<u32, ()>;
 
 #[derive(Default)]
 struct DynamicTraversalCache {
-    boundary: FxHashMap<(u32, usize), (ParserStacks, bool)>,
+    admissible_terminals: FxHashMap<usize, (ParserStacks, BitSet)>,
     lexer_relevant: FxHashMap<(u32, usize), (ParserStacks, bool)>,
     parser_children: FxHashMap<(usize, TerminalID), (ParserStacks, Option<ParserStacks>)>,
+}
+
+#[derive(Default)]
+struct DynamicTokenProgramCache {
+    rows_by_stack: FxHashMap<usize, usize>,
+    rows: Vec<(ParserStacks, Box<[u8]>)>,
+    entries: usize,
+}
+
+impl DynamicTokenProgramCache {
+    const UNKNOWN: u8 = 0;
+    const REJECTED: u8 = 1;
+    const ADMITTED: u8 = 2;
+
+    #[inline]
+    fn get(&self, program_id: u32, stacks: &ParserStacks) -> Option<bool> {
+        let row = *self.rows_by_stack.get(&stacks.ptr_key())?;
+        let (cached_stacks, results) = &self.rows[row];
+        debug_assert!(cached_stacks.ptr_eq(stacks));
+        match results[program_id as usize] {
+            Self::REJECTED => Some(false),
+            Self::ADMITTED => Some(true),
+            Self::UNKNOWN => None,
+            _ => unreachable!("invalid dynamic token-program cache entry"),
+        }
+    }
+
+    #[inline]
+    fn insert(
+        &mut self,
+        program_count: usize,
+        program_id: u32,
+        stacks: &ParserStacks,
+        accepted: bool,
+    ) {
+        let key = stacks.ptr_key();
+        let row = if let Some(&row) = self.rows_by_stack.get(&key) {
+            debug_assert!(self.rows[row].0.ptr_eq(stacks));
+            row
+        } else {
+            let row = self.rows.len();
+            self.rows.push((
+                stacks.clone(),
+                vec![Self::UNKNOWN; program_count].into_boxed_slice(),
+            ));
+            self.rows_by_stack.insert(key, row);
+            row
+        };
+        let slot = &mut self.rows[row].1[program_id as usize];
+        if *slot == Self::UNKNOWN {
+            self.entries += 1;
+        }
+        *slot = if accepted {
+            Self::ADMITTED
+        } else {
+            Self::REJECTED
+        };
+    }
 }
 
 #[derive(Clone)]
@@ -47,7 +109,7 @@ struct TraverseWork {
 enum ContinuationFilter {
     Narrow {
         partition_index: usize,
-        required_groups: u64,
+        required_groups: u128,
     },
     AlreadyMarked,
 }
@@ -389,6 +451,44 @@ impl InitialPruneGuard {
         }
     }
 
+    fn allows_token_program(
+        &self,
+        constraint: &Constraint,
+        program: &super::artifact::DynamicTokenProgram,
+    ) -> bool {
+        let Self::Pending {
+            blocked,
+            actionable_states,
+            ..
+        } = self
+        else {
+            return true;
+        };
+
+        let mut saw_actionable = false;
+        let mut previous_terminal = None;
+        for &(terminal, _) in program.branches.iter() {
+            if previous_terminal == Some(terminal) {
+                continue;
+            }
+            previous_terminal = Some(terminal);
+            if Some(terminal) == constraint.ignore_terminal
+                || !terminal_is_actionable_from_states(
+                    constraint,
+                    actionable_states,
+                    terminal,
+                )
+            {
+                continue;
+            }
+            saw_actionable = true;
+            if !blocked.contains(&terminal) {
+                return true;
+            }
+        }
+        !saw_actionable
+    }
+
     /// Advance the original token-start lexer branch through a trie segment.
     /// Parser resets caused by terminal matches elsewhere in the dynamic walk
     /// deliberately do not affect this guard: commit evaluates its initial
@@ -456,9 +556,10 @@ fn parser_child(
         return Some(stacks.clone());
     }
     let parser_gss = with_empty_accumulators(stacks);
-    if !stack_may_advance_on(&constraint.table, &parser_gss, terminal) {
-        return None;
-    }
+    // The actual structural advance is already the definitive admissibility
+    // test. Running exact admission first duplicates reduction simulation on
+    // every program branch and is especially costly when many token programs
+    // share the same small terminal set.
     let advanced = advance_stacks(&constraint.table, &parser_gss, terminal).apply(|_| ());
     (!advanced.is_empty()).then_some(advanced)
 }
@@ -481,21 +582,91 @@ fn parser_child_cached(
     result
 }
 
+fn token_program_accepts(
+    constraint: &Constraint,
+    partition: &DynamicTokenProgramPartition,
+    program_id: u32,
+    stacks: &ParserStacks,
+    traversal_cache: &mut DynamicTraversalCache,
+    program_cache: &mut DynamicTokenProgramCache,
+) -> bool {
+    let program = &partition.programs[program_id as usize];
+    if program.accept {
+        return true;
+    }
+
+    if let Some(result) = program_cache.get(program_id, stacks) {
+        return result;
+    }
+
+    let accepted = program.end_states.iter().any(|&end_state| {
+        token_boundary_allowed_cached(constraint, end_state, stacks, traversal_cache)
+    }) || program.branches.iter().any(|&(terminal, suffix)| {
+        let Some(advanced) = parser_child_cached(constraint, stacks, terminal, traversal_cache)
+        else {
+            return false;
+        };
+        token_program_accepts(
+            constraint,
+            partition,
+            suffix,
+            &advanced,
+            traversal_cache,
+            program_cache,
+        )
+    });
+    program_cache.insert(partition.programs.len(), program_id, stacks, accepted);
+    accepted
+}
+
+fn source_token_program_accepts(
+    constraint: &Constraint,
+    partition: &DynamicTokenProgramPartition,
+    source_partition: &super::artifact::DynamicSourceTokenProgramPartition,
+    program_id: u16,
+    stacks: &ParserStacks,
+    traversal_cache: &mut DynamicTraversalCache,
+    program_cache: &mut DynamicTokenProgramCache,
+) -> bool {
+    let program = &source_partition.programs[program_id as usize];
+    if program.accept {
+        return true;
+    }
+
+    program.end_states.iter().any(|&end_state| {
+        token_boundary_allowed_cached(constraint, end_state, stacks, traversal_cache)
+    }) || program.branches.iter().any(|&(terminal, suffix)| {
+        let Some(advanced) = parser_child_cached(constraint, stacks, terminal, traversal_cache)
+        else {
+            return false;
+        };
+        token_program_accepts(
+            constraint,
+            partition,
+            suffix,
+            &advanced,
+            traversal_cache,
+            program_cache,
+        )
+    })
+}
+
 fn token_boundary_allowed(
     constraint: &Constraint,
     tokenizer_state: u32,
     stacks: &ParserStacks,
 ) -> bool {
-    let parser_gss = with_empty_accumulators(stacks);
-    constraint
+    let accessible = constraint
         .tokenizer
-        .tokens_accessible_from_state(tokenizer_state)
-        .iter()
-        .any(|terminal| {
-            let terminal = terminal as TerminalID;
-            Some(terminal) == constraint.ignore_terminal
-                || stack_may_advance_on(&constraint.table, &parser_gss, terminal)
-        })
+        .tokens_accessible_from_state(tokenizer_state);
+    if constraint
+        .ignore_terminal
+        .is_some_and(|terminal| accessible.contains(terminal as usize))
+    {
+        return true;
+    }
+    let parser_gss = with_empty_accumulators(stacks);
+    stack_may_advance_on_any(&constraint.table, &parser_gss, accessible)
 }
 
 fn token_boundary_allowed_cached(
@@ -504,16 +675,40 @@ fn token_boundary_allowed_cached(
     stacks: &ParserStacks,
     cache: &mut DynamicTraversalCache,
 ) -> bool {
-    let key = (tokenizer_state, stacks.ptr_key());
-    if let Some((cached_stacks, result)) = cache.boundary.get(&key) {
-        debug_assert!(cached_stacks.ptr_eq(stacks));
-        return *result;
+    let accessible = constraint
+        .tokenizer
+        .tokens_accessible_from_state(tokenizer_state);
+    if constraint
+        .ignore_terminal
+        .is_some_and(|terminal| accessible.contains(terminal as usize))
+    {
+        return true;
     }
-    let result = token_boundary_allowed(constraint, tokenizer_state, stacks);
-    cache
-        .boundary
-        .insert(key, (stacks.clone(), result));
-    result
+
+    let key = stacks.ptr_key();
+    let admitted = if let Some((cached_stacks, admitted)) =
+        cache.admissible_terminals.get(&key)
+    {
+        debug_assert!(cached_stacks.ptr_eq(stacks));
+        admitted
+    } else {
+        let parser_gss = with_empty_accumulators(stacks);
+        let candidates = BitSet::all(accessible.len());
+        let admitted = stack_admissible_terminals(
+            &constraint.table,
+            &parser_gss,
+            &candidates,
+        );
+        cache
+            .admissible_terminals
+            .insert(key, (stacks.clone(), admitted));
+        &cache
+            .admissible_terminals
+            .get(&key)
+            .expect("admissible terminal cache insertion must be visible")
+            .1
+    };
+    !admitted.is_disjoint(accessible)
 }
 
 fn lexer_state_relevant_cached(
@@ -672,6 +867,15 @@ pub(crate) fn fill_mask_dynamic_bounded(
     )
 }
 
+#[inline]
+fn same_parser_stack_language(left: &ParserStacks, right: &ParserStacks) -> bool {
+    left.ptr_eq(right)
+        || left
+            .single_interface_lower_id()
+            .zip(right.single_interface_lower_id())
+            .is_some_and(|(left, right)| left == right)
+}
+
 fn fill_mask_dynamic_impl(
     state: &ConstraintState<'_>,
     buf: &mut [u32],
@@ -712,6 +916,8 @@ fn fill_mask_dynamic_impl(
     let mut segment_stack = Vec::<(usize, u32, ParserStacks)>::with_capacity(8);
     let mut self_loop_cache = FxHashMap::<u32, U8Set>::default();
     let mut traversal_cache = DynamicTraversalCache::default();
+    let mut token_program_cache = DynamicTokenProgramCache::default();
+    let mut handled_source_seeds = FxHashSet::<(u32, usize)>::default();
     let mut lexer_scan_cache = DynamicNfaScanCache::new(state.constraint, deadline);
     let tries = [vocab.trie.clone()];
     let mut continuation_partitions = Vec::new();
@@ -722,7 +928,15 @@ fn fill_mask_dynamic_impl(
     let mut subtree_mark_tokens = 0usize;
     let mut continuation_groups_admitted = 0usize;
     let mut continuation_groups_traversed = 0usize;
-    let mut lazy_continuation_builds_remaining = 1usize;
+    let mut token_program_groups_evaluated = 0usize;
+    let mut token_program_groups_admitted = 0usize;
+    let mut token_program_acceptance_cache_hits = 0usize;
+    // Building a whole-vocabulary continuation partition is compile work,
+    // never decoding-loop work. A cold partition costs milliseconds to tens of
+    // milliseconds, while direct traversal of the same narrow residual is
+    // usually sub-millisecond. Runtime may use cached/prebuilt partitions, but
+    // it must not construct one inside a timed mask call.
+    let lazy_continuation_builds_remaining = 0usize;
     if profile {
         eprintln!(
             "[glrmask/profile][dynamic_mask_config] tokenizer_states={} epsilon={} fast_transition_rows={}",
@@ -736,6 +950,12 @@ fn fill_mask_dynamic_impl(
         check_deadline()?;
         for (stacks, terminals_disallowed) in gss.partition_by_accumulator() {
             check_deadline()?;
+            let stack_identity = stacks.single_interface_lower_id();
+            if stack_identity.is_some_and(|identity| {
+                handled_source_seeds.contains(&(tokenizer_state, identity))
+            }) {
+                continue;
+            }
             let initial_prune_guard = InitialPruneGuard::new(
                 state.constraint,
                 tokenizer_state,
@@ -779,6 +999,292 @@ fn fill_mask_dynamic_impl(
                     ),
                 );
             }
+            if tokenizer_state == initial_tsid
+                && let Some(program_partition) = vocab.initial_token_program_partition()
+            {
+                let source_states = [initial_tsid];
+                let mut accepted_programs = vec![false; program_partition.programs.len()];
+                if vocab.copy_cached_program_acceptance(
+                    &source_states,
+                    &stacks,
+                    &mut accepted_programs,
+                ) {
+                    token_program_acceptance_cache_hits += 1;
+                } else {
+                    for &program in program_partition.root_programs.iter() {
+                        check_deadline()?;
+                        token_program_groups_evaluated += 1;
+                        if token_program_accepts(
+                            state.constraint,
+                            &program_partition,
+                            u32::from(program),
+                            &stacks,
+                            &mut traversal_cache,
+                            &mut token_program_cache,
+                        ) {
+                            accepted_programs[program as usize] = true;
+                        }
+                    }
+                    vocab.cache_program_acceptance(
+                        &source_states,
+                        &stacks,
+                        &accepted_programs,
+                    );
+                }
+                for &program in program_partition.root_programs.iter() {
+                    if accepted_programs[program as usize]
+                        && !initial_prune_guard.allows_token_program(
+                            state.constraint,
+                            &program_partition.programs[program as usize],
+                        )
+                    {
+                        accepted_programs[program as usize] = false;
+                    }
+                }
+                token_program_groups_admitted += accepted_programs
+                    .iter()
+                    .filter(|&&accepted| accepted)
+                    .count();
+                for (word, programs) in buf
+                    .iter_mut()
+                    .zip(program_partition.token_programs.chunks(32))
+                {
+                    let mut accepted_bits = 0u32;
+                    for (bit, &program) in programs.iter().enumerate() {
+                        let accepted = program != u16::MAX
+                            && accepted_programs[program as usize];
+                        accepted_bits |= u32::from(accepted) << bit;
+                    }
+                    *word |= accepted_bits;
+                }
+                continue;
+            }
+            if initial_prune_guard.is_passed()
+                && let Some(program_partition) = vocab.initial_token_program_partition()
+            {
+                let mut combined_states = Vec::<u32>::new();
+                let mut selected_source_partition =
+                    program_partition.source_partition(tokenizer_state);
+                if let Some(identity) = stack_identity
+                    && let Some(combined) = program_partition
+                        .combined_source_partition_starting_at(tokenizer_state)
+                {
+                    let mut matches = true;
+                    for &other_state in combined.source_states.iter().skip(1) {
+                        let Some(other_gss) = state.state.get(&other_state) else {
+                            matches = false;
+                            break;
+                        };
+                        let other_matches = other_gss
+                            .partition_by_accumulator()
+                            .into_iter()
+                            .any(|(other_stacks, other_disallowed)| {
+                                other_stacks.single_interface_lower_id() == Some(identity)
+                                    && InitialPruneGuard::new(
+                                        state.constraint,
+                                        other_state,
+                                        &other_stacks,
+                                        &other_disallowed,
+                                    )
+                                    .is_passed()
+                                    && same_parser_stack_language(&stacks, &other_stacks)
+                            });
+                        if !other_matches {
+                            matches = false;
+                            break;
+                        }
+                        combined_states.push(other_state);
+                    }
+                    if matches {
+                        selected_source_partition = Some(combined);
+                    } else {
+                        combined_states.clear();
+                    }
+                }
+                if let Some(source_partition) = selected_source_partition {
+                    // A derived source partition stores only exact token
+                    // overrides. All other tokens inherit the corresponding
+                    // program from its full base partition.
+                    let base_source_partition = source_partition
+                        .base_source_state
+                        .and_then(|base_state| program_partition.source_partition(base_state));
+                    let mut needed_programs = vec![false; source_partition.programs.len()];
+                    let mut needed_base_programs = base_source_partition
+                        .map(|base| vec![false; base.programs.len()]);
+                    // Combined residual unions are selected because all
+                    // participating seeds are live and compatible. Scanning the
+                    // output mask to rediscover their roots is pure overhead.
+                    // Single-source partitions remain proportional to mask holes.
+                    if source_partition.source_states.len() > 1 {
+                        for &program in source_partition.root_programs.iter() {
+                            needed_programs[program as usize] = true;
+                        }
+                        if let (Some(base), Some(needed_base)) = (
+                            base_source_partition,
+                            needed_base_programs.as_mut(),
+                        ) {
+                            for &program in base.root_programs.iter() {
+                                needed_base[program as usize] = true;
+                            }
+                        }
+                    } else {
+                        for (word_index, (&word, programs)) in buf
+                            .iter()
+                            .zip(source_partition.token_programs.chunks(32))
+                            .enumerate()
+                        {
+                            let mut missing = !word;
+                            while missing != 0 {
+                                let bit = missing.trailing_zeros() as usize;
+                                if let Some(&program) = programs.get(bit) {
+                                    if program == u16::MAX {
+                                        if let (Some(base), Some(needed_base)) = (
+                                            base_source_partition,
+                                            needed_base_programs.as_mut(),
+                                        ) {
+                                            let token_index = word_index * 32 + bit;
+                                            let base_program = base.token_programs[token_index];
+                                            if base_program != u16::MAX {
+                                                needed_base[base_program as usize] = true;
+                                            }
+                                        }
+                                    } else if program & DYNAMIC_SOURCE_BASE_PROGRAM_FLAG != 0 {
+                                        if let Some(needed_base) = needed_base_programs.as_mut() {
+                                            needed_base[(program & DYNAMIC_SOURCE_PROGRAM_ID_MASK)
+                                                as usize] = true;
+                                        }
+                                    } else {
+                                        needed_programs[program as usize] = true;
+                                    }
+                                }
+                                missing &= missing - 1;
+                            }
+                        }
+                    }
+
+                    let mut evaluate_source_programs = |
+                        partition: &super::artifact::DynamicSourceTokenProgramPartition,
+                        needed: &[bool],
+                    | -> Result<Vec<bool>, String> {
+                        let needed_count = needed.iter().filter(|&&needed| needed).count();
+                        if needed_count == 0 {
+                            return Ok(vec![false; partition.programs.len()]);
+                        }
+                        let cache_full_acceptance = needed_count * 4
+                            >= partition.root_programs.len() * 3;
+                        let mut accepted = vec![false; partition.programs.len()];
+                        let cache_hit = cache_full_acceptance
+                            && vocab.copy_cached_program_acceptance(
+                                &partition.source_states,
+                                &stacks,
+                                &mut accepted,
+                            );
+                        if cache_hit {
+                            token_program_acceptance_cache_hits += 1;
+                        } else if cache_full_acceptance {
+                            for &program in partition.root_programs.iter() {
+                                check_deadline()?;
+                                token_program_groups_evaluated += 1;
+                                if source_token_program_accepts(
+                                    state.constraint,
+                                    &program_partition,
+                                    partition,
+                                    program,
+                                    &stacks,
+                                    &mut traversal_cache,
+                                    &mut token_program_cache,
+                                ) {
+                                    accepted[program as usize] = true;
+                                }
+                            }
+                            vocab.cache_program_acceptance(
+                                &partition.source_states,
+                                &stacks,
+                                &accepted,
+                            );
+                        } else {
+                            for (program, needed) in needed.iter().copied().enumerate() {
+                                if !needed {
+                                    continue;
+                                }
+                                check_deadline()?;
+                                token_program_groups_evaluated += 1;
+                                let program = program as u16;
+                                if source_token_program_accepts(
+                                    state.constraint,
+                                    &program_partition,
+                                    partition,
+                                    program,
+                                    &stacks,
+                                    &mut traversal_cache,
+                                    &mut token_program_cache,
+                                ) {
+                                    accepted[program as usize] = true;
+                                }
+                            }
+                        }
+                        token_program_groups_admitted += accepted
+                            .iter()
+                            .zip(needed)
+                            .filter(|&(&accepted, &needed)| accepted && needed)
+                            .count();
+                        Ok(accepted)
+                    };
+
+                    let accepted_programs = evaluate_source_programs(
+                        source_partition,
+                        &needed_programs,
+                    )?;
+                    let accepted_base_programs = if let (
+                        Some(base),
+                        Some(needed_base_programs),
+                    ) = (base_source_partition, needed_base_programs.as_deref())
+                    {
+                        Some(evaluate_source_programs(base, needed_base_programs)?)
+                    } else {
+                        None
+                    };
+
+                    for (word_index, (word, programs)) in buf
+                        .iter_mut()
+                        .zip(source_partition.token_programs.chunks(32))
+                        .enumerate()
+                    {
+                        let mut accepted_bits = 0u32;
+                        for (bit, &program) in programs.iter().enumerate() {
+                            let accepted = if program == u16::MAX {
+                                if let (Some(base), Some(accepted_base)) = (
+                                    base_source_partition,
+                                    accepted_base_programs.as_ref(),
+                                ) {
+                                    let token_index = word_index * 32 + bit;
+                                    let base_program = base.token_programs[token_index];
+                                    base_program != u16::MAX
+                                        && accepted_base[base_program as usize]
+                                } else {
+                                    false
+                                }
+                            } else if program & DYNAMIC_SOURCE_BASE_PROGRAM_FLAG != 0 {
+                                accepted_base_programs.as_ref().is_some_and(|accepted_base| {
+                                    accepted_base[(program
+                                        & DYNAMIC_SOURCE_PROGRAM_ID_MASK)
+                                        as usize]
+                                })
+                            } else {
+                                accepted_programs[program as usize]
+                            };
+                            accepted_bits |= u32::from(accepted) << bit;
+                        }
+                        *word |= accepted_bits;
+                    }
+                    if let Some(identity) = stack_identity {
+                        for other_state in combined_states {
+                            handled_source_seeds.insert((other_state, identity));
+                        }
+                    }
+                    continue;
+                }
+            }
             if initial_prune_guard.is_passed() {
                 let mut partition = vocab.cached_continuation_partition(tokenizer_state);
                 if partition.is_none()
@@ -791,7 +1297,6 @@ fn fill_mask_dynamic_impl(
                         &mut traversal_cache,
                     )
                 {
-                    lazy_continuation_builds_remaining -= 1;
                     partition = vocab.cached_or_build_continuation_partition(
                         &state.constraint.tokenizer,
                         tokenizer_state,
@@ -857,8 +1362,8 @@ fn fill_mask_dynamic_impl(
                             let required_groups = admitted_groups
                                 .iter()
                                 .enumerate()
-                                .fold(0u64, |groups, (group_id, &admitted)| {
-                                    groups | ((!admitted) as u64) << group_id
+                                .fold(0u128, |groups, (group_id, &admitted)| {
+                                    groups | ((!admitted) as u128) << group_id
                                 });
                             let partition_index = continuation_partitions.len();
                             continuation_partitions.push(partition);
@@ -899,7 +1404,7 @@ fn fill_mask_dynamic_impl(
     // not just for the seed that selected the partition. Once any partition has
     // filled part of the output mask, an otherwise-unfiltered seed can skip
     // leaves and complete subtrees that are already globally admitted.
-    if continuation_groups_admitted != 0 {
+    if continuation_groups_admitted != 0 || token_program_groups_admitted != 0 {
         for work in &mut traversal {
             if work.continuation_filter.is_none() {
                 work.continuation_filter = Some(ContinuationFilter::AlreadyMarked);
@@ -957,7 +1462,7 @@ fn fill_mask_dynamic_impl(
                     .and_then(|token_id| {
                         continuation_partitions[partition_index].token_group(token_id)
                     })
-                    .is_some_and(|group| required_groups & (1u64 << group) != 0)
+                    .is_some_and(|group| required_groups & (1u128 << group) != 0)
             }
             Some(ContinuationFilter::AlreadyMarked) => node
                 .token_id
@@ -1072,7 +1577,7 @@ fn fill_mask_dynamic_impl(
     }
     if let Some(total_started_at) = total_started_at {
         eprintln!(
-            "[glrmask/profile][dynamic_mask] generation={} cache_hit=false key_ms={:.3} work_items={} trie_edges={} lexer_execs={} subtree_marks={} subtree_tokens={} continuation_admitted={} continuation_traversed={} boundary_cache={} relevant_cache={} child_cache={} total_ms={:.3}",
+            "[glrmask/profile][dynamic_mask] generation={} cache_hit=false key_ms={:.3} work_items={} trie_edges={} lexer_execs={} subtree_marks={} subtree_tokens={} token_program_evaluated={} token_program_admitted={} token_program_acceptance_cache_hits={} token_program_cache={} continuation_admitted={} continuation_traversed={} boundary_cache={} relevant_cache={} child_cache={} total_ms={:.3}",
             state.generation,
             key_ms,
             work_items,
@@ -1080,9 +1585,13 @@ fn fill_mask_dynamic_impl(
             lexer_executions,
             subtree_marks,
             subtree_mark_tokens,
+            token_program_groups_evaluated,
+            token_program_groups_admitted,
+            token_program_acceptance_cache_hits,
+            token_program_cache.entries,
             continuation_groups_admitted,
             continuation_groups_traversed,
-            traversal_cache.boundary.len(),
+            traversal_cache.admissible_terminals.len(),
             traversal_cache.lexer_relevant.len(),
             traversal_cache.parser_children.len(),
             total_started_at.elapsed().as_secs_f64() * 1000.0,
