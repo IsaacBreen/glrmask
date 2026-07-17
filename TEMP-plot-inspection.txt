@@ -1,0 +1,108 @@
+IMAGE docs/assets/benchmark-mask-tail-2026-07-16.webp size=(2700, 1619)
+TOP COLORS
+(np.uint8(248), np.uint8(248), np.uint8(248)) 4119317
+(np.uint8(0), np.uint8(0), np.uint8(0)) 51042
+(np.uint8(240), np.uint8(240), np.uint8(240)) 40418
+(np.uint8(16), np.uint8(16), np.uint8(16)) 17286
+(np.uint8(232), np.uint8(232), np.uint8(232)) 13288
+(np.uint8(192), np.uint8(192), np.uint8(192)) 12406
+(np.uint8(64), np.uint8(64), np.uint8(64)) 10487
+(np.uint8(8), np.uint8(8), np.uint8(8)) 7424
+(np.uint8(136), np.uint8(136), np.uint8(136)) 6163
+(np.uint8(184), np.uint8(184), np.uint8(184)) 5415
+(np.uint8(200), np.uint8(200), np.uint8(200)) 5017
+(np.uint8(240), np.uint8(248), np.uint8(248)) 4898
+(np.uint8(232), np.uint8(248), np.uint8(248)) 3996
+(np.uint8(144), np.uint8(144), np.uint8(144)) 3995
+(np.uint8(24), np.uint8(24), np.uint8(24)) 2922
+(np.uint8(224), np.uint8(248), np.uint8(248)) 2880
+(np.uint8(40), np.uint8(40), np.uint8(40)) 2481
+(np.uint8(224), np.uint8(224), np.uint8(224)) 2375
+(np.uint8(72), np.uint8(72), np.uint8(72)) 2193
+(np.uint8(160), np.uint8(160), np.uint8(160)) 2149
+(np.uint8(128), np.uint8(128), np.uint8(128)) 2148
+(np.uint8(32), np.uint8(32), np.uint8(32)) 2094
+(np.uint8(56), np.uint8(56), np.uint8(56)) 1978
+(np.uint8(216), np.uint8(248), np.uint8(248)) 1842
+(np.uint8(208), np.uint8(208), np.uint8(208)) 1791
+(np.uint8(152), np.uint8(152), np.uint8(152)) 1740
+(np.uint8(168), np.uint8(168), np.uint8(168)) 1685
+(np.uint8(88), np.uint8(88), np.uint8(88)) 1594
+(np.uint8(176), np.uint8(176), np.uint8(176)) 1584
+(np.uint8(120), np.uint8(120), np.uint8(120)) 1578
+OCR TOKENS
+Mask-generation 592 22 458 48 91
+exceedance 1523 22 321 39 92
+LLGuidance 1075 90 149 20 92
+sample 1235 90 91 26 96
+maximum: 1338 90 134 20 93
+8.0413ms 1485 90 127 20 90
+0.01% 1927 295 89 21 93
+exceedance 2028 294 171 22 91
+LLGuidance 1888 326 165 22 91
+mask 2067 326 74 22 96
+latency 2154 326 103 28 96
+(~361 1887 358 87 26 92
+mask 1988 358 75 22 93
+GLRMask 1116 598 117 20 91
+sample 1243 598 92 26 96
+maximum: 1347 598 134 20 93
+28.565us 1494 598 118 26 65
+GLRMask 2309 1246 151 26 92
+LLGuidance 2309 1296 190 26 78
+0.01% 1988 1382 93 22 95
+Exceedance 1165 1434 216 53 92
+IMAGE docs/assets/benchmark-mask-tail-2026-07-16-dark.webp size=(2700, 1619)
+TOP COLORS
+(np.uint8(8), np.uint8(16), np.uint8(16)) 3879537
+(np.uint8(16), np.uint8(16), np.uint8(24)) 188242
+(np.uint8(8), np.uint8(16), np.uint8(24)) 61529
+(np.uint8(224), np.uint8(232), np.uint8(240)) 45829
+(np.uint8(24), np.uint8(24), np.uint8(32)) 35615
+(np.uint8(208), np.uint8(216), np.uint8(224)) 13177
+(np.uint8(16), np.uint8(24), np.uint8(32)) 8934
+(np.uint8(168), np.uint8(176), np.uint8(184)) 6749
+(np.uint8(56), np.uint8(64), np.uint8(64)) 5542
+(np.uint8(16), np.uint8(24), np.uint8(24)) 5514
+(np.uint8(56), np.uint8(64), np.uint8(72)) 5473
+(np.uint8(216), np.uint8(224), np.uint8(224)) 4272
+(np.uint8(64), np.uint8(72), np.uint8(72)) 3780
+(np.uint8(104), np.uint8(112), np.uint8(120)) 3691
+(np.uint8(216), np.uint8(216), np.uint8(224)) 3420
+(np.uint8(64), np.uint8(64), np.uint8(72)) 3415
+(np.uint8(216), np.uint8(224), np.uint8(232)) 3267
+(np.uint8(168), np.uint8(176), np.uint8(176)) 3035
+(np.uint8(224), np.uint8(224), np.uint8(232)) 3034
+(np.uint8(224), np.uint8(248), np.uint8(248)) 2880
+(np.uint8(232), np.uint8(248), np.uint8(248)) 2438
+(np.uint8(104), np.uint8(112), np.uint8(112)) 2432
+(np.uint8(56), np.uint8(56), np.uint8(64)) 2298
+(np.uint8(200), np.uint8(208), np.uint8(216)) 2272
+(np.uint8(224), np.uint8(232), np.uint8(232)) 2201
+(np.uint8(104), np.uint8(104), np.uint8(112)) 1857
+(np.uint8(216), np.uint8(248), np.uint8(248)) 1842
+(np.uint8(16), np.uint8(192), np.uint8(208)) 1500
+(np.uint8(208), np.uint8(216), np.uint8(216)) 1497
+(np.uint8(192), np.uint8(200), np.uint8(208)) 1473
+OCR TOKENS
+Mask-generation 592 22 458 48 91
+exceedance 1523 22 321 39 91
+LLGuidance 1075 90 149 20 91
+sample 1235 90 91 26 95
+maximum: 1338 90 134 20 93
+8.0413ms 1485 90 127 20 90
+0.01% 1927 295 89 21 93
+exceedance 2028 294 171 22 92
+LLGuidance 1888 326 165 22 92
+mask 2067 326 74 22 96
+latency 2154 326 103 28 96
+(~361 1887 358 87 26 92
+mask 1988 358 75 22 93
+GLRMask 1115 597 118 22 90
+sample 1242 598 94 27 96
+maximum: 1345 598 138 21 93
+28.565ys 1493 597 120 28 53
+GLRMask 2309 1246 151 26 84
+LLGuidance 2309 1296 190 26 89
+0.01% 1988 1382 93 22 95
+Exceedance 1165 1434 216 53 92
