@@ -59,9 +59,35 @@ jobs:
         run: |
           ! grep -R -n -E 'eos_token_id|EOS_BYTES|update_eos_mask|finalize_eos_ns' --include='*.rs' src python glrmask-runtime tests
       - name: Check workspace
-        run: cargo check --workspace --all-targets
+        id: check
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cargo check --workspace --all-targets 2>&1 | tee /tmp/agent-eos-check.log
+      - name: Upload compiler failure
+        if: steps.check.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-eos-check-log
+          path: /tmp/agent-eos-check.log
+      - name: Stop after compiler failure
+        if: steps.check.outcome == 'failure'
+        run: exit 1
       - name: Test workspace
-        run: cargo test --workspace
+        id: test
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cargo test --workspace 2>&1 | tee /tmp/agent-eos-test.log
+      - name: Upload test failure
+        if: steps.test.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-eos-test-log
+          path: /tmp/agent-eos-test.log
+      - name: Stop after test failure
+        if: steps.test.outcome == 'failure'
+        run: exit 1
       - name: Commit validated source changes to feature branch
         run: |
           git config user.name github-actions[bot]
