@@ -2822,6 +2822,83 @@ fn exact_admission_may_advance_on_any(
     false
 }
 
+fn exact_admission_admissible_terminals(
+    table: &GLRTable,
+    stack: &ParserGSS,
+    terminals: &BitSet,
+) -> BitSet {
+    let mut admitted = BitSet::new(terminals.len());
+    if terminals.is_empty() {
+        return admitted;
+    }
+
+    let mut queue = VecDeque::<(ParserGSS, BitSet)>::new();
+    let mut visited = FxHashMap::<ExactAdmissionSemanticKey, BitSet>::default();
+    let mut key_interner = ExactAdmissionKeyInterner::new();
+
+    for state in stack.peek_values() {
+        exact_admission_enqueue_frontier_any(
+            stack.isolate(Some(state)),
+            terminals,
+            &mut queue,
+            &mut visited,
+            &mut key_interner,
+        );
+    }
+
+    while let Some((frontier, frontier_terminals)) = queue.pop_front() {
+        let remaining = frontier_terminals.difference(&admitted);
+        if remaining.is_empty() {
+            continue;
+        }
+        for source_state in frontier.peek_values() {
+            if !table.advance_row_intersects(source_state, &remaining) {
+                continue;
+            }
+
+            let isolated = frontier.isolate(Some(source_state));
+            let mut pending_reduces = SmallVec::<[(u32, u32, BitSet); 8]>::new();
+            exact_admission_for_each_matching_action(
+                table,
+                source_state,
+                &remaining,
+                |terminal, terminal_bit, action| {
+                    if exact_admission_process_action_any(
+                        &isolated,
+                        terminal,
+                        terminal_bit,
+                        action,
+                        remaining.len(),
+                        &mut pending_reduces,
+                    ) {
+                        admitted.set(terminal_bit);
+                    }
+                    false
+                },
+            );
+
+            for (nt, len, reduce_terminals) in pending_reduces {
+                let reduce_terminals = reduce_terminals.difference(&admitted);
+                if reduce_terminals.is_empty() {
+                    continue;
+                }
+                exact_admission_enqueue_reduce_any(
+                    table,
+                    &isolated,
+                    nt,
+                    len as usize,
+                    &reduce_terminals,
+                    &mut queue,
+                    &mut visited,
+                    &mut key_interner,
+                );
+            }
+        }
+    }
+
+    admitted
+}
+
 fn exact_admission_for_each_matching_action(
     table: &GLRTable,
     state: u32,
@@ -3077,6 +3154,7 @@ mod tests {
         advance_concrete_stacks_reference,
         advance_stacks,
         apply_guarded_stack_shifts_to_vstack,
+        stack_admissible_terminals,
         stack_may_advance_on,
         stack_may_advance_on_any,
         try_advance_pop1_reduce_plus_stackshift_wave,
@@ -3850,6 +3928,28 @@ mod tests {
         );
     }
 
+    fn assert_admissible_set_matches_individual(
+        table: &GLRTable,
+        stack: &ParserGSS,
+        terminals: &BitSet,
+    ) {
+        let admitted = stack_admissible_terminals(table, stack, terminals);
+        let mut expected = BitSet::new(terminals.len());
+        for bit in terminals.iter_ones() {
+            let terminal = if bit == table.num_terminals as usize {
+                EOF
+            } else if bit < table.num_terminals as usize {
+                bit as u32
+            } else {
+                continue;
+            };
+            if stack_may_advance_on(table, stack, terminal) {
+                expected.set(bit);
+            }
+        }
+        assert_eq!(admitted, expected);
+    }
+
     #[test]
     fn exact_admission_any_does_not_mix_lookahead_reductions() {
         let reduce_token = 0;
@@ -3877,6 +3977,7 @@ mod tests {
         assert!(!stack_may_advance_on(&table, &stack, reduce_token));
         assert!(!stack_may_advance_on(&table, &stack, shift_token));
         assert_exact_any_matches_disjunction(&table, &stack, &terminals);
+        assert_admissible_set_matches_individual(&table, &stack, &terminals);
         assert!(!stack_may_advance_on_any(&table, &stack, &terminals));
     }
 
@@ -3910,6 +4011,7 @@ mod tests {
         assert!(!stack_may_advance_on(&table, &stack, token_a));
         assert!(stack_may_advance_on(&table, &stack, token_b));
         assert_exact_any_matches_disjunction(&table, &stack, &terminals);
+        assert_admissible_set_matches_individual(&table, &stack, &terminals);
         assert!(stack_may_advance_on_any(&table, &stack, &terminals));
     }
 
@@ -3945,10 +4047,12 @@ mod tests {
 
         let rejected = ParserGSS::from_single_stack(vec![1, 2], TerminalsDisallowed::new());
         assert_exact_any_matches_disjunction(&table, &rejected, &terminals);
+        assert_admissible_set_matches_individual(&table, &rejected, &terminals);
         assert!(!stack_may_advance_on_any(&table, &rejected, &terminals));
 
         let accepted = ParserGSS::from_single_stack(vec![0, 2], TerminalsDisallowed::new());
         assert_exact_any_matches_disjunction(&table, &accepted, &terminals);
+        assert_admissible_set_matches_individual(&table, &accepted, &terminals);
         assert!(stack_may_advance_on_any(&table, &accepted, &terminals));
     }
 
@@ -3962,11 +4066,13 @@ mod tests {
         let mut non_eof = BitSet::new(2);
         non_eof.set(token as usize);
         assert_exact_any_matches_disjunction(&table, &stack, &non_eof);
+        assert_admissible_set_matches_individual(&table, &stack, &non_eof);
         assert!(!stack_may_advance_on_any(&table, &stack, &non_eof));
 
         let mut eof = BitSet::new(2);
         eof.set(table.num_terminals as usize);
         assert_exact_any_matches_disjunction(&table, &stack, &eof);
+        assert_admissible_set_matches_individual(&table, &stack, &eof);
         assert!(stack_may_advance_on_any(&table, &stack, &eof));
     }
 
@@ -4104,6 +4210,38 @@ mod tests {
             assert_eq!(indexed, linear);
         }
     }
+}
+
+/// Return exactly the candidate terminals on which this parser stack can
+/// advance. Unlike repeated `stack_may_advance_on_any` calls, ExactSimulation
+/// explores the reduction closure once while propagating all candidate bits.
+pub(crate) fn stack_admissible_terminals(
+    table: &GLRTable,
+    stack: &ParserGSS,
+    terminals: &BitSet,
+) -> BitSet {
+    if table.admission_policy == AdmissionPolicy::ExactSimulation {
+        return exact_admission_admissible_terminals(table, stack, terminals);
+    }
+
+    let mut admitted = BitSet::new(terminals.len());
+    for bit in terminals.iter_ones() {
+        let Some(terminal) = exact_admission_terminal_from_bit(table, bit) else {
+            continue;
+        };
+        if stack
+            .peek_values()
+            .into_iter()
+            .any(|state| table.advance_row_allows(state, terminal))
+        {
+            admitted.set(bit);
+        }
+    }
+    if assert_row_presence_exact_enabled() {
+        let simulated = exact_admission_admissible_terminals(table, stack, terminals);
+        assert_eq!(admitted, simulated, "RowPresenceExact admissible-set mismatch");
+    }
+    admitted
 }
 
 /// Precise predicate for whether this parser stack can advance on any terminal in
