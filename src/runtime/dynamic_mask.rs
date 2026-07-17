@@ -38,7 +38,60 @@ struct DynamicTraversalCache {
 
 #[derive(Default)]
 struct DynamicTokenProgramCache {
-    results: FxHashMap<(u32, usize), bool>,
+    rows_by_stack: FxHashMap<usize, usize>,
+    rows: Vec<(ParserStacks, Box<[u8]>)>,
+    entries: usize,
+}
+
+impl DynamicTokenProgramCache {
+    const UNKNOWN: u8 = 0;
+    const REJECTED: u8 = 1;
+    const ADMITTED: u8 = 2;
+
+    #[inline]
+    fn get(&self, program_id: u32, stacks: &ParserStacks) -> Option<bool> {
+        let row = *self.rows_by_stack.get(&stacks.ptr_key())?;
+        let (cached_stacks, results) = &self.rows[row];
+        debug_assert!(cached_stacks.ptr_eq(stacks));
+        match results[program_id as usize] {
+            Self::REJECTED => Some(false),
+            Self::ADMITTED => Some(true),
+            Self::UNKNOWN => None,
+            _ => unreachable!("invalid dynamic token-program cache entry"),
+        }
+    }
+
+    #[inline]
+    fn insert(
+        &mut self,
+        program_count: usize,
+        program_id: u32,
+        stacks: &ParserStacks,
+        accepted: bool,
+    ) {
+        let key = stacks.ptr_key();
+        let row = if let Some(&row) = self.rows_by_stack.get(&key) {
+            debug_assert!(self.rows[row].0.ptr_eq(stacks));
+            row
+        } else {
+            let row = self.rows.len();
+            self.rows.push((
+                stacks.clone(),
+                vec![Self::UNKNOWN; program_count].into_boxed_slice(),
+            ));
+            self.rows_by_stack.insert(key, row);
+            row
+        };
+        let slot = &mut self.rows[row].1[program_id as usize];
+        if *slot == Self::UNKNOWN {
+            self.entries += 1;
+        }
+        *slot = if accepted {
+            Self::ADMITTED
+        } else {
+            Self::REJECTED
+        };
+    }
 }
 
 #[derive(Clone)]
@@ -541,9 +594,8 @@ fn token_program_accepts(
         return true;
     }
 
-    let key = (program_id, stacks.ptr_key());
-    if let Some(result) = program_cache.results.get(&key) {
-        return *result;
+    if let Some(result) = program_cache.get(program_id, stacks) {
+        return result;
     }
 
     let accepted = program.end_states.iter().any(|&end_state| {
@@ -562,7 +614,7 @@ fn token_program_accepts(
             program_cache,
         )
     });
-    program_cache.results.insert(key, accepted);
+    program_cache.insert(partition.programs.len(), program_id, stacks, accepted);
     accepted
 }
 
@@ -1452,7 +1504,7 @@ fn fill_mask_dynamic_impl(
             token_program_groups_evaluated,
             token_program_groups_admitted,
             token_program_acceptance_cache_hits,
-            token_program_cache.results.len(),
+            token_program_cache.entries,
             continuation_groups_admitted,
             continuation_groups_traversed,
             traversal_cache.admissible_terminals.len(),
