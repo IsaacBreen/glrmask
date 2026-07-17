@@ -13,13 +13,21 @@ GLRMask shifts work into ahead-of-time compilation. In this run, that made compi
 ### Mask-generation latency
 
 <p align="center">
-  <img src="docs/assets/benchmark-mask-tail-2026-07-16.webp" alt="Mask-generation latency tail curves for GLRMask and LLGuidance, with GLRMask speedup by exceedance probability" width="100%">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-mask-tail-2026-07-16-dark.webp">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/benchmark-mask-tail-2026-07-16.webp">
+    <img src="docs/assets/benchmark-mask-tail-2026-07-16.webp" alt="Mask-generation latency tail curves for GLRMask and LLGuidance, with GLRMask speedup by exceedance probability" width="100%">
+  </picture>
 </p>
 
 <p align="center"><em>Full paired tail over 2,122,307 shared finite token positions. The lower panel is LLGuidance latency divided by GLRMask latency.</em></p>
 
 <p align="center">
-  <img src="docs/assets/benchmark-mask-summary-2026-07-16.webp" alt="Mask-generation latency percentile summary for GLRMask and LLGuidance" width="88%">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-mask-summary-2026-07-16-dark.webp">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/benchmark-mask-summary-2026-07-16.webp">
+    <img src="docs/assets/benchmark-mask-summary-2026-07-16.webp" alt="Mask-generation latency percentile summary for GLRMask and LLGuidance" width="88%">
+  </picture>
 </p>
 
 | Latency | GLRMask | LLGuidance |
@@ -36,7 +44,11 @@ The figure gives a fuller percentile view; the table preserves the headline valu
 ### Compilation time
 
 <p align="center">
-  <img src="docs/assets/benchmark-compilation-summary-2026-07-16.webp" alt="Compilation-time percentile summary for GLRMask and LLGuidance" width="88%">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-compilation-summary-2026-07-16-dark.webp">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/benchmark-compilation-summary-2026-07-16.webp">
+    <img src="docs/assets/benchmark-compilation-summary-2026-07-16.webp" alt="Compilation-time percentile summary for GLRMask and LLGuidance" width="88%">
+  </picture>
 </p>
 
 | Compilation time | GLRMask | LLGuidance |
