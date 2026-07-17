@@ -3,8 +3,8 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
-use glrmask::{Constraint, Vocab};
 use glrmask::__private::ConstraintExt as _;
+use glrmask::{Constraint, Vocab};
 use glrmask_runtime::RuntimeArtifact;
 use serde_json::{json, Value};
 
@@ -54,7 +54,7 @@ fn load_gpt_style_vocab(tokenizer_path: &Path) -> Result<Vocab, String> {
             .collect::<Result<Vec<_>, _>>()?;
         entries.push((id, bytes));
     }
-    Ok(Vocab::new(entries, None))
+    Ok(Vocab::new(entries))
 }
 
 fn story_json_grammar() -> String {
@@ -75,7 +75,7 @@ fn story_json_grammar() -> String {
             {"Pattern": {"id": 5, "pattern": "[A-Za-z0-9 .,!?'-]{1,96}", "utf8": false}}
         ],
         "nonterminal_names": {"0": "json_story"},
-        "terminal_names": {"0": "{", "1": "\\\"story\\\"", "2": ":", "3": "\\\"", "4": "}", "5": "story chars"},
+        "terminal_names": {"0": "{", "1": "\"story\"", "2": ":", "3": "\"", "4": "}", "5": "story chars"},
         "ignore_terminal": null
     })
     .to_string()
@@ -83,21 +83,24 @@ fn story_json_grammar() -> String {
 
 fn run() -> Result<(), String> {
     let mut args = env::args().skip(1);
-    let tokenizer = args
-        .next()
-        .ok_or_else(|| "usage: glrmask-browser-artifact <tokenizer.json> <output.glrmaskc>".to_owned())?;
-    let output = args
-        .next()
-        .ok_or_else(|| "usage: glrmask-browser-artifact <tokenizer.json> <output.glrmaskc>".to_owned())?;
+    let tokenizer = args.next().ok_or_else(|| {
+        "usage: glrmask-browser-artifact <tokenizer.json> <output.glrmaskc>".to_owned()
+    })?;
+    let output = args.next().ok_or_else(|| {
+        "usage: glrmask-browser-artifact <tokenizer.json> <output.glrmaskc>".to_owned()
+    })?;
     if args.next().is_some() {
-        return Err("usage: glrmask-browser-artifact <tokenizer.json> <output.glrmaskc>".to_owned());
+        return Err(
+            "usage: glrmask-browser-artifact <tokenizer.json> <output.glrmaskc>".to_owned(),
+        );
     }
 
     let vocab = load_gpt_style_vocab(Path::new(&tokenizer))?;
     eprintln!("loaded {} TinyStories BPE tokens", vocab.len());
     let constraint = Constraint::compile_grammar_def_json(&story_json_grammar(), &vocab)
         .map_err(|error| error.to_string())?;
-    let artifact = RuntimeArtifact::from_runtime_payload_v2(constraint.save_runtime_payload_v2());
+    let artifact =
+        RuntimeArtifact::from_runtime_payload_v3(constraint.save_runtime_payload_v3());
     let output = Path::new(&output);
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent)
@@ -105,7 +108,11 @@ fn run() -> Result<(), String> {
     }
     fs::write(output, artifact.as_bytes())
         .map_err(|error| format!("write {}: {error}", output.display()))?;
-    eprintln!("wrote {} bytes to {}", artifact.as_bytes().len(), output.display());
+    eprintln!(
+        "wrote {} bytes to {}",
+        artifact.as_bytes().len(),
+        output.display()
+    );
     Ok(())
 }
 

@@ -28,7 +28,7 @@ nt start ::= v_0 | v_1 | v_2 | v_3 | v_4;
 const FIXED_N5_INPUT: &str = "a,b,c,d,e,f,g,h,i,j";
 
 fn byte_vocab() -> Vocab {
-    Vocab::new((0u8..=127).map(|byte| (byte as u32, vec![byte])).collect(), None)
+    Vocab::new((0u8..=127).map(|byte| (byte as u32, vec![byte])).collect())
 }
 
 fn live_stack_count(state: &ConstraintState<'_>) -> usize {

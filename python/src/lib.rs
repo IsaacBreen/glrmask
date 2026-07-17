@@ -78,7 +78,7 @@ fn dict_to_vocab(token_to_id: &Bound<'_, PyDict>) -> PyResult<glrmask::Vocab> {
         let token_id: u32 = value.extract()?;
         entries.push((token_id, token_bytes));
     }
-    Ok(glrmask::Vocab::new(entries, None))
+    Ok(glrmask::Vocab::new(entries))
 }
 
 fn id_to_bytes_dict_to_vocab(id_to_bytes: &Bound<'_, PyDict>) -> PyResult<glrmask::Vocab> {
@@ -92,7 +92,7 @@ fn id_to_bytes_dict_to_vocab(id_to_bytes: &Bound<'_, PyDict>) -> PyResult<glrmas
             .to_vec();
         entries.push((token_id, token_bytes));
     }
-    Ok(glrmask::Vocab::new(entries, None))
+    Ok(glrmask::Vocab::new(entries))
 }
 
 fn constraint_result<T, E: std::fmt::Display>(result: Result<T, E>) -> PyResult<T> {
@@ -199,7 +199,6 @@ fn mask_profile_to_dict<'py>(
     dict.set_item("finalize_ns", profile.finalize_ns)?;
     dict.set_item("finalize_zero_ns", profile.finalize_zero_ns)?;
     dict.set_item("finalize_dense_to_buf_ns", profile.finalize_dense_to_buf_ns)?;
-    dict.set_item("finalize_eos_ns", profile.finalize_eos_ns)?;
     dict.set_item("finalize_cache_ns", profile.finalize_cache_ns)?;
     dict.set_item("delta_prev_available", profile.delta_prev_available)?;
     dict.set_item("delta_added_bits", profile.delta_added_bits)?;
@@ -508,9 +507,18 @@ impl PyConstraint {
 #[pymethods]
 impl PyConstraint {
     #[staticmethod]
-    fn from_json_schema(schema: &str, vocab: &PyVocab) -> PyResult<Self> {
+    #[pyo3(signature = (schema, vocab, end_token_ids=None))]
+    fn from_json_schema(
+        schema: &str,
+        vocab: &PyVocab,
+        end_token_ids: Option<Vec<u32>>,
+    ) -> PyResult<Self> {
         Self::from_constraint_result(
-            glrmask::Constraint::from_json_schema(schema, &vocab.inner),
+            glrmask::Constraint::from_json_schema_with_end_tokens(
+                schema,
+                &vocab.inner,
+                end_token_ids.as_deref().unwrap_or(&[]),
+            ),
             vocab,
         )
     }
@@ -589,9 +597,18 @@ impl PyDynamicConstraint {
 #[pymethods]
 impl PyDynamicConstraint {
     #[staticmethod]
-    fn from_json_schema(schema: &str, vocab: &PyVocab) -> PyResult<Self> {
+    #[pyo3(signature = (schema, vocab, end_token_ids=None))]
+    fn from_json_schema(
+        schema: &str,
+        vocab: &PyVocab,
+        end_token_ids: Option<Vec<u32>>,
+    ) -> PyResult<Self> {
         Self::from_constraint_result(
-            glrmask::DynamicConstraint::from_json_schema(schema, &vocab.inner),
+            glrmask::DynamicConstraint::from_json_schema_with_end_tokens(
+                schema,
+                &vocab.inner,
+                end_token_ids.as_deref().unwrap_or(&[]),
+            ),
             vocab,
         )
     }

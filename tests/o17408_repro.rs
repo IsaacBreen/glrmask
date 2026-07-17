@@ -15,9 +15,7 @@ fn test_github_easy_o17408_false_positive_3() {
             (17u32, b"2".to_vec()),
             (18u32, b"3".to_vec()),
             (471u32, b" U".to_vec()),
-        ],
-        None,
-    );
+        ]);
     let lark = r#"
 PATTERN_1: /[\xC2-\xDF]/
 PATTERN_2: /[\x80-\xBF]/

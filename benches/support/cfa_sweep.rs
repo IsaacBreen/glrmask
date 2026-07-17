@@ -65,9 +65,7 @@ pub fn load_llama3_vocab() -> Vocab {
             (token_id, hex_to_bytes(&hex).unwrap_or_else(|err| {
                 panic!("invalid hex bytes for token {token_id} in {}: {err}", path.display())
             }))
-        }).collect(),
-        None,
-    )
+        }).collect())
 }
 
 fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, String> {

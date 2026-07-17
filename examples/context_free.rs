@@ -9,9 +9,7 @@ fn main() {
     // The language { a^n b^n | n >= 1 } is context-free but not regular.
     let grammar = r#"start ::= "a" start "b" | "a" "b""#;
     let vocab = Vocab::new(
-        vec![(0, b"a".to_vec()), (1, b"b".to_vec())],
-        None,
-    );
+        vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
     let constraint = Constraint::from_ebnf(grammar, &vocab).unwrap();
     let mut state = constraint.start();
 

@@ -2,7 +2,7 @@ use glrmask::{Constraint, Vocab};
 
 fn byte_vocab() -> Vocab {
     let entries = (0..=255u32).map(|byte| (byte, vec![byte as u8])).collect();
-    Vocab::new(entries, None)
+    Vocab::new(entries)
 }
 
 fn main() {

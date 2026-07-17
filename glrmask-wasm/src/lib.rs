@@ -211,12 +211,6 @@ pub extern "C" fn glrmask_commit(handle: u32, token_id: u32) -> u32 {
     }
 }
 
-/// Whether end-of-sequence is currently grammatically admissible.
-#[unsafe(no_mangle)]
-pub extern "C" fn glrmask_eos_allowed(handle: u32) -> u32 {
-    with_session_mut(handle, |session| u32::from(session.inner.eos_allowed())).unwrap_or(0)
-}
-
 /// Restore a session to its artifact's initial parser/lexer state.
 #[unsafe(no_mangle)]
 pub extern "C" fn glrmask_reset(handle: u32) -> u32 {

@@ -162,5 +162,5 @@ fn snowplow_vocab() -> Vocab {
         (75369u32, b"_manifest".to_vec()),
         (77763u32, b"purpose".to_vec()),
         (96809u32, b"Dyn".to_vec()),
-    ], None)
+    ])
 }
