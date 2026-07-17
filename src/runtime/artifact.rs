@@ -1329,12 +1329,11 @@ impl DynamicMaskVocab {
                 )
             },
         );
-        // The largest dynamic tails come from broad token-boundary residuals
-        // that can consume most bytes while already matching several terminals.
-        // Some of these states are reached only after committed tokens and are
-        // therefore invisible to initial-program reachability scores. Select
-        // the structural class directly rather than relying on root frequency.
-        let mut source_states = (0..tokenizer.num_states())
+        // Compile one broad consuming residual and one exact union with the
+        // first live epsilon-only residual. Compiling every structurally broad
+        // state duplicates the full-vocabulary scan dozens of times and adds
+        // build cost without helping a mask that only contains a few live seeds.
+        let primary_source = (0..tokenizer.num_states())
             .filter(|&state| state != initial_state)
             .filter(|&state| tokenizer.transitions_from(state).count() >= 128)
             .filter(|&state| tokenizer.matched_terminals_iter(state).count() >= 5)
@@ -1344,38 +1343,31 @@ impl DynamicMaskVocab {
                     .count()
                     >= 9
             })
-            .filter(|&state| {
-                source_scores[state as usize] != 0
-                    || tokenizer.matched_terminals_iter(state).count() >= 6
+            .max_by_key(|&state| {
+                (
+                    source_scores[state as usize],
+                    tokenizer.matched_terminals_iter(state).count(),
+                    tokenizer.transitions_from(state).count(),
+                    std::cmp::Reverse(state),
+                )
             })
-            .collect::<Vec<_>>();
-        if source_states.is_empty()
-            && let Some(&(state, _, _, _, _)) = ranked_source_states
-                .iter()
-                .find(|&&(_, _, transitions, _, _)| transitions != 0)
-        {
-            source_states.push(state);
-        }
+            .or_else(|| {
+                ranked_source_states
+                    .iter()
+                    .find(|&&(_, _, transitions, _, _)| transitions != 0)
+                    .map(|&(state, _, _, _, _)| state)
+            });
         let epsilon_source = (0..tokenizer.num_states())
             .filter(|&state| state != initial_state)
             .filter(|&state| tokenizer.transitions_from(state).next().is_none())
             .filter(|&state| !tokenizer.is_end(state))
             .min();
-        source_states.sort_unstable();
-        source_states.dedup();
-
-        let mut source_specs = source_states
-            .iter()
-            .copied()
-            .map(|state| vec![state])
-            .collect::<Vec<_>>();
-        if let (Some(epsilon_source), Some(&primary)) = (
-            epsilon_source,
-            source_states
-                .iter()
-                .max_by_key(|&&state| source_scores[state as usize]),
-        ) {
-            source_specs.push(vec![epsilon_source, primary]);
+        let mut source_specs = Vec::<Vec<u32>>::new();
+        if let Some(primary) = primary_source {
+            source_specs.push(vec![primary]);
+            if let Some(epsilon) = epsilon_source {
+                source_specs.push(vec![epsilon, primary]);
+            }
         }
         source_specs.sort();
         source_specs.dedup();
@@ -1456,9 +1448,13 @@ impl DynamicMaskVocab {
                 branch_count,
                 partition.token_count,
                 ranked_source_states.iter().take(32).copied().collect::<Vec<_>>(),
-                source_states
+                partition
+                    .source_partitions
                     .iter()
-                    .map(|&state| (
+                    .flat_map(|source| source.source_states.iter().copied())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .map(|state| (
                         state,
                         source_scores[state as usize],
                         tokenizer.transitions_from(state).count(),
