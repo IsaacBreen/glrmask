@@ -1,6 +1,6 @@
 # GLRMask
 
-GLRMask is a grammar-constrained generation library for high-throughput LLM decoding. It compiles constraints ahead of time into an optimized representation, keeping next-token masks cheap to compute at runtime, even for complex grammars.
+GLRMask is a grammar-constrained generation library for high-throughput LLM decoding. It is optimized for extremely low next-token mask latency across the distribution, even for complex grammars.
 
 ## Performance
 
