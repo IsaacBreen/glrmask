@@ -21,7 +21,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use numpy::{PyArray1, PyReadwriteArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict};
+use pyo3::types::{PyAny, PyBytes, PyDict};
 use self_cell::self_cell;
 use std::sync::Arc;
 use glrmask::__private::{
@@ -93,6 +93,25 @@ fn id_to_bytes_dict_to_vocab(id_to_bytes: &Bound<'_, PyDict>) -> PyResult<glrmas
         entries.push((token_id, token_bytes));
     }
     Ok(glrmask::Vocab::new(entries, None))
+}
+
+fn llama_cpp_to_vocab(llm: &Bound<'_, PyAny>) -> PyResult<glrmask::Vocab> {
+    let n_vocab: u32 = llm.call_method0("n_vocab")?.extract()?;
+    let eos_token_id: u32 = llm.call_method0("token_eos")?.extract()?;
+    let kwargs = PyDict::new(llm.py());
+    kwargs.set_item("special", true)?;
+
+    let mut entries = Vec::with_capacity(n_vocab as usize);
+    for token_id in 0..n_vocab {
+        let token_bytes = llm
+            .call_method("detokenize", (vec![token_id],), Some(&kwargs))?
+            .downcast_into::<PyBytes>()?
+            .as_bytes()
+            .to_vec();
+        entries.push((token_id, token_bytes));
+    }
+
+    Ok(glrmask::Vocab::new(entries, Some(eos_token_id)))
 }
 
 fn constraint_result<T, E: std::fmt::Display>(result: Result<T, E>) -> PyResult<T> {
@@ -439,6 +458,12 @@ impl PyVocab {
     #[staticmethod]
     fn from_id_to_bytes(id_to_bytes: &Bound<'_, PyDict>) -> PyResult<Self> {
         let vocab = id_to_bytes_dict_to_vocab(id_to_bytes)?;
+        Ok(Self { inner: vocab })
+    }
+
+    #[staticmethod]
+    fn from_llama_cpp(llm: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let vocab = llama_cpp_to_vocab(llm)?;
         Ok(Self { inner: vocab })
     }
 }
