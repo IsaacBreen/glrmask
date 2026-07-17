@@ -6,8 +6,6 @@ GLRMask is a grammar-constrained generation library for high-throughput LLM deco
 
 Measured with MaskBench on the JSONSchemaBench corpus, using the Llama 3 vocabulary on an Intel Core i7-13620H under Ubuntu 24.04/WSL2.
 
-> **Preliminary:** these timings are not yet accurate and should not be relied on.
-
 ### Mask-generation latency
 
 <p align="center">
