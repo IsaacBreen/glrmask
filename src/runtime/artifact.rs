@@ -1337,15 +1337,49 @@ impl DynamicMaskVocab {
                 )
             },
         );
-        // A small number of broad residuals account for most expensive tail
-        // masks. Compile the five highest-coverage consuming states in parallel
-        // rather than relying on one hand-shaped residual selector.
-        let broad_sources = ranked_source_states
+        // Compile the highest-reach residuals directly. Also retain the first
+        // ten matched-terminal residuals: long lexer families can place the
+        // state reached at the measured tail well below the overall top 32.
+        // Additional candidates are admitted only when they can be built as a
+        // cheap exact overlay of an already-required full partition.
+        let anchor_sources = ranked_source_states
             .iter()
-            .filter(|&&(_, _, transitions, _, _)| transitions >= 128)
-            .take(5)
+            .take(8)
             .map(|&(state, _, _, _, _)| state)
+            .collect::<FxHashSet<_>>();
+        let mut required_sources = ranked_source_states
+            .iter()
+            .take(32)
+            .map(|&(state, _, _, _, _)| state)
+            .collect::<FxHashSet<_>>();
+        required_sources.extend(
+            ranked_source_states
+                .iter()
+                .filter(|&&(_, _, _, matched, _)| matched != 0)
+                .take(10)
+                .map(|&(state, _, _, _, _)| state),
+        );
+        let low_complexity_sources = (0..tokenizer.num_states())
+            .filter(|&state| state != initial_state)
+            .filter(|state| !required_sources.contains(state))
+            .filter(|&state| tokenizer.transitions_from(state).count() >= 128)
+            .filter(|&state| tokenizer.self_loop_bytes(state).len() < 24)
+            .filter(|&state| tokenizer.matched_terminals_iter(state).next().is_none())
+            .filter(|&state| {
+                (2..=4).contains(
+                    &tokenizer
+                        .possible_future_terminals_iter(state)
+                        .count(),
+                )
+            })
+            .take(8)
             .collect::<Vec<_>>();
+        let low_complexity_source_set =
+            low_complexity_sources.iter().copied().collect::<FxHashSet<_>>();
+        required_sources.extend(low_complexity_sources.iter().copied());
+        let mut broad_sources = required_sources.iter().copied().collect::<Vec<_>>();
+        broad_sources.sort_unstable();
+        broad_sources.dedup();
         let epsilon_source = (0..tokenizer.num_states())
             .filter(|&state| state != initial_state)
             .filter(|&state| tokenizer.transitions_from(state).next().is_none())
@@ -1383,7 +1417,8 @@ impl DynamicMaskVocab {
         // closed lexer configuration; only the differing first-byte buckets
         // need exact rescanning. The threshold prevents a nominal "patch"
         // from degenerating into another full-vocabulary build.
-        const MAX_DERIVED_SOURCE_PATCH_TOKENS: usize = 16_384;
+        const MAX_DERIVED_SOURCE_PATCH_TOKENS: usize = 65_536;
+        const MAX_LOW_COMPLEXITY_PATCH_TOKENS: usize = 128_256;
         let mut source_plan_order = source_states.clone();
         source_plan_order.sort_unstable_by_key(|&state| {
             (
@@ -1413,8 +1448,14 @@ impl DynamicMaskVocab {
                     (base, different_first_bytes, patched_tokens)
                 })
                 .min_by_key(|&(_, _, patched_tokens)| patched_tokens);
-            if let Some((base, different_first_bytes, patched_tokens)) = best
-                && patched_tokens <= MAX_DERIVED_SOURCE_PATCH_TOKENS
+            let max_patch_tokens = if low_complexity_source_set.contains(&state) {
+                MAX_LOW_COMPLEXITY_PATCH_TOKENS
+            } else {
+                MAX_DERIVED_SOURCE_PATCH_TOKENS
+            };
+            if !anchor_sources.contains(&state)
+                && let Some((base, different_first_bytes, patched_tokens)) = best
+                && patched_tokens <= max_patch_tokens
             {
                 derived_source_plans.push((
                     state,
@@ -1422,12 +1463,183 @@ impl DynamicMaskVocab {
                     different_first_bytes,
                     patched_tokens,
                 ));
-            } else {
+            } else if required_sources.contains(&state) {
                 full_source_states.push(state);
             }
         }
+        // Initial-token reachability misses residuals that appear only after
+        // committed tokens. Search that structural class after the mandatory
+        // bases are fixed, then retain only the cheapest exact overlays. This
+        // broadens tail coverage without permitting additional full scans.
+        const MAX_CHEAP_OPPORTUNISTIC_DERIVED_SOURCES: usize = 16;
+        const MAX_STRUCTURAL_OPPORTUNISTIC_DERIVED_SOURCES: usize = 32;
+        const MAX_COMPLEX_OPPORTUNISTIC_DERIVED_SOURCES_PER_BASE: usize = 6;
+        let selected_sources = full_source_states
+            .iter()
+            .copied()
+            .chain(derived_source_plans.iter().map(|&(state, _, _, _)| state))
+            .collect::<FxHashSet<_>>();
+        let mut opportunistic_derived = Vec::<(u32, u32, U8Set, usize)>::new();
+        for state in 0..tokenizer.num_states() {
+            if state == initial_state
+                || selected_sources.contains(&state)
+                || tokenizer.transitions_from(state).count() < 128
+                || tokenizer.self_loop_bytes(state).len() >= 24
+            {
+                continue;
+            }
+            let matched = tokenizer.matched_terminals_iter(state).count();
+            let futures = tokenizer
+                .possible_future_terminals_iter(state)
+                .count();
+            if matched == 0 && futures <= 1 {
+                continue;
+            }
+
+            let config = transition_cache.config_for_raw_start(state);
+            let mut row = Box::new([CONTINUATION_NFA_CONFIG_DEAD; 256]);
+            for byte in 0u16..=255 {
+                if let Some(target) = transition_cache.step_config(config, byte as u8) {
+                    row[byte as usize] = target;
+                }
+            }
+            let best = full_source_states
+                .iter()
+                .copied()
+                .map(|base| {
+                    let base_row = &source_transition_rows[&base];
+                    let mut different_first_bytes = U8Set::empty();
+                    let mut patched_tokens = empty_token_count;
+                    for byte in 0u16..=255 {
+                        let byte = byte as u8;
+                        if row[byte as usize] != base_row[byte as usize] {
+                            different_first_bytes.insert(byte);
+                            patched_tokens += first_byte_token_counts[byte as usize];
+                        }
+                    }
+                    (state, base, different_first_bytes, patched_tokens)
+                })
+                .min_by_key(|&(_, _, _, patched_tokens)| patched_tokens);
+            let max_patch_tokens = if matched >= 4 && futures >= 7 {
+                MAX_LOW_COMPLEXITY_PATCH_TOKENS
+            } else {
+                MAX_DERIVED_SOURCE_PATCH_TOKENS
+            };
+            if let Some(plan @ (_, _, _, patched_tokens)) = best
+                && patched_tokens <= max_patch_tokens
+            {
+                opportunistic_derived.push(plan);
+            }
+        }
+        // Split the bounded opportunistic budget between the cheapest exact
+        // overlays and the structurally richest residuals. Pure cost ranking
+        // otherwise fills every slot with tiny punctuation variants and misses
+        // expensive post-commit states with several matched/future terminals.
+        let mut cheapest_opportunistic = opportunistic_derived.clone();
+        cheapest_opportunistic.sort_unstable_by_key(
+            |&(state, _, _, patched_tokens)| {
+                (
+                    patched_tokens,
+                    std::cmp::Reverse(source_scores[state as usize]),
+                    state,
+                )
+            },
+        );
+        cheapest_opportunistic.truncate(MAX_CHEAP_OPPORTUNISTIC_DERIVED_SOURCES);
+
+        // Reserve a few cheap complex overlays around each full base. Global
+        // ranking alone can spend every slot on descendants of one base and
+        // omit a similarly cheap post-commit residual from another family.
+        let mut per_base_opportunistic = opportunistic_derived
+            .iter()
+            .cloned()
+            .filter(|&(state, _, _, _)| {
+                tokenizer.matched_terminals_iter(state).count() >= 2
+                    && tokenizer
+                        .possible_future_terminals_iter(state)
+                        .count()
+                        >= 2
+            })
+            .collect::<Vec<_>>();
+        per_base_opportunistic.sort_unstable_by_key(
+            |&(state, base, _, patched_tokens)| {
+                (
+                    base,
+                    tokenizer.matched_terminals_iter(state).count(),
+                    tokenizer
+                        .possible_future_terminals_iter(state)
+                        .count(),
+                    patched_tokens,
+                    state,
+                )
+            },
+        );
+        per_base_opportunistic.dedup_by_key(|plan| {
+            let state = plan.0;
+            (
+                plan.1,
+                tokenizer.matched_terminals_iter(state).count(),
+                tokenizer
+                    .possible_future_terminals_iter(state)
+                    .count(),
+            )
+        });
+        per_base_opportunistic.sort_unstable_by_key(
+            |&(state, base, _, patched_tokens)| {
+                (
+                    base,
+                    std::cmp::Reverse(tokenizer.matched_terminals_iter(state).count()),
+                    std::cmp::Reverse(
+                        tokenizer
+                            .possible_future_terminals_iter(state)
+                            .count(),
+                    ),
+                    patched_tokens,
+                    state,
+                )
+            },
+        );
+        let mut current_base = None;
+        let mut selected_for_base = 0usize;
+        per_base_opportunistic.retain(|&(_, base, _, _)| {
+            if current_base != Some(base) {
+                current_base = Some(base);
+                selected_for_base = 0;
+            }
+            if selected_for_base >= MAX_COMPLEX_OPPORTUNISTIC_DERIVED_SOURCES_PER_BASE {
+                return false;
+            }
+            selected_for_base += 1;
+            true
+        });
+
+        opportunistic_derived.sort_unstable_by_key(|&(state, _, _, patched_tokens)| {
+            (
+                std::cmp::Reverse(tokenizer.matched_terminals_iter(state).count()),
+                std::cmp::Reverse(
+                    tokenizer
+                        .possible_future_terminals_iter(state)
+                        .count(),
+                ),
+                std::cmp::Reverse(source_scores[state as usize]),
+                patched_tokens,
+                state,
+            )
+        });
+        opportunistic_derived.truncate(MAX_STRUCTURAL_OPPORTUNISTIC_DERIVED_SOURCES);
+        opportunistic_derived.extend(cheapest_opportunistic);
+        opportunistic_derived.extend(per_base_opportunistic);
+        opportunistic_derived.sort_unstable_by_key(|plan| plan.0);
+        opportunistic_derived.dedup_by_key(|plan| plan.0);
+        derived_source_plans.extend(opportunistic_derived);
+
         full_source_states.sort_unstable();
         derived_source_plans.sort_unstable_by_key(|&(state, _, _, _)| state);
+        derived_source_plans.dedup_by_key(|plan| plan.0);
+        source_states = full_source_states.clone();
+        source_states.extend(derived_source_plans.iter().map(|&(state, _, _, _)| state));
+        source_states.sort_unstable();
+        source_states.dedup();
 
         let mut full_source_specs = full_source_states
             .iter()
