@@ -9,7 +9,17 @@ documentation = "https://docs.rs/glrmask"
 repository = "https://github.com/IsaacBreen/glrmask"
 keywords = ["grammar", "llm", "decoding", "parser", "json-schema"]
 categories = ["algorithms", "parsing"]
-exclude = [".agents/**", ".benchmarks/**", ".cache/**", ".idea/**", "glrmask-runtime/**", "notes/**", "patch_debug*.py", "python/**", "python-runtime/**", "scripts/**", "target/**"]
+exclude = [
+    ".benchmarks/**",
+    ".cache/**",
+    "glrmask-browser-artifact/**",
+    "glrmask-runtime/**",
+    "glrmask-wasm/**",
+    "python/**",
+    "python-runtime/**",
+    "scripts/**",
+    "target/**",
+]
 
 [features]
 default = []

@@ -10,10 +10,10 @@ ffi-release:
 	maturin develop --release --manifest-path python/Cargo.toml
 
 runtime-ffi:
-	maturin develop --manifest-path glrmask-runtime/python/Cargo.toml
+	maturin develop --manifest-path python-runtime/Cargo.toml
 
 runtime-ffi-release:
-	maturin develop --release --manifest-path glrmask-runtime/python/Cargo.toml
+	maturin develop --release --manifest-path python-runtime/Cargo.toml
 
 bench-cfa-build:
 	$(BENCH_CASE_ENV) $(BENCH_PROFILE_ENV) cargo bench --bench cfa_sweep_schema_build_single_threaded

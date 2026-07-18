@@ -1,4 +1,0 @@
-interface:
-  display_name: "GLRMask MRE Minimization"
-  short_description: "Minimize glrmask2 mask/commit repros"
-  default_prompt: "Use $glrmask-mre-minimization to build and recursively minimize this glrmask2 mask/commit repro."

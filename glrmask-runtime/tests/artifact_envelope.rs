@@ -1,7 +1,4 @@
-use glrmask_runtime::{
-    RuntimeArtifact, ARTIFACT_MAGIC, ARTIFACT_VERSION, LEGACY_ARTIFACT_VERSION,
-    V2_ARTIFACT_VERSION,
-};
+use glrmask_runtime::{RuntimeArtifact, ARTIFACT_MAGIC, ARTIFACT_VERSION};
 
 fn envelope(version: u16, payload_len: u64, payload: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::new();
@@ -13,15 +10,11 @@ fn envelope(version: u16, payload_len: u64, payload: &[u8]) -> Vec<u8> {
 }
 
 #[test]
-fn rejects_obsolete_envelope_version() {
-    let error = RuntimeArtifact::from_bytes(envelope(1, 0, &[])).unwrap_err();
-    assert!(error.to_string().contains("version 1"));
-}
-
-#[test]
-fn accepts_legacy_envelope_version() {
-    RuntimeArtifact::from_bytes(envelope(LEGACY_ARTIFACT_VERSION, 0, &[])).unwrap();
-    RuntimeArtifact::from_bytes(envelope(V2_ARTIFACT_VERSION, 0, &[])).unwrap();
+fn rejects_previous_envelope_versions() {
+    for version in [1, ARTIFACT_VERSION - 1] {
+        let error = RuntimeArtifact::from_bytes(envelope(version, 0, &[])).unwrap_err();
+        assert!(error.to_string().contains(&format!("version {version}")));
+    }
 }
 
 #[test]
