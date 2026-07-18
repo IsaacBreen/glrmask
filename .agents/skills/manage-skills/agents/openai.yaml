@@ -1,4 +1,0 @@
-interface:
-  display_name: "Manage Skills"
-  short_description: "Create, update, validate, and commit skills"
-  default_prompt: "Use $manage-skills to add or update a Codex skill and commit the skill changes."

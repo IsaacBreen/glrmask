@@ -1,4 +1,0 @@
-interface:
-  display_name: "JSON Schema Importer Regression"
-  short_description: "Fix modular importer perf regressions"
-  default_prompt: "Use $json-schema-importer-regression when fixing glrmask JSON-schema importer TBM or build-time regressions after the modular rewrite."

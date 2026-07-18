@@ -35,3 +35,5 @@ debug/
 patch_debug*.py
 src.zip
 tests/data/kb143_gpt2.bin
+
+.agents
