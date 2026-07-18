@@ -25,7 +25,7 @@ Published wheels include the native extension. Building from source requires a R
 ### Rust
 
 ```bash
-cargo add glrmask@0.1.0
+cargo add glrmask
 ```
 
 ## Usage
