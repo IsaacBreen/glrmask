@@ -2388,26 +2388,34 @@ fn build_state_map(
     candidate_classes: &[u32],
     num_states: usize,
 ) -> ManyToOneIdMap {
-    let num_classes = candidate_classes
+    let class_label_count = candidate_classes
         .iter()
         .copied()
         .max()
-        .map_or(0, |class| class + 1);
+        .map_or(0, |class| class as usize + 1);
+    let mut class_to_internal = vec![u32::MAX; class_label_count];
     let mut original_to_internal = vec![u32::MAX; num_states];
-    let mut internal_to_originals = vec![Vec::new(); num_classes as usize];
-    let mut representative_original_ids = vec![u32::MAX; num_classes as usize];
+    let mut internal_to_originals = Vec::<Vec<u32>>::new();
+    let mut representative_original_ids = Vec::<u32>::new();
 
     for ((members, &representative), &class) in candidate_members
         .iter()
         .zip(candidate_representatives)
         .zip(candidate_classes)
     {
-        let bucket = &mut internal_to_originals[class as usize];
-        if bucket.is_empty() {
-            representative_original_ids[class as usize] = representative as u32;
-        }
+        let class = class as usize;
+        let internal = if class_to_internal[class] == u32::MAX {
+            let internal = internal_to_originals.len() as u32;
+            class_to_internal[class] = internal;
+            internal_to_originals.push(Vec::new());
+            representative_original_ids.push(representative as u32);
+            internal
+        } else {
+            class_to_internal[class]
+        };
+        let bucket = &mut internal_to_originals[internal as usize];
         for &raw in members {
-            original_to_internal[raw as usize] = class;
+            original_to_internal[raw as usize] = internal;
             bucket.push(raw);
         }
     }
@@ -3201,6 +3209,20 @@ pub(crate) fn compute_state_map(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn state_map_compacts_sparse_worklist_class_labels() {
+        let map = build_state_map(
+            &[vec![0], vec![1], vec![2]],
+            &[0, 1, 2],
+            &[0, 2, 2],
+            3,
+        );
+
+        assert_eq!(map.original_to_internal, vec![0, 1, 1]);
+        assert_eq!(map.internal_to_originals, vec![vec![0], vec![1, 2]]);
+        assert_eq!(map.representative_original_ids, vec![0, 1]);
+    }
 
     #[test]
     fn sorted_byte_trie_matches_generic_builder() {
