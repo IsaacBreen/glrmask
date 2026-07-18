@@ -62,9 +62,9 @@ cargo add glrmask@0.1.0
 
 ## Usage
 
-GLRMask takes a grammar and vocabulary and produces a `Constraint`, which provides a `ConstraintState` via `constraint.start()`.
+GLRMask compiles a grammar and vocabulary into a `Constraint`. The resulting `Constraint` can be serialized and cached for reuse across requests.
 
-In the decoding loop, call `state.mask()` to generate the next-token mask. This should be done in parallel with the LLM's forward pass so that the mask is ready before the logits. Apply the mask to the logits before sampling, then call `state.commit_token(token_id)` to advance the state with the sampled token.
+At runtime, call `constraint.start()` to initialize a `ConstraintState`. In the decoding loop, run `state.mask()` in parallel with the model’s forward pass so the mask is ready in time for sampling. Then apply the mask to the logits, sample a token, and call `state.commit_token(token_id)` to advance the state.
 
 ```text
 state = constraint.start()
@@ -78,6 +78,12 @@ while generating:
     token_id = sample(logits)
     state.commit_token(token_id)
 ```
+
+## Cold starts
+
+`DynamicConstraint` has the same interface and produces identical masks, but compiles much faster than `Constraint`, at the cost of higher mask-generation latency.
+
+To minimize cold-start latency, `DynamicConstraint` can be used on a cache miss while the corresponding `Constraint` is compiled in parallel and cached for subsequent requests.
 
 ## Python quickstart
 
@@ -181,30 +187,9 @@ for _ in range(MAX_OUTPUT_TOKENS):
 print(llm.detokenize(generated).decode())
 ```
 
-## Compilation and caching
-
-A `Constraint` can be serialized and cached for reuse across requests.
-
-`DynamicConstraint` has the same interface and produces identical masks, but compiles much faster than `Constraint`, at the cost of higher mask-generation latency.
-
-To minimize cold-start latency, `DynamicConstraint` can be used on a cache miss while the corresponding `Constraint` is compiled in parallel and cached for subsequent requests.
-
-```text
-grammar + vocabulary
-        │
-        ▼
-  Constraint cache
-    ├─ hit  → Constraint ───────────────────→ generate
-    └─ miss
-         ├─ current request → DynamicConstraint → generate
-         └─ parallel build  → compile Constraint → cache
-```
-
-<p align="center"><em>Cold-start architecture</em></p>
-
 ## Grammar formats
 
-[Unfortunately, there is no universally accepted EBNF dialect.](https://dwheeler.com/essays/dont-use-iso-14977-ebnf.html) In keeping with this tradition, GLRMask includes its own.
+Unfortunately, [there is no universally accepted EBNF dialect.](https://dwheeler.com/essays/dont-use-iso-14977-ebnf.html) In keeping with this tradition, GLRMask includes its own.
 
 GLRM is GLRMask's native, EBNF-like grammar syntax. It supports exact model-token terminals with `@token(<id>)`. GLRMask also accepts Lark and EBNF grammars.
 
