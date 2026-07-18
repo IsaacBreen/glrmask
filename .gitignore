@@ -24,7 +24,6 @@ build/
 Thumbs.db
 
 # Local caches, scratch work, and secrets
-.agents/
 .benchmarks/
 .cache/
 notes/
