@@ -175,12 +175,6 @@ constraint = glrmask.Constraint.from_json_schema(
 
 The state becomes complete only after one of those tokens is committed.
 
-## Cold starts
-
-`DynamicConstraint` has the same interface and produces identical masks, but compiles much faster than `Constraint`, at the cost of higher mask-generation latency.
-
-To minimize cold-start latency, `DynamicConstraint` can be used on a cache miss while the corresponding `Constraint` is compiled in parallel and cached for subsequent requests.
-
 ## How it works
 
 GLRMask maintains a GLR parser state for the generated prefix, updating it as tokens are committed. To compute the next-token mask, a precomputed deterministic weighted automaton reads each parser stack one symbol at a time.
@@ -212,6 +206,12 @@ Measured with MaskBench on the JSONSchemaBench corpus, using the Llama 3 vocabul
 </p>
 
 See the [full benchmark report](docs/benchmark-full-corpus-2026-07-16.md) for methodology.
+
+## Cold starts
+
+`DynamicConstraint` has the same interface and produces identical masks, but compiles much faster than `Constraint`, at the cost of higher mask-generation latency.
+
+To minimize cold-start latency, `DynamicConstraint` can be used on a cache miss while the corresponding `Constraint` is compiled in parallel and cached for subsequent requests.
 
 ## License
 
