@@ -222,6 +222,10 @@ start ::= "hello" @token(128009)
 
 GLRMask normally masks the vocabulary's EOS token until the constraint is complete. If EOS is referenced explicitly with `@token(...)`, the grammar controls when it is allowed.
 
+## State lifecycle
+
+The follow-up lifecycle APIs add bounded rollback, non-mutating proposal validation, failed-state inspection, and explicit EOS identity for serving integrations. See [the constraint-state lifecycle contract](docs/state-lifecycle.md) for the Rust and Python signatures and exact semantics.
+
 ## Serialization
 
 Compiled constraints can be serialized and restored:
