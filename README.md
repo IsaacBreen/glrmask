@@ -168,8 +168,6 @@ Each transition carries a Boolean mask over the model vocabulary. These masks ar
 
 Measured with MaskBench on the JSONSchemaBench corpus, using the Llama 3 vocabulary on an Intel Core i7-13620H under Ubuntu 24.04/WSL2.
 
-### Mask-generation latency
-
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-mask-cfa-bars-2026-07-16-dark.webp">
@@ -177,8 +175,6 @@ Measured with MaskBench on the JSONSchemaBench corpus, using the Llama 3 vocabul
     <img src="docs/assets/benchmark-mask-cfa-bars-2026-07-16.webp" alt="Mask-generation latency percentiles for GLRMask and LLGuidance" width="92%">
   </picture>
 </p>
-
-### Compilation time
 
 <p align="center">
   <picture>
