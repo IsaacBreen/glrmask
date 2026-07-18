@@ -153,7 +153,7 @@ enum ExtractResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SubsetOutcome {
     Holds { pairs: usize },
-    DoesNotHold { pairs: usize },
+    NotProved { pairs: usize },
     BudgetExceeded { pairs: usize },
 }
 
@@ -181,7 +181,7 @@ impl SubsetOutcome {
     fn pairs(self) -> usize {
         match self {
             Self::Holds { pairs }
-            | Self::DoesNotHold { pairs }
+            | Self::NotProved { pairs }
             | Self::BudgetExceeded { pairs } => pairs,
         }
     }
@@ -190,7 +190,7 @@ impl SubsetOutcome {
         let pairs = self.pairs().saturating_add(additional);
         match self {
             Self::Holds { .. } => Self::Holds { pairs },
-            Self::DoesNotHold { .. } => Self::DoesNotHold { pairs },
+            Self::NotProved { .. } => Self::NotProved { pairs },
             Self::BudgetExceeded { .. } => Self::BudgetExceeded { pairs },
         }
     }
@@ -364,7 +364,10 @@ fn extract_repeat_context(expr: &Expr, min_repeat: usize) -> ExtractResult {
     }
 }
 
-/// Decide one already-reduced inclusion problem exactly.
+/// Check one already-reduced inclusion problem by exact DFA-product search.
+/// `NotProved` means the supplied reduced problem has a counterexample; callers
+/// deliberately expose it only as absence of a positive certificate because
+/// context cancellation is sound in the positive direction only.
 fn certify_subset_exact(
     cache: &mut SubsetCertificateCache,
     left: &Expr,
@@ -379,7 +382,7 @@ fn certify_subset_exact(
         return if holds {
             SubsetOutcome::Holds { pairs: 0 }
         } else {
-            SubsetOutcome::DoesNotHold { pairs: 0 }
+            SubsetOutcome::NotProved { pairs: 0 }
         };
     }
 
@@ -399,7 +402,7 @@ fn certify_subset_exact(
             .is_some_and(|state| right.matched_terminal_bitset(state).contains(0));
         if left_accepts && !right_accepts {
             cache.completed.insert(key, false);
-            return SubsetOutcome::DoesNotHold { pairs: seen.len() };
+            return SubsetOutcome::NotProved { pairs: seen.len() };
         }
 
         for (byte, next_left) in left.transitions_from(left_state) {
@@ -471,7 +474,7 @@ fn prove_within_kleene_star(
             *pairs_used = pairs_used.saturating_add(outcome.pairs());
             match outcome {
                 SubsetOutcome::Holds { .. } => ClosureProof::Holds,
-                SubsetOutcome::DoesNotHold { .. } => ClosureProof::Unknown,
+                SubsetOutcome::NotProved { .. } => ClosureProof::Unknown,
                 SubsetOutcome::BudgetExceeded { .. } => ClosureProof::BudgetExceeded,
             }
         }
@@ -536,11 +539,13 @@ fn certify_against_repetition(
     }
 }
 
-/// Decide `L(left) ⊆ L(right)` exactly, subject only to a resource budget.
+/// Prove `L(left) ⊆ L(right)`, subject to a resource budget.
 ///
-/// Positive structural certificates are compositional theorems. Otherwise the
-/// fallback walks the reachable product of deterministic byte DFAs. Budget
-/// exhaustion is always reported as unknown, never as a positive certificate.
+/// Every `Holds` result is a sound positive certificate. The common-context
+/// reduction is intentionally one-way: a failed residual inclusion is reported
+/// only as `NotProved`, because concatenation languages are not cancellative in
+/// general. Otherwise the fallback walks the reachable product of deterministic
+/// byte DFAs. Budget exhaustion is never interpreted as a positive certificate.
 fn certify_subset(
     cache: &mut SubsetCertificateCache,
     left: &Expr,
@@ -813,16 +818,21 @@ impl CountedSplitPlan {
     }
 
     fn count_cover_is_exact(&self) -> bool {
-        let mut covered = vec![false; self.max_repeat + 1];
-        for (start, end) in self.count_intervals() {
-            if start > end || end > self.max_repeat {
+        let intervals = self.count_intervals();
+        let mut expected_start = 0usize;
+        for (index, (start, end)) in intervals.iter().copied().enumerate() {
+            if start != expected_start || start > end || end > self.max_repeat {
                 return false;
             }
-            for count in start..=end {
-                covered[count] = true;
+            if end == self.max_repeat {
+                return index + 1 == intervals.len();
             }
+            let Some(next) = end.checked_add(1) else {
+                return false;
+            };
+            expected_start = next;
         }
-        covered.into_iter().all(|value| value)
+        false
     }
 }
 
@@ -1112,6 +1122,33 @@ mod tests {
         true
     }
 
+    fn exact_language_subset(left: &Expr, right: &Expr) -> bool {
+        let left = build_regex(std::slice::from_ref(left)).into_tokenizer(1, None);
+        let right = build_regex(std::slice::from_ref(right)).into_tokenizer(1, None);
+        let mut queue = VecDeque::from([(Some(left.start_state()), Some(right.start_state()))]);
+        let mut seen = HashSet::new();
+        while let Some((left_state, right_state)) = queue.pop_front() {
+            if !seen.insert((left_state, right_state)) {
+                continue;
+            }
+            let left_accepts = left_state
+                .is_some_and(|state| left.matched_terminal_bitset(state).contains(0));
+            let right_accepts = right_state
+                .is_some_and(|state| right.matched_terminal_bitset(state).contains(0));
+            if left_accepts && !right_accepts {
+                return false;
+            }
+            for byte in 0u8..=255 {
+                let next_left = left_state.and_then(|state| left.step(state, byte));
+                let next_right = right_state.and_then(|state| right.step(state, byte));
+                if next_left.is_some() {
+                    queue.push_back((next_left, next_right));
+                }
+            }
+        }
+        true
+    }
+
     fn candidate(body: Expr, max_repeat: usize) -> Expr {
         seq([
             Expr::U8Seq(b"prefix:".to_vec()),
@@ -1176,6 +1213,115 @@ mod tests {
             &original,
             &plan.replacement_expr(false)
         ));
+    }
+
+    #[test]
+    fn counted_replacement_matches_source_across_small_parameter_grid() {
+        let bodies = [
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::Choice(vec![
+                Expr::U8Seq(b"a".to_vec()),
+                Expr::U8Seq(b"aa".to_vec()),
+            ]),
+            seq([
+                Expr::Repeat {
+                    expr: Box::new(Expr::U8Seq(b"x".to_vec())),
+                    min: 1,
+                    max: Some(2),
+                },
+                Expr::U8Seq(b"y".to_vec()),
+            ]),
+        ];
+        for body in bodies {
+            for max_repeat in 2..=12 {
+                let original = candidate(body.clone(), max_repeat);
+                let ExtractResult::One(context) = extract_repeat_context(&original, 2) else {
+                    panic!("candidate should extract");
+                };
+                for block in 2..=max_repeat {
+                    let plan = CountedSplitPlan {
+                        passthrough: context.passthrough.clone(),
+                        prefix: context.prefix.clone(),
+                        body: context.body.clone(),
+                        suffix: context.suffix.clone(),
+                        max_repeat,
+                        block,
+                    };
+                    assert!(plan.count_cover_is_exact());
+                    assert!(exact_language_equivalent(
+                        &original,
+                        &plan.replacement_expr(false)
+                    ));
+                    assert!(exact_language_equivalent(
+                        &original,
+                        &plan.replacement_expr(true)
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_positive_subset_certificate_matches_exact_reference() {
+        let a = Expr::U8Seq(b"a".to_vec());
+        let b = Expr::U8Seq(b"b".to_vec());
+        let expressions = vec![
+            Expr::Epsilon,
+            a.clone(),
+            b.clone(),
+            choice([a.clone(), b.clone()]),
+            seq([a.clone(), a.clone()]),
+            choice([a.clone(), seq([a.clone(), a.clone()])]),
+            Expr::Repeat {
+                expr: Box::new(a.clone()),
+                min: 0,
+                max: None,
+            },
+            Expr::Repeat {
+                expr: Box::new(a.clone()),
+                min: 1,
+                max: None,
+            },
+            Expr::Repeat {
+                expr: Box::new(choice([a.clone(), b.clone()])),
+                min: 0,
+                max: None,
+            },
+            seq([
+                Expr::Repeat {
+                    expr: Box::new(a.clone()),
+                    min: 0,
+                    max: None,
+                },
+                Expr::Repeat {
+                    expr: Box::new(b.clone()),
+                    min: 0,
+                    max: None,
+                },
+            ]),
+            Expr::Repeat {
+                expr: Box::new(choice([a.clone(), seq([a.clone(), a.clone()])])),
+                min: 0,
+                max: Some(3),
+            },
+        ];
+        let mut positive = 0usize;
+        for left in &expressions {
+            for right in &expressions {
+                let mut cache = SubsetCertificateCache::default();
+                if matches!(
+                    certify_subset(&mut cache, left, right, 100_000),
+                    SubsetOutcome::Holds { .. }
+                ) {
+                    positive += 1;
+                    assert!(
+                        exact_language_subset(left, right),
+                        "unsound positive certificate: left={left:?} right={right:?}"
+                    );
+                }
+            }
+        }
+        assert!(positive > expressions.len());
     }
 
     #[test]
@@ -1411,6 +1557,64 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_generated_expr_across_families_preserves_partitions() {
+        let first = candidate(Expr::U8Seq(b"a".to_vec()), 24);
+        let second = candidate(Expr::U8Seq(b"b".to_vec()), 24);
+        let mut grammar = GrammarDef {
+            rules: vec![
+                Rule { lhs: 0, rhs: vec![Symbol::Terminal(0)] },
+                Rule { lhs: 0, rhs: vec![Symbol::Terminal(1)] },
+            ],
+            start: 0,
+            terminals: vec![
+                Terminal::Expr { id: 0, expr: first },
+                Terminal::Expr { id: 1, expr: second },
+            ],
+            nonterminal_names: BTreeMap::from([(0, "start".to_string())]),
+            terminal_names: BTreeMap::from([(0, "first".to_string()), (1, "second".to_string())]),
+            ignore_terminal: None,
+            lexer_partitions: BTreeMap::new(),
+        };
+        let vocab = Vocab::new(vec![(0, b"prefix:empty;".to_vec())]);
+        let profile = split_with_config(
+            &mut grammar,
+            &vocab,
+            SplitConfig {
+                enabled: true,
+                min_repeat: 2,
+                min_score: 0,
+                max_full_middles_per_token: 16,
+                max_groups: 32,
+                block_override: Some(8),
+                fuse_prefix: false,
+                subset_max_pairs: 10_000,
+            },
+        );
+        assert_eq!(profile.split_terminals, 2);
+        let normalized =
+            crate::compiler::grammar::transforms::prepare_grammar_transforms_only(grammar);
+        let shared_passthroughs = normalized
+            .terminals
+            .iter()
+            .filter(|terminal| {
+                terminal_expr(terminal)
+                    == Some(Expr::U8Seq(b"prefix:empty;".to_vec()))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(shared_passthroughs.len(), 2);
+        let partitions = shared_passthroughs
+            .iter()
+            .map(|terminal| {
+                normalized
+                    .lexer_partitions
+                    .get(&terminal.id())
+                    .expect("generated terminal should retain its partition")
+            })
+            .collect::<HashSet<_>>();
+        assert_eq!(partitions.len(), 2);
+    }
+
+    #[test]
     fn intersections_are_not_split_without_a_compositional_certificate() {
         let expr = Expr::Intersect {
             expr: Box::new(candidate(Expr::U8Seq(b"a".to_vec()), 20)),
@@ -1444,7 +1648,7 @@ mod tests {
         ));
         assert!(matches!(
             certify_subset(&mut cache, &right, &left, 100),
-            SubsetOutcome::DoesNotHold { .. }
+            SubsetOutcome::NotProved { .. }
         ));
         assert!(matches!(
             certify_subset(

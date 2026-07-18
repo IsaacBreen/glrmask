@@ -185,8 +185,11 @@ fn terminal_identity(terminal: &Terminal, is_ignore: bool) -> TerminalIdentity {
 }
 
 /// Remove terminals that are no longer referenced by any normalized rule,
-/// merge identical terminals, and compact the remaining terminal IDs to a
-/// dense 0..N-1 range.  Mutates the grammar in place.
+/// merge identical terminals within the same explicit lexer partition, and
+/// compact the remaining terminal IDs to a dense 0..N-1 range. Distinct
+/// partition assignments are part of the compilation structure and must be
+/// preserved even when two terminals have identical languages. Mutates the
+/// grammar in place.
 pub(crate) fn compact_unused_terminals(grammar: &mut GrammarDef) {
     let mut used = BTreeSet::<TerminalID>::new();
     for rule in grammar.rules.iter() {
@@ -202,14 +205,18 @@ pub(crate) fn compact_unused_terminals(grammar: &mut GrammarDef) {
 
     let mut remap = BTreeMap::<TerminalID, TerminalID>::new();
     let mut compacted = Vec::with_capacity(used.len());
-    let mut canonical_ids = HashMap::<TerminalIdentity, TerminalID>::new();
+    let mut canonical_ids =
+        HashMap::<(TerminalIdentity, Option<String>), TerminalID>::new();
 
     for old_id in used {
         let terminal = grammar.terminals.get(old_id as usize).unwrap_or_else(|| {
             panic!("terminal id {} referenced by a rule but missing from grammar.terminals", old_id)
         });
         let is_ignore = grammar.ignore_terminal == Some(old_id);
-        let identity = terminal_identity(terminal, is_ignore);
+        let identity = (
+            terminal_identity(terminal, is_ignore),
+            grammar.lexer_partitions.get(&old_id).cloned(),
+        );
         if let Some(&existing_id) = canonical_ids.get(&identity) {
             remap.insert(old_id, existing_id);
             continue;
