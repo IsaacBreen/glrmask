@@ -538,25 +538,52 @@ impl PyConstraint {
     }
 
     #[staticmethod]
-    fn from_lark(lark_source: &str, vocab: &PyVocab) -> PyResult<Self> {
+    #[pyo3(signature = (lark_source, vocab, end_token_ids=None))]
+    fn from_lark(
+        lark_source: &str,
+        vocab: &PyVocab,
+        end_token_ids: Option<Vec<u32>>,
+    ) -> PyResult<Self> {
         Self::from_constraint_result(
-            glrmask::Constraint::from_lark(lark_source, &vocab.inner),
+            glrmask::Constraint::from_lark_with_end_tokens(
+                lark_source,
+                &vocab.inner,
+                end_token_ids.as_deref().unwrap_or(&[]),
+            ),
             vocab,
         )
     }
 
     #[staticmethod]
-    fn from_glrm_grammar(glrm_source: &str, vocab: &PyVocab) -> PyResult<Self> {
+    #[pyo3(signature = (glrm_source, vocab, end_token_ids=None))]
+    fn from_glrm_grammar(
+        glrm_source: &str,
+        vocab: &PyVocab,
+        end_token_ids: Option<Vec<u32>>,
+    ) -> PyResult<Self> {
         Self::from_constraint_result(
-            glrmask::Constraint::from_glrm_grammar(glrm_source, &vocab.inner),
+            glrmask::Constraint::from_glrm_grammar_with_end_tokens(
+                glrm_source,
+                &vocab.inner,
+                end_token_ids.as_deref().unwrap_or(&[]),
+            ),
             vocab,
         )
     }
 
     #[staticmethod]
-    fn from_ebnf(ebnf_source: &str, vocab: &PyVocab) -> PyResult<Self> {
+    #[pyo3(signature = (ebnf_source, vocab, end_token_ids=None))]
+    fn from_ebnf(
+        ebnf_source: &str,
+        vocab: &PyVocab,
+        end_token_ids: Option<Vec<u32>>,
+    ) -> PyResult<Self> {
         Self::from_constraint_result(
-            glrmask::Constraint::from_ebnf(ebnf_source, &vocab.inner),
+            glrmask::Constraint::from_ebnf_with_end_tokens(
+                ebnf_source,
+                &vocab.inner,
+                end_token_ids.as_deref().unwrap_or(&[]),
+            ),
             vocab,
         )
     }
@@ -629,25 +656,52 @@ impl PyDynamicConstraint {
     }
 
     #[staticmethod]
-    fn from_lark(lark_source: &str, vocab: &PyVocab) -> PyResult<Self> {
+    #[pyo3(signature = (lark_source, vocab, end_token_ids=None))]
+    fn from_lark(
+        lark_source: &str,
+        vocab: &PyVocab,
+        end_token_ids: Option<Vec<u32>>,
+    ) -> PyResult<Self> {
         Self::from_constraint_result(
-            glrmask::DynamicConstraint::from_lark(lark_source, &vocab.inner),
+            glrmask::DynamicConstraint::from_lark_with_end_tokens(
+                lark_source,
+                &vocab.inner,
+                end_token_ids.as_deref().unwrap_or(&[]),
+            ),
             vocab,
         )
     }
 
     #[staticmethod]
-    fn from_glrm_grammar(glrm_source: &str, vocab: &PyVocab) -> PyResult<Self> {
+    #[pyo3(signature = (glrm_source, vocab, end_token_ids=None))]
+    fn from_glrm_grammar(
+        glrm_source: &str,
+        vocab: &PyVocab,
+        end_token_ids: Option<Vec<u32>>,
+    ) -> PyResult<Self> {
         Self::from_constraint_result(
-            glrmask::DynamicConstraint::from_glrm_grammar(glrm_source, &vocab.inner),
+            glrmask::DynamicConstraint::from_glrm_grammar_with_end_tokens(
+                glrm_source,
+                &vocab.inner,
+                end_token_ids.as_deref().unwrap_or(&[]),
+            ),
             vocab,
         )
     }
 
     #[staticmethod]
-    fn from_ebnf(ebnf_source: &str, vocab: &PyVocab) -> PyResult<Self> {
+    #[pyo3(signature = (ebnf_source, vocab, end_token_ids=None))]
+    fn from_ebnf(
+        ebnf_source: &str,
+        vocab: &PyVocab,
+        end_token_ids: Option<Vec<u32>>,
+    ) -> PyResult<Self> {
         Self::from_constraint_result(
-            glrmask::DynamicConstraint::from_ebnf(ebnf_source, &vocab.inner),
+            glrmask::DynamicConstraint::from_ebnf_with_end_tokens(
+                ebnf_source,
+                &vocab.inner,
+                end_token_ids.as_deref().unwrap_or(&[]),
+            ),
             vocab,
         )
     }

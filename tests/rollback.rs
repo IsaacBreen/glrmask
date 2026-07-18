@@ -1,14 +1,11 @@
 use glrmask::{Constraint, Vocab};
 
 fn setup() -> (Constraint, Vec<u32>) {
-    let vocab = Vocab::new(
-        vec![
-            (0, b"a".to_vec()),
-            (1, b"b".to_vec()),
-            (2, b"x".to_vec()),
-        ],
-        None,
-    );
+    let vocab = Vocab::new(vec![
+        (0, b"a".to_vec()),
+        (1, b"b".to_vec()),
+        (2, b"x".to_vec()),
+    ]);
     let constraint = Constraint::from_ebnf(r#"start ::= "a" "b""#, &vocab).unwrap();
     let initial_mask = constraint.start().mask();
     (constraint, initial_mask)

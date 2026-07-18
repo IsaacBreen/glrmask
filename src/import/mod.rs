@@ -196,6 +196,14 @@ fn parse_json_schema_to_named(schema_json: &str) -> crate::Result<ast::NamedGram
 
 impl Constraint {
     pub fn from_ebnf(ebnf: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
+        Self::from_ebnf_with_end_tokens(ebnf, vocab, &[])
+    }
+
+    pub fn from_ebnf_with_end_tokens(
+        ebnf: &str,
+        vocab: &crate::Vocab,
+        end_token_ids: &[u32],
+    ) -> crate::Result<Self> {
         compile_from_source(
             ebnf,
             vocab,
@@ -203,11 +211,19 @@ impl Constraint {
             GlrTableConstruction::ExperimentalCoreMerged,
             ebnf::parse_ebnf_to_named,
             None,
-            &[],
+            end_token_ids,
         )
     }
 
     pub fn from_lark(lark: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
+        Self::from_lark_with_end_tokens(lark, vocab, &[])
+    }
+
+    pub fn from_lark_with_end_tokens(
+        lark: &str,
+        vocab: &crate::Vocab,
+        end_token_ids: &[u32],
+    ) -> crate::Result<Self> {
         compile_from_source(
             lark,
             vocab,
@@ -215,7 +231,7 @@ impl Constraint {
             GlrTableConstruction::ExperimentalCoreMerged,
             lark::parse_lark_to_named,
             None,
-            &[],
+            end_token_ids,
         )
     }
 
@@ -243,6 +259,14 @@ impl Constraint {
 
     /// Load a grammar from the GLRM text format.
     pub fn from_glrm_grammar(glrm: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
+        Self::from_glrm_grammar_with_end_tokens(glrm, vocab, &[])
+    }
+
+    pub fn from_glrm_grammar_with_end_tokens(
+        glrm: &str,
+        vocab: &crate::Vocab,
+        end_token_ids: &[u32],
+    ) -> crate::Result<Self> {
         compile_from_source(
             glrm,
             vocab,
@@ -250,31 +274,47 @@ impl Constraint {
             GlrTableConstruction::ExperimentalCoreMerged,
             crate::grammar::glrm::from_glrm,
             None,
-            &[],
+            end_token_ids,
         )
     }
 }
 
 impl DynamicConstraint {
     pub fn from_ebnf(ebnf: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
+        Self::from_ebnf_with_end_tokens(ebnf, vocab, &[])
+    }
+
+    pub fn from_ebnf_with_end_tokens(
+        ebnf: &str,
+        vocab: &crate::Vocab,
+        end_token_ids: &[u32],
+    ) -> crate::Result<Self> {
         compile_dynamic_from_source(
             ebnf,
             vocab,
             GlrTableConstruction::ExperimentalCoreMerged,
             ebnf::parse_ebnf_to_named,
             None,
-            &[],
+            end_token_ids,
         )
     }
 
     pub fn from_lark(lark: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
+        Self::from_lark_with_end_tokens(lark, vocab, &[])
+    }
+
+    pub fn from_lark_with_end_tokens(
+        lark: &str,
+        vocab: &crate::Vocab,
+        end_token_ids: &[u32],
+    ) -> crate::Result<Self> {
         compile_dynamic_from_source(
             lark,
             vocab,
             GlrTableConstruction::ExperimentalCoreMerged,
             lark::parse_lark_to_named,
             None,
-            &[],
+            end_token_ids,
         )
     }
 
@@ -298,13 +338,21 @@ impl DynamicConstraint {
     }
 
     pub fn from_glrm_grammar(glrm: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
+        Self::from_glrm_grammar_with_end_tokens(glrm, vocab, &[])
+    }
+
+    pub fn from_glrm_grammar_with_end_tokens(
+        glrm: &str,
+        vocab: &crate::Vocab,
+        end_token_ids: &[u32],
+    ) -> crate::Result<Self> {
         compile_dynamic_from_source(
             glrm,
             vocab,
             GlrTableConstruction::ExperimentalCoreMerged,
             crate::grammar::glrm::from_glrm,
             None,
-            &[],
+            end_token_ids,
         )
     }
 }
