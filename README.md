@@ -172,7 +172,7 @@ Measured with MaskBench on the JSONSchemaBench corpus, using the Llama 3 vocabul
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-mask-cfa-bars-2026-07-16-dark.webp">
     <source media="(prefers-color-scheme: light)" srcset="docs/assets/benchmark-mask-cfa-bars-2026-07-16.webp">
-    <img src="docs/assets/benchmark-mask-cfa-bars-2026-07-16.webp" alt="Mask-generation latency percentiles for GLRMask and LLGuidance" width="92%">
+    <img src="docs/assets/benchmark-mask-cfa-bars-2026-07-16.webp" alt="Mask-generation latency percentiles for GLRMask and LLGuidance" width="100%">
   </picture>
 </p>
 
@@ -180,7 +180,7 @@ Measured with MaskBench on the JSONSchemaBench corpus, using the Llama 3 vocabul
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-compilation-cfa-bars-2026-07-16-dark.webp">
     <source media="(prefers-color-scheme: light)" srcset="docs/assets/benchmark-compilation-cfa-bars-2026-07-16.webp">
-    <img src="docs/assets/benchmark-compilation-cfa-bars-2026-07-16.webp" alt="Compilation-time percentiles for GLRMask and LLGuidance" width="92%">
+    <img src="docs/assets/benchmark-compilation-cfa-bars-2026-07-16.webp" alt="Compilation-time percentiles for GLRMask and LLGuidance" width="100%">
   </picture>
 </p>
 
