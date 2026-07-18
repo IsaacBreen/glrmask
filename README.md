@@ -14,44 +14,27 @@ Measured with MaskBench on the JSONSchemaBench corpus, using the Llama 3 vocabul
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-mask-tail-2026-07-16-dark.webp">
     <source media="(prefers-color-scheme: light)" srcset="docs/assets/benchmark-mask-tail-2026-07-16.webp">
-    <img src="docs/assets/benchmark-mask-tail-2026-07-16.webp" alt="Mask-generation latency tail curves for GLRMask and LLGuidance, with GLRMask speedup by exceedance probability" width="100%">
+    <img src="docs/assets/benchmark-mask-tail-2026-07-16.webp" alt="Mask-generation latency tail curves for GLRMask and LLGuidance, with higher exceedance probabilities on the left and rarer events on the right" width="100%">
   </picture>
 </p>
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-mask-summary-2026-07-16-dark.webp">
-    <source media="(prefers-color-scheme: light)" srcset="docs/assets/benchmark-mask-summary-2026-07-16.webp">
-    <img src="docs/assets/benchmark-mask-summary-2026-07-16.webp" alt="Mask-generation latency percentile summary for GLRMask and LLGuidance" width="88%">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-mask-cfa-bars-2026-07-16-dark.webp">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/benchmark-mask-cfa-bars-2026-07-16.webp">
+    <img src="docs/assets/benchmark-mask-cfa-bars-2026-07-16.webp" alt="Mask-generation latency percentiles for GLRMask and LLGuidance" width="92%">
   </picture>
 </p>
-
-| Latency | GLRMask | LLGuidance |
-|---|---:|---:|
-| Mean | **1.743 µs** | 24.179 µs |
-| Median | **1.440 µs** | 12.205 µs |
-| p99 | **5.171 µs** | 247.306 µs |
-| p99.9 | **7.673 µs** | 950.700 µs |
-| p99.99 | **11.556 µs** | 2,771.304 µs |
-| Maximum | **28.565 µs** | 8,041.301 µs |
 
 ### Compilation time
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-compilation-summary-2026-07-16-dark.webp">
-    <source media="(prefers-color-scheme: light)" srcset="docs/assets/benchmark-compilation-summary-2026-07-16.webp">
-    <img src="docs/assets/benchmark-compilation-summary-2026-07-16.webp" alt="Compilation-time percentile summary for GLRMask and LLGuidance" width="88%">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-compilation-cfa-bars-2026-07-16-dark.webp">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/benchmark-compilation-cfa-bars-2026-07-16.webp">
+    <img src="docs/assets/benchmark-compilation-cfa-bars-2026-07-16.webp" alt="Compilation-time percentiles for GLRMask and LLGuidance" width="92%">
   </picture>
 </p>
-
-| Compilation time | GLRMask | LLGuidance |
-|---|---:|---:|
-| Mean | 86.698 ms | **1.527 ms** |
-| Median | 50.963 ms | **0.904 ms** |
-| p99 | 565.257 ms | **11.711 ms** |
-| p99.9 | 2,221.152 ms | **42.989 ms** |
-| Maximum | 6,440.287 ms | **239.964 ms** |
 
 See the [full benchmark report](docs/benchmark-full-corpus-2026-07-16.md) for methodology.
 
