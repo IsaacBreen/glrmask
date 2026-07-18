@@ -25,7 +25,7 @@ python/Cargo.toml           [package].version
 python/pyproject.toml       [project].version
 ```
 
-Then update `Cargo.lock` and replace the changelog placeholder and release date. `scripts/release-artifact-dry-run.sh` rejects a mismatch among these three versions.
+Keep `Cargo.lock` and the dated changelog entry synchronized with those manifests. `scripts/release-artifact-dry-run.sh` rejects a mismatch among these three versions.
 
 The other workspace packages are not separate registry deliverables in this release path. In particular, `glrmask-runtime`, `python-runtime`, `glrmask-wasm`, and `glrmask-browser-artifact` have `publish = false` where applicable. Their internal versions do not determine the crates.io or PyPI version, although they may be advanced for a deliberate workspace-versioning policy.
 
@@ -61,9 +61,7 @@ A patch release can reproduce the `0.1.0` platform coverage, but registry public
 
 ## Minimum-version wording for vLLM
 
-Before the version is selected:
-
-> The GLRMask backend requires `glrmask >= 0.1.1`. Public `glrmask 0.1.0` is incompatible because it does not expose bounded rollback, non-mutating token validation, failed-state inspection, or the explicit-EOS constructor and mask-extent contract.
+> The GLRMask backend requires `glrmask >= 0.1.1`. Public `glrmask 0.1.0` is incompatible because it does not expose bounded rollback, non-mutating token validation, failed-state inspection, or grammar-level end-token constructors.
 
 After publication, use `0.1.1` in the vLLM dependency metadata, optional-dependency error, RFC body, support matrix, and reproduction instructions.
 
