@@ -2163,6 +2163,7 @@ struct TrieWalkChunkStats {
     dfs_dead_without_new_dirty: usize,
     dfs_new_dirty_groups: usize,
     dfs_new_dirty_states: usize,
+    dfs_noop_self_loops: usize,
     clean_tokens: usize,
     dirty_tokens: usize,
     single_target_tokens: usize,
@@ -2184,6 +2185,7 @@ impl TrieWalkChunkStats {
         self.dfs_dead_without_new_dirty += other.dfs_dead_without_new_dirty;
         self.dfs_new_dirty_groups += other.dfs_new_dirty_groups;
         self.dfs_new_dirty_states += other.dfs_new_dirty_states;
+        self.dfs_noop_self_loops += other.dfs_noop_self_loops;
         self.clean_tokens += other.clean_tokens;
         self.dirty_tokens += other.dirty_tokens;
         self.single_target_tokens += other.single_target_tokens;
@@ -2199,6 +2201,7 @@ struct DfsStepStats {
     dead_without_new_dirty: usize,
     new_dirty_groups: usize,
     new_dirty_states: usize,
+    noop_self_loops: usize,
 }
 
 /// Walk one byte forward at the given depth, recording all state changes
@@ -2237,6 +2240,12 @@ fn dfs_step(
     for &i in source_indices {
         let old_state = scratch.current_states[i];
         debug_assert_ne!(old_state, STATE_NONE);
+        if dfa.finalizers[old_state].is_empty()
+            && dfa.self_loop_bytes[old_state].contains(byte)
+        {
+            log.active_indices.push(i);
+            continue;
+        }
 
         let next_state_raw =
             unsafe { *dfa.trans_by_class.get_unchecked(class_base + old_state) };
@@ -2320,6 +2329,13 @@ fn dfs_step_profiled(
         let old_state = scratch.current_states[i];
         debug_assert_ne!(old_state, STATE_NONE);
         step_stats.states_visited += 1;
+        if dfa.finalizers[old_state].is_empty()
+            && dfa.self_loop_bytes[old_state].contains(byte)
+        {
+            log.active_indices.push(i);
+            step_stats.noop_self_loops += 1;
+            continue;
+        }
 
         let mut state_new_dirty_groups = 0usize;
 
@@ -2451,6 +2467,38 @@ fn finish_token_signature_clean(
     sig
 }
 
+fn all_none_completion_signature(dfa: &Dfa, num_initial_states: usize) -> u64 {
+    let mut signature = HASH_SEED3;
+    for _ in 0..num_initial_states {
+        signature = signature
+            .wrapping_mul(HASH_SEED1)
+            .wrapping_add(dfa.none_completion_hash);
+    }
+    signature
+}
+
+/// Compute the clean completion fold from the states that remain live at the
+/// current trie node. Every omitted state is exactly `STATE_NONE`, so starting
+/// from the all-dead fold and applying polynomial-position corrections is
+/// algebraically identical to scanning the full batch.
+fn finish_token_signature_sparse_live_clean(
+    dfa: &Dfa,
+    live_indices: &[usize],
+    scratch: &Scratch,
+    all_none_signature: u64,
+) -> u64 {
+    let mut signature = all_none_signature;
+    for &index in live_indices {
+        let state = scratch.current_states[index];
+        debug_assert_ne!(state, STATE_NONE);
+        let correction = dfa.completion_hash[state].wrapping_sub(dfa.none_completion_hash);
+        signature = signature.wrapping_add(
+            correction.wrapping_mul(scratch.completion_weights[index]),
+        );
+    }
+    signature
+}
+
 /// Compute token signature without modifying scratch state (no cleanup).
 /// Uses multi-word bitmask dirty tracking for any number of groups.
 fn finish_token_signature_no_cleanup(
@@ -2569,6 +2617,28 @@ fn finish_token_signature_sparse_dirty(
     sig
 }
 
+fn token_indices_in_lexical_order<S: AsRef<[u8]>>(strings: &[S]) -> Vec<usize> {
+    let mut order = (0..strings.len()).collect::<Vec<_>>();
+    order.sort_unstable_by(|&left, &right| {
+        strings[left]
+            .as_ref()
+            .cmp(strings[right].as_ref())
+            .then_with(|| left.cmp(&right))
+    });
+    order
+}
+
+fn active_indices_in_lexical_order(
+    lexical_order: &[usize],
+    active_tokens: &[bool],
+) -> Vec<usize> {
+    lexical_order
+        .iter()
+        .copied()
+        .filter(|&token_idx| active_tokens[token_idx])
+        .collect()
+}
+
 /// Process a sorted chunk of tokens using DFS trie walk with prefix sharing.
 /// Tokens must be sorted by byte content. Returns (token_idx, signature) pairs.
 fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
@@ -2605,6 +2675,7 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
     let dirty_state_words = batch_len.div_ceil(64);
     scratch.dirty_state_bits[..dirty_state_words].fill(0);
     ensure_completion_weights(scratch, batch_len);
+    let all_none_signature = all_none_completion_signature(dfa, batch_len);
     for i in 0..batch_len {
         if dfa.is_dead_end[scratch.current_states[i]] {
             scratch.current_states[i] = STATE_NONE;
@@ -2645,7 +2716,14 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
         for depth in lcp..token_len {
             if profile {
                 let step_stats =
-                    dfs_step_profiled(dfa, scratch, trie, token[depth], depth, batch_len);
+                    dfs_step_profiled(
+                        dfa,
+                        scratch,
+                        trie,
+                        token[depth],
+                        depth,
+                        batch_len,
+                    );
                 dirty_count += trie.depth_logs[depth].dirty_state_flag_changes.len();
                 stats.dfs_steps += 1;
                 if step_stats.new_dirty_groups == 0 {
@@ -2656,20 +2734,38 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
                 stats.dfs_dead_without_new_dirty += step_stats.dead_without_new_dirty;
                 stats.dfs_new_dirty_groups += step_stats.new_dirty_groups;
                 stats.dfs_new_dirty_states += step_stats.new_dirty_states;
+                stats.dfs_noop_self_loops += step_stats.noop_self_loops;
             } else {
-                dfs_step(dfa, scratch, trie, token[depth], depth, batch_len);
+                dfs_step(
+                    dfa,
+                    scratch,
+                    trie,
+                    token[depth],
+                    depth,
+                    batch_len,
+                );
                 dirty_count += trie.depth_logs[depth].dirty_state_flag_changes.len();
             }
         }
         stats.dfs_step_ms += elapsed_ms(dfs_started_at);
         current_depth = token_len;
+        let live_indices = if token_len == 0 {
+            trie.root_active_indices.as_slice()
+        } else {
+            trie.depth_logs[token_len - 1].active_indices.as_slice()
+        };
 
         let sig = if dirty_count == 0 {
             if profile {
                 stats.clean_tokens += 1;
             }
             let finish_started_at = profile.then(Instant::now);
-            let signature = finish_token_signature_clean(dfa, batch_len, scratch);
+            let signature = finish_token_signature_sparse_live_clean(
+                dfa,
+                live_indices,
+                scratch,
+                all_none_signature,
+            );
             stats.finish_signature_ms += elapsed_ms(finish_started_at);
             signature
         } else {
@@ -3429,9 +3525,13 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
     let batch_size = vocab_batch_size_override()
         .unwrap_or_else(|| num_initial_states.min(default_batch_size));
     let mut active_indices: Vec<usize> = (0..num_tokens).collect();
+    let mut active_tokens = vec![true; num_tokens];
+    let lexical_order_started_at = profiling.then(Instant::now);
+    let lexical_order = (num_tokens >= TRIE_WALK_MIN_TOKENS && !*TRIE_WALK_DISABLED)
+        .then(|| token_indices_in_lexical_order(strings));
+    let mut sort_tokens_ms = elapsed_ms(lexical_order_started_at);
     let mut partition = vec![0usize; num_tokens];
     let mut next_class_id = 1usize;
-    let mut sort_tokens_ms = 0.0;
     let mut signature_ms = 0.0;
     let mut refinement_ms = 0.0;
     let mut batches = 0usize;
@@ -3476,12 +3576,15 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
             && !*TRIE_WALK_DISABLED;
         used_trie_walk |= use_trie_walk;
         let active_sigs: Vec<(usize, u64)> = if use_trie_walk {
-            let mut sorted_indices = active_indices.clone();
             let sort_started_at = profiling.then(Instant::now);
-            sorted_indices.sort_unstable_by(|&a, &b| {
-                strings[a].as_ref().cmp(strings[b].as_ref())
-            });
+            let sorted_indices = active_indices_in_lexical_order(
+                lexical_order
+                    .as_deref()
+                    .expect("trie walk must precompute lexical token order"),
+                &active_tokens,
+            );
             sort_tokens_ms += elapsed_ms(sort_started_at);
+            debug_assert_eq!(sorted_indices.len(), active_indices.len());
             let signature_started_at = profiling.then(Instant::now);
             let mut flat_results = Vec::with_capacity(sorted_indices.len());
             if let (Some(scratch), Some(trie_state)) = (
@@ -3608,6 +3711,10 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
                 new_active.extend(tokens);
             }
         }
+        active_tokens.fill(false);
+        for &token_idx in &new_active {
+            active_tokens[token_idx] = true;
+        }
         active_indices = new_active;
         refinement_ms += elapsed_ms(refinement_started_at);
         batch_start = batch_end;
@@ -3674,7 +3781,7 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
 
     if profiling {
         eprintln!(
-            "[glrmask/profile][vocab_equiv] strings={} initial_states={} batches={} used_trie_walk={} active_final={} original_states={} effective_states={} compacted={} build_dfa_ms={:.3} compact_dfa_ms={:.3} state_order_ms={:.3} sort_tokens_ms={:.3} signature_ms={:.3} refinement_ms={:.3} final_groups_ms={:.3} dfs_step_ms={:.3} collect_targets_ms={:.3} single_target_suffix_ms={:.3} multi_target_suffix_ms={:.3} finish_signature_ms={:.3} dfs_steps={} dfs_steps_without_new_dirty={} dfs_states_visited={} dfs_dead_transitions={} dfs_dead_without_new_dirty={} dfs_new_dirty_groups={} dfs_new_dirty_states={} clean_tokens={} dirty_tokens={} single_target_tokens={} multi_target_tokens={} total_targets={} scratch_pool_allocations={} scratch_pool_reuses={} total_ms={:.3}",
+            "[glrmask/profile][vocab_equiv] strings={} initial_states={} batches={} used_trie_walk={} active_final={} original_states={} effective_states={} compacted={} build_dfa_ms={:.3} compact_dfa_ms={:.3} state_order_ms={:.3} sort_tokens_ms={:.3} signature_ms={:.3} refinement_ms={:.3} final_groups_ms={:.3} dfs_step_ms={:.3} collect_targets_ms={:.3} single_target_suffix_ms={:.3} multi_target_suffix_ms={:.3} finish_signature_ms={:.3} dfs_steps={} dfs_steps_without_new_dirty={} dfs_states_visited={} dfs_dead_transitions={} dfs_dead_without_new_dirty={} dfs_new_dirty_groups={} dfs_new_dirty_states={} dfs_noop_self_loops={} clean_tokens={} dirty_tokens={} single_target_tokens={} multi_target_tokens={} total_targets={} scratch_pool_allocations={} scratch_pool_reuses={} total_ms={:.3}",
             num_tokens,
             num_initial_states,
             batches,
@@ -3702,6 +3809,7 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
             trie_walk_stats.dfs_dead_without_new_dirty,
             trie_walk_stats.dfs_new_dirty_groups,
             trie_walk_stats.dfs_new_dirty_states,
+            trie_walk_stats.dfs_noop_self_loops,
             trie_walk_stats.clean_tokens,
             trie_walk_stats.dirty_tokens,
             trie_walk_stats.single_target_tokens,
@@ -3868,6 +3976,110 @@ mod shared_base_tests {
         }
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn trie_noop_self_loop_skip_matches_independent_token_scans() {
+        let mut flat_dfa = sample_dfa();
+        let mut transitions = flat_dfa.transitions.to_vec();
+        transitions[b'a' as usize] = 0;
+        flat_dfa.transitions = Arc::from(transitions);
+        let view = TokenizerView { flat_dfa };
+        let disallowed = BTreeMap::<u32, BitSet>::new();
+        let dfa = build_dfa_with_group_filter(&view, &disallowed, None, None, None);
+        assert!(dfa.finalizers[0].is_empty());
+        assert!(dfa.self_loop_bytes[0].contains(b'a'));
+
+        let states = vec![0usize, 1, 2];
+        let tokens = vec![
+            b"a".to_vec(),
+            b"aa".to_vec(),
+            b"aaa".to_vec(),
+            b"aab".to_vec(),
+            b"ab".to_vec(),
+            b"b".to_vec(),
+        ];
+        let expected = token_signatures_for_states(&dfa, &tokens, &states);
+        let sorted_indices = token_indices_in_lexical_order(&tokens);
+        let state_group_size = vocab_state_group_size(states.len(), dfa.num_groups);
+        let mut scratch = Scratch::new(states.len(), dfa.num_groups);
+        let mut trie = TrieWalkState::new();
+        let (pairs, _) = trie_walk_chunk_signatures(
+            &dfa,
+            &tokens,
+            &sorted_indices,
+            &states,
+            state_group_size,
+            &mut scratch,
+            &mut trie,
+            false,
+        );
+        let mut actual = vec![0u64; tokens.len()];
+        for (token_idx, signature) in pairs {
+            actual[token_idx] = signature;
+        }
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn sparse_live_clean_signature_matches_dense_fold() {
+        let view = TokenizerView { flat_dfa: sample_dfa() };
+        let disallowed = BTreeMap::<u32, BitSet>::new();
+        let dfa = build_dfa_with_group_filter(&view, &disallowed, None, None, None);
+        let state_count = 6usize;
+        let mut scratch = Scratch::new(state_count, dfa.num_groups);
+        ensure_completion_weights(&mut scratch, state_count);
+        let all_none_signature = all_none_completion_signature(&dfa, state_count);
+
+        for live_mask in 0usize..(1usize << state_count) {
+            let mut live_indices = Vec::new();
+            for index in 0..state_count {
+                if live_mask & (1usize << index) == 0 {
+                    scratch.current_states[index] = STATE_NONE;
+                } else {
+                    scratch.current_states[index] = (index + live_mask) % dfa.num_states;
+                    live_indices.push(index);
+                }
+            }
+            assert_eq!(
+                finish_token_signature_sparse_live_clean(
+                    &dfa,
+                    &live_indices,
+                    &scratch,
+                    all_none_signature,
+                ),
+                finish_token_signature_clean(&dfa, state_count, &scratch),
+                "live_mask={live_mask:#b}",
+            );
+        }
+    }
+
+    #[test]
+    fn precomputed_lexical_order_matches_sorting_each_active_subset() {
+        let tokens = vec![
+            b"ba".to_vec(),
+            b"a".to_vec(),
+            b"".to_vec(),
+            b"aa".to_vec(),
+            b"a".to_vec(),
+            b"b".to_vec(),
+        ];
+        let lexical_order = token_indices_in_lexical_order(&tokens);
+        for mask in 0usize..(1usize << tokens.len()) {
+            let active_tokens = (0..tokens.len())
+                .map(|token_idx| mask & (1usize << token_idx) != 0)
+                .collect::<Vec<_>>();
+            let actual = active_indices_in_lexical_order(&lexical_order, &active_tokens);
+            let mut expected = (0..tokens.len())
+                .filter(|&token_idx| active_tokens[token_idx])
+                .collect::<Vec<_>>();
+            expected.sort_unstable_by(|&left, &right| {
+                tokens[left]
+                    .cmp(&tokens[right])
+                    .then_with(|| left.cmp(&right))
+            });
+            assert_eq!(actual, expected, "mask={mask:#b}");
+        }
     }
 
     #[test]
