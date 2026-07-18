@@ -47,6 +47,8 @@ while generating:
     state.commit_token(token_id)
 ```
 
+To minimize cold-start latency, `DynamicConstraint` can be used on a cache miss while the corresponding `Constraint` is compiled in parallel and cached for subsequent requests. `DynamicConstraint` has the same interface and produces identical masks, but compiles much faster than `Constraint`, at the cost of higher mask-generation latency.
+
 ## Python quickstart
 
 ```bash
@@ -206,12 +208,6 @@ Measured with MaskBench on the JSONSchemaBench corpus, using the Llama 3 vocabul
 </p>
 
 See the [full benchmark report](docs/benchmark-full-corpus-2026-07-16.md) for methodology.
-
-## Cold starts
-
-`DynamicConstraint` has the same interface and produces identical masks, but compiles much faster than `Constraint`, at the cost of higher mask-generation latency.
-
-To minimize cold-start latency, `DynamicConstraint` can be used on a cache miss while the corresponding `Constraint` is compiled in parallel and cached for subsequent requests.
 
 ## License
 
