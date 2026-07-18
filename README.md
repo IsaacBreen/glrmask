@@ -62,26 +62,22 @@ cargo add glrmask@0.1.0
 
 ## Usage
 
-A `Constraint` is compiled for a grammar and vocabulary. It can be serialized and cached for reuse across requests.
+GLRMask takes a grammar and vocabulary and produces a `Constraint`, which provides a `ConstraintState` via `constraint.start()`.
 
-`DynamicConstraint` has the same interface and produces identical masks, but compiles much faster than `Constraint`, at the cost of higher mask-generation latency.
-
-To minimize cold-start latency, `DynamicConstraint` can be used on a cache miss while the corresponding `Constraint` is compiled in parallel and cached for subsequent requests.
+In the decoding loop, call `state.mask()` to generate the next-token mask. This should be done in parallel with the LLM's forward pass so that the mask is ready before the logits. Apply the mask to the logits before sampling, then call `state.commit_token(token_id)` to advance the state with the sampled token.
 
 ```text
-grammar + vocabulary
-        │
-        ▼
-  Constraint cache
-    ├─ hit  → Constraint ───────────────────→ generate
-    └─ miss
-         ├─ current request → DynamicConstraint → generate
-         └─ parallel build  → compile Constraint → cache
+state = constraint.start()
+
+while generating:
+    in parallel:
+        logits = llm.forward(...)
+        mask = state.mask()
+
+    logits = apply_mask(logits, mask)
+    token_id = sample(logits)
+    state.commit_token(token_id)
 ```
-
-<p align="center"><em>Cold-start architecture</em></p>
-
-At runtime, initialize the constraint state with `constraint.start()`. Then, in the decoding loop, generate the next-token mask with `state.mask(...)` in parallel with the LLM's forward pass. Apply the mask to the logits before sampling, then call `state.commit_token(token_id)` to advance the state with the sampled token.
 
 ## Python quickstart
 
@@ -184,6 +180,27 @@ for _ in range(MAX_OUTPUT_TOKENS):
 
 print(llm.detokenize(generated).decode())
 ```
+
+## Compilation and caching
+
+A `Constraint` can be serialized and cached for reuse across requests.
+
+`DynamicConstraint` has the same interface and produces identical masks, but compiles much faster than `Constraint`, at the cost of higher mask-generation latency.
+
+To minimize cold-start latency, `DynamicConstraint` can be used on a cache miss while the corresponding `Constraint` is compiled in parallel and cached for subsequent requests.
+
+```text
+grammar + vocabulary
+        │
+        ▼
+  Constraint cache
+    ├─ hit  → Constraint ───────────────────→ generate
+    └─ miss
+         ├─ current request → DynamicConstraint → generate
+         └─ parallel build  → compile Constraint → cache
+```
+
+<p align="center"><em>Cold-start architecture</em></p>
 
 ## Grammar formats
 
