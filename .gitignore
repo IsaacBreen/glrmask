@@ -34,3 +34,5 @@ debug/
 !.env.example
 patch_debug*.py
 src.zip
+
+.agents
