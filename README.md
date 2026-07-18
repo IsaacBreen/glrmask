@@ -2,6 +2,16 @@
 
 GLRMask is a grammar-constrained generation library for high-throughput LLM decoding. It is optimized for extremely low next-token mask latency across the distribution, even for complex grammars.
 
+> **Preliminary:** these timings are not yet accurate and should not be relied on.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-mask-tail-2026-07-16-dark.webp">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/benchmark-mask-tail-2026-07-16.webp">
+    <img src="docs/assets/benchmark-mask-tail-2026-07-16.webp" alt="Mask-generation latency tail curves for GLRMask and LLGuidance, with higher exceedance probabilities on the left and rarer events on the right" width="100%">
+  </picture>
+</p>
+
 ## How it works
 
 GLRMask maintains a GLR parser state for the generated prefix, updating it as tokens are committed. To compute the next-token mask, a precomputed deterministic weighted automaton reads each parser stack one symbol at a time.
@@ -12,17 +22,7 @@ Each transition carries a Boolean mask over the model vocabulary. These masks ar
 
 Measured with MaskBench on the JSONSchemaBench corpus, using the Llama 3 vocabulary on an Intel Core i7-13620H under Ubuntu 24.04/WSL2.
 
-> **Preliminary:** these timings are not yet accurate and should not be relied on.
-
 ### Mask-generation latency
-
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-mask-tail-2026-07-16-dark.webp">
-    <source media="(prefers-color-scheme: light)" srcset="docs/assets/benchmark-mask-tail-2026-07-16.webp">
-    <img src="docs/assets/benchmark-mask-tail-2026-07-16.webp" alt="Mask-generation latency tail curves for GLRMask and LLGuidance, with higher exceedance probabilities on the left and rarer events on the right" width="100%">
-  </picture>
-</p>
 
 <p align="center">
   <picture>
