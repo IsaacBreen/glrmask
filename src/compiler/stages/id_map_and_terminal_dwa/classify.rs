@@ -2653,15 +2653,14 @@ fn exact_terminal_path_two_plus_candidate_dfa(
         };
     }
     let compile_started_at = std::time::Instant::now();
-    // Reuse the original tokenizer for broad candidate sets. Recompiling a
-    // candidate-only lexer is useful for small masks, but becomes the dominant
-    // cost once dozens or thousands of terminals participate. The powerset
-    // scanner filters matched/future masks through `terminal_to_local`, so the
-    // original tokenizer remains exact even when many terminals are inactive.
-    let uses_original_tokenizer = candidate_ids.len() >= 64
-        || (tokenizer.has_epsilon_transitions()
-            && candidate_ids.len().saturating_mul(4)
-                >= tokenizer.num_terminals() as usize);
+    // Reuse the original tokenizer for broad candidate sets and for every
+    // epsilon tokenizer. Recompiling an epsilon lexer from a small terminal
+    // subset can destroy sharing and produce a much larger determinized scanner
+    // than the original combined lexer. The powerset scanner filters matched
+    // and future masks through `terminal_to_local`, so scanning the original
+    // tokenizer remains exact while avoiding that subset-compilation cliff.
+    let uses_original_tokenizer =
+        tokenizer.has_epsilon_transitions() || candidate_ids.len() >= 64;
     let terminal_to_local = uses_original_tokenizer.then(|| {
         let mut map = vec![u32::MAX; tokenizer.num_terminals() as usize];
         for (local, &terminal) in candidate_ids.iter().enumerate() {

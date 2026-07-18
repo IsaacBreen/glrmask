@@ -664,6 +664,19 @@ let strict_reference = reference_terminal_expansion
     // equivalence observations to this L2P partition's active terminals. With
     // TI enabled this is the representative mask, so all three equivalence
     // passes ignore class members replaced by their representatives.
+    // Splitting one regular terminal into parser-visible fragments introduces
+    // residual languages that can overlap terminals in another construction
+    // family. Projecting scanner observations to a single family can then erase
+    // distinctions which later family-map reconciliation cannot reconstruct.
+    // For transformed grammars, observe all terminal residuals. Unsplit grammars
+    // retain the cheaper family-local projection.
+    let has_generated_split_terminals = grammar.terminal_display_names.iter().any(|name| {
+        name.starts_with(
+            crate::compiler::grammar::terminal_splitting::GENERATED_TERMINAL_NAME_PREFIX,
+        )
+    });
+    let equivalence_active_groups =
+        (!has_generated_split_terminals).then_some(analysis_active_terminals.as_slice());
     let (simplified_id_map, equiv_profile) =
         equivalence_analysis::combined::analyze_equivalences_with_group_filter(
             partition_label,
@@ -675,7 +688,7 @@ let strict_reference = reference_terminal_expansion
             equivalence_uses_pre_normalized_follows
                 .then_some(normalized_token_path_disallowed_follows)
                 .flatten(),
-            Some(&analysis_active_terminals),
+            equivalence_active_groups,
             equivalence_vocab_dfa_cache,
             shared_analysis_dfa_cache,
             shared_base_setup_ms,
