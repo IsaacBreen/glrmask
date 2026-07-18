@@ -17,7 +17,7 @@ GLRMask is a grammar-constrained generation library for high-throughput LLM deco
 ### Python
 
 ```bash
-python -m pip install glrmask==0.1.0
+python -m pip install glrmask
 ```
 
 Published wheels include the native extension. Building from source requires a Rust toolchain and the platform's native build tools.
@@ -52,7 +52,7 @@ For complex constraints, compilation typically takes a few hundred milliseconds.
 ## Python quickstart
 
 ```bash
-python -m pip install glrmask==0.1.0 llama-cpp-python torch
+python -m pip install glrmask llama-cpp-python torch
 ```
 
 ```python
