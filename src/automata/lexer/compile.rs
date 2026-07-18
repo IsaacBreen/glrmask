@@ -406,6 +406,219 @@ fn count_nested_group_ops(expr: &Expr, counts: &mut FxHashMap<Expr, usize>) {
     }
 }
 
+fn count_all_subexpressions(expr: &Expr, counts: &mut FxHashMap<Expr, usize>) {
+    *counts.entry(expr.clone()).or_default() += 1;
+    match expr {
+        Expr::Exclude { expr, exclude } => {
+            count_all_subexpressions(expr, counts);
+            count_all_subexpressions(exclude, counts);
+        }
+        Expr::Intersect { expr, intersect } => {
+            count_all_subexpressions(expr, counts);
+            count_all_subexpressions(intersect, counts);
+        }
+        Expr::Seq(parts) | Expr::Choice(parts) => {
+            for part in parts {
+                count_all_subexpressions(part, counts);
+            }
+        }
+        Expr::Repeat { expr, .. } => {
+            count_all_subexpressions(expr, counts);
+        }
+        Expr::Shared(expr) => {
+            count_all_subexpressions(expr, counts);
+        }
+        Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Dfa(_) | Expr::Epsilon => {}
+    }
+}
+
+fn collect_maximal_repeated_subexpressions(
+    expr: &Expr,
+    candidates: &FxHashSet<Expr>,
+    selected: &mut FxHashSet<Expr>,
+) {
+    if candidates.contains(expr) {
+        selected.insert(expr.clone());
+        return;
+    }
+    match expr {
+        Expr::Exclude { expr, exclude } => {
+            collect_maximal_repeated_subexpressions(expr, candidates, selected);
+            collect_maximal_repeated_subexpressions(exclude, candidates, selected);
+        }
+        Expr::Intersect { expr, intersect } => {
+            collect_maximal_repeated_subexpressions(expr, candidates, selected);
+            collect_maximal_repeated_subexpressions(intersect, candidates, selected);
+        }
+        Expr::Seq(parts) | Expr::Choice(parts) => {
+            for part in parts {
+                collect_maximal_repeated_subexpressions(part, candidates, selected);
+            }
+        }
+        Expr::Repeat { expr, .. } => {
+            collect_maximal_repeated_subexpressions(expr, candidates, selected);
+        }
+        Expr::Shared(expr) => {
+            collect_maximal_repeated_subexpressions(expr, candidates, selected);
+        }
+        Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Dfa(_) | Expr::Epsilon => {}
+    }
+}
+
+fn replace_compiled_subexpressions(
+    expr: Expr,
+    compiled: &FxHashMap<Expr, Arc<DFA>>,
+    replace_root: bool,
+) -> Expr {
+    if replace_root && let Some(dfa) = compiled.get(&expr) {
+        return Expr::Dfa(Arc::clone(dfa));
+    }
+    match expr {
+        Expr::Exclude { expr, exclude } => Expr::Exclude {
+            expr: Box::new(replace_compiled_subexpressions(*expr, compiled, true)),
+            exclude: Box::new(replace_compiled_subexpressions(*exclude, compiled, true)),
+        },
+        Expr::Intersect { expr, intersect } => Expr::Intersect {
+            expr: Box::new(replace_compiled_subexpressions(*expr, compiled, true)),
+            intersect: Box::new(replace_compiled_subexpressions(*intersect, compiled, true)),
+        },
+        Expr::Seq(parts) => Expr::Seq(
+            parts
+                .into_iter()
+                .map(|part| replace_compiled_subexpressions(part, compiled, true))
+                .collect(),
+        ),
+        Expr::Choice(parts) => Expr::Choice(
+            parts
+                .into_iter()
+                .map(|part| replace_compiled_subexpressions(part, compiled, true))
+                .collect(),
+        ),
+        Expr::Repeat { expr, min, max } => Expr::Repeat {
+            expr: Box::new(replace_compiled_subexpressions(*expr, compiled, true)),
+            min,
+            max,
+        },
+        Expr::Shared(inner) => {
+            let rewritten = replace_compiled_subexpressions((*inner).clone(), compiled, true);
+            if rewritten == *inner {
+                Expr::Shared(inner)
+            } else {
+                rewritten
+            }
+        }
+        leaf @ (Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Dfa(_) | Expr::Epsilon) => leaf,
+    }
+}
+
+fn materialize_repeated_subexpression_dfas_with_limits(
+    exprs: &[Expr],
+    min_size: usize,
+    min_occurrences: usize,
+) -> Option<Vec<Expr>> {
+    debug_assert!(min_size > 1);
+    debug_assert!(min_occurrences > 1);
+    let started_at = Instant::now();
+    let mut counts = FxHashMap::<Expr, usize>::default();
+    for expr in exprs {
+        count_all_subexpressions(expr, &mut counts);
+    }
+    let occurrences = counts.clone();
+    let candidates = counts
+        .into_iter()
+        .filter_map(|(expr, count)| {
+            (count >= min_occurrences
+                && expr_structural_size(&expr) >= min_size
+                && !expr_contains_group_op(&expr)
+                && !matches!(expr, Expr::Dfa(_)))
+            .then_some(expr)
+        })
+        .collect::<FxHashSet<_>>();
+    let mut selected = FxHashSet::default();
+    for expr in exprs {
+        collect_maximal_repeated_subexpressions(expr, &candidates, &mut selected);
+    }
+    if selected.is_empty() {
+        return None;
+    }
+
+    let selected = selected.into_iter().collect::<Vec<_>>();
+    let compile_started_at = Instant::now();
+    let compiled_entries = selected
+        .into_par_iter()
+        .map(|expr| {
+            let expr_size = expr_structural_size(&expr);
+            let occurrence_count = occurrences.get(&expr).copied().unwrap_or(0);
+            let entry_started_at = Instant::now();
+            let dfa = Arc::new(compile_expr_to_dfa(&expr));
+            let entry_compile_ms = entry_started_at.elapsed().as_secs_f64() * 1000.0;
+            (expr, dfa, expr_size, occurrence_count, entry_compile_ms)
+        })
+        .collect::<Vec<_>>();
+    let compile_ms = compile_started_at.elapsed().as_secs_f64() * 1000.0;
+    let mut compiled = FxHashMap::<Expr, Arc<DFA>>::default();
+    for (expr, dfa, expr_size, occurrence_count, entry_compile_ms) in compiled_entries {
+        if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some() {
+            eprintln!(
+                "[glrmask/profile][tokenizer] shared_subexpr_dfa_entry size={} occurrences={} states={} transitions={} compile_ms={:.3}",
+                expr_size,
+                occurrence_count,
+                dfa.num_states(),
+                dfa_transition_count(&dfa),
+                entry_compile_ms,
+            );
+        }
+        compiled.insert(expr, dfa);
+    }
+    let rewritten = exprs
+        .iter()
+        .cloned()
+        .map(|expr| replace_compiled_subexpressions(expr, &compiled, true))
+        .collect::<Vec<_>>();
+    if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some() {
+        eprintln!(
+            "[glrmask/profile][tokenizer] shared_subexpr_dfas entries={} compile_ms={:.3} total_ms={:.3}",
+            compiled.len(),
+            compile_ms,
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    Some(rewritten)
+}
+
+fn materialize_repeated_subexpression_dfas(exprs: &[Expr]) -> Option<Vec<Expr>> {
+    if std::env::var_os("GLRMASK_DISABLE_SHARED_SUBEXPR_DFA_CACHE").is_some() {
+        return None;
+    }
+    let forced = std::env::var_os("GLRMASK_FORCE_SHARED_SUBEXPR_DFA_CACHE").is_some();
+    let min_total_size = std::env::var("GLRMASK_SHARED_SUBEXPR_MIN_TOTAL_SIZE")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&value| value > 1)
+        .unwrap_or(40_000);
+    let total_size = exprs.iter().map(expr_structural_size).sum::<usize>();
+    if !forced && total_size < min_total_size {
+        return None;
+    }
+    let min_size = std::env::var("GLRMASK_SHARED_SUBEXPR_MIN_SIZE")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&value| value > 1)
+        .unwrap_or(128);
+    let min_occurrences = std::env::var("GLRMASK_SHARED_SUBEXPR_MIN_OCCURRENCES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&value| value > 1)
+        .unwrap_or(8);
+    if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some() {
+        eprintln!(
+            "[glrmask/profile][tokenizer] shared_subexpr_scan forced={} total_size={} min_total_size={} min_size={} min_occurrences={}",
+            forced, total_size, min_total_size, min_size, min_occurrences,
+        );
+    }
+    materialize_repeated_subexpression_dfas_with_limits(exprs, min_size, min_occurrences)
+}
+
 fn shared_duplicate_nested_group_op_cache(
     exprs: &[Expr],
     grouped: &BTreeMap<u32, Vec<usize>>,
@@ -1909,6 +2122,8 @@ fn compile_partition_components(
     partitions: &[u32],
 ) -> Vec<LexerComponent> {
     let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
+    let rewritten_exprs = materialize_repeated_subexpression_dfas(exprs);
+    let exprs = rewritten_exprs.as_deref().unwrap_or(exprs);
     let mut grouped = BTreeMap::<u32, Vec<usize>>::new();
     for (terminal, &partition) in partitions.iter().enumerate() {
         grouped.entry(partition).or_default().push(terminal);
@@ -3468,6 +3683,68 @@ mod tests {
         }
     }
 
+    fn random_group_free_expr(rng: &mut StdRng, depth: usize) -> Expr {
+        let atom = |rng: &mut StdRng| match rng.gen_range(0..4) {
+            0 => Expr::U8Seq(vec![b'a' + rng.gen_range(0..3)]),
+            1 => Expr::U8Seq(
+                (0..rng.gen_range(1..=3))
+                    .map(|_| b'a' + rng.gen_range(0..3))
+                    .collect(),
+            ),
+            2 => Expr::U8Class(U8Set::from_bytes(match rng.gen_range(0..3) {
+                0 => b"ab",
+                1 => b"bc",
+                _ => b"abc",
+            })),
+            _ => Expr::Epsilon,
+        };
+
+        if depth == 0 {
+            return atom(rng);
+        }
+        match rng.gen_range(0..7) {
+            0..=2 => atom(rng),
+            3 => Expr::Choice(vec![
+                random_group_free_expr(rng, depth - 1),
+                random_group_free_expr(rng, depth - 1),
+            ]),
+            4 => Expr::Seq(vec![
+                random_group_free_expr(rng, depth - 1),
+                random_group_free_expr(rng, depth - 1),
+            ]),
+            5 => Expr::Repeat {
+                expr: Box::new(random_group_free_expr(rng, depth - 1)),
+                min: rng.gen_range(0..=1),
+                max: Some(rng.gen_range(1..=3)),
+            },
+            _ => Expr::Shared(Arc::new(random_group_free_expr(rng, depth - 1))),
+        }
+    }
+
+    fn expr_contains_dfa(expr: &Expr) -> bool {
+        match expr {
+            Expr::Dfa(_) => true,
+            Expr::Exclude { expr, exclude } => {
+                expr_contains_dfa(expr) || expr_contains_dfa(exclude)
+            }
+            Expr::Intersect { expr, intersect } => {
+                expr_contains_dfa(expr) || expr_contains_dfa(intersect)
+            }
+            Expr::Seq(parts) | Expr::Choice(parts) => parts.iter().any(expr_contains_dfa),
+            Expr::Repeat { expr, .. } => expr_contains_dfa(expr),
+            Expr::Shared(expr) => expr_contains_dfa(expr),
+            Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Epsilon => false,
+        }
+    }
+
+    fn tokenizer_from_partitioned_exprs(exprs: &[Expr]) -> Tokenizer {
+        let partitions = (0..exprs.len() as u32).collect::<Vec<_>>();
+        build_regex_partitioned_with_adaptive(exprs, &partitions, false).into_tokenizer(
+            exprs.len() as u32,
+            Some(Arc::from(exprs.to_vec().into_boxed_slice())),
+        )
+    }
+
     #[test]
     fn partitioned_lexer_matches_monolithic_semantics_exhaustively() {
         let shared_tail = Arc::new(Expr::Choice(vec![
@@ -3651,6 +3928,89 @@ mod tests {
         match (first, second) {
             (Expr::Dfa(first), Expr::Dfa(second)) => assert!(Arc::ptr_eq(&first, &second)),
             _ => panic!("nested group operation was not materialized to a DFA"),
+        }
+    }
+
+    #[test]
+    fn repeated_subexpression_dfa_materialization_preserves_observations_exhaustively() {
+        let repeated = Expr::Seq(vec![
+            Expr::Choice(vec![byte_expr(b'a'), byte_expr(b'b')]),
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"bc"))),
+                min: 1,
+                max: Some(2),
+            },
+        ]);
+        let exprs = vec![
+            Expr::Seq(vec![byte_expr(b'a'), repeated.clone(), byte_expr(b'c')]),
+            Expr::Choice(vec![repeated.clone(), Expr::U8Seq(b"cc".to_vec())]),
+            Expr::Repeat {
+                expr: Box::new(repeated.clone()),
+                min: 0,
+                max: Some(2),
+            },
+            Expr::Repeat {
+                expr: Box::new(repeated.clone()),
+                min: 1,
+                max: None,
+            },
+            Expr::Exclude {
+                expr: Box::new(Expr::Choice(vec![repeated.clone(), byte_expr(b'c')])),
+                exclude: Box::new(byte_expr(b'c')),
+            },
+            Expr::Intersect {
+                expr: Box::new(Expr::Choice(vec![repeated.clone(), Expr::U8Seq(b"ab".to_vec())])),
+                intersect: Box::new(Expr::Choice(vec![repeated, byte_expr(b'b')])),
+            },
+        ];
+        let rewritten = super::materialize_repeated_subexpression_dfas_with_limits(&exprs, 2, 2)
+            .expect("the repeated subtree should be materialized");
+        assert!(rewritten.iter().any(expr_contains_dfa));
+
+        let original = tokenizer_from_partitioned_exprs(&exprs);
+        let materialized = tokenizer_from_partitioned_exprs(&rewritten);
+        for input in enumerate_inputs(b"abc", 6) {
+            assert_eq!(
+                tokenizer_observation(&materialized, &input),
+                tokenizer_observation(&original, &input),
+                "materialized repeated subtree changed tokenizer observation for input={input:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn repeated_subexpression_dfa_materialization_seeded_differential() {
+        let mut rng = StdRng::seed_from_u64(0xC5E0_2026_0718);
+        let inputs = enumerate_inputs(b"abc", 4);
+
+        for case in 0..32 {
+            let repeated = Expr::Seq(vec![
+                random_group_free_expr(&mut rng, 2),
+                random_group_free_expr(&mut rng, 2),
+            ]);
+            let exprs = vec![
+                Expr::Seq(vec![byte_expr(b'a'), repeated.clone(), byte_expr(b'b')]),
+                Expr::Choice(vec![repeated.clone(), random_group_free_expr(&mut rng, 1)]),
+                Expr::Repeat {
+                    expr: Box::new(repeated.clone()),
+                    min: rng.gen_range(0..=1),
+                    max: Some(rng.gen_range(1..=3)),
+                },
+                Expr::Shared(Arc::new(repeated)),
+            ];
+            let rewritten =
+                super::materialize_repeated_subexpression_dfas_with_limits(&exprs, 2, 2)
+                    .expect("the seeded repeated subtree should be materialized");
+            let original = tokenizer_from_partitioned_exprs(&exprs);
+            let materialized = tokenizer_from_partitioned_exprs(&rewritten);
+
+            for input in &inputs {
+                assert_eq!(
+                    tokenizer_observation(&materialized, input),
+                    tokenizer_observation(&original, input),
+                    "seeded CSE mismatch case={case} input={input:?} exprs={exprs:?} rewritten={rewritten:?}",
+                );
+            }
         }
     }
 
