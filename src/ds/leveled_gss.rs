@@ -2384,6 +2384,142 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         complete.then_some(stacks)
     }
 
+    /// Visit concrete stack lengths without materializing stack values.
+    ///
+    /// Returns `false` as soon as more than `limit` paths are represented. This
+    /// is intended for cheap admission checks before an exact bounded stack
+    /// traversal. Unlike `for_each_stack_top_first_bounded`, it does not clone
+    /// stack values or maintain a path buffer.
+    pub(crate) fn for_each_stack_len_bounded(
+        &self,
+        limit: usize,
+        mut f: impl FnMut(usize, &A),
+    ) -> bool {
+        fn emit<A, F>(
+            depth: usize,
+            acc: &A,
+            limit: usize,
+            emitted: &mut usize,
+            f: &mut F,
+        ) -> bool
+        where
+            F: FnMut(usize, &A),
+        {
+            if *emitted >= limit {
+                return false;
+            }
+            *emitted += 1;
+            f(depth, acc);
+            true
+        }
+
+        fn dfs_lower<T, A, F>(
+            lower: &Lower<T>,
+            depth: usize,
+            acc: &A,
+            limit: usize,
+            emitted: &mut usize,
+            f: &mut F,
+        ) -> bool
+        where
+            T: Clone + Eq + Hash,
+            A: Merge + Clone + Eq + Hash,
+            F: FnMut(usize, &A),
+        {
+            if lower.empty() && !emit(depth, acc, limit, emitted, f) {
+                return false;
+            }
+            match lower {
+                Lower::Segment(seg) => dfs_lower(
+                    &seg.next,
+                    depth + seg.values.len(),
+                    acc,
+                    limit,
+                    emitted,
+                    f,
+                ),
+                Lower::General { children, .. } => {
+                    for kids in children.values() {
+                        for child in kids.values() {
+                            if !dfs_lower(child, depth + 1, acc, limit, emitted, f) {
+                                return false;
+                            }
+                        }
+                    }
+                    true
+                }
+            }
+        }
+
+        fn dfs_upper<T, A, F>(
+            upper: &Upper<T, A>,
+            depth: usize,
+            limit: usize,
+            emitted: &mut usize,
+            f: &mut F,
+        ) -> bool
+        where
+            T: Clone + Eq + Hash,
+            A: Merge + Clone + Eq + Hash,
+            F: FnMut(usize, &A),
+        {
+            match upper {
+                Upper::Branch(branch) => {
+                    if let Some(acc) = &branch.empty
+                        && !emit(depth, acc, limit, emitted, f)
+                    {
+                        return false;
+                    }
+                    for kids in branch.children.values() {
+                        for child in kids.values() {
+                            if !dfs_upper(child, depth + 1, limit, emitted, f) {
+                                return false;
+                            }
+                        }
+                    }
+                    true
+                }
+                Upper::Interface(interface) => {
+                    if interface.inner.empty()
+                        && !emit(depth, &interface.acc, limit, emitted, f)
+                    {
+                        return false;
+                    }
+                    match &*interface.inner {
+                        Lower::Segment(seg) => dfs_lower(
+                            &seg.next,
+                            depth + seg.values.len(),
+                            &interface.acc,
+                            limit,
+                            emitted,
+                            f,
+                        ),
+                        Lower::General { children, .. } => {
+                            for kids in children.values() {
+                                for child in kids.values() {
+                                    if !dfs_lower(
+                                        child,
+                                        depth + 1,
+                                        &interface.acc,
+                                        limit,
+                                        emitted,
+                                        f,
+                                    ) {
+                                        return false;
+                                    }
+                                }
+                            }
+                            true
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut emitted = 0usize;
+        dfs_upper(&self.inner, 0, limit, &mut emitted, &mut f)
+    }
+
     /// Visit concrete stacks in top-first order without materializing the full
     /// stack set. Returns `false` as soon as more than `limit` paths are found.
     ///
@@ -4123,6 +4259,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         // Fast path: single Interface at root.
         if let Upper::Interface(i) = &*self.inner {
             return match mutator(&i.acc) {
+                Some(new_acc) if new_acc == i.acc => self.clone(),
                 Some(new_acc) => LeveledGSS { inner: new_interface(i.inner.clone(), new_acc) },
                 None => LeveledGSS::empty(),
             };
@@ -4162,16 +4299,30 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             match &**node {
                 Upper::Interface(i) => {
                     let new_acc_opt = mutate_acc_np(&i.acc, memo, m);
-                    new_acc_opt.map(|new_acc| new_interface(i.inner.clone(), new_acc))
+                    new_acc_opt.map(|new_acc| {
+                        if new_acc == i.acc {
+                            node.clone()
+                        } else {
+                            new_interface(i.inner.clone(), new_acc)
+                        }
+                    })
                 }
                 Upper::Branch(b) => {
                     let new_empty_opt = b.empty.as_ref().and_then(|e| mutate_acc_np(e, memo, m));
+                    let empty_unchanged = match (&b.empty, &new_empty_opt) {
+                        (None, None) => true,
+                        (Some(old), Some(new)) => old == new,
+                        _ => false,
+                    };
                     // Fast path: single child entry with single child.
                     if b.children.len() == 1 && new_empty_opt.is_none() {
                         let (v, kids) = b.children.iter().next().unwrap();
                         if kids.len() == 1 {
                             let child = kids.values().next().unwrap();
                             if let Some(nc) = transform_np::<T, A, M>(child, memo, m) {
+                                if empty_unchanged && Arc::ptr_eq(&nc, child) {
+                                    return Some(node.clone());
+                                }
                                 let new_kids = CompactOrdMap::unit(nc.max_depth(), nc);
                                 let new_children = CompactMap::unit(v.clone(), new_kids);
                                 return Some(new_branch(new_children, None));
@@ -4181,17 +4332,26 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                         }
                     }
                     let mut new_children: Children<T, Upper<T, A>> = CompactMap::new();
+                    let mut unchanged = empty_unchanged;
                     for (v, kids) in b.children.iter() {
-                        let new_kids: CompactOrdMap<Arc<Upper<T, A>>> = kids.values()
-                            .filter_map(|child| transform_np::<T, A, M>(child, memo, m))
-                            .map(|nc| (nc.max_depth(), nc))
-                            .collect();
+                        let mut new_kids: CompactOrdMap<Arc<Upper<T, A>>> = CompactOrdMap::new();
+                        for child in kids.values() {
+                            let Some(nc) = transform_np::<T, A, M>(child, memo, m) else {
+                                unchanged = false;
+                                continue;
+                            };
+                            unchanged &= Arc::ptr_eq(&nc, child);
+                            new_kids.insert(nc.max_depth(), nc);
+                        }
+                        unchanged &= new_kids.len() == kids.len();
                         if !new_kids.is_empty() {
                             new_children.insert(v.clone(), new_kids);
                         }
                     }
                     if new_children.is_empty() && new_empty_opt.is_none() {
                         None
+                    } else if unchanged && new_children.len() == b.children.len() {
+                        Some(node.clone())
                     } else {
                         Some(new_branch(new_children, new_empty_opt))
                     }
@@ -4713,7 +4873,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     /// Visit each accumulator in the GSS without collecting or merging.
     /// Uses pointer-based visited set to avoid hashing accumulators.
     pub fn for_each_acc(&self, mut f: impl FnMut(&A)) {
-        const INLINE_VISITED_PTRS: usize = 16;
+        const INLINE_VISITED_PTRS: usize = 32;
 
         enum VisitedPtrs {
             Small(SmallVec<[usize; INLINE_VISITED_PTRS]>),
@@ -5311,6 +5471,34 @@ mod tests {
 
         let mut visited = 0usize;
         assert!(!gss.for_each_stack_top_first_bounded(2, |_, _| {
+            visited += 1;
+        }));
+        assert_eq!(visited, 2);
+    }
+
+    #[test]
+    fn bounded_stack_length_traversal_matches_concrete_stacks() {
+        let gss = LeveledGSS::from_stacks(&[
+            (vec![0_u32, 1, 7], TestAcc(1)),
+            (vec![0_u32, 2, 8, 9], TestAcc(2)),
+            (vec![0_u32, 2, 8, 10], TestAcc(2)),
+        ]);
+        let mut expected = gss
+            .to_stacks(4_096)
+            .expect("stack enumeration exceeded explicit limit")
+            .into_iter()
+            .map(|(stack, acc)| (stack.len(), acc))
+            .collect::<Vec<_>>();
+        let mut actual = Vec::new();
+        assert!(gss.for_each_stack_len_bounded(3, |len, acc| {
+            actual.push((len, acc.clone()));
+        }));
+        expected.sort_unstable_by_key(|(len, acc)| (*len, acc.0));
+        actual.sort_unstable_by_key(|(len, acc)| (*len, acc.0));
+        assert_eq!(actual, expected);
+
+        let mut visited = 0usize;
+        assert!(!gss.for_each_stack_len_bounded(2, |_, _| {
             visited += 1;
         }));
         assert_eq!(visited, 2);

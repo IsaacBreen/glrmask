@@ -35,6 +35,8 @@ const DELTA_SEED_MIN_SAVINGS: u64 = 2048;
 const MASK_SINGLE_PATH_DIRECT_MAX_DEPTH: u32 = 64;
 const MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_PATHS: usize = 16;
 const MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_STACK_VALUES: usize = 128;
+const MASK_SINGLE_PATH_DIRECT_TWO_PASS_MIN_STATE_COUNT: usize =
+    MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_PATHS / 2;
 
 fn single_path_direct_stack_work_within_budget(
     stack_lengths: impl IntoIterator<Item = usize>,
@@ -104,6 +106,9 @@ struct DenseTokenSetIntersectionKey {
     dense_len: usize,
     token_set: usize,
 }
+
+type DenseTokenSetIntersectionSmallCache =
+    SmallVec<[(Arc<[u64]>, usize, Option<Arc<[u64]>>); 8]>;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct DenseGssTransitionKey {
@@ -400,6 +405,57 @@ impl DenseMaskAcc {
         result
     }
 
+    fn intersect_with_weight_small_cached(
+        &self,
+        weight: &Weight,
+        precomputed: &DenseTokenMaskCache,
+        cache: &mut DenseTokenSetIntersectionSmallCache,
+    ) -> Option<Self> {
+        if self.is_empty() {
+            return None;
+        }
+        if weight.is_full() {
+            return Some(self.clone());
+        }
+
+        let mut result = SmallVec::new();
+        for (tsid, dense) in &self.0 {
+            let Some(token_set) = weight.0.get(*tsid) else {
+                continue;
+            };
+            if let Some(intersection) = Self::intersect_dense_with_token_set_small_cached(
+                dense,
+                token_set,
+                precomputed,
+                cache,
+            ) {
+                result.push((*tsid, intersection));
+            }
+        }
+
+        (!result.is_empty()).then_some(Self(result))
+    }
+
+    fn intersect_dense_with_token_set_small_cached(
+        dense: &Arc<[u64]>,
+        token_set: &Arc<RangeSetBlaze<u32>>,
+        precomputed: &DenseTokenMaskCache,
+        cache: &mut DenseTokenSetIntersectionSmallCache,
+    ) -> Option<Arc<[u64]>> {
+        let token_set_key = Arc::as_ptr(token_set) as usize;
+        if let Some((_, _, result)) = cache.iter().find(|(cached_dense, cached_token_set, _)| {
+            Arc::ptr_eq(cached_dense, dense) && *cached_token_set == token_set_key
+        }) {
+            return result.clone();
+        }
+
+        let result = Self::intersect_dense_with_token_set(dense, token_set, precomputed);
+        if cache.len() < cache.inline_size() {
+            cache.push((Arc::clone(dense), token_set_key, result.clone()));
+        }
+        result
+    }
+
     fn intersect_with_weight_in_place(
         &mut self,
         weight: &Weight,
@@ -484,6 +540,7 @@ mod tests {
         single_path_direct_stack_work_within_budget,
         DenseMaskAcc,
         DenseTokenMaskCache,
+        DenseTokenSetIntersectionSmallCache,
         MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_STACK_VALUES,
     };
     use crate::automata::lexer::Lexer;
@@ -540,6 +597,34 @@ mod tests {
 
         assert!(!Arc::ptr_eq(&intersected, &dense));
         assert_eq!(&*intersected, &[0b0011_u64, 0b0000]);
+    }
+
+    #[test]
+    fn small_intersection_cache_reuses_exact_result() {
+        let dense: Arc<[u64]> = Arc::from([0b1011_u64, 0b0101]);
+        let token_set = Arc::new(RangeSetBlaze::from_iter([0_u32..=127]));
+        let precomputed = precomputed_for(&token_set, Arc::from([0b0011_u64, 0b0100]));
+        let mut cache = DenseTokenSetIntersectionSmallCache::new();
+
+        let first = DenseMaskAcc::intersect_dense_with_token_set_small_cached(
+            &dense,
+            &token_set,
+            &precomputed,
+            &mut cache,
+        )
+        .unwrap();
+        let second = DenseMaskAcc::intersect_dense_with_token_set_small_cached(
+            &dense,
+            &token_set,
+            &precomputed,
+            &mut cache,
+        )
+        .unwrap();
+
+        assert_eq!(&*first, &[0b0011_u64, 0b0100]);
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(cache.len(), 1);
+        assert!(Arc::ptr_eq(&cache[0].0, &dense));
     }
 
     #[test]
@@ -734,10 +819,7 @@ fn enqueue_weighted_transition(
     weight: &Weight,
     precomputed: &DenseTokenMaskCache,
     transition_gss_cache: &mut FxHashMap<DenseGssTransitionKey, DenseMaskGSS>,
-    transition_intersection_cache: &mut FxHashMap<
-        DenseTokenSetIntersectionKey,
-        Option<Arc<[u64]>>,
-    >,
+    transition_intersection_cache: &mut DenseTokenSetIntersectionSmallCache,
     profile: &mut Option<MaskInnerProfileStats>,
 ) {
     if weight.is_full() {
@@ -752,7 +834,7 @@ fn enqueue_weighted_transition(
         None
     };
     let mut intersect_ns = 0u64;
-    let cache_key = dense_gss_transition_key(popped, weight);
+    let cache_key = None;
     if let Some(key) = cache_key.as_ref() {
         if let Some(cached) = transition_gss_cache.get(key) {
             if let (Some(profile), Some(start)) = (profile.as_mut(), apply_start) {
@@ -771,7 +853,7 @@ fn enqueue_weighted_transition(
         } else {
             None
         };
-        let intersected = allowed.intersect_with_weight_cached(
+        let intersected = allowed.intersect_with_weight_small_cached(
             weight,
             precomputed,
             transition_intersection_cache,
@@ -801,10 +883,7 @@ fn enqueue_parser_state_transition(
     popped: &DenseMaskGSS,
     precomputed: &DenseTokenMaskCache,
     transition_gss_cache: &mut FxHashMap<DenseGssTransitionKey, DenseMaskGSS>,
-    transition_intersection_cache: &mut FxHashMap<
-        DenseTokenSetIntersectionKey,
-        Option<Arc<[u64]>>,
-    >,
+    transition_intersection_cache: &mut DenseTokenSetIntersectionSmallCache,
     profile: &mut Option<MaskInnerProfileStats>,
 ) {
     let positive_label = encode_positive_label(parser_state);
@@ -853,35 +932,108 @@ impl<'a> ConstraintState<'a> {
         }
 
         let mut paths = SmallVec::<[(u32, TerminalsDisallowed, SmallVec<[u32; 16]>); MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_PATHS]>::new();
-        for (&original_tokenizer_state, gss) in &self.state {
-            if gss.max_depth() > MASK_SINGLE_PATH_DIRECT_MAX_DEPTH {
-                return false;
-            }
+        if self.state.len() < MASK_SINGLE_PATH_DIRECT_TWO_PASS_MIN_STATE_COUNT {
+            // Below half the path budget, accepted multipath states are common
+            // and a separate counting traversal costs more than it saves. Keep
+            // the original one-pass admission/materialization algorithm.
+            for (&original_tokenizer_state, gss) in &self.state {
+                if gss.max_depth() > MASK_SINGLE_PATH_DIRECT_MAX_DEPTH {
+                    return false;
+                }
 
-            let mut stack = SmallVec::<[u32; 16]>::new();
-            if let Some(terminals_disallowed) = gss.single_path_top_first_and_acc(&mut stack) {
+                let mut stack = SmallVec::<[u32; 16]>::new();
+                if let Some(terminals_disallowed) = gss.single_path_top_first_and_acc(&mut stack) {
+                    paths.push((original_tokenizer_state, terminals_disallowed, stack));
+                    continue;
+                }
+
+                if mask_single_path_to_stacks_fallback_disabled() {
+                    return false;
+                }
+                let remaining = MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_PATHS.saturating_sub(paths.len());
+                let complete = gss.for_each_stack_top_first_bounded(
+                    remaining,
+                    |stack_top_first, terminals_disallowed| {
+                        let mut path_stack = SmallVec::<[u32; 16]>::new();
+                        path_stack.extend(stack_top_first.iter().copied());
+                        paths.push((
+                            original_tokenizer_state,
+                            terminals_disallowed.clone(),
+                            path_stack,
+                        ));
+                    },
+                );
+                if !complete {
+                    return false;
+                }
+            }
+        } else {
+            // Once active tokenizer states consume at least half the path
+            // budget, a small amount of branching is likely to reject the
+            // specialized kernel. Count without cloning stack values first;
+            // only accepted states pay to materialize concrete stacks.
+            let mut all_single_path = true;
+            for (&original_tokenizer_state, gss) in &self.state {
+                if gss.max_depth() > MASK_SINGLE_PATH_DIRECT_MAX_DEPTH {
+                    return false;
+                }
+
+                let mut stack = SmallVec::<[u32; 16]>::new();
+                let Some(terminals_disallowed) = gss.single_path_top_first_and_acc(&mut stack) else {
+                    all_single_path = false;
+                    break;
+                };
                 paths.push((original_tokenizer_state, terminals_disallowed, stack));
-                continue;
             }
 
-            if mask_single_path_to_stacks_fallback_disabled() {
-                return false;
-            }
-            let remaining = MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_PATHS.saturating_sub(paths.len());
-            let complete = gss.for_each_stack_top_first_bounded(
-                remaining,
-                |stack_top_first, terminals_disallowed| {
-                    let mut path_stack = SmallVec::<[u32; 16]>::new();
-                    path_stack.extend(stack_top_first.iter().copied());
-                    paths.push((
-                        original_tokenizer_state,
-                        terminals_disallowed.clone(),
-                        path_stack,
-                    ));
-                },
-            );
-            if !complete {
-                return false;
+            if !all_single_path {
+                if mask_single_path_to_stacks_fallback_disabled() {
+                    return false;
+                }
+
+                let mut total_paths = 0usize;
+                let mut total_stack_values = 0usize;
+                for gss in self.state.values() {
+                    if gss.max_depth() > MASK_SINGLE_PATH_DIRECT_MAX_DEPTH {
+                        return false;
+                    }
+                    let remaining =
+                        MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_PATHS.saturating_sub(total_paths);
+                    let complete = gss.for_each_stack_len_bounded(remaining, |stack_len, _| {
+                        total_paths += 1;
+                        total_stack_values = total_stack_values.saturating_add(stack_len);
+                    });
+                    if !complete
+                        || total_stack_values > MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_STACK_VALUES
+                    {
+                        return false;
+                    }
+                }
+
+                paths.clear();
+                for (&original_tokenizer_state, gss) in &self.state {
+                    let remaining =
+                        MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_PATHS.saturating_sub(paths.len());
+                    let complete = gss.for_each_stack_top_first_bounded(
+                        remaining,
+                        |stack_top_first, terminals_disallowed| {
+                            let mut path_stack = SmallVec::<[u32; 16]>::new();
+                            path_stack.extend(stack_top_first.iter().copied());
+                            paths.push((
+                                original_tokenizer_state,
+                                terminals_disallowed.clone(),
+                                path_stack,
+                            ));
+                        },
+                    );
+                    debug_assert!(
+                        complete,
+                        "admitted GSS must materialize within the path budget"
+                    );
+                    if !complete {
+                        return false;
+                    }
+                }
             }
         }
         if !single_path_direct_stack_work_within_budget(
@@ -1247,10 +1399,7 @@ impl<'a> ConstraintState<'a> {
         start_fast_transitions: &FxHashMap<i32, (u32, Weight)>,
         precomputed: &DenseTokenMaskCache,
         transition_gss_cache: &mut FxHashMap<DenseGssTransitionKey, DenseMaskGSS>,
-        transition_intersection_cache: &mut FxHashMap<
-            DenseTokenSetIntersectionKey,
-            Option<Arc<[u64]>>,
-        >,
+        transition_intersection_cache: &mut DenseTokenSetIntersectionSmallCache,
         queue: &mut MaskQueue,
         merged: &mut [u64],
         direct_buf: &mut Option<&mut [u32]>,
@@ -1492,10 +1641,7 @@ impl<'a> ConstraintState<'a> {
         let dense_words = self.constraint.internal_token_dense_words;
         let mut transition_gss_cache: FxHashMap<DenseGssTransitionKey, DenseMaskGSS> =
             FxHashMap::default();
-        let mut transition_intersection_cache: FxHashMap<
-            DenseTokenSetIntersectionKey,
-            Option<Arc<[u64]>>,
-        > = FxHashMap::default();
+        let mut transition_intersection_cache = DenseTokenSetIntersectionSmallCache::new();
 
         let mut merged = {
             let mut scratch = self.mask_scratch.lock().unwrap();
@@ -1505,7 +1651,7 @@ impl<'a> ConstraintState<'a> {
         buf.fill(0);
         merged.clear();
         merged.resize(dense_words, 0);
-        let mut direct_buf = Some(&mut *buf);
+        let mut direct_buf = None;
         let mut direct_buf_possible = true;
         let mut direct_buf_used = false;
         let mut direct_buf_dirty = false;
