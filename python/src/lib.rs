@@ -21,7 +21,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use numpy::{PyArray1, PyReadwriteArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict};
+use pyo3::types::{PyAny, PyBytes, PyDict};
 use self_cell::self_cell;
 use std::sync::Arc;
 use glrmask::__private::{
@@ -95,6 +95,82 @@ fn id_to_bytes_dict_to_vocab(id_to_bytes: &Bound<'_, PyDict>) -> PyResult<glrmas
         entries.push((token_id, token_bytes));
     }
     Ok(glrmask::Vocab::new(entries))
+}
+
+fn llama_cpp_to_vocab(llm: &Bound<'_, PyAny>) -> PyResult<(glrmask::Vocab, Vec<u32>)> {
+    let py = llm.py();
+    let llama_cpp = py.import("llama_cpp")?;
+    let ctypes = py.import("ctypes")?;
+    let llama_vocab = llama_cpp
+        .getattr("llama_model_get_vocab")?
+        .call1((llm.getattr("model")?,))?;
+    let n_vocab: u32 = llm.call_method0("n_vocab")?.extract()?;
+    let excluded_attrs: u32 = llama_cpp
+        .getattr("LLAMA_TOKEN_ATTR_CONTROL")?
+        .extract::<u32>()?
+        | llama_cpp
+            .getattr("LLAMA_TOKEN_ATTR_UNUSED")?
+            .extract::<u32>()?;
+    let is_eog = llama_cpp.getattr("llama_vocab_is_eog")?;
+    let get_attr = llama_cpp.getattr("llama_vocab_get_attr")?;
+    let token_to_piece = llama_cpp.getattr("llama_token_to_piece")?;
+    let create_string_buffer = ctypes.getattr("create_string_buffer")?;
+
+    let mut entries = Vec::with_capacity(n_vocab as usize);
+    let mut end_token_ids = Vec::new();
+    for token_id in 0..n_vocab {
+        if is_eog.call1((&llama_vocab, token_id))?.is_truthy()? {
+            end_token_ids.push(token_id);
+            continue;
+        }
+
+        let attrs: u32 = get_attr.call1((&llama_vocab, token_id))?.extract()?;
+        if attrs & excluded_attrs != 0 {
+            continue;
+        }
+
+        let required: isize = token_to_piece
+            .call1((&llama_vocab, token_id, py.None(), 0, 0, false))?
+            .extract()?;
+        let capacity = if required < 0 {
+            required.checked_neg().ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "llama_token_to_piece returned an invalid size for token {token_id}"
+                ))
+            })?
+        } else {
+            required
+        };
+        if capacity == 0 {
+            continue;
+        }
+
+        let buffer = create_string_buffer.call1((capacity,))?;
+        let length: isize = token_to_piece
+            .call1((&llama_vocab, token_id, &buffer, capacity, 0, false))?
+            .extract()?;
+        if length < 0 || length > capacity {
+            return Err(PyValueError::new_err(format!(
+                "llama_token_to_piece returned invalid length {length} for token {token_id}"
+            )));
+        }
+        if length == 0 {
+            continue;
+        }
+
+        let raw = buffer.getattr("raw")?.downcast_into::<PyBytes>()?;
+        let length = length as usize;
+        let raw = raw.as_bytes();
+        if length > raw.len() {
+            return Err(PyValueError::new_err(format!(
+                "llama.cpp wrote {length} bytes for token {token_id} into a {}-byte buffer",
+                raw.len()
+            )));
+        }
+        entries.push((token_id, raw[..length].to_vec()));
+    }
+
+    Ok((glrmask::Vocab::new(entries), end_token_ids))
 }
 
 fn constraint_result<T, E: std::fmt::Display>(result: Result<T, E>) -> PyResult<T> {
@@ -438,6 +514,7 @@ fn advance_trace_step_to_dict<'py>(
 #[derive(Clone)]
 pub struct PyVocab {
     inner: glrmask::Vocab,
+    llama_cpp_end_token_ids: Vec<u32>,
 }
 
 #[pymethods]
@@ -445,13 +522,38 @@ impl PyVocab {
     #[staticmethod]
     fn from_dict(token_to_id: &Bound<'_, PyDict>) -> PyResult<Self> {
         let vocab = dict_to_vocab(token_to_id)?;
-        Ok(Self { inner: vocab })
+        Ok(Self {
+            inner: vocab,
+            llama_cpp_end_token_ids: Vec::new(),
+        })
     }
 
     #[staticmethod]
     fn from_id_to_bytes(id_to_bytes: &Bound<'_, PyDict>) -> PyResult<Self> {
         let vocab = id_to_bytes_dict_to_vocab(id_to_bytes)?;
-        Ok(Self { inner: vocab })
+        Ok(Self {
+            inner: vocab,
+            llama_cpp_end_token_ids: Vec::new(),
+        })
+    }
+
+    /// Build the byte vocabulary used by a llama-cpp-python `Llama` model.
+    ///
+    /// EOG, control, unused, and empty-piece tokens are omitted from the byte
+    /// vocabulary. EOG IDs remain available through `llama_cpp_end_token_ids`
+    /// so callers can pass them explicitly to a constraint constructor.
+    #[staticmethod]
+    fn from_llama_cpp(llm: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let (vocab, llama_cpp_end_token_ids) = llama_cpp_to_vocab(llm)?;
+        Ok(Self {
+            inner: vocab,
+            llama_cpp_end_token_ids,
+        })
+    }
+
+    #[getter]
+    fn llama_cpp_end_token_ids(&self) -> Vec<u32> {
+        self.llama_cpp_end_token_ids.clone()
     }
 
 }
