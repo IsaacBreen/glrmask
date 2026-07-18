@@ -261,6 +261,10 @@ constraint = glrmask.Constraint.from_json_schema(
 
 The state becomes complete only after one of those token IDs is committed.
 
+## State lifecycle
+
+The follow-up lifecycle APIs add bounded rollback, non-mutating proposal validation, failed-state inspection, and explicit EOS identity for serving integrations. See [the constraint-state lifecycle contract](docs/state-lifecycle.md) for the Rust and Python signatures and exact semantics.
+
 ## Serialization
 
 Compiled constraints can be serialized and restored:

@@ -1,5 +1,21 @@
 # Changelog
 
+## `<NEXT_VERSION>` — release date pending — vLLM prerequisite lifecycle APIs
+
+> Release-preparation placeholder. Replace `<NEXT_VERSION>` and the date only after the integrated prerequisite branch passes the complete release gate. These APIs are not present in public `glrmask 0.1.0`.
+
+### Added
+
+- Bounded token-level rollback for speculative decoding, with zero retained history by default.
+- Non-mutating proposal validation that returns the longest admissible token prefix.
+- Explicit failed-state inspection for recovery after an invalid commit.
+- Explicit EOS identity in vocabulary constructors and EOS-aware packed-mask extent.
+
+### Integration compatibility
+
+- The frozen vLLM backend requires these APIs and must declare `glrmask >= <NEXT_VERSION>` after the version is selected and published.
+- Public `glrmask 0.1.0` remains installable but is not compatible with that backend.
+
 ## 0.1.0 — 2026-07-15 — Shingleback initial release
 
 ### Highlights
