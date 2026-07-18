@@ -2225,7 +2225,12 @@ struct CandidatePrefixPowerset<'a> {
     tokenizer: &'a Tokenizer,
     words_per_mask: usize,
     terminal_to_local: Option<Box<[u32]>>,
+    sparse_transitions_by_byte: Option<&'a [Vec<(u32, u32)>]>,
+    singleton_epsilon_closures: Option<Vec<Option<Box<[u32]>>>>,
+    closure_marks: Vec<u32>,
+    closure_generation: u32,
     configs: Vec<Box<[u32]>>,
+    config_membership_words: Vec<Box<[u64]>>,
     config_ids: FxHashMap<Vec<u32>, u32>,
     transitions: Vec<[u32; 256]>,
     matched_masks: Vec<u64>,
@@ -2341,12 +2346,24 @@ impl<'a> CandidatePrefixPowerset<'a> {
         tokenizer: &'a Tokenizer,
         words_per_mask: usize,
         terminal_to_local: Option<Box<[u32]>>,
+        sparse_transitions_by_byte: Option<&'a [Vec<(u32, u32)>]>,
     ) -> (Self, u32, u32) {
         let mut scanner = Self {
             tokenizer,
             words_per_mask,
             terminal_to_local,
+            sparse_transitions_by_byte,
+            singleton_epsilon_closures: tokenizer
+                .has_epsilon_transitions()
+                .then(|| vec![None; tokenizer.num_states() as usize]),
+            closure_marks: if tokenizer.has_epsilon_transitions() {
+                vec![0; tokenizer.num_states() as usize]
+            } else {
+                Vec::new()
+            },
+            closure_generation: 0,
             configs: Vec::new(),
+            config_membership_words: Vec::new(),
             config_ids: FxHashMap::default(),
             transitions: Vec::new(),
             matched_masks: Vec::new(),
@@ -2408,6 +2425,16 @@ impl<'a> CandidatePrefixPowerset<'a> {
                 }
             }
         }
+        if self.sparse_transitions_by_byte.is_some() {
+            let mut membership = vec![0u64; (self.tokenizer.num_states() as usize).div_ceil(64)];
+            for &raw_state in &states {
+                membership[raw_state as usize >> 6] |= 1u64 << (raw_state as usize & 63);
+            }
+            self.config_membership_words
+                .push(membership.into_boxed_slice());
+        } else {
+            self.config_membership_words.push(Box::new([]));
+        }
         self.configs.push(states.into_boxed_slice());
         self.transitions.push([PREFIX_UNKNOWN_STATE; 256]);
         state
@@ -2422,10 +2449,31 @@ impl<'a> CandidatePrefixPowerset<'a> {
         if cached != PREFIX_UNKNOWN_STATE {
             return cached;
         }
-        let mut targets = if self.tokenizer.has_epsilon_transitions() {
-            self.tokenizer
-                .step_all(&self.configs[state as usize], byte)
-                .to_vec()
+        let direct_targets = if let Some(sparse_transitions_by_byte) =
+            self.sparse_transitions_by_byte
+        {
+            let sparse = &sparse_transitions_by_byte[byte as usize];
+            let config = self.configs[state as usize].as_ref();
+            if sparse.len() < config.len() {
+                let membership = self.config_membership_words[state as usize].as_ref();
+                sparse
+                    .iter()
+                    .filter_map(|&(source, target)| {
+                        ((membership[source as usize >> 6]
+                            & (1u64 << (source as usize & 63)))
+                            != 0)
+                            .then_some(target)
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                config
+                    .iter()
+                    .filter_map(|&raw_state| {
+                        let target = self.tokenizer.get_transition(raw_state, byte);
+                        (target != u32::MAX).then_some(target)
+                    })
+                    .collect::<Vec<_>>()
+            }
         } else {
             self.configs[state as usize]
                 .iter()
@@ -2434,6 +2482,34 @@ impl<'a> CandidatePrefixPowerset<'a> {
                     (target != u32::MAX).then_some(target)
                 })
                 .collect::<Vec<_>>()
+        };
+        let mut targets = if let Some(singleton_closures) =
+            self.singleton_epsilon_closures.as_mut()
+        {
+            // Every interned configuration is epsilon-closed. Follow visible
+            // byte edges once, then union cached singleton closures without
+            // rebuilding source closures or allocating a fresh seen vector.
+            self.closure_generation = self.closure_generation.wrapping_add(1);
+            if self.closure_generation == 0 {
+                self.closure_marks.fill(0);
+                self.closure_generation = 1;
+            }
+            let generation = self.closure_generation;
+            let mut targets = Vec::new();
+            for target in direct_targets {
+                let closure = singleton_closures[target as usize]
+                    .get_or_insert_with(|| self.tokenizer.singleton_epsilon_closure(target));
+                for &closed in closure.iter() {
+                    let mark = &mut self.closure_marks[closed as usize];
+                    if *mark != generation {
+                        *mark = generation;
+                        targets.push(closed);
+                    }
+                }
+            }
+            targets
+        } else {
+            direct_targets
         };
         targets.sort_unstable();
         targets.dedup();
@@ -2584,8 +2660,8 @@ fn exact_terminal_path_two_plus_candidate_dfa(
     // original tokenizer remains exact even when many terminals are inactive.
     let uses_original_tokenizer = candidate_ids.len() >= 64
         || (tokenizer.has_epsilon_transitions()
-            && candidate_ids.len().saturating_mul(10)
-                >= (tokenizer.num_terminals() as usize).saturating_mul(9));
+            && candidate_ids.len().saturating_mul(4)
+                >= tokenizer.num_terminals() as usize);
     let terminal_to_local = uses_original_tokenizer.then(|| {
         let mut map = vec![u32::MAX; tokenizer.num_terminals() as usize];
         for (local, &terminal) in candidate_ids.iter().enumerate() {
@@ -2650,6 +2726,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
         candidate_tokenizer,
         words_per_mask,
         terminal_to_local,
+        uses_original_tokenizer.then_some(bytesets.sparse_transitions_by_byte.as_slice()),
     );
     let mut split_offsets = Vec::with_capacity(vocab.entries.len() + 1);
     let mut prefix_states = Vec::<u32>::with_capacity(total_splits);

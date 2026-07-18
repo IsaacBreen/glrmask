@@ -131,6 +131,222 @@ impl RelevantPowersetView {
     }
 }
 
+fn mark_relevant_powerset_trie_trajectories(
+    view: &RelevantPowersetView,
+    dense_transitions: &[u32],
+    byte_to_slot: &[u16; 256],
+    transition_stride: usize,
+    start_states: &[u32],
+    trie: &[ByteTrieNode],
+    selected: &mut [bool],
+    observed_bytes: &mut [[u64; 4]],
+) {
+    if trie.is_empty() || start_states.is_empty() {
+        return;
+    }
+
+    let mut node_state_start = vec![0u32; trie.len()];
+    let mut node_state_len = vec![0u32; trie.len()];
+    let mut product_states = Vec::<u32>::with_capacity(start_states.len());
+    product_states.extend_from_slice(start_states);
+    node_state_len[0] = start_states.len() as u32;
+    for &state in start_states {
+        selected[state as usize] = true;
+    }
+
+    let mut state_marks = vec![0u32; view.states.len()];
+    let mut generation = 0u32;
+    for node_index in 0..trie.len() {
+        let state_start = node_state_start[node_index] as usize;
+        let state_len = node_state_len[node_index] as usize;
+        if state_len == 0 {
+            continue;
+        }
+
+        // The root frontier can contain tens of thousands of states. Route its
+        // sparse outgoing edges to matching trie children once per source,
+        // rather than probing every root byte from every source.
+        if node_index == 0 && trie[node_index].children.len() > 1 {
+            let mut child_slot_by_byte = [u16::MAX; 256];
+            for (slot, &(byte, _)) in trie[node_index].children.iter().enumerate() {
+                child_slot_by_byte[byte as usize] = slot as u16;
+            }
+            let mut child_frontiers =
+                vec![Vec::<u32>::new(); trie[node_index].children.len()];
+            for offset in 0..state_len {
+                let source = product_states[state_start + offset];
+                let edge_start = view.edge_offsets[source as usize] as usize;
+                let edge_end = view.edge_offsets[source as usize + 1] as usize;
+                for &(byte, target) in &view.edges[edge_start..edge_end] {
+                    let slot = child_slot_by_byte[byte as usize];
+                    if slot == u16::MAX {
+                        continue;
+                    }
+                    let word = byte as usize / 64;
+                    observed_bytes[source as usize][word] |= 1u64 << (byte as usize % 64);
+                    selected[target as usize] = true;
+                    child_frontiers[slot as usize].push(target);
+                }
+            }
+            for ((_, child), frontier) in trie[node_index]
+                .children
+                .iter()
+                .zip(child_frontiers.iter_mut())
+            {
+                frontier.sort_unstable();
+                frontier.dedup();
+                let child_start = product_states.len();
+                product_states.extend_from_slice(frontier);
+                node_state_start[*child] = child_start as u32;
+                node_state_len[*child] = frontier.len() as u32;
+            }
+            continue;
+        }
+
+        for &(token_byte, child) in &trie[node_index].children {
+            generation = generation.wrapping_add(1);
+            if generation == 0 {
+                state_marks.fill(0);
+                generation = 1;
+            }
+            let byte = token_byte;
+            let child_start = product_states.len();
+            let byte_slot = byte_to_slot[byte as usize];
+            if byte_slot == u16::MAX {
+                node_state_start[child] = child_start as u32;
+                node_state_len[child] = 0;
+                continue;
+            }
+            for offset in 0..state_len {
+                let source = product_states[state_start + offset];
+                let target = dense_transitions
+                    [source as usize * transition_stride + byte_slot as usize];
+                if target == u32::MAX {
+                    continue;
+                }
+                let word = byte as usize / 64;
+                observed_bytes[source as usize][word] |= 1u64 << (byte as usize % 64);
+                selected[target as usize] = true;
+                if state_marks[target as usize] != generation {
+                    state_marks[target as usize] = generation;
+                    product_states.push(target);
+                }
+            }
+            node_state_start[child] = child_start as u32;
+            node_state_len[child] = (product_states.len() - child_start) as u32;
+        }
+    }
+}
+
+/// Restrict an exact relevant-byte powerset to precisely the whole-token and
+/// reset-suffix trajectories needed by the bounded vocabulary analysis.
+/// This preserves the bounded view's observation domain while reusing the
+/// powerset configurations and transitions already constructed for the NFA
+/// refinement prepass.
+pub(crate) fn build_bounded_analysis_view_from_relevant_powerset(
+    view: &RelevantPowersetView,
+    raw_start_states: &[usize],
+    tokens: &[&[u8]],
+) -> BoundedAnalysisView {
+    let transition_stride = view.bytes.len();
+    let mut byte_to_slot = [u16::MAX; 256];
+    for (slot, &byte) in view.bytes.iter().enumerate() {
+        byte_to_slot[byte as usize] = slot as u16;
+    }
+    let mut dense_transitions =
+        vec![u32::MAX; view.states.len().saturating_mul(transition_stride)];
+    for state in 0..view.states.len() {
+        let edge_start = view.edge_offsets[state] as usize;
+        let edge_end = view.edge_offsets[state + 1] as usize;
+        for &(byte, target) in &view.edges[edge_start..edge_end] {
+            let slot = byte_to_slot[byte as usize];
+            debug_assert_ne!(slot, u16::MAX);
+            dense_transitions[state * transition_stride + slot as usize] = target;
+        }
+    }
+    let token_trie = build_byte_trie(tokens.iter().copied());
+    let suffix_trie = build_byte_trie(
+        tokens
+            .iter()
+            .flat_map(|token| (0..token.len()).map(move |offset| &token[offset..])),
+    );
+    let mut selected = vec![false; view.states.len()];
+    let mut observed_bytes = vec![[0u64; 4]; view.states.len()];
+    let mut raw_seed_states = raw_start_states
+        .iter()
+        .map(|&raw| view.view_state_for_raw_start(raw) as u32)
+        .collect::<Vec<_>>();
+    raw_seed_states.sort_unstable();
+    raw_seed_states.dedup();
+    mark_relevant_powerset_trie_trajectories(
+        view,
+        &dense_transitions,
+        &byte_to_slot,
+        transition_stride,
+        &raw_seed_states,
+        &token_trie,
+        &mut selected,
+        &mut observed_bytes,
+    );
+    mark_relevant_powerset_trie_trajectories(
+        view,
+        &dense_transitions,
+        &byte_to_slot,
+        transition_stride,
+        std::slice::from_ref(&(view.start_state as u32)),
+        &suffix_trie,
+        &mut selected,
+        &mut observed_bytes,
+    );
+    selected[view.start_state] = true;
+
+    let mut old_to_new = vec![u32::MAX; view.states.len()];
+    let mut states = Vec::<FlatDfaState>::new();
+    for (old, &is_selected) in selected.iter().enumerate() {
+        if is_selected {
+            old_to_new[old] = states.len() as u32;
+            states.push(view.states[old].clone());
+        }
+    }
+    let mut transitions = vec![u32::MAX; states.len().saturating_mul(256)];
+    for (old_source, &new_source) in old_to_new.iter().enumerate() {
+        if new_source == u32::MAX {
+            continue;
+        }
+        let edge_start = view.edge_offsets[old_source] as usize;
+        let edge_end = view.edge_offsets[old_source + 1] as usize;
+        for &(byte, old_target) in &view.edges[edge_start..edge_end] {
+            let word = byte as usize / 64;
+            if observed_bytes[old_source][word] & (1u64 << (byte as usize % 64)) == 0 {
+                continue;
+            }
+            let new_target = old_to_new[old_target as usize];
+            debug_assert_ne!(new_target, u32::MAX);
+            transitions[new_source as usize * 256 + byte as usize] = new_target;
+        }
+    }
+
+    let mut raw_start_to_view = vec![u32::MAX; view.raw_start_to_view.len()];
+    for &raw in raw_start_states {
+        let old = view.view_state_for_raw_start(raw);
+        let new = old_to_new[old];
+        assert_ne!(new, u32::MAX, "raw analysis seed was not retained");
+        raw_start_to_view[raw] = new;
+    }
+    let start_state = old_to_new[view.start_state];
+    assert_ne!(start_state, u32::MAX);
+    BoundedAnalysisView {
+        tokenizer_view: TokenizerView {
+            flat_dfa: FlatDfa {
+                states,
+                start_state: start_state as usize,
+                transitions: Arc::from(transitions),
+            },
+        },
+        raw_start_to_view,
+    }
+}
+
 pub(crate) fn build_relevant_powerset_analysis_view(
     tokenizer: &Tokenizer,
     relevant_bytes: &[bool; 256],
@@ -3580,6 +3796,164 @@ mod tests {
                     view_trace(&powerset, powerset_start, token),
                     "raw_state={raw_state} token={token:?}",
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn powerset_restricted_bounded_view_matches_direct_bounded_view() {
+        let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
+        let raw_start_states = (0..tokenizer.num_states() as usize).collect::<Vec<_>>();
+        let tokens = [
+            b"".as_slice(),
+            b"a".as_slice(),
+            b"b".as_slice(),
+            b"aa".as_slice(),
+            b"ab".as_slice(),
+            b"ba".as_slice(),
+            b"aab".as_slice(),
+        ];
+        let active_groups = [true, true];
+        let direct = build_bounded_analysis_view(
+            &tokenizer,
+            &raw_start_states,
+            &tokens,
+            Some(&active_groups),
+        );
+        let mut relevant_bytes = [false; 256];
+        for token in tokens {
+            for &byte in token {
+                relevant_bytes[byte as usize] = true;
+            }
+        }
+        let powerset = build_relevant_powerset_view(
+            &tokenizer,
+            &relevant_bytes,
+            Some(&active_groups),
+            None,
+        );
+        let restricted = build_bounded_analysis_view_from_relevant_powerset(
+            &powerset,
+            &raw_start_states,
+            &tokens,
+        );
+
+        for &raw_state in &raw_start_states {
+            let direct_start = direct.view_state_for_raw_start(raw_state);
+            let restricted_start = restricted.view_state_for_raw_start(raw_state);
+            for token in tokens {
+                assert_eq!(
+                    view_trace(&restricted.tokenizer_view, restricted_start, token),
+                    view_trace(&direct.tokenizer_view, direct_start, token),
+                    "raw_state={raw_state} token={token:?}",
+                );
+            }
+        }
+        for token in tokens {
+            for offset in 0..token.len() {
+                assert_eq!(
+                    view_trace(
+                        &restricted.tokenizer_view,
+                        restricted.tokenizer_view.dfa().start_state,
+                        &token[offset..],
+                    ),
+                    view_trace(
+                        &direct.tokenizer_view,
+                        direct.tokenizer_view.dfa().start_state,
+                        &token[offset..],
+                    ),
+                    "reset suffix={:?}",
+                    &token[offset..],
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn powerset_restricted_bounded_view_matches_direct_across_projections() {
+        fn binary_inputs(max_len: usize) -> Vec<Vec<u8>> {
+            let mut inputs = vec![Vec::new()];
+            for len in 1..=max_len {
+                let start = inputs.len();
+                for bits in 0..(1usize << len) {
+                    inputs.push(
+                        (0..len)
+                            .rev()
+                            .map(|shift| if bits & (1 << shift) == 0 { b'a' } else { b'b' })
+                            .collect(),
+                    );
+                }
+                debug_assert_eq!(inputs.len() - start, 1usize << len);
+            }
+            inputs
+        }
+
+        let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
+        let raw_start_states = (0..tokenizer.num_states() as usize).collect::<Vec<_>>();
+        let exhaustive = binary_inputs(4);
+        let sparse_cases = vec![
+            vec![Vec::new(), b"ab".to_vec(), b"baa".to_vec(), b"bbbb".to_vec()],
+            vec![b"a".to_vec(), b"bb".to_vec(), b"aaba".to_vec()],
+        ];
+        let mut token_cases = vec![exhaustive];
+        token_cases.extend(sparse_cases);
+
+        for active_groups in [[true, true], [true, false], [false, true]] {
+            for owned_tokens in &token_cases {
+                let tokens = owned_tokens.iter().map(Vec::as_slice).collect::<Vec<_>>();
+                let direct = build_bounded_analysis_view(
+                    &tokenizer,
+                    &raw_start_states,
+                    &tokens,
+                    Some(&active_groups),
+                );
+                let mut relevant_bytes = [false; 256];
+                for token in &tokens {
+                    for &byte in *token {
+                        relevant_bytes[byte as usize] = true;
+                    }
+                }
+                let powerset = build_relevant_powerset_view(
+                    &tokenizer,
+                    &relevant_bytes,
+                    Some(&active_groups),
+                    None,
+                );
+                let restricted = build_bounded_analysis_view_from_relevant_powerset(
+                    &powerset,
+                    &raw_start_states,
+                    &tokens,
+                );
+
+                for &raw_state in &raw_start_states {
+                    let direct_start = direct.view_state_for_raw_start(raw_state);
+                    let restricted_start = restricted.view_state_for_raw_start(raw_state);
+                    for token in &tokens {
+                        assert_eq!(
+                            view_trace(&restricted.tokenizer_view, restricted_start, token),
+                            view_trace(&direct.tokenizer_view, direct_start, token),
+                            "active_groups={active_groups:?} raw_state={raw_state} token={token:?}",
+                        );
+                    }
+                }
+                for token in &tokens {
+                    for offset in 0..token.len() {
+                        assert_eq!(
+                            view_trace(
+                                &restricted.tokenizer_view,
+                                restricted.tokenizer_view.dfa().start_state,
+                                &token[offset..],
+                            ),
+                            view_trace(
+                                &direct.tokenizer_view,
+                                direct.tokenizer_view.dfa().start_state,
+                                &token[offset..],
+                            ),
+                            "active_groups={active_groups:?} reset suffix={:?}",
+                            &token[offset..],
+                        );
+                    }
+                }
             }
         }
     }

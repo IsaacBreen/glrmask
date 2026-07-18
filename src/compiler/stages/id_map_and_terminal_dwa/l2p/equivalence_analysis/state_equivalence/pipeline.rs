@@ -200,19 +200,25 @@ pub(crate) fn run_state_equivalence_pipeline(
                 );
                 let started_at = Instant::now();
                 current_state_map = if tokenizer.has_epsilon_transitions() {
-                    // Stable restricted-observation refinement has its own
-                    // predecessor-driven direct-NFA engine. Keep this choice
-                    // independent from the optional powerset prepass used by
-                    // bounded max-length refinement: a powerset can be a good
-                    // bounded-analysis accelerator without being the best way
-                    // to compute the stable restricted-observation quotient.
-                    super::nfa::compute_state_map(
-                        tokenizer,
-                        statistic.relevant_bytes(),
-                        active_groups,
-                        Some(&current_state_map),
-                        super::nfa::RefinementDepth::Stable,
-                    )
+                    if let Some(prebuilt) = prebuilt_nfa_refinement {
+                        // The sparse relevant powerset is already exact over the
+                        // active terminal language and relevant vocabulary bytes.
+                        // Reuse its topology for the stable quotient instead of
+                        // traversing the raw epsilon NFA a second time.
+                        prebuilt.compute_state_map(
+                            tokenizer,
+                            Some(&current_state_map),
+                            super::nfa::RefinementDepth::Stable,
+                        )
+                    } else {
+                        super::nfa::compute_state_map(
+                            tokenizer,
+                            statistic.relevant_bytes(),
+                            active_groups,
+                            Some(&current_state_map),
+                            super::nfa::RefinementDepth::Stable,
+                        )
+                    }
                 } else {
                     let tokenizer_view = kbounded_tokenizer_view
                         .expect("L2P restricted observation requires the shared analysis view");

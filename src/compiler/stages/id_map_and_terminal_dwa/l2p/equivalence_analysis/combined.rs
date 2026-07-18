@@ -14,7 +14,8 @@ use super::state_equivalence::{
 };
 use super::state_equivalence::nfa::{
     PrebuiltSparsePowersetRefinement, build_bounded_analysis_view,
-    build_relevant_powerset_view, powerset_output_class_ids,
+    build_bounded_analysis_view_from_relevant_powerset, build_relevant_powerset_view,
+    powerset_output_class_ids,
 };
 use crate::ds::bitset::BitSet;
 use super::compat::{TokenizerView, compute_active_terminal_language_byte_classes};
@@ -397,7 +398,7 @@ fn l2p_nfa_relevant_powerset_max_states() -> usize {
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|&value| value > 0)
-        .unwrap_or(8_192)
+        .unwrap_or(32_768)
 }
 
 #[inline]
@@ -1867,7 +1868,7 @@ fn analyze_equivalences_impl(
         );
         let powerset_started_at = Instant::now();
         let can_reuse_prepass_powerset = prepass_relevant_bytes == relevant_bytes;
-        let powerset_candidate = should_probe_powerset.then(|| {
+        let mut powerset_candidate = should_probe_powerset.then(|| {
             if can_reuse_prepass_powerset {
                 prepass_powerset_candidate.take().unwrap_or_else(|| {
                     build_relevant_powerset_view(tokenizer, &relevant_bytes, active_groups, None)
@@ -1887,14 +1888,34 @@ fn analyze_equivalences_impl(
             powerset_states,
             powerset_max_states,
         );
-        let (analysis_view_owned, preclass_view_states) = if use_powerset {
+        let (analysis_view_owned, preclass_view_states, analysis_view_kind) = if use_powerset {
             let powerset = powerset_candidate
+                .take()
                 .expect("powerset analysis policy must build a powerset candidate");
             let preclass_view_states = raw_pre_representatives
                 .iter()
                 .map(|&raw| powerset.view_state_for_raw_start(raw))
                 .collect::<Vec<_>>();
-            (powerset.into_tokenizer_view(), preclass_view_states)
+            (
+                powerset.into_tokenizer_view(),
+                preclass_view_states,
+                "powerset",
+            )
+        } else if let Some(powerset) = powerset_candidate.as_ref() {
+            let bounded = build_bounded_analysis_view_from_relevant_powerset(
+                powerset,
+                &raw_pre_representatives,
+                &dedup.representative_token_bytes,
+            );
+            let preclass_view_states = raw_pre_representatives
+                .iter()
+                .map(|&raw| bounded.view_state_for_raw_start(raw))
+                .collect::<Vec<_>>();
+            (
+                bounded.tokenizer_view,
+                preclass_view_states,
+                "bounded_from_powerset",
+            )
         } else {
             let bounded = build_bounded_analysis_view(
                 tokenizer,
@@ -1906,7 +1927,7 @@ fn analyze_equivalences_impl(
                 .iter()
                 .map(|&raw| bounded.view_state_for_raw_start(raw))
                 .collect::<Vec<_>>();
-            (bounded.tokenizer_view, preclass_view_states)
+            (bounded.tokenizer_view, preclass_view_states, "bounded")
         };
         let analysis_view_build_ms =
             analysis_view_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -1918,7 +1939,7 @@ fn analyze_equivalences_impl(
                 "[glrmask/profile][l2p_nfa_analysis_view] partition={} policy={} selected={} bounded_pair_estimate={} powerset_min_bounded_pairs={} powerset_probed={} powerset_states={} powerset_max_states={} powerset_build_ms={:.3} total_build_ms={:.3}",
                 partition_label,
                 analysis_view_policy.as_str(),
-                if use_powerset { "powerset" } else { "bounded" },
+                analysis_view_kind,
                 bounded_pair_estimate,
                 powerset_min_bounded_pairs,
                 powerset_probed,

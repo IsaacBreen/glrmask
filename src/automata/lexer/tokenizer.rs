@@ -376,6 +376,10 @@ impl Tokenizer {
         }))
     }
 
+    pub(crate) fn singleton_epsilon_closure(&self, state: u32) -> Box<[u32]> {
+        self.dfa.epsilon_closure(&[state]).into_boxed_slice()
+    }
+
     fn matched_terminals_iter(
         &self,
         state: u32,

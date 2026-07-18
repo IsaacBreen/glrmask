@@ -2035,6 +2035,8 @@ static TRIE_WALK_DISABLED: Lazy<bool> =
     Lazy::new(|| env_flag_enabled("GLRMASK_DISABLE_TRIE_WALK"));
 
 struct DepthChangeLog {
+    /// Batch indices whose DFA paths remain live after this depth.
+    active_indices: Vec<usize>,
     /// (state_idx, old_state_value)
     state_changes: Vec<(usize, usize)>,
     /// (match_positions_flat_idx, old_value)
@@ -2048,6 +2050,7 @@ struct DepthChangeLog {
 impl DepthChangeLog {
     fn new() -> Self {
         Self {
+            active_indices: Vec::new(),
             state_changes: Vec::new(),
             match_changes: Vec::new(),
             dirty_changes: Vec::new(),
@@ -2056,6 +2059,7 @@ impl DepthChangeLog {
     }
 
     fn clear(&mut self) {
+        self.active_indices.clear();
         self.state_changes.clear();
         self.match_changes.clear();
         self.dirty_changes.clear();
@@ -2064,12 +2068,14 @@ impl DepthChangeLog {
 }
 
 struct TrieWalkState {
+    root_active_indices: Vec<usize>,
     depth_logs: Vec<DepthChangeLog>,
 }
 
 impl TrieWalkState {
     fn new() -> Self {
         Self {
+            root_active_indices: Vec::new(),
             depth_logs: Vec::new(),
         }
     }
@@ -2206,7 +2212,19 @@ fn dfs_step(
     batch_len: usize,
 ) {
     trie.ensure_depth(depth);
-    let log = &mut trie.depth_logs[depth];
+    let TrieWalkState {
+        root_active_indices,
+        depth_logs,
+    } = trie;
+    let (source_indices, log) = if depth == 0 {
+        (root_active_indices.as_slice(), &mut depth_logs[0])
+    } else {
+        let (previous, current) = depth_logs.split_at_mut(depth);
+        (
+            previous[depth - 1].active_indices.as_slice(),
+            &mut current[0],
+        )
+    };
     log.clear();
 
     let num_groups = dfa.num_groups;
@@ -2215,11 +2233,10 @@ fn dfs_step(
     let class = dfa.byte_to_class[byte as usize] as usize;
     let class_base = class * dfa.num_states;
 
-    for i in 0..batch_len {
+    debug_assert!(source_indices.iter().all(|&i| i < batch_len));
+    for &i in source_indices {
         let old_state = scratch.current_states[i];
-        if old_state == STATE_NONE {
-            continue;
-        }
+        debug_assert_ne!(old_state, STATE_NONE);
 
         let next_state_raw =
             unsafe { *dfa.trans_by_class.get_unchecked(class_base + old_state) };
@@ -2260,6 +2277,8 @@ fn dfs_step(
 
         if dfa.is_dead_end[ns] {
             scratch.current_states[i] = STATE_NONE;
+        } else {
+            log.active_indices.push(i);
         }
     }
 }
@@ -2273,7 +2292,19 @@ fn dfs_step_profiled(
     batch_len: usize,
 ) -> DfsStepStats {
     trie.ensure_depth(depth);
-    let log = &mut trie.depth_logs[depth];
+    let TrieWalkState {
+        root_active_indices,
+        depth_logs,
+    } = trie;
+    let (source_indices, log) = if depth == 0 {
+        (root_active_indices.as_slice(), &mut depth_logs[0])
+    } else {
+        let (previous, current) = depth_logs.split_at_mut(depth);
+        (
+            previous[depth - 1].active_indices.as_slice(),
+            &mut current[0],
+        )
+    };
     log.clear();
 
     let mut step_stats = DfsStepStats::default();
@@ -2284,11 +2315,10 @@ fn dfs_step_profiled(
     let class = dfa.byte_to_class[byte as usize] as usize;
     let class_base = class * dfa.num_states;
 
-    for i in 0..batch_len {
+    debug_assert!(source_indices.iter().all(|&i| i < batch_len));
+    for &i in source_indices {
         let old_state = scratch.current_states[i];
-        if old_state == STATE_NONE {
-            continue;
-        }
+        debug_assert_ne!(old_state, STATE_NONE);
         step_stats.states_visited += 1;
 
         let mut state_new_dirty_groups = 0usize;
@@ -2341,6 +2371,8 @@ fn dfs_step_profiled(
             if state_new_dirty_groups == 0 {
                 step_stats.dead_without_new_dirty += 1;
             }
+        } else {
+            log.active_indices.push(i);
         }
     }
 
@@ -2559,6 +2591,7 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
 
     // Initialize: copy initial states and mark dead-ends
     scratch.current_states[..batch_len].clone_from_slice(batch);
+    trie.root_active_indices.clear();
     {
         let dirty_words = scratch.dirty_words;
         let mask_end = batch_len * dirty_words;
@@ -2575,6 +2608,8 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
     for i in 0..batch_len {
         if dfa.is_dead_end[scratch.current_states[i]] {
             scratch.current_states[i] = STATE_NONE;
+        } else {
+            trie.root_active_indices.push(i);
         }
     }
     let max_token_len = chunk
@@ -3790,6 +3825,49 @@ mod shared_base_tests {
         assert!(!token_signatures_are_pairwise_distinct(
             &dfa, &collided, &states,
         ));
+    }
+
+    #[test]
+    fn trie_live_frontier_signatures_match_independent_token_scans() {
+        let view = TokenizerView { flat_dfa: sample_dfa() };
+        let disallowed = BTreeMap::<u32, BitSet>::new();
+        let dfa = build_dfa_with_group_filter(&view, &disallowed, None, None, None);
+        let states = vec![0usize, 1, 2];
+        let tokens = vec![
+            b"".to_vec(),
+            b"a".to_vec(),
+            b"aa".to_vec(),
+            b"ab".to_vec(),
+            b"aba".to_vec(),
+            b"abb".to_vec(),
+            b"b".to_vec(),
+            b"ba".to_vec(),
+            b"bb".to_vec(),
+            b"c".to_vec(),
+            b"ca".to_vec(),
+        ];
+        let expected = token_signatures_for_states(&dfa, &tokens, &states);
+        let mut sorted_indices = (0..tokens.len()).collect::<Vec<_>>();
+        sorted_indices.sort_unstable_by(|&left, &right| tokens[left].cmp(&tokens[right]));
+        let state_group_size = vocab_state_group_size(states.len(), dfa.num_groups);
+        let mut scratch = Scratch::new(states.len(), dfa.num_groups);
+        let mut trie = TrieWalkState::new();
+        let (pairs, _) = trie_walk_chunk_signatures(
+            &dfa,
+            &tokens,
+            &sorted_indices,
+            &states,
+            state_group_size,
+            &mut scratch,
+            &mut trie,
+            false,
+        );
+        let mut actual = vec![0u64; tokens.len()];
+        for (token_idx, signature) in pairs {
+            actual[token_idx] = signature;
+        }
+
+        assert_eq!(actual, expected);
     }
 
     #[test]
