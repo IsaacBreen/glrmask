@@ -60,10 +60,11 @@ struct LegacyDynamicConstraintPayloadV3 {
     initial_token_program_partition: Option<DynamicTokenProgramPartition>,
 }
 
-/// A constraint compiled only for direct lexer/parser masking.
+/// A constraint optimized for low compilation latency.
 ///
 /// Unlike [`Constraint`], this omits terminal-DWA, possible-match, parser-DWA,
-/// token-remapping, and dense-mask compilation.
+/// token-remapping, and dense-mask compilation. It produces the same masks as
+/// [`Constraint`] but performs more work during mask generation.
 #[derive(Debug)]
 pub struct DynamicConstraint {
     pub(crate) inner: Constraint,
@@ -228,6 +229,7 @@ impl DynamicConstraint {
         Self { inner }
     }
 
+    /// Serialize this dynamic constraint to a versioned binary artifact.
     pub fn save(&self) -> Vec<u8> {
         let payload = DynamicConstraintPayloadV3 {
             v2: DynamicConstraintPayloadV2 {
@@ -256,6 +258,7 @@ impl DynamicConstraint {
         bytes
     }
 
+    /// Load an artifact produced by [`DynamicConstraint::save`].
     pub fn load(bytes: &[u8]) -> crate::Result<Self> {
         if bytes.len() < DYNAMIC_CONSTRAINT_HEADER_LEN
             || !bytes.starts_with(&DYNAMIC_CONSTRAINT_MAGIC)
@@ -318,6 +321,7 @@ impl DynamicConstraint {
         }
     }
 
+    /// Return the number of `u32` words required for a packed token mask.
     pub fn mask_len(&self) -> usize {
         self.inner.mask_len()
     }
@@ -326,6 +330,7 @@ impl DynamicConstraint {
         self.inner.max_original_token_id()
     }
 
+    /// Create a fresh state for one generated sequence.
     pub fn start(&self) -> DynamicConstraintState<'_> {
         DynamicConstraintState {
             inner: self.inner.start_dynamic(),
@@ -333,43 +338,53 @@ impl DynamicConstraint {
     }
 }
 
+/// Mutable per-sequence state for a [`DynamicConstraint`].
 pub struct DynamicConstraintState<'a> {
     inner: ConstraintState<'a>,
 }
 
 impl<'a> DynamicConstraintState<'a> {
+    /// Advance the state by raw bytes.
     pub fn commit_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
         self.inner.commit_bytes(bytes)
     }
 
+    /// Advance the state by one model token ID.
     pub fn commit_token(&mut self, token_id: u32) -> Result<(), String> {
         self.inner.commit_token_dynamic(token_id)
     }
 
+    /// Advance the state by a sequence of model token IDs.
     pub fn commit_tokens(&mut self, token_ids: &[u32]) -> Result<(), String> {
         self.inner.commit_tokens_dynamic(token_ids)
     }
 
+    /// Fill `buf` with the allowed-token mask as a packed bitset.
     pub fn fill_mask(&self, buf: &mut [u32]) {
         self.inner.fill_mask_dynamic(buf);
     }
 
+    /// Fill the mask, returning an error if generation exceeds `timeout_ms`.
     pub fn fill_mask_bounded(&self, buf: &mut [u32], timeout_ms: u64) -> Result<(), String> {
         self.inner.fill_mask_dynamic_bounded(buf, timeout_ms)
     }
 
+    /// Return a forced token sequence when one can be determined.
     pub fn forced(&self) -> Vec<u32> {
         self.inner.forced_dynamic()
     }
 
+    /// Return whether the committed prefix completes the grammar.
     pub fn is_complete(&self) -> bool {
         self.inner.is_complete()
     }
 
+    /// Return whether generation has finished.
     pub fn is_finished(&self) -> bool {
         self.inner.is_finished()
     }
 
+    /// Return the allowed-token mask as a packed `u32` bitset.
     pub fn mask(&self) -> Vec<u32> {
         let mut mask = vec![0u32; self.inner.constraint.mask_len()];
         self.fill_mask(&mut mask);

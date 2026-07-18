@@ -3621,6 +3621,7 @@ impl<'a> ConstraintState<'a> {
     ///
     /// Returns an error if `token_id` is neither present in the vocabulary nor
     /// declared by a special-token terminal.
+    /// Advance the state by one model token ID.
     pub fn commit_token(
         &mut self,
         token_id: u32,
@@ -3825,6 +3826,7 @@ impl<'a> ConstraintState<'a> {
         result
     }
 
+    /// Advance the state by raw bytes.
     pub fn commit_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
         let result = commit_bytes_impl(self.constraint, &mut self.state, bytes, &mut self.buffers);
         let result = clear_state_on_commit_error(&mut self.state, result);
@@ -3832,6 +3834,7 @@ impl<'a> ConstraintState<'a> {
         result
     }
 
+    /// Advance the state by a sequence of model token IDs.
     pub fn commit_tokens(&mut self, tokens: &[u32]) -> Result<(), String> {
         for &token in tokens {
             self.commit_token(token)?;

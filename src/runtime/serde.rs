@@ -5,6 +5,7 @@ const CONSTRAINT_VERSION: u16 = 3;
 const CONSTRAINT_HEADER_LEN: usize = CONSTRAINT_MAGIC.len() + 2 + 8;
 
 impl Constraint {
+    /// Serialize this compiled constraint to a versioned binary artifact.
     pub fn save(&self) -> Vec<u8> {
         let payload = bincode::serialize(self).expect("Constraint serialization should succeed");
         let mut bytes = Vec::with_capacity(CONSTRAINT_HEADER_LEN + payload.len());
@@ -15,6 +16,7 @@ impl Constraint {
         bytes
     }
 
+    /// Load a compiled constraint from an artifact produced by [`Constraint::save`].
     pub fn load(bytes: &[u8]) -> crate::Result<Self> {
         if bytes.len() < CONSTRAINT_HEADER_LEN || !bytes.starts_with(&CONSTRAINT_MAGIC) {
             return Err(crate::GlrMaskError::Serialization(

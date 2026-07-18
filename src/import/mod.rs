@@ -195,10 +195,12 @@ fn parse_json_schema_to_named(schema_json: &str) -> crate::Result<ast::NamedGram
 }
 
 impl Constraint {
+    /// Compile an EBNF grammar for `vocab`.
     pub fn from_ebnf(ebnf: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
         Self::from_ebnf_with_end_tokens(ebnf, vocab, &[])
     }
 
+    /// Compile an EBNF grammar and declare model end-token IDs.
     pub fn from_ebnf_with_end_tokens(
         ebnf: &str,
         vocab: &crate::Vocab,
@@ -215,10 +217,12 @@ impl Constraint {
         )
     }
 
+    /// Compile a Lark grammar for `vocab`.
     pub fn from_lark(lark: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
         Self::from_lark_with_end_tokens(lark, vocab, &[])
     }
 
+    /// Compile a Lark grammar and declare model end-token IDs.
     pub fn from_lark_with_end_tokens(
         lark: &str,
         vocab: &crate::Vocab,
@@ -235,10 +239,12 @@ impl Constraint {
         )
     }
 
+    /// Compile a JSON Schema for `vocab`.
     pub fn from_json_schema(schema: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
         Self::from_json_schema_with_end_tokens(schema, vocab, &[])
     }
 
+    /// Compile a JSON Schema and declare model end-token IDs.
     pub fn from_json_schema_with_end_tokens(
         schema: &str,
         vocab: &crate::Vocab,
@@ -257,11 +263,12 @@ impl Constraint {
         })
     }
 
-    /// Load a grammar from the GLRM text format.
+    /// Compile a grammar in GLRMask's native GLRM format.
     pub fn from_glrm_grammar(glrm: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
         Self::from_glrm_grammar_with_end_tokens(glrm, vocab, &[])
     }
 
+    /// Compile a GLRM grammar and declare model end-token IDs.
     pub fn from_glrm_grammar_with_end_tokens(
         glrm: &str,
         vocab: &crate::Vocab,
@@ -280,10 +287,12 @@ impl Constraint {
 }
 
 impl DynamicConstraint {
+    /// Compile an EBNF grammar with reduced compilation latency.
     pub fn from_ebnf(ebnf: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
         Self::from_ebnf_with_end_tokens(ebnf, vocab, &[])
     }
 
+    /// Compile an EBNF grammar with reduced latency and model end-token IDs.
     pub fn from_ebnf_with_end_tokens(
         ebnf: &str,
         vocab: &crate::Vocab,
@@ -299,10 +308,12 @@ impl DynamicConstraint {
         )
     }
 
+    /// Compile a Lark grammar with reduced compilation latency.
     pub fn from_lark(lark: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
         Self::from_lark_with_end_tokens(lark, vocab, &[])
     }
 
+    /// Compile a Lark grammar with reduced latency and model end-token IDs.
     pub fn from_lark_with_end_tokens(
         lark: &str,
         vocab: &crate::Vocab,
@@ -318,10 +329,12 @@ impl DynamicConstraint {
         )
     }
 
+    /// Compile a JSON Schema with reduced compilation latency.
     pub fn from_json_schema(schema: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
         Self::from_json_schema_with_end_tokens(schema, vocab, &[])
     }
 
+    /// Compile a JSON Schema with reduced latency and model end-token IDs.
     pub fn from_json_schema_with_end_tokens(
         schema: &str,
         vocab: &crate::Vocab,
@@ -337,10 +350,12 @@ impl DynamicConstraint {
         )
     }
 
+    /// Compile a GLRM grammar with reduced compilation latency.
     pub fn from_glrm_grammar(glrm: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
         Self::from_glrm_grammar_with_end_tokens(glrm, vocab, &[])
     }
 
+    /// Compile a GLRM grammar with reduced latency and model end-token IDs.
     pub fn from_glrm_grammar_with_end_tokens(
         glrm: &str,
         vocab: &crate::Vocab,

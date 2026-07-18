@@ -28,6 +28,8 @@ Published wheels include the native extension. Building from source requires a R
 cargo add glrmask
 ```
 
+**Documentation:** [Python](python/README.md) · [Rust](https://docs.rs/glrmask)
+
 ## Usage
 
 GLRMask compiles a grammar and vocabulary into a `Constraint`. The resulting `Constraint` can be serialized and cached for reuse across requests.

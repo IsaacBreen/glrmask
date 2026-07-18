@@ -3,6 +3,10 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
+/// Model vocabulary used when compiling a grammar constraint.
+///
+/// Entries map model token IDs to their exact byte sequences. Token IDs may be
+/// sparse; masks are indexed by the original model token IDs.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Vocab {
     pub entries: Arc<BTreeMap<u32, Vec<u8>>>,
@@ -56,6 +60,7 @@ impl Clone for Vocab {
 }
 
 impl Vocab {
+    /// Build a vocabulary from `(token_id, token_bytes)` pairs.
     pub fn new(entries: Vec<(u32, Vec<u8>)>) -> Self {
         Self {
             entries: Arc::new(entries.into_iter().collect()),
@@ -63,14 +68,17 @@ impl Vocab {
         }
     }
 
+    /// Return the number of vocabulary entries.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    /// Return whether the vocabulary contains no entries.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
+    /// Return the highest token ID, or `0` for an empty vocabulary.
     pub fn max_token_id(&self) -> u32 {
         self.entries
             .last_key_value()

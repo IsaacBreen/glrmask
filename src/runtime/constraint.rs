@@ -2079,10 +2079,12 @@ impl Constraint {
         Self::dense_words_from_internal_set_with_words(internal_tokens, self.internal_token_dense_words)
     }
 
+    /// Create a fresh state for one generated sequence.
     pub fn start(&self) -> ConstraintState<'_> {
         self.start_with_rollback(0)
     }
 
+    /// Create a state retaining up to `max_rollback_tokens` token snapshots.
     pub fn start_with_rollback(&self, max_rollback_tokens: usize) -> ConstraintState<'_> {
         let state = self.initial_state_map();
         let state = ConstraintState {
@@ -2112,6 +2114,7 @@ impl Constraint {
         }
     }
 
+    /// Return the number of `u32` words required for a packed token mask.
     pub fn mask_len(&self) -> usize {
         self.max_original_token_id()
             .map(|token_id| (token_id as usize / 32) + 1)

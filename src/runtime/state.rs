@@ -64,6 +64,10 @@ pub(crate) struct StateSnapshot {
     pub generation: u64,
 }
 
+/// Mutable parser state for one generated sequence.
+///
+/// Obtain a mask, sample a permitted token, and commit it to advance the state.
+/// Create separate states for concurrently generated sequences.
 pub struct ConstraintState<'a> {
     pub(crate) constraint: &'a Constraint,
     pub(crate) state: BTreeMap<u32, ParserGSS>,
@@ -145,6 +149,7 @@ impl<'a> ConstraintState<'a> {
         });
     }
 
+    /// Roll back committed tokens retained by `start_with_rollback`.
     pub fn rollback(&mut self, num_tokens: usize) -> Result<(), String> {
         if num_tokens == 0 {
             return Ok(());
@@ -166,6 +171,7 @@ impl<'a> ConstraintState<'a> {
         Ok(())
     }
 
+    /// Return the longest valid prefix of `tokens` without modifying this state.
     pub fn validate_tokens(&self, tokens: &[u32]) -> Vec<u32> {
         let mut cursor = self.clone_without_history();
         let mut accepted = Vec::with_capacity(tokens.len());
@@ -178,10 +184,12 @@ impl<'a> ConstraintState<'a> {
         accepted
     }
 
+    /// Return whether no valid parser state remains.
     pub fn is_failed(&self) -> bool {
         self.state.is_empty()
     }
 
+    /// Return whether the committed prefix completes the grammar.
     pub fn is_complete(&self) -> bool {
         let initial_tsid = self.constraint.tokenizer.initial_state();
         let Some(stack) = self.state.get(&initial_tsid) else {
@@ -190,6 +198,9 @@ impl<'a> ConstraintState<'a> {
         !stack.is_empty() && stacks_finished(&self.constraint.table, stack)
     }
 
+    /// Return whether generation has finished.
+    ///
+    /// This is currently equivalent to [`ConstraintState::is_complete`].
     pub fn is_finished(&self) -> bool {
         self.is_complete()
     }
@@ -221,6 +232,7 @@ impl<'a> ConstraintState<'a> {
         }).collect()
     }
 
+    /// Return a forced token sequence when one can be determined.
     pub fn forced(&self) -> Vec<u32> {
         self.forced_impl(false)
     }

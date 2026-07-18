@@ -2076,6 +2076,7 @@ impl<'a> ConstraintState<'a> {
         returned_profile
     }
 
+    /// Return the allowed-token mask as a packed `u32` bitset.
     pub fn mask(&self) -> Vec<u32> {
         let mut buf = vec![0u32; self.constraint.mask_len()];
         self.fill_mask(&mut buf);
@@ -2096,6 +2097,10 @@ impl<'a> ConstraintState<'a> {
         self.fill_mask_uncached(&mut buf);
     }
 
+    /// Fill `buf` with the allowed-token mask.
+    ///
+    /// `buf` must contain at least [`crate::Constraint::mask_len`] words. Any extra
+    /// words are cleared.
     pub fn fill_mask(&self, buf: &mut [u32]) {
         let required = self.constraint.mask_len();
         assert!(buf.len() >= required, "mask buffer is smaller than constraint mask");

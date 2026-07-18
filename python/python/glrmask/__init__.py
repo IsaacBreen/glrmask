@@ -1,3 +1,3 @@
-"""Python bindings for glrmask."""
+"""Extremely fast grammar-constrained decoding for LLMs."""
 
 from ._glrmask import *

@@ -6,14 +6,16 @@ build-backend = "maturin"
 name = "glrmask"
 version = "0.1.1"
 requires-python = ">=3.9,<3.14"
-description = "Grammar-constrained token masking for context-free languages"
+description = "Extremely fast grammar-constrained decoding for LLMs"
 readme = "README.md"
 license = { text = "MIT OR Apache-2.0" }
 license-files = ["licenses/LICENSE-MIT", "licenses/LICENSE-APACHE"]
 dependencies = ["numpy>=1.21"]
 
 [project.urls]
+Documentation = "https://github.com/IsaacBreen/glrmask/tree/main/python"
 Repository = "https://github.com/IsaacBreen/glrmask"
+Changelog = "https://github.com/IsaacBreen/glrmask/blob/main/CHANGELOG.md"
 
 [tool.maturin]
 features = []

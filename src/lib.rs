@@ -1,3 +1,57 @@
+//! Extremely fast grammar-constrained decoding for LLMs.
+//!
+//! GLRMask compiles a grammar together with a model vocabulary into a reusable
+//! [`Constraint`]. A mutable [`ConstraintState`] tracks one generated sequence:
+//! obtain the next-token mask, sample a token, then commit that token to advance
+//! the parser state.
+//!
+//! [`DynamicConstraint`] exposes the same decoding model with much lower
+//! compilation latency and higher mask-generation latency. It is intended for
+//! cache misses while a reusable [`Constraint`] is compiled separately.
+//!
+//! # Quickstart
+//!
+//! ```
+//! use glrmask::{Constraint, Vocab};
+//!
+//! let vocab = Vocab::new(vec![
+//!     (0, b"hello".to_vec()),
+//!     (1, b" ".to_vec()),
+//!     (2, b"world".to_vec()),
+//! ]);
+//! let constraint = Constraint::from_ebnf(
+//!     r#"start ::= "hello" " " "world""#,
+//!     &vocab,
+//! )
+//! .unwrap();
+//!
+//! let mut state = constraint.start();
+//! assert_ne!(state.mask()[0] & (1 << 0), 0);
+//! state.commit_token(0).unwrap();
+//! assert_ne!(state.mask()[0] & (1 << 1), 0);
+//! state.commit_token(1).unwrap();
+//! state.commit_token(2).unwrap();
+//! assert!(state.is_finished());
+//! ```
+//!
+//! Masks in the Rust API are packed `u32` bitsets. Bit `token_id % 32` of word
+//! `token_id / 32` indicates whether that token is allowed.
+//!
+//! # Grammar inputs
+//!
+//! [`Constraint`] and [`DynamicConstraint`] can be compiled from JSON Schema,
+//! GLRM, Lark, or EBNF. Constructors ending in `_with_end_tokens` additionally
+//! declare model token IDs that may terminate generation once the grammar is
+//! complete.
+//!
+//! # Persistence
+//!
+//! Use [`Constraint::save`] and [`Constraint::load`] to cache compiled
+//! constraints across requests or process restarts.
+//!
+//! See the repository's Python guide and README for model integration examples,
+//! grammar syntax, special tokens, and benchmarks.
+
 #![deny(warnings)]
 #![allow(dead_code)]
 #![allow(unused_variables)]

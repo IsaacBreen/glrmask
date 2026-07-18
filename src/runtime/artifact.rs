@@ -2249,6 +2249,10 @@ pub(crate) struct CommitTemplateDfas {
     pub(crate) read_to_push: Vec<Option<u32>>,
 }
 
+/// Fully compiled, immutable grammar constraint.
+///
+/// A `Constraint` is intended to be reused across generated sequences. Call
+/// [`Constraint::start`] to create a mutable per-sequence state.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Constraint {
     pub(crate) parser_dwa: DWA,
