@@ -47,7 +47,7 @@ while generating:
     state.commit_token(token_id)
 ```
 
-To minimize cold-start latency, `DynamicConstraint` can be used on a cache miss while the corresponding `Constraint` is compiled in parallel and cached for subsequent requests. `DynamicConstraint` has the same interface and produces identical masks, but compiles much faster than `Constraint`, at the cost of higher mask-generation latency.
+Constraint compilation typically takes a few hundred milliseconds. To minimize cold-start latency, use `DynamicConstraint` on cache miss. It has the same interface as `Constraint` and produces identical masks, but compiles much faster, at the cost of higher mask-generation latency. The corresponding `Constraint` can be compiled separately and cached for subsequent requests.
 
 ## Python quickstart
 
