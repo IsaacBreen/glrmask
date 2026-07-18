@@ -38,6 +38,8 @@ const HASH_SEED4: u64 = 0x85eb_ca6b_27d4_eb2f;
 const NONE: u32 = u32::MAX;
 const STATE_NONE: usize = usize::MAX;
 const VOCAB_MATCH_POSITIONS_GROUP_BYTES: usize = 256 * 1024;
+const VOCAB_DEFAULT_BATCH_MAX_STATES: usize = 4_000;
+const VOCAB_DEFAULT_BATCH_MATCH_POSITION_BYTES: usize = 4 * 1024 * 1024;
 const SELF_LOOP_ACTIVE_LEN_LIMIT: usize = 512;
 
 /// Flat DFA with byte-class-compressed transposed transition tables.
@@ -700,6 +702,21 @@ fn vocab_batch_size_override() -> Option<usize> {
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|&value| value > 0)
+}
+
+fn default_vocab_batch_size(num_states: usize, num_groups: usize) -> usize {
+    if num_states == 0 {
+        return 0;
+    }
+    if num_groups == 0 {
+        return num_states.min(VOCAB_DEFAULT_BATCH_MAX_STATES);
+    }
+    let bytes_per_state = num_groups.saturating_mul(std::mem::size_of::<u32>());
+    let memory_bounded_states =
+        (VOCAB_DEFAULT_BATCH_MATCH_POSITION_BYTES / bytes_per_state.max(1)).max(1);
+    num_states
+        .min(VOCAB_DEFAULT_BATCH_MAX_STATES)
+        .min(memory_bounded_states)
 }
 
 fn vocab_verify_token_pair_override() -> Option<(usize, usize)> {
@@ -3518,12 +3535,12 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
     };
 
     let num_groups = dfa_ref.num_groups;
-    // A 500-state default is empirically better for the TTFM tail than the
-    // older memory-target-derived large batch when combined with the no-unit
-    // GLR default; keep the env override for A/B.
-    let default_batch_size = 500usize;
+    // Sparse live-state signatures make larger batches profitable by reducing
+    // repeated trie traversal. Bound the default by the dominant
+    // `match_positions` allocation so unusually wide terminal-group axes do
+    // not inherit an unbounded memory increase. Keep the env override for A/B.
     let batch_size = vocab_batch_size_override()
-        .unwrap_or_else(|| num_initial_states.min(default_batch_size));
+        .unwrap_or_else(|| default_vocab_batch_size(num_initial_states, num_groups));
     let mut active_indices: Vec<usize> = (0..num_tokens).collect();
     let mut active_tokens = vec![true; num_tokens];
     let lexical_order_started_at = profiling.then(Instant::now);
@@ -4052,6 +4069,17 @@ mod shared_base_tests {
                 "live_mask={live_mask:#b}",
             );
         }
+    }
+
+    #[test]
+    fn default_vocab_batch_size_is_state_and_memory_bounded() {
+        assert_eq!(default_vocab_batch_size(0, 10), 0);
+        assert_eq!(default_vocab_batch_size(123, 0), 123);
+        assert_eq!(default_vocab_batch_size(10_000, 0), 4_000);
+        assert_eq!(default_vocab_batch_size(10_000, 1), 4_000);
+        assert_eq!(default_vocab_batch_size(10_000, 262), 4_000);
+        assert_eq!(default_vocab_batch_size(10_000, 263), 3_986);
+        assert_eq!(default_vocab_batch_size(10_000, usize::MAX), 1);
     }
 
     #[test]
