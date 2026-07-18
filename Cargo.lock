@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "_glrmask"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "glrmask",
  "glrmask-runtime",
@@ -419,7 +419,7 @@ dependencies = [
 
 [[package]]
 name = "glrmask"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ahash",
  "bincode",

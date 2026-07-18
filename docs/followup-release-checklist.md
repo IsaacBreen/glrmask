@@ -1,6 +1,6 @@
 # Follow-up release checklist for the vLLM prerequisite APIs
 
-> **Status:** preparation for `<NEXT_VERSION>`. This document does not select a version, publish an artifact, or make the current public `0.1.0` compatible with vLLM.
+> **Status:** release checklist for `0.1.1`. This document does not publish an artifact. Public `0.1.0` remains incompatible with the vLLM backend.
 
 ## Required source gate
 
@@ -9,15 +9,15 @@ The release source must contain the semantically integrated versions of:
 - bounded rollback with zero history by default;
 - non-mutating `validate_tokens`;
 - `is_failed`;
-- explicit EOS in Python vocabulary constructors;
-- EOS-aware packed-mask extent;
+- grammar-level end-token IDs across JSON Schema, EBNF, Lark, and GLRM constructors;
+- end-token-aware packed-mask extent;
 - focused Rust and Python tests for all of the above.
 
-The preserved prerequisite source is `c13e5d857a9366221949bb73f6224342d2330335`. It is validation evidence, not the final release head. The release must use the prerequisite integrated onto the current intended release line and rerun the complete gate there.
+The old prerequisite branch is validation evidence only. The release must use the lifecycle API integrated with grammar-level end-token semantics on the unified current development line.
 
 ## Version surfaces
 
-After the owner selects `<NEXT_VERSION>`, update these three enforced publication surfaces together:
+The three enforced publication surfaces must all read `0.1.1`:
 
 ```text
 Cargo.toml                  [package].version
@@ -63,9 +63,9 @@ A patch release can reproduce the `0.1.0` platform coverage, but registry public
 
 Before the version is selected:
 
-> The GLRMask backend requires `glrmask >= <NEXT_VERSION>`. Public `glrmask 0.1.0` is incompatible because it does not expose bounded rollback, non-mutating token validation, failed-state inspection, or the explicit-EOS constructor and mask-extent contract.
+> The GLRMask backend requires `glrmask >= 0.1.1`. Public `glrmask 0.1.0` is incompatible because it does not expose bounded rollback, non-mutating token validation, failed-state inspection, or the explicit-EOS constructor and mask-extent contract.
 
-After publication, replace `<NEXT_VERSION>` with the exact released version in the vLLM dependency metadata, optional-dependency error, RFC body, support matrix, and reproduction instructions.
+After publication, use `0.1.1` in the vLLM dependency metadata, optional-dependency error, RFC body, support matrix, and reproduction instructions.
 
 ## Pre-tag gate
 
@@ -87,13 +87,14 @@ Constraint.start(max_rollback_tokens=...)
 rollback(n)
 validate_tokens(...)
 is_failed()
-Vocab.from_id_to_bytes(..., eos_token_id=...)
-EOS included in mask_len() and admitted only at completion
+Constraint.from_json_schema(..., end_token_ids=[...])
+Constraint.from_ebnf(..., end_token_ids=[...])
+end token included in mask_len(), admitted after the base language, and committed to complete the augmented grammar
 ```
 
 ## Tag, build, publish, and verify
 
-Use `<NEXT_VERSION>` and `<RELEASE_COMMIT>` literally until the owner chooses and approves them.
+Use `0.1.1` and `<RELEASE_COMMIT>` until the exact release commit is approved.
 
 1. Confirm source identity and cleanliness:
 
@@ -106,8 +107,8 @@ Use `<NEXT_VERSION>` and `<RELEASE_COMMIT>` literally until the owner chooses an
 2. Create and push the annotated tag only after the pre-tag gate passes:
 
    ```bash
-   git tag -a "v<NEXT_VERSION>" <RELEASE_COMMIT> -m "GLRMask <NEXT_VERSION>"
-   git push origin "v<NEXT_VERSION>"
+   git tag -a "v0.1.1" <RELEASE_COMMIT> -m "GLRMask 0.1.1"
+   git push origin "v0.1.1"
    ```
 
 3. Wait for the tag-triggered `Python wheels` workflow to pass all jobs. Download its combined `python-release-artifacts` artifact into an empty `dist/` directory, then recheck locally:
@@ -118,7 +119,7 @@ Use `<NEXT_VERSION>` and `<RELEASE_COMMIT>` literally until the owner chooses an
    python scripts/check-python-wheel-set.py dist
    test "$(find dist -maxdepth 1 -name '*.whl' | wc -l | tr -d ' ')" = 25
    test "$(find dist -maxdepth 1 -name '*.tar.gz' | wc -l | tr -d ' ')" = 1
-   shasum -a 256 dist/* > "glrmask-<NEXT_VERSION>-artifacts.sha256"
+   shasum -a 256 dist/* > "glrmask-0.1.1-artifacts.sha256"
    ```
 
 4. Publish the Rust crate from the exact tagged source:
@@ -133,7 +134,7 @@ Use `<NEXT_VERSION>` and `<RELEASE_COMMIT>` literally until the owner chooses an
    python -m twine upload dist/*
    ```
 
-6. Create a non-draft, non-prerelease GitHub Release for `v<NEXT_VERSION>` using the finalized changelog entry and attach the checksum manifest. Do not attach locally rebuilt replacement wheels.
+6. Create a non-draft, non-prerelease GitHub Release for `v0.1.1` using the finalized changelog entry and attach the checksum manifest. Do not attach locally rebuilt replacement wheels.
 
 7. Verify the public Python package in a fresh environment with no local or alternate-index fallback:
 
@@ -142,16 +143,16 @@ Use `<NEXT_VERSION>` and `<RELEASE_COMMIT>` literally until the owner chooses an
    PIP_CONFIG_FILE=/dev/null \
      /tmp/glrmask-public-python/bin/python -m pip install \
      --index-url https://pypi.org/simple --no-cache-dir \
-     "glrmask==<NEXT_VERSION>"
+     "glrmask==0.1.1"
    /tmp/glrmask-public-python/bin/python -c \
-     'import importlib.metadata, glrmask; assert importlib.metadata.version("glrmask") == "<NEXT_VERSION>"; print(glrmask.__file__)'
+     'import importlib.metadata, glrmask; assert importlib.metadata.version("glrmask") == "0.1.1"; print(glrmask.__file__)'
    ```
 
 8. Verify the public Rust crate in a fresh consumer with an exact dependency:
 
    ```toml
    [dependencies]
-   glrmask = "=<NEXT_VERSION>"
+   glrmask = "=0.1.1"
    ```
 
    Run `cargo generate-lockfile` followed by `cargo build --locked`, inspect `Cargo.lock` for a crates.io source and checksum, then run a rollback/EOS lifecycle smoke.
@@ -159,8 +160,8 @@ Use `<NEXT_VERSION>` and `<RELEASE_COMMIT>` literally until the owner chooses an
 9. Verify tag identity and registry state:
 
    ```bash
-   git ls-remote origin "refs/tags/v<NEXT_VERSION>^{}"
-   cargo info "glrmask@<NEXT_VERSION>"
+   git ls-remote origin "refs/tags/v0.1.1^{}"
+   cargo info "glrmask@0.1.1"
    python -m pip index versions glrmask --index-url https://pypi.org/simple
    ```
 
@@ -169,7 +170,6 @@ Use `<NEXT_VERSION>` and `<RELEASE_COMMIT>` literally until the owner chooses an
 ## Artifact and registry checklist
 
 - [ ] Integrated prerequisite branch is reviewed and approved.
-- [ ] `<NEXT_VERSION>` selected by the owner.
 - [ ] Three enforced version surfaces and `Cargo.lock` agree.
 - [ ] Changelog placeholder replaced with the exact version/date.
 - [ ] Full Rust/source gate passes at `<RELEASE_COMMIT>`.

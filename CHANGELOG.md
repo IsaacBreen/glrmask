@@ -1,19 +1,29 @@
 # Changelog
 
-## `<NEXT_VERSION>` — release date pending — vLLM prerequisite lifecycle APIs
-
-> Release-preparation placeholder. Replace `<NEXT_VERSION>` and the date only after the integrated prerequisite branch passes the complete release gate. These APIs are not present in public `glrmask 0.1.0`.
+## 0.1.1 — 2026-07-18 — runtime, integration, and tail-latency update
 
 ### Added
 
+- Grammar-level end-token IDs for JSON Schema, EBNF, Lark, and GLRM constructors. End tokens are exact parser terminals rather than byte spellings or metadata stored on `Vocab`.
 - Bounded token-level rollback for speculative decoding, with zero retained history by default.
 - Non-mutating proposal validation that returns the longest admissible token prefix.
 - Explicit failed-state inspection for recovery after an invalid commit.
-- Explicit EOS identity in vocabulary constructors and EOS-aware packed-mask extent.
+- A llama.cpp-oriented vocabulary construction path and expanded integration examples.
+
+### Improved
+
+- Dynamic masking now precompiles and caches exact residual token programs, selects overlays by structural family, and avoids redundant parser simulation and continuation-partition construction.
+- Dynamic mask and artifact paths received additional indexing, cache, serialization, and tail-latency work.
+- README performance figures, dark-mode assets, runtime-mode documentation, and full-corpus benchmark links were revised.
+
+### Changed
+
+- `Vocab` no longer owns a distinguished EOS field. Consumers pass one or more `end_token_ids` when compiling a constraint; those tokens may also retain ordinary byte semantics if present in the byte vocabulary.
+- Dynamic constraint artifacts use a new format version. Older artifacts without Vocab-level EOS metadata are migrated; artifacts that depended on the removed EOS metadata fail explicitly and must be rebuilt.
 
 ### Integration compatibility
 
-- The frozen vLLM backend requires these APIs and must declare `glrmask >= <NEXT_VERSION>` after the version is selected and published.
+- The frozen vLLM backend requires `glrmask >= 0.1.1` for bounded rollback, non-mutating validation, failed-state inspection, and grammar-level end-token support.
 - Public `glrmask 0.1.0` remains installable but is not compatible with that backend.
 
 ## 0.1.0 — 2026-07-15 — Shingleback initial release
