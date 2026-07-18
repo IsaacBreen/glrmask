@@ -1254,29 +1254,6 @@ fn save_load_roundtrip_preserves_behavior() {
     assert_accepts_tokens(&loaded, &[0, 1]);
 }
 
-#[test]
-fn runtime_payload_v1_roundtrip_preserves_behavior_without_overlay() {
-    let constraint = ebnf(&["a", "b"], r#"start ::= "a" "b""#);
-    let bytes = constraint.save_runtime_payload_v1();
-    let loaded = Constraint::load_runtime_payload_v1(&bytes).unwrap();
-    assert_accepts_tokens(&loaded, &[0, 1]);
-}
-
-#[test]
-fn runtime_payload_v2_roundtrip_preserves_split_parser_overlay() {
-    let constraint = lark(
-        &["!", "aaa"],
-        r#"
-            start: "!" | WORD
-            WORD: /[a-z]+/
-        "#,
-    );
-    let bytes = constraint.save_runtime_payload_v2();
-    let loaded = Constraint::load_runtime_payload_v2(&bytes).unwrap();
-    assert_accepts_tokens(&loaded, &[0]);
-    assert_accepts_tokens(&loaded, &[1]);
-}
-
 fn special_token_vocab() -> Vocab {
     Vocab::new(
         vec![
@@ -1401,11 +1378,6 @@ fn special_token_static_dynamic_and_serialized_constraints_agree() {
 
     let loaded = Constraint::load(&constraint.save()).unwrap();
     assert_special_token_sequence(&loaded);
-    let runtime_loaded = Constraint::load_runtime_payload_v3(
-        &constraint.save_runtime_payload_v3(),
-    )
-    .unwrap();
-    assert_special_token_sequence(&runtime_loaded);
     let dynamic_loaded = DynamicConstraint::load(&dynamic.save()).unwrap();
     let mut dynamic_loaded_state = dynamic_loaded.start();
     dynamic_loaded_state.commit_token(0).unwrap();

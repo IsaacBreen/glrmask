@@ -666,27 +666,6 @@ mod tests {
         state.fill_mask(&mut actual);
         assert_eq!(actual, expected);
 
-        let mut expected_internal = Vec::new();
-        for (word_index, &word) in expected.iter().enumerate() {
-            let mut word = word;
-            while word != 0 {
-                let bit = word.trailing_zeros() as usize;
-                let original_token = (word_index * 32 + bit) as u32;
-                if let Some(internal_token) =
-                    constraint.final_internal_token_for_original(original_token)
-                {
-                    expected_internal.push(internal_token);
-                }
-                word &= word - 1;
-            }
-        }
-        expected_internal.sort_unstable();
-        expected_internal.dedup();
-        let mut mask_game_buf = vec![0u32; constraint.mask_len()];
-        let actual_internal = state.mask_game_fill_mask_and_internal_ids(&mut mask_game_buf);
-        assert_eq!(mask_game_buf, expected);
-        assert_eq!(actual_internal, expected_internal);
-
         let loaded = Constraint::load(&constraint.save()).expect("empty-PM constraint should roundtrip");
         assert!(loaded.possible_matches.is_empty());
         let mut loaded_state = loaded.start_dynamic();
@@ -2155,62 +2134,4 @@ impl<'a> ConstraintState<'a> {
             })
     }
 
-    pub(crate) fn mask_game_fill_mask_and_internal_ids(&self, buf: &mut [u32]) -> Vec<u32> {
-        if self.requires_dynamic_possible_matches_fallback() {
-            self.fill_mask(buf);
-            let mut internal_ids = Vec::new();
-            for (word_index, &word) in buf.iter().enumerate() {
-                let mut word = word;
-                while word != 0 {
-                    let bit = word.trailing_zeros() as usize;
-                    let original_token = (word_index * 32 + bit) as u32;
-                    if let Some(internal_token) = self
-                        .constraint
-                        .final_internal_token_for_original(original_token)
-                    {
-                        internal_ids.push(internal_token);
-                    }
-                    word &= word - 1;
-                }
-            }
-            internal_ids.sort_unstable();
-            internal_ids.dedup();
-            return internal_ids;
-        }
-
-        if self.try_fill_mask_from_cache(buf) {
-            let cache = self.mask_cache.lock().unwrap();
-            if cache
-                .as_ref()
-                .is_some_and(|cache_data| !cache_data.merged_dense.is_empty())
-            {
-                drop(cache);
-            } else {
-                drop(cache);
-                let _ = self.fill_mask_uncached_queue(buf, false, None);
-            }
-        } else {
-            let _ = self.fill_mask_uncached_queue(buf, false, None);
-        }
-
-        let cache = self.mask_cache.lock().unwrap();
-        let Some(cache_data) = cache.as_ref() else {
-            return Vec::new();
-        };
-
-        let n_internal = self.constraint.internal_token_to_tokens.len();
-        let mut out = Vec::new();
-        for (word_idx, &word) in cache_data.merged_dense.iter().enumerate() {
-            let mut word = word;
-            while word != 0 {
-                let bit = word.trailing_zeros() as usize;
-                let internal = word_idx * 64 + bit;
-                if internal < n_internal {
-                    out.push(internal as u32);
-                }
-                word &= word - 1;
-            }
-        }
-        out
-    }
 }

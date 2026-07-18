@@ -1,7 +1,7 @@
 use glrmask::Constraint;
 use glrmask::__private::ConstraintStateExt as _;
 
-include!("snowplow_hostname_fixture.rsinc");
+include!("../../fixtures/snowplow_hostname.rsinc");
 
 fn token_allowed(mask: &[u32], token_id: u32) -> bool {
     let word = token_id as usize / 32;

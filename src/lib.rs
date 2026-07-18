@@ -135,14 +135,6 @@ pub mod __private {
         fn clear_weight_op_caches();
         fn set_test_compat_mode(enabled: bool);
 
-        fn save_runtime_payload_v1(&self) -> Vec<u8>;
-        fn load_runtime_payload_v1(bytes: &[u8]) -> Result<Self>;
-        fn save_runtime_payload_v2(&self) -> Vec<u8>;
-        fn load_runtime_payload_v2(bytes: &[u8]) -> Result<Self>;
-        fn save_runtime_payload_v3(&self) -> Vec<u8>;
-        fn load_runtime_payload_v3(bytes: &[u8]) -> Result<Self>;
-        fn mask_game_internal_to_original(&self) -> &[Vec<u32>];
-        fn mask_game_original_to_internal(&self) -> &[u32];
         fn num_parser_states(&self) -> u32;
         fn num_tokenizer_states(&self) -> usize;
         fn num_forced_minimized_tokenizer_states(&self) -> usize;
@@ -186,37 +178,6 @@ pub mod __private {
             crate::set_test_compat_mode(enabled);
         }
 
-        fn save_runtime_payload_v1(&self) -> Vec<u8> {
-            Constraint::save_runtime_payload_v1(self)
-        }
-
-        fn load_runtime_payload_v1(bytes: &[u8]) -> Result<Self> {
-            Constraint::load_runtime_payload_v1(bytes)
-        }
-
-        fn save_runtime_payload_v2(&self) -> Vec<u8> {
-            Constraint::save_runtime_payload_v2(self)
-        }
-
-        fn load_runtime_payload_v2(bytes: &[u8]) -> Result<Self> {
-            Constraint::load_runtime_payload_v2(bytes)
-        }
-
-        fn save_runtime_payload_v3(&self) -> Vec<u8> {
-            Constraint::save_runtime_payload_v3(self)
-        }
-
-        fn load_runtime_payload_v3(bytes: &[u8]) -> Result<Self> {
-            Constraint::load_runtime_payload_v3(bytes)
-        }
-
-        fn mask_game_internal_to_original(&self) -> &[Vec<u32>] {
-            Constraint::mask_game_internal_to_original(self)
-        }
-
-        fn mask_game_original_to_internal(&self) -> &[u32] {
-            Constraint::mask_game_original_to_internal(self)
-        }
 
         fn num_parser_states(&self) -> u32 {
             Constraint::num_parser_states(self)
@@ -278,7 +239,6 @@ pub mod __private {
         fn fill_mask_profiled(&self, buf: &mut [u32]) -> MaskProfile;
         fn fill_mask_timed_ns(&self, buf: &mut [u32]) -> u64;
         fn has_parser_ambiguity(&self) -> bool;
-        fn mask_game_fill_mask_and_internal_ids(&self, buf: &mut [u32]) -> Vec<u32>;
         fn parser_path_count(&self, limit: usize) -> usize;
         fn parser_root_count(&self) -> usize;
     }
@@ -319,10 +279,6 @@ pub mod __private {
 
         fn has_parser_ambiguity(&self) -> bool {
             ConstraintState::has_parser_ambiguity(self)
-        }
-
-        fn mask_game_fill_mask_and_internal_ids(&self, buf: &mut [u32]) -> Vec<u32> {
-            ConstraintState::mask_game_fill_mask_and_internal_ids(self, buf)
         }
 
         fn parser_path_count(&self, limit: usize) -> usize {

@@ -2,6 +2,7 @@
 name = "glrmask"
 version = "0.1.1"
 edition = "2024"
+autotests = false
 description = "Grammar-constrained token masking for context-free languages"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
@@ -10,13 +11,10 @@ repository = "https://github.com/IsaacBreen/glrmask"
 keywords = ["grammar", "llm", "decoding", "parser", "json-schema"]
 categories = ["algorithms", "parsing"]
 exclude = [
+    ".agents/**",
     ".benchmarks/**",
     ".cache/**",
-    "glrmask-browser-artifact/**",
-    "glrmask-runtime/**",
-    "glrmask-wasm/**",
     "python/**",
-    "python-runtime/**",
     "scripts/**",
     "target/**",
 ]
@@ -69,49 +67,110 @@ harness = false
 [[example]]
 name = "profile_glr"
 
+# Public API suites.
 [[test]]
 name = "integration"
+path = "tests/integration.rs"
 
 [[test]]
-name = "mre"
+name = "end_tokens"
+path = "tests/end_tokens.rs"
 
 [[test]]
-name = "o4836_unicode_escape_key"
+name = "rollback"
+path = "tests/rollback.rs"
+
+# Focused JSON Schema suites.
+[[test]]
+name = "json_schema_unicode_class_pattern"
+path = "tests/json_schema/unicode_class_pattern.rs"
 
 [[test]]
 name = "json_schema_unicode_escape_characterization"
+path = "tests/json_schema/unicode_escape_characterization.rs"
 
+# General regression collection.
 [[test]]
-name = "o35155_tokenizer_scaling"
+name = "mre"
+path = "tests/regressions/mre.rs"
 
+# Parser and GSS regressions.
 [[test]]
-name = "o25804_mask_commit_mismatch"
-
-[[test]]
-name = "ordered_anyof_ambiguity"
-
-[[test]]
-name = "snowplow_hostname_replay_mre"
+name = "direct_glrm_ordered_suffix_ambiguity"
+path = "tests/regressions/parser/direct_glrm_ordered_suffix_ambiguity.rs"
 
 [[test]]
 name = "direct_glrm_ordered_suffix_fixed_n5"
+path = "tests/regressions/parser/direct_glrm_ordered_suffix_fixed_n5.rs"
 
 [[test]]
-name = "direct_glrm_ordered_suffix_ambiguity"
+name = "ordered_anyof_ambiguity"
+path = "tests/regressions/parser/ordered_anyof_ambiguity.rs"
 
 [[test]]
 name = "o13029_unit_inlining_false_negative"
+path = "tests/regressions/parser/o13029_unit_inlining_false_negative.rs"
 
 [[test]]
 name = "o15627_schema_gss_split_mre"
+path = "tests/regressions/parser/o15627_schema_gss_split.rs"
+
+# JSON Schema regressions keyed by corpus/problem ID.
+[[test]]
+name = "o17408_repro"
+path = "tests/regressions/json_schema/o17408_false_positive.rs"
+
+[[test]]
+name = "o25804_mask_commit_mismatch"
+path = "tests/regressions/json_schema/o25804_mask_commit_mismatch.rs"
+
+[[test]]
+name = "o4836_unicode_escape_key"
+path = "tests/regressions/json_schema/o4836_unicode_escape_key.rs"
+
+[[test]]
+name = "o6363_required_anyof"
+path = "tests/regressions/json_schema/o6363_required_anyof.rs"
+
+[[test]]
+name = "o67291_recursive_anyof_ref"
+path = "tests/regressions/json_schema/o67291_recursive_anyof_ref.rs"
+
+[[test]]
+name = "o82710_repro"
+path = "tests/regressions/json_schema/o82710_whitespace.rs"
+
+[[test]]
+name = "resjson_repro"
+path = "tests/regressions/json_schema/resjson_recursive_ref.rs"
+
+# Tokenizer and lexical-state regressions.
+[[test]]
+name = "byte_restricted_state_equivalence_mre"
+path = "tests/regressions/tokenizer/byte_restricted_state_equivalence.rs"
+
+[[test]]
+name = "o35155_tokenizer_scaling"
+path = "tests/regressions/tokenizer/o35155_scaling.rs"
+
+[[test]]
+name = "unicode_escape_progression_glrm_mre"
+path = "tests/regressions/tokenizer/unicode_escape_progression.rs"
+
+# Terminal-interchangeability regressions.
+[[test]]
+name = "ti_mre_final"
+path = "tests/regressions/terminal_interchangeability/shared_suffix.rs"
+
+[[test]]
+name = "ti_separator_transport_mre"
+path = "tests/regressions/terminal_interchangeability/separator_transport.rs"
+
+# Replay regressions with checked-in generated fixtures.
+[[test]]
+name = "snowplow_hostname_replay_mre"
+path = "tests/regressions/replay/snowplow_hostname.rs"
 
 [workspace]
-members = [
-    ".",
-    "python",
-    "python-runtime",
-    "glrmask-runtime",
-    "glrmask-wasm",
-    "glrmask-browser-artifact",
-]
+members = [".", "python"]
 resolver = "2"

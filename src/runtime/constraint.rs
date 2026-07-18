@@ -2118,14 +2118,6 @@ impl Constraint {
             .unwrap_or(0)
     }
 
-    pub(crate) fn mask_game_internal_to_original(&self) -> &[Vec<u32>] {
-        &self.internal_token_to_tokens
-    }
-
-    pub(crate) fn mask_game_original_to_internal(&self) -> &[u32] {
-        &self.original_token_to_internal
-    }
-
     pub(crate) fn num_parser_states(&self) -> u32 {
         self.table.num_states
     }

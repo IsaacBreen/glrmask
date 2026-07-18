@@ -1,6 +1,8 @@
 # How to Minimize Properly, Recursively
 
-This note is based on the actual `glrmask2` commit sequence from `da8bc0bc` forward, with emphasis on the minimization chain for the split-token-boundary MRE in `tests/o82710_repro.rs`.
+This note is based on the actual `glrmask2` commit sequence from `da8bc0bc`
+forward, with emphasis on the minimization chain now stored in
+`tests/regressions/json_schema/o82710_whitespace.rs`.
 
 The important sequence is:
 
@@ -522,9 +524,10 @@ That is how scanning should be used during minimization: as a narrowing instrume
 
 ## Phase 12: Build A Fresh Reduction Ladder From The Live Failure
 
-The old note was still too anchored to the earlier `tests/o82710_repro.rs` family.
+The old note was still too anchored to the earlier o82710 reproduction family.
 
-The later `tests/o82710_current_mre.rs` work on the current live `Github_medium---o82710` discrepancy added a lesson that matters more than any individual cut:
+The later work on the current live `Github_medium---o82710` discrepancy added a
+lesson that matters more than any individual cut:
 
 **when the old minimized witness stops being the real bug, restart from the live failure and rebuild the ladder.**
 

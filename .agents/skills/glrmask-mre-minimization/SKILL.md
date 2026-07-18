@@ -39,7 +39,10 @@ Debug straightforward breakages normally first, especially when recent local cha
 
 ## Repro Workflow
 
-Create minimal reproducible Rust tests in `tests/mre.rs`. Do not put MREs in `integration.rs` or another existing test module.
+Put small cross-cutting reproductions in `tests/regressions/mre.rs`. Give larger
+or subsystem-specific reproductions their own file under the appropriate
+`tests/regressions/` subdirectory and declare the test target in `Cargo.toml`.
+Do not put MREs in `tests/integration.rs`.
 
 Prefer a one-item vocab whenever possible. If the claim is that one token should
 be accepted or rejected at a particular point, make a dedicated test for that

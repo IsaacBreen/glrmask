@@ -481,24 +481,6 @@ impl PyConstraint {
         })
     }
 
-    /// Serialize the versioned execution-only artifact consumed by
-    /// `_glrmask_runtime`. Compilation remains in this main binding; the
-    /// runtime binding only loads and executes this artifact.
-    fn save_runtime_artifact(&self) -> Vec<u8> {
-        glrmask_runtime::RuntimeArtifact::from_runtime_payload_v3(
-            self.inner.save_runtime_payload_v3(),
-        )
-            .as_bytes()
-            .to_vec()
-    }
-
-    /// Return the final constraint-internal vocab remapping used by mask materialization.
-    fn mask_game_mapping(&self) -> (Vec<Vec<u32>>, Vec<u32>) {
-        (
-            self.inner.mask_game_internal_to_original().to_vec(),
-            self.inner.mask_game_original_to_internal().to_vec(),
-        )
-    }
 
     /// Return the number of GLR parser states.
     fn num_parser_states(&self) -> u32 {
@@ -905,21 +887,6 @@ impl PyConstraintState {
         mask_profile_to_dict(py, profile)
     }
 
-    fn mask_game_fill_mask_and_internal_ids(
-        &self,
-        mut bitmask: PyReadwriteArray1<i32>,
-    ) -> PyResult<Vec<u32>> {
-        let slice = bitmask.as_slice_mut().map_err(|e| {
-            PyValueError::new_err(format!("Array must be contiguous: {e:?}"))
-        })?;
-        let buf: &mut [u32] = unsafe {
-            std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u32, slice.len())
-        };
-        Ok(self
-            .inner
-            .with_dependent(|_owner, state| state.mask_game_fill_mask_and_internal_ids(buf)))
-    }
-
     fn commit_token_timed_ns(&mut self, token_id: u32) -> PyResult<u64> {
         self.inner.with_dependent_mut(|_owner, state| {
             state
@@ -1170,15 +1137,6 @@ impl PyConstraintState {
 // Module
 // ---------------------------------------------------------------------------
 
-#[pyfunction]
-fn save_runtime_artifact(constraint: PyRef<'_, PyConstraint>) -> Vec<u8> {
-    constraint.save_runtime_artifact()
-}
-
-#[pyfunction]
-fn mask_game_mapping(constraint: PyRef<'_, PyConstraint>) -> (Vec<Vec<u32>>, Vec<u32>) {
-    constraint.mask_game_mapping()
-}
 
 #[pyfunction]
 fn num_parser_states(constraint: PyRef<'_, PyConstraint>) -> u32 {
@@ -1213,14 +1171,6 @@ fn fill_mask_profiled<'py>(
     bitmask: PyReadwriteArray1<i32>,
 ) -> PyResult<Bound<'py, PyDict>> {
     state.fill_mask_profiled(py, bitmask)
-}
-
-#[pyfunction]
-fn mask_game_fill_mask_and_internal_ids(
-    state: PyRef<'_, PyConstraintState>,
-    bitmask: PyReadwriteArray1<i32>,
-) -> PyResult<Vec<u32>> {
-    state.mask_game_fill_mask_and_internal_ids(bitmask)
 }
 
 #[pyfunction]
@@ -1279,14 +1229,11 @@ fn add_internal_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     internal.add_function(wrap_pyfunction!(prepare_vocab_for_compile, &internal)?)?;
     internal.add_function(wrap_pyfunction!(compile_grammar_def_json, &internal)?)?;
     internal.add_function(wrap_pyfunction!(dump_json_schema_grammar_glrm, &internal)?)?;
-    internal.add_function(wrap_pyfunction!(save_runtime_artifact, &internal)?)?;
-    internal.add_function(wrap_pyfunction!(mask_game_mapping, &internal)?)?;
     internal.add_function(wrap_pyfunction!(num_parser_states, &internal)?)?;
     internal.add_function(wrap_pyfunction!(terminal_display_names, &internal)?)?;
     internal.add_function(wrap_pyfunction!(terminal_display_name, &internal)?)?;
     internal.add_function(wrap_pyfunction!(fill_mask_timed_ns, &internal)?)?;
     internal.add_function(wrap_pyfunction!(fill_mask_profiled, &internal)?)?;
-    internal.add_function(wrap_pyfunction!(mask_game_fill_mask_and_internal_ids, &internal)?)?;
     internal.add_function(wrap_pyfunction!(commit_token_timed_ns, &internal)?)?;
     internal.add_function(wrap_pyfunction!(commit_token_profiled, &internal)?)?;
     internal.add_function(wrap_pyfunction!(parser_root_count, &internal)?)?;
