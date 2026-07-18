@@ -2,6 +2,12 @@
 
 GLRMask is a grammar-constrained generation library for high-throughput LLM decoding. It is optimized for extremely low next-token mask latency across the distribution, even for complex grammars.
 
+## How it works
+
+GLRMask maintains a GLR parser state for the generated prefix, updating it as tokens are committed. To compute the next-token mask, a precomputed deterministic weighted automaton reads each parser stack one symbol at a time.
+
+Each transition carries a Boolean mask over the model vocabulary. These masks are intersected along each stack traversal and unioned across alternative paths.
+
 ## Performance
 
 Measured with MaskBench on the JSONSchemaBench corpus, using the Llama 3 vocabulary on an Intel Core i7-13620H under Ubuntu 24.04/WSL2.
@@ -46,7 +52,7 @@ See the [full benchmark report](docs/benchmark-full-corpus-2026-07-16.md) for me
 python -m pip install glrmask==0.1.0
 ```
 
-Published wheels contain the native extension. Building from source requires Python, a Rust toolchain, and the platform's native linker and build tools.
+Published wheels include the native extension. Building from source requires a Rust toolchain and the platform's native build tools.
 
 ### Rust
 
@@ -54,12 +60,28 @@ Published wheels contain the native extension. Building from source requires Pyt
 cargo add glrmask@0.1.0
 ```
 
-or add the dependency directly:
+## Usage
 
-```toml
-[dependencies]
-glrmask = "0.1.0"
+A `Constraint` is compiled for a grammar and vocabulary. It can be serialized and cached for reuse across requests.
+
+`DynamicConstraint` has the same interface and produces identical masks, but compiles much faster than `Constraint`, at the cost of higher mask-generation latency.
+
+To minimize cold-start latency, `DynamicConstraint` can be used on a cache miss while the corresponding `Constraint` is compiled in parallel and cached for subsequent requests.
+
+```text
+grammar + vocabulary
+        │
+        ▼
+  Constraint cache
+    ├─ hit  → Constraint ───────────────────→ generate
+    └─ miss
+         ├─ current request → DynamicConstraint → generate
+         └─ parallel build  → compile Constraint → cache
 ```
+
+<p align="center"><em>Cold-start architecture</em></p>
+
+At runtime, initialize the constraint state with `constraint.start()`. Then, in the decoding loop, generate the next-token mask with `state.mask(...)` in parallel with the LLM's forward pass. Apply the mask to the logits before sampling, then call `state.commit_token(token_id)` to advance the state with the sampled token.
 
 ## Python quickstart
 
@@ -163,76 +185,21 @@ for _ in range(MAX_OUTPUT_TOKENS):
 print(llm.detokenize(generated).decode())
 ```
 
-### With forced tokens
+## Grammar formats
 
-`forced()` returns the token IDs that can be emitted without sampling. It does not advance the state.
+[Unfortunately, there is no universally accepted EBNF dialect.](https://dwheeler.com/essays/dont-use-iso-14977-ebnf.html) In keeping with this tradition, GLRMask includes its own.
 
-```python
-llm.reset()
-llm.eval(input_tokens)
-
-state = constraint.start()
-generated = []
-
-for _ in range(MAX_OUTPUT_TOKENS):
-    logits = get_logits()
-    mask = state.mask(llm.n_vocab())
-    logits[~mask] = -np.inf
-
-    token = sample(logits)
-    llm.eval([token])
-    state.commit_token(token)
-    generated.append(token)
-
-    if token in end_tokens:
-        break
-
-    for token in state.forced():
-        llm.eval([token])
-        state.commit_token(token)
-        generated.append(token)
-
-        if token in end_tokens:
-            break
-
-    if state.is_finished():
-        break
-
-print(llm.detokenize(generated).decode())
-```
-
-## Compilation modes
-
-`Constraint` and `DynamicConstraint` have the same interface and produce identical masks. `Constraint` is optimized for per-token latency; `DynamicConstraint` is optimized for cold-start latency.
-
-On a cache miss, use `DynamicConstraint` immediately while a builder compiles and caches `Constraint`. To hot-swap an active request, start a state from the compiled `Constraint` and replay the generated token IDs.
-
-| Mode | Median compilation | p99 TBM | Maximum TBM |
-|---|---:|---:|---:|
-| `Constraint` | 50.963 ms | **10.521 µs** | **49.539 µs** |
-| `DynamicConstraint` | **4.550 ms** | 23.122 ms | 323.609 ms |
-
-## JSON Schema
-
-GLRMask implements a pragmatic subset of JSON Schema. Unsupported constructs may be rejected. See [JSON Schema semantic deviations](docs/json-schema-semantic-deviations.md).
-
-## Other grammar formats
-
-Lark grammars use the corresponding constructor:
-
-```python
-constraint = glrmask.Constraint.from_lark(lark_source, vocab)
-```
+GLRM is GLRMask's native, EBNF-like grammar syntax. It supports exact model-token terminals with `@token(<id>)`. GLRMask also accepts Lark and EBNF grammars.
 
 ## Special tokens
 
-Use `@token(<id>)` in EBNF, Lark, or GLRM grammars to match a model token by ID:
+Use `@token(<id>)` in GLRM, Lark, or EBNF to match an exact model token:
 
 ```text
 start ::= "hello" @token(128009)
 ```
 
-JSON Schema constraints can append exact end-token terminals with `end_token_ids`:
+Use `end_token_ids` to require one of the specified model tokens after the grammar completes:
 
 ```python
 constraint = glrmask.Constraint.from_json_schema(
@@ -242,23 +209,7 @@ constraint = glrmask.Constraint.from_json_schema(
 )
 ```
 
-The state becomes complete only after one of those token IDs is committed.
-
-## State lifecycle
-
-`0.1.1` adds bounded rollback, non-mutating proposal validation, failed-state inspection, and grammar-level end-token IDs for serving integrations. See [the constraint-state lifecycle contract](docs/state-lifecycle.md) for the Rust and Python signatures and exact semantics.
-
-## Serialization
-
-Compiled constraints can be serialized and restored:
-
-```python
-artifact = constraint.save()
-restored = glrmask.Constraint.load(artifact, vocab)
-state = restored.start()
-```
-
-Rust provides `Constraint::save()` and `Constraint::load(...)`.
+The state becomes complete only after one of those tokens is committed.
 
 ## License
 
