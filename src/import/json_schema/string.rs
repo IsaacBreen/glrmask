@@ -98,6 +98,10 @@ impl<'a> Lowerer<'a> {
                     } else {
                         "json_string_constrained"
                     });
+                    if let Some(expr) = lowerer.lower_anchored_prefix_any_suffix_bounded_pattern_expr(schema)? {
+                        lowerer.add_nonterminal_rule(&name, expr);
+                        return Ok(r(&name));
+                    }
                     if let Some(expr) = lowerer.lower_complex_anchored_pattern_expr(schema)? {
                         lowerer.add_nonterminal_rule(&name, expr);
                         return Ok(r(&name));
@@ -251,6 +255,117 @@ impl<'a> Lowerer<'a> {
             self.lower_constrained_string_terminal_expr_with_pattern_split(string, false)?,
             repeat_complexity,
         )))
+    }
+
+    fn anchored_prefix_any_suffix_bounded_pattern_plan(
+        &self,
+        schema: &StringSchema,
+    ) -> ImportResult<Option<(Hir, usize, usize)>> {
+        let Some(pattern) = schema.pattern.as_deref() else {
+            return Ok(None);
+        };
+        let Some(max_length) = schema.max_length else {
+            return Ok(None);
+        };
+        if recognized_string_format_body_regex_for_lowering(schema.format.as_deref()).is_some() {
+            return Ok(None);
+        }
+        if !self.should_split_bounded_string(schema.min_length, max_length)
+            || !self.config.preserve_pattern_max_length
+        {
+            return Ok(None);
+        }
+
+        let preprocessed = preprocess_ascii_shorthand(pattern);
+        if pattern_max_length_complexity_score(&preprocessed, max_length)
+            > self.config.pattern_max_length_complexity_limit
+        {
+            return Ok(None);
+        }
+        let hir = Parser::new().parse(&preprocessed).map_err(|error| {
+            SchemaImportError::new(format!("invalid string pattern {pattern:?}: {error}"))
+        })?;
+        let (body, anchored_start, anchored_end) = strip_outer_anchors(hir);
+        if !anchored_start || anchored_end {
+            return Ok(None);
+        }
+
+        // A start-anchored pattern of the form `^P.*` with no end anchor
+        // accepts exactly the strings whose decoded value begins with P. The
+        // trailing `.*` may stop before any later character (including a line
+        // terminator), so the remainder is an unconstrained JSON-string suffix.
+        let (prefix, tail) = match body.kind() {
+            HirKind::Concat(parts) if !parts.is_empty() => {
+                let Some((tail, prefix_parts)) = parts.split_last() else {
+                    return Ok(None);
+                };
+                (Hir::concat(prefix_parts.to_vec()), tail)
+            }
+            HirKind::Repetition(_) => (Hir::empty(), &body),
+            _ => return Ok(None),
+        };
+        let HirKind::Repetition(repetition) = tail.kind() else {
+            return Ok(None);
+        };
+        if repetition.min != 0 || repetition.max.is_some() {
+            return Ok(None);
+        }
+        let HirKind::Class(class) = repetition.sub.kind() else {
+            return Ok(None);
+        };
+        if !is_dot_like_unicode_class(class) {
+            return Ok(None);
+        }
+
+        let Some(prefix_length) = fixed_decoded_pattern_length(&prefix) else {
+            return Ok(None);
+        };
+        if prefix_length > max_length {
+            return Ok(Some((prefix, 1, 0)));
+        }
+        let effective_min = schema.min_length.max(prefix_length);
+        Ok(Some((
+            prefix,
+            effective_min - prefix_length,
+            max_length - prefix_length,
+        )))
+    }
+
+    fn lower_anchored_prefix_any_suffix_bounded_pattern_expr(
+        &mut self,
+        schema: &StringSchema,
+    ) -> ImportResult<Option<GrammarExpr>> {
+        let Some((prefix, remainder_min, remainder_max)) =
+            self.anchored_prefix_any_suffix_bounded_pattern_plan(schema)?
+        else {
+            return Ok(None);
+        };
+        if remainder_min > remainder_max {
+            return Ok(Some(never()));
+        }
+        let prefix_body = lower_decoded_regex_hir_to_json_body_regex(
+            &prefix,
+            JsonStringContext::Value,
+        )?;
+
+        let open_name = self.fresh_rule_name("json_string_anchored_prefix_open");
+        self.add_pattern_terminal_rule_with_partition_key(
+            &open_name,
+            seq(vec![lit("\""), GrammarExpr::RawRegex(prefix_body)]),
+            JsonPatternPartitionKey::from(schema),
+        );
+        let tail = if remainder_min == remainder_max {
+            seq(vec![
+                self.split_string_exact_expr(remainder_min),
+                lit("\""),
+            ])
+        } else {
+            seq(vec![
+                self.split_string_exact_expr(remainder_min),
+                self.split_string_upto_close_expr(remainder_max - remainder_min),
+            ])
+        };
+        Ok(Some(seq(vec![r(&open_name), tail])))
     }
 
     fn complex_anchored_pattern_plan(
@@ -1219,7 +1334,9 @@ impl<'a> Lowerer<'a> {
         key: &str,
         schema: &StringSchema,
     ) -> ImportResult<GrammarExpr> {
-        if self.complex_anchored_pattern_plan(schema)?.is_some() {
+        if self.anchored_prefix_any_suffix_bounded_pattern_plan(schema)?.is_some()
+            || self.complex_anchored_pattern_plan(schema)?.is_some()
+        {
             return Ok(seq(vec![
                 self.lower_literal_key_colon_with_prefix(prefix, key),
                 self.lower_string(schema)?,
@@ -1263,7 +1380,9 @@ impl<'a> Lowerer<'a> {
         &mut self,
         schema: &StringSchema,
     ) -> ImportResult<GrammarExpr> {
-        if self.complex_anchored_pattern_plan(schema)?.is_some() {
+        if self.anchored_prefix_any_suffix_bounded_pattern_plan(schema)?.is_some()
+            || self.complex_anchored_pattern_plan(schema)?.is_some()
+        {
             return self.lower_string(schema);
         }
         if schema.pattern.is_none()
@@ -2396,6 +2515,32 @@ fn cheap_pattern_length_bound_body_regex(
     }
 
     None
+}
+
+fn fixed_decoded_pattern_length(hir: &Hir) -> Option<usize> {
+    match hir.kind() {
+        HirKind::Empty => Some(0),
+        HirKind::Look(_) => None,
+        HirKind::Literal(Literal(bytes)) => Some(std::str::from_utf8(bytes).ok()?.chars().count()),
+        HirKind::Class(_) => Some(1),
+        HirKind::Capture(capture) => fixed_decoded_pattern_length(&capture.sub),
+        HirKind::Concat(parts) => parts.iter().try_fold(0usize, |total, part| {
+            total.checked_add(fixed_decoded_pattern_length(part)?)
+        }),
+        HirKind::Alternation(parts) => {
+            let mut lengths = parts.iter().map(fixed_decoded_pattern_length);
+            let first = lengths.next()??;
+            lengths.all(|length| length == Some(first)).then_some(first)
+        }
+        HirKind::Repetition(repetition) => {
+            let max = repetition.max?;
+            if max != repetition.min {
+                return None;
+            }
+            fixed_decoded_pattern_length(&repetition.sub)?
+                .checked_mul(repetition.min as usize)
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -2191,12 +2191,20 @@ fn find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
         let prebuilt_trie = token_buckets.packed_suffix_tries_by_first_byte[byte_idx]
             .as_deref()
             .expect("non-empty first-byte bucket must retain its prepared suffix trie");
-        if token_ids.len() >= 10_000 && targets.len() >= 32 && rayon::current_num_threads() > 1 {
+        const LARGE_BUCKET_WORK_PRODUCT: usize = 1_000_000;
+        let estimated_work = token_ids.len().saturating_mul(targets.len());
+        let parallel_bucket = token_ids.len() >= 10_000
+            || estimated_work >= LARGE_BUCKET_WORK_PRODUCT;
+        if parallel_bucket && targets.len() >= 32 && rayon::current_num_threads() > 1 {
             let chunk_count = std::env::var("GLRMASK_L1_LARGE_BUCKET_CHUNKS")
                 .ok()
                 .and_then(|value| value.trim().parse::<usize>().ok())
                 .filter(|&value| value > 0)
-                .unwrap_or(2)
+                .unwrap_or_else(|| {
+                    // Use most of the worker pool for genuinely large suffix-profile
+                    // batches, while leaving a little headroom for partition-level work.
+                    rayon::current_num_threads().min(8)
+                })
                 .min(rayon::current_num_threads())
                 .min(targets.len());
             let chunk_size = targets.len().div_ceil(chunk_count);

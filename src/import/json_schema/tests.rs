@@ -3261,7 +3261,7 @@ fn small_bounded_string_pattern_preserves_short_length_bounds() {
 }
 
 #[test]
-fn large_simple_bounded_string_pattern_preserves_length_without_hard_cap() {
+fn large_simple_bounded_string_pattern_uses_exact_chunked_prefix_tail() {
     let schema = json!({
         "type": "string",
         "maxLength": 512,
@@ -3269,29 +3269,94 @@ fn large_simple_bounded_string_pattern_preserves_length_without_hard_cap() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let rule = grammar
-        .rules
-        .iter()
-        .find(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained"))
-        .expect("expected terminalized constrained string rule");
-
-    let GrammarExpr::Intersect { expr, intersect } = &rule.expr else {
-        panic!("expected pattern terminal intersected with length envelope: {:?}", rule.expr);
-    };
-    let GrammarExpr::RawRegex(pattern_regex) = expr.as_ref() else {
-        panic!("expected raw regex pattern envelope: {:?}", expr);
-    };
-    let GrammarExpr::RawRegex(length_regex) = intersect.as_ref() else {
-        panic!("expected raw regex length envelope: {:?}", intersect);
-    };
-    assert!(pattern_regex.contains("(?:/"), "{pattern_regex}");
-    assert!(length_regex.contains("{0,512}"), "{length_regex}");
-
     let glrm = to_glrm(&grammar);
-    assert!(!glrm.contains("json_string_char_exact_open_50"), "{glrm}");
-    assert!(!glrm.contains("json_string_char_upto_close_50"), "{glrm}");
-    assert!(!glrm.contains("json_string_bounded_split"), "{glrm}");
+    assert!(glrm.contains("json_string_anchored_prefix_open"), "{glrm}");
+    assert!(glrm.contains("json_string_char_exact_64"), "{glrm}");
+    assert!(glrm.contains("json_string_char_upto_close_63"), "{glrm}");
+    assert!(!glrm.contains(" & "), "{glrm}");
+    assert!(!glrm.contains("{0,512}"), "{glrm}");
+    lower(&grammar).unwrap();
+}
 
+#[test]
+fn chunked_anchored_prefix_pattern_preserves_bounds_and_search_semantics() {
+    let schema = json!({
+        "type": "string",
+        "minLength": 3,
+        "maxLength": 130,
+        "pattern": "^/.*"
+    });
+
+    assert!(!schema_accepts_bytes(&schema, br#""/a""#));
+    assert!(schema_accepts_bytes(&schema, br#""/ab""#));
+
+    let mut at_limit = Vec::from([b'"', b'/']);
+    at_limit.extend(std::iter::repeat_n(b'a', 129));
+    at_limit.push(b'"');
+    assert!(schema_accepts_bytes(&schema, &at_limit));
+
+    let mut too_long = Vec::from([b'"', b'/']);
+    too_long.extend(std::iter::repeat_n(b'a', 130));
+    too_long.push(b'"');
+    assert!(!schema_accepts_bytes(&schema, &too_long));
+
+    assert!(!schema_accepts_bytes(&schema, br#""xab""#));
+    assert!(schema_accepts_bytes(&schema, br#""/a\n""#));
+}
+
+#[test]
+fn chunked_anchored_prefix_pattern_is_structural_not_literal_specific() {
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _compat = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let schema = json!({
+        "type": "string",
+        "minLength": 6,
+        "maxLength": 200,
+        "pattern": "^[A-Z]{2}foo.*"
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(glrm.contains("json_string_anchored_prefix_open"), "{glrm}");
+    assert!(glrm.contains("json_string_char_exact_64"), "{glrm}");
+    assert!(!glrm.contains(" & "), "{glrm}");
+
+    assert!(schema_accepts_bytes(&schema, br#""ABfoox""#));
+    assert!(schema_accepts_bytes(&schema, br#""ZZfoo\n""#));
+    assert!(!schema_accepts_bytes(&schema, br#""AfooXX""#));
+    assert!(!schema_accepts_bytes(&schema, br#""abfoox""#));
+}
+
+#[test]
+fn chunked_anchored_prefix_pattern_rejects_prefix_longer_than_max() {
+    let schema = json!({
+        "type": "string",
+        "maxLength": 70,
+        "pattern": "^[a]{80}.*"
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(!glrm.contains(" & "), "{glrm}");
+
+    let mut input = Vec::from([b'"']);
+    input.extend(std::iter::repeat_n(b'a', 80));
+    input.push(b'"');
+    assert!(!schema_accepts_bytes(&schema, &input));
+}
+
+#[test]
+fn chunked_anchored_prefix_pattern_does_not_bypass_recognized_format() {
+    let schema = json!({
+        "type": "string",
+        "format": "date-time",
+        "maxLength": 200,
+        "pattern": "^2.*"
+    });
+
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    let glrm = to_glrm(&grammar);
+    assert!(!glrm.contains("json_string_anchored_prefix_open"), "{glrm}");
     lower(&grammar).unwrap();
 }
 
