@@ -597,3 +597,48 @@ fn kb304_nullable_enum_bare_quote_requires_canonical_separator_space() {
     // says type ["string", "null"], enum ["v1"] excludes null.
     assert!(!commit_null_accepts);
 }
+
+#[test]
+fn bounded_analysis_byte_classes_must_not_merge_distinct_vocab_tokens() {
+    const INVALID: u32 = 1;
+
+    fn spelling(value: usize) -> Vec<u8> {
+        const ALPHABET: &[u8] =
+            b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        vec![
+            ALPHABET[value % ALPHABET.len()],
+            ALPHABET[(value / ALPHABET.len()) % ALPHABET.len()],
+            ALPHABET[(value / ALPHABET.len().pow(2)) % ALPHABET.len()],
+        ]
+    }
+
+    // The faulty prequotient activates at 50,000 distinct vocabulary
+    // spellings. All generated fillers are three-byte alphanumeric strings, so
+    // active-language canonicalization reduces the local vocabulary to exactly
+    // the two relevant spellings: two bytes (`aa`) and three bytes (`aaa`).
+    let mut entries = vec![(0, b"aa".to_vec()), (INVALID, b"aaa".to_vec())];
+    let mut value = 0usize;
+    while entries.len() < 50_000 {
+        let filler = spelling(value);
+        value += 1;
+        if filler == b"aaa" {
+            continue;
+        }
+        entries.push((entries.len() as u32, filler));
+    }
+    let vocab = Vocab::new(entries);
+    let grammar = r#"
+start S;
+lexer group x ::= X;
+t X ::= /./;
+nt S ::= X X "!";
+"#;
+
+    let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
+    let mask = constraint.start().mask();
+    assert!(token_allowed(&mask, 0));
+    assert!(!token_allowed(&mask, INVALID as usize));
+
+    let mut byte_state = constraint.start();
+    assert!(byte_state.commit_bytes(b"aaa").is_err());
+}

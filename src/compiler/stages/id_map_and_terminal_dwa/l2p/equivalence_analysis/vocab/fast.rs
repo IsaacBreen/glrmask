@@ -3874,6 +3874,66 @@ mod shared_base_tests {
     };
     use std::sync::Arc;
 
+    #[test]
+    fn byte_classes_from_unpruned_view_are_not_valid_for_bounded_view() {
+        fn view(include_bang: bool) -> TokenizerView {
+            let mut transitions = vec![u32::MAX; 2 * 256];
+            transitions[b'a' as usize] = 1;
+            if include_bang {
+                transitions[b'!' as usize] = 1;
+            }
+            TokenizerView {
+                flat_dfa: FlatDfa {
+                    start_state: 0,
+                    transitions: Arc::from(transitions),
+                    states: vec![
+                        FlatDfaState {
+                            finalizers: vec![],
+                            possible_future_group_ids: vec![0],
+                        },
+                        FlatDfaState {
+                            finalizers: vec![0],
+                            possible_future_group_ids: vec![],
+                        },
+                    ],
+                },
+            }
+        }
+
+        let full = view(true);
+        let bounded = view(false);
+        let full_classes = compute_byte_classes(full.dfa());
+        let bounded_classes = compute_byte_classes(bounded.dfa());
+
+        assert_eq!(
+            full_classes[b'!' as usize],
+            full_classes[b'a' as usize],
+            "the bytes are genuinely equivalent in the full view",
+        );
+        assert_ne!(
+            bounded.dfa().trans(0, b'!' as usize),
+            bounded.dfa().trans(0, b'a' as usize),
+            "relevant-byte pruning splits that class in the bounded view",
+        );
+        assert_ne!(
+            bounded_classes[b'!' as usize],
+            bounded_classes[b'a' as usize],
+            "classes recomputed from the bounded view must reflect that split",
+        );
+        let tokens = [b"a".as_slice(), b"aa".as_slice()];
+        let classes = find_vocab_equivalence_classes_with_group_filter(
+            &bounded,
+            &tokens,
+            &[0],
+            &BTreeMap::new(),
+            Some(&bounded_classes),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(classes, BTreeSet::from([vec![0], vec![1]]));
+    }
+
     fn sample_dfa() -> FlatDfa {
         let mut transitions = vec![u32::MAX; 3 * 256];
         transitions[b'a' as usize] = 1;

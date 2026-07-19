@@ -1952,17 +1952,12 @@ fn analyze_equivalences_impl(
         let analysis_view = &analysis_view_owned;
 
         let byte_class_started_at = Instant::now();
-        // The active-language classes are an exact byte congruence for every
-        // residual of every active terminal language.  They are therefore a
-        // sound (possibly finer) partition for the derived analysis view too,
-        // and avoid rescanning every analysis-view transition column.
-        let byte_to_class = active_language_byte_classes
-            .or_else(|| {
-                shared_transition_cache
-                    .and_then(std::sync::OnceLock::get)
-                    .map(|cache| cache.byte_to_class)
-            })
-            .unwrap_or_else(|| super::compat::compute_byte_classes(analysis_view.dfa()));
+        // The full active-language classes remain sound for token-spelling
+        // canonicalization above, but the bounded analysis view materializes
+        // only vocabulary-relevant byte trajectories. That pruning can split a
+        // full-language byte class, so transition compression must use classes
+        // computed from this exact view rather than reusing the earlier table.
+        let byte_to_class = super::compat::compute_byte_classes(analysis_view.dfa());
         let byte_class_setup_ms = byte_class_started_at.elapsed().as_secs_f64() * 1000.0;
 
         let follows_normalize_started_at = Instant::now();
