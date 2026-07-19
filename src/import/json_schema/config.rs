@@ -64,7 +64,7 @@ impl Default for JsonSchemaConfig {
             // The estimate includes bounded repeat alternatives and the string-length
             // envelope. It is deliberately a product-cost budget, not a hard length cap.
             pattern_max_length_complexity_limit: 8_000,
-            split_complex_patterns: true,
+            split_complex_patterns: false,
             value_merging: MergeFamily {
                 generic: split_open_merge_close,
                 literal: merge_both_quotes,

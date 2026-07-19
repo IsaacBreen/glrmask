@@ -4061,6 +4061,23 @@ fn discriminator_anyof_object_lowers_to_compact_body() {
 }
 
 #[test]
+fn complex_anchored_pattern_splitting_is_disabled_by_default() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _guard = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_SPLIT_COMPLEX_PATTERNS");
+    let complex = json!({
+        "type": "string",
+        "pattern": r"^$|(^(?:\S+\s+){0,99}\S+$)"
+    });
+    let grammar = schema_to_named_grammar(&complex).expect("complex pattern should import");
+    assert_eq!(
+        count_rules_with_prefix(&grammar, "json_string_complex_pattern_"),
+        0,
+        "{:?}",
+        grammar.rules
+    );
+}
+
+#[test]
 fn complex_anchored_pattern_splitting_is_importer_only_and_selective() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
 

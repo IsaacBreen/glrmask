@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.1 — 2026-07-18 — runtime, integration, and tail-latency update
+## 0.1.1 — 2026-07-19 — runtime, integration, and tail-latency update
 
 ### Added
 
@@ -20,6 +20,7 @@
 
 - `Vocab` no longer owns a distinguished EOS field. Consumers pass one or more `end_token_ids` when compiling a constraint; those tokens may also retain ordinary byte semantics if present in the byte vocabulary.
 - Dynamic constraint artifacts use a new format version. Older artifacts without Vocab-level EOS metadata are migrated; artifacts that depended on the removed EOS metadata fail explicitly and must be rebuilt.
+- Importer-level complex anchored-pattern splitting is available through `GLRMASK_JSON_SCHEMA_SPLIT_COMPLEX_PATTERNS=1` but is disabled by default.
 
 ### Integration compatibility
 
