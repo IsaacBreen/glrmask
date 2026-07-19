@@ -3165,6 +3165,10 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
         );
     }
 
+    let requires_global_terminal_observation = grammar.rules.iter().any(|rule| {
+        rule.is_terminal && rule.name.starts_with("json_string_complex_pattern_")
+    });
+
     Ok(GrammarDef {
         rules: lowerer.rules,
         start,
@@ -3173,6 +3177,7 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
         terminal_names: lowerer.terminal_names,
         ignore_terminal,
         lexer_partitions,
+        requires_global_terminal_observation,
     })
 }
 

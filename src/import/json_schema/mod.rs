@@ -7,6 +7,7 @@ mod load;
 mod lower;
 mod number;
 mod object;
+mod pattern_splitting;
 mod preflight;
 pub(crate) mod string;
 

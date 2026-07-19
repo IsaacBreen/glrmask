@@ -24,7 +24,6 @@ use crate::automata::weighted::terminal_automaton::TerminalAutomaton;
 use crate::compiler::constraint_possible_matches as cpm;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::{GLRTable, GlrTableConstruction};
-use crate::compiler::grammar::terminal_splitting::split_complex_terminals;
 use crate::compiler::grammar::transforms::prepare_grammar_transforms_only;
 use crate::compiler::stages::id_map_and_terminal_dwa::classify::{
     SharedClassifyCache,
@@ -2167,25 +2166,7 @@ pub(crate) fn compile_prepared(prepared_grammar: GrammarDef, vocab: &Vocab) -> C
     compile_prepared_with_profile(prepared_grammar, vocab).0
 }
 
-fn prepare_grammar_for_vocab(mut grammar: GrammarDef, vocab: &Vocab) -> GrammarDef {
-    let split_started_at = Instant::now();
-    let split_profile = split_complex_terminals(&mut grammar, vocab);
-    if compile_profile_enabled() {
-        eprintln!(
-            "[glrmask/profile][terminal_split] candidates={} split={} generated_terminals={} generated_rules={} block_size={}..{} maximum_internal_path_bound={} certified_intersections={} subset_certificate_pairs={} subset_certificate_ms={:.3} ms={:.3}",
-            split_profile.candidate_terminals,
-            split_profile.split_terminals,
-            split_profile.generated_terminals,
-            split_profile.generated_rules,
-            split_profile.minimum_block_size,
-            split_profile.maximum_block_size,
-            split_profile.maximum_internal_path_bound,
-            split_profile.certified_intersections,
-            split_profile.subset_certificate_pairs,
-            split_profile.subset_certificate_ms,
-            elapsed_ms(split_started_at),
-        );
-    }
+fn prepare_grammar(grammar: GrammarDef) -> GrammarDef {
     prepare_grammar_transforms_only(grammar)
 }
 
@@ -2205,7 +2186,7 @@ pub(crate) fn compile_dynamic_owned_with_table_construction(
     let profile = compile_profile_enabled();
     let total_started_at = profile.then(Instant::now);
     let prepare_started_at = profile.then(Instant::now);
-    let prepared_grammar = prepare_grammar_for_vocab(grammar, vocab);
+    let prepared_grammar = prepare_grammar(grammar);
     let prepare_ms = prepare_started_at.map_or(0.0, elapsed_ms);
     run_with_compile_thread_pool(|| {
         let analysis_started_at = profile.then(Instant::now);
@@ -2269,7 +2250,7 @@ pub(crate) fn compile_owned_with_table_construction(
         return constraint;
     }
 
-    let prepared_grammar = prepare_grammar_for_vocab(grammar, vocab);
+    let prepared_grammar = prepare_grammar(grammar);
     compile_prepared_with_table_construction(prepared_grammar, vocab, default_table_construction)
 }
 
@@ -2293,7 +2274,7 @@ pub(crate) fn compile_owned_with_lexer_adaptive(
     vocab: &Vocab,
     adaptive: bool,
 ) -> Constraint {
-    let prepared_grammar = prepare_grammar_for_vocab(grammar, vocab);
+    let prepared_grammar = prepare_grammar(grammar);
     compile_prepared_with_profile_and_table_construction(
         prepared_grammar,
         vocab,
@@ -2321,7 +2302,7 @@ pub(crate) fn compile_owned_profiled_with_table_construction(
 ) -> (Constraint, CompilePhaseProfile) {
     let total_started_at = Instant::now();
     let prepare_started_at = Instant::now();
-    let prepared_grammar = prepare_grammar_for_vocab(grammar, vocab);
+    let prepared_grammar = prepare_grammar(grammar);
     let prepare_ms = elapsed_ms(prepare_started_at);
 
     let (constraint, mut profile) = compile_prepared_with_profile_and_table_construction(

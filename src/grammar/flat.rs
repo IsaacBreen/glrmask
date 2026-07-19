@@ -18,6 +18,10 @@ pub struct GrammarDef {
     /// Explicit terminal-id → named lexer partition assignments.
     #[serde(default)]
     pub lexer_partitions: BTreeMap<TerminalID, String>,
+    /// Exact token-equivalence analysis must observe all terminal residuals,
+    /// rather than projecting to one L2P construction family.
+    #[serde(default)]
+    pub requires_global_terminal_observation: bool,
 }
 
 pub type NonterminalID = u32;

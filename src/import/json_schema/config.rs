@@ -12,6 +12,7 @@ pub(crate) struct JsonSchemaConfig {
     pub(crate) terminalize_bounded_string_max: usize,
     pub(crate) preserve_pattern_max_length: bool,
     pub(crate) pattern_max_length_complexity_limit: usize,
+    pub(crate) split_complex_patterns: bool,
     pub(crate) value_merging: MergeFamily,
     pub(crate) key_merging: MergeFamily,
     pub(crate) object_merging: ObjectMergeConfig,
@@ -63,6 +64,7 @@ impl Default for JsonSchemaConfig {
             // The estimate includes bounded repeat alternatives and the string-length
             // envelope. It is deliberately a product-cost budget, not a hard length cap.
             pattern_max_length_complexity_limit: 8_000,
+            split_complex_patterns: true,
             value_merging: MergeFamily {
                 generic: split_open_merge_close,
                 literal: merge_both_quotes,
@@ -106,6 +108,10 @@ impl JsonSchemaConfig {
             "GLRMASK_JSON_SCHEMA_PATTERN_MAX_LENGTH_COMPLEXITY_LIMIT",
         )
         .unwrap_or(config.pattern_max_length_complexity_limit);
+        config.split_complex_patterns = read_bool(
+            "GLRMASK_JSON_SCHEMA_SPLIT_COMPLEX_PATTERNS",
+        )
+        .unwrap_or(config.split_complex_patterns);
         config.value_merging.generic = read_quote_merge(
             "GLRMASK_JSON_SCHEMA_VALUE_MERGE_OPEN",
             "GLRMASK_JSON_SCHEMA_VALUE_MERGE_CLOSE",

@@ -63,8 +63,11 @@ This document lists all `GLRMASK_*` environment variables used in this crate, gr
 | `GLRMASK_STRING_REPEAT_CHUNK` | integer (`usize`) | `256` |
 | `GLRMASK_JSON_SCHEMA_PRESERVE_PATTERN_MAX_LENGTH` | truthy bool | `on` |
 | `GLRMASK_JSON_SCHEMA_PATTERN_MAX_LENGTH_COMPLEXITY_LIMIT` | integer (`usize`) | `8000` |
+| `GLRMASK_JSON_SCHEMA_SPLIT_COMPLEX_PATTERNS` | truthy bool | `on` |
 
 `GLRMASK_JSON_SCHEMA_PATTERN_MAX_LENGTH_COMPLEXITY_LIMIT` is a static regex-HIR budget used only when preserving `maxLength` on patterned strings. If the score is above the budget, the importer drops the upper length envelope before terminal DFA construction; cheap `minLength` lower bounds are still kept. There is no separate hard `maxLength` cap: a sufficiently simple large bound can remain exact.
+
+`GLRMASK_JSON_SCHEMA_SPLIT_COMPLEX_PATTERNS` controls the importer-level exact decomposition of sufficiently complex, fully anchored string `pattern` expressions containing one large bounded repetition. It is enabled by default. Setting it to `0`, `false`, `no`, or `off` retains the original monolithic pattern terminal and is useful for differential validation.
 
 `GLRMASK_STRING_VALUE_EXCLUSIONS_COMPAT=abdcffb6b` restores the old capped
 schema-wide string-value exclusion profile from `abdcffb6b`: global shared

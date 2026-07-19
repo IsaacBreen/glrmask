@@ -660,23 +660,15 @@ let strict_reference = reference_terminal_expansion
     // state/vocab equivalence pass must not be bypassed. Do not reintroduce
     // fast-sound, identity, lex-dedup, or similar shortcut id-map paths.
     let fast_sound_id_map_used = false;
-    // Keep raw lexer-state coordinates for the final scanner, but restrict
-    // equivalence observations to this L2P partition's active terminals. With
-    // TI enabled this is the representative mask, so all three equivalence
-    // passes ignore class members replaced by their representatives.
-    // Splitting one regular terminal into parser-visible fragments introduces
-    // residual languages that can overlap terminals in another construction
-    // family. Projecting scanner observations to a single family can then erase
-    // distinctions which later family-map reconciliation cannot reconstruct.
-    // For transformed grammars, observe all terminal residuals. Unsplit grammars
-    // retain the cheaper family-local projection.
-    let has_generated_split_terminals = grammar.terminal_display_names.iter().any(|name| {
-        name.starts_with(
-            crate::compiler::grammar::terminal_splitting::GENERATED_TERMINAL_NAME_PREFIX,
-        )
-    });
-    let equivalence_active_groups =
-        (!has_generated_split_terminals).then_some(analysis_active_terminals.as_slice());
+    // Keep raw lexer-state coordinates for the final scanner. Ordinarily the
+    // exact equivalence analysis can project observations to this L2P family's
+    // active terminals. Importer-level complex-pattern decomposition creates
+    // parser-visible residual terminals whose byte languages can overlap a
+    // terminal in another construction family. In that case family-local
+    // projection can erase a vocabulary distinction that reconciliation cannot
+    // reconstruct, so observe every terminal residual conservatively.
+    let equivalence_active_groups = (!grammar.requires_global_terminal_observation)
+        .then_some(analysis_active_terminals.as_slice());
     let (simplified_id_map, equiv_profile) =
         equivalence_analysis::combined::analyze_equivalences_with_group_filter(
             partition_label,

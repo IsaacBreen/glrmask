@@ -23,7 +23,7 @@ use crate::grammar::ast::{
 use crate::grammar::factoring::factor_named_grammar;
 use crate::grammar::glrm::{from_glrm, to_glrm};
 use crate::dump_json_schema_grammar_glrm;
-use crate::Vocab;
+use crate::{Constraint, DynamicConstraint, Vocab};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -4058,6 +4058,206 @@ fn discriminator_anyof_object_lowers_to_compact_body() {
         br#"{"type": "VIAF", "value": "1234567", "extra": true}"#
     ));
     lower(&grammar).unwrap();
+}
+
+#[test]
+fn complex_anchored_pattern_splitting_is_importer_only_and_selective() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+
+    {
+        let _guard = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_SPLIT_COMPLEX_PATTERNS", "1");
+        let complex = json!({
+            "type": "string",
+            "pattern": r"^$|(^(?:\S+\s+){0,99}\S+$)"
+        });
+        let grammar = schema_to_named_grammar(&complex).expect("complex pattern should import");
+        assert_eq!(
+            count_rules_with_prefix(&grammar, "json_string_complex_pattern_prefix_"),
+            1,
+            "{:?}",
+            grammar.rules
+        );
+        assert_eq!(
+            count_rules_with_prefix(&grammar, "json_string_complex_pattern_chunk_"),
+            1,
+            "{:?}",
+            grammar.rules
+        );
+        assert_eq!(
+            count_rules_with_prefix(&grammar, "json_string_complex_pattern_full_tail_"),
+            1,
+            "{:?}",
+            grammar.rules
+        );
+        assert_eq!(
+            count_rules_with_prefix(&grammar, "json_string_complex_pattern_final_tail_"),
+            1,
+            "{:?}",
+            grammar.rules
+        );
+        assert_eq!(
+            count_rules_with_prefix(&grammar, "json_string_complex_pattern_passthrough_"),
+            1,
+            "{:?}",
+            grammar.rules
+        );
+        let chunk_name = grammar
+            .rules
+            .iter()
+            .find(|rule| rule.name.starts_with("json_string_complex_pattern_chunk_"))
+            .expect("complex pattern chunk terminal")
+            .name
+            .clone();
+        assert!(grammar.rules.iter().any(|rule| {
+            !rule.is_terminal
+                && rule.name.starts_with("json_string_constrained_")
+                && contains_ref_named(&rule.expr, &chunk_name)
+        }), "{:?}", grammar.rules);
+        let lowered = lower(&grammar).expect("complex pattern grammar should lower");
+        assert!(lowered.requires_global_terminal_observation);
+
+        for schema in [
+            json!({"type": "string", "pattern": "^[a-z]{0,100}$"}),
+            json!({"type": "string", "pattern": "(?:a+b+){0,99}a+"}),
+            json!({"type": "string", "maxLength": 1000}),
+            json!({"type": "string", "format": "date-time"}),
+            json!({"type": "string", "pattern": "^abc$", "format": "date-time"}),
+        ] {
+            let grammar = schema_to_named_grammar(&schema).expect("schema should import");
+            assert_eq!(
+                count_rules_with_prefix(&grammar, "json_string_complex_pattern_"),
+                0,
+                "schema={schema} rules={:?}",
+                grammar.rules
+            );
+            let lowered = lower(&grammar).expect("unsplit grammar should lower");
+            assert!(!lowered.requires_global_terminal_observation);
+        }
+    }
+
+    {
+        let _guard = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_SPLIT_COMPLEX_PATTERNS", "0");
+        let complex = json!({
+            "type": "string",
+            "pattern": r"^$|(^(?:\S+\s+){0,99}\S+$)"
+        });
+        let grammar = schema_to_named_grammar(&complex).expect("complex pattern should import");
+        assert_eq!(
+            count_rules_with_prefix(&grammar, "json_string_complex_pattern_"),
+            0,
+            "{:?}",
+            grammar.rules
+        );
+    }
+}
+
+#[test]
+fn complex_anchored_pattern_split_matches_monolithic_masks() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "value": {
+                "type": "string",
+                "pattern": r"^$|(^(?:\S+\s+){0,63}\S+$)"
+            },
+            "simple": {
+                "type": "string",
+                "pattern": "^[A-Za-z_]{0,100}$",
+                "maxLength": 100
+            }
+        },
+        "required": ["value", "simple"],
+        "additionalProperties": false
+    });
+    let schema_json = serde_json::to_string(&schema).unwrap();
+    let mut entries = (0u32..=255)
+        .map(|byte| (byte, vec![byte as u8]))
+        .collect::<Vec<_>>();
+    entries.extend([
+        (300, b"                                                                ".to_vec()),
+        (301, b"word ".to_vec()),
+        (302, b"\", \"simple\": \"".to_vec()),
+        (303, b"_".repeat(64)),
+    ]);
+    let vocab = Vocab::new(entries);
+
+    let monolithic = {
+        let _guard = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_SPLIT_COMPLEX_PATTERNS", "0");
+        DynamicConstraint::from_json_schema(&schema_json, &vocab)
+            .expect("monolithic dynamic constraint should compile")
+    };
+    let split = {
+        let _guard = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_SPLIT_COMPLEX_PATTERNS", "1");
+        Constraint::from_json_schema(&schema_json, &vocab)
+            .expect("split static constraint should compile")
+    };
+
+    fn choose_token(mask: &[u32], random: u64) -> Option<u32> {
+        let count = mask.iter().map(|word| word.count_ones() as usize).sum::<usize>();
+        if count == 0 {
+            return None;
+        }
+        let mut rank = (random as usize) % count;
+        for (word_index, &word) in mask.iter().enumerate() {
+            let bits = word.count_ones() as usize;
+            if rank >= bits {
+                rank -= bits;
+                continue;
+            }
+            let mut remaining = word;
+            for _ in 0..rank {
+                remaining &= remaining - 1;
+            }
+            return Some((word_index as u32) * 32 + remaining.trailing_zeros());
+        }
+        unreachable!("rank is smaller than mask population")
+    }
+
+    fn next_random(seed: &mut u64) -> u64 {
+        *seed ^= *seed << 13;
+        *seed ^= *seed >> 7;
+        *seed ^= *seed << 17;
+        *seed
+    }
+
+    let mut compared = 0usize;
+    for walk in 0..32u64 {
+        let mut split_state = split.start();
+        let mut monolithic_state = monolithic.start();
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64
+            ^ walk.wrapping_mul(0x5851_f42d_4c95_7f2d);
+        for step in 0..96 {
+            assert_eq!(
+                split_state.is_finished(),
+                monolithic_state.is_finished(),
+                "finished mismatch walk={walk} step={step}"
+            );
+            let split_mask = split_state.mask();
+            let monolithic_mask = monolithic_state.mask();
+            assert_eq!(
+                split_mask, monolithic_mask,
+                "mask mismatch walk={walk} step={step}"
+            );
+            compared += 1;
+            if split_state.is_finished() {
+                break;
+            }
+            let Some(token) = choose_token(&split_mask, next_random(&mut seed)) else {
+                break;
+            };
+            let split_result = split_state.commit_token(token);
+            let monolithic_result = monolithic_state.commit_token(token);
+            assert_eq!(
+                split_result.is_ok(),
+                monolithic_result.is_ok(),
+                "commit mismatch walk={walk} step={step} token={token}"
+            );
+            split_result.expect("selected split token should commit");
+            monolithic_result.expect("selected monolithic token should commit");
+        }
+    }
+    assert!(compared >= 64, "expected a nontrivial differential sweep");
 }
 
 #[test]

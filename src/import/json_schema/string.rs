@@ -20,6 +20,10 @@ use super::lower::{
     JSON_STRING_CHAR_RULE,
     JSON_STRING_PATTERN_DOT_CHAR_RULE, JSON_STRING_RULE, MAX_SHARED_ADDITIONAL_EXCLUSION_KEYS,
 };
+use super::pattern_splitting::{
+    analyze_complex_anchored_pattern, ComplexPatternBranch, ComplexPatternPlan,
+    CountedPatternBranch,
+};
 
 fn encoded_json_key_regex(encoded: &str) -> String {
     // Keep literal property spelling exactly as serde_json emits it.
@@ -94,6 +98,10 @@ impl<'a> Lowerer<'a> {
                     } else {
                         "json_string_constrained"
                     });
+                    if let Some(expr) = lowerer.lower_complex_anchored_pattern_expr(schema)? {
+                        lowerer.add_nonterminal_rule(&name, expr);
+                        return Ok(r(&name));
+                    }
                     if schema.min_length == 0
                         && schema.max_length.is_none()
                         && let Some(pattern) = &schema.pattern
@@ -155,7 +163,9 @@ impl<'a> Lowerer<'a> {
         };
 
         if let Some(pattern) = &string.pattern {
-            if self.llguidance_compat_enabled() {
+            if self.llguidance_compat_enabled()
+                || self.complex_anchored_pattern_plan(string)?.is_some()
+            {
                 return Ok(None);
             }
             if string.min_length != 0 || string.max_length.is_some() || string.format.is_some() {
@@ -222,6 +232,9 @@ impl<'a> Lowerer<'a> {
         let Some(string) = &assertions.string else {
             return Ok(None);
         };
+        if self.complex_anchored_pattern_plan(string)?.is_some() {
+            return Ok(None);
+        }
         if string.pattern.is_none()
             && recognized_string_format_body_regex_for_lowering(string.format.as_deref()).is_none()
         {
@@ -238,6 +251,154 @@ impl<'a> Lowerer<'a> {
             self.lower_constrained_string_terminal_expr_with_pattern_split(string, false)?,
             repeat_complexity,
         )))
+    }
+
+    fn complex_anchored_pattern_plan(
+        &self,
+        schema: &StringSchema,
+    ) -> ImportResult<Option<ComplexPatternPlan>> {
+        let Some(pattern) = schema.pattern.as_deref() else {
+            return Ok(None);
+        };
+        if !self.config.split_complex_patterns
+            || self.llguidance_compat_enabled()
+            || recognized_string_format_body_regex_for_lowering(schema.format.as_deref()).is_some()
+        {
+            return Ok(None);
+        }
+
+        let preprocessed = preprocess_ascii_shorthand(pattern);
+        let preserved_max = schema.max_length.filter(|&max| {
+            pattern_matches_any_string(&preprocessed)
+                || (self.config.preserve_pattern_max_length
+                    && pattern_max_length_complexity_score(&preprocessed, max)
+                        <= self.config.pattern_max_length_complexity_limit)
+        });
+        analyze_complex_anchored_pattern(&preprocessed, schema.min_length, preserved_max)
+    }
+
+    fn lower_complex_anchored_pattern_expr(
+        &mut self,
+        schema: &StringSchema,
+    ) -> ImportResult<Option<GrammarExpr>> {
+        let Some(plan) = self.complex_anchored_pattern_plan(schema)? else {
+            return Ok(None);
+        };
+        let partition_key = JsonPatternPartitionKey::from(schema);
+        let mut alternatives = Vec::new();
+        for branch in plan.branches {
+            match branch {
+                ComplexPatternBranch::Passthrough(body) => {
+                    let Some(body) = self
+                        .lower_decoded_regex_hir_to_json_body_expr_at_start(&body, true)?
+                    else {
+                        return Ok(None);
+                    };
+                    alternatives.push(self.add_complex_pattern_terminal(
+                        "passthrough",
+                        seq(vec![lit("\""), body, lit("\"")]),
+                        partition_key.clone(),
+                    ));
+                }
+                ComplexPatternBranch::Counted(branch) => {
+                    let Some(mut branch_alternatives) =
+                        self.lower_counted_complex_pattern_branch(branch, partition_key.clone())?
+                    else {
+                        return Ok(None);
+                    };
+                    alternatives.append(&mut branch_alternatives);
+                }
+            }
+        }
+        Ok(Some(choice(alternatives)))
+    }
+
+    fn lower_counted_complex_pattern_branch(
+        &mut self,
+        branch: CountedPatternBranch,
+        partition_key: JsonPatternPartitionKey,
+    ) -> ImportResult<Option<Vec<GrammarExpr>>> {
+        let Some(prefix_body) = self
+            .lower_decoded_regex_hir_to_json_body_expr_at_start(&branch.prefix, true)?
+        else {
+            return Ok(None);
+        };
+        let Some(body) = self
+            .lower_decoded_regex_hir_to_json_body_expr_at_start(&branch.body, true)?
+        else {
+            return Ok(None);
+        };
+        let Some(suffix_body) = self
+            .lower_decoded_regex_hir_to_json_body_expr_at_start(&branch.suffix, false)?
+        else {
+            return Ok(None);
+        };
+
+        let prefix = self.add_complex_pattern_terminal(
+            "prefix",
+            seq(vec![lit("\""), prefix_body]),
+            partition_key.clone(),
+        );
+        let chunk = self.add_complex_pattern_terminal(
+            "chunk",
+            GrammarExpr::Quantified(
+                Box::new(body.clone()),
+                Quantifier::Range(branch.block, Some(branch.block)),
+            ),
+            partition_key.clone(),
+        );
+        let full_tail = self.add_complex_pattern_terminal(
+            "full_tail",
+            seq(vec![
+                GrammarExpr::Quantified(
+                    Box::new(body.clone()),
+                    Quantifier::Range(0, Some(branch.block - 1)),
+                ),
+                suffix_body.clone(),
+                lit("\""),
+            ]),
+            partition_key.clone(),
+        );
+        let remainder = branch.max_repeat % branch.block;
+        let final_tail = self.add_complex_pattern_terminal(
+            "final_tail",
+            seq(vec![
+                GrammarExpr::Quantified(
+                    Box::new(body),
+                    Quantifier::Range(0, Some(remainder)),
+                ),
+                suffix_body,
+                lit("\""),
+            ]),
+            partition_key,
+        );
+
+        let full_groups = branch.max_repeat / branch.block;
+        let mut alternatives = vec![seq(vec![prefix.clone(), full_tail.clone()])];
+        for group_count in 1..full_groups {
+            let mut parts = Vec::with_capacity(group_count + 2);
+            parts.push(prefix.clone());
+            parts.extend(std::iter::repeat_n(chunk.clone(), group_count));
+            parts.push(full_tail.clone());
+            alternatives.push(seq(parts));
+        }
+        let mut final_parts = Vec::with_capacity(full_groups + 2);
+        final_parts.push(prefix);
+        final_parts.extend(std::iter::repeat_n(chunk, full_groups));
+        final_parts.push(final_tail);
+        alternatives.push(seq(final_parts));
+        Ok(Some(alternatives))
+    }
+
+    fn add_complex_pattern_terminal(
+        &mut self,
+        role: &str,
+        expr: GrammarExpr,
+        partition_key: JsonPatternPartitionKey,
+    ) -> GrammarExpr {
+        let name = self.fresh_rule_name(&format!("json_string_complex_pattern_{role}"));
+        self.add_pattern_terminal_rule_with_partition_key(&name, expr, partition_key);
+        r(&name)
     }
 
     fn lower_constrained_string_terminal_expr(
@@ -1058,6 +1219,12 @@ impl<'a> Lowerer<'a> {
         key: &str,
         schema: &StringSchema,
     ) -> ImportResult<GrammarExpr> {
+        if self.complex_anchored_pattern_plan(schema)?.is_some() {
+            return Ok(seq(vec![
+                self.lower_literal_key_colon_with_prefix(prefix, key),
+                self.lower_string(schema)?,
+            ]));
+        }
         if !split_literal_terminals_enabled()
             && (schema.pattern.is_some()
                 || recognized_string_format_body_regex_for_lowering(schema.format.as_deref()).is_some())
@@ -1096,6 +1263,9 @@ impl<'a> Lowerer<'a> {
         &mut self,
         schema: &StringSchema,
     ) -> ImportResult<GrammarExpr> {
+        if self.complex_anchored_pattern_plan(schema)?.is_some() {
+            return self.lower_string(schema);
+        }
         if schema.pattern.is_none()
             && recognized_string_format_body_regex_for_lowering(schema.format.as_deref()).is_none()
         {
@@ -2519,7 +2689,7 @@ fn strip_outer_end_anchor(hir: Hir) -> Option<Hir> {
     }
 }
 
-fn strip_outer_anchors(hir: Hir) -> (Hir, bool, bool) {
+pub(super) fn strip_outer_anchors(hir: Hir) -> (Hir, bool, bool) {
     let mut hir = strip_outer_captures(hir);
     let mut anchored_start = false;
     let mut anchored_end = false;
