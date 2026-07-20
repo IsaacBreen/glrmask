@@ -3177,6 +3177,7 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
         terminal_names: lowerer.terminal_names,
         ignore_terminal,
         lexer_partitions,
+        residual_isolation_classes: BTreeMap::new(),
         requires_global_terminal_observation,
     })
 }

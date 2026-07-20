@@ -386,8 +386,9 @@ impl<'a> Lowerer<'a> {
         let preserved_max = schema.max_length.filter(|&max| {
             pattern_matches_any_string(&preprocessed)
                 || (self.config.preserve_pattern_max_length
-                    && pattern_max_length_complexity_score(&preprocessed, max)
-                        <= self.config.pattern_max_length_complexity_limit)
+                    && (crate::compiler::synthetic_bounded_terminals_enabled()
+                        || pattern_max_length_complexity_score(&preprocessed, max)
+                            <= self.config.pattern_max_length_complexity_limit))
         });
         analyze_complex_anchored_pattern(&preprocessed, schema.min_length, preserved_max)
     }
@@ -2482,7 +2483,7 @@ fn cheap_pattern_length_bound_body_regex(
     min: usize,
     max: Option<usize>,
     preserve_pattern_max_length: bool,
-    pattern_max_length_complexity_limit: usize,
+    _pattern_max_length_complexity_limit: usize,
 ) -> Option<String> {
     if min == 0 && max.is_none() {
         return None;
@@ -2494,22 +2495,22 @@ fn cheap_pattern_length_bound_body_regex(
     }
 
     if let Some(max) = max {
-        // Preserve an upper bound only when the pattern/length product stays
-        // below the static cost budget. This is intentionally not a hard
-        // maxLength cutoff: a large simple language can remain exact, while a
-        // shorter nested variable-repeat language is rejected before it expands
-        // the terminal lexer state space.
+        // The complexity budget may choose another lowering strategy, but it
+        // must not weaken the imported language. Large exact envelopes are
+        // handled by compile-time terminal synthesis and late full-lexer state
+        // expansion. The explicit compatibility switch remains available for
+        // callers that deliberately request the historical approximation.
         if preserve_pattern_max_length
-            && pattern_max_length_complexity_score(&pattern, max)
-                <= pattern_max_length_complexity_limit
+            && (crate::compiler::synthetic_bounded_terminals_enabled()
+                || pattern_max_length_complexity_score(&pattern, max)
+                    <= _pattern_max_length_complexity_limit)
         {
             return Some(bounded_json_string_body_regex(string_char_regex, min, Some(max)));
         }
     }
 
-    // Keep the cheap lower bound when the product-cost estimate rejects the
-    // upper envelope. This is a deliberate over-accepting importer policy for
-    // pathological pattern/length intersections.
+    // Historical compatibility mode: keep only the cheap lower bound when the
+    // caller explicitly disables patterned max-length preservation.
     if min > 0 {
         return Some(bounded_json_string_body_regex(string_char_regex, min, None));
     }

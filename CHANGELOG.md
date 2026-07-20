@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Improved
+
+- Large bounded JSON Schema string patterns now retain exact `maxLength`
+  semantics by compiling terminal/parser automata against a certified smaller
+  residual representative while keeping the full exact lexer for runtime
+  state. Pathological bounded-repeat intersections no longer force the former
+  multi-second terminal-DWA construction path.
+
+### Changed
+
+- Exact bounded-terminal synthesis is enabled by default. Set
+  `GLRMASK_SYNTHETIC_BOUNDED_TERMINALS=0` to disable the optimization and use
+  the full exact tokenizer throughout compilation.
+
 ## 0.1.1 — 2026-07-19 — runtime, integration, and tail-latency update
 
 ### Added

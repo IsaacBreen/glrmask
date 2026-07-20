@@ -206,7 +206,7 @@ pub(crate) fn compact_unused_terminals(grammar: &mut GrammarDef) {
     let mut remap = BTreeMap::<TerminalID, TerminalID>::new();
     let mut compacted = Vec::with_capacity(used.len());
     let mut canonical_ids =
-        HashMap::<(TerminalIdentity, Option<String>), TerminalID>::new();
+        HashMap::<(TerminalIdentity, Option<String>, Option<u32>), TerminalID>::new();
 
     for old_id in used {
         let terminal = grammar.terminals.get(old_id as usize).unwrap_or_else(|| {
@@ -216,6 +216,7 @@ pub(crate) fn compact_unused_terminals(grammar: &mut GrammarDef) {
         let identity = (
             terminal_identity(terminal, is_ignore),
             grammar.lexer_partitions.get(&old_id).cloned(),
+            grammar.residual_isolation_classes.get(&old_id).copied(),
         );
         if let Some(&existing_id) = canonical_ids.get(&identity) {
             remap.insert(old_id, existing_id);
@@ -241,6 +242,27 @@ pub(crate) fn compact_unused_terminals(grammar: &mut GrammarDef) {
     grammar.ignore_terminal = grammar.ignore_terminal.and_then(|old_id| remap.get(&old_id).copied());
     grammar.terminal_names = remap_terminal_names(&grammar.terminal_names, &remap);
     grammar.lexer_partitions = remap_lexer_partitions(&grammar.lexer_partitions, &remap);
+    grammar.residual_isolation_classes =
+        remap_residual_isolation_classes(&grammar.residual_isolation_classes, &remap);
+}
+
+fn remap_residual_isolation_classes(
+    classes: &BTreeMap<TerminalID, u32>,
+    remap: &BTreeMap<TerminalID, TerminalID>,
+) -> BTreeMap<TerminalID, u32> {
+    let mut remapped = BTreeMap::new();
+    for (&old_id, &class) in classes {
+        let Some(&new_id) = remap.get(&old_id) else {
+            continue;
+        };
+        if let Some(previous) = remapped.insert(new_id, class) {
+            assert_eq!(
+                previous, class,
+                "terminal compaction merged distinct residual isolation classes {previous} and {class}",
+            );
+        }
+    }
+    remapped
 }
 
 fn remap_lexer_partitions(
@@ -1132,6 +1154,42 @@ mod tests {
                 (0, "literal-family".to_string()),
                 (1, "other-family".to_string()),
             ]),
+        );
+    }
+
+    #[test]
+    fn compact_unused_terminals_preserves_distinct_residual_isolation_classes() {
+        let mut grammar = GrammarDef {
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![t(0), t(1)],
+            }],
+            start: 0,
+            terminals: vec![
+                Terminal::Literal {
+                    id: 0,
+                    bytes: b"same".to_vec(),
+                },
+                Terminal::Literal {
+                    id: 1,
+                    bytes: b"same".to_vec(),
+                },
+            ],
+            lexer_partitions: BTreeMap::from([
+                (0, "same-partition".to_string()),
+                (1, "same-partition".to_string()),
+            ]),
+            residual_isolation_classes: BTreeMap::from([(0, 41), (1, 42)]),
+            ..GrammarDef::default()
+        };
+
+        compact_unused_terminals(&mut grammar);
+
+        assert_eq!(grammar.terminals.len(), 2);
+        assert_eq!(grammar.rules[0].rhs, vec![t(0), t(1)]);
+        assert_eq!(
+            grammar.residual_isolation_classes,
+            BTreeMap::from([(0, 41), (1, 42)]),
         );
     }
 

@@ -18,6 +18,16 @@ pub struct GrammarDef {
     /// Explicit terminal-id → named lexer partition assignments.
     #[serde(default)]
     pub lexer_partitions: BTreeMap<TerminalID, String>,
+    /// Residual coordinates that must remain independently identifiable while
+    /// the compile-time lexer is simplified. Terminals with different class
+    /// ids must not be deduplicated or jointly determinized before late
+    /// full-lexer state-map expansion is complete.
+    ///
+    /// This is compiler metadata rather than language semantics. Ordinary
+    /// grammars leave the map empty. Synthetic bounded-terminal lowering gives
+    /// each independently simplified terminal its own class initially.
+    #[serde(default)]
+    pub residual_isolation_classes: BTreeMap<TerminalID, u32>,
     /// Exact token-equivalence analysis must observe all terminal residuals,
     /// rather than projecting to one L2P construction family.
     #[serde(default)]

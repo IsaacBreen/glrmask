@@ -52,6 +52,17 @@ impl SparseStateSet {
         }
     }
 
+    #[inline]
+    pub fn union_compressed(&mut self, set: &CompressedStateSet) {
+        for &(word_index, bits) in &set.words {
+            let word = &mut self.words[word_index as usize];
+            if *word == 0 {
+                self.dirty_words.push(word_index as usize);
+            }
+            *word |= bits;
+        }
+    }
+
     pub fn clear(&mut self) {
         for &idx in &self.dirty_words {
             self.words[idx] = 0;
@@ -91,6 +102,23 @@ impl CompressedStateSet {
     pub fn from_sparse(sparse: &SparseStateSet) -> Self {
         let mut result = Self::new();
         Self::reuse_from_sparse(sparse, &mut result);
+        result
+    }
+
+    #[inline]
+    pub fn from_sparse_masked(sparse: &SparseStateSet, word_masks: &[u64]) -> Self {
+        let mut result = Self::new();
+        result.words.reserve(sparse.dirty_words.len());
+        let mut hash = 0u64;
+        for &word_index in &sparse.dirty_words {
+            let word = sparse.words[word_index] & word_masks[word_index];
+            if word != 0 {
+                result.words.push((word_index as u32, word));
+                hash ^= hash_sparse_word(word_index, word);
+            }
+        }
+        result.words.sort_unstable_by_key(|&(index, _)| index);
+        result.hash = hash;
         result
     }
 

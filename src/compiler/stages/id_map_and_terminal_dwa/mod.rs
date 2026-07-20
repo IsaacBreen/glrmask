@@ -10,6 +10,7 @@ mod finalize_ignore;
 pub(crate) mod grammar_helpers;
 pub(crate) mod l1;
 pub(crate) mod l2p;
+pub(crate) mod synthetic_state_map;
 pub(crate) mod merge;
 pub(crate) mod partition;
 pub(crate) mod types;

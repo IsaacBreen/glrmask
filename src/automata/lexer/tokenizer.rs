@@ -45,6 +45,15 @@ pub struct TokenizerExecResult {
 
 pub type TokenizerStateSet = SmallVec<[u32; 1]>;
 
+/// Exact disjoint union used only by cross-tokenizer compile-time analyses.
+/// Source state `s` is represented by `left_offset + s` or
+/// `right_offset + s`; state zero is a fresh epsilon dispatcher.
+pub(crate) struct TokenizerAnalysisUnion {
+    pub(crate) tokenizer: Tokenizer,
+    pub(crate) left_offset: u32,
+    pub(crate) right_offset: u32,
+}
+
 pub(crate) trait Lexer {
     fn start_state(&self) -> u32;
     fn num_terminals(&self) -> u32;
@@ -160,6 +169,79 @@ impl Tokenizer {
         }
     }
 
+    /// Put two tokenizers with the same terminal-id domain under one fresh
+    /// epsilon root without identifying any source states. This lets the exact
+    /// state-equivalence machinery compare residual states across independently
+    /// built full and synthesized lexers.
+    pub(crate) fn disjoint_union_for_analysis(
+        left: &Tokenizer,
+        right: &Tokenizer,
+    ) -> TokenizerAnalysisUnion {
+        assert_eq!(
+            left.num_terminals, right.num_terminals,
+            "cross-tokenizer analysis requires one shared terminal-id domain",
+        );
+
+        let left_offset = 1u32;
+        let right_offset = left_offset + left.dfa.num_states() as u32;
+        let mut dfa = DFA::new(
+            1usize
+                .saturating_add(left.dfa.num_states())
+                .saturating_add(right.dfa.num_states()),
+        );
+        let num_groups = left.num_terminals as usize;
+        dfa.ensure_group_capacity(num_groups);
+
+        for group in 0..num_groups {
+            let left_set = *left.dfa.group_id_to_u8set(group as u32);
+            let right_set = *right.dfa.group_id_to_u8set(group as u32);
+            dfa.set_group_u8set(group as u32, left_set.union(&right_set));
+        }
+
+        let copy_source = |target: &mut DFA, source: &DFA, offset: u32| {
+            for (state_index, state) in source.states().iter().enumerate() {
+                let target_state = offset + state_index as u32;
+                target.set_transitions_from_sorted_entries(
+                    target_state,
+                    state
+                        .transitions
+                        .iter()
+                        .map(|(byte, &destination)| (byte, offset + destination))
+                        .collect(),
+                );
+                for &destination in &state.epsilon_transitions {
+                    target.add_epsilon_transition(target_state, offset + destination);
+                }
+                target.overwrite_state_metadata(
+                    target_state,
+                    state.finalizers.clone(),
+                    source
+                        .possible_future_group_ids(state_index as u32)
+                        .clone(),
+                );
+            }
+        };
+        copy_source(&mut dfa, &left.dfa, left_offset);
+        copy_source(&mut dfa, &right.dfa, right_offset);
+        dfa.add_epsilon_transition(0, left_offset + left.start_state());
+        dfa.add_epsilon_transition(0, right_offset + right.start_state());
+
+        let mut root_futures = BitSet::new(num_groups);
+        for terminal in left
+            .possible_future_terminals_iter(left.start_state())
+            .chain(right.possible_future_terminals_iter(right.start_state()))
+        {
+            root_futures.set(terminal as usize);
+        }
+        dfa.overwrite_state_metadata(0, BitSet::new(num_groups), root_futures);
+
+        TokenizerAnalysisUnion {
+            tokenizer: Tokenizer::from_parts(dfa, left.num_terminals, None),
+            left_offset,
+            right_offset,
+        }
+    }
+
     fn start_state(&self) -> u32 {
         0
     }
@@ -170,6 +252,14 @@ impl Tokenizer {
 
     pub(crate) fn has_epsilon_transitions(&self) -> bool {
         self.dfa.has_epsilon_transitions()
+    }
+
+    #[inline]
+    pub(crate) fn state_has_epsilon_transitions(&self, state: u32) -> bool {
+        self.dfa
+            .states()
+            .get(state as usize)
+            .is_some_and(|state| !state.epsilon_transitions.is_empty())
     }
 
     pub(crate) fn terminal_expr(&self, terminal: TerminalID) -> Option<&Expr> {

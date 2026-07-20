@@ -3775,7 +3775,10 @@ fn simple_pattern_max_length_above_former_cap_preserves_upper_bound() {
 }
 
 #[test]
-fn shorter_word_pattern_drops_upper_bound_at_product_cost() {
+fn shorter_word_pattern_preserves_upper_bound_despite_product_cost() {
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _synthetic_guard =
+        EnvVarGuard::set("GLRMASK_SYNTHETIC_BOUNDED_TERMINALS", "1");
     let schema = json!({
         "type": "string",
         "pattern": r"^(?:\S+\s+){0,9}\S+$",
@@ -3791,13 +3794,12 @@ fn shorter_word_pattern_drops_upper_bound_at_product_cost() {
         .expect("expected terminalized constrained string rule");
 
     let GrammarExpr::Intersect { intersect, .. } = &rule.expr else {
-        panic!("expected pattern terminal intersected with lower-bound envelope: {:?}", rule.expr);
+        panic!("expected pattern terminal intersected with exact length envelope: {:?}", rule.expr);
     };
     let GrammarExpr::RawRegex(regex) = intersect.as_ref() else {
         panic!("expected raw regex length envelope: {:?}", intersect);
     };
-    assert!(regex.contains("{2,}"), "{regex}");
-    assert!(!regex.contains("{2,120}"), "{regex}");
+    assert!(regex.contains("{2,120}"), "{regex}");
     lower(&grammar).unwrap();
 }
 
@@ -3846,8 +3848,10 @@ fn large_pattern_max_length_env_intersects_json_string_length_envelope() {
 
 
 #[test]
-fn pathological_pattern_max_length_guard_drops_upper_bound() {
+fn pathological_pattern_max_length_budget_does_not_drop_upper_bound() {
     let _env_lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _synthetic_guard =
+        EnvVarGuard::set("GLRMASK_SYNTHETIC_BOUNDED_TERMINALS", "1");
     let _preserve_guard = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PRESERVE_PATTERN_MAX_LENGTH", "1");
     let _limit_guard = EnvVarGuard::set(
         "GLRMASK_JSON_SCHEMA_PATTERN_MAX_LENGTH_COMPLEXITY_LIMIT",
@@ -3869,13 +3873,12 @@ fn pathological_pattern_max_length_guard_drops_upper_bound() {
         .expect("expected terminalized constrained string rule");
 
     let GrammarExpr::Intersect { intersect, .. } = &rule.expr else {
-        panic!("expected pattern terminal intersected with cheap lower-bound envelope: {:?}", rule.expr);
+        panic!("expected pattern terminal intersected with exact length envelope: {:?}", rule.expr);
     };
     let GrammarExpr::RawRegex(regex) = intersect.as_ref() else {
         panic!("expected raw regex length envelope: {:?}", intersect);
     };
-    assert!(regex.contains("{2,}"), "{regex}");
-    assert!(!regex.contains("{2,500}"), "{regex}");
+    assert!(regex.contains("{2,500}"), "{regex}");
     lower(&grammar).unwrap();
 }
 
@@ -6108,6 +6111,41 @@ fn adaptive_final_lexer_determinization_can_coalesce_uuid_and_bounded_string_par
         "the guarded category product should fit and eliminate the epsilon dispatch",
     );
     assert!(tokenizer.num_states() < 2_000, "states={}", tokenizer.num_states());
+}
+
+#[test]
+#[ignore]
+fn dump_pathological_nested_repeat_prepared_terminal() {
+    let schema = json!({
+        "type": "string",
+        "pattern": "^(?:a+b+){0,100}a+$",
+        "minLength": 2,
+        "maxLength": 500
+    });
+    let named = schema_to_named_grammar(&schema).unwrap();
+    let mut factored = factor_named_grammar(named);
+    super::prepare_named_grammar(&mut factored).unwrap();
+    let lowered = lower(&factored).unwrap();
+    let prepared = prepare_grammar_transforms_only(lowered);
+    for terminal in &prepared.terminals {
+        eprintln!("PATHOLOGICAL_TERMINAL={terminal:#?}");
+        if let crate::grammar::flat::Terminal::Expr { expr, .. } = terminal
+            && let crate::automata::regex::Expr::Intersect { expr: left, .. } = expr
+        {
+            let factored = crate::automata::lexer::compile::factor_regex_expr((**left).clone());
+            eprintln!("PATHOLOGICAL_FACTORED_LEFT={factored:#?}");
+            if std::env::var_os("GLRMASK_DUMP_COMPILE").is_some() {
+                let started = std::time::Instant::now();
+                let regex = crate::automata::lexer::compile::build_regex(std::slice::from_ref(&factored));
+                eprintln!(
+                    "PATHOLOGICAL_LEFT states={} transitions={} elapsed_ms={:.3}",
+                    regex.num_states(),
+                    regex.num_transitions(),
+                    started.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
+        }
+    }
 }
 
 #[test]

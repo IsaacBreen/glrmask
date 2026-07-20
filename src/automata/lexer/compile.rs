@@ -1195,6 +1195,10 @@ fn compile_direct_bounded_repeat_base_dfa(expr: &Expr, max: usize) -> Option<DFA
 
 fn build_bounded_repeat_dfa(expr: &Expr, min: usize, max: usize) -> Option<DFA> {
     let base_dfa = compile_direct_bounded_repeat_base_dfa(expr, max)?;
+    build_bounded_repeat_dfa_from_base(&base_dfa, min, max)
+}
+
+fn build_bounded_repeat_dfa_from_base(base_dfa: &DFA, min: usize, max: usize) -> Option<DFA> {
 
     let base_states = base_dfa.states();
     let base_state_count = base_states.len();
@@ -1394,7 +1398,194 @@ fn build_bounded_repeat_with_suffix_dfa(parts: &[Expr]) -> Option<(DFA, bool)> {
 /// At body completion, the counter increments and the suffix may start. If two
 /// live paths cannot be represented by one `(body_state, suffix_state, counter)`
 /// tuple, this function falls back to the general compiler.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct ZeroMinRepeatSuffixState {
+    /// Minimum completed-copy count reaching each body DFA residual. A smaller
+    /// count dominates every larger count at the same residual.
+    body_min_counts: Box<[u32]>,
+    /// Exact live suffix residuals. Count is irrelevant once the suffix starts.
+    suffix_states: Box<[u32]>,
+}
+
+fn close_zero_min_repeat_suffix_state(
+    body_min_counts: &mut [u32],
+    suffix_states: &mut Vec<u32>,
+    body_dfa: &DFA,
+    suffix_dfa: &DFA,
+    max: usize,
+) {
+    let mut completed_boundary = u32::MAX;
+    for (body_state, &completed) in body_min_counts.iter().enumerate() {
+        if completed == u32::MAX {
+            continue;
+        }
+        if body_dfa.finalizers(body_state as u32).contains(0) {
+            completed_boundary = completed_boundary.min(completed.saturating_add(1));
+        }
+    }
+
+    if completed_boundary != u32::MAX {
+        suffix_states.push(0);
+        if completed_boundary < max as u32 {
+            body_min_counts[0] = body_min_counts[0].min(completed_boundary);
+        }
+    }
+
+    // Keep only residuals that can consume at least one more byte toward a
+    // body match. Acceptance at the current body state has already spawned the
+    // repeat/suffix boundary above.
+    for (body_state, completed) in body_min_counts.iter_mut().enumerate() {
+        if *completed != u32::MAX
+            && !body_dfa
+                .possible_future_group_ids(body_state as u32)
+                .contains(0)
+        {
+            *completed = u32::MAX;
+        }
+    }
+
+    suffix_states.retain(|&state| {
+        suffix_dfa.finalizers(state).contains(0)
+            || suffix_dfa.possible_future_group_ids(state).contains(0)
+    });
+    suffix_states.sort_unstable();
+    suffix_states.dedup();
+}
+
+fn set_zero_min_repeat_suffix_metadata(
+    dfa: &mut DFA,
+    state_id: u32,
+    state: &ZeroMinRepeatSuffixState,
+    suffix_dfa: &DFA,
+) {
+    let mut finalizers = BitSet::new(1);
+    if state
+        .suffix_states
+        .iter()
+        .any(|&suffix_state| suffix_dfa.finalizers(suffix_state).contains(0))
+    {
+        finalizers.set(0);
+    }
+    let mut future = BitSet::new(1);
+    if state.body_min_counts.iter().any(|&count| count != u32::MAX)
+        || state
+            .suffix_states
+            .iter()
+            .any(|&suffix_state| {
+                suffix_dfa
+                    .possible_future_group_ids(suffix_state)
+                    .contains(0)
+            })
+    {
+        future.set(0);
+    }
+    dfa.overwrite_state_metadata(state_id, finalizers, future);
+}
+
+fn build_zero_min_repeat_suffix_dominance_dfa(
+    body_dfa: &DFA,
+    suffix_dfa: &DFA,
+    max: usize,
+) -> Option<DFA> {
+    if max == 0
+        || body_dfa.num_states() == 0
+        || suffix_dfa.num_states() == 0
+        || body_dfa.finalizers(0).contains(0)
+        || suffix_dfa.finalizers(0).contains(0)
+    {
+        return None;
+    }
+
+    let mut start_body = vec![u32::MAX; body_dfa.num_states()];
+    start_body[0] = 0;
+    let mut start_suffix = vec![0u32];
+    close_zero_min_repeat_suffix_state(
+        &mut start_body,
+        &mut start_suffix,
+        body_dfa,
+        suffix_dfa,
+        max,
+    );
+    let start = ZeroMinRepeatSuffixState {
+        body_min_counts: start_body.into_boxed_slice(),
+        suffix_states: start_suffix.into_boxed_slice(),
+    };
+
+    let mut dfa = DFA::new(1);
+    dfa.ensure_group_capacity(1);
+    set_zero_min_repeat_suffix_metadata(&mut dfa, 0, &start, suffix_dfa);
+    let mut state_map = FxHashMap::<ZeroMinRepeatSuffixState, u32>::default();
+    state_map.insert(start.clone(), 0);
+    let mut worklist = VecDeque::from([(0u32, start)]);
+
+    while let Some((state_id, state)) = worklist.pop_front() {
+        let mut transitions = Vec::new();
+        for byte_value in 0u16..=255 {
+            let byte = byte_value as u8;
+            let mut next_body = vec![u32::MAX; body_dfa.num_states()];
+            for (body_state, &completed) in state.body_min_counts.iter().enumerate() {
+                if completed == u32::MAX {
+                    continue;
+                }
+                if let Some(target) = body_dfa.step(body_state as u32, byte) {
+                    let target_count = &mut next_body[target as usize];
+                    *target_count = (*target_count).min(completed);
+                }
+            }
+
+            let mut next_suffix = Vec::with_capacity(state.suffix_states.len());
+            for &suffix_state in state.suffix_states.iter() {
+                if let Some(target) = suffix_dfa.step(suffix_state, byte) {
+                    next_suffix.push(target);
+                }
+            }
+
+            close_zero_min_repeat_suffix_state(
+                &mut next_body,
+                &mut next_suffix,
+                body_dfa,
+                suffix_dfa,
+                max,
+            );
+            if next_body.iter().all(|&count| count == u32::MAX) && next_suffix.is_empty() {
+                continue;
+            }
+
+            let next = ZeroMinRepeatSuffixState {
+                body_min_counts: next_body.into_boxed_slice(),
+                suffix_states: next_suffix.into_boxed_slice(),
+            };
+            let target = if let Some(&target) = state_map.get(&next) {
+                target
+            } else {
+                let target = dfa.add_state();
+                set_zero_min_repeat_suffix_metadata(&mut dfa, target, &next, suffix_dfa);
+                state_map.insert(next.clone(), target);
+                worklist.push_back((target, next));
+                target
+            };
+            transitions.push((byte, target));
+        }
+        dfa.set_transitions_from_sorted_entries(state_id, transitions);
+    }
+
+    // Hopcroft-style minimization is counterproductive for broad direct
+    // residual DFAs: a few thousand states with dense byte rows can cost
+    // seconds even when almost no states merge. Downstream product/DWA
+    // construction is already designed to consume unminimized deterministic
+    // components. Keep minimization for compact results where it is cheap and
+    // useful, but preserve the exact direct DFA as-is above that threshold.
+    let transitions = dfa_transition_count(&dfa);
+    if dfa.num_states() <= 2_048 && transitions <= 100_000 {
+        Some(dfa.minimize())
+    } else {
+        Some(dfa)
+    }
+}
+
 fn build_bounded_repeat_with_regex_suffix(parts: &[Expr]) -> Option<(DFA, bool)> {
+    let profile_timing = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
+    let total_started_at = profile_timing.then(Instant::now);
     if parts.len() < 2 {
         return None;
     }
@@ -1440,7 +1631,9 @@ fn build_bounded_repeat_with_regex_suffix(parts: &[Expr]) -> Option<(DFA, bool)>
         return None;
     }
 
+    let body_started_at = profile_timing.then(Instant::now);
     let body_dfa = compile_expr_to_dfa(repeat_expr);
+    let body_ms = body_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     if body_dfa.num_states() == 0 || !body_dfa.finalizers(0).is_empty() {
         return None;
     }
@@ -1450,7 +1643,9 @@ fn build_bounded_repeat_with_regex_suffix(parts: &[Expr]) -> Option<(DFA, bool)>
     } else {
         Expr::Seq(parts_ref[1..].iter().map(|e| (*e).clone()).collect())
     };
+    let suffix_started_at = profile_timing.then(Instant::now);
     let suffix_dfa = compile_expr_to_dfa(&suffix_expr);
+    let suffix_ms = suffix_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     if suffix_dfa.num_states() == 0 {
         return None;
     }
@@ -1461,6 +1656,44 @@ fn build_bounded_repeat_with_regex_suffix(parts: &[Expr]) -> Option<(DFA, bool)>
     // end-of-input. Fall back to the general construction.
     if !suffix_dfa.finalizers(0).is_empty() {
         return None;
+    }
+
+    // For a zero-minimum repeat, paths that reach the same body residual with
+    // different completed-copy counts are ordered by language inclusion. The
+    // smallest count has at least as much remaining repeat budget and may take
+    // every suffix boundary available to a larger count, so larger counts are
+    // redundant. Track only that minimum count per body state, plus the exact
+    // set of live suffix states. This is an exact quotient of the ordinary NFA
+    // subset construction and handles ambiguous body/suffix boundaries without
+    // materializing the enormous unrolled-repeat powerset.
+    // The dense minimum-count vector makes this quotient exceptionally fast
+    // for the small repeat bodies that cause large counter products, but its
+    // per-state work is quadratic in a very large body DFA. Large-body,
+    // low-repeat wrappers are better served by the existing compact product
+    // below (or the generic fallback when genuinely ambiguous).
+    const DOMINANCE_MAX_BODY_STATES: usize = 256;
+    if min == 0
+        && body_dfa.num_states() <= DOMINANCE_MAX_BODY_STATES
+        && let Some(dfa) = build_zero_min_repeat_suffix_dominance_dfa(
+            &body_dfa,
+            &suffix_dfa,
+            max,
+        )
+    {
+        if let Some(total_started_at) = total_started_at {
+            eprintln!(
+                "[glrmask/profile][tokenizer] bounded_repeat_regex_suffix_dominance body_states={} suffix_states={} max={} final_states={} final_transitions={} body_ms={:.3} suffix_ms={:.3} total_ms={:.3}",
+                body_dfa.num_states(),
+                suffix_dfa.num_states(),
+                max,
+                dfa.num_states(),
+                dfa_transition_count(&dfa),
+                body_ms,
+                suffix_ms,
+                total_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        return Some((dfa, false));
     }
 
     let max_product =
@@ -1494,6 +1727,7 @@ fn build_bounded_repeat_with_regex_suffix(parts: &[Expr]) -> Option<(DFA, bool)>
         dfa.overwrite_state_metadata(0, finalizers, future);
     }
 
+    let construct_started_at = profile_timing.then(Instant::now);
     while let Some((dfa_state, (b, s, c))) = worklist.pop_front() {
         let body_is_accept = b < body_dead && !body_dfa.finalizers(b).is_empty();
 
@@ -1604,7 +1838,29 @@ fn build_bounded_repeat_with_regex_suffix(parts: &[Expr]) -> Option<(DFA, bool)>
         dfa.set_transitions_from_sorted_entries(dfa_state, transitions);
     }
 
+    let construct_ms = construct_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    let pre_minimize_states = dfa.num_states();
+    let pre_minimize_transitions = dfa_transition_count(&dfa);
+    let minimize_started_at = profile_timing.then(Instant::now);
     let dfa = dfa.minimize();
+    let minimize_ms = minimize_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    if let Some(total_started_at) = total_started_at {
+        eprintln!(
+            "[glrmask/profile][tokenizer] bounded_repeat_regex_suffix body_states={} suffix_states={} max={} pre_minimize_states={} pre_minimize_transitions={} final_states={} final_transitions={} body_ms={:.3} suffix_ms={:.3} construct_ms={:.3} minimize_ms={:.3} total_ms={:.3}",
+            body_dfa.num_states(),
+            suffix_dfa.num_states(),
+            max,
+            pre_minimize_states,
+            pre_minimize_transitions,
+            dfa.num_states(),
+            dfa_transition_count(&dfa),
+            body_ms,
+            suffix_ms,
+            construct_ms,
+            minimize_ms,
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
     Some((dfa, false))
 }
 
@@ -1821,21 +2077,58 @@ impl Expr {
 ///
 /// Each expression's index becomes its group ID in the resulting DFA.
 fn compile_single_expr_dfa(expr: &Expr) -> DFA {
+    let profile_timing = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
+    let direct_started_at = profile_timing.then(Instant::now);
     if let Some((mut dfa, needs_future_recompute)) = compile_product_component_dfa_direct(expr) {
+        let direct_ms = direct_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         dfa.ensure_group_capacity(1);
         dfa.set_group_u8set(0, expr_u8set(expr));
         if needs_future_recompute {
             dfa.recompute_possible_futures();
         }
+        if profile_timing {
+            eprintln!(
+                "[glrmask/profile][tokenizer] single_expr_path path=direct states={} transitions={} direct_ms={:.3}",
+                dfa.num_states(),
+                dfa_transition_count(&dfa),
+                direct_ms,
+            );
+        }
         return dfa;
     }
 
+    let direct_ms = direct_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    let nfa_started_at = profile_timing.then(Instant::now);
     let mut nfa = build_regex_nfa(std::slice::from_ref(expr));
+    let nfa_ms = nfa_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    let condense_started_at = profile_timing.then(Instant::now);
     nfa.condense_epsilon_sccs();
-    nfa.to_dfa()
+    let condense_ms =
+        condense_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    let determinize_started_at = profile_timing.then(Instant::now);
+    let dfa = nfa.to_dfa();
+    if profile_timing {
+        eprintln!(
+            "[glrmask/profile][tokenizer] single_expr_path path=nfa_dfa states={} transitions={} direct_attempt_ms={:.3} nfa_ms={:.3} condense_ms={:.3} determinize_ms={:.3}",
+            dfa.num_states(),
+            dfa_transition_count(&dfa),
+            direct_ms,
+            nfa_ms,
+            condense_ms,
+            determinize_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
+        );
+    }
+    dfa
 }
 
 fn compile_with_plan(plan: ExclusionCompilePlan) -> DFA {
+    compile_with_plan_internal(plan, false).0
+}
+
+fn compile_with_plan_internal(
+    plan: ExclusionCompilePlan,
+    capture_product_trace: bool,
+) -> (DFA, Option<ProductBuildTrace>) {
     let profile_trace = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TRACE").is_some();
     let profile_detail = profile_trace
         || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some();
@@ -1851,29 +2144,41 @@ fn compile_with_plan(plan: ExclusionCompilePlan) -> DFA {
     let group_sets: Vec<U8Set> = plan
         .compiled_exprs
         .iter()
-        .map(|expr| expr_u8set(expr))
+        .map(expr_u8set)
         .collect();
     let group_set_ms = profile_plan
         .then(|| group_set_started_at.elapsed().as_secs_f64() * 1000.0);
     let used_product_dfa = plan.compiled_exprs.len() > 1;
 
     let dfa_build_started_at = Instant::now();
-    let mut dfa = if plan.compiled_exprs.is_empty() {
+    let (mut dfa, product_group_ops_applied, mut product_trace) = if plan.compiled_exprs.is_empty() {
         // A grammar can lower to the empty language, for example when a const
         // literal conflicts with sibling assertions. Keep a single non-final
         // start state so tokenizer users can still query/step the DFA safely.
-        DFA::new(1)
+        (DFA::new(1), false, None)
     } else if used_product_dfa {
-        build_product_dfa(&plan.compiled_exprs, plan.profile_labels.as_deref())
+        build_product_dfa(
+            &plan.compiled_exprs,
+            plan.profile_labels.as_deref(),
+            plan.visible_groups,
+            &plan.exclusions,
+            &plan.intersections,
+            capture_product_trace,
+        )
     } else {
-        compile_single_expr_dfa(&plan.compiled_exprs[0])
+        (compile_single_expr_dfa(&plan.compiled_exprs[0]), false, None)
     };
     let dfa_build_ms = profile_plan
         .then(|| dfa_build_started_at.elapsed().as_secs_f64() * 1000.0);
 
     let metadata_started_at = Instant::now();
-    dfa.ensure_group_capacity(group_sets.len());
-    for (group_id, set) in group_sets.into_iter().enumerate() {
+    let output_group_count = if product_group_ops_applied {
+        plan.visible_groups
+    } else {
+        group_sets.len()
+    };
+    dfa.ensure_group_capacity(output_group_count);
+    for (group_id, set) in group_sets.into_iter().take(output_group_count).enumerate() {
         dfa.set_group_u8set(group_id as u32, set);
     }
     let metadata_ms = profile_plan
@@ -1881,10 +2186,10 @@ fn compile_with_plan(plan: ExclusionCompilePlan) -> DFA {
 
     let group_ops_started_at = Instant::now();
     let mut group_ops_changed = false;
-    if !plan.exclusions.is_empty() {
+    if !product_group_ops_applied && !plan.exclusions.is_empty() {
         group_ops_changed |= dfa.apply_group_exclusions(&plan.exclusions);
     }
-    if !plan.intersections.is_empty() {
+    if !product_group_ops_applied && !plan.intersections.is_empty() {
         group_ops_changed |= dfa.apply_group_intersections(&plan.intersections);
     }
     if group_ops_changed {
@@ -1894,7 +2199,7 @@ fn compile_with_plan(plan: ExclusionCompilePlan) -> DFA {
         .then(|| group_ops_started_at.elapsed().as_secs_f64() * 1000.0);
 
     let project_started_at = Instant::now();
-    let dfa = if plan.visible_groups < plan.compiled_exprs.len() {
+    let dfa = if !product_group_ops_applied && plan.visible_groups < plan.compiled_exprs.len() {
         dfa.project_groups(plan.visible_groups)
     } else {
         dfa
@@ -1909,6 +2214,7 @@ fn compile_with_plan(plan: ExclusionCompilePlan) -> DFA {
     let final_dfa = if used_product_dfa && !force_tokenizer_minimize {
         dfa
     } else {
+        product_trace = None;
         dfa.minimize()
     };
     let minimize_ms = profile_plan
@@ -1946,7 +2252,7 @@ fn compile_with_plan(plan: ExclusionCompilePlan) -> DFA {
             profile_started_at.elapsed().as_secs_f64() * 1000.0,
         );
     }
-    final_dfa
+    (final_dfa, product_trace)
 }
 
 pub fn build_regex(exprs: &[Expr]) -> Regex {
@@ -1977,13 +2283,43 @@ pub(crate) fn build_regex_partitioned(exprs: &[Expr], partitions: &[u32]) -> Reg
     build_regex_partitioned_with_adaptive(exprs, partitions, adaptive_lexer_enabled())
 }
 
+pub(crate) fn build_regex_partitioned_with_residual_isolation(
+    exprs: &[Expr],
+    partitions: &[u32],
+    residual_isolation_classes: &[Option<u32>],
+) -> Regex {
+    build_regex_partitioned_with_adaptive_and_residual_isolation(
+        exprs,
+        partitions,
+        residual_isolation_classes,
+        adaptive_lexer_enabled(),
+    )
+}
+
 pub(crate) fn build_regex_partitioned_with_adaptive(
     exprs: &[Expr],
     partitions: &[u32],
     adaptive: bool,
 ) -> Regex {
     Regex {
-        dfa: compile_terminal_partitions(exprs, None, partitions, adaptive),
+        dfa: compile_terminal_partitions(exprs, None, partitions, None, adaptive),
+    }
+}
+
+pub(crate) fn build_regex_partitioned_with_adaptive_and_residual_isolation(
+    exprs: &[Expr],
+    partitions: &[u32],
+    residual_isolation_classes: &[Option<u32>],
+    adaptive: bool,
+) -> Regex {
+    Regex {
+        dfa: compile_terminal_partitions(
+            exprs,
+            None,
+            partitions,
+            Some(residual_isolation_classes),
+            adaptive,
+        ),
     }
 }
 
@@ -2000,6 +2336,22 @@ pub(crate) fn build_regex_partitioned_with_profile_labels(
     )
 }
 
+
+pub(crate) fn build_regex_partitioned_with_profile_labels_and_residual_isolation(
+    exprs: &[Expr],
+    visible_labels: &[String],
+    partitions: &[u32],
+    residual_isolation_classes: &[Option<u32>],
+) -> Regex {
+    build_regex_partitioned_with_profile_labels_and_adaptive_and_residual_isolation(
+        exprs,
+        visible_labels,
+        partitions,
+        residual_isolation_classes,
+        adaptive_lexer_enabled(),
+    )
+}
+
 pub(crate) fn build_regex_partitioned_with_profile_labels_and_adaptive(
     exprs: &[Expr],
     visible_labels: &[String],
@@ -2007,7 +2359,32 @@ pub(crate) fn build_regex_partitioned_with_profile_labels_and_adaptive(
     adaptive: bool,
 ) -> Regex {
     Regex {
-        dfa: compile_terminal_partitions(exprs, Some(visible_labels), partitions, adaptive),
+        dfa: compile_terminal_partitions(
+            exprs,
+            Some(visible_labels),
+            partitions,
+            None,
+            adaptive,
+        ),
+    }
+}
+
+
+pub(crate) fn build_regex_partitioned_with_profile_labels_and_adaptive_and_residual_isolation(
+    exprs: &[Expr],
+    visible_labels: &[String],
+    partitions: &[u32],
+    residual_isolation_classes: &[Option<u32>],
+    adaptive: bool,
+) -> Regex {
+    Regex {
+        dfa: compile_terminal_partitions(
+            exprs,
+            Some(visible_labels),
+            partitions,
+            Some(residual_isolation_classes),
+            adaptive,
+        ),
     }
 }
 
@@ -2114,12 +2491,14 @@ fn compile_terminal_ids_with_shared_duplicate_cache(
 struct LexerComponent {
     terminal_ids: Vec<usize>,
     dfa: DFA,
+    protected_residual: bool,
 }
 
 fn compile_partition_components(
     exprs: &[Expr],
     visible_labels: Option<&[String]>,
     partitions: &[u32],
+    residual_isolation_classes: Option<&[Option<u32>]>,
 ) -> Vec<LexerComponent> {
     let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
     let rewritten_exprs = materialize_repeated_subexpression_dfas(exprs);
@@ -2127,6 +2506,33 @@ fn compile_partition_components(
     let mut grouped = BTreeMap::<u32, Vec<usize>>::new();
     for (terminal, &partition) in partitions.iter().enumerate() {
         grouped.entry(partition).or_default().push(terminal);
+    }
+    if let Some(classes) = residual_isolation_classes {
+        assert_eq!(
+            classes.len(),
+            exprs.len(),
+            "one residual isolation class entry is required per terminal",
+        );
+        for terminal_ids in grouped.values() {
+            let mut class = None;
+            let mut has_unprotected = false;
+            for &terminal in terminal_ids {
+                match classes[terminal] {
+                    Some(current) => match class {
+                        Some(previous) => assert_eq!(
+                            previous, current,
+                            "one lexer partition cannot contain distinct protected residual classes",
+                        ),
+                        None => class = Some(current),
+                    },
+                    None => has_unprotected = true,
+                }
+            }
+            assert!(
+                class.is_none() || !has_unprotected,
+                "one lexer partition cannot mix protected and unprotected residual coordinates",
+            );
+        }
     }
     let shared_duplicates = shared_duplicate_nested_group_op_cache(exprs, &grouped);
     if let Some(shared_duplicates) = &shared_duplicates {
@@ -2155,7 +2561,16 @@ fn compile_partition_components(
                     started_at.elapsed().as_secs_f64() * 1000.0,
                 );
             }
-            LexerComponent { terminal_ids, dfa }
+            let protected_residual = residual_isolation_classes.is_some_and(|classes| {
+                terminal_ids
+                    .first()
+                    .is_some_and(|&terminal| classes[terminal].is_some())
+            });
+            LexerComponent {
+                terminal_ids,
+                dfa,
+                protected_residual,
+            }
         })
         .collect()
 }
@@ -2520,6 +2935,35 @@ fn adaptively_determinize_components_with_limits(
     transition_growth_percent: usize,
     max_depth: Option<usize>,
 ) -> Vec<LexerComponent> {
+    if inputs.iter().any(|component| component.protected_residual) {
+        let mut protected = Vec::new();
+        let mut ordinary = Vec::new();
+        for component in inputs {
+            if component.protected_residual {
+                protected.push(component);
+            } else {
+                ordinary.push(component);
+            }
+        }
+
+        let mut output = if ordinary.len() >= 2 {
+            adaptively_determinize_components_with_limits(
+                ordinary,
+                state_limit,
+                growth_percent,
+                transition_growth_percent,
+                max_depth,
+            )
+        } else {
+            ordinary
+        };
+        output.append(&mut protected);
+        output.sort_unstable_by_key(|component| {
+            component.terminal_ids.first().copied().unwrap_or(usize::MAX)
+        });
+        return output;
+    }
+
     let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some()
         || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
     let started_at = Instant::now();
@@ -2587,7 +3031,11 @@ fn adaptively_determinize_components_with_limits(
     }
 
     match candidate {
-        Some(dfa) if accepted => vec![LexerComponent { terminal_ids, dfa }],
+        Some(dfa) if accepted => vec![LexerComponent {
+            terminal_ids,
+            dfa,
+            protected_residual: false,
+        }],
         _ => inputs,
     }
 }
@@ -2640,11 +3088,19 @@ fn compile_terminal_partitions(
     exprs: &[Expr],
     visible_labels: Option<&[String]>,
     partitions: &[u32],
+    residual_isolation_classes: Option<&[Option<u32>]>,
     adaptive: bool,
 ) -> DFA {
     let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
     let total_started_at = Instant::now();
     assert_eq!(exprs.len(), partitions.len(), "one lexer partition id is required per terminal");
+    if let Some(classes) = residual_isolation_classes {
+        assert_eq!(
+            exprs.len(),
+            classes.len(),
+            "one residual isolation class entry is required per terminal",
+        );
+    }
     if let Some(labels) = visible_labels {
         assert_eq!(exprs.len(), labels.len(), "one profile label is required per terminal");
     }
@@ -2661,7 +3117,12 @@ fn compile_terminal_partitions(
     // adaptive policy. Adaptive determinization is a second, generic step over
     // the disjoint deterministic components of the combined epsilon-NFA.
     let partition_compile_started_at = Instant::now();
-    let mut components = compile_partition_components(exprs, visible_labels, partitions);
+    let mut components = compile_partition_components(
+        exprs,
+        visible_labels,
+        partitions,
+        residual_isolation_classes,
+    );
     let partition_compile_ms = partition_compile_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let adaptive_started_at = Instant::now();
@@ -2784,6 +3245,106 @@ fn product_state_metadata(
     }
 
     (finalizers, future)
+}
+
+fn product_state_single_visible_finalizer(
+    components: &[ProductComponent],
+    state_tuple: &ProductStateTuple,
+    exclusions: &BTreeMap<u32, BTreeSet<u32>>,
+    intersections: &BTreeMap<u32, BTreeSet<u32>>,
+) -> BitSet {
+    let mut accepting = vec![false; components.len()];
+    for &(group_id, state) in state_tuple {
+        let group = group_id as usize;
+        accepting[group] = match &components[group] {
+            ProductComponent::Materialized(dfa) => dfa.finalizers(state).contains(0),
+            ProductComponent::VirtualBoundedRepeat { base_dfa, min, .. } => {
+                let base_state_count = base_dfa.num_states() as u32;
+                state % base_state_count == 0 && state / base_state_count >= *min
+            }
+        };
+    }
+
+    let mut visible_accepting = accepting.first().copied().unwrap_or(false);
+    if visible_accepting
+        && exclusions
+            .get(&0)
+            .is_some_and(|blocked| blocked.iter().any(|&group| accepting[group as usize]))
+    {
+        visible_accepting = false;
+    }
+    if visible_accepting
+        && intersections
+            .get(&0)
+            .is_some_and(|required| required.iter().any(|&group| !accepting[group as usize]))
+    {
+        visible_accepting = false;
+    }
+
+    let mut finalizers = BitSet::new(1);
+    if visible_accepting {
+        finalizers.set(0);
+    }
+    finalizers
+}
+
+fn set_single_group_futures_from_class_graph(
+    dfa: &mut DFA,
+    class_transitions: &[Vec<(u8, u32)>],
+) {
+    let states = dfa.num_states();
+    debug_assert_eq!(states, class_transitions.len());
+    let edge_count = class_transitions.iter().map(Vec::len).sum::<usize>();
+    let mut predecessor_counts = vec![0u32; states];
+    for transitions in class_transitions {
+        for &(_, target) in transitions {
+            predecessor_counts[target as usize] += 1;
+        }
+    }
+
+    let mut offsets = vec![0usize; states + 1];
+    for state in 0..states {
+        offsets[state + 1] = offsets[state] + predecessor_counts[state] as usize;
+    }
+    debug_assert_eq!(offsets[states], edge_count);
+    let mut write_offsets = offsets[..states].to_vec();
+    let mut predecessors = vec![0u32; edge_count];
+    for (source, transitions) in class_transitions.iter().enumerate() {
+        for &(_, target) in transitions {
+            let slot = &mut write_offsets[target as usize];
+            predecessors[*slot] = source as u32;
+            *slot += 1;
+        }
+    }
+
+    let mut can_reach_final = vec![false; states];
+    let mut queue = VecDeque::<u32>::new();
+    for state in 0..states {
+        if dfa.finalizers(state as u32).contains(0) {
+            can_reach_final[state] = true;
+            queue.push_back(state as u32);
+        }
+    }
+    while let Some(target) = queue.pop_front() {
+        let target = target as usize;
+        for &source in &predecessors[offsets[target]..offsets[target + 1]] {
+            if !can_reach_final[source as usize] {
+                can_reach_final[source as usize] = true;
+                queue.push_back(source);
+            }
+        }
+    }
+
+    for (source, transitions) in class_transitions.iter().enumerate() {
+        let mut future = BitSet::new(1);
+        if transitions
+            .iter()
+            .any(|&(_, target)| can_reach_final[target as usize])
+        {
+            future.set(0);
+        }
+        dfa.set_possible_future_group_ids(source as u32, future);
+    }
 }
 
 fn explicit_dead_sink_state(dfa: &DFA) -> Option<u32> {
@@ -2919,19 +3480,42 @@ fn compile_product_component_dfa(expr: &Expr) -> DFA {
 }
 
 fn compile_product_component_materialized_dfa(expr: &Expr) -> DFA {
+    let profile_timing = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
+    let direct_started_at = profile_timing.then(Instant::now);
     if let Some((mut dfa, needs_future_recompute)) = compile_product_component_dfa_direct(expr) {
+        let direct_ms = direct_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         dfa.ensure_group_capacity(1);
         dfa.set_group_u8set(0, expr_u8set(expr));
         if needs_future_recompute {
             dfa.recompute_possible_futures();
         }
+        if profile_timing {
+            eprintln!(
+                "[glrmask/profile][tokenizer] product_component_path path=direct states={} transitions={} direct_ms={:.3}",
+                dfa.num_states(),
+                dfa_transition_count(&dfa),
+                direct_ms,
+            );
+        }
         dfa
     } else {
+        let direct_ms = direct_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         // The generic NFA->DFA path may still carry conservative future-group
         // metadata until the ordinary single-expression compile/minimize pass
         // recomputes it. Product construction consumes that metadata directly,
         // so retain the exact old fallback rather than using the raw DFA here.
-        compile_product_component_dfa(expr)
+        let fallback_started_at = profile_timing.then(Instant::now);
+        let dfa = compile_product_component_dfa(expr);
+        if profile_timing {
+            eprintln!(
+                "[glrmask/profile][tokenizer] product_component_path path=fallback states={} transitions={} direct_attempt_ms={:.3} fallback_ms={:.3}",
+                dfa.num_states(),
+                dfa_transition_count(&dfa),
+                direct_ms,
+                fallback_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
+            );
+        }
+        dfa
     }
 }
 
@@ -2943,6 +3527,786 @@ enum ProductComponent {
         min: u32,
         max: u32,
     },
+}
+
+struct ProductBuildTrace {
+    components: Vec<ProductComponent>,
+    state_tuples: Vec<ProductStateTuple>,
+    state_by_tuple: FxHashMap<ProductStateTuple, u32>,
+    direct_single_visible_group: bool,
+}
+
+fn product_component_mapping_dfa(component: &ProductComponent) -> Option<DFA> {
+    match component {
+        ProductComponent::Materialized(dfa) => Some(dfa.as_ref().clone()),
+        ProductComponent::VirtualBoundedRepeat {
+            base_dfa,
+            min,
+            max,
+        } => build_bounded_repeat_dfa_from_base(base_dfa, *min as usize, *max as usize),
+    }
+}
+
+fn exact_combined_dfa_byte_representatives(
+    full: &DFA,
+    synthesized: &DFA,
+    relevant_bytes: &[u8],
+) -> Vec<u8> {
+    const HASH_MULTIPLIER: u64 = 0x517c_c1b7_2722_0a95;
+    let mut bytes = relevant_bytes.to_vec();
+    bytes.sort_unstable();
+    bytes.dedup();
+    if bytes.len() <= 1 {
+        return bytes;
+    }
+
+    let mut hashes = FxHashMap::<u64, Vec<u8>>::default();
+    for &byte in &bytes {
+        let mut hash = 0u64;
+        for dfa in [synthesized, full] {
+            for state in 0..dfa.num_states() as u32 {
+                hash = hash
+                    .wrapping_mul(HASH_MULTIPLIER)
+                    .wrapping_add(dfa.step(state, byte).unwrap_or(u32::MAX) as u64);
+            }
+        }
+        hashes.entry(hash).or_default().push(byte);
+    }
+
+    let columns_equal = |left: u8, right: u8| {
+        [synthesized, full].into_iter().all(|dfa| {
+            (0..dfa.num_states() as u32)
+                .all(|state| dfa.step(state, left) == dfa.step(state, right))
+        })
+    };
+    let mut representatives = Vec::new();
+    for candidates in hashes.into_values() {
+        let mut local = Vec::<u8>::new();
+        for byte in candidates {
+            if local
+                .iter()
+                .copied()
+                .any(|representative| columns_equal(byte, representative))
+            {
+                continue;
+            }
+            local.push(byte);
+        }
+        representatives.extend(local);
+    }
+    representatives.sort_unstable();
+    representatives
+}
+
+fn exact_kbounded_single_group_state_map(
+    full: &DFA,
+    synthesized: &DFA,
+    depth: usize,
+    relevant_bytes: &[u8],
+) -> Option<Vec<u32>> {
+    if full.num_groups() != 1 || synthesized.num_groups() != 1 {
+        return None;
+    }
+    let relevant_bytes =
+        exact_combined_dfa_byte_representatives(full, synthesized, relevant_bytes);
+    let synthesized_states = synthesized.num_states();
+    let full_states = full.num_states();
+    let label = |dfa: &DFA, state: u32| {
+        u8::from(dfa.finalizers(state).contains(0))
+            | (u8::from(dfa.possible_future_group_ids(state).contains(0)) << 1)
+    };
+    let synthesized_labels = (0..synthesized_states as u32)
+        .map(|state| label(synthesized, state))
+        .collect::<Vec<_>>();
+    let full_labels = (0..full_states as u32)
+        .map(|state| label(full, state))
+        .collect::<Vec<_>>();
+
+    let mut label_classes = FxHashMap::<u8, u32>::default();
+    let mut synthesized_classes = synthesized_labels
+        .iter()
+        .map(|&state_label| {
+            let next = label_classes.len() as u32;
+            *label_classes.entry(state_label).or_insert(next)
+        })
+        .collect::<Vec<_>>();
+    let mut full_classes = full_labels
+        .iter()
+        .map(|state_label| label_classes.get(state_label).copied())
+        .collect::<Option<Vec<_>>>()?;
+
+    let mut synthesized_signature = vec![0u32; 1 + relevant_bytes.len()];
+    for _ in 0..depth {
+        let mut signature_to_class = FxHashMap::<Vec<u32>, u32>::default();
+        let mut next_synthesized = vec![0u32; synthesized_states];
+        for state in 0..synthesized_states as u32 {
+            synthesized_signature[0] = synthesized_labels[state as usize] as u32;
+            for (slot, &byte) in relevant_bytes.iter().enumerate() {
+                synthesized_signature[slot + 1] = synthesized
+                    .step(state, byte)
+                    .map_or(u32::MAX, |target| synthesized_classes[target as usize]);
+            }
+            let next = signature_to_class.len() as u32;
+            next_synthesized[state as usize] = *signature_to_class
+                .entry(synthesized_signature.clone())
+                .or_insert(next);
+        }
+
+        let next_full = (0..full_states as u32)
+            .into_par_iter()
+            .map_init(
+                || vec![0u32; 1 + relevant_bytes.len()],
+                |signature, state| {
+                    signature[0] = full_labels[state as usize] as u32;
+                    for (slot, &byte) in relevant_bytes.iter().enumerate() {
+                        signature[slot + 1] = full
+                            .step(state, byte)
+                            .map_or(u32::MAX, |target| full_classes[target as usize]);
+                    }
+                    signature_to_class.get(signature).copied()
+                },
+            )
+            .collect::<Option<Vec<_>>>()?;
+        synthesized_classes = next_synthesized;
+        full_classes = next_full;
+    }
+
+    let class_count = synthesized_classes
+        .iter()
+        .copied()
+        .max()
+        .map_or(0usize, |class| class as usize + 1);
+    let mut synthesized_for_class = vec![u32::MAX; class_count];
+    for (state, &class) in synthesized_classes.iter().enumerate() {
+        synthesized_for_class[class as usize] = state as u32;
+    }
+    full_classes
+        .into_iter()
+        .map(|class| {
+            synthesized_for_class
+                .get(class as usize)
+                .copied()
+                .filter(|&state| state != u32::MAX)
+        })
+        .collect()
+}
+
+struct DirectBoundedSuffixShape<'a> {
+    prefix: Vec<u8>,
+    body: &'a Expr,
+    min: usize,
+    max: usize,
+    suffix: Vec<u8>,
+}
+
+fn direct_bounded_suffix_shape(expr: &Expr) -> Option<DirectBoundedSuffixShape<'_>> {
+    let expr = match expr {
+        Expr::Shared(inner) => inner.as_ref(),
+        expr => expr,
+    };
+    let Expr::Seq(parts) = expr else {
+        return None;
+    };
+    let mut flat_parts = Vec::new();
+    for part in parts {
+        match part {
+            Expr::Shared(inner) => match inner.as_ref() {
+                Expr::Seq(inner_parts) => flat_parts.extend(inner_parts.iter()),
+                _ => flat_parts.push(part),
+            },
+            Expr::Seq(inner_parts) => flat_parts.extend(inner_parts.iter()),
+            _ => flat_parts.push(part),
+        }
+    }
+    for repeat_index in 0..flat_parts.len() {
+        let repeat = match flat_parts[repeat_index] {
+            Expr::Shared(inner) => inner.as_ref(),
+            expr => expr,
+        };
+        let Expr::Repeat {
+            expr: body,
+            min,
+            max: Some(max),
+        } = repeat
+        else {
+            continue;
+        };
+        let prefix = if repeat_index == 0 {
+            Vec::new()
+        } else {
+            collect_suffix_bytes(
+                &flat_parts[..repeat_index]
+                    .iter()
+                    .map(|expr| (*expr).clone())
+                    .collect::<Vec<_>>(),
+            )?
+        };
+        let suffix = collect_suffix_bytes(
+            &flat_parts[repeat_index + 1..]
+                .iter()
+                .map(|expr| (*expr).clone())
+                .collect::<Vec<_>>(),
+        )?;
+        return Some(DirectBoundedSuffixShape {
+            prefix,
+            body: body.as_ref(),
+            min: *min,
+            max: *max,
+            suffix,
+        });
+    }
+    None
+}
+
+/// Exact finite-token-horizon transport for the direct DFA emitted for
+/// `Repeat(body, min..=max) + literal_suffix`.
+///
+/// The direct compiler numbers repeat states by `(completed_copies,
+/// body_state)`, followed by the literal suffix chain. Once the minimum has
+/// been crossed, completed-copy counts differ observably only through their
+/// remaining distance to the upper bound. A token of `K` bytes can cross at
+/// most `ceil(K / minimum_body_width) + 1` repetition boundaries. We therefore
+/// retain low counts exactly, retain that many upper-bound layers exactly, and
+/// map every deeper interior layer to one synthesized interior layer.
+fn direct_bounded_suffix_state_map(
+    full_expr: &Expr,
+    synthesized_expr: &Expr,
+    full: &DFA,
+    synthesized: &DFA,
+    max_token_len: usize,
+    relevant_bytes: &[u8],
+) -> Option<Vec<u32>> {
+    let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
+    let Some(full_shape) = direct_bounded_suffix_shape(full_expr)
+    else {
+        if profile {
+            eprintln!(
+                "[glrmask/profile][tokenizer] layered_bounded_suffix_rejected stage=full_shape expr={:?}",
+                expr_profile_summary(full_expr),
+            );
+        }
+        return None;
+    };
+    let Some(synthesized_shape) = direct_bounded_suffix_shape(synthesized_expr)
+    else {
+        if profile {
+            eprintln!(
+                "[glrmask/profile][tokenizer] layered_bounded_suffix_rejected stage=synthesized_shape expr={:?}",
+                expr_profile_summary(synthesized_expr),
+            );
+        }
+        return None;
+    };
+    if full_shape.prefix != synthesized_shape.prefix
+        || full_shape.min != synthesized_shape.min
+        || full_shape.suffix != synthesized_shape.suffix
+        || full_shape.max < synthesized_shape.max
+    {
+        if profile {
+            eprintln!(
+                "[glrmask/profile][tokenizer] layered_bounded_suffix_rejected stage=shape_mismatch full_prefix={} synthesized_prefix={} full_min={} synthesized_min={} full_max={} synthesized_max={} full_suffix={} synthesized_suffix={}",
+                full_shape.prefix.len(),
+                synthesized_shape.prefix.len(),
+                full_shape.min,
+                synthesized_shape.min,
+                full_shape.max,
+                synthesized_shape.max,
+                full_shape.suffix.len(),
+                synthesized_shape.suffix.len(),
+            );
+        }
+        return None;
+    }
+
+    let base = compile_direct_bounded_repeat_base_dfa_unconditionally(full_shape.body)?;
+    let synthesized_base =
+        compile_direct_bounded_repeat_base_dfa_unconditionally(synthesized_shape.body)?;
+    let base_state_map = exact_kbounded_single_group_state_map(
+        &base,
+        &synthesized_base,
+        max_token_len,
+        relevant_bytes,
+    );
+    let Some(base_state_map) = base_state_map else {
+        if profile {
+            eprintln!(
+                "[glrmask/profile][tokenizer] layered_bounded_suffix_rejected stage=base_dfa_map full_base_states={} synthesized_base_states={}",
+                base.num_states(),
+                synthesized_base.num_states(),
+            );
+        }
+        return None;
+    };
+    let full_base_states = base.num_states();
+    let synthesized_base_states = synthesized_base.num_states();
+    let prefix_states = full_shape.prefix.len();
+    let suffix_states = full_shape.suffix.len();
+    let expected_full_states =
+        prefix_states + (full_shape.max + 1).checked_mul(full_base_states)? + suffix_states;
+    let expected_synthesized_states =
+        prefix_states
+            + (synthesized_shape.max + 1).checked_mul(synthesized_base_states)?
+            + suffix_states;
+    let suffix_overlaps = base.states()[0]
+        .transitions
+        .get(full_shape.suffix[0])
+        .is_some();
+    if suffix_states == 0
+        || suffix_overlaps
+        || full.num_states() != expected_full_states
+        || synthesized.num_states() != expected_synthesized_states
+    {
+        if profile {
+            eprintln!(
+                "[glrmask/profile][tokenizer] layered_bounded_suffix_rejected prefix_states={} base_states={} suffix_states={} full_max={} synthesized_max={} expected_full_states={} actual_full_states={} expected_synthesized_states={} actual_synthesized_states={} suffix_overlaps={}",
+                prefix_states,
+                full_base_states,
+                suffix_states,
+                full_shape.max,
+                synthesized_shape.max,
+                expected_full_states,
+                full.num_states(),
+                expected_synthesized_states,
+                synthesized.num_states(),
+                suffix_overlaps,
+            );
+        }
+        return None;
+    }
+
+    let minimum_body_width = base.min_match_byte_len()?.max(1);
+    let crossed_boundaries = max_token_len
+        .div_ceil(minimum_body_width)
+        .saturating_add(1);
+    // The synthesized interior representative must itself remain farther than
+    // one token horizon from the upper boundary.
+    if synthesized_shape.max.saturating_sub(synthesized_shape.min) <= crossed_boundaries {
+        return None;
+    }
+    let interior_representative = synthesized_shape
+        .max
+        .checked_sub(crossed_boundaries.saturating_add(1))?;
+    if interior_representative < synthesized_shape.min {
+        return None;
+    }
+
+    let full_suffix_start = prefix_states + (full_shape.max + 1) * full_base_states;
+    let synthesized_suffix_start =
+        prefix_states + (synthesized_shape.max + 1) * synthesized_base_states;
+    let mut mapping = Vec::with_capacity(full.num_states());
+    mapping.extend((0..prefix_states).map(|state| state as u32));
+    for completed in 0..=full_shape.max {
+        let distance_to_upper = full_shape.max - completed;
+        let mapped_completed = if completed < full_shape.min {
+            completed
+        } else if distance_to_upper <= crossed_boundaries {
+            synthesized_shape.max - distance_to_upper
+        } else {
+            interior_representative
+        };
+        for &mapped_body_state in &base_state_map {
+            mapping.push(
+                (prefix_states
+                    + mapped_completed * synthesized_base_states
+                    + mapped_body_state as usize) as u32,
+            );
+        }
+    }
+    for suffix_state in 0..suffix_states {
+        debug_assert_eq!(mapping.len(), full_suffix_start + suffix_state);
+        mapping.push((synthesized_suffix_start + suffix_state) as u32);
+    }
+    Some(mapping)
+}
+
+fn add_product_tuple_state(
+    dfa: &mut DFA,
+    trace: &mut ProductBuildTrace,
+    tuple: ProductStateTuple,
+    exclusions: &BTreeMap<u32, BTreeSet<u32>>,
+    intersections: &BTreeMap<u32, BTreeSet<u32>>,
+) -> (u32, bool) {
+    if let Some(&state) = trace.state_by_tuple.get(&tuple) {
+        return (state, false);
+    }
+    let state = dfa.add_state();
+    let (finalizers, futures) = if trace.direct_single_visible_group {
+        (
+            product_state_single_visible_finalizer(
+                &trace.components,
+                &tuple,
+                exclusions,
+                intersections,
+            ),
+            BitSet::new(1),
+        )
+    } else {
+        product_state_metadata(&trace.components, &tuple)
+    };
+    dfa.overwrite_state_metadata(state, finalizers, futures);
+    trace.state_by_tuple.insert(tuple.clone(), state);
+    trace.state_tuples.push(tuple);
+    (state, true)
+}
+
+fn augment_product_dfa_from_seed_tuples(
+    dfa: &mut DFA,
+    trace: &mut ProductBuildTrace,
+    seeds: &[ProductStateTuple],
+    exclusions: &BTreeMap<u32, BTreeSet<u32>>,
+    intersections: &BTreeMap<u32, BTreeSet<u32>>,
+) {
+    let (class_map, class_members) = compute_product_equivalence_classes(&trace.components);
+    let component_class_transitions =
+        build_product_class_transitions(&trace.components, &class_map);
+    let component_dead_states = trace
+        .components
+        .iter()
+        .map(ProductComponent::dead_state)
+        .collect::<Vec<_>>();
+    let mut worklist = VecDeque::<(u32, ProductStateTuple)>::new();
+    for tuple in seeds {
+        let (state, inserted) = add_product_tuple_state(
+            dfa,
+            trace,
+            tuple.clone(),
+            exclusions,
+            intersections,
+        );
+        if inserted {
+            worklist.push_back((state, tuple.clone()));
+        }
+    }
+
+    let mut class_buffers = (0..class_members.len())
+        .map(|_| ProductStateTuple::new())
+        .collect::<Vec<_>>();
+    let mut class_active = vec![false; class_members.len()];
+    let mut used_classes = Vec::<usize>::new();
+    while let Some((state, tuple)) = worklist.pop_front() {
+        for &(component_id, component_state) in &tuple {
+            let component = component_id as usize;
+            match (
+                &trace.components[component],
+                &component_class_transitions[component],
+            ) {
+                (
+                    ProductComponent::Materialized(_),
+                    ProductComponentClassTransitions::Materialized(transitions),
+                ) => {
+                    for &(class, target) in &transitions[component_state as usize] {
+                        let class = class as usize;
+                        if !class_active[class] {
+                            class_active[class] = true;
+                            used_classes.push(class);
+                        }
+                        if component_dead_states[component] != Some(target) {
+                            class_buffers[class].push((component_id, target));
+                        }
+                    }
+                }
+                (
+                    ProductComponent::VirtualBoundedRepeat { base_dfa, max, .. },
+                    ProductComponentClassTransitions::VirtualBoundedRepeat(transitions),
+                ) => {
+                    let base_states = base_dfa.num_states() as u32;
+                    let copies = component_state / base_states;
+                    if copies >= *max {
+                        continue;
+                    }
+                    let base_state = component_state % base_states;
+                    if base_dfa.finalizers(base_state).contains(0) {
+                        continue;
+                    }
+                    for &(class, target_base) in &transitions[base_state as usize] {
+                        let class = class as usize;
+                        if !class_active[class] {
+                            class_active[class] = true;
+                            used_classes.push(class);
+                        }
+                        if component_dead_states[component] == Some(target_base) {
+                            continue;
+                        }
+                        let target = if base_dfa.finalizers(target_base).contains(0) {
+                            (copies + 1) * base_states
+                        } else {
+                            copies * base_states + target_base
+                        };
+                        class_buffers[class].push((component_id, target));
+                    }
+                }
+                _ => unreachable!("component and transition representations must align"),
+            }
+        }
+
+        let mut byte_transitions = Vec::new();
+        for &class in &used_classes {
+            let next_tuple = class_buffers[class].clone();
+            let (target, inserted) = add_product_tuple_state(
+                dfa,
+                trace,
+                next_tuple.clone(),
+                exclusions,
+                intersections,
+            );
+            if inserted {
+                worklist.push_back((target, next_tuple));
+            }
+            byte_transitions.extend(
+                class_members[class]
+                    .iter()
+                    .copied()
+                    .map(|byte| (byte, target)),
+            );
+            class_buffers[class].clear();
+            class_active[class] = false;
+        }
+        used_classes.clear();
+        byte_transitions.sort_unstable_by_key(|entry| entry.0);
+        dfa.set_transitions_from_sorted_entries(state, byte_transitions);
+    }
+    if trace.direct_single_visible_group {
+        dfa.recompute_possible_futures();
+    }
+}
+
+pub(crate) struct CompiledTerminalExpressionPair {
+    pub(crate) synthesized: Regex,
+    pub(crate) full: Regex,
+    pub(crate) full_to_synthesized: Vec<u32>,
+}
+
+pub(crate) fn compile_terminal_expression_pair_with_structural_map(
+    full_expression: &Expr,
+    synthesized_expression: &Expr,
+    max_token_len: usize,
+    relevant_bytes: &[u8],
+) -> Option<CompiledTerminalExpressionPair> {
+    let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
+    let total_started_at = profile.then(Instant::now);
+    let full_plan = build_exclusion_compile_plan(std::slice::from_ref(full_expression));
+    let synthesized_plan =
+        build_exclusion_compile_plan(std::slice::from_ref(synthesized_expression));
+    if full_plan.visible_groups != 1
+        || synthesized_plan.visible_groups != 1
+        || full_plan.compiled_exprs.len() != synthesized_plan.compiled_exprs.len()
+        || full_plan.exclusions != synthesized_plan.exclusions
+        || full_plan.intersections != synthesized_plan.intersections
+        || full_plan.compiled_exprs.len() < 2
+    {
+        return None;
+    }
+    let exclusions = synthesized_plan.exclusions.clone();
+    let intersections = synthesized_plan.intersections.clone();
+    let full_component_expressions = full_plan.compiled_exprs.clone();
+    let synthesized_component_expressions = synthesized_plan.compiled_exprs.clone();
+    let product_build_started_at = profile.then(Instant::now);
+    let ((full_dfa, full_trace), (mut synthesized_dfa, synthesized_trace)) = rayon::join(
+        || compile_with_plan_internal(full_plan, true),
+        || compile_with_plan_internal(synthesized_plan, true),
+    );
+    let product_build_ms = product_build_started_at
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    let full_trace = full_trace?;
+    let mut synthesized_trace = synthesized_trace?;
+    if full_trace.components.len() != synthesized_trace.components.len() {
+        return None;
+    }
+
+    let component_maps_started_at = profile.then(Instant::now);
+    let component_maps = full_trace
+        .components
+        .par_iter()
+        .zip(&synthesized_trace.components)
+        .zip(
+            full_component_expressions
+                .par_iter()
+                .zip(&synthesized_component_expressions),
+        )
+        .enumerate()
+        .map(
+            |(
+                component_index,
+                ((full_component, synthesized_component), (full_expr, synthesized_expr)),
+            )| {
+            let started_at = profile.then(Instant::now);
+            let full = product_component_mapping_dfa(full_component)?;
+            let synthesized = product_component_mapping_dfa(synthesized_component)?;
+            let structural_mapping = direct_bounded_suffix_state_map(
+                full_expr,
+                synthesized_expr,
+                &full,
+                &synthesized,
+                max_token_len,
+                relevant_bytes,
+            );
+            let used_structural_mapping = structural_mapping.is_some();
+            let mapping = structural_mapping.or_else(|| {
+                exact_kbounded_single_group_state_map(
+                    &full,
+                    &synthesized,
+                    max_token_len,
+                    relevant_bytes,
+                )
+            });
+            if profile {
+                let kind = |component: &ProductComponent| match component {
+                    ProductComponent::Materialized(_) => "materialized",
+                    ProductComponent::VirtualBoundedRepeat { .. } => "virtual_bounded_repeat",
+                };
+                eprintln!(
+                    "[glrmask/profile][tokenizer] structural_component_map component={} full_kind={} synthesized_kind={} full_states={} synthesized_states={} depth={} path={} success={} elapsed_ms={:.3} expr={:?}",
+                    component_index,
+                    kind(full_component),
+                    kind(synthesized_component),
+                    full.num_states(),
+                    synthesized.num_states(),
+                    max_token_len,
+                    if used_structural_mapping { "layered_bounded_suffix" } else { "moore" },
+                    mapping.is_some(),
+                    started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
+                    expr_profile_summary(full_expr),
+                );
+            }
+            mapping
+        },
+        )
+        .collect::<Option<Vec<_>>>()?;
+    let component_maps_ms = component_maps_started_at
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    let synthesized_component_dead_states = synthesized_trace
+        .components
+        .iter()
+        .map(ProductComponent::dead_state)
+        .collect::<Vec<_>>();
+
+    let tuple_map_started_at = profile.then(Instant::now);
+    const DENSE_PRODUCT_LOOKUP_MAX_CELLS: usize = 16 * 1024 * 1024;
+    let component_extents = component_maps
+        .iter()
+        .map(|mapping| {
+            mapping
+                .iter()
+                .copied()
+                .max()
+                .map_or(1usize, |state| state as usize + 2)
+        })
+        .collect::<Vec<_>>();
+    let dense_two_component_cells = (component_maps.len() == 2)
+        .then(|| component_extents[0].checked_mul(component_extents[1]))
+        .flatten()
+        .filter(|&cells| cells <= DENSE_PRODUCT_LOOKUP_MAX_CELLS);
+
+    let mut full_to_synthesized = if let Some(cells) = dense_two_component_cells {
+        let right_extent = component_extents[1];
+        let mut state_by_key = vec![u32::MAX; cells];
+        for (state, tuple) in synthesized_trace.state_tuples.iter().enumerate() {
+            let mut coordinates = [0usize; 2];
+            for &(component, component_state) in tuple {
+                coordinates[component as usize] = component_state as usize + 1;
+            }
+            state_by_key[coordinates[0] * right_extent + coordinates[1]] = state as u32;
+        }
+        full_trace
+            .state_tuples
+            .par_iter()
+            .map(|tuple| {
+                let mut coordinates = [0usize; 2];
+                for &(component_id, full_state) in tuple {
+                    let component = component_id as usize;
+                    let synthesized_state = component_maps[component][full_state as usize];
+                    if synthesized_component_dead_states[component] != Some(synthesized_state) {
+                        coordinates[component] = synthesized_state as usize + 1;
+                    }
+                }
+                state_by_key[coordinates[0] * right_extent + coordinates[1]]
+            })
+            .collect::<Vec<_>>()
+    } else {
+        full_trace
+            .state_tuples
+            .par_iter()
+            .map(|tuple| {
+                let mut mapped = ProductStateTuple::new();
+                for &(component_id, full_state) in tuple {
+                    let component = component_id as usize;
+                    let synthesized_state = component_maps[component][full_state as usize];
+                    if synthesized_component_dead_states[component] != Some(synthesized_state) {
+                        mapped.push((component_id, synthesized_state));
+                    }
+                }
+                synthesized_trace
+                    .state_by_tuple
+                    .get(&mapped)
+                    .copied()
+                    .unwrap_or(u32::MAX)
+            })
+            .collect::<Vec<_>>()
+    };
+    let tuple_map_ms = tuple_map_started_at
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    let missing_positions = full_to_synthesized
+        .iter()
+        .enumerate()
+        .filter_map(|(position, &state)| (state == u32::MAX).then_some(position))
+        .collect::<Vec<_>>();
+    let missing_before = missing_positions.len();
+    let missing_tuples = missing_positions
+        .par_iter()
+        .map(|&position| {
+            let mut mapped = ProductStateTuple::new();
+            for &(component_id, full_state) in &full_trace.state_tuples[position] {
+                let component = component_id as usize;
+                let synthesized_state = component_maps[component][full_state as usize];
+                if synthesized_component_dead_states[component] != Some(synthesized_state) {
+                    mapped.push((component_id, synthesized_state));
+                }
+            }
+            mapped
+        })
+        .collect::<Vec<_>>();
+    let states_before_augment = synthesized_dfa.num_states();
+    let augment_started_at = profile.then(Instant::now);
+    augment_product_dfa_from_seed_tuples(
+        &mut synthesized_dfa,
+        &mut synthesized_trace,
+        &missing_tuples,
+        &exclusions,
+        &intersections,
+    );
+    let augment_ms = augment_started_at
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    let lookup_started_at = profile.then(Instant::now);
+    for (&position, tuple) in missing_positions.iter().zip(&missing_tuples) {
+        full_to_synthesized[position] = *synthesized_trace.state_by_tuple.get(tuple)?;
+    }
+    let lookup_ms = lookup_started_at
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+
+    if let Some(total_started_at) = total_started_at {
+        eprintln!(
+            "[glrmask/profile][tokenizer] structural_pair full_states={} synthesized_states_before={} synthesized_states_after={} mapped_tuples={} missing_before={} product_build_ms={:.3} component_maps_ms={:.3} tuple_map_ms={:.3} augment_ms={:.3} lookup_ms={:.3} total_ms={:.3}",
+            full_dfa.num_states(),
+            states_before_augment,
+            synthesized_dfa.num_states(),
+            full_to_synthesized.len(),
+            missing_before,
+            product_build_ms,
+            component_maps_ms,
+            tuple_map_ms,
+            augment_ms,
+            lookup_ms,
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+
+    Some(CompiledTerminalExpressionPair {
+        synthesized: Regex {
+            dfa: synthesized_dfa,
+        },
+        full: Regex { dfa: full_dfa },
+        full_to_synthesized,
+    })
 }
 
 enum ProductComponentClassTransitions {
@@ -3075,7 +4439,14 @@ fn compile_product_components(exprs: &[Expr]) -> (Vec<ProductComponent>, usize) 
     (components, cache_hits)
 }
 
-fn build_product_dfa(exprs: &[Expr], profile_labels: Option<&[ProductComponentProfileLabel]>) -> DFA {
+fn build_product_dfa(
+    exprs: &[Expr],
+    profile_labels: Option<&[ProductComponentProfileLabel]>,
+    visible_groups: usize,
+    exclusions: &BTreeMap<u32, BTreeSet<u32>>,
+    intersections: &BTreeMap<u32, BTreeSet<u32>>,
+    capture_trace: bool,
+) -> (DFA, bool, Option<ProductBuildTrace>) {
     let profile_trace = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TRACE").is_some();
     let profile_detail = profile_trace
         || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some();
@@ -3153,6 +4524,9 @@ fn build_product_dfa(exprs: &[Expr], profile_labels: Option<&[ProductComponentPr
         }
     }
     let num_groups = components.len();
+    let direct_single_visible_group = visible_groups == 1
+        && num_groups > 1
+        && (!exclusions.is_empty() || !intersections.is_empty());
     let component_dead_states: Vec<Option<u32>> = components
         .iter()
         .map(ProductComponent::dead_state)
@@ -3167,14 +4541,30 @@ fn build_product_dfa(exprs: &[Expr], profile_labels: Option<&[ProductComponentPr
     let class_transition_ms = profile_timing
         .then(|| class_transition_started_at.elapsed().as_secs_f64() * 1000.0);
     let mut dfa = DFA::new(1);
-    dfa.ensure_group_capacity(num_groups);
+    dfa.ensure_group_capacity(if direct_single_visible_group {
+        1
+    } else {
+        num_groups
+    });
 
     assert!(num_groups <= u32::MAX as usize, "too many product DFA groups");
     let mut start_tuple = ProductStateTuple::with_capacity(num_groups);
     for group_id in 0..num_groups {
         start_tuple.push((group_id as u32, 0u32));
     }
-    let (start_finalizers, start_future) = product_state_metadata(&components, &start_tuple);
+    let (start_finalizers, start_future) = if direct_single_visible_group {
+        (
+            product_state_single_visible_finalizer(
+                &components,
+                &start_tuple,
+                exclusions,
+                intersections,
+            ),
+            BitSet::new(1),
+        )
+    } else {
+        product_state_metadata(&components, &start_tuple)
+    };
     dfa.overwrite_state_metadata(0, start_finalizers, start_future);
 
     let mut state_map = FxHashMap::<ProductStateTuple, u32>::default();
@@ -3187,6 +4577,7 @@ fn build_product_dfa(exprs: &[Expr], profile_labels: Option<&[ProductComponentPr
     let mut class_active = vec![false; num_classes];
     let mut used_classes = Vec::<usize>::new();
     let mut growth_recorder = profile_trace.then(|| ProductGrowthRecorder::new(num_groups));
+    let mut state_tuples = capture_trace.then(|| vec![start_tuple.clone()]);
     state_map.insert(start_tuple.clone(), 0);
     if let Some(recorder) = growth_recorder.as_mut() {
         recorder.record(num_groups, &start_tuple);
@@ -3260,9 +4651,25 @@ fn build_product_dfa(exprs: &[Expr], profile_labels: Option<&[ProductComponentPr
                 existing
             } else {
                 let new_state = dfa.add_state();
-                let (finalizers, future) = product_state_metadata(&components, next_tuple);
+                let (finalizers, future) = if direct_single_visible_group {
+                    (
+                        product_state_single_visible_finalizer(
+                            &components,
+                            next_tuple,
+                            exclusions,
+                            intersections,
+                        ),
+                        BitSet::new(1),
+                    )
+                } else {
+                    product_state_metadata(&components, next_tuple)
+                };
                 dfa.overwrite_state_metadata(new_state, finalizers, future);
                 state_map.insert(next_tuple.clone(), new_state);
+                if let Some(state_tuples) = state_tuples.as_mut() {
+                    debug_assert_eq!(state_tuples.len(), new_state as usize);
+                    state_tuples.push(next_tuple.clone());
+                }
                 if let Some(recorder) = growth_recorder.as_mut() {
                     recorder.record(num_groups, next_tuple);
                 }
@@ -3279,6 +4686,13 @@ fn build_product_dfa(exprs: &[Expr], profile_labels: Option<&[ProductComponentPr
     }
     let product_state_expand_ms = profile_timing
         .then(|| product_state_expand_started_at.elapsed().as_secs_f64() * 1000.0);
+
+    let direct_future_started_at = Instant::now();
+    if direct_single_visible_group {
+        set_single_group_futures_from_class_graph(&mut dfa, &pending_class_transitions);
+    }
+    let direct_future_ms = profile_timing
+        .then(|| direct_future_started_at.elapsed().as_secs_f64() * 1000.0);
 
     if profile_trace {
         if let Some(recorder) = growth_recorder.as_ref() {
@@ -3367,18 +4781,26 @@ fn build_product_dfa(exprs: &[Expr], profile_labels: Option<&[ProductComponentPr
 
     if profile_timing {
         eprintln!(
-            "[glrmask/profile][tokenizer] product_phases groups={} classes={} component_compile_ms={:.3} equivalence_classes_ms={:.3} class_transition_ms={:.3} product_state_expand_ms={:.3} byte_expand_ms={:.3}",
+            "[glrmask/profile][tokenizer] product_phases groups={} classes={} direct_single_visible_group={} component_compile_ms={:.3} equivalence_classes_ms={:.3} class_transition_ms={:.3} product_state_expand_ms={:.3} direct_future_ms={:.3} byte_expand_ms={:.3}",
             components.len(),
             num_classes,
+            direct_single_visible_group,
             component_compile_ms.unwrap_or_default(),
             equivalence_classes_ms.unwrap_or_default(),
             class_transition_ms.unwrap_or_default(),
             product_state_expand_ms.unwrap_or_default(),
+            direct_future_ms.unwrap_or_default(),
             byte_expand_ms.unwrap_or_default(),
         );
     }
 
-    dfa
+    let trace = state_tuples.map(|state_tuples| ProductBuildTrace {
+        components,
+        state_tuples,
+        state_by_tuple: state_map,
+        direct_single_visible_group,
+    });
+    (dfa, direct_single_visible_group, trace)
 }
 
 fn compute_product_equivalence_classes(components: &[ProductComponent]) -> (Vec<u8>, Vec<Vec<u8>>) {
@@ -3567,6 +4989,75 @@ mod tests {
         let mut out = Vec::new();
         extend(&mut out, &mut Vec::new(), alphabet, max_len);
         out
+    }
+
+    fn dfa_state_observation(
+        dfa: &super::DFA,
+        mut state: u32,
+        input: &[u8],
+    ) -> (bool, bool, bool) {
+        for &byte in input {
+            let Some(next) = dfa.step(state, byte) else {
+                return (true, false, false);
+            };
+            state = next;
+        }
+        (
+            false,
+            dfa.finalizers(state).contains(0),
+            dfa.possible_future_group_ids(state).contains(0),
+        )
+    }
+
+    #[test]
+    fn layered_bounded_suffix_transport_matches_all_short_observations() {
+        const HORIZON: usize = 4;
+        let alphabet = b"[]abx";
+        let inputs = enumerate_inputs(alphabet, HORIZON);
+        let bodies = [
+            Expr::U8Class(U8Set::from_bytes(b"ab")),
+            Expr::U8Seq(b"ab".to_vec()),
+        ];
+
+        for body in bodies {
+            let make_expr = |max| {
+                factor_regex_expr(Expr::Seq(vec![
+                    Expr::U8Seq(b"[".to_vec()),
+                    Expr::Repeat {
+                        expr: Box::new(body.clone()),
+                        min: 2,
+                        max: Some(max),
+                    },
+                    Expr::U8Seq(b"]".to_vec()),
+                ]))
+            };
+            let full_expr = make_expr(24);
+            let synthesized_expr = make_expr(16);
+            let full = super::compile_product_component_materialized_dfa(&full_expr);
+            let synthesized =
+                super::compile_product_component_materialized_dfa(&synthesized_expr);
+            let mapping = super::direct_bounded_suffix_state_map(
+                &full_expr,
+                &synthesized_expr,
+                &full,
+                &synthesized,
+                HORIZON,
+                alphabet,
+            )
+            .expect("direct layered transport");
+            assert_eq!(mapping.len(), full.num_states());
+
+            for full_state in 0..full.num_states() as u32 {
+                let synthesized_state = mapping[full_state as usize];
+                for input in &inputs {
+                    assert_eq!(
+                        dfa_state_observation(&full, full_state, input),
+                        dfa_state_observation(&synthesized, synthesized_state, input),
+                        "body={body:?} full_state={full_state} synthesized_state={synthesized_state} input={input:?}",
+                    );
+                }
+            }
+        }
     }
 
     fn tokenizer_observation(
@@ -4734,6 +6225,81 @@ mod tests {
     }
 
     #[test]
+    fn protected_residual_components_survive_adaptive_determinization() {
+        let expressions = vec![
+            Expr::U8Seq(b"same".to_vec()),
+            Expr::U8Seq(b"same".to_vec()),
+            Expr::U8Seq(b"ordinary-a".to_vec()),
+            Expr::U8Seq(b"ordinary-b".to_vec()),
+        ];
+        let isolation = [Some(100), Some(101), None, None];
+        let components = super::compile_partition_components(
+            &expressions,
+            None,
+            &[0, 1, 2, 3],
+            Some(&isolation),
+        );
+
+        let output = super::adaptively_determinize_components_with_limits(
+            components,
+            32_768,
+            1_000,
+            1_000,
+            Some(1),
+        );
+
+        for protected_terminal in [0usize, 1] {
+            let component = output
+                .iter()
+                .find(|component| component.terminal_ids.contains(&protected_terminal))
+                .expect("protected terminal must remain present");
+            assert!(component.protected_residual);
+            assert_eq!(component.terminal_ids, vec![protected_terminal]);
+        }
+    }
+
+    #[test]
+    fn protected_identical_terminals_keep_independent_live_states() {
+        let expressions = vec![
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+                min: 1,
+                max: Some(4),
+            },
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+                min: 1,
+                max: Some(4),
+            },
+        ];
+        let regex = super::build_regex_partitioned_with_adaptive_and_residual_isolation(
+            &expressions,
+            &[0, 1],
+            &[Some(200), Some(201)],
+            true,
+        );
+        assert_eq!(
+            regex.dfa.states()[0].epsilon_transitions.len(),
+            2,
+            "protected coordinates must not collapse into one adaptive product",
+        );
+        let tokenizer = regex.into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let result = tokenizer.execute_from_state(b"a", tokenizer.initial_state());
+        assert_eq!(result.end_state.len(), 2);
+        assert_eq!(
+            result
+                .matches
+                .iter()
+                .map(|matched| matched.id)
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from([0, 1]),
+        );
+    }
+
+    #[test]
     fn shared_nested_group_ops_are_initialized_before_parallel_partition_compile() {
         let shared_nested = Expr::Exclude {
             expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"abcdefghijklmnopqrstuvwxyz"))),
@@ -4758,7 +6324,8 @@ mod tests {
         super::prewarm_shared_duplicate_nested_group_ops(&shared);
         assert!(shared.all_entries_initialized());
 
-        let components = super::compile_partition_components(&expressions, None, &partitions);
+        let components =
+            super::compile_partition_components(&expressions, None, &partitions, None);
         assert_eq!(components.len(), expressions.len());
     }
 
@@ -4828,7 +6395,8 @@ mod tests {
             parse_regex(r"\w+_(\w_)?\d+", false),
             parse_regex(r"(\w|-){12}", false),
         ];
-        let components = super::compile_partition_components(&expressions, None, &[0, 1]);
+        let components =
+            super::compile_partition_components(&expressions, None, &[0, 1], None);
         assert!(
             try_product_union_components(&components, 32, usize::MAX, None).is_none(),
             "the bounded trial unexpectedly completed within 32 product states",
@@ -4852,7 +6420,8 @@ mod tests {
                 max: None,
             },
         ];
-        let components = super::compile_partition_components(&expressions, None, &[0, 1, 2]);
+        let components =
+            super::compile_partition_components(&expressions, None, &[0, 1, 2], None);
         let original_terminal_ids = components
             .iter()
             .map(|component| component.terminal_ids.clone())
@@ -4889,7 +6458,8 @@ mod tests {
             Expr::U8Seq(b"c".to_vec()),
         ];
         let partitions = [7, 7, 9, 11];
-        let components = super::compile_partition_components(&expressions, None, &partitions);
+        let components =
+            super::compile_partition_components(&expressions, None, &partitions, None);
         let expected_terminal_ids = [vec![0, 1], vec![2], vec![3]];
 
         assert_eq!(components.len(), expected_terminal_ids.len());
@@ -4915,7 +6485,8 @@ mod tests {
                 expressions.len() as u32,
                 Some(Arc::from(expressions.clone().into_boxed_slice())),
             );
-        let components = super::compile_partition_components(&expressions, None, &[0, 1]);
+        let components =
+            super::compile_partition_components(&expressions, None, &[0, 1], None);
         let prefix_dfa = try_product_union_components(&components, 32_768, usize::MAX, Some(1))
             .expect("depth-one adaptive product should fit");
         assert!(prefix_dfa.states()[0].epsilon_transitions.is_empty());
@@ -5036,6 +6607,64 @@ mod tests {
                     observe(direct.clone(), &input),
                     observe(generic.clone(), &input),
                     "direct DFA behavior differed for {expr:?} on {input:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn zero_min_repeat_suffix_dominance_matches_generic_ambiguous_boundaries() {
+        let expressions = [
+            Expr::Seq(vec![
+                Expr::Repeat {
+                    expr: Box::new(parse_regex("a+", false)),
+                    min: 0,
+                    max: Some(4),
+                },
+                parse_regex("a+", false),
+            ]),
+            Expr::Seq(vec![
+                Expr::Repeat {
+                    expr: Box::new(parse_regex("a+b+", false)),
+                    min: 0,
+                    max: Some(4),
+                },
+                parse_regex("a+", false),
+            ]),
+            Expr::Seq(vec![
+                Expr::Repeat {
+                    expr: Box::new(parse_regex("(?:ab|a)", false)),
+                    min: 0,
+                    max: Some(4),
+                },
+                parse_regex("b+", false),
+            ]),
+        ];
+
+        for expression in expressions {
+            let direct_dfa = compile_product_component_dfa_direct(&expression)
+                .expect("zero-minimum bounded repeat with non-nullable suffix must compile directly")
+                .0;
+            let direct = super::Regex { dfa: direct_dfa }.into_tokenizer(
+                1,
+                Some(Arc::from(vec![expression.clone()].into_boxed_slice())),
+            );
+
+            let mut nfa = super::build_regex_nfa(std::slice::from_ref(&expression));
+            nfa.condense_epsilon_sccs();
+            let generic = super::Regex {
+                dfa: nfa.to_dfa().minimize(),
+            }
+            .into_tokenizer(
+                1,
+                Some(Arc::from(vec![expression.clone()].into_boxed_slice())),
+            );
+
+            for input in enumerate_inputs(b"abx", 8) {
+                assert_eq!(
+                    tokenizer_observation(&direct, &input),
+                    tokenizer_observation(&generic, &input),
+                    "dominance quotient differed from generic determinization for expression {expression:?}, input {input:?}",
                 );
             }
         }

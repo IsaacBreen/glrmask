@@ -72,6 +72,7 @@ pub struct AnalyzedGrammar {
     pub terminal_display_names: Vec<String>,
     pub num_nonterminals: u32,
     pub nonterminal_display_names: Vec<String>,
+    pub residual_isolation_classes: BTreeMap<TerminalID, u32>,
     pub requires_global_terminal_observation: bool,
     pub nullable: BTreeSet<NonterminalID>,
     pub first: Vec<BitSet>,
@@ -129,6 +130,7 @@ impl AnalyzedGrammar {
                     }
                 })
                 .collect(),
+            residual_isolation_classes: g.residual_isolation_classes.clone(),
             requires_global_terminal_observation: g.requires_global_terminal_observation,
             nullable,
             first,

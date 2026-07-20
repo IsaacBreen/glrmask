@@ -879,6 +879,48 @@ fn find_state_equivalence_classes_ex_inner<S: AsRef<[u8]> + Sync>(
         shared_base,
         force_raw_transitions,
         seed_initial_finalizers,
+        None,
+    )
+}
+
+/// Exact token-observation equivalence for states whose scanner reset depends
+/// on the source state. This is used to compare independently built lexer
+/// domains: after a terminal edge, a full-lexer state must resume from the full
+/// lexer start while a synthesized-lexer state must resume from the synthesized
+/// lexer start.
+pub(crate) fn find_state_equivalence_classes_with_state_resets<
+    S: AsRef<[u8]> + Sync,
+>(
+    tokenizer: &TokenizerView,
+    tokens: &[S],
+    states: &[usize],
+    disallowed_follows: &[BitSet],
+    reset_states: &[usize],
+    seed_initial_finalizers: bool,
+) -> Vec<usize> {
+    assert_eq!(
+        states.len(),
+        reset_states.len(),
+        "one scanner reset state is required per analyzed state",
+    );
+    if states.is_empty() {
+        return Vec::new();
+    }
+
+    find_state_equivalence_classes_token_based(
+        tokenizer,
+        tokens,
+        states,
+        &[],
+        FollowRows::Dense(Some(disallowed_follows)),
+        None,
+        None,
+        None,
+        false,
+        None,
+        false,
+        seed_initial_finalizers,
+        Some(reset_states),
     )
 }
 
@@ -895,6 +937,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
     shared_base: Option<&SharedVocabDfaBase>,
     force_raw_transitions: bool,
     seed_initial_finalizers: bool,
+    reset_states: Option<&[usize]>,
 ) -> Vec<usize> {
     use std::collections::{hash_map::Entry, HashMap};
 
@@ -1027,41 +1070,63 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
         vec![true; total_tokens]
     };
 
-    let tokenizer_start = tokenizer.initial_state_id();
-    let suffix_hashes_by_token: Vec<Option<TokenSuffixHashes>> = sorted_tokens
+    let default_reset = tokenizer.initial_state_id();
+    let reset_states = reset_states.unwrap_or(&[]);
+    let mut unique_reset_states = Vec::<usize>::new();
+    let mut reset_index_by_state = HashMap::<usize, usize>::new();
+    let mut state_reset_indices = Vec::with_capacity(states.len());
+    for (state_index, _) in states.iter().enumerate() {
+        let reset = reset_states
+            .get(state_index)
+            .copied()
+            .unwrap_or(default_reset);
+        assert!(reset < num_dfa_states, "invalid scanner reset state");
+        let reset_index = *reset_index_by_state.entry(reset).or_insert_with(|| {
+            let index = unique_reset_states.len();
+            unique_reset_states.push(reset);
+            index
+        });
+        state_reset_indices.push(reset_index);
+    }
+    let suffix_hashes_by_reset: Vec<Vec<Option<TokenSuffixHashes>>> = unique_reset_states
         .par_iter()
-        .enumerate()
-        .map_init(
-            || {
-                (
-                    vec![-1i32; num_groups],
-                    vec![0u64; bit_words(num_groups)],
+        .map(|&reset_state| {
+            sorted_tokens
+                .par_iter()
+                .enumerate()
+                .map_init(
+                    || {
+                        (
+                            vec![-1i32; num_groups],
+                            vec![0u64; bit_words(num_groups)],
+                        )
+                    },
+                    |(positions, active_bits), (token_idx, token)| {
+                        if !needed_token_flags[token_idx] {
+                            None
+                        } else {
+                            let nodes = build_start_state_suffix_nodes(
+                                token,
+                                reset_state,
+                                compact_transitions.as_ref(),
+                                byte_to_class,
+                                num_bc,
+                                &dfa_finalizers,
+                                &state_has_future,
+                                skip_groups,
+                                positions,
+                                active_bits,
+                            );
+                            Some(build_token_suffix_hashes(
+                                nodes,
+                                &follow_contexts,
+                                &future_group_hashes_by_context,
+                            ))
+                        }
+                    },
                 )
-            },
-            |(positions, active_bits), (token_idx, token)| {
-                if !needed_token_flags[token_idx] {
-                    None
-                } else {
-                    let nodes = build_start_state_suffix_nodes(
-                        token,
-                        tokenizer_start,
-                        compact_transitions.as_ref(),
-                        byte_to_class,
-                        num_bc,
-                        &dfa_finalizers,
-                        &state_has_future,
-                        skip_groups,
-                        positions,
-                        active_bits,
-                    );
-                    Some(build_token_suffix_hashes(
-                        nodes,
-                        &follow_contexts,
-                        &future_group_hashes_by_context,
-                    ))
-                }
-            },
-        )
+                .collect()
+        })
         .collect();
 
     let common_prefix_len = |a: &[u8], b: &[u8]| -> usize {
@@ -1181,6 +1246,8 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                 || batch_scratch_pool.checkout(num_groups),
                 |lease, &state_idx| {
                     let state = states[state_idx] as u32;
+                    let suffix_hashes_by_token =
+                        &suffix_hashes_by_reset[state_reset_indices[state_idx]];
                     let mut hash_delta: u128 = 0;
                     let state_ct_base = (state as usize) * num_bc;
                     let has_seed_initial_finalizers = seed_initial_finalizers

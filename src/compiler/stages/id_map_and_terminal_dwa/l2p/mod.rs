@@ -444,6 +444,11 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     ) =
         if l2p_terminal_interchangeability_enabled_for_partition(partition_label) {
             let mut active = active_terminals.to_vec();
+            for &terminal in grammar.residual_isolation_classes.keys() {
+                if let Some(slot) = active.get_mut(terminal as usize) {
+                    *slot = false;
+                }
+            }
             let mut classes = singleton_partition(&active);
             // Always use the byte-level exact discovery oracle. When the global
             // token-position quotient C is available (p7/p8), build discovery

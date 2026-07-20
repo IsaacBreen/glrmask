@@ -32,6 +32,23 @@ impl TerminalColoring {
             .copied()
             .unwrap_or(terminal_id)
     }
+
+    /// Give externally protected lexer residuals unique colors so terminal-DWA
+    /// transition sharing cannot erase their identities before late state-map
+    /// expansion.
+    pub(crate) fn isolate_terminals(
+        &mut self,
+        terminals: impl IntoIterator<Item = TerminalID>,
+    ) {
+        for terminal in terminals {
+            let terminal = terminal as usize;
+            if terminal >= self.terminal_to_color.len() {
+                continue;
+            }
+            self.terminal_to_color[terminal] = self.num_colors as ColorId;
+            self.num_colors += 1;
+        }
+    }
 }
 
 /// Per-partition build profile counters.
