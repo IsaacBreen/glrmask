@@ -30,6 +30,11 @@ use super::types::{LocalIdMapTerminalDwa, TerminalDwaPhaseProfile, compile_profi
 type RemapCache<T> = FxHashMap<usize, T>;
 type CompositeClassKey = SmallVec<[u32; 16]>;
 
+enum FastGlobalTokenMaps {
+    Direct(Vec<Vec<u32>>),
+    General(Vec<Vec<Vec<u32>>>),
+}
+
 fn merged_terminal_dwa_phase_enabled(variable: &str, default: bool) -> bool {
     std::env::var(variable)
         .map(|value| {
@@ -1760,24 +1765,37 @@ fn try_merge_immediate_terminal_dwas(
     let total_started_at = Instant::now();
     let id_map_started_at = Instant::now();
     let id_map_refs: Vec<&InternalIdMap> = inputs.iter().map(|input| &input.id_map).collect();
-    let (global_id_map, direct_local_to_global_token_maps) =
-        build_unified_global_id_map(&id_map_refs, num_tokenizer_states, max_token_id);
+    // These inputs are the compiler's disjoint vocabulary partitions. Preserve
+    // that proof instead of scanning every original-token map again, and retain
+    // the local→global TSID maps produced while constructing the global classes.
+    let (global_id_map, token_maps, local_to_global_tsid_maps) =
+        build_unified_global_id_map_fast(
+            &id_map_refs,
+            num_tokenizer_states,
+            max_token_id,
+            None,
+            false,
+        );
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let remap_started_at = Instant::now();
     let mut weights_by_label = BTreeMap::<i32, Vec<Weight>>::new();
     for (input_index, input) in inputs.iter().enumerate() {
         let mut dwa = input.dwa.clone();
-        let tsid_map = build_local_to_global_tsid_map(&input.id_map, &global_id_map);
-        let token_map = direct_local_to_global_token_maps
-            .as_ref()
-            .and_then(|maps| maps.get(input_index))
-            .map(|direct_map| build_direct_local_to_global_token_map(direct_map))
-            .unwrap_or_else(|| build_local_to_global_token_map(&input.id_map, &global_id_map));
+        let tsid_map = &local_to_global_tsid_maps[input_index];
+        let direct_token_map_storage;
+        let token_map = match &token_maps {
+            FastGlobalTokenMaps::Direct(maps) => {
+                direct_token_map_storage =
+                    build_direct_local_to_global_token_map(&maps[input_index]);
+                direct_token_map_storage.as_slice()
+            }
+            FastGlobalTokenMaps::General(maps) => maps[input_index].as_slice(),
+        };
         remap_dwa_with_maps(
             &mut dwa,
-            &tsid_map,
-            &token_map,
+            tsid_map,
+            token_map,
             global_id_map.num_tsids() as usize,
         );
         for (label, weight) in immediate_dwa_accepting_edges(&dwa)? {
@@ -1828,20 +1846,21 @@ fn try_merge_immediate_terminal_dwas(
 /// partition. The input order and original-state order are deterministic, so
 /// first-seen class IDs are stable for this merge and avoid a costly sort and
 /// relabel pass used only for cross-order canonicalization.
-fn build_unified_global_id_map_disjoint_fast(
+fn build_unified_global_id_map_fast(
     inputs: &[&InternalIdMap],
     num_tokenizer_states: usize,
     max_token_id: u32,
     primary_source: Option<usize>,
-) -> (InternalIdMap, Vec<Vec<u32>>, Vec<Vec<Vec<u32>>>) {
-    let mut composite_to_class = FxHashMap::<SmallVec<[u32; 8]>, u32>::default();
+    require_direct_token_maps: bool,
+) -> (InternalIdMap, FastGlobalTokenMaps, Vec<Vec<Vec<u32>>>) {
+    let mut composite_to_class = FxHashMap::<SmallVec<[u32; 16]>, u32>::default();
     let mut state_o2i = vec![0u32; num_tokenizer_states];
     let mut state_i2o: Vec<Vec<u32>> = Vec::new();
     let mut state_reps: Vec<u32> = Vec::new();
-    let mut class_keys = Vec::<SmallVec<[u32; 8]>>::new();
+    let mut class_keys = Vec::<SmallVec<[u32; 16]>>::new();
 
     for state in 0..num_tokenizer_states {
-        let mut composite = SmallVec::<[u32; 8]>::with_capacity(inputs.len());
+        let mut composite = SmallVec::<[u32; 16]>::with_capacity(inputs.len());
         composite.extend(
             inputs
                 .iter()
@@ -1912,8 +1931,23 @@ fn build_unified_global_id_map_disjoint_fast(
         }
     }
 
-    let (vocab_tokens, direct_local_to_global_token_maps) =
-        build_unified_global_token_id_map_assume_disjoint(inputs, max_token_id);
+    let (vocab_tokens, token_maps) = if require_direct_token_maps {
+        let (vocab_tokens, direct_maps) = build_unified_global_token_id_map_disjoint(
+            inputs,
+            max_token_id,
+        )
+        .expect("caller proved disjoint token domains");
+        (
+            vocab_tokens,
+            FastGlobalTokenMaps::Direct(
+                direct_maps.expect("disjoint builder must return direct token maps"),
+            ),
+        )
+    } else {
+        let (vocab_tokens, general_maps) =
+            build_unified_global_token_id_map_sparse_generic(inputs, max_token_id);
+        (vocab_tokens, FastGlobalTokenMaps::General(general_maps))
+    };
     (
         InternalIdMap {
             tokenizer_states: ManyToOneIdMap {
@@ -1922,10 +1956,30 @@ fn build_unified_global_id_map_disjoint_fast(
                 representative_original_ids: state_reps,
             },
             vocab_tokens,
+            deferred_vocab_singleton_original_ids: None,
         },
-        direct_local_to_global_token_maps,
+        token_maps,
         local_to_global_tsids,
     )
+}
+
+fn build_unified_global_id_map_disjoint_fast(
+    inputs: &[&InternalIdMap],
+    num_tokenizer_states: usize,
+    max_token_id: u32,
+    primary_source: Option<usize>,
+) -> (InternalIdMap, Vec<Vec<u32>>, Vec<Vec<Vec<u32>>>) {
+    let (id_map, token_maps, tsid_maps) = build_unified_global_id_map_fast(
+        inputs,
+        num_tokenizer_states,
+        max_token_id,
+        primary_source,
+        true,
+    );
+    let FastGlobalTokenMaps::Direct(direct_maps) = token_maps else {
+        panic!("disjoint token domains must produce direct token maps");
+    };
+    (id_map, direct_maps, tsid_maps)
 }
 
 fn build_unified_global_token_id_map_assume_disjoint(
@@ -2010,8 +2064,138 @@ fn build_unified_global_id_map(
                 representative_original_ids: state_reps,
             },
             vocab_tokens,
+            deferred_vocab_singleton_original_ids: None,
         },
         direct_local_to_global_token_maps,
+    )
+}
+
+fn build_unified_global_token_id_map_sparse_generic(
+    inputs: &[&InternalIdMap],
+    max_token_id: u32,
+) -> (ManyToOneIdMap, Vec<Vec<Vec<u32>>>) {
+    type MembershipKey = SmallVec<[u64; 4]>;
+
+    let token_count = max_token_id as usize + 1;
+    let mut first_input = vec![u16::MAX; token_count];
+    let mut first_local_class = vec![u32::MAX; token_count];
+    let mut overlap_index = vec![u32::MAX; token_count];
+    let mut overlap_memberships = Vec::<MembershipKey>::new();
+
+    for (input_index, input) in inputs.iter().enumerate() {
+        assert!(input_index < u16::MAX as usize, "too many immediate merge inputs");
+        for (local_class, originals) in input
+            .vocab_tokens
+            .internal_to_originals
+            .iter()
+            .enumerate()
+        {
+            for &token_id in originals {
+                let token_index = token_id as usize;
+                debug_assert!(token_index < token_count);
+                if first_input[token_index] == u16::MAX {
+                    first_input[token_index] = input_index as u16;
+                    first_local_class[token_index] = local_class as u32;
+                    continue;
+                }
+
+                let membership_index = if overlap_index[token_index] == u32::MAX {
+                    let membership_index = overlap_memberships.len() as u32;
+                    let mut membership = MembershipKey::new();
+                    membership.push(
+                        ((first_input[token_index] as u64) << 32)
+                            | first_local_class[token_index] as u64,
+                    );
+                    overlap_memberships.push(membership);
+                    overlap_index[token_index] = membership_index;
+                    membership_index
+                } else {
+                    overlap_index[token_index]
+                };
+                overlap_memberships[membership_index as usize]
+                    .push(((input_index as u64) << 32) | local_class as u64);
+            }
+        }
+    }
+
+    let mut unique_counts = inputs
+        .iter()
+        .map(|input| vec![0usize; input.num_internal_tokens() as usize])
+        .collect::<Vec<_>>();
+    for token_index in 0..token_count {
+        if first_input[token_index] != u16::MAX && overlap_index[token_index] == u32::MAX {
+            unique_counts[first_input[token_index] as usize]
+                [first_local_class[token_index] as usize] += 1;
+        }
+    }
+
+    let mut token_i2o = Vec::<Vec<u32>>::new();
+    let mut token_reps = Vec::<u32>::new();
+    let mut local_to_global = inputs
+        .iter()
+        .map(|input| vec![Vec::<u32>::new(); input.num_internal_tokens() as usize])
+        .collect::<Vec<_>>();
+    let mut unique_global_class = inputs
+        .iter()
+        .map(|input| vec![u32::MAX; input.num_internal_tokens() as usize])
+        .collect::<Vec<_>>();
+
+    for input_index in 0..inputs.len() {
+        for local_class in 0..unique_counts[input_index].len() {
+            if unique_counts[input_index][local_class] == 0 {
+                continue;
+            }
+            let global_class = token_i2o.len() as u32;
+            unique_global_class[input_index][local_class] = global_class;
+            local_to_global[input_index][local_class].push(global_class);
+            token_i2o.push(Vec::with_capacity(unique_counts[input_index][local_class]));
+            token_reps.push(u32::MAX);
+        }
+    }
+
+    let mut overlap_class_by_membership = FxHashMap::<MembershipKey, u32>::default();
+    let mut token_o2i = vec![u32::MAX; token_count];
+    for token_index in 0..token_count {
+        if first_input[token_index] == u16::MAX {
+            continue;
+        }
+        let global_class = if overlap_index[token_index] == u32::MAX {
+            unique_global_class[first_input[token_index] as usize]
+                [first_local_class[token_index] as usize]
+        } else {
+            let membership = &overlap_memberships[overlap_index[token_index] as usize];
+            if let Some(&existing) = overlap_class_by_membership.get(membership) {
+                existing
+            } else {
+                let global_class = token_i2o.len() as u32;
+                overlap_class_by_membership.insert(membership.clone(), global_class);
+                token_i2o.push(Vec::new());
+                token_reps.push(u32::MAX);
+                for &packed in membership {
+                    let input_index = (packed >> 32) as usize;
+                    let local_class = packed as u32 as usize;
+                    local_to_global[input_index][local_class].push(global_class);
+                }
+                global_class
+            }
+        };
+        debug_assert_ne!(global_class, u32::MAX);
+        token_o2i[token_index] = global_class;
+        let originals = &mut token_i2o[global_class as usize];
+        if originals.is_empty() {
+            token_reps[global_class as usize] = token_index as u32;
+        }
+        originals.push(token_index as u32);
+    }
+
+    debug_assert!(token_i2o.iter().all(|originals| !originals.is_empty()));
+    (
+        ManyToOneIdMap {
+            original_to_internal: token_o2i,
+            internal_to_originals: token_i2o,
+            representative_original_ids: token_reps,
+        },
+        local_to_global,
     )
 }
 
@@ -2630,6 +2814,7 @@ mod tests {
                 Vec::new(),
                 0,
             ),
+            deferred_vocab_singleton_original_ids: None,
         }
     }
 
@@ -2651,6 +2836,60 @@ mod tests {
             .into_iter()
             .map(|targets| targets.into_iter().collect())
             .collect()
+    }
+
+    fn id_map_with_vocab_partition(
+        original_to_internal: Vec<u32>,
+        num_classes: u32,
+    ) -> InternalIdMap {
+        InternalIdMap {
+            tokenizer_states: ManyToOneIdMap::from_original_to_internal_with_representatives(
+                vec![0],
+                1,
+                vec![0],
+            ),
+            vocab_tokens: ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+                original_to_internal,
+                num_classes,
+            ),
+            deferred_vocab_singleton_original_ids: None,
+        }
+    }
+
+    #[test]
+    fn sparse_overlapping_token_map_matches_generic_partition() {
+        let first = id_map_with_vocab_partition(
+            vec![0, 0, u32::MAX, 1, 1],
+            2,
+        );
+        let second = id_map_with_vocab_partition(
+            vec![u32::MAX, 0, 0, 1, u32::MAX],
+            2,
+        );
+        let inputs = [&first, &second];
+        let generic = build_unified_global_token_id_map_generic(&inputs, 4);
+        let (sparse, local_to_global) =
+            build_unified_global_token_id_map_sparse_generic(&inputs, 4);
+
+        let mut generic_groups = generic.internal_to_originals.clone();
+        let mut sparse_groups = sparse.internal_to_originals.clone();
+        generic_groups.sort_unstable();
+        sparse_groups.sort_unstable();
+        assert_eq!(sparse_groups, generic_groups);
+
+        for (input_index, input) in inputs.iter().enumerate() {
+            for (local_class, originals) in
+                input.vocab_tokens.internal_to_originals.iter().enumerate()
+            {
+                for &token_id in originals {
+                    let global_class = sparse.original_to_internal[token_id as usize];
+                    assert!(
+                        local_to_global[input_index][local_class].contains(&global_class),
+                        "input={input_index} local_class={local_class} token={token_id} global={global_class}",
+                    );
+                }
+            }
+        }
     }
 
     #[test]

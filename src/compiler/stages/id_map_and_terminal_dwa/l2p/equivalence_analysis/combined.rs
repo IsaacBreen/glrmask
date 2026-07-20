@@ -624,6 +624,7 @@ fn build_internal_id_map_from_combined_result(
     InternalIdMap {
         tokenizer_states: state_map,
         vocab_tokens: vocab_map,
+        deferred_vocab_singleton_original_ids: None,
     }
 }
 
@@ -945,6 +946,7 @@ fn try_analyze_equivalences_with_token_position_partition(
     let internal_id_map = InternalIdMap {
         tokenizer_states,
         vocab_tokens: build_vocab_map(&vocab_classes, &prepared.token_ids, prepared.max_token_id),
+        deferred_vocab_singleton_original_ids: None,
     };
     let id_map_finalize_ms = finalize_started_at.elapsed().as_secs_f64() * 1000.0;
     let exact_reps = internal_id_map.tokenizer_states.num_internal_ids() as usize;
@@ -1164,6 +1166,7 @@ fn try_analyze_equivalences_with_raw_quotient(
         let internal_id_map = InternalIdMap {
             tokenizer_states,
             vocab_tokens: build_identity_vocab_map(&prepared.token_ids, prepared.max_token_id),
+            deferred_vocab_singleton_original_ids: None,
         };
         let id_map_finalize_ms = id_map_finalize_started_at.elapsed().as_secs_f64() * 1000.0;
         if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
@@ -1482,6 +1485,7 @@ fn try_analyze_equivalences_with_raw_quotient(
         let internal_id_map = InternalIdMap {
             tokenizer_states,
             vocab_tokens: build_identity_vocab_map(&prepared.token_ids, prepared.max_token_id),
+            deferred_vocab_singleton_original_ids: None,
         };
         let id_map_finalize_ms = id_map_finalize_started_at.elapsed().as_secs_f64() * 1000.0;
         return Some((
@@ -1553,6 +1557,7 @@ fn try_analyze_equivalences_with_raw_quotient(
     let internal_id_map = InternalIdMap {
         tokenizer_states,
         vocab_tokens: build_vocab_map(&vocab_classes, &prepared.token_ids, prepared.max_token_id),
+        deferred_vocab_singleton_original_ids: None,
     };
     let id_map_finalize_ms = id_map_finalize_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -2162,6 +2167,7 @@ fn analyze_equivalences_impl(
         let id_map = InternalIdMap {
             tokenizer_states,
             vocab_tokens,
+            deferred_vocab_singleton_original_ids: None,
         };
         let id_map_finalize_ms = id_map_finalize_started_at.elapsed().as_secs_f64() * 1000.0;
         let exact_reps = id_map.tokenizer_states.num_internal_ids() as usize;

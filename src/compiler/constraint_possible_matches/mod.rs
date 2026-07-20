@@ -2316,6 +2316,7 @@ fn empty_possible_matches_computation(
             vec![u32::MAX; original_token_count],
             0,
         ),
+        deferred_vocab_singleton_original_ids: None,
     };
     ConstraintPossibleMatchesComputation {
         mapped_possible_matches: MappedArtifact::new(
@@ -2460,6 +2461,7 @@ fn compute_constraint_possible_matches_with_artifacts(
             trie_class_result.state_classes.iter().copied().filter(|&class_id| class_id != u32::MAX).max().map(|class_id| class_id + 1).unwrap_or(0),
         ),
         vocab_tokens,
+        deferred_vocab_singleton_original_ids: None,
     };
 
     if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some() || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {

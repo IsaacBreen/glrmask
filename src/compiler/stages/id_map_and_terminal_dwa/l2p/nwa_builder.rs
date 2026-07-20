@@ -1561,6 +1561,7 @@ mod tests {
             vocab_tokens: ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
                 vec![0, 1], vec![0, 1],
             ),
+            deferred_vocab_singleton_original_ids: None,
         };
         let mut possible_matches = PossibleMatchesComputer::new(&tokenizer);
         let mut nwa = NWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
@@ -1623,6 +1624,7 @@ mod tests {
                 vocab_tokens.clone(),
                 vocab_tokens,
             ),
+            deferred_vocab_singleton_original_ids: None,
         }
     }
 

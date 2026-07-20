@@ -271,6 +271,7 @@ fn build_common_internal_id_map(inputs: &[&InternalIdMap]) -> InternalIdMap {
     InternalIdMap {
         tokenizer_states,
         vocab_tokens,
+        deferred_vocab_singleton_original_ids: None,
     }
 }
 
@@ -1208,6 +1209,7 @@ mod tests {
         InternalIdMap {
             tokenizer_states: map(states, num_states),
             vocab_tokens: map(tokens, num_tokens),
+            deferred_vocab_singleton_original_ids: None,
         }
     }
 

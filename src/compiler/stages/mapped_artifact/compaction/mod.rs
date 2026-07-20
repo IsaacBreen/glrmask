@@ -443,11 +443,19 @@ pub(super) fn apply_compaction_plan_to_weight_refs(
         );
     }
     if !plan.token_perm_is_identity(num_tokens) {
-        apply_perm_to_id_map(
-            &mut id_map.vocab_tokens,
-            &plan.token_perm,
-            plan.ordered_num_tokens,
-        );
+        if id_map.deferred_vocab_singleton_original_ids.is_some() {
+            apply_perm_to_deferred_vocab_singletons(
+                id_map,
+                &plan.token_perm,
+                plan.ordered_num_tokens,
+            );
+        } else {
+            apply_perm_to_id_map(
+                &mut id_map.vocab_tokens,
+                &plan.token_perm,
+                plan.ordered_num_tokens,
+            );
+        }
     }
     let apply_id_map_ms = apply_id_map_started_at.map_or(0.0, elapsed_ms);
 
@@ -1805,6 +1813,54 @@ fn apply_perm_to_id_map(id_map: &mut ManyToOneIdMap, perm: &[u32], new_count: us
 
     id_map.internal_to_originals = new_internal_to_originals;
     id_map.representative_original_ids = new_representatives;
+}
+
+fn apply_perm_to_deferred_vocab_singletons(
+    id_map: &mut InternalIdMap,
+    perm: &[u32],
+    new_count: usize,
+) {
+    let original_ids = id_map
+        .deferred_vocab_singleton_original_ids
+        .take()
+        .expect("deferred vocabulary singleton order disappeared before compaction");
+    let original_count = original_ids
+        .iter()
+        .copied()
+        .max()
+        .map_or(0, |max_original| max_original as usize + 1);
+    let mut original_to_internal = vec![u32::MAX; original_count];
+    let mut sizes = vec![0usize; new_count];
+    for old_internal in 0..original_ids.len() {
+        let Some(&new_internal) = perm.get(old_internal) else {
+            continue;
+        };
+        if (new_internal as usize) < new_count {
+            sizes[new_internal as usize] += 1;
+        }
+    }
+    let mut internal_to_originals: Vec<Vec<u32>> =
+        sizes.into_iter().map(Vec::with_capacity).collect();
+    let mut representative_original_ids = vec![u32::MAX; new_count];
+    for (old_internal, &original) in original_ids.iter().enumerate() {
+        let Some(&new_internal) = perm.get(old_internal) else {
+            continue;
+        };
+        let new_internal = new_internal as usize;
+        if new_internal >= new_count {
+            continue;
+        }
+        original_to_internal[original as usize] = new_internal as u32;
+        internal_to_originals[new_internal].push(original);
+        if representative_original_ids[new_internal] == u32::MAX {
+            representative_original_ids[new_internal] = original;
+        }
+    }
+    id_map.vocab_tokens = ManyToOneIdMap {
+        original_to_internal,
+        internal_to_originals,
+        representative_original_ids,
+    };
 }
 
 fn collect_token_sets_after_permutation(

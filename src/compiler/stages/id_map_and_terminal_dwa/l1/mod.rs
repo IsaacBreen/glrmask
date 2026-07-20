@@ -742,6 +742,13 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
     } else {
         (None, 0.0)
     };
+    // Token compaction normally consumes the deferred singleton coordinate.
+    // If it was a no-op, materialize the ordinary map before this local
+    // artifact escapes the L1 builder.
+    mapped_dwa
+        .parts_mut()
+        .1
+        .materialize_deferred_vocab_singletons();
     let dwa_stats_after_compact = mapped_dwa.artifact().stats();
     let tsids_after_compact = mapped_dwa.id_map().num_tsids();
     let tokens_after_compact = mapped_dwa.id_map().num_internal_tokens();
@@ -1034,7 +1041,8 @@ fn build_l1_generic_nfa_exact_id_map<'a>(
     Option<L1ExactProfileReuse>,
 ) {
     let num_states = tokenizer.num_states() as usize;
-    let (vocab_tokens, vocab_order, token_identity_map_ms) = build_l1_identity_vocab_map(vocab);
+    let (deferred_vocab_singleton_original_ids, vocab_order, token_identity_map_ms) =
+        build_l1_identity_vocab_order(vocab);
     let token_entries = vocab_order.token_entries_sorted.as_ref();
     let token_len_stats = token_length_stats_from_entries(token_entries);
     let max_token_len = token_entries
@@ -1138,7 +1146,8 @@ fn build_l1_generic_nfa_exact_id_map<'a>(
     (
         InternalIdMap {
             tokenizer_states,
-            vocab_tokens,
+            vocab_tokens: ManyToOneIdMap::empty(),
+            deferred_vocab_singleton_original_ids: Some(deferred_vocab_singleton_original_ids),
         },
         vocab_order,
         state_to_rep,
@@ -1181,7 +1190,8 @@ fn build_l1_generic_nfa_fallback_id_map<'a>(
         .collect::<Vec<_>>();
     let token_len_stats = token_length_stats(&token_bytes);
     let max_token_len = token_bytes.iter().map(|bytes| bytes.len()).max().unwrap_or(0);
-    let (vocab_tokens, vocab_order, token_identity_map_ms) = build_l1_identity_vocab_map(vocab);
+    let (deferred_vocab_singleton_original_ids, vocab_order, token_identity_map_ms) =
+        build_l1_identity_vocab_order(vocab);
 
     // Raw TSIDs are the token-boundary coordinate.  Do not quotient them
     // through powerset scanner configurations before the exact L1 profile is
@@ -1202,7 +1212,8 @@ fn build_l1_generic_nfa_fallback_id_map<'a>(
     (
         InternalIdMap {
             tokenizer_states,
-            vocab_tokens,
+            vocab_tokens: ManyToOneIdMap::empty(),
+            deferred_vocab_singleton_original_ids: Some(deferred_vocab_singleton_original_ids),
         },
         vocab_order,
         state_to_rep,
@@ -1543,8 +1554,8 @@ fn build_l1_id_map<'a>(
             .map(|bytes| bytes.len())
             .max()
             .unwrap_or(0);
-        let (vocab_tokens, vocab_order, token_identity_map_ms) =
-            build_l1_identity_vocab_map(vocab);
+        let (deferred_vocab_singleton_original_ids, vocab_order, token_identity_map_ms) =
+            build_l1_identity_vocab_order(vocab);
         let mut tokenizer_states = initial_state_map
             .expect("checked by should_use_fast_projected_l1_id_map")
             .clone();
@@ -1557,7 +1568,10 @@ fn build_l1_id_map<'a>(
         return (
             InternalIdMap {
                 tokenizer_states,
-                vocab_tokens,
+                vocab_tokens: ManyToOneIdMap::empty(),
+                deferred_vocab_singleton_original_ids: Some(
+                    deferred_vocab_singleton_original_ids,
+                ),
             },
             vocab_order,
             state_to_rep,
@@ -1695,8 +1709,7 @@ fn build_l1_id_map<'a>(
     let state_equiv_ms = state_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let token_map_started_at = Instant::now();
-    let token_original_to_internal = order.original_to_internal.to_vec();
-    let token_ids_sorted = order.token_ids_sorted.to_vec();
+    let deferred_vocab_singleton_original_ids = Arc::clone(&order.token_ids_sorted);
     let token_identity_map_ms =
         token_sort_ms + token_map_started_at.elapsed().as_secs_f64() * 1000.0;
     if tokenizer.has_deterministic_dispatch()
@@ -1718,10 +1731,8 @@ fn build_l1_id_map<'a>(
     (
         InternalIdMap {
             tokenizer_states,
-            vocab_tokens: ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
-                token_original_to_internal,
-                token_ids_sorted,
-            ),
+            vocab_tokens: ManyToOneIdMap::empty(),
+            deferred_vocab_singleton_original_ids: Some(deferred_vocab_singleton_original_ids),
         },
         order,
         state_to_rep,
@@ -1745,21 +1756,15 @@ fn build_l1_id_map<'a>(
     )
 }
 
-fn build_l1_identity_vocab_map(vocab: &Vocab) -> (ManyToOneIdMap, Arc<L1IdentityVocabOrder>, f64) {
+fn build_l1_identity_vocab_order(
+    vocab: &Vocab,
+) -> (Arc<[u32]>, Arc<L1IdentityVocabOrder>, f64) {
     let token_identity_started_at = Instant::now();
     let order = l1_identity_vocab_order(vocab);
-    let token_original_to_internal = order.original_to_internal.to_vec();
-    let token_ids_sorted = order.token_ids_sorted.to_vec();
+    let token_ids_sorted = Arc::clone(&order.token_ids_sorted);
 
     let token_identity_map_ms = token_identity_started_at.elapsed().as_secs_f64() * 1000.0;
-    (
-        ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
-            token_original_to_internal,
-            token_ids_sorted,
-        ),
-        order,
-        token_identity_map_ms,
-    )
+    (token_ids_sorted, order, token_identity_map_ms)
 }
 
 fn state_to_representative_vector(state_map: &ManyToOneIdMap, num_dfa_states: usize) -> Vec<u32> {
@@ -2195,6 +2200,7 @@ fn find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
         let estimated_work = token_ids.len().saturating_mul(targets.len());
         let parallel_bucket = token_ids.len() >= 10_000
             || estimated_work >= LARGE_BUCKET_WORK_PRODUCT;
+
         if parallel_bucket && targets.len() >= 32 && rayon::current_num_threads() > 1 {
             let chunk_count = std::env::var("GLRMASK_L1_LARGE_BUCKET_CHUNKS")
                 .ok()
@@ -2631,6 +2637,7 @@ fn l1_bucket_suffix_signature_profiles_batched(
         }
     }
 
+
     if walk_targets.is_empty() {
         return results;
     }
@@ -2929,7 +2936,7 @@ fn l1_packed_uniform_signature(
     records[data[node_index].records_start as usize + behavior_id as usize - 1].uniform_signature
 }
 
-fn l1_packed_append_behavior(
+fn l1_packed_append_behavior_reference(
     trie: &L1PackedSuffixTrie,
     node_index: usize,
     behavior_id: u32,
@@ -2952,7 +2959,7 @@ fn l1_packed_append_behavior(
     }
     if node.terminal_token == L1_NONE && node.edge_len == 1 {
         let child = trie.edges[node.first_edge as usize].child as usize;
-        l1_packed_append_behavior(
+        l1_packed_append_behavior_reference(
             trie,
             child,
             behavior_id,
@@ -2985,7 +2992,7 @@ fn l1_packed_append_behavior(
     let children_start = record.child_behaviors_start as usize;
     for edge_offset in 0..node.edge_len as usize {
         let edge = trie.edges[node.first_edge as usize + edge_offset];
-        l1_packed_append_behavior(
+        l1_packed_append_behavior_reference(
             trie,
             edge.child as usize,
             record_child_behaviors[children_start + edge_offset],
@@ -2995,6 +3002,85 @@ fn l1_packed_append_behavior(
             profile,
         );
     }
+}
+
+
+fn l1_packed_materialize_behavior(
+    trie: &L1PackedSuffixTrie,
+    node_index: usize,
+    behavior_id: u32,
+    data: &[L1PackedProductNodeData],
+    records: &[L1PackedProductBehaviorRecord],
+    record_child_behaviors: &[u32],
+    materialized_records: &mut [Option<Arc<[(u32, u32, u32)]>>],
+    empty_profile: &Arc<[(u32, u32, u32)]>,
+) -> Arc<[(u32, u32, u32)]> {
+    if behavior_id == 0 {
+        return Arc::clone(empty_profile);
+    }
+    let node = trie.nodes[node_index];
+    if let Some(signature) = l1_uniform_behavior_signature(behavior_id) {
+        return Arc::from([(signature, node.subtree_start, node.subtree_end)]);
+    }
+    if node.edge_len == 0 {
+        return Arc::from([(behavior_id, node.subtree_start, node.subtree_end)]);
+    }
+    if node.terminal_token == L1_NONE && node.edge_len == 1 {
+        let child = trie.edges[node.first_edge as usize].child as usize;
+        return l1_packed_materialize_behavior(
+            trie,
+            child,
+            behavior_id,
+            data,
+            records,
+            record_child_behaviors,
+            materialized_records,
+            empty_profile,
+        );
+    }
+
+    let record_index = data[node_index].records_start as usize + behavior_id as usize - 1;
+    if let Some(profile) = materialized_records[record_index].as_ref() {
+        return Arc::clone(profile);
+    }
+    let record = records[record_index];
+    let profile: Arc<[(u32, u32, u32)]> = if record.uniform_signature != 0 {
+        Arc::from([(
+            record.uniform_signature,
+            node.subtree_start,
+            node.subtree_end,
+        )])
+    } else {
+        let mut profile = Vec::<(u32, u32, u32)>::new();
+        if record.terminal_signature != 0 {
+            append_l1_signature_profile_range(
+                &mut profile,
+                record.terminal_signature,
+                node.terminal_token,
+                node.terminal_token_end,
+            );
+        }
+        let children_start = record.child_behaviors_start as usize;
+        for edge_offset in 0..node.edge_len as usize {
+            let edge = trie.edges[node.first_edge as usize + edge_offset];
+            let child_profile = l1_packed_materialize_behavior(
+                trie,
+                edge.child as usize,
+                record_child_behaviors[children_start + edge_offset],
+                data,
+                records,
+                record_child_behaviors,
+                materialized_records,
+                empty_profile,
+            );
+            for &(signature, start, end) in child_profile.iter() {
+                append_l1_signature_profile_range(&mut profile, signature, start, end);
+            }
+        }
+        Arc::from(profile)
+    };
+    materialized_records[record_index] = Some(Arc::clone(&profile));
+    profile
 }
 
 fn l1_uniform_bucket_profile(
@@ -3117,6 +3203,7 @@ fn l1_bucket_suffix_signature_profiles_packed(
             }
         }
     }
+
     if walk_targets.is_empty() {
         return results;
     }
@@ -3636,6 +3723,10 @@ fn l1_bucket_suffix_signature_profiles_packed(
     let materialize_started_at = profiling.then(Instant::now);
     let root_behavior_start = data[0].behaviors_start as usize;
     let mut profiles_by_behavior = FxHashMap::<u32, Arc<[(u32, u32, u32)]>>::default();
+    let empty_profile: Arc<[(u32, u32, u32)]> = Arc::from([]);
+    let memoize_materialization =
+        std::env::var_os("GLRMASK_DISABLE_L1_MATERIALIZE_MEMO").is_none();
+    let mut materialized_records = vec![None; records.len()];
     for (target_index, &target) in walk_targets.iter().enumerate() {
         let behavior_id = behavior_ids[root_behavior_start + target_index];
         let profile = if let Some(profile) = profiles_by_behavior.get(&behavior_id) {
@@ -3655,9 +3746,20 @@ fn l1_bucket_suffix_signature_profiles_packed(
                     token_start,
                     token_end,
                 )
+            } else if memoize_materialization {
+                l1_packed_materialize_behavior(
+                    &trie,
+                    0,
+                    behavior_id,
+                    &data,
+                    &records,
+                    &record_child_behaviors,
+                    &mut materialized_records,
+                    &empty_profile,
+                )
             } else {
                 let mut profile = Vec::new();
-                l1_packed_append_behavior(
+                l1_packed_append_behavior_reference(
                     &trie,
                     0,
                     behavior_id,
@@ -5533,8 +5635,8 @@ mod generic_nfa_tests {
             let scalar_tsid = scalar_id_map.tokenizer_states.original_to_internal[raw_state as usize];
             for (&token_id, bytes) in vocab.entries.iter() {
                 let optimized_token =
-                    optimized_id_map.vocab_tokens.original_to_internal[token_id as usize];
-                let scalar_token = scalar_id_map.vocab_tokens.original_to_internal[token_id as usize];
+                    optimized_id_map.internal_token_for_original(token_id).expect("optimized token");
+                let scalar_token = scalar_id_map.internal_token_for_original(token_id).expect("scalar token");
                 for terminal in 0..2u32 {
                     let optimized_accepts = optimized
                         .eval_word(&[terminal as i32])
@@ -5645,9 +5747,9 @@ mod generic_nfa_tests {
             let shared_tsid = shared_map.tokenizer_states.original_to_internal[raw_state];
             let standalone_tsid = standalone_map.tokenizer_states.original_to_internal[raw_state];
             for (&token_id, bytes) in subset_vocab.entries.iter() {
-                let shared_token = shared_map.vocab_tokens.original_to_internal[token_id as usize];
+                let shared_token = shared_map.internal_token_for_original(token_id).expect("shared token");
                 let standalone_token =
-                    standalone_map.vocab_tokens.original_to_internal[token_id as usize];
+                    standalone_map.internal_token_for_original(token_id).expect("standalone token");
                 for terminal in 0..2u32 {
                     assert_eq!(
                         shared_dwa
@@ -5710,8 +5812,8 @@ mod generic_nfa_tests {
             assert_ne!(exact_tsid, u32::MAX, "exact raw_state={raw_state}");
             for (&token_id, bytes) in vocab.entries.iter() {
                 let fallback_token =
-                    fallback_id_map.vocab_tokens.original_to_internal[token_id as usize];
-                let exact_token = exact_id_map.vocab_tokens.original_to_internal[token_id as usize];
+                    fallback_id_map.internal_token_for_original(token_id).expect("fallback token");
+                let exact_token = exact_id_map.internal_token_for_original(token_id).expect("exact token");
                 assert_ne!(fallback_token, u32::MAX, "fallback token={token_id}");
                 assert_ne!(exact_token, u32::MAX, "exact token={token_id}");
                 let end_states = tokenizer.execute_from_state_end_only(bytes, raw_state);
@@ -6058,9 +6160,9 @@ mod packed_suffix_product_tests {
 
             for (&token_id, bytes) in vocab.entries.iter() {
                 let optimized_token =
-                    optimized_id_map.vocab_tokens.original_to_internal[token_id as usize];
+                    optimized_id_map.internal_token_for_original(token_id).expect("optimized token");
                 let fallback_token =
-                    fallback_id_map.vocab_tokens.original_to_internal[token_id as usize];
+                    fallback_id_map.internal_token_for_original(token_id).expect("fallback token");
                 let end_states = tokenizer.execute_from_state_end_only(bytes, raw_state);
 
                 for terminal in 0..expressions.len() as u32 {
@@ -6168,9 +6270,9 @@ mod packed_suffix_product_tests {
                 fallback_id_map.tokenizer_states.original_to_internal[raw_state as usize];
             for (&token_id, bytes) in vocab.entries.iter() {
                 let optimized_token =
-                    optimized_id_map.vocab_tokens.original_to_internal[token_id as usize];
+                    optimized_id_map.internal_token_for_original(token_id).expect("optimized token");
                 let fallback_token =
-                    fallback_id_map.vocab_tokens.original_to_internal[token_id as usize];
+                    fallback_id_map.internal_token_for_original(token_id).expect("fallback token");
                 let end_states = tokenizer.execute_from_state_end_only(bytes, raw_state);
                 let expected = end_states.iter().any(|&state| {
                     collect_active_terminal_signature(

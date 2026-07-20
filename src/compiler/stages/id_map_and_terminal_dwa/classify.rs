@@ -2706,6 +2706,27 @@ fn exact_terminal_path_two_plus_candidate_dfa(
             local_disallowed.insert(local_1 as u32, local_blocked);
         }
     }
+    // Any exact within-token boundary must place a terminal-1 last byte
+    // immediately before a terminal-2 first byte. Apply that same sound byte
+    // condition at each split, rather than analyzing every suffix admitted by
+    // the partition-wide candidate upper bound.
+    let mut feasible_follow_bytes_by_last_byte = [U8Set::empty(); 256];
+    for (local_1, &terminal_1) in candidate_ids.iter().enumerate() {
+        let blocked = local_disallowed.get(&(local_1 as u32));
+        for (local_2, &terminal_2) in candidate_ids.iter().enumerate() {
+            if blocked.is_some_and(|blocked| blocked.contains(local_2)) {
+                continue;
+            }
+            let first_bytes = bytesets.first_bytes[terminal_2];
+            for last_byte in bytesets.last_bytes[terminal_1].iter() {
+                feasible_follow_bytes_by_last_byte[last_byte as usize] |= first_bytes;
+            }
+        }
+    }
+    let split_may_host_boundary = |bytes: &[u8], split_after: usize| {
+        feasible_follow_bytes_by_last_byte[bytes[split_after] as usize]
+            .contains(bytes[split_after + 1])
+    };
     let analyze_started_at = std::time::Instant::now();
     let candidate_count = candidate_ids.len();
     let words_per_mask = candidate_count.div_ceil(64);
@@ -2720,7 +2741,6 @@ fn exact_terminal_path_two_plus_candidate_dfa(
     // ID at each token split directly. A global byte trie duplicates the same
     // prefixes as nodes and masks, while the downstream pass still visits every
     // token split in vocabulary order.
-    let prefix_started_at = std::time::Instant::now();
     let (mut prefix_scanner, prefix_start, reset_state) = CandidatePrefixPowerset::new(
         candidate_tokenizer,
         words_per_mask,
@@ -2728,18 +2748,18 @@ fn exact_terminal_path_two_plus_candidate_dfa(
         uses_original_tokenizer.then_some(bytesets.sparse_transitions_by_byte.as_slice()),
     );
     let mut split_offsets = Vec::with_capacity(vocab.entries.len() + 1);
-    let mut prefix_states = Vec::<u32>::with_capacity(total_splits);
     split_offsets.push(0usize);
     for bytes in vocab.entries.values() {
-        let mut state = prefix_start;
-        for &byte in bytes.iter().take(bytes.len().saturating_sub(1)) {
-            state = prefix_scanner.step(state, byte);
-            prefix_states.push(state);
-        }
-        split_offsets.push(prefix_states.len());
+        split_offsets.push(
+            split_offsets
+                .last()
+                .copied()
+                .unwrap_or(0usize)
+                .saturating_add(bytes.len().saturating_sub(1)),
+        );
     }
     let trie_ms = 0.0;
-    let prefix_ms = prefix_started_at.elapsed().as_secs_f64() * 1000.0;
+    let prefix_ms = 0.0;
 
     let suffix_started_at = std::time::Instant::now();
     let mut dense_flat_trans = Vec::new();
@@ -2766,10 +2786,15 @@ fn exact_terminal_path_two_plus_candidate_dfa(
         candidate_tokenizer.initial_state_id()
     };
     let mut suffix_viable_masks = vec![0u64; total_splits * words_per_mask];
+    let mut candidate_splits = 0usize;
     if words_per_mask == 1 {
         for (token_index, bytes) in vocab.entries.values().enumerate() {
             let split_start = split_offsets[token_index];
             for split_after in 0..bytes.len().saturating_sub(1) {
+                if !split_may_host_boundary(bytes, split_after) {
+                    continue;
+                }
+                candidate_splits += 1;
                 let mut state = continuation_reset_state;
                 let mut matched = 0u64;
                 let mut consumed_suffix = true;
@@ -2813,6 +2838,10 @@ fn exact_terminal_path_two_plus_candidate_dfa(
         for (token_index, bytes) in vocab.entries.values().enumerate() {
             let split_start = split_offsets[token_index];
             for split_after in 0..bytes.len().saturating_sub(1) {
+                if !split_may_host_boundary(bytes, split_after) {
+                    continue;
+                }
+                candidate_splits += 1;
                 matched.fill(0);
                 let mut state = continuation_reset_state;
                 let mut consumed_suffix = true;
@@ -2898,16 +2927,22 @@ fn exact_terminal_path_two_plus_candidate_dfa(
         for (token_index, (&token_id, bytes)) in vocab.entries.iter().enumerate() {
             continuations.clear();
             let split_start = split_offsets[token_index];
-            let split_end = split_offsets[token_index + 1];
+            let Some(last_candidate_split) = (0..bytes.len().saturating_sub(1))
+                .rfind(|&split_after| split_may_host_boundary(bytes, split_after))
+            else {
+                continue;
+            };
+            let split_end = split_start + last_candidate_split + 1;
+            let mut prefix_state = prefix_start;
             for (split_after, split_index) in (split_start..split_end).enumerate() {
-                let prefix_state = prefix_states[split_index];
+                let byte = bytes[split_after];
+                prefix_state = prefix_scanner.step(prefix_state, byte);
                 matched[0] = if prefix_state == PREFIX_DEAD_STATE {
                     0
                 } else {
                     prefix_scanner.matched_mask(prefix_state)[0]
                 };
                 next_continuations.clear();
-                let byte = bytes[split_after];
                 for &(state, active) in &continuations {
                     let target = if uses_original_tokenizer {
                         prefix_scanner.step(state, byte)
@@ -2990,16 +3025,22 @@ fn exact_terminal_path_two_plus_candidate_dfa(
         for (token_index, (&token_id, bytes)) in vocab.entries.iter().enumerate() {
             continuations.clear();
             let split_start = split_offsets[token_index];
-            let split_end = split_offsets[token_index + 1];
+            let Some(last_candidate_split) = (0..bytes.len().saturating_sub(1))
+                .rfind(|&split_after| split_may_host_boundary(bytes, split_after))
+            else {
+                continue;
+            };
+            let split_end = split_start + last_candidate_split + 1;
+            let mut prefix_state = prefix_start;
             for (split_after, split_index) in (split_start..split_end).enumerate() {
-                let prefix_state = prefix_states[split_index];
+                let byte = bytes[split_after];
+                prefix_state = prefix_scanner.step(prefix_state, byte);
                 if prefix_state == PREFIX_DEAD_STATE {
                     matched.fill(0);
                 } else {
                     matched.copy_from_slice(prefix_scanner.matched_mask(prefix_state));
                 }
                 next_continuations.clear();
-                let byte = bytes[split_after];
                 for (state, active) in &continuations {
                     let target = if uses_original_tokenizer {
                         prefix_scanner.step(*state, byte)
@@ -3093,13 +3134,14 @@ fn exact_terminal_path_two_plus_candidate_dfa(
     }
     if super::types::compile_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][terminal_path_candidate_dfa] tokens={} candidates={} states={} transitions={} prefix_entries={} suffix_splits={} prefix_configs={} split_checks={} allowed_pairs={} two_plus={} compile_ms={:.3} trie_ms={:.3} prefix_ms={:.3} suffix_ms={:.3} combine_ms={:.3} analyze_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][terminal_path_candidate_dfa] tokens={} candidates={} states={} transitions={} prefix_entries={} suffix_splits={} candidate_splits={} prefix_configs={} split_checks={} allowed_pairs={} two_plus={} compile_ms={:.3} trie_ms={:.3} prefix_ms={:.3} suffix_ms={:.3} combine_ms={:.3} analyze_ms={:.3} total_ms={:.3}",
             vocab.entries.len(),
             candidate_ids.len(),
             candidate_tokenizer.num_states(),
             candidate_tokenizer.transition_count(),
-            prefix_states.len(),
             total_splits,
+            total_splits,
+            candidate_splits,
             prefix_scanner.configs.len(),
             split_checks,
             allowed_pairs,

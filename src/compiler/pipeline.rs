@@ -738,6 +738,7 @@ fn build_special_token_terminal_family(
     let id_map = InternalIdMap {
         tokenizer_states,
         vocab_tokens,
+        deferred_vocab_singleton_original_ids: None,
     };
 
     let mut dwa = DWA::new(id_map.num_tsids(), id_map.max_internal_token_id());

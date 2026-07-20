@@ -646,6 +646,7 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
                 internal_to_originals: Vec::new(),
                 representative_original_ids: Vec::new(),
             },
+            deferred_vocab_singleton_original_ids: None,
         };
         return (
             TerminalDwaFamilies {

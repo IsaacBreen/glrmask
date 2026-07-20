@@ -4,6 +4,8 @@
 //! equivalence-class mappings.  The analysis that *produces* them lives in
 //! `id_map_and_terminal_dwa::l2p::equivalence_analysis`.
 
+use std::sync::Arc;
+
 #[derive(Debug, Clone)]
 pub struct ManyToOneIdMap {
     pub original_to_internal: Vec<u32>,
@@ -12,6 +14,14 @@ pub struct ManyToOneIdMap {
 }
 
 impl ManyToOneIdMap {
+    pub(crate) fn empty() -> Self {
+        Self {
+            original_to_internal: Vec::new(),
+            internal_to_originals: Vec::new(),
+            representative_original_ids: Vec::new(),
+        }
+    }
+
     /// Construct from a pre-computed original→internal mapping with explicit representatives.
     pub fn from_original_to_internal_with_representatives(
         original_to_internal: Vec<u32>,
@@ -271,6 +281,10 @@ impl GlobalScannerStateQuotient {
 pub struct InternalIdMap {
     pub tokenizer_states: ManyToOneIdMap,
     pub vocab_tokens: ManyToOneIdMap,
+    /// Internal-token order for a temporary singleton vocabulary coordinate.
+    /// Local L1 artifacts are compacted immediately, so retaining the prepared
+    /// order by `Arc` avoids cloning two dense token maps per partition.
+    pub(crate) deferred_vocab_singleton_original_ids: Option<Arc<[u32]>>,
 }
 
 pub(crate) use super::mapped_artifact::MappedArtifact;
@@ -281,10 +295,50 @@ impl InternalIdMap {
     }
 
     pub fn num_internal_tokens(&self) -> u32 {
-        self.vocab_tokens.num_internal_ids()
+        self.deferred_vocab_singleton_original_ids
+            .as_ref()
+            .map_or_else(|| self.vocab_tokens.num_internal_ids(), |ids| ids.len() as u32)
     }
 
     pub fn max_internal_token_id(&self) -> u32 {
         self.num_internal_tokens().saturating_sub(1)
+    }
+
+    pub(crate) fn internal_token_for_original(&self, original: u32) -> Option<u32> {
+        if let Some(original_ids) = self.deferred_vocab_singleton_original_ids.as_ref() {
+            return original_ids
+                .iter()
+                .position(|&candidate| candidate == original)
+                .map(|internal| internal as u32);
+        }
+        self.vocab_tokens
+            .original_to_internal
+            .get(original as usize)
+            .copied()
+            .filter(|&internal| internal != u32::MAX)
+    }
+
+    pub(crate) fn materialize_deferred_vocab_singletons(&mut self) {
+        let Some(original_ids) = self.deferred_vocab_singleton_original_ids.take() else {
+            return;
+        };
+        let original_count = original_ids
+            .iter()
+            .copied()
+            .max()
+            .map_or(0, |max_original| max_original as usize + 1);
+        let mut original_to_internal = vec![u32::MAX; original_count];
+        let mut internal_to_originals = Vec::with_capacity(original_ids.len());
+        let mut representative_original_ids = Vec::with_capacity(original_ids.len());
+        for (internal, &original) in original_ids.iter().enumerate() {
+            original_to_internal[original as usize] = internal as u32;
+            internal_to_originals.push(vec![original]);
+            representative_original_ids.push(original);
+        }
+        self.vocab_tokens = ManyToOneIdMap {
+            original_to_internal,
+            internal_to_originals,
+            representative_original_ids,
+        };
     }
 }
