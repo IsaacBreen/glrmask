@@ -15,6 +15,8 @@ const RECOGNIZER_SUFFIX_QUOTIENT_MAX_ALTS_ENV: &str =
     "GLRMASK_RECOGNIZER_SUFFIX_QUOTIENT_MAX_ALTS";
 const RECOGNIZER_SUFFIX_QUOTIENT_MAX_WIDTH_ENV: &str =
     "GLRMASK_RECOGNIZER_SUFFIX_QUOTIENT_MAX_WIDTH";
+const RECOGNIZER_SUFFIX_QUOTIENT_MAX_DEPTH_ENV: &str =
+    "GLRMASK_RECOGNIZER_SUFFIX_QUOTIENT_MAX_DEPTH";
 const MAX_GUARDED_STACK_EFFECTS_ENV: &str = "GLRMASK_MAX_GUARDED_STACK_EFFECTS";
 const UNIT_INLINE_WORK_MAX_WALL_MS_ENV: &str = "GLRMASK_UNIT_REDUCTION_INLINE_MAX_MS";
 const UNIT_INLINE_WORK_MAX_ITERATIONS_ENV: &str = "GLRMASK_UNIT_REDUCTION_INLINE_MAX_ITERATIONS";
@@ -2058,6 +2060,8 @@ struct SuffixQuotient {
     max_states: usize,
     max_alts: usize,
     max_width: usize,
+    max_depth: usize,
+    build_depth: usize,
     created_states: usize,
 }
 
@@ -2072,6 +2076,12 @@ impl SuffixQuotient {
             max_states: env_usize(RECOGNIZER_SUFFIX_QUOTIENT_MAX_STATES_ENV, 4096),
             max_alts: env_usize(RECOGNIZER_SUFFIX_QUOTIENT_MAX_ALTS_ENV, 64),
             max_width: env_usize(RECOGNIZER_SUFFIX_QUOTIENT_MAX_WIDTH_ENV, 8),
+            // Synthetic rows can recursively require further synthetic rows.
+            // The quotient is optional and transactional, so aborting a deeply
+            // nested attempt preserves the exact unquotiented table while
+            // avoiding a native stack overflow on adversarial grammars.
+            max_depth: env_usize(RECOGNIZER_SUFFIX_QUOTIENT_MAX_DEPTH_ENV, 128),
+            build_depth: 0,
             created_states: 0,
         }
     }
@@ -2187,6 +2197,9 @@ impl SuffixQuotient {
         if self.failed_suffixes.contains(&suffixes) || self.created_states >= self.max_states {
             return Err(());
         }
+        if self.build_depth >= self.max_depth {
+            return Err(());
+        }
 
         let rollback_state = table.num_states;
         let rollback_created_states = self.created_states;
@@ -2202,11 +2215,13 @@ impl SuffixQuotient {
         }
         self.created_states += 1;
         self.suffix_to_state.insert(suffixes.clone(), state);
+        self.build_depth += 1;
         let built = (|| {
             let action = self.build_suffix_action_row(table, &suffixes)?;
             let goto = self.build_suffix_goto_row(table, &suffixes)?;
             Ok::<_, ()>((action, goto))
         })();
+        self.build_depth -= 1;
 
         match built {
             Ok((action, goto)) => {
@@ -5413,6 +5428,61 @@ mod tests {
     }
 
     #[test]
+    fn suffix_quotient_rolls_back_when_nested_construction_hits_depth_bound() {
+        let outer_suffixes = vec![vec![10, 1], vec![10, 2]];
+
+        let mut table = GLRTable {
+            action: vec![ActionRow::default(); 11],
+            goto: vec![GotoRow::default(); 11],
+            num_states: 11,
+            num_terminals: 0,
+            num_rules: 0,
+            rules: Vec::new(),
+            nonterminal_display_names: Vec::new(),
+            construction: GlrTableConstruction::LegacyRowBisim,
+            admission_policy: AdmissionPolicy::RowPresenceExact,
+            advance: Vec::new(),
+            forwarded_shifts: FxHashSet::default(),
+            guarded_shift_index: Vec::new(),
+        };
+        table.goto[1].insert(0, (3, false));
+        table.goto[2].insert(0, (4, false));
+        table.rebuild_advance_rows_from_actions();
+
+        let original_num_states = table.num_states;
+        let original_action = table.action.clone();
+        let original_goto = table.goto.clone();
+        let original_advance = table.advance.clone();
+
+        let mut quotient = SuffixQuotient {
+            suffix_to_state: FxHashMap::default(),
+            failed_suffixes: FxHashSet::default(),
+            max_states: 4096,
+            max_alts: 8,
+            max_width: 8,
+            max_depth: 1,
+            build_depth: 0,
+            created_states: 0,
+        };
+
+        assert_eq!(
+            quotient.ensure_suffix_state(&mut table, outer_suffixes.clone()),
+            Err(())
+        );
+        assert_eq!(table.num_states, original_num_states);
+        assert_eq!(table.action, original_action);
+        assert_eq!(table.goto, original_goto);
+        assert_eq!(table.advance, original_advance);
+        assert_eq!(quotient.created_states, 0);
+        assert_eq!(quotient.build_depth, 0);
+        assert!(quotient.failed_suffixes.contains(&outer_suffixes));
+        assert!(quotient
+            .suffix_to_state
+            .values()
+            .all(|&state| state < original_num_states));
+    }
+
+    #[test]
     fn suffix_quotient_rolls_back_nested_created_states_on_outer_failure() {
         let outer_suffixes = vec![vec![10, 1], vec![10, 2]];
 
@@ -5447,6 +5517,8 @@ mod tests {
             max_states: 2,
             max_alts: 8,
             max_width: 8,
+            max_depth: 128,
+            build_depth: 0,
             created_states: 0,
         };
 
