@@ -15,6 +15,13 @@ __pycache__/
 dist/
 build/
 *.egg-info/
+/python/Cargo.lock
+/python/python/glrmask/_glrmask*.so
+/python/python/glrmask/_glrmask*.pyd
+
+# Local mask-game captures
+/mask_game/Cargo.lock
+/mask_game/data/*.json.gz
 
 # IDE, editor, and OS files
 .idea/
