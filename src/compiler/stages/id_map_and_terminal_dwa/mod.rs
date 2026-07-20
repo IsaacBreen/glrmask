@@ -241,18 +241,9 @@ pub(crate) fn build_global_max_length_state_map(
     let started_at = Instant::now();
     let num_states_u32 = tokenizer.num_states();
     let num_states = num_states_u32 as usize;
-    let token_bytes: Vec<&[u8]> = vocab
-        .entries
-        .values()
-        .map(|bytes| bytes.as_slice())
-        .collect();
-    let max_token_len = token_bytes
-        .iter()
-        .map(|bytes| bytes.len())
-        .max()
-        .unwrap_or(0);
     let global_statistic =
-        l2p::equivalence_analysis::state_equivalence::max_length::compute_statistic(vocab);
+        l2p::equivalence_analysis::state_equivalence::max_length::cached_statistic(vocab);
+    let max_token_len = global_statistic.max_token_len();
     let stable_signature_cells = global_max_length_stable_signature_cells(tokenizer, &global_statistic);
     let stable_signature_cell_limit = global_max_length_stable_signature_cell_limit();
 
@@ -284,7 +275,7 @@ pub(crate) fn build_global_max_length_state_map(
                 "[glrmask/profile][global_max_length] mode=stable skipped=false states={} reps={} tokens_included={} max_token_len={} stable_signature_cells={} stable_signature_cell_limit={} ms={:.3}",
                 num_states,
                 state_map.representative_original_ids.len(),
-                token_bytes.len(),
+                vocab.len(),
                 max_token_len,
                 stable_signature_cells,
                 stable_signature_cell_limit,

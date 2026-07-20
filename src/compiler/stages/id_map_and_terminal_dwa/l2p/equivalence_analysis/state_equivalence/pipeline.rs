@@ -152,7 +152,7 @@ pub(crate) fn run_state_equivalence_pipeline(
         max_length_reps: current_state_map.num_internal_ids() as usize,
         ..StateEquivalencePipelineProfile::default()
     };
-    let statistic = max_length::compute_statistic(vocab);
+    let statistic = max_length::cached_statistic(vocab);
     let mut epsilon_stable_restricted_observation = false;
 
     for kind in &config.passes {

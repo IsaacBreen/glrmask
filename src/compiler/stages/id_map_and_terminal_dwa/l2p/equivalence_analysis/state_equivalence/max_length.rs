@@ -31,6 +31,8 @@ pub(crate) struct MaxLengthStatistic {
     relevant_bytes: [bool; 256],
 }
 
+impl crate::vocab::VocabDerivedArtifact for MaxLengthStatistic {}
+
 impl MaxLengthStatistic {
     pub(crate) fn max_token_len(&self) -> usize {
         self.max_token_len
@@ -492,6 +494,17 @@ pub(crate) fn compute_statistic(vocab: &Vocab) -> MaxLengthStatistic {
     }
 }
 
+/// Return the vocabulary-only max-length statistic, reusing it across grammar compiles.
+/// Without this cache, every state-equivalence lane rescans every token byte.
+pub(crate) fn cached_statistic(vocab: &Vocab) -> std::sync::Arc<MaxLengthStatistic> {
+    if let Some(cached) = vocab.vocab_derived_cache_get::<MaxLengthStatistic>() {
+        return cached;
+    }
+    let statistic = std::sync::Arc::new(compute_statistic(vocab));
+    vocab.vocab_derived_cache_set(std::sync::Arc::clone(&statistic));
+    statistic
+}
+
 pub(crate) fn compute_state_map(
     tokenizer: &Tokenizer,
     statistic: &MaxLengthStatistic,
@@ -576,4 +589,30 @@ pub(crate) fn compute_state_map(
         num_states,
         initial_state_map,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn max_length_statistic_is_cached_per_vocab() {
+        let vocab = Vocab::new(vec![
+            (0, b"a".to_vec()),
+            (1, b"longer".to_vec()),
+            (2, vec![0xff, b'z']),
+        ]);
+
+        assert_eq!(vocab.compiler_cache_entry_count(), 0);
+        let first = cached_statistic(&vocab);
+        let second = cached_statistic(&vocab);
+
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+        assert_eq!(vocab.compiler_cache_entry_count(), 1);
+        assert_eq!(first.max_token_len(), 6);
+        assert!(first.relevant_bytes()[b'a' as usize]);
+        assert!(first.relevant_bytes()[b'z' as usize]);
+        assert!(first.relevant_bytes()[0xff]);
+        assert!(!first.relevant_bytes()[b'q' as usize]);
+    }
 }
