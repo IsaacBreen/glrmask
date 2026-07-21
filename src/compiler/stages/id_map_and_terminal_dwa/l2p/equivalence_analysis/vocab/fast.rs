@@ -2054,6 +2054,12 @@ static TRIE_WALK_DISABLED: Lazy<bool> =
 struct DepthChangeLog {
     /// Batch indices whose DFA paths remain live after this depth.
     active_indices: Vec<usize>,
+    /// This byte was a non-accepting self-loop for every source state, so the
+    /// active set is inherited from the preceding depth without copying.
+    inherits_active_indices: bool,
+    /// Bytes that are non-accepting self-loops for every state in this active
+    /// set. An empty active set deliberately has no inheritable bytes.
+    all_noop_self_loop_bytes: U8Set,
     /// (state_idx, old_state_value)
     state_changes: Vec<(usize, usize)>,
     /// (match_positions_flat_idx, old_value)
@@ -2068,6 +2074,8 @@ impl DepthChangeLog {
     fn new() -> Self {
         Self {
             active_indices: Vec::new(),
+            inherits_active_indices: false,
+            all_noop_self_loop_bytes: U8Set::empty(),
             state_changes: Vec::new(),
             match_changes: Vec::new(),
             dirty_changes: Vec::new(),
@@ -2077,6 +2085,8 @@ impl DepthChangeLog {
 
     fn clear(&mut self) {
         self.active_indices.clear();
+        self.inherits_active_indices = false;
+        self.all_noop_self_loop_bytes = U8Set::empty();
         self.state_changes.clear();
         self.match_changes.clear();
         self.dirty_changes.clear();
@@ -2086,6 +2096,7 @@ impl DepthChangeLog {
 
 struct TrieWalkState {
     root_active_indices: Vec<usize>,
+    root_all_noop_self_loop_bytes: U8Set,
     depth_logs: Vec<DepthChangeLog>,
 }
 
@@ -2093,6 +2104,7 @@ impl TrieWalkState {
     fn new() -> Self {
         Self {
             root_active_indices: Vec::new(),
+            root_all_noop_self_loop_bytes: U8Set::empty(),
             depth_logs: Vec::new(),
         }
     }
@@ -2102,6 +2114,59 @@ impl TrieWalkState {
             self.depth_logs.push(DepthChangeLog::new());
         }
     }
+
+    fn materialized_source_before_depth(&self, depth: usize) -> Option<usize> {
+        if depth == 0 {
+            return None;
+        }
+        let mut source = depth - 1;
+        loop {
+            if !self.depth_logs[source].inherits_active_indices {
+                return Some(source);
+            }
+            if source == 0 {
+                return None;
+            }
+            source -= 1;
+        }
+    }
+
+    fn active_indices_after_depth(&self, depth: usize) -> &[usize] {
+        let mut source = depth;
+        loop {
+            let log = &self.depth_logs[source];
+            if !log.inherits_active_indices {
+                return &log.active_indices;
+            }
+            if source == 0 {
+                return &self.root_active_indices;
+            }
+            source -= 1;
+        }
+    }
+}
+
+fn active_set_noop_self_loop_bytes(
+    dfa: &Dfa,
+    scratch: &Scratch,
+    active_indices: &[usize],
+) -> U8Set {
+    if active_indices.is_empty() {
+        return U8Set::empty();
+    }
+    let mut bytes = U8Set::all();
+    for &index in active_indices {
+        let state = scratch.current_states[index];
+        debug_assert_ne!(state, STATE_NONE);
+        if !dfa.finalizers[state].is_empty() {
+            return U8Set::empty();
+        }
+        bytes &= dfa.self_loop_bytes[state];
+        if bytes.is_empty() {
+            break;
+        }
+    }
+    bytes
 }
 
 struct ScratchWorker {
@@ -2232,20 +2297,28 @@ fn dfs_step(
     batch_len: usize,
 ) {
     trie.ensure_depth(depth);
+    let source_log = trie.materialized_source_before_depth(depth);
+    let source_noop_self_loops = source_log.map_or(
+        trie.root_all_noop_self_loop_bytes,
+        |source| trie.depth_logs[source].all_noop_self_loop_bytes,
+    );
     let TrieWalkState {
         root_active_indices,
+        root_all_noop_self_loop_bytes: _,
         depth_logs,
     } = trie;
-    let (source_indices, log) = if depth == 0 {
-        (root_active_indices.as_slice(), &mut depth_logs[0])
-    } else {
+    let (source_indices, log) = if let Some(source) = source_log {
         let (previous, current) = depth_logs.split_at_mut(depth);
-        (
-            previous[depth - 1].active_indices.as_slice(),
-            &mut current[0],
-        )
+        (previous[source].active_indices.as_slice(), &mut current[0])
+    } else {
+        (root_active_indices.as_slice(), &mut depth_logs[0])
     };
     log.clear();
+    if source_noop_self_loops.contains(byte) {
+        log.inherits_active_indices = true;
+        log.all_noop_self_loop_bytes = source_noop_self_loops;
+        return;
+    }
 
     let num_groups = dfa.num_groups;
     let dirty_words = scratch.dirty_words;
@@ -2307,6 +2380,8 @@ fn dfs_step(
             log.active_indices.push(i);
         }
     }
+    log.all_noop_self_loop_bytes =
+        active_set_noop_self_loop_bytes(dfa, scratch, &log.active_indices);
 }
 
 fn dfs_step_profiled(
@@ -2318,22 +2393,30 @@ fn dfs_step_profiled(
     batch_len: usize,
 ) -> DfsStepStats {
     trie.ensure_depth(depth);
+    let source_log = trie.materialized_source_before_depth(depth);
+    let source_noop_self_loops = source_log.map_or(
+        trie.root_all_noop_self_loop_bytes,
+        |source| trie.depth_logs[source].all_noop_self_loop_bytes,
+    );
     let TrieWalkState {
         root_active_indices,
+        root_all_noop_self_loop_bytes: _,
         depth_logs,
     } = trie;
-    let (source_indices, log) = if depth == 0 {
-        (root_active_indices.as_slice(), &mut depth_logs[0])
-    } else {
+    let (source_indices, log) = if let Some(source) = source_log {
         let (previous, current) = depth_logs.split_at_mut(depth);
-        (
-            previous[depth - 1].active_indices.as_slice(),
-            &mut current[0],
-        )
+        (previous[source].active_indices.as_slice(), &mut current[0])
+    } else {
+        (root_active_indices.as_slice(), &mut depth_logs[0])
     };
     log.clear();
 
     let mut step_stats = DfsStepStats::default();
+    if source_noop_self_loops.contains(byte) {
+        log.inherits_active_indices = true;
+        log.all_noop_self_loop_bytes = source_noop_self_loops;
+        return step_stats;
+    }
 
     let num_groups = dfa.num_groups;
     let dirty_words = scratch.dirty_words;
@@ -2408,6 +2491,9 @@ fn dfs_step_profiled(
             log.active_indices.push(i);
         }
     }
+
+    log.all_noop_self_loop_bytes =
+        active_set_noop_self_loop_bytes(dfa, scratch, &log.active_indices);
 
     step_stats
 }
@@ -2700,6 +2786,8 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
             trie.root_active_indices.push(i);
         }
     }
+    trie.root_all_noop_self_loop_bytes =
+        active_set_noop_self_loop_bytes(dfa, scratch, &trie.root_active_indices);
     let max_token_len = chunk
         .iter()
         .map(|&token_idx| strings[token_idx].as_ref().len())
@@ -2769,7 +2857,7 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
         let live_indices = if token_len == 0 {
             trie.root_active_indices.as_slice()
         } else {
-            trie.depth_logs[token_len - 1].active_indices.as_slice()
+            trie.active_indices_after_depth(token_len - 1)
         };
 
         let sig = if dirty_count == 0 {
