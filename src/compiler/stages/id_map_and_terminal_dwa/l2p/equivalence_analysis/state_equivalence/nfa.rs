@@ -10,9 +10,11 @@ use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 
 use super::super::compat::{FlatDfa, FlatDfaState, TokenizerView};
 
-const RAW_POWERSET_TARGET_VIEW_CACHE_MAX_CELLS: usize = 8 * 1024 * 1024;
-const RAW_POWERSET_TARGET_VIEW_CACHE_MIN_EXPANSIONS: usize = 65_536;
-const RAW_POWERSET_TARGET_VIEW_CACHE_MAX_CELLS_PER_EXPANSION: usize = 32;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RawPowersetTargetMode {
+    Scalar,
+    Direct,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum RefinementDepth {
@@ -546,6 +548,7 @@ pub(crate) fn build_relevant_powerset_view(
         active_groups,
         state_map,
         None,
+        RawPowersetTargetMode::Direct,
     )
     .expect("unbounded relevant-powerset construction cannot abort")
 }
@@ -563,6 +566,7 @@ pub(crate) fn build_relevant_powerset_view_budgeted(
         active_groups,
         state_map,
         Some(budget),
+        RawPowersetTargetMode::Direct,
     )
 }
 
@@ -572,6 +576,7 @@ fn try_build_relevant_powerset_view(
     active_groups: Option<&[bool]>,
     state_map: Option<&ManyToOneIdMap>,
     budget: Option<RelevantPowersetWorkBudget>,
+    raw_target_mode: RawPowersetTargetMode,
 ) -> Result<RelevantPowersetView, RelevantPowersetWork> {
     #[inline]
     fn check_budget(
@@ -852,21 +857,11 @@ fn try_build_relevant_powerset_view(
             edge_offsets.push(edges.len() as u32);
         }
     } else {
-        let cache_raw_target_views =
-            std::env::var_os("GLRMASK_DISABLE_RAW_POWERSET_TARGET_VIEW_CACHE").is_none();
-        let profile_raw_target_views = cache_raw_target_views
-            && std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
-        let cached_target_cell_count = raw_state_count
-            .checked_mul(bytes.len())
-            .filter(|&cells| cells <= RAW_POWERSET_TARGET_VIEW_CACHE_MAX_CELLS);
-        let mut cached_raw_target_views = None;
-        let mut cache_activation = None::<(usize, usize, usize, f64)>;
-        let mut observed_expansions = 0usize;
-        let mut cached_expansions = 0usize;
+        let direct_raw_target_views = raw_target_mode == RawPowersetTargetMode::Direct;
         let mut byte_marks = [0u32; 256];
         let mut byte_epoch = 0u32;
         let mut candidate_bytes = Vec::<u8>::new();
-        let mut target_marks = None::<Vec<u32>>;
+        let mut target_marks = direct_raw_target_views.then(|| vec![0u32; raw_state_count]);
         let mut target_epoch = 0u32;
         while let Some(state) = worklist.pop_front() {
             assert_eq!(
@@ -919,62 +914,22 @@ fn try_build_relevant_powerset_view(
                 }
             }
             candidate_bytes.sort_unstable();
-            let encountered_expansions = observed_expansions.saturating_add(candidate_bytes.len());
-            if cached_raw_target_views.is_none()
-                && cache_raw_target_views
-                && let Some(cell_count) = cached_target_cell_count
-                && encountered_expansions >= RAW_POWERSET_TARGET_VIEW_CACHE_MIN_EXPANSIONS
-                && encountered_expansions.saturating_mul(
-                    RAW_POWERSET_TARGET_VIEW_CACHE_MAX_CELLS_PER_EXPANSION,
-                ) >= cell_count
-            {
-                let cache_started_at = std::time::Instant::now();
-                let byte_count = bytes.len();
-                let mut byte_slot = [usize::MAX; 256];
-                for (slot, &byte) in bytes.iter().enumerate() {
-                    byte_slot[byte as usize] = slot;
-                }
-                let mut targets = vec![u32::MAX; cell_count];
-                for source in 0..raw_state_count as u32 {
-                    for (byte, raw_target) in tokenizer.transitions_from(source) {
-                        let slot = byte_slot[byte as usize];
-                        if slot != usize::MAX {
-                            targets[source as usize * byte_count + slot] =
-                                raw_start_to_view[raw_target as usize];
-                        }
-                    }
-                }
-                cached_raw_target_views = Some((byte_slot, targets));
-                target_marks = Some(vec![0u32; raw_state_count]);
-                cache_activation = Some((
-                    configs.len(),
-                    edges.len(),
-                    encountered_expansions,
-                    cache_started_at.elapsed().as_secs_f64() * 1e3,
-                ));
-            }
             for &byte in &candidate_bytes {
-                let projected = if let Some((byte_slot, cached_targets)) =
-                    cached_raw_target_views.as_ref()
-                {
-                    cached_expansions += 1;
-                    let slot = byte_slot[byte as usize];
-                    debug_assert_ne!(slot, usize::MAX);
+                let projected = if direct_raw_target_views {
                     target_epoch = target_epoch.wrapping_add(1);
                     let target_marks = target_marks
                         .as_mut()
-                        .expect("cached raw targets must retain target marks");
+                        .expect("direct raw targets must retain target marks");
                     if target_epoch == 0 {
                         target_marks.fill(0);
                         target_epoch = 1;
                     }
                     let mut projected = Vec::<u32>::new();
                     for &source in configs[config_index].iter() {
-                        let target_view =
-                            cached_targets[source as usize * bytes.len() + slot];
-                        if target_view == u32::MAX {
+                        let Some(raw_target) = tokenizer.step(source, byte) else {
                             continue;
-                        }
+                        };
+                        let target_view = raw_start_to_view[raw_target as usize];
                         for &target_state in configs[target_view as usize].iter() {
                             let mark = &mut target_marks[target_state as usize];
                             if *mark != target_epoch {
@@ -990,10 +945,7 @@ fn try_build_relevant_powerset_view(
                     if targets.is_empty() {
                         continue;
                     }
-                    project_raw_config(
-                        targets.to_vec(),
-                        raw_active_language.as_deref(),
-                    )
+                    project_raw_config(targets.to_vec(), raw_active_language.as_deref())
                 };
                 if projected.is_empty() {
                     continue;
@@ -1009,40 +961,7 @@ fn try_build_relevant_powerset_view(
                     worklist.push_back(target);
                 }
             }
-            if cached_raw_target_views.is_none() {
-                observed_expansions = encountered_expansions;
-            }
             edge_offsets.push(edges.len() as u32);
-        }
-        if profile_raw_target_views {
-            if let Some((activation_configs, activation_edges, activation_expansions, build_ms)) =
-                cache_activation
-            {
-                eprintln!(
-                    "[glrmask/profile][raw_powerset_target_view_cache] raw_states={} bytes={} cells={} activation_configs={} activation_edges={} activation_expansions={} final_configs={} final_edges={} cached_expansions={} build_ms={:.3}",
-                    raw_state_count,
-                    bytes.len(),
-                    cached_target_cell_count.expect("cache activation requires bounded cells"),
-                    activation_configs,
-                    activation_edges,
-                    activation_expansions,
-                    configs.len(),
-                    edges.len(),
-                    cached_expansions,
-                    build_ms,
-                );
-            } else {
-                eprintln!(
-                    "[glrmask/profile][raw_powerset_target_view_cache] raw_states={} bytes={} cells={} activation=none final_configs={} final_edges={}",
-                    raw_state_count,
-                    bytes.len(),
-                    cached_target_cell_count
-                        .map(|cells| cells.to_string())
-                        .unwrap_or_else(|| "over_budget".to_string()),
-                    configs.len(),
-                    edges.len(),
-                );
-            }
         }
     }
 
@@ -4183,6 +4102,54 @@ mod tests {
                     "raw_state={raw_state} token={token:?}",
                 );
             }
+        }
+    }
+
+    #[test]
+    fn raw_relevant_powerset_projected_targets_match_scalar_exactly() {
+        fn assert_same(left: &RelevantPowersetView, right: &RelevantPowersetView) {
+            assert_eq!(left.start_state, right.start_state);
+            assert_eq!(left.bytes, right.bytes);
+            assert_eq!(left.edge_offsets, right.edge_offsets);
+            assert_eq!(left.edges, right.edges);
+            assert_eq!(left.raw_start_to_view, right.raw_start_to_view);
+            assert_eq!(left.configurations, right.configurations);
+            assert_eq!(left.states.len(), right.states.len());
+            for (left, right) in left.states.iter().zip(&right.states) {
+                assert_eq!(left.finalizers, right.finalizers);
+                assert_eq!(
+                    left.possible_future_group_ids,
+                    right.possible_future_group_ids,
+                );
+            }
+        }
+
+        let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
+        let mut relevant_bytes = [false; 256];
+        relevant_bytes[b'a' as usize] = true;
+        relevant_bytes[b'b' as usize] = true;
+
+        for active_groups in [None, Some([true, true]), Some([true, false]), Some([false, true])] {
+            let active_groups = active_groups.as_ref().map(<[_; 2]>::as_slice);
+            let scalar = try_build_relevant_powerset_view(
+                &tokenizer,
+                &relevant_bytes,
+                active_groups,
+                None,
+                None,
+                RawPowersetTargetMode::Scalar,
+            )
+            .expect("unbounded scalar powerset construction");
+            let direct = try_build_relevant_powerset_view(
+                &tokenizer,
+                &relevant_bytes,
+                active_groups,
+                None,
+                None,
+                RawPowersetTargetMode::Direct,
+            )
+            .expect("unbounded direct powerset construction");
+            assert_same(&scalar, &direct);
         }
     }
 
