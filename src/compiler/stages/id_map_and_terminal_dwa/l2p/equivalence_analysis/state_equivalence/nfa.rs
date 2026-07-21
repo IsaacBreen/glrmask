@@ -854,6 +854,8 @@ fn try_build_relevant_powerset_view(
     } else {
         let cache_raw_target_views =
             std::env::var_os("GLRMASK_RAW_POWERSET_CACHED_TARGET_VIEWS").is_some();
+        let scatter_raw_target_views =
+            std::env::var_os("GLRMASK_RAW_POWERSET_SCATTER_TARGET_VIEWS").is_some();
         let profile_raw_target_views = cache_raw_target_views
             && std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
         let cached_target_cell_count = raw_state_count
@@ -868,6 +870,11 @@ fn try_build_relevant_powerset_view(
         let mut candidate_bytes = Vec::<u8>::new();
         let mut target_marks = None::<Vec<u32>>;
         let mut target_epoch = 0u32;
+        let mut scatter_targets = scatter_raw_target_views
+            .then(|| (0..256).map(|_| Vec::<u32>::new()).collect::<Vec<_>>());
+        let mut scatter_byte_marks = [0u32; 256];
+        let mut scatter_byte_epoch = 0u32;
+        let mut scatter_bytes = Vec::<u8>::new();
         while let Some(state) = worklist.pop_front() {
             assert_eq!(
                 state as usize + 1,
@@ -891,6 +898,54 @@ fn try_build_relevant_powerset_view(
                     debug_assert_ne!(target, u32::MAX);
                     if configs[target as usize].is_empty() {
                         continue;
+                    }
+                    edges.push((byte, target));
+                    check_budget(configs.len(), edges.len(), budget)?;
+                    if !queued[target as usize] {
+                        queued[target as usize] = true;
+                        worklist.push_back(target);
+                    }
+                }
+                edge_offsets.push(edges.len() as u32);
+                continue;
+            }
+
+            if scatter_raw_target_views {
+                let scatter_targets = scatter_targets
+                    .as_mut()
+                    .expect("scatter mode must retain per-byte target scratch");
+                scatter_byte_epoch = scatter_byte_epoch.wrapping_add(1);
+                if scatter_byte_epoch == 0 {
+                    scatter_byte_marks.fill(0);
+                    scatter_byte_epoch = 1;
+                }
+                scatter_bytes.clear();
+                for &source in configs[config_index].iter() {
+                    for (byte, raw_target) in tokenizer.transitions_from(source) {
+                        let byte_index = byte as usize;
+                        if !relevant_bytes[byte_index] {
+                            continue;
+                        }
+                        if scatter_byte_marks[byte_index] != scatter_byte_epoch {
+                            scatter_byte_marks[byte_index] = scatter_byte_epoch;
+                            scatter_bytes.push(byte);
+                        }
+                        let target_view = raw_start_to_view[raw_target as usize];
+                        scatter_targets[byte_index]
+                            .extend_from_slice(configs[target_view as usize].as_ref());
+                    }
+                }
+                scatter_bytes.sort_unstable();
+                for &byte in &scatter_bytes {
+                    let mut projected = std::mem::take(&mut scatter_targets[byte as usize]);
+                    projected.sort_unstable();
+                    projected.dedup();
+                    if projected.is_empty() {
+                        continue;
+                    }
+                    let target = config_ids.intern(projected, &mut configs);
+                    if queued.len() < configs.len() {
+                        queued.resize(configs.len(), false);
                     }
                     edges.push((byte, target));
                     check_budget(configs.len(), edges.len(), budget)?;
