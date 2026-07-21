@@ -181,7 +181,6 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                 &l1_mask,
                 vocab,
                 flat_trans,
-                false,
             )
         })
         .flatten();
@@ -195,7 +194,6 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                 &l2p_mask,
                 vocab,
                 flat_trans,
-                false,
             )
         })
         .flatten();
@@ -222,44 +220,6 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
         || {
             if has_l1 {
                 let started_at = Instant::now();
-                let max_token_len = vocab
-                    .entries
-                    .values()
-                    .map(Vec::len)
-                    .max()
-                    .unwrap_or(0);
-                let inactive_reps = l1_initial_state_map
-                    .map_or(tokenizer.num_states(), ManyToOneIdMap::num_internal_ids);
-                let try_active_quotient = inactive_reps > 16_384
-                    && (2_048..=32_768).contains(&vocab.entries.len())
-                    && max_token_len <= 64;
-                let active_structural_state_map = try_active_quotient
-                    .then(|| {
-                        super::synthetic_state_map::inactive_dispatch_component_state_map(
-                            tokenizer,
-                            &l1_mask,
-                            vocab,
-                            flat_trans,
-                            true,
-                        )
-                    })
-                    .flatten()
-                    .filter(|map| map.num_internal_ids() < inactive_reps);
-                let branch_initial_state_map = active_structural_state_map
-                    .as_ref()
-                    .or(l1_initial_state_map);
-                if compile_profile_enabled() {
-                    eprintln!(
-                        "[glrmask/profile][active_component_gate] partition={} try={} vocab_tokens={} max_token_len={} inactive_reps={} selected_reps={}",
-                        partition_label,
-                        try_active_quotient,
-                        vocab.entries.len(),
-                        max_token_len,
-                        inactive_reps,
-                        branch_initial_state_map
-                            .map_or(tokenizer.num_states(), ManyToOneIdMap::num_internal_ids),
-                    );
-                }
                 let result = super::l1::build_l1_id_map_and_terminal_dwa(
                     partition_label,
                     tokenizer,
@@ -271,7 +231,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                     &l1_mask,
                     flat_trans,
                     l1_transitions_by_byte,
-                    branch_initial_state_map,
+                    l1_initial_state_map,
                     None,
                     shared_l1_token_trie.as_deref(),
                     None,

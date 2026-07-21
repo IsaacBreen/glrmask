@@ -52,9 +52,8 @@ pub(crate) fn inactive_dispatch_component_state_map(
     active_terminals: &[bool],
     vocab: &Vocab,
     flat_trans: &Arc<[u32]>,
-    allow_kbounded: bool,
 ) -> Option<ManyToOneIdMap> {
-    if allow_kbounded && std::env::var_os("GLRMASK_ACTIVE_COMPONENT_KBOUNDED").is_some() {
+    if std::env::var_os("GLRMASK_ACTIVE_COMPONENT_KBOUNDED").is_some() {
         let started_at = std::time::Instant::now();
         let components = tokenizer.disjoint_dispatch_components()?;
         let num_states = tokenizer.num_states() as usize;
