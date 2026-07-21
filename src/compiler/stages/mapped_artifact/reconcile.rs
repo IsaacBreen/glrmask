@@ -341,6 +341,126 @@ fn build_common_many_to_one_id_map_pair(
     num_originals: usize,
     allow_unmapped: bool,
 ) -> ManyToOneIdMap {
+    let use_sparse_unmapped_pair = std::env::var("GLRMASK_SPARSE_UNMAPPED_COMMON_PAIR_MAP")
+        .map(|value| {
+            let trimmed = value.trim();
+            trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or(true);
+    if allow_unmapped && use_sparse_unmapped_pair {
+        return build_common_many_to_one_id_map_pair_sparse_unmapped(
+            left,
+            right,
+            num_originals,
+        );
+    }
+    build_common_many_to_one_id_map_pair_hashed(left, right, num_originals, allow_unmapped)
+}
+
+fn build_common_many_to_one_id_map_pair_sparse_unmapped(
+    left: &ManyToOneIdMap,
+    right: &ManyToOneIdMap,
+    num_originals: usize,
+) -> ManyToOneIdMap {
+    let left_classes = left.internal_to_originals.len();
+    let right_classes = right.internal_to_originals.len();
+    let mut left_only_counts = vec![0usize; left_classes];
+    let mut right_only_counts = vec![0usize; right_classes];
+    let mut overlap_counts = FxHashMap::<(u32, u32), usize>::default();
+
+    let pair = |original: usize| {
+        let left_internal = left
+            .original_to_internal
+            .get(original)
+            .copied()
+            .unwrap_or(u32::MAX);
+        let right_internal = right
+            .original_to_internal
+            .get(original)
+            .copied()
+            .unwrap_or(u32::MAX);
+        (left_internal, right_internal)
+    };
+
+    for original in 0..num_originals {
+        let (left_internal, right_internal) = pair(original);
+        match (left_internal, right_internal) {
+            (u32::MAX, u32::MAX) => {}
+            (left, u32::MAX) => left_only_counts[left as usize] += 1,
+            (u32::MAX, right) => right_only_counts[right as usize] += 1,
+            (left, right) => *overlap_counts.entry((left, right)).or_insert(0) += 1,
+        }
+    }
+
+    let mut overlap_keys = overlap_counts.keys().copied().collect::<Vec<_>>();
+    overlap_keys.sort_unstable();
+
+    let mut left_only_class = vec![u32::MAX; left_classes];
+    let mut right_only_class = vec![u32::MAX; right_classes];
+    let mut overlap_class = FxHashMap::<(u32, u32), u32>::default();
+    let mut internal_to_originals = Vec::<Vec<u32>>::new();
+    let mut representatives = Vec::<u32>::new();
+
+    let mut overlap_cursor = 0usize;
+    for left_class in 0..left_classes {
+        while overlap_cursor < overlap_keys.len()
+            && overlap_keys[overlap_cursor].0 as usize == left_class
+        {
+            let key = overlap_keys[overlap_cursor];
+            let class = internal_to_originals.len() as u32;
+            overlap_class.insert(key, class);
+            internal_to_originals.push(Vec::with_capacity(overlap_counts[&key]));
+            representatives.push(u32::MAX);
+            overlap_cursor += 1;
+        }
+        let count = left_only_counts[left_class];
+        if count != 0 {
+            left_only_class[left_class] = internal_to_originals.len() as u32;
+            internal_to_originals.push(Vec::with_capacity(count));
+            representatives.push(u32::MAX);
+        }
+    }
+    debug_assert_eq!(overlap_cursor, overlap_keys.len());
+    for right_class in 0..right_classes {
+        let count = right_only_counts[right_class];
+        if count != 0 {
+            right_only_class[right_class] = internal_to_originals.len() as u32;
+            internal_to_originals.push(Vec::with_capacity(count));
+            representatives.push(u32::MAX);
+        }
+    }
+
+    let mut original_to_internal = vec![u32::MAX; num_originals];
+    for (original, slot) in original_to_internal.iter_mut().enumerate() {
+        let (left_internal, right_internal) = pair(original);
+        let class = match (left_internal, right_internal) {
+            (u32::MAX, u32::MAX) => continue,
+            (left, u32::MAX) => left_only_class[left as usize],
+            (u32::MAX, right) => right_only_class[right as usize],
+            (left, right) => overlap_class[&(left, right)],
+        };
+        debug_assert_ne!(class, u32::MAX);
+        *slot = class;
+        let originals = &mut internal_to_originals[class as usize];
+        if originals.is_empty() {
+            representatives[class as usize] = original as u32;
+        }
+        originals.push(original as u32);
+    }
+
+    ManyToOneIdMap {
+        original_to_internal,
+        internal_to_originals,
+        representative_original_ids: representatives,
+    }
+}
+
+fn build_common_many_to_one_id_map_pair_hashed(
+    left: &ManyToOneIdMap,
+    right: &ManyToOneIdMap,
+    num_originals: usize,
+    allow_unmapped: bool,
+) -> ManyToOneIdMap {
     let mut composite_to_class: FxHashMap<(u32, u32), u32> = FxHashMap::default();
     let mut original_to_internal = vec![u32::MAX; num_originals];
     let mut internal_to_originals: Vec<Vec<u32>> = Vec::new();
@@ -1268,6 +1388,44 @@ mod tests {
 
         *left_id_map = common_id_map.clone();
         *right_id_map = common_id_map;
+    }
+
+    #[test]
+    fn sparse_unmapped_pair_common_map_matches_hashed_pair_order() {
+        for (left, right, num_originals, allow_unmapped) in [
+            (
+                map(vec![0, 0, 1, 1, 2, 2], 3),
+                map(vec![0, 1, 0, 1, 2, 2], 3),
+                6,
+                false,
+            ),
+            (
+                map(vec![0, u32::MAX, 1, 1, u32::MAX, 2], 3),
+                map(vec![u32::MAX, 0, 0, 1, u32::MAX, 1], 2),
+                6,
+                true,
+            ),
+        ] {
+            let hashed = build_common_many_to_one_id_map_pair_hashed(
+                &left,
+                &right,
+                num_originals,
+                allow_unmapped,
+            );
+            if allow_unmapped {
+                let sparse = build_common_many_to_one_id_map_pair_sparse_unmapped(
+                    &left,
+                    &right,
+                    num_originals,
+                );
+                assert_eq!(sparse.original_to_internal, hashed.original_to_internal);
+                assert_eq!(sparse.internal_to_originals, hashed.internal_to_originals);
+                assert_eq!(
+                    sparse.representative_original_ids,
+                    hashed.representative_original_ids,
+                );
+            }
+        }
     }
 
     #[test]

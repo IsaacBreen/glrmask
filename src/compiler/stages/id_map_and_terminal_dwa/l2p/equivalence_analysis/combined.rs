@@ -13,7 +13,8 @@ use super::state_equivalence::{
     run_state_equivalence_pipeline, StateEquivalenceScope,
 };
 use super::state_equivalence::nfa::{
-    PrebuiltSparsePowersetRefinement, build_bounded_analysis_view,
+    PrebuiltSparsePowersetRefinement, TokenBoundedAnalysisTrie, build_bounded_analysis_view,
+    build_bounded_analysis_view_with_trie,
     build_bounded_analysis_view_from_relevant_powerset, build_relevant_powerset_view,
     powerset_output_class_ids,
 };
@@ -1610,6 +1611,7 @@ pub(crate) fn analyze_equivalences_with_group_filter(
     initial_state_map: Option<&ManyToOneIdMap>,
     token_position_partition: Option<&GlobalTokenPositionStatePartition>,
     precomputed_raw_observations: Option<(&[u32], &[u32])>,
+    prebuilt_token_trie: Option<&TokenBoundedAnalysisTrie>,
 ) -> (InternalIdMap, CombinedEquivalenceProfile) {
     analyze_equivalences_impl(
         partition_label,
@@ -1628,6 +1630,7 @@ pub(crate) fn analyze_equivalences_with_group_filter(
         initial_state_map,
         token_position_partition,
         precomputed_raw_observations,
+        prebuilt_token_trie,
     )
 }
 
@@ -1652,7 +1655,16 @@ fn analyze_equivalences_impl(
     initial_state_map: Option<&ManyToOneIdMap>,
     token_position_partition: Option<&GlobalTokenPositionStatePartition>,
     precomputed_raw_observations: Option<(&[u32], &[u32])>,
+    prebuilt_token_trie: Option<&TokenBoundedAnalysisTrie>,
 ) -> (InternalIdMap, CombinedEquivalenceProfile) {
+    let prebuilt_token_trie = std::env::var("GLRMASK_USE_PREBUILT_L2P_TOKEN_TRIE")
+        .map(|value| {
+            let trimmed = value.trim();
+            trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or(true)
+        .then_some(prebuilt_token_trie)
+        .flatten();
     if tokenizer.has_epsilon_transitions() {
         let follows_prepare_started_at = Instant::now();
         let token_path_disallowed_follows = (!disallowed_follows_are_ignore_transparent)
@@ -1922,11 +1934,15 @@ fn analyze_equivalences_impl(
                 "bounded_from_powerset",
             )
         } else {
-            let bounded = build_bounded_analysis_view(
+            let bounded_prebuilt_trie = prebuilt_token_trie.filter(|trie| {
+                trie.is_reasonable_superset_for(dedup.representative_token_bytes.len())
+            });
+            let bounded = build_bounded_analysis_view_with_trie(
                 tokenizer,
                 &raw_pre_representatives,
                 &dedup.representative_token_bytes,
                 active_groups,
+                bounded_prebuilt_trie,
             );
             let preclass_view_states = raw_pre_representatives
                 .iter()

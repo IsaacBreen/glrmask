@@ -368,6 +368,9 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     shared_transition_cache: Option<&OnceLock<equivalence_analysis::compat::FlatTransitionCache>>,
     shared_ti_output_cache: Option<&SharedTiTokenizerOutputCache>,
     flat_trans: Option<&std::sync::Arc<[u32]>>,
+    prebuilt_token_trie: Option<
+        &equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTrie,
+    >,
     initial_state_map: Option<&ManyToOneIdMap>,
 ) -> Option<LocalIdMapTerminalDwa> {
     if vocab.is_empty() {
@@ -696,6 +699,7 @@ let strict_reference = reference_terminal_expansion
                     })
                 })
                 .flatten(),
+            prebuilt_token_trie,
         );
 
     // Replay and transport-coordinate refinement are intentionally deferred
@@ -1103,10 +1107,18 @@ let strict_reference = reference_terminal_expansion
         // already established before minimization.
         let mut minimized_artifact = MappedArtifact::new(minimized_dwa, final_id_map);
         let final_compact_started_at = Instant::now();
-        if profiling {
-            minimized_artifact.compact_dimensions_merge_only_fast_with_stats();
-        } else {
-            minimized_artifact.compact_dimensions_merge_only_fast();
+        let skip_final_compact = std::env::var("GLRMASK_SKIP_TI_FINAL_COMPACT")
+            .map(|value| {
+                let trimmed = value.trim();
+                trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
+            })
+            .unwrap_or(true);
+        if !skip_final_compact {
+            if profiling {
+                minimized_artifact.compact_dimensions_merge_only_fast_with_stats();
+            } else {
+                minimized_artifact.compact_dimensions_merge_only_fast();
+            }
         }
         ti_post_dwa_compact_ms += final_compact_started_at.elapsed().as_secs_f64() * 1000.0;
         let stats = minimized_artifact.artifact().stats();
@@ -1321,6 +1333,7 @@ let strict_reference = reference_terminal_expansion
                 shared_transition_cache,
                 shared_ti_output_cache,
                 flat_trans,
+                prebuilt_token_trie,
                 initial_state_map,
             )
             .expect("terminal interchangeability baseline L2P build unexpectedly returned None")

@@ -14,7 +14,7 @@ use crate::Vocab;
 
 use super::l2p::equivalence_analysis::compat::FlatDfa;
 use super::l2p::equivalence_analysis::state_equivalence::nfa::{
-    build_bounded_analysis_view_from_combined_starts,
+    TokenBoundedAnalysisTrie, build_bounded_analysis_view_from_combined_starts_with_trie,
     build_token_bounded_analysis_view_from_combined_starts,
 };
 use super::types::TerminalPathLength;
@@ -209,6 +209,84 @@ pub(crate) struct VocabClassificationFacts {
 
 impl crate::vocab::VocabDerivedArtifact for VocabClassificationFacts {}
 
+#[derive(Debug)]
+struct VocabAdjacentPairIndex {
+    pair_offsets: Box<[u32]>,
+    occurrences: Box<[u64]>,
+    entry_split_offsets: Box<[usize]>,
+    split_offset_by_token_id: Box<[u32]>,
+    total_splits: usize,
+}
+
+impl crate::vocab::VocabDerivedArtifact for VocabAdjacentPairIndex {}
+
+impl VocabAdjacentPairIndex {
+    #[inline]
+    fn occurrences_for_pair(&self, left: u8, right: u8) -> &[u64] {
+        let pair = ((left as usize) << 8) | right as usize;
+        let start = self.pair_offsets[pair] as usize;
+        let end = self.pair_offsets[pair + 1] as usize;
+        &self.occurrences[start..end]
+    }
+
+    #[inline]
+    fn split_offset_for_token(&self, token_id: u32) -> usize {
+        let offset = self
+            .split_offset_by_token_id
+            .get(token_id as usize)
+            .copied()
+            .unwrap_or(u32::MAX);
+        assert_ne!(offset, u32::MAX, "token missing from adjacent-pair index");
+        offset as usize
+    }
+}
+
+fn vocab_adjacent_pair_index(vocab: &Vocab) -> Arc<VocabAdjacentPairIndex> {
+    if let Some(cached) = vocab.vocab_derived_cache_get::<VocabAdjacentPairIndex>() {
+        return cached;
+    }
+
+    let mut counts = vec![0u32; 1 << 16];
+    let mut entry_split_offsets = Vec::with_capacity(vocab.len() + 1);
+    let mut split_offset_by_token_id = vec![u32::MAX; vocab.max_token_id() as usize + 1];
+    let mut total_splits = 0usize;
+    entry_split_offsets.push(0);
+    for (&token_id, bytes) in vocab.entries.iter() {
+        assert!(total_splits <= u32::MAX as usize);
+        split_offset_by_token_id[token_id as usize] = total_splits as u32;
+        for pair in bytes.windows(2) {
+            counts[((pair[0] as usize) << 8) | pair[1] as usize] += 1;
+        }
+        total_splits += bytes.len().saturating_sub(1);
+        entry_split_offsets.push(total_splits);
+    }
+
+    let mut pair_offsets = vec![0u32; (1 << 16) + 1];
+    for pair in 0..(1 << 16) {
+        pair_offsets[pair + 1] = pair_offsets[pair] + counts[pair];
+    }
+    let mut next = pair_offsets[..1 << 16].to_vec();
+    let mut occurrences = vec![0u64; total_splits];
+    for (&token_id, bytes) in vocab.entries.iter() {
+        for (split_after, pair) in bytes.windows(2).enumerate() {
+            let pair_id = ((pair[0] as usize) << 8) | pair[1] as usize;
+            let slot = &mut next[pair_id];
+            occurrences[*slot as usize] = ((token_id as u64) << 32) | split_after as u64;
+            *slot += 1;
+        }
+    }
+
+    let index = Arc::new(VocabAdjacentPairIndex {
+        pair_offsets: pair_offsets.into_boxed_slice(),
+        occurrences: occurrences.into_boxed_slice(),
+        entry_split_offsets: entry_split_offsets.into_boxed_slice(),
+        split_offset_by_token_id: split_offset_by_token_id.into_boxed_slice(),
+        total_splits,
+    });
+    vocab.vocab_derived_cache_set(Arc::clone(&index));
+    index
+}
+
 fn vocab_classification_facts(vocab: &Vocab) -> Arc<VocabClassificationFacts> {
     if let Some(cached) = vocab.vocab_derived_cache_get::<VocabClassificationFacts>() {
         return cached;
@@ -249,6 +327,7 @@ fn vocab_byte_set(vocab: &Vocab) -> U8Set {
 
 pub(crate) fn prepare_vocab_for_terminal_classification(vocab: &Vocab) {
     let _ = vocab_classification_facts(vocab);
+    let _ = vocab_adjacent_pair_index(vocab);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2730,11 +2809,23 @@ fn exact_terminal_path_two_plus_candidate_dfa(
     let analyze_started_at = std::time::Instant::now();
     let candidate_count = candidate_ids.len();
     let words_per_mask = candidate_count.div_ceil(64);
-    let total_splits = vocab
-        .entries
-        .values()
-        .map(|bytes| bytes.len().saturating_sub(1))
-        .sum::<usize>();
+    let use_pair_index = std::env::var("GLRMASK_CLASSIFY_PAIR_INDEX")
+        .map(|value| {
+            let trimmed = value.trim();
+            trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or(true);
+    let adjacent_pair_index = use_pair_index.then(|| vocab_adjacent_pair_index(vocab));
+    let total_splits = adjacent_pair_index.as_ref().map_or_else(
+        || {
+            vocab
+                .entries
+                .values()
+                .map(|bytes| bytes.len().saturating_sub(1))
+                .sum::<usize>()
+        },
+        |index| index.total_splits,
+    );
 
     // The scanner already interns exact epsilon-closed prefix configurations and
     // memoizes every (configuration, byte) transition. Store that compact state
@@ -2747,17 +2838,26 @@ fn exact_terminal_path_two_plus_candidate_dfa(
         terminal_to_local,
         uses_original_tokenizer.then_some(bytesets.sparse_transitions_by_byte.as_slice()),
     );
-    let mut split_offsets = Vec::with_capacity(vocab.entries.len() + 1);
-    split_offsets.push(0usize);
-    for bytes in vocab.entries.values() {
-        split_offsets.push(
-            split_offsets
-                .last()
-                .copied()
-                .unwrap_or(0usize)
-                .saturating_add(bytes.len().saturating_sub(1)),
-        );
-    }
+    let owned_split_offsets;
+    let split_offsets: &[usize] = if let Some(index) = adjacent_pair_index.as_ref() {
+        &index.entry_split_offsets
+    } else {
+        owned_split_offsets = {
+            let mut offsets = Vec::with_capacity(vocab.entries.len() + 1);
+            offsets.push(0usize);
+            for bytes in vocab.entries.values() {
+                offsets.push(
+                    offsets
+                        .last()
+                        .copied()
+                        .unwrap_or(0usize)
+                        .saturating_add(bytes.len().saturating_sub(1)),
+                );
+            }
+            offsets
+        };
+        &owned_split_offsets
+    };
     let trie_ms = 0.0;
     let prefix_ms = 0.0;
 
@@ -2787,7 +2887,61 @@ fn exact_terminal_path_two_plus_candidate_dfa(
     };
     let mut suffix_viable_masks = vec![0u64; total_splits * words_per_mask];
     let mut candidate_splits = 0usize;
-    if words_per_mask == 1 {
+    let mut any_viable_suffix = false;
+    if words_per_mask == 1 && adjacent_pair_index.is_some() {
+        let index = adjacent_pair_index.as_ref().expect("checked above");
+        for left in 0u8..=u8::MAX {
+            for right in feasible_follow_bytes_by_last_byte[left as usize].iter() {
+                for &packed in index.occurrences_for_pair(left, right) {
+                    let token_id = (packed >> 32) as u32;
+                    let split_after = packed as u32 as usize;
+                    let bytes = vocab
+                        .entries
+                        .get(&token_id)
+                        .expect("indexed token must remain in vocabulary");
+                    candidate_splits += 1;
+                    let mut state = continuation_reset_state;
+                    let mut matched = 0u64;
+                    let mut consumed_suffix = true;
+                    for &byte in &bytes[split_after + 1..] {
+                        if uses_original_tokenizer {
+                            if prefix_scanner.future_mask(state)[0] == 0 {
+                                consumed_suffix = false;
+                                break;
+                            }
+                            state = prefix_scanner.step(state, byte);
+                            if state == PREFIX_DEAD_STATE {
+                                consumed_suffix = false;
+                                break;
+                            }
+                            matched |= prefix_scanner.matched_mask(state)[0];
+                        } else {
+                            if dense_future_masks[state as usize] == 0 {
+                                consumed_suffix = false;
+                                break;
+                            }
+                            state = dense_flat_trans[state as usize * 256 + byte as usize];
+                            if state == u32::MAX {
+                                consumed_suffix = false;
+                                break;
+                            }
+                            matched |= dense_finalizer_masks[state as usize];
+                        }
+                    }
+                    if consumed_suffix {
+                        matched |= if uses_original_tokenizer {
+                            prefix_scanner.future_mask(state)[0]
+                        } else {
+                            dense_future_masks[state as usize]
+                        };
+                    }
+                    any_viable_suffix |= matched != 0;
+                    let split_index = index.split_offset_for_token(token_id) + split_after;
+                    suffix_viable_masks[split_index] = matched;
+                }
+            }
+        }
+    } else if words_per_mask == 1 {
         for (token_index, bytes) in vocab.entries.values().enumerate() {
             let split_start = split_offsets[token_index];
             for split_after in 0..bytes.len().saturating_sub(1) {
@@ -2830,6 +2984,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
                         dense_future_masks[state as usize]
                     };
                 }
+                any_viable_suffix |= matched != 0;
                 suffix_viable_masks[split_start + split_after] = matched;
             }
         }
@@ -2895,6 +3050,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
                         }
                     }
                 }
+                any_viable_suffix |= matched.iter().any(|&word| word != 0);
                 let suffix_base = (split_start + split_after) * words_per_mask;
                 suffix_viable_masks[suffix_base..suffix_base + words_per_mask]
                     .copy_from_slice(&matched);
@@ -2902,6 +3058,37 @@ fn exact_terminal_path_two_plus_candidate_dfa(
         }
     }
     let suffix_ms = suffix_started_at.elapsed().as_secs_f64() * 1000.0;
+    let early_empty_suffix_enabled = std::env::var("GLRMASK_CLASSIFY_EARLY_EMPTY_SUFFIX")
+        .map(|value| {
+            let trimmed = value.trim();
+            trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or(true);
+    if early_empty_suffix_enabled && !any_viable_suffix {
+        if super::types::compile_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][terminal_path_candidate_dfa] tokens={} candidates={} states={} transitions={} prefix_entries={} suffix_splits={} candidate_splits={} prefix_configs={} split_checks=0 allowed_pairs=0 two_plus=0 compile_ms={:.3} trie_ms={:.3} prefix_ms={:.3} suffix_ms={:.3} combine_ms=0.000 analyze_ms={:.3} total_ms={:.3} early_empty_suffix=true",
+                vocab.len(),
+                candidate_ids.len(),
+                candidate_tokenizer.num_states(),
+                candidate_tokenizer.transition_count(),
+                split_offsets.last().copied().unwrap_or(0),
+                total_splits,
+                candidate_splits,
+                prefix_scanner.configs.len(),
+                compile_ms,
+                trie_ms,
+                prefix_ms,
+                suffix_ms,
+                analyze_started_at.elapsed().as_secs_f64() * 1000.0,
+                total_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        return ExactTerminalPathTwoPlus {
+            two_plus: BitSet::new(candidates.len()),
+            witnesses: vec![None; candidates.len()],
+        };
+    }
 
     let combine_started_at = std::time::Instant::now();
     let mut allowed_after = vec![0u64; candidate_count * words_per_mask];
@@ -3733,6 +3920,7 @@ fn tokens_have_exact_active_l2p_boundary(
     active_bitset: &BitSet,
     disallowed_follows: &BTreeMap<u32, BitSet>,
     active_start_states: &[u32],
+    prebuilt_token_trie: Option<&TokenBoundedAnalysisTrie>,
 ) -> Vec<bool> {
     if !tokenizer.has_epsilon_transitions() {
         let scanner = RawExactBoundaryScanner { tokenizer, flat_trans };
@@ -3765,11 +3953,12 @@ fn tokens_have_exact_active_l2p_boundary(
     let active_groups = (0..active_bitset.len())
         .map(|terminal| active_bitset.contains(terminal))
         .collect::<Vec<_>>();
-    let bounded = build_bounded_analysis_view_from_combined_starts(
+    let bounded = build_bounded_analysis_view_from_combined_starts_with_trie(
         tokenizer,
         &raw_start_states,
         tokens,
         Some(&active_groups),
+        prebuilt_token_trie.filter(|trie| trie.is_reasonable_superset_for(tokens.len())),
     );
     let view_build_ms = view_started_at.elapsed().as_secs_f64() * 1000.0;
     let dfa = bounded.tokenizer_view.dfa();
@@ -3828,7 +4017,16 @@ pub(crate) fn split_vocab_for_active_l2p_terminals(
     num_terminals: u32,
     active_terminals: &[bool],
     shared_classify_cache: Option<&SharedClassifyCache>,
+    prebuilt_token_trie: Option<&TokenBoundedAnalysisTrie>,
 ) -> L2pVocabBoundarySplit {
+    let prebuilt_token_trie = std::env::var("GLRMASK_USE_PREBUILT_L2P_ROUTE_TRIE")
+        .map(|value| {
+            let trimmed = value.trim();
+            trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or(true)
+        .then_some(prebuilt_token_trie)
+        .flatten();
     let split_started_at = std::time::Instant::now();
     let owned_bytesets: Option<SharedClassifyBytesets>;
     let bytesets = if let Some(cache) = shared_classify_cache {
@@ -3946,6 +4144,7 @@ pub(crate) fn split_vocab_for_active_l2p_terminals(
             &active_bitset,
             disallowed_follows.as_ref(),
             &route_setup.active_start_states,
+            prebuilt_token_trie,
         );
         exact_batch_ms = batch_started_at.elapsed().as_secs_f64() * 1000.0;
         let mut matches = vec![false; adjacent_entries.len()];
@@ -4457,6 +4656,7 @@ mod tests {
             &active,
             &disallowed,
             &active_start_states,
+            None,
         );
         let scalar = tokens
             .iter()

@@ -1032,6 +1032,30 @@ fn build_byte_trie<'a>(sequences: impl IntoIterator<Item = &'a [u8]>) -> Vec<Byt
 /// in lexicographic byte order. Consecutive sequences share exactly their LCP,
 /// so no edge hash table is needed: truncate the previous prefix path to the
 /// LCP and append the new suffix once.
+#[derive(Debug)]
+pub(crate) struct TokenBoundedAnalysisTrie {
+    nodes: Arc<[ByteTrieNode]>,
+}
+
+impl TokenBoundedAnalysisTrie {
+    pub(crate) fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
+    pub(crate) fn is_reasonable_superset_for(&self, token_count: usize) -> bool {
+        const MAX_NODE_RATIO: usize = 8;
+        self.len() <= token_count.saturating_mul(MAX_NODE_RATIO).max(256)
+    }
+}
+
+pub(crate) fn build_token_bounded_analysis_trie_sorted(
+    sequences: &[&[u8]],
+) -> TokenBoundedAnalysisTrie {
+    TokenBoundedAnalysisTrie {
+        nodes: Arc::from(build_byte_trie_sorted(sequences)),
+    }
+}
+
 fn build_byte_trie_sorted(sequences: &[&[u8]]) -> Vec<ByteTrieNode> {
     debug_assert!(sequences.windows(2).all(|pair| pair[0] <= pair[1]));
 
@@ -1695,6 +1719,7 @@ fn build_bounded_analysis_topology_impl(
     tokens_are_sorted: bool,
     active_groups: Option<&[bool]>,
     budget: Option<TokenBoundedAnalysisWorkBudget>,
+    prebuilt_token_trie: Option<&TokenBoundedAnalysisTrie>,
 ) -> Result<(TokenBoundedAnalysisTopology, TokenBoundedAnalysisWork), TokenBoundedAnalysisWork> {
     let use_frontier_expansion =
         std::env::var_os("GLRMASK_DISABLE_TRIE_FRONTIER_EXPANSION").is_none();
@@ -1709,6 +1734,7 @@ fn build_bounded_analysis_topology_impl(
         tokens_are_sorted,
         active_groups,
         budget,
+        prebuilt_token_trie,
         use_frontier_expansion,
     )
 }
@@ -1724,8 +1750,12 @@ fn build_bounded_analysis_topology_impl_with_expansion(
     tokens_are_sorted: bool,
     active_groups: Option<&[bool]>,
     budget: Option<TokenBoundedAnalysisWorkBudget>,
+    prebuilt_token_trie: Option<&TokenBoundedAnalysisTrie>,
     use_frontier_expansion: bool,
 ) -> Result<(TokenBoundedAnalysisTopology, TokenBoundedAnalysisWork), TokenBoundedAnalysisWork> {
+    let profile_timing = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
+    let total_started_at = profile_timing.then(std::time::Instant::now);
+    let setup_started_at = profile_timing.then(std::time::Instant::now);
     let raw_state_count = tokenizer.num_states() as usize;
     let mut config_ids = FxHashMap::<Vec<u32>, u32>::default();
     let mut configs = Vec::<Box<[u32]>>::new();
@@ -1783,6 +1813,8 @@ fn build_bounded_analysis_topology_impl_with_expansion(
     }
     let mut transitions = vec![u32::MAX; configs.len() * 256];
     let mut known_transitions = vec![0u8; transitions.len()];
+    let setup_ms = setup_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    let trie_started_at = profile_timing.then(std::time::Instant::now);
     let common_first_byte = factor_common_first_byte
         .then(|| {
             let first = tokens.first()?.first().copied()?;
@@ -1792,17 +1824,25 @@ fn build_bounded_analysis_topology_impl_with_expansion(
                 .then_some(first)
         })
         .flatten();
-    let token_trie = if common_first_byte.is_some() {
-        if tokens_are_sorted {
-            let suffixes = tokens.iter().map(|token| &token[1..]).collect::<Vec<_>>();
-            build_byte_trie_sorted(&suffixes)
-        } else {
-            build_byte_trie(tokens.iter().map(|token| &token[1..]))
-        }
-    } else if tokens_are_sorted {
-        build_byte_trie_sorted(tokens)
+    let owned_token_trie;
+    let token_trie: &[ByteTrieNode] = if common_first_byte.is_none()
+        && let Some(prebuilt) = prebuilt_token_trie
+    {
+        prebuilt.nodes.as_ref()
     } else {
-        build_byte_trie(tokens.iter().copied())
+        owned_token_trie = if common_first_byte.is_some() {
+            if tokens_are_sorted {
+                let suffixes = tokens.iter().map(|token| &token[1..]).collect::<Vec<_>>();
+                build_byte_trie_sorted(&suffixes)
+            } else {
+                build_byte_trie(tokens.iter().map(|token| &token[1..]))
+            }
+        } else if tokens_are_sorted {
+            build_byte_trie_sorted(tokens)
+        } else {
+            build_byte_trie(tokens.iter().copied())
+        };
+        &owned_token_trie
     };
     let suffix_trie = include_reset_suffixes.then(|| {
         build_byte_trie(
@@ -1811,6 +1851,8 @@ fn build_bounded_analysis_topology_impl_with_expansion(
                 .flat_map(|token| (0..token.len()).map(move |offset| &token[offset..])),
         )
     });
+    let trie_ms = trie_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    let expansion_started_at = profile_timing.then(std::time::Instant::now);
     let mut target_marks = vec![0u32; raw_state_count];
     let mut target_generation = 0u32;
     let mut seeded_configs = raw_start_states
@@ -1857,7 +1899,7 @@ fn build_bounded_analysis_topology_impl_with_expansion(
             tokenizer,
             raw_transitions,
             &seeded_configs,
-            &token_trie,
+            token_trie,
             &mut configs,
             &mut config_ids,
             &mut transitions,
@@ -1900,7 +1942,7 @@ fn build_bounded_analysis_topology_impl_with_expansion(
                     tokenizer,
                     raw_transitions,
                     state,
-                    &token_trie,
+                    token_trie,
                     &mut configs,
                     &mut config_ids,
                     &mut transitions,
@@ -1919,7 +1961,7 @@ fn build_bounded_analysis_topology_impl_with_expansion(
                     tokenizer,
                     raw_transitions,
                     state,
-                    &token_trie,
+                    token_trie,
                     &mut configs,
                     &mut config_ids,
                     &mut transitions,
@@ -1976,10 +2018,28 @@ fn build_bounded_analysis_topology_impl_with_expansion(
         (token_visited.len(), suffix_visited.len())
     };
 
+    let expansion_ms = expansion_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     let work = TokenBoundedAnalysisWork {
         configurations: configs.len(),
         trie_visits: token_trie_visits + suffix_trie_visits,
     };
+    if let Some(total_started_at) = total_started_at {
+        eprintln!(
+            "[glrmask/profile][token_bounded_topology] raw_states={} tokens={} active_projection={} combine_starts={} common_first={} trie_nodes={} configs={} trie_visits={} setup_ms={:.3} trie_ms={:.3} expansion_ms={:.3} total_ms={:.3}",
+            raw_state_count,
+            tokens.len(),
+            active_groups.is_some(),
+            combine_start_states,
+            common_first_byte.is_some(),
+            token_trie.len(),
+            work.configurations,
+            work.trie_visits,
+            setup_ms,
+            trie_ms,
+            expansion_ms,
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
     Ok((
         TokenBoundedAnalysisTopology {
             configurations: Arc::from(configs),
@@ -2009,6 +2069,7 @@ fn build_bounded_analysis_view_inner(
         false,
         None,
         None,
+        None,
     )
     .expect("unbounded token analysis topology build")
     .0
@@ -2035,6 +2096,7 @@ fn build_bounded_analysis_view_impl(
         false,
         None,
         None,
+        None,
     )
     .expect("unbounded token analysis topology build")
     .0
@@ -2047,13 +2109,38 @@ pub(crate) fn build_bounded_analysis_view(
     tokens: &[&[u8]],
     active_groups: Option<&[bool]>,
 ) -> BoundedAnalysisView {
-    build_bounded_analysis_view_inner(
+    build_bounded_analysis_view_with_trie(
         tokenizer,
         raw_start_states,
         tokens,
         active_groups,
-        false,
+        None,
     )
+}
+
+pub(crate) fn build_bounded_analysis_view_with_trie(
+    tokenizer: &Tokenizer,
+    raw_start_states: &[usize],
+    tokens: &[&[u8]],
+    active_groups: Option<&[bool]>,
+    prebuilt_token_trie: Option<&TokenBoundedAnalysisTrie>,
+) -> BoundedAnalysisView {
+    build_bounded_analysis_topology_impl(
+        tokenizer,
+        None,
+        raw_start_states,
+        tokens,
+        false,
+        true,
+        true,
+        false,
+        None,
+        None,
+        prebuilt_token_trie,
+    )
+    .expect("unbounded token analysis topology build")
+    .0
+    .materialize(tokenizer, active_groups)
 }
 
 pub(crate) fn build_bounded_analysis_view_from_combined_starts(
@@ -2062,13 +2149,38 @@ pub(crate) fn build_bounded_analysis_view_from_combined_starts(
     tokens: &[&[u8]],
     active_groups: Option<&[bool]>,
 ) -> BoundedAnalysisView {
-    build_bounded_analysis_view_inner(
+    build_bounded_analysis_view_from_combined_starts_with_trie(
         tokenizer,
         raw_start_states,
         tokens,
         active_groups,
-        true,
+        None,
     )
+}
+
+pub(crate) fn build_bounded_analysis_view_from_combined_starts_with_trie(
+    tokenizer: &Tokenizer,
+    raw_start_states: &[usize],
+    tokens: &[&[u8]],
+    active_groups: Option<&[bool]>,
+    prebuilt_token_trie: Option<&TokenBoundedAnalysisTrie>,
+) -> BoundedAnalysisView {
+    build_bounded_analysis_topology_impl(
+        tokenizer,
+        None,
+        raw_start_states,
+        tokens,
+        true,
+        true,
+        true,
+        false,
+        None,
+        None,
+        prebuilt_token_trie,
+    )
+    .expect("unbounded token analysis topology build")
+    .0
+    .materialize(tokenizer, active_groups)
 }
 
 pub(crate) fn build_token_bounded_analysis_topology(
@@ -2085,6 +2197,7 @@ pub(crate) fn build_token_bounded_analysis_topology(
         true,
         false,
         false,
+        None,
         None,
         None,
     )
@@ -2105,6 +2218,7 @@ pub(crate) fn build_token_bounded_analysis_view_projected(
         tokens,
         active_groups,
         false,
+        None,
     )
 }
 
@@ -2121,6 +2235,7 @@ pub(crate) fn build_token_bounded_analysis_view_projected_sorted(
         tokens,
         active_groups,
         true,
+        None,
     )
 }
 
@@ -2131,6 +2246,24 @@ pub(crate) fn build_token_bounded_analysis_view_projected_sorted_with_raw_transi
     tokens: &[&[u8]],
     active_groups: &[bool],
 ) -> BoundedAnalysisView {
+    build_token_bounded_analysis_view_projected_sorted_with_raw_transitions_and_trie(
+        tokenizer,
+        raw_transitions,
+        raw_start_states,
+        tokens,
+        active_groups,
+        None,
+    )
+}
+
+pub(crate) fn build_token_bounded_analysis_view_projected_sorted_with_raw_transitions_and_trie(
+    tokenizer: &Tokenizer,
+    raw_transitions: &[u32],
+    raw_start_states: &[usize],
+    tokens: &[&[u8]],
+    active_groups: &[bool],
+    prebuilt_token_trie: Option<&TokenBoundedAnalysisTrie>,
+) -> BoundedAnalysisView {
     build_token_bounded_analysis_view_projected_with_order(
         tokenizer,
         Some(raw_transitions),
@@ -2138,6 +2271,7 @@ pub(crate) fn build_token_bounded_analysis_view_projected_sorted_with_raw_transi
         tokens,
         active_groups,
         true,
+        prebuilt_token_trie,
     )
 }
 
@@ -2148,6 +2282,7 @@ fn build_token_bounded_analysis_view_projected_with_order(
     tokens: &[&[u8]],
     active_groups: &[bool],
     tokens_are_sorted: bool,
+    prebuilt_token_trie: Option<&TokenBoundedAnalysisTrie>,
 ) -> BoundedAnalysisView {
     build_bounded_analysis_topology_impl(
         tokenizer,
@@ -2160,6 +2295,7 @@ fn build_token_bounded_analysis_view_projected_with_order(
         tokens_are_sorted,
         Some(active_groups),
         None,
+        prebuilt_token_trie,
     )
     .expect("unbounded token analysis topology build")
     .0
@@ -2181,6 +2317,7 @@ pub(crate) fn try_build_token_bounded_analysis_view_projected(
         active_groups,
         budget,
         false,
+        None,
     )
 }
 
@@ -2199,6 +2336,7 @@ pub(crate) fn try_build_token_bounded_analysis_view_projected_sorted(
         active_groups,
         budget,
         true,
+        None,
     )
 }
 
@@ -2210,6 +2348,26 @@ pub(crate) fn try_build_token_bounded_analysis_view_projected_sorted_with_raw_tr
     active_groups: &[bool],
     budget: TokenBoundedAnalysisWorkBudget,
 ) -> Result<(BoundedAnalysisView, TokenBoundedAnalysisWork), TokenBoundedAnalysisWork> {
+    try_build_token_bounded_analysis_view_projected_sorted_with_raw_transitions_and_trie(
+        tokenizer,
+        raw_transitions,
+        raw_start_states,
+        tokens,
+        active_groups,
+        budget,
+        None,
+    )
+}
+
+pub(crate) fn try_build_token_bounded_analysis_view_projected_sorted_with_raw_transitions_and_trie(
+    tokenizer: &Tokenizer,
+    raw_transitions: &[u32],
+    raw_start_states: &[usize],
+    tokens: &[&[u8]],
+    active_groups: &[bool],
+    budget: TokenBoundedAnalysisWorkBudget,
+    prebuilt_token_trie: Option<&TokenBoundedAnalysisTrie>,
+) -> Result<(BoundedAnalysisView, TokenBoundedAnalysisWork), TokenBoundedAnalysisWork> {
     try_build_token_bounded_analysis_view_projected_with_order(
         tokenizer,
         Some(raw_transitions),
@@ -2218,6 +2376,7 @@ pub(crate) fn try_build_token_bounded_analysis_view_projected_sorted_with_raw_tr
         active_groups,
         budget,
         true,
+        prebuilt_token_trie,
     )
 }
 
@@ -2229,6 +2388,7 @@ fn try_build_token_bounded_analysis_view_projected_with_order(
     active_groups: &[bool],
     budget: TokenBoundedAnalysisWorkBudget,
     tokens_are_sorted: bool,
+    prebuilt_token_trie: Option<&TokenBoundedAnalysisTrie>,
 ) -> Result<(BoundedAnalysisView, TokenBoundedAnalysisWork), TokenBoundedAnalysisWork> {
     let (topology, work) = build_bounded_analysis_topology_impl(
         tokenizer,
@@ -2241,6 +2401,7 @@ fn try_build_token_bounded_analysis_view_projected_with_order(
         tokens_are_sorted,
         Some(active_groups),
         Some(budget),
+        prebuilt_token_trie,
     )?;
     Ok((
         topology.materialize_already_projected(tokenizer, active_groups),
@@ -2273,6 +2434,7 @@ pub(crate) fn build_token_bounded_analysis_view_from_combined_starts(
         true,
         false,
         false,
+        None,
         None,
         None,
     )
@@ -3225,6 +3387,84 @@ mod tests {
     }
 
     #[test]
+    fn prebuilt_superset_token_trie_matches_subset_analysis() {
+        let tokenizer =
+            crate::automata::lexer::tokenizer::arbitrary_epsilon_l1_test_tokenizer();
+        let raw_states = (0..tokenizer.num_states() as usize).collect::<Vec<_>>();
+        let flat_trans = crate::compiler::stages::id_map_and_terminal_dwa::l1::build_flat_transition_table(&tokenizer);
+        let parent_tokens: Vec<&[u8]> = vec![b"", b"a", b"aa", b"ab", b"b", b"ba", b"x"];
+        let subset_tokens: Vec<&[u8]> = vec![b"", b"a", b"aa", b"ab", b"b", b"ba"];
+        let active = [true, true];
+        let parent_trie = build_token_bounded_analysis_trie_sorted(&parent_tokens);
+        let direct = build_token_bounded_analysis_view_projected_sorted_with_raw_transitions(
+            &tokenizer,
+            &flat_trans,
+            &raw_states,
+            &subset_tokens,
+            &active,
+        );
+        let reused =
+            build_token_bounded_analysis_view_projected_sorted_with_raw_transitions_and_trie(
+                &tokenizer,
+                &flat_trans,
+                &raw_states,
+                &subset_tokens,
+                &active,
+                Some(&parent_trie),
+            );
+        for &raw_state in &raw_states {
+            let direct_start = direct.view_state_for_raw_start(raw_state);
+            let reused_start = reused.view_state_for_raw_start(raw_state);
+            for &token in &subset_tokens {
+                assert_eq!(
+                    view_trace(&direct.tokenizer_view, direct_start, token),
+                    view_trace(&reused.tokenizer_view, reused_start, token),
+                    "raw_state={raw_state} token={token:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn prebuilt_superset_token_trie_matches_bounded_reset_suffix_analysis() {
+        let tokenizer =
+            crate::automata::lexer::tokenizer::arbitrary_epsilon_l1_test_tokenizer();
+        let raw_states = (0..tokenizer.num_states() as usize).collect::<Vec<_>>();
+        let parent_tokens: Vec<&[u8]> =
+            vec![b"a", b"aa", b"ab", b"aba", b"b", b"ba", b"x"];
+        let subset_tokens: Vec<&[u8]> = vec![b"aa", b"aba", b"ba"];
+        let parent_trie = build_token_bounded_analysis_trie_sorted(&parent_tokens);
+        let direct = build_bounded_analysis_view(
+            &tokenizer,
+            &raw_states,
+            &subset_tokens,
+            Some(&[true, true]),
+        );
+        let reused = build_bounded_analysis_view_with_trie(
+            &tokenizer,
+            &raw_states,
+            &subset_tokens,
+            Some(&[true, true]),
+            Some(&parent_trie),
+        );
+        let observed = subset_tokens
+            .iter()
+            .flat_map(|token| (0..token.len()).map(move |offset| &token[offset..]))
+            .collect::<Vec<_>>();
+        for &raw_state in &raw_states {
+            let direct_start = direct.view_state_for_raw_start(raw_state);
+            let reused_start = reused.view_state_for_raw_start(raw_state);
+            for &bytes in &observed {
+                assert_eq!(
+                    view_trace(&direct.tokenizer_view, direct_start, bytes),
+                    view_trace(&reused.tokenizer_view, reused_start, bytes),
+                    "raw_state={raw_state} bytes={bytes:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
     fn sorted_byte_trie_matches_generic_builder() {
         let sequences: Vec<&[u8]> = vec![
             b"",
@@ -3411,6 +3651,7 @@ mod tests {
                 true,
                 Some(&active_groups),
                 None,
+                None,
                 true,
             )
             .expect("frontier topology build");
@@ -3424,6 +3665,7 @@ mod tests {
                 false,
                 true,
                 Some(&active_groups),
+                None,
                 None,
                 false,
             )
@@ -3463,6 +3705,7 @@ mod tests {
             true,
             Some(&subset_active_groups),
             None,
+            None,
             true,
         )
         .expect("frontier topology build with unpreseeded targets");
@@ -3476,6 +3719,7 @@ mod tests {
             false,
             true,
             Some(&subset_active_groups),
+            None,
             None,
             false,
         )
@@ -3509,6 +3753,7 @@ mod tests {
             false,
             None,
             None,
+            None,
             true,
         )
         .expect("frontier topology build with reset suffixes");
@@ -3521,6 +3766,7 @@ mod tests {
             false,
             true,
             false,
+            None,
             None,
             None,
             false,
@@ -3641,6 +3887,7 @@ mod tests {
             false,
             false,
             Some(&active_groups),
+            None,
             None,
         )
         .expect("projected topology build")

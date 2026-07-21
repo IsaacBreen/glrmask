@@ -153,7 +153,7 @@ struct PreHashedRanges {
 }
 
 #[derive(Debug)]
-struct L1IdentityVocabOrder {
+pub(crate) struct L1IdentityVocabOrder {
     token_ids_sorted: Arc<[u32]>,
     token_entries_sorted: Arc<[(u32, Arc<[u8]>)]>,
     original_to_internal: Arc<[u32]>,
@@ -161,18 +161,63 @@ struct L1IdentityVocabOrder {
 }
 
 impl crate::vocab::VocabDerivedArtifact for L1IdentityVocabOrder {}
+impl crate::vocab::VocabDerivedArtifact
+    for super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTrie
+{
+}
+
+fn l1_token_bounded_analysis_trie(
+    vocab: &Vocab,
+) -> Option<Arc<super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTrie>> {
+    if vocab.len() > L1_GENERIC_NFA_TOKEN_BOUNDED_MAX_VOCAB {
+        return None;
+    }
+    if let Some(cached) = vocab.vocab_derived_cache_get::<
+        super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTrie,
+    >() {
+        return Some(cached);
+    }
+    let order = l1_identity_vocab_order(vocab);
+    let tokens = order
+        .token_entries_sorted
+        .iter()
+        .map(|(_, bytes)| bytes.as_ref())
+        .collect::<Vec<_>>();
+    let trie = Arc::new(
+        super::l2p::equivalence_analysis::state_equivalence::nfa::build_token_bounded_analysis_trie_sorted(
+            &tokens,
+        ),
+    );
+    vocab.vocab_derived_cache_set(Arc::clone(&trie));
+    Some(trie)
+}
+
+pub(crate) fn prepare_l1_token_bounded_analysis_trie(vocab: &Vocab) {
+    let _ = l1_token_bounded_analysis_trie(vocab);
+}
+
+pub(crate) fn prepared_l1_token_bounded_analysis_trie(
+    vocab: &Vocab,
+) -> Option<Arc<super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTrie>> {
+    l1_token_bounded_analysis_trie(vocab)
+}
 
 fn l1_identity_vocab_order(vocab: &Vocab) -> Arc<L1IdentityVocabOrder> {
     if let Some(cached) = vocab.vocab_derived_cache_get::<L1IdentityVocabOrder>() {
         return cached;
     }
 
+    let profiling = compile_profile_enabled();
+    let total_started_at = profiling.then(Instant::now);
+    let collect_started_at = profiling.then(Instant::now);
     let mut token_entries_sorted: Vec<(u32, Arc<[u8]>)> = vocab
         .entries
         .iter()
         .map(|(&id, bytes)| (id, Arc::<[u8]>::from(bytes.clone().into_boxed_slice())))
         .collect();
+    let collect_ms = collect_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
+    let sort_started_at = profiling.then(Instant::now);
     token_entries_sorted.sort_unstable_by(|(left_id, left_bytes), (right_id, right_bytes)| {
         left_bytes
             .first()
@@ -180,7 +225,9 @@ fn l1_identity_vocab_order(vocab: &Vocab) -> Arc<L1IdentityVocabOrder> {
             .then(left_bytes.cmp(right_bytes))
             .then(left_id.cmp(right_id))
     });
+    let sort_ms = sort_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
+    let map_started_at = profiling.then(Instant::now);
     let mut token_original_to_internal = vec![u32::MAX; vocab.max_token_id() as usize + 1];
     let token_ids_sorted: Vec<u32> = token_entries_sorted
         .iter()
@@ -190,8 +237,32 @@ fn l1_identity_vocab_order(vocab: &Vocab) -> Arc<L1IdentityVocabOrder> {
             *original_id
         })
         .collect();
+    let map_ms = map_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
+    let buckets_started_at = profiling.then(Instant::now);
     let token_buckets = build_l1_sorted_token_buckets(&token_entries_sorted);
+    let eager_subset_tries = std::env::var("GLRMASK_EAGER_SUBSET_PACKED_TRIES")
+        .map(|value| {
+            let trimmed = value.trim();
+            trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or(false);
+    if eager_subset_tries {
+        for first_byte in 0..256 {
+            let token_ids = &token_buckets.token_indices_by_first_byte[first_byte];
+            if token_ids.is_empty() {
+                continue;
+            }
+            token_buckets.packed_suffix_tries_by_first_byte[first_byte].get_or_init(|| {
+                Arc::new(L1PackedSuffixTrie::build(
+                    &token_entries_sorted,
+                    token_ids,
+                    &token_buckets.suffix_lcps_by_first_byte[first_byte],
+                ))
+            });
+        }
+    }
+    let buckets_ms = buckets_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     let order = Arc::new(L1IdentityVocabOrder {
         token_ids_sorted: token_ids_sorted.into(),
         token_entries_sorted: token_entries_sorted.into(),
@@ -199,11 +270,91 @@ fn l1_identity_vocab_order(vocab: &Vocab) -> Arc<L1IdentityVocabOrder> {
         token_buckets,
     });
     vocab.vocab_derived_cache_set(Arc::clone(&order));
+    if let Some(total_started_at) = total_started_at {
+        eprintln!(
+            "[glrmask/profile][l1_identity_order] tokens={} collect_ms={:.3} sort_ms={:.3} map_ms={:.3} buckets_ms={:.3} total_ms={:.3}",
+            vocab.len(),
+            collect_ms,
+            sort_ms,
+            map_ms,
+            buckets_ms,
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
     order
 }
 
 pub(crate) fn prepare_l1_identity_vocab_order(vocab: &Vocab) {
-    let _ = l1_identity_vocab_order(vocab);
+    let order = l1_identity_vocab_order(vocab);
+    for first_byte in 0..256 {
+        let token_ids = &order.token_buckets.token_indices_by_first_byte[first_byte];
+        if token_ids.is_empty() {
+            continue;
+        }
+        order.token_buckets.packed_suffix_tries_by_first_byte[first_byte].get_or_init(|| {
+            Arc::new(L1PackedSuffixTrie::build(
+                order.token_entries_sorted.as_ref(),
+                token_ids,
+                &order.token_buckets.suffix_lcps_by_first_byte[first_byte],
+            ))
+        });
+    }
+}
+
+pub(crate) fn prepared_l1_identity_vocab_order(vocab: &Vocab) -> Arc<L1IdentityVocabOrder> {
+    l1_identity_vocab_order(vocab)
+}
+
+fn derive_l1_identity_vocab_order_from_parent(
+    parent: &L1IdentityVocabOrder,
+    subset_vocab: &Vocab,
+) -> Arc<L1IdentityVocabOrder> {
+    let profiling = compile_profile_enabled();
+    let total_started_at = profiling.then(Instant::now);
+    let membership_started_at = profiling.then(Instant::now);
+    let mut included = vec![false; parent.original_to_internal.len()];
+    for &token_id in subset_vocab.entries.keys() {
+        let token_id = token_id as usize;
+        assert!(token_id < included.len(), "subset token missing from parent order");
+        included[token_id] = true;
+    }
+    let membership_ms = membership_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    let filter_started_at = profiling.then(Instant::now);
+    let mut token_entries_sorted = Vec::with_capacity(subset_vocab.len());
+    for (token_id, bytes) in parent.token_entries_sorted.iter() {
+        if included[*token_id as usize] {
+            token_entries_sorted.push((*token_id, Arc::clone(bytes)));
+        }
+    }
+    assert_eq!(token_entries_sorted.len(), subset_vocab.len());
+    let filter_ms = filter_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    let map_started_at = profiling.then(Instant::now);
+    let mut original_to_internal = vec![u32::MAX; subset_vocab.max_token_id() as usize + 1];
+    let token_ids_sorted = token_entries_sorted
+        .iter()
+        .enumerate()
+        .map(|(internal_id, (original_id, _))| {
+            original_to_internal[*original_id as usize] = internal_id as u32;
+            *original_id
+        })
+        .collect::<Vec<_>>();
+    let map_ms = map_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    let buckets_started_at = profiling.then(Instant::now);
+    let token_buckets = build_l1_sorted_token_buckets(&token_entries_sorted);
+    let buckets_ms = buckets_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    if let Some(total_started_at) = total_started_at {
+        eprintln!(
+            "[glrmask/profile][l1_subset_order] tokens={} membership_ms={:.3} filter_ms={:.3} map_ms={:.3} buckets_ms={:.3} total_ms={:.3}",
+            subset_vocab.len(), membership_ms, filter_ms, map_ms, buckets_ms,
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    Arc::new(L1IdentityVocabOrder {
+        token_ids_sorted: token_ids_sorted.into(),
+        token_entries_sorted: token_entries_sorted.into(),
+        original_to_internal: original_to_internal.into(),
+        token_buckets,
+    })
 }
 
 fn skip_max_length_for_partition(partition_label: &str) -> bool {
@@ -665,6 +816,10 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
     shared_generic_nfa_topology: Option<
         &super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTopology,
     >,
+    shared_generic_nfa_trie: Option<
+        &super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTrie,
+    >,
+    subset_parent_order: Option<&L1IdentityVocabOrder>,
 ) -> Option<LocalIdMapTerminalDwa> {
     if vocab.is_empty() {
         return None;
@@ -683,6 +838,8 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
                 active_terminals,
                 flat_trans.as_ref(),
                 shared_generic_nfa_topology,
+                shared_generic_nfa_trie,
+                subset_parent_order,
             )
         } else if generic_epsilon_nfa {
             build_l1_generic_nfa_fallback_id_map(tokenizer, vocab, initial_state_map)
@@ -882,6 +1039,9 @@ fn build_l1_generic_nfa_analysis_view(
     shared_topology: Option<
         &super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTopology,
     >,
+    shared_token_trie: Option<
+        &super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTrie,
+    >,
     large_work_budget: super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisWorkBudget,
 ) -> (Vec<usize>, TokenizerView, &'static str) {
     let mut relevant_bytes = [false; 256];
@@ -949,12 +1109,13 @@ fn build_l1_generic_nfa_analysis_view(
                 .iter()
                 .map(|(_, bytes)| bytes.as_ref())
                 .collect::<Vec<_>>();
-            super::l2p::equivalence_analysis::state_equivalence::nfa::build_token_bounded_analysis_view_projected_sorted_with_raw_transitions(
+            super::l2p::equivalence_analysis::state_equivalence::nfa::build_token_bounded_analysis_view_projected_sorted_with_raw_transitions_and_trie(
                 tokenizer,
                 flat_trans,
                 raw_states,
                 &tokens,
                 active_terminals,
+                shared_token_trie,
             )
         };
         Some((bounded, "token_bounded"))
@@ -963,13 +1124,14 @@ fn build_l1_generic_nfa_analysis_view(
             .iter()
             .map(|(_, bytes)| bytes.as_ref())
             .collect::<Vec<_>>();
-        let bounded = super::l2p::equivalence_analysis::state_equivalence::nfa::try_build_token_bounded_analysis_view_projected_sorted_with_raw_transitions(
+        let bounded = super::l2p::equivalence_analysis::state_equivalence::nfa::try_build_token_bounded_analysis_view_projected_sorted_with_raw_transitions_and_trie(
             tokenizer,
             flat_trans,
             raw_states,
             &tokens,
             active_terminals,
             large_work_budget,
+            shared_token_trie,
         );
         match bounded {
             Ok((bounded, work)) => {
@@ -1033,6 +1195,10 @@ fn build_l1_generic_nfa_exact_id_map<'a>(
     shared_topology: Option<
         &super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTopology,
     >,
+    shared_token_trie: Option<
+        &super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTrie,
+    >,
+    subset_parent_order: Option<&L1IdentityVocabOrder>,
 ) -> (
     InternalIdMap,
     Arc<L1IdentityVocabOrder>,
@@ -1041,8 +1207,12 @@ fn build_l1_generic_nfa_exact_id_map<'a>(
     Option<L1ExactProfileReuse>,
 ) {
     let num_states = tokenizer.num_states() as usize;
-    let (deferred_vocab_singleton_original_ids, vocab_order, token_identity_map_ms) =
-        build_l1_identity_vocab_order(vocab);
+    let token_identity_started_at = Instant::now();
+    let vocab_order = subset_parent_order
+        .map(|parent| derive_l1_identity_vocab_order_from_parent(parent, vocab))
+        .unwrap_or_else(|| l1_identity_vocab_order(vocab));
+    let deferred_vocab_singleton_original_ids = Arc::clone(&vocab_order.token_ids_sorted);
+    let token_identity_map_ms = token_identity_started_at.elapsed().as_secs_f64() * 1000.0;
     let token_entries = vocab_order.token_entries_sorted.as_ref();
     let token_len_stats = token_length_stats_from_entries(token_entries);
     let max_token_len = token_entries
@@ -1061,6 +1231,7 @@ fn build_l1_generic_nfa_exact_id_map<'a>(
         active_terminals,
         flat_trans,
         shared_topology,
+        shared_token_trie,
         L1_GENERIC_NFA_TOKEN_BOUNDED_LARGE_WORK_BUDGET,
     );
     let view_build_ms = view_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -2193,15 +2364,20 @@ fn find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
         let byte_idx = *byte as usize;
         let token_ids = &token_buckets.token_indices_by_first_byte[byte_idx];
         let suffix_lcps = &token_buckets.suffix_lcps_by_first_byte[byte_idx];
-        let prebuilt_trie = token_buckets.packed_suffix_tries_by_first_byte[byte_idx]
-            .as_deref()
-            .expect("non-empty first-byte bucket must retain its prepared suffix trie");
         const LARGE_BUCKET_WORK_PRODUCT: usize = 1_000_000;
         let estimated_work = token_ids.len().saturating_mul(targets.len());
         let parallel_bucket = token_ids.len() >= 10_000
             || estimated_work >= LARGE_BUCKET_WORK_PRODUCT;
 
         if parallel_bucket && targets.len() >= 32 && rayon::current_num_threads() > 1 {
+            let prebuilt_trie = token_buckets.packed_suffix_tries_by_first_byte[byte_idx]
+                .get_or_init(|| {
+                    Arc::new(L1PackedSuffixTrie::build(
+                        sorted_entries,
+                        token_ids,
+                        suffix_lcps,
+                    ))
+                });
             let chunk_count = std::env::var("GLRMASK_L1_LARGE_BUCKET_CHUNKS")
                 .ok()
                 .and_then(|value| value.trim().parse::<usize>().ok())
@@ -2234,7 +2410,7 @@ fn find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
                         Some(&active_language),
                         horizon_maps.as_deref(),
                         suffix_horizon_by_first_byte[byte_idx],
-                        Some(prebuilt_trie),
+                        Some(prebuilt_trie.as_ref()),
                     )
                 })
                 .flatten()
@@ -2258,25 +2434,126 @@ fn find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
             }
             chunked_profiles
         } else {
-            l1_bucket_suffix_signature_profiles_packed(
-                *byte,
-                targets,
-                sorted_entries,
-                token_ids,
-                suffix_lcps,
-                &token_buckets.suffix_subtree_bytes[byte_idx],
-                &token_buckets.suffix_first_bytes_by_bucket[byte_idx],
-                token_buckets.has_empty_suffix_by_bucket[byte_idx],
-                &state_to_terminal_signature,
-                &self_loop_bytes_by_state,
-                flat_trans,
-                transitions_by_byte,
-                num_tokenizer_states,
-                Some(&active_language),
-                horizon_maps.as_deref(),
-                suffix_horizon_by_first_byte[byte_idx],
-                Some(prebuilt_trie),
-            )
+            let requested = std::env::var("GLRMASK_L1_PROFILE_BUILDER")
+                .unwrap_or_else(|_| "auto".to_owned());
+            let flat_supported = transitions_by_byte.is_none() && horizon_maps.is_none();
+            let build_flat = || {
+                l1_bucket_suffix_signature_profiles_batched_arc(
+                    *byte,
+                    targets,
+                    sorted_entries,
+                    token_ids,
+                    suffix_lcps,
+                    &token_buckets.suffix_subtree_bytes[byte_idx],
+                    &token_buckets.suffix_first_bytes_by_bucket[byte_idx],
+                    token_buckets.has_empty_suffix_by_bucket[byte_idx],
+                    &state_to_terminal_signature,
+                    flat_trans,
+                    transitions_by_byte,
+                    num_tokenizer_states,
+                    Some(&active_language),
+                )
+            };
+            let build_packed = || {
+                let prebuilt_trie = token_buckets.packed_suffix_tries_by_first_byte[byte_idx]
+                    .get_or_init(|| {
+                        Arc::new(L1PackedSuffixTrie::build(
+                            sorted_entries,
+                            token_ids,
+                            suffix_lcps,
+                        ))
+                    });
+                l1_bucket_suffix_signature_profiles_packed(
+                    *byte,
+                    targets,
+                    sorted_entries,
+                    token_ids,
+                    suffix_lcps,
+                    &token_buckets.suffix_subtree_bytes[byte_idx],
+                    &token_buckets.suffix_first_bytes_by_bucket[byte_idx],
+                    token_buckets.has_empty_suffix_by_bucket[byte_idx],
+                    &state_to_terminal_signature,
+                    &self_loop_bytes_by_state,
+                    flat_trans,
+                    transitions_by_byte,
+                    num_tokenizer_states,
+                    Some(&active_language),
+                    horizon_maps.as_deref(),
+                    suffix_horizon_by_first_byte[byte_idx],
+                    Some(prebuilt_trie.as_ref()),
+                )
+            };
+            if flat_supported && requested == "compare" {
+                let flat_started = Instant::now();
+                let mut flat = build_flat();
+                let flat_ms = flat_started.elapsed().as_secs_f64() * 1000.0;
+                let packed_started = Instant::now();
+                let mut packed = build_packed();
+                let packed_ms = packed_started.elapsed().as_secs_f64() * 1000.0;
+                flat.sort_unstable_by_key(|(key, _)| *key);
+                packed.sort_unstable_by_key(|(key, _)| *key);
+                assert_eq!(flat.len(), packed.len());
+                for ((flat_key, flat_profile), (packed_key, packed_profile)) in
+                    flat.iter().zip(&packed)
+                {
+                    assert_eq!(flat_key, packed_key);
+                    assert_eq!(flat_profile.as_ref(), packed_profile.as_ref());
+                }
+                let first_suffix_bytes = token_buckets.suffix_first_bytes_by_bucket[byte_idx]
+                    .iter()
+                    .map(|word| word.count_ones() as usize)
+                    .sum::<usize>();
+                let compression = l1_bucket_compression_estimate(
+                    targets,
+                    &token_buckets.suffix_subtree_bytes[byte_idx],
+                    &token_buckets.suffix_first_bytes_by_bucket[byte_idx],
+                    token_buckets.has_empty_suffix_by_bucket[byte_idx],
+                    flat_trans,
+                );
+                let prebuilt_trie = token_buckets.packed_suffix_tries_by_first_byte[byte_idx]
+                    .get()
+                    .expect("compare mode built the packed suffix trie");
+                eprintln!(
+                    "[glrmask/profile][l1_builder_compare] byte={} tokens={} targets={} work={} trie_nodes={} trie_edges={} suffix_horizon={} first_suffix_bytes={} has_empty={} self_loop_targets={} first_dead_targets={} first_groups={} effective_targets={} first_live_edges={} first_unique_states={} flat_ms={:.3} packed_ms={:.3} delta_ms={:.3}",
+                    byte_idx,
+                    token_ids.len(),
+                    targets.len(),
+                    token_ids.len().saturating_mul(targets.len()),
+                    prebuilt_trie.nodes.len(),
+                    prebuilt_trie.edges.len(),
+                    suffix_horizon_by_first_byte[byte_idx],
+                    first_suffix_bytes,
+                    token_buckets.has_empty_suffix_by_bucket[byte_idx],
+                    compression.self_loop_targets,
+                    compression.first_step_dead_targets,
+                    compression.first_step_groups,
+                    compression.effective_targets,
+                    compression.first_step_live_edges,
+                    compression.first_step_unique_states,
+                    flat_ms,
+                    packed_ms,
+                    flat_ms - packed_ms,
+                );
+                if flat_ms <= packed_ms { flat } else { packed }
+            } else {
+                let auto_prefers_packed = token_ids.len() > 500
+                    && token_ids.len() <= 7_000
+                    && token_buckets.packed_suffix_tries_by_first_byte[byte_idx]
+                        .get_or_init(|| {
+                            Arc::new(L1PackedSuffixTrie::build(
+                                sorted_entries,
+                                token_ids,
+                                suffix_lcps,
+                            ))
+                        })
+                        .nodes
+                        .len()
+                        > 4_000;
+                let use_flat = flat_supported
+                    && (requested == "flat"
+                        || (requested == "auto" && !auto_prefers_packed));
+                if use_flat { build_flat() } else { build_packed() }
+            }
         }
     };
     let target_profile_batches: Vec<Vec<((u8, u32), Arc<[(u32, u32, u32)]>)>> =
@@ -2555,6 +2832,120 @@ fn l1_target_self_loop_covers_suffix_subtree(
     true
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct L1BucketCompressionEstimate {
+    self_loop_targets: usize,
+    first_step_dead_targets: usize,
+    first_step_groups: usize,
+    effective_targets: usize,
+    first_step_live_edges: usize,
+    first_step_unique_states: usize,
+}
+
+fn l1_bucket_compression_estimate(
+    targets: &[u32],
+    suffix_subtree: &[u64; 4],
+    suffix_first_bytes: &[u64; 4],
+    has_empty_suffix: bool,
+    flat_trans: &[u32],
+) -> L1BucketCompressionEstimate {
+    let dead = u32::MAX;
+    let mut estimate = L1BucketCompressionEstimate::default();
+    let mut walk_targets = Vec::new();
+    for &target in targets {
+        if l1_target_self_loop_covers_suffix_subtree(target, suffix_subtree, flat_trans) {
+            estimate.self_loop_targets += 1;
+        } else {
+            walk_targets.push(target);
+        }
+    }
+    if has_empty_suffix {
+        estimate.effective_targets = walk_targets.len();
+        return estimate;
+    }
+    let mut first_suffix_bytes = Vec::new();
+    for word in 0..4u8 {
+        let mut bits = suffix_first_bytes[word as usize];
+        while bits != 0 {
+            let offset = bits.trailing_zeros() as u8;
+            first_suffix_bytes.push(word * 64 + offset);
+            bits &= bits - 1;
+        }
+    }
+    if first_suffix_bytes.is_empty() {
+        estimate.effective_targets = walk_targets.len();
+        return estimate;
+    }
+    let mut groups = FxHashMap::<Vec<u32>, usize>::default();
+    let mut unique_states = rustc_hash::FxHashSet::default();
+    for target in walk_targets {
+        let fp = first_suffix_bytes
+            .iter()
+            .map(|&byte| flat_trans[target as usize * 256 + byte as usize])
+            .collect::<Vec<_>>();
+        if fp.iter().all(|&state| state == dead) {
+            estimate.first_step_dead_targets += 1;
+            continue;
+        }
+        estimate.first_step_live_edges += fp.iter().filter(|&&state| state != dead).count();
+        unique_states.extend(fp.iter().copied().filter(|&state| state != dead));
+        groups.entry(fp).or_insert(0);
+    }
+    estimate.first_step_groups = groups.len();
+    estimate.effective_targets = groups.len();
+    estimate.first_step_unique_states = unique_states.len();
+    estimate
+}
+
+fn l1_bucket_suffix_signature_profiles_batched_arc(
+    first_byte: u8,
+    targets: &[u32],
+    sorted_entries: &[(u32, Arc<[u8]>)],
+    token_ids: &[usize],
+    suffix_lcps: &[usize],
+    suffix_subtree: &[u64; 4],
+    suffix_first_bytes: &[u64; 4],
+    has_empty_suffix: bool,
+    state_to_terminal_signature: &[u32],
+    flat_trans: &[u32],
+    transitions_by_byte: Option<&[u32]>,
+    num_tokenizer_states: usize,
+    active_language: Option<&[bool]>,
+) -> Vec<((u8, u32), Arc<[(u32, u32, u32)]>)> {
+    let profiles = l1_bucket_suffix_signature_profiles_batched(
+        first_byte,
+        targets,
+        sorted_entries,
+        token_ids,
+        suffix_lcps,
+        suffix_subtree,
+        suffix_first_bytes,
+        has_empty_suffix,
+        state_to_terminal_signature,
+        flat_trans,
+        transitions_by_byte,
+        num_tokenizer_states,
+        active_language,
+    );
+    let mut canonical =
+        FxHashMap::<Arc<[(u32, u32, u32)]>, Arc<[(u32, u32, u32)]>>::default();
+    profiles
+        .into_iter()
+        .map(|(key, profile)| {
+            if profile.is_empty() {
+                return (key, Arc::from([]));
+            }
+            let profile: Arc<[(u32, u32, u32)]> = Arc::from(profile);
+            if let Some(existing) = canonical.get(&profile) {
+                (key, Arc::clone(existing))
+            } else {
+                canonical.insert(Arc::clone(&profile), Arc::clone(&profile));
+                (key, profile)
+            }
+        })
+        .collect()
+}
+
 fn l1_bucket_suffix_signature_profiles_batched(
     first_byte: u8,
     targets: &[u32],
@@ -2566,6 +2957,9 @@ fn l1_bucket_suffix_signature_profiles_batched(
     has_empty_suffix: bool,
     state_to_terminal_signature: &[u32],
     flat_trans: &[u32],
+    transitions_by_byte: Option<&[u32]>,
+    num_tokenizer_states: usize,
+    active_language: Option<&[bool]>,
 ) -> Vec<((u8, u32), Vec<(u32, u32, u32)>)> {
     let dead = u32::MAX;
     let mut results = Vec::<((u8, u32), Vec<(u32, u32, u32)>)>::with_capacity(targets.len());
@@ -2613,7 +3007,17 @@ fn l1_bucket_suffix_signature_profiles_batched(
             for &target in &walk_targets {
                 let fp: Vec<u32> = first_suffix_bytes
                     .iter()
-                    .map(|&byte| flat_trans[target as usize * 256 + byte as usize])
+                    .map(|&byte| {
+                        l1_transition(
+                            flat_trans,
+                            transitions_by_byte,
+                            num_tokenizer_states,
+                            active_language,
+                            target,
+                            byte as usize,
+                            None,
+                        )
+                    })
                     .collect();
                 fp_groups.entry(fp).or_default().push(target);
             }
@@ -2659,7 +3063,15 @@ fn l1_bucket_suffix_signature_profiles_batched(
                 let next_state = if previous_state == dead {
                     dead
                 } else {
-                    flat_trans[previous_state as usize * 256 + byte as usize]
+                    l1_transition(
+                        flat_trans,
+                        transitions_by_byte,
+                        num_tokenizer_states,
+                        active_language,
+                        previous_state,
+                        byte as usize,
+                        None,
+                    )
                 };
                 suffix_states.push(next_state);
             }
@@ -3812,7 +4224,7 @@ struct L1SortedTokenBuckets {
     suffix_subtree_bytes: Vec<[u64; 4]>,
     suffix_first_bytes_by_bucket: Vec<[u64; 4]>,
     has_empty_suffix_by_bucket: Vec<bool>,
-    packed_suffix_tries_by_first_byte: Vec<Option<Arc<L1PackedSuffixTrie>>>,
+    packed_suffix_tries_by_first_byte: Vec<OnceLock<Arc<L1PackedSuffixTrie>>>,
 }
 
 fn build_l1_sorted_token_buckets(sorted_entries: &[(u32, Arc<[u8]>)]) -> L1SortedTokenBuckets {
@@ -3857,18 +4269,8 @@ fn build_l1_sorted_token_buckets(sorted_entries: &[(u32, Arc<[u8]>)]) -> L1Sorte
         }
     }
 
-    let packed_suffix_tries_by_first_byte = (0..256)
-        .map(|first_byte| {
-            let token_ids = &token_indices_by_first_byte[first_byte];
-            (!token_ids.is_empty()).then(|| {
-                Arc::new(L1PackedSuffixTrie::build(
-                    sorted_entries,
-                    token_ids,
-                    &suffix_lcps_by_first_byte[first_byte],
-                ))
-            })
-        })
-        .collect();
+    let packed_suffix_tries_by_first_byte =
+        (0..256).map(|_| OnceLock::new()).collect();
 
     L1SortedTokenBuckets {
         empty_token_indices,
@@ -5490,6 +5892,67 @@ mod generic_nfa_tests {
     use crate::automata::lexer::tokenizer::arbitrary_epsilon_l1_test_tokenizer;
 
     #[test]
+    fn locally_derived_subset_order_matches_standalone_order() {
+        let parent = Vocab::new(vec![
+            (9, b"z".to_vec()),
+            (2, b" alpha".to_vec()),
+            (7, b"".to_vec()),
+            (4, b"apple".to_vec()),
+            (1, b" beta".to_vec()),
+            (12, vec![0xff, b'x']),
+        ]);
+        let subset_entries = vec![
+            (12, vec![0xff, b'x']),
+            (7, b"".to_vec()),
+            (2, b" alpha".to_vec()),
+            (4, b"apple".to_vec()),
+        ];
+        let subset = Vocab::new(subset_entries.clone());
+        let parent_order = l1_identity_vocab_order(&parent);
+        let derived = derive_l1_identity_vocab_order_from_parent(&parent_order, &subset);
+        let standalone = l1_identity_vocab_order(&Vocab::new(subset_entries));
+
+        assert_eq!(derived.token_ids_sorted, standalone.token_ids_sorted);
+        assert_eq!(derived.original_to_internal, standalone.original_to_internal);
+        assert_eq!(
+            derived
+                .token_entries_sorted
+                .iter()
+                .map(|(id, bytes)| (*id, bytes.as_ref()))
+                .collect::<Vec<_>>(),
+            standalone
+                .token_entries_sorted
+                .iter()
+                .map(|(id, bytes)| (*id, bytes.as_ref()))
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            derived.token_buckets.empty_token_indices,
+            standalone.token_buckets.empty_token_indices,
+        );
+        assert_eq!(
+            derived.token_buckets.token_indices_by_first_byte,
+            standalone.token_buckets.token_indices_by_first_byte,
+        );
+        assert_eq!(
+            derived.token_buckets.suffix_lcps_by_first_byte,
+            standalone.token_buckets.suffix_lcps_by_first_byte,
+        );
+        assert_eq!(
+            derived.token_buckets.suffix_subtree_bytes,
+            standalone.token_buckets.suffix_subtree_bytes,
+        );
+        assert_eq!(
+            derived.token_buckets.suffix_first_bytes_by_bucket,
+            standalone.token_buckets.suffix_first_bytes_by_bucket,
+        );
+        assert_eq!(
+            derived.token_buckets.has_empty_suffix_by_bucket,
+            standalone.token_buckets.has_empty_suffix_by_bucket,
+        );
+    }
+
+    #[test]
     fn large_vocab_prefers_bounded_relevant_powerset_probe_before_token_bounded_fallback() {
         let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
         let raw_states = (0..tokenizer.num_states() as usize).collect::<Vec<_>>();
@@ -5510,6 +5973,7 @@ mod generic_nfa_tests {
             &token_entries,
             &active,
             &flat_trans,
+            None,
             None,
             super::super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisWorkBudget {
                 max_configurations: usize::MAX,
@@ -5700,6 +6164,8 @@ mod generic_nfa_tests {
                 &active,
                 &flat_trans,
                 Some(&topology),
+                None,
+                None,
             );
         let (mut standalone_map, standalone_order, _, _, standalone_reuse) =
             build_l1_generic_nfa_exact_id_map(
@@ -5707,6 +6173,8 @@ mod generic_nfa_tests {
                 &subset_vocab,
                 &active,
                 &flat_trans,
+                None,
+                None,
                 None,
             );
 
@@ -5792,7 +6260,15 @@ mod generic_nfa_tests {
 
         let flat_trans = build_flat_transition_table(&tokenizer);
         let (mut exact_id_map, exact_order, _, _, exact_reuse) =
-            build_l1_generic_nfa_exact_id_map(&tokenizer, &vocab, &active, &flat_trans, None);
+            build_l1_generic_nfa_exact_id_map(
+                &tokenizer,
+                &vocab,
+                &active,
+                &flat_trans,
+                None,
+                None,
+                None,
+            );
         let (exact_dwa, _) = build_l1_terminal_dwa(
             &tokenizer,
             exact_order.as_ref(),
@@ -5951,6 +6427,9 @@ mod packed_suffix_product_tests {
                   buckets.has_empty_suffix_by_bucket[first_byte],
                   &state_to_terminal_signature,
                   &flat_trans,
+                  None,
+                  tokenizer.num_states() as usize,
+                  None,
             );
             let suffix_horizon = token_ids
                 .iter()
