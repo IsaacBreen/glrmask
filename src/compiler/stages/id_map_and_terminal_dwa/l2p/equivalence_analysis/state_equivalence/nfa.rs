@@ -10,6 +10,9 @@ use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 
 use super::super::compat::{FlatDfa, FlatDfaState, TokenizerView};
 
+const RAW_POWERSET_TARGET_VIEW_CACHE_MIN_CONFIGURATIONS: usize = 8_192;
+const RAW_POWERSET_TARGET_VIEW_CACHE_MAX_CELLS: usize = 8 * 1024 * 1024;
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum RefinementDepth {
     Stable,
@@ -848,9 +851,17 @@ fn try_build_relevant_powerset_view(
             edge_offsets.push(edges.len() as u32);
         }
     } else {
+        let cache_raw_target_views =
+            std::env::var_os("GLRMASK_RAW_POWERSET_CACHED_TARGET_VIEWS").is_some();
+        let cached_target_cell_count = raw_state_count
+            .checked_mul(bytes.len())
+            .filter(|&cells| cells <= RAW_POWERSET_TARGET_VIEW_CACHE_MAX_CELLS);
+        let mut cached_raw_target_views = None;
         let mut byte_marks = [0u32; 256];
         let mut byte_epoch = 0u32;
         let mut candidate_bytes = Vec::<u8>::new();
+        let mut target_marks = vec![0u32; raw_state_count];
+        let mut target_epoch = 0u32;
         while let Some(state) = worklist.pop_front() {
             assert_eq!(
                 state as usize + 1,
@@ -886,6 +897,29 @@ fn try_build_relevant_powerset_view(
                 continue;
             }
 
+            if cached_raw_target_views.is_none()
+                && cache_raw_target_views
+                && configs.len() >= RAW_POWERSET_TARGET_VIEW_CACHE_MIN_CONFIGURATIONS
+                && let Some(cell_count) = cached_target_cell_count
+            {
+                let byte_count = bytes.len();
+                let mut byte_slot = [usize::MAX; 256];
+                for (slot, &byte) in bytes.iter().enumerate() {
+                    byte_slot[byte as usize] = slot;
+                }
+                let mut targets = vec![u32::MAX; cell_count];
+                for source in 0..raw_state_count as u32 {
+                    for (byte, raw_target) in tokenizer.transitions_from(source) {
+                        let slot = byte_slot[byte as usize];
+                        if slot != usize::MAX {
+                            targets[source as usize * byte_count + slot] =
+                                raw_start_to_view[raw_target as usize];
+                        }
+                    }
+                }
+                cached_raw_target_views = Some((byte_slot, targets));
+            }
+
             byte_epoch = byte_epoch.wrapping_add(1);
             if byte_epoch == 0 {
                 byte_marks.fill(0);
@@ -903,14 +937,43 @@ fn try_build_relevant_powerset_view(
             }
             candidate_bytes.sort_unstable();
             for &byte in &candidate_bytes {
-                let targets = tokenizer.step_all(&configs[config_index], byte);
-                if targets.is_empty() {
-                    continue;
-                }
-                let projected = project_raw_config(
-                    targets.to_vec(),
-                    raw_active_language.as_deref(),
-                );
+                let projected = if let Some((byte_slot, cached_targets)) =
+                    cached_raw_target_views.as_ref()
+                {
+                    let slot = byte_slot[byte as usize];
+                    debug_assert_ne!(slot, usize::MAX);
+                    target_epoch = target_epoch.wrapping_add(1);
+                    if target_epoch == 0 {
+                        target_marks.fill(0);
+                        target_epoch = 1;
+                    }
+                    let mut projected = Vec::<u32>::new();
+                    for &source in configs[config_index].iter() {
+                        let target_view =
+                            cached_targets[source as usize * bytes.len() + slot];
+                        if target_view == u32::MAX {
+                            continue;
+                        }
+                        for &target_state in configs[target_view as usize].iter() {
+                            let mark = &mut target_marks[target_state as usize];
+                            if *mark != target_epoch {
+                                *mark = target_epoch;
+                                projected.push(target_state);
+                            }
+                        }
+                    }
+                    projected.sort_unstable();
+                    projected
+                } else {
+                    let targets = tokenizer.step_all(&configs[config_index], byte);
+                    if targets.is_empty() {
+                        continue;
+                    }
+                    project_raw_config(
+                        targets.to_vec(),
+                        raw_active_language.as_deref(),
+                    )
+                };
                 if projected.is_empty() {
                     continue;
                 }
