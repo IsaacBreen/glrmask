@@ -19,7 +19,7 @@ use crate::ds::bitset::BitSet;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
-use super::l2p::equivalence_analysis::compat::TokenizerView;
+use super::l2p::equivalence_analysis::compat::{FlatDfa, FlatDfaState, TokenizerView};
 use super::l2p::equivalence_analysis::state::fast::find_state_equivalence_classes_with_state_resets;
 use super::l2p::equivalence_analysis::state_equivalence::max_length::{
     self, MaxLengthMode,
@@ -35,6 +35,288 @@ pub(crate) struct CertifiedFullToSynthesizedStateMap {
 pub(crate) struct SynthesizedTerminalExpressions {
     pub(crate) expressions: Vec<Expr>,
     pub(crate) changed_terminals: Vec<u32>,
+}
+
+/// Build an exact active-language quotient for a deterministic epsilon
+/// dispatch lexer by collapsing components that cannot ever observe an active
+/// terminal. Active components remain state-for-state identity classes.
+///
+/// A dispatch component is closed under byte transitions. If none of its
+/// states can match or continue an active terminal, every residual state in
+/// that component has the same active-language behavior for every future byte
+/// string: the empty observation. All such components may therefore share one
+/// class. The global epsilon dispatcher and any states outside the verified
+/// disjoint components remain isolated.
+pub(crate) fn inactive_dispatch_component_state_map(
+    tokenizer: &Tokenizer,
+    active_terminals: &[bool],
+    vocab: &Vocab,
+    flat_trans: &Arc<[u32]>,
+) -> Option<ManyToOneIdMap> {
+    if std::env::var_os("GLRMASK_ACTIVE_COMPONENT_KBOUNDED").is_some() {
+        let started_at = std::time::Instant::now();
+        let components = tokenizer.disjoint_dispatch_components()?;
+        let num_states = tokenizer.num_states() as usize;
+        let mut relevant_bytes = [false; 256];
+        let mut max_token_len = 0usize;
+        for bytes in vocab.entries.values() {
+            max_token_len = max_token_len.max(bytes.len());
+            for &byte in bytes {
+                relevant_bytes[byte as usize] = true;
+            }
+        }
+
+        let mut original_to_internal = vec![u32::MAX; num_states];
+        let mut representative_original_ids = Vec::new();
+        let add_class = |original_to_internal: &mut [u32],
+                         representative_original_ids: &mut Vec<u32>,
+                         states: &[u32]| {
+            let internal = representative_original_ids.len() as u32;
+            representative_original_ids.push(states[0]);
+            for &state in states {
+                original_to_internal[state as usize] = internal;
+            }
+        };
+        add_class(
+            &mut original_to_internal,
+            &mut representative_original_ids,
+            &[tokenizer.start_state()],
+        );
+
+        let mut inactive_states = Vec::new();
+        let mut raw_to_local = vec![u32::MAX; num_states];
+        for component in components {
+            let active = component.iter().any(|&state| {
+                let (matched, future) =
+                    filtered_state_label(tokenizer, state, Some(active_terminals));
+                !matched.is_empty() || !future.is_empty()
+            });
+            if !active {
+                inactive_states.extend(component);
+                continue;
+            }
+
+            for (local, &raw) in component.iter().enumerate() {
+                raw_to_local[raw as usize] = local as u32;
+            }
+            let mut local_states = Vec::with_capacity(component.len());
+            let mut local_transitions = vec![u32::MAX; component.len() * 256];
+            for (local, &raw) in component.iter().enumerate() {
+                let (matched, future) =
+                    filtered_state_label(tokenizer, raw, Some(active_terminals));
+                local_states.push(FlatDfaState {
+                    finalizers: matched.into_iter().map(|terminal| terminal as usize).collect(),
+                    possible_future_group_ids: future
+                        .into_iter()
+                        .map(|terminal| terminal as usize)
+                        .collect(),
+                });
+                let raw_base = raw as usize * 256;
+                let local_base = local * 256;
+                for byte in 0..256usize {
+                    let target = flat_trans[raw_base + byte];
+                    if target != u32::MAX {
+                        let mapped = raw_to_local[target as usize];
+                        if mapped == u32::MAX {
+                            return None;
+                        }
+                        local_transitions[local_base + byte] = mapped;
+                    }
+                }
+            }
+
+            let active_language = local_states
+                .iter()
+                .map(|state| {
+                    !state.finalizers.is_empty() || !state.possible_future_group_ids.is_empty()
+                })
+                .collect::<Vec<_>>();
+            for state in 0..local_states.len() {
+                let row = &mut local_transitions[state * 256..(state + 1) * 256];
+                if !active_language[state] {
+                    row.fill(u32::MAX);
+                    continue;
+                }
+                for target in row {
+                    if *target != u32::MAX && !active_language[*target as usize] {
+                        *target = u32::MAX;
+                    }
+                }
+            }
+
+            let view = TokenizerView {
+                flat_dfa: FlatDfa {
+                    states: local_states,
+                    start_state: 0,
+                    transitions: Arc::from(local_transitions),
+                },
+            };
+            let byte_to_class =
+                super::l2p::equivalence_analysis::compat::compute_byte_classes(view.dfa());
+            let local_query = (0..component.len()).collect::<Vec<_>>();
+            let local_representatives =
+                super::l2p::equivalence_analysis::state::max_length::find_state_equivalence_classes_kbounded(
+                    &view,
+                    &local_query,
+                    max_token_len,
+                    None,
+                    Some(&relevant_bytes),
+                    Some(&byte_to_class),
+                    "active_dispatch_component_local",
+                );
+            let mut representative_to_states = FxHashMap::<usize, Vec<u32>>::default();
+            for (local, representative) in local_representatives.into_iter().enumerate() {
+                representative_to_states
+                    .entry(representative)
+                    .or_default()
+                    .push(component[local]);
+            }
+            let mut classes = representative_to_states.into_values().collect::<Vec<_>>();
+            classes.sort_unstable_by_key(|states| states[0]);
+            for states in classes {
+                add_class(
+                    &mut original_to_internal,
+                    &mut representative_original_ids,
+                    &states,
+                );
+            }
+            for &raw in &component {
+                raw_to_local[raw as usize] = u32::MAX;
+            }
+        }
+        if !inactive_states.is_empty() {
+            add_class(
+                &mut original_to_internal,
+                &mut representative_original_ids,
+                &inactive_states,
+            );
+        }
+        for state in 0..num_states {
+            if original_to_internal[state] == u32::MAX {
+                add_class(
+                    &mut original_to_internal,
+                    &mut representative_original_ids,
+                    &[state as u32],
+                );
+            }
+        }
+        if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some() {
+            eprintln!(
+                "[glrmask/profile][active_dispatch_component_map] mode=component_local states={} reps={} max_token_len={} relevant_bytes={} elapsed_ms={:.3}",
+                tokenizer.num_states(),
+                representative_original_ids.len(),
+                max_token_len,
+                relevant_bytes.iter().filter(|&&active| active).count(),
+                started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        return Some(ManyToOneIdMap::from_original_to_internal_with_representatives(
+            original_to_internal,
+            representative_original_ids.len() as u32,
+            representative_original_ids,
+        ));
+    }
+
+    let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
+    let Some(components) = tokenizer.disjoint_dispatch_components() else {
+        if profile {
+            eprintln!(
+                "[glrmask/profile][inactive_dispatch_components] available=false states={} epsilon={} branches={}",
+                tokenizer.num_states(),
+                tokenizer.has_epsilon_transitions(),
+                tokenizer.initial_epsilon_branch_count(),
+            );
+        }
+        return None;
+    };
+    let num_states = tokenizer.num_states() as usize;
+    let start = tokenizer.start_state() as usize;
+    let mut classified_components = Vec::with_capacity(components.len());
+    for (component_index, states) in components.into_iter().enumerate() {
+        let active = states.iter().any(|&state| {
+            let (matched, future) = filtered_state_label(tokenizer, state, Some(active_terminals));
+            !matched.is_empty() || !future.is_empty()
+        });
+        if profile {
+            let mut observed = BitSet::new(active_terminals.len());
+            for &state in &states {
+                for terminal in tokenizer.matched_terminals_iter(state) {
+                    observed.set(terminal as usize);
+                }
+                for terminal in tokenizer.possible_future_terminals_iter(state) {
+                    observed.set(terminal as usize);
+                }
+            }
+            let observed_active = observed
+                .iter()
+                .filter(|&terminal| active_terminals.get(terminal).copied().unwrap_or(false))
+                .count();
+            eprintln!(
+                "[glrmask/profile][inactive_dispatch_component] component={} root={} states={} observed_terminals={} observed_active={} active={}",
+                component_index,
+                states[0],
+                states.len(),
+                observed.iter().count(),
+                observed_active,
+                active,
+            );
+        }
+        classified_components.push((states, active));
+    }
+
+    let mut original_to_internal = vec![u32::MAX; num_states];
+    let mut representatives = Vec::new();
+    let add_class = |original_to_internal: &mut [u32],
+                     representatives: &mut Vec<u32>,
+                     states: &[u32]| {
+        let internal = representatives.len() as u32;
+        representatives.push(states[0]);
+        for &state in states {
+            original_to_internal[state as usize] = internal;
+        }
+    };
+
+    add_class(
+        &mut original_to_internal,
+        &mut representatives,
+        &[start as u32],
+    );
+    let mut inactive_states = Vec::new();
+    for (states, active) in classified_components {
+        if active {
+            for state in states {
+                add_class(
+                    &mut original_to_internal,
+                    &mut representatives,
+                    &[state],
+                );
+            }
+        } else {
+            inactive_states.extend(states);
+        }
+    }
+    if !inactive_states.is_empty() {
+        add_class(
+            &mut original_to_internal,
+            &mut representatives,
+            &inactive_states,
+        );
+    }
+    for state in 0..num_states {
+        if original_to_internal[state] == u32::MAX {
+            add_class(
+                &mut original_to_internal,
+                &mut representatives,
+                &[state as u32],
+            );
+        }
+    }
+
+    Some(ManyToOneIdMap::from_original_to_internal_with_representatives(
+        original_to_internal,
+        representatives.len() as u32,
+        representatives,
+    ))
 }
 
 const BYTE_COLUMN_HASH_MULTIPLIER: u64 = 0x517c_c1b7_2722_0a95;
