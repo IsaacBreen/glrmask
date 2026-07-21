@@ -853,7 +853,7 @@ fn try_build_relevant_powerset_view(
         }
     } else {
         let cache_raw_target_views =
-            std::env::var_os("GLRMASK_RAW_POWERSET_CACHED_TARGET_VIEWS").is_some();
+            std::env::var_os("GLRMASK_DISABLE_RAW_POWERSET_TARGET_VIEW_CACHE").is_none();
         let scatter_raw_target_views =
             std::env::var_os("GLRMASK_RAW_POWERSET_SCATTER_TARGET_VIEWS").is_some();
         let profile_raw_target_views = cache_raw_target_views
