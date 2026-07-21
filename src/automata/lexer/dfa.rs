@@ -331,7 +331,7 @@ impl DFA {
         }
     }
 
-    pub(super) fn num_states(&self) -> usize {
+    pub(crate) fn num_states(&self) -> usize {
         self.states.len()
     }
 

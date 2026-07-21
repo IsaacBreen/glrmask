@@ -46,9 +46,8 @@ use crate::compiler::stages::id_map_and_terminal_dwa::types::{
     TerminalDwaPhaseProfile,
 };
 use crate::compiler::stages::id_map_and_terminal_dwa::synthetic_state_map::{
-    BoundedTerminalAnalysisCache, CertifiedFullToSynthesizedStateMap,
-    certify_full_to_synthesized_state_map, synthesize_bounded_terminal_expressions,
-    synthesize_terminal_expressions_for_horizon,
+    CertifiedFullToSynthesizedStateMap, certify_full_to_synthesized_state_map,
+    synthesize_bounded_terminal_expressions, synthesize_terminal_expressions_for_horizon,
 };
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::compiler::stages::mapped_artifact::{
@@ -887,6 +886,7 @@ struct SyntheticTokenizerPlan {
     partition_ids: Vec<u32>,
     residual_isolation_classes: Vec<Option<u32>>,
     changed_terminal_count: usize,
+    repeat_horizons: Arc<crate::automata::lexer::compile::VocabularyRepeatHorizonCache>,
 }
 
 fn synthetic_state_reduction_is_profitable(full_states: usize, synthesized_states: usize) -> bool {
@@ -935,66 +935,20 @@ fn plan_synthetic_tokenizer(
         return None;
     }
 
-    // A terminal that can only be shortened for the common <=64-byte
-    // partitions, but not for the vocabulary's true maximum token length,
-    // remains a large exact coordinate beside the global candidate. That shape
-    // has repeatedly made the candidate DWA slower than the mature exact path.
-    // Fail closed before building either candidate lexer. This is only a
-    // profitability gate; it cannot change the accepted language.
+    // The normal path uses exact vocabulary-relative repeat horizons. The
+    // legacy fixed 64-byte candidate remains available only as an explicitly
+    // unsafe diagnostic probe whose result must still pass full certification.
     const COMMON_PARTITION_HORIZON: usize = 64;
-    let allow_partition_only =
-        std::env::var_os("GLRMASK_ALLOW_PARTITION_ONLY_SYNTHETIC").is_some();
     let aggressive_partition_horizon =
         std::env::var_os("GLRMASK_AGGRESSIVE_PARTITION_HORIZON").is_some();
-    let max_token_len = vocab.entries.values().map(Vec::len).max().unwrap_or(0);
-    let mut global_analysis = BoundedTerminalAnalysisCache::new(max_token_len);
-    let mut local_analysis = BoundedTerminalAnalysisCache::new(COMMON_PARTITION_HORIZON);
-    let mut changed_terminal_ids = Vec::new();
-    let mut first_partition_only_terminal = None;
-    for (terminal_index, terminal) in grammar.terminals.iter().enumerate() {
-        let mut inspect = |expr: &Expr| {
-            (
-                global_analysis.is_pathological_candidate(expr),
-                max_token_len > COMMON_PARTITION_HORIZON
-                    && local_analysis.has_reducible_repeat(expr),
-            )
-        };
-        let (globally_changed, locally_reducible) = match terminal {
-            Terminal::Literal { .. } | Terminal::SpecialToken { .. } => (false, false),
-            Terminal::Pattern { pattern, utf8, .. } => inspect(&parse_regex(pattern, *utf8)),
-            Terminal::Expr { expr, .. } => inspect(expr),
-        };
-        if globally_changed || (aggressive_partition_horizon && locally_reducible) {
-            changed_terminal_ids.push(terminal_index as u32);
-        } else if locally_reducible && first_partition_only_terminal.is_none() {
-            first_partition_only_terminal = Some(terminal_index as u32);
-        }
-    }
-    if changed_terminal_ids.is_empty() {
-        return None;
-    }
-    if let Some(extra_terminal) = first_partition_only_terminal
-        && !allow_partition_only
-    {
-        if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some() {
-            eprintln!(
-                "[glrmask/profile][tokenizer] synthetic_plan_skipped reason=partition_only_large_terminal terminal={} global_horizon={} local_horizon={}",
-                extra_terminal,
-                max_token_len,
-                COMMON_PARTITION_HORIZON,
-            );
-        }
-        return None;
-    }
-
-    // Only now allocate the full/synthesized expression domains. Rejected
-    // candidates above perform a read-only tree walk and leave the ordinary
-    // exact compiler with the same memory state as synthesis-disabled mode.
     let full_expressions = grammar
         .terminals
         .iter()
         .map(terminal_expr)
         .collect::<Vec<_>>();
+    let repeat_horizons = Arc::new(
+        crate::automata::lexer::compile::VocabularyRepeatHorizonCache::new(),
+    );
     let synthesized = if aggressive_partition_horizon {
         // Experimental candidate generation may shorten terminals that are
         // reducible only at the common partition horizon. The resulting
@@ -1006,9 +960,16 @@ fn plan_synthetic_tokenizer(
             COMMON_PARTITION_HORIZON,
         )
     } else {
-        synthesize_bounded_terminal_expressions(&full_expressions, vocab)
+        synthesize_bounded_terminal_expressions(
+            &full_expressions,
+            vocab,
+            repeat_horizons.as_ref(),
+        )
     };
-    debug_assert_eq!(synthesized.changed_terminals, changed_terminal_ids);
+    let changed_terminal_ids = synthesized.changed_terminals.clone();
+    if changed_terminal_ids.is_empty() {
+        return None;
+    }
     let changed_terminal_count = changed_terminal_ids.len();
 
     let mut residual_isolation_classes = lexer_residual_isolation_classes(grammar);
@@ -1034,6 +995,7 @@ fn plan_synthetic_tokenizer(
         partition_ids,
         residual_isolation_classes,
         changed_terminal_count,
+        repeat_horizons,
     })
 }
 
@@ -1121,6 +1083,8 @@ fn build_structural_tokenizer_pair(
             let pair = compile_terminal_expression_pair_with_structural_map(
                 &full_expressions[0],
                 &synthesized_expressions[0],
+                vocab,
+                plan.repeat_horizons.as_ref(),
                 max_token_len,
                 &relevant_bytes,
             )?;
@@ -1145,6 +1109,8 @@ fn build_structural_tokenizer_pair(
                 &plan.partition_ids,
                 &plan.residual_isolation_classes,
                 adaptive,
+                vocab,
+                plan.repeat_horizons.as_ref(),
                 max_token_len,
                 &relevant_bytes,
             )?;

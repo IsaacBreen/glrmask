@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use crate::Vocab;
+use crate::automata::lexer::compile::VocabularyRepeatHorizonCache;
 use crate::automata::lexer::Lexer;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::regex::Expr;
@@ -691,7 +692,14 @@ fn synthesize_expression(expr: &Expr, max_token_len: usize) -> (Expr, bool) {
                         crossed_per_token.saturating_mul(STENCIL_TOKEN_NEIGHBORHOODS),
                     )
                     .saturating_add(1);
-                if max > stencil_max {
+                if max > stencil_max
+                    && estimated_repeat_reduction_is_material(
+                        expr,
+                        &child,
+                        max,
+                        stencil_max,
+                    )
+                {
                     changed = true;
                     stencil_max
                 } else {
@@ -761,6 +769,200 @@ fn synthesize_expression(expr: &Expr, max_token_len: usize) -> (Expr, bool) {
     }
 }
 
+/// Vocabulary-relative counterpart of `synthesize_expression`.
+///
+/// For each bounded repeat, use the exact maximum number of repeat boundaries
+/// observable within a suffix of one actual vocabulary token. The traditional
+/// byte-length/minimum-width estimate remains the fail-closed fallback when the
+/// translation automaton exceeds its proof budget.
+fn synthesize_expression_for_vocab(
+    expr: &Expr,
+    max_token_len: usize,
+    vocab: &Vocab,
+    horizons: &VocabularyRepeatHorizonCache,
+) -> (Expr, bool) {
+    match expr {
+        Expr::Repeat { expr: body, min, max } => {
+            let (child, child_changed) =
+                synthesize_expression_for_vocab(body, max_token_len, vocab, horizons);
+            let child_min = minimum_consumed_bytes(&child);
+            let mut changed = child_changed;
+            let synthesized_max = max.map(|max| {
+                if child_min == 0 {
+                    return max;
+                }
+                let fallback = max_token_len.div_ceil(child_min).saturating_add(1);
+                let crossed_per_token = horizons.horizon_for_expr(body, vocab).unwrap_or(fallback);
+                let stencil_max = min
+                    .saturating_add(
+                        crossed_per_token.saturating_mul(STENCIL_TOKEN_NEIGHBORHOODS),
+                    )
+                    .saturating_add(1);
+                if max > stencil_max
+                    && estimated_repeat_reduction_is_material(
+                        body,
+                        &child,
+                        max,
+                        stencil_max,
+                    )
+                {
+                    changed = true;
+                    stencil_max
+                } else {
+                    max
+                }
+            });
+            (
+                Expr::Repeat {
+                    expr: Box::new(child),
+                    min: *min,
+                    max: synthesized_max,
+                },
+                changed,
+            )
+        }
+        Expr::Intersect { expr, intersect } => {
+            let (expr, left_changed) =
+                synthesize_expression_for_vocab(expr, max_token_len, vocab, horizons);
+            let (intersect, right_changed) =
+                synthesize_expression_for_vocab(intersect, max_token_len, vocab, horizons);
+            (
+                Expr::Intersect {
+                    expr: Box::new(expr),
+                    intersect: Box::new(intersect),
+                },
+                left_changed || right_changed,
+            )
+        }
+        Expr::Seq(parts) => {
+            let mut changed = false;
+            let parts = parts
+                .iter()
+                .map(|part| {
+                    let (part, part_changed) =
+                        synthesize_expression_for_vocab(part, max_token_len, vocab, horizons);
+                    changed |= part_changed;
+                    part
+                })
+                .collect();
+            (Expr::Seq(parts), changed)
+        }
+        Expr::Choice(options) => {
+            let mut changed = false;
+            let options = options
+                .iter()
+                .map(|option| {
+                    let (option, option_changed) =
+                        synthesize_expression_for_vocab(option, max_token_len, vocab, horizons);
+                    changed |= option_changed;
+                    option
+                })
+                .collect();
+            (Expr::Choice(options), changed)
+        }
+        Expr::Exclude { expr, exclude } => {
+            let (expr, left_changed) =
+                synthesize_expression_for_vocab(expr, max_token_len, vocab, horizons);
+            let (exclude, right_changed) =
+                synthesize_expression_for_vocab(exclude, max_token_len, vocab, horizons);
+            (
+                Expr::Exclude {
+                    expr: Box::new(expr),
+                    exclude: Box::new(exclude),
+                },
+                left_changed || right_changed,
+            )
+        }
+        Expr::Shared(inner) => {
+            let (inner, changed) =
+                synthesize_expression_for_vocab(inner, max_token_len, vocab, horizons);
+            (Expr::Shared(std::sync::Arc::new(inner)), changed)
+        }
+        leaf => (leaf.clone(), false),
+    }
+}
+
+fn estimated_expression_state_volume_inner(
+    expr: &Expr,
+    shared_cache: &mut FxHashMap<usize, u128>,
+) -> u128 {
+    match expr {
+        Expr::U8Seq(bytes) => bytes.len().saturating_add(1) as u128,
+        Expr::U8Class(_) => 2,
+        Expr::Dfa(dfa) => dfa.num_states().max(1) as u128,
+        Expr::Epsilon => 1,
+        Expr::Shared(inner) => {
+            let key = Arc::as_ptr(inner) as usize;
+            if let Some(&cached) = shared_cache.get(&key) {
+                return cached;
+            }
+            let estimate = estimated_expression_state_volume_inner(inner, shared_cache);
+            shared_cache.insert(key, estimate);
+            estimate
+        }
+        Expr::Seq(parts) | Expr::Choice(parts) => parts.iter().fold(1u128, |total, part| {
+            total.saturating_add(estimated_expression_state_volume_inner(part, shared_cache))
+        }),
+        Expr::Repeat { expr, max, .. } => {
+            let body = estimated_expression_state_volume_inner(expr, shared_cache);
+            let copies = max.map_or(2u128, |max| max.saturating_add(1) as u128);
+            1u128.saturating_add(body.saturating_mul(copies))
+        }
+        Expr::Intersect { expr, intersect } => {
+            let left = estimated_expression_state_volume_inner(expr, shared_cache);
+            let right = estimated_expression_state_volume_inner(intersect, shared_cache);
+            left.saturating_mul(right)
+        }
+        Expr::Exclude { expr, exclude } => {
+            let base = estimated_expression_state_volume_inner(expr, shared_cache);
+            let excluded = estimated_expression_state_volume_inner(exclude, shared_cache);
+            base.saturating_mul(excluded)
+        }
+    }
+}
+
+fn estimated_expression_state_volume(expr: &Expr) -> u128 {
+    estimated_expression_state_volume_inner(expr, &mut FxHashMap::default())
+}
+
+fn estimated_repeat_reduction_is_material(
+    full_body: &Expr,
+    synthesized_body: &Expr,
+    full_max: usize,
+    synthesized_max: usize,
+) -> bool {
+    const MIN_LOCAL_STATE_SAVING: u128 = 64;
+    const MAX_SYNTHESIZED_RATIO_NUMERATOR: u128 = 3;
+    const MAX_SYNTHESIZED_RATIO_DENOMINATOR: u128 = 4;
+
+    let full = estimated_expression_state_volume(full_body)
+        .saturating_mul(full_max.saturating_add(1) as u128);
+    let synthesized = estimated_expression_state_volume(synthesized_body)
+        .saturating_mul(synthesized_max.saturating_add(1) as u128);
+    full.saturating_sub(synthesized) >= MIN_LOCAL_STATE_SAVING
+        && synthesized.saturating_mul(MAX_SYNTHESIZED_RATIO_DENOMINATOR)
+            <= full.saturating_mul(MAX_SYNTHESIZED_RATIO_NUMERATOR)
+}
+
+fn estimated_synthesis_reduction_is_profitable(full: &Expr, synthesized: &Expr) -> bool {
+    const MIN_ESTIMATED_FULL_STATES: u128 = 8_192;
+    const MIN_ESTIMATED_STATE_SAVING: u128 = 4_096;
+    const MAX_SYNTHESIZED_RATIO_NUMERATOR: u128 = 3;
+    const MAX_SYNTHESIZED_RATIO_DENOMINATOR: u128 = 4;
+
+    let full_estimate = estimated_expression_state_volume(full);
+    let synthesized_estimate = estimated_expression_state_volume(synthesized);
+    full_estimate >= MIN_ESTIMATED_FULL_STATES
+        && full_estimate.saturating_sub(synthesized_estimate) >= MIN_ESTIMATED_STATE_SAVING
+        && synthesized_estimate.saturating_mul(MAX_SYNTHESIZED_RATIO_DENOMINATOR)
+            <= full_estimate.saturating_mul(MAX_SYNTHESIZED_RATIO_NUMERATOR)
+}
+
+fn estimated_expression_is_large_enough_for_synthesis(expr: &Expr) -> bool {
+    const MIN_ESTIMATED_FULL_STATES: u128 = 8_192;
+    estimated_expression_state_volume(expr) >= MIN_ESTIMATED_FULL_STATES
+}
+
 /// Build a finite-token-horizon stencil without applying the global
 /// pathological-candidate threshold. This is used for partition-local
 /// analysis lexers: a terminal whose exact bound is observable by the longest
@@ -791,6 +993,7 @@ pub(crate) fn synthesize_terminal_expressions_for_horizon(
 pub(crate) fn synthesize_bounded_terminal_expressions(
     expressions: &[Expr],
     vocab: &Vocab,
+    horizons: &VocabularyRepeatHorizonCache,
 ) -> SynthesizedTerminalExpressions {
     let max_token_len = vocab.entries.values().map(Vec::len).max().unwrap_or(0);
     let mut changed_terminals = Vec::new();
@@ -798,16 +1001,30 @@ pub(crate) fn synthesize_bounded_terminal_expressions(
         .iter()
         .enumerate()
         .map(|(terminal, expression)| {
-            let stats = reducible_repeat_stats(expression, max_token_len);
-            let (synthesized, changed) = if stats.is_pathological_candidate() {
-                synthesize_expression(expression, max_token_len)
-            } else {
-                (expression.clone(), false)
-            };
-            if changed {
+            if !estimated_expression_is_large_enough_for_synthesis(expression) {
+                return expression.clone();
+            }
+            let (candidate, changed) =
+                synthesize_expression_for_vocab(expression, max_token_len, vocab, horizons);
+            let profitable = changed
+                && estimated_synthesis_reduction_is_profitable(expression, &candidate);
+            if std::env::var_os("GLRMASK_PROFILE_SYNTHETIC_PLAN").is_some() && changed {
+                eprintln!(
+                    "[glrmask/profile][synthetic_candidate] terminal={} selected={} full_estimate={} synthesized_estimate={}",
+                    terminal,
+                    profitable,
+                    estimated_expression_state_volume(expression),
+                    estimated_expression_state_volume(&candidate),
+                );
+            }
+            if profitable {
                 changed_terminals.push(terminal as u32);
             }
-            synthesized.optimize()
+            if profitable {
+                candidate
+            } else {
+                expression.clone()
+            }
         })
         .collect();
     SynthesizedTerminalExpressions {
@@ -1133,7 +1350,7 @@ mod tests {
     }
 
     #[test]
-    fn expression_synthesis_uses_child_minimum_width_and_preserves_small_bounds() {
+    fn expression_synthesis_uses_vocab_displacement_and_preserves_small_bounds() {
         let expressions = vec![
             Expr::Repeat {
                 expr: Box::new(Expr::U8Seq(b"word ".to_vec())),
@@ -1147,16 +1364,19 @@ mod tests {
             },
         ];
         let vocab = Vocab::new(vec![(0, b"0123456789".to_vec())]);
-        let synthesized = synthesize_bounded_terminal_expressions(&expressions, &vocab);
+        let horizons = VocabularyRepeatHorizonCache::new();
+        let synthesized =
+            synthesize_bounded_terminal_expressions(&expressions, &vocab, &horizons);
 
         assert_eq!(synthesized.changed_terminals, vec![0]);
         let Expr::Repeat { max, .. } = &synthesized.expressions[0] else {
             panic!("expected repeat");
         };
-        // ceil(10 / 5) + 1 = 3 crossed repetitions; retain one full
-        // token-width neighbourhood plus one boundary state. Cross-component
-        // synchronization is handled by structural tuple materialization.
-        assert_eq!(*max, Some(4));
+        // No vocabulary-token suffix can complete `"word "`, so the repeat
+        // counter has zero observable displacement. Retain one canonical
+        // interior layer; cross-component synchronization is handled by
+        // structural tuple materialization.
+        assert_eq!(*max, Some(1));
         assert_eq!(synthesized.expressions[1], expressions[1]);
     }
 
