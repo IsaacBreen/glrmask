@@ -404,11 +404,16 @@ fn l2p_nfa_analysis_view_policy() -> L2pNfaAnalysisViewPolicy {
 
 #[inline]
 fn l2p_nfa_relevant_powerset_max_states() -> usize {
+    // Keep a narrow allowance above 32K for projected powersets that only
+    // slightly overflow the historical cap. This admits useful ~35K views
+    // without selecting the 41K+ views whose larger downstream state domain
+    // is slower than the bounded fallback.
+    const DEFAULT_MAX_STATES: usize = 36_864;
     std::env::var("GLRMASK_L2P_NFA_RELEVANT_POWERSET_MAX_STATES")
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|&value| value > 0)
-        .unwrap_or(32_768)
+        .unwrap_or(DEFAULT_MAX_STATES)
 }
 
 #[inline]
