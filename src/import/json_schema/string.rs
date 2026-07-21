@@ -2504,9 +2504,12 @@ fn cheap_pattern_length_bound_body_regex(
         // bound rather than turning synthesis into a build-time regression.
         // Callers that require the exact envelope can raise the complexity
         // limit explicitly.
+        let force_exact_pattern_max_length =
+            std::env::var_os("GLRMASK_FORCE_EXACT_PATTERN_MAX_LENGTH").is_some();
         if preserve_pattern_max_length
-            && pattern_max_length_complexity_score(&pattern, max)
-                <= pattern_max_length_complexity_limit
+            && (force_exact_pattern_max_length
+                || pattern_max_length_complexity_score(&pattern, max)
+                    <= pattern_max_length_complexity_limit)
         {
             return Some(bounded_json_string_body_regex(string_char_regex, min, Some(max)));
         }

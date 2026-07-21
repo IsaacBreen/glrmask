@@ -48,6 +48,7 @@ use crate::compiler::stages::id_map_and_terminal_dwa::types::{
 use crate::compiler::stages::id_map_and_terminal_dwa::synthetic_state_map::{
     BoundedTerminalAnalysisCache, CertifiedFullToSynthesizedStateMap,
     certify_full_to_synthesized_state_map, synthesize_bounded_terminal_expressions,
+    synthesize_terminal_expressions_for_horizon,
 };
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::compiler::stages::mapped_artifact::{
@@ -941,6 +942,10 @@ fn plan_synthetic_tokenizer(
     // Fail closed before building either candidate lexer. This is only a
     // profitability gate; it cannot change the accepted language.
     const COMMON_PARTITION_HORIZON: usize = 64;
+    let allow_partition_only =
+        std::env::var_os("GLRMASK_ALLOW_PARTITION_ONLY_SYNTHETIC").is_some();
+    let aggressive_partition_horizon =
+        std::env::var_os("GLRMASK_AGGRESSIVE_PARTITION_HORIZON").is_some();
     let max_token_len = vocab.entries.values().map(Vec::len).max().unwrap_or(0);
     let mut global_analysis = BoundedTerminalAnalysisCache::new(max_token_len);
     let mut local_analysis = BoundedTerminalAnalysisCache::new(COMMON_PARTITION_HORIZON);
@@ -959,7 +964,7 @@ fn plan_synthetic_tokenizer(
             Terminal::Pattern { pattern, utf8, .. } => inspect(&parse_regex(pattern, *utf8)),
             Terminal::Expr { expr, .. } => inspect(expr),
         };
-        if globally_changed {
+        if globally_changed || (aggressive_partition_horizon && locally_reducible) {
             changed_terminal_ids.push(terminal_index as u32);
         } else if locally_reducible && first_partition_only_terminal.is_none() {
             first_partition_only_terminal = Some(terminal_index as u32);
@@ -969,7 +974,7 @@ fn plan_synthetic_tokenizer(
         return None;
     }
     if let Some(extra_terminal) = first_partition_only_terminal
-        && std::env::var_os("GLRMASK_ALLOW_PARTITION_ONLY_SYNTHETIC").is_none()
+        && !allow_partition_only
     {
         if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some() {
             eprintln!(
@@ -990,7 +995,19 @@ fn plan_synthetic_tokenizer(
         .iter()
         .map(terminal_expr)
         .collect::<Vec<_>>();
-    let synthesized = synthesize_bounded_terminal_expressions(&full_expressions, vocab);
+    let synthesized = if aggressive_partition_horizon {
+        // Experimental candidate generation may shorten terminals that are
+        // reducible only at the common partition horizon. The resulting
+        // tokenizer is never trusted directly: the full-vocabulary
+        // certification below remains authoritative and rejects any candidate
+        // whose shortened states are observable by a longer token.
+        synthesize_terminal_expressions_for_horizon(
+            &full_expressions,
+            COMMON_PARTITION_HORIZON,
+        )
+    } else {
+        synthesize_bounded_terminal_expressions(&full_expressions, vocab)
+    };
     debug_assert_eq!(synthesized.changed_terminals, changed_terminal_ids);
     let changed_terminal_count = changed_terminal_ids.len();
 

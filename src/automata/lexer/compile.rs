@@ -4722,10 +4722,35 @@ pub(crate) fn compile_terminal_expression_pair_with_structural_map(
                     relevant_bytes,
                 )
             };
+            let unsafe_override_horizon = std::env::var(
+                "GLRMASK_UNSAFE_STRUCTURAL_MAP_HORIZON",
+            )
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|&horizon| horizon < max_token_len);
+            let override_layered_mapping = if used_homomorphism_mapping
+                || layered_mapping.is_some()
+            {
+                None
+            } else {
+                unsafe_override_horizon.and_then(|horizon| {
+                    direct_bounded_suffix_state_map(
+                        full_expr,
+                        synthesized_expr,
+                        &full,
+                        &synthesized,
+                        horizon,
+                        relevant_bytes,
+                    )
+                })
+            };
             let used_layered_mapping = layered_mapping.is_some();
+            let used_override_layered_mapping = override_layered_mapping.is_some();
             let mapping = if let Some(mapping) = homomorphism_mapping {
                 Some(ProductComponentStateMap::Fixed(mapping))
             } else if let Some(mapping) = layered_mapping {
+                Some(ProductComponentStateMap::Layered(mapping))
+            } else if let Some(mapping) = override_layered_mapping {
                 Some(ProductComponentStateMap::Layered(mapping))
             } else {
                 exact_kbounded_single_group_state_map(
@@ -4753,6 +4778,8 @@ pub(crate) fn compile_terminal_expression_pair_with_structural_map(
                         "deterministic_homomorphism"
                     } else if used_layered_mapping {
                         "layered_bounded_suffix"
+                    } else if used_override_layered_mapping {
+                        "UNSAFE_layered_bounded_suffix_override"
                     } else {
                         "moore"
                     },
