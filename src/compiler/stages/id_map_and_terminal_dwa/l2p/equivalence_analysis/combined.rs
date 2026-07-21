@@ -42,6 +42,15 @@ fn common_atom_preclass_strict_reference_enabled(partition_label: &str) -> bool 
         .is_some_and(|value| value == "1" || value == partition_label)
 }
 
+fn common_atom_preclass_enabled() -> bool {
+    std::env::var("GLRMASK_ENABLE_L2P_COMMON_ATOM_PRECLASS")
+        .map(|value| {
+            let trimmed = value.trim();
+            trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or(false)
+}
+
 fn deduplicate_tokens_by_byte_class<'a, S: AsRef<[u8]>>(
     tokens: &'a [S],
     byte_to_class: &[u8; 256],
@@ -2003,13 +2012,14 @@ fn analyze_equivalences_impl(
         }
         let (precomputed_vocab, state_tokens, vocab_equiv_ms) = if vocab_first {
             let vocab_equiv_started_at = Instant::now();
-            let precomputed_vocab = if let Some(preclasses) =
+            let common_atom_preclasses = common_atom_preclass_enabled().then(|| {
                 common_atom_preclass::try_find_common_atom_preclasses(
                     tokenizer,
                     active_groups,
                     &dedup.representative_token_bytes,
                 )
-            {
+            });
+            let precomputed_vocab = if let Some(preclasses) = common_atom_preclasses.flatten() {
                 let representative_tokens =
                     preclasses.representative_tokens(&dedup.representative_token_bytes);
                 let exact_started_at = Instant::now();
