@@ -519,8 +519,10 @@ fn split_top_level_group_ops(expr: &Expr) -> (Expr, Vec<Expr>, Vec<Expr>) {
 /// Expose one intersection nested under a common sequence shell. This is an
 /// exact distributive rewrite:
 ///
-///     prefix · (left ∩ right) · suffix
-///       = (prefix · left · suffix) ∩ (prefix · right · suffix)
+/// ```text
+/// prefix · (left ∩ right) · suffix
+///   = (prefix · left · suffix) ∩ (prefix · right · suffix)
+/// ```
 ///
 /// Keeping the operands visible lets structural full/stencil compilation map
 /// their residual coordinates independently and materialize missing correlated
