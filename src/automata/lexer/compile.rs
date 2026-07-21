@@ -3991,6 +3991,40 @@ fn set_single_group_futures_from_class_graph(
 ) {
     let states = dfa.num_states();
     debug_assert_eq!(states, class_transitions.len());
+
+    // Reachable-state discovery assigns a state ID when a transition first
+    // encounters it. For acyclic products, every edge therefore points to a
+    // larger ID and the numbering is already a topological order. Compute the
+    // strict future bit directly in reverse order instead of materializing the
+    // full predecessor graph. Cyclic products fail the checked condition and
+    // use the general reverse-reachability implementation below.
+    let forward_topological = class_transitions.iter().enumerate().all(|(source, transitions)| {
+        transitions
+            .iter()
+            .all(|&(_, target)| target as usize > source)
+    });
+    if forward_topological {
+        let mut can_reach_final = vec![false; states];
+        for source in (0..states).rev() {
+            let has_future = class_transitions[source]
+                .iter()
+                .any(|&(_, target)| can_reach_final[target as usize]);
+            can_reach_final[source] = dfa.finalizers(source as u32).contains(0) || has_future;
+            let mut future = BitSet::new(1);
+            if has_future {
+                future.set(0);
+            }
+            dfa.set_possible_future_group_ids(source as u32, future);
+        }
+        if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some() {
+            eprintln!(
+                "[glrmask/profile][tokenizer] single_group_futures path=reverse_topological states={}",
+                states,
+            );
+        }
+        return;
+    }
+
     let mut predecessor_counts = vec![0u32; states];
     let mut seen_target_epoch = vec![0u32; states];
     let mut epoch = 1u32;
