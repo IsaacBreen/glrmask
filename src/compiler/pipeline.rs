@@ -18,9 +18,9 @@ use crate::automata::lexer::compile::{
     build_regex_partitioned_with_profile_labels_and_residual_isolation,
     build_regex_partitioned_with_residual_isolation,
     build_regex_with_profile_labels,
+    compile_partitioned_expression_pair_with_structural_map,
     compile_terminal_expression_pair_with_structural_map,
     factor_regex_expr,
-    prepare_partitioned_expression_pair_with_structural_map,
 };
 use crate::automata::lexer::regex::parse_regex;
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -1109,32 +1109,6 @@ fn build_structural_tokenizer_pair(
     Tokenizer,
     CertifiedFullToSynthesizedStateMap,
 )> {
-    let prepared = prepare_structural_tokenizer_pair(
-        grammar,
-        plan,
-        vocab,
-        adaptive_override,
-    )?;
-    let full = (prepared.finish)()?;
-    Some((prepared.synthesized, full.0, full.1))
-}
-
-type StructuralRuntimeCompletion = Box<
-    dyn FnOnce() -> Option<(Tokenizer, CertifiedFullToSynthesizedStateMap)> + Send,
->;
-
-struct PreparedStructuralTokenizerPair {
-    synthesized: Tokenizer,
-    full_state_count: usize,
-    finish: StructuralRuntimeCompletion,
-}
-
-fn prepare_structural_tokenizer_pair(
-    grammar: &GrammarDef,
-    plan: &SyntheticTokenizerPlan,
-    vocab: &Vocab,
-    adaptive_override: Option<bool>,
-) -> Option<PreparedStructuralTokenizerPair> {
     // Importer-split residual terminals can overlap terminals in another
     // parser construction family. Their compiler contract deliberately
     // requires grammar-wide terminal observation, while the structural pair
@@ -1164,11 +1138,12 @@ fn prepare_structural_tokenizer_pair(
     relevant_bytes.sort_unstable();
     relevant_bytes.dedup();
 
-    let expression_count = full_expressions.len() as u32;
-    let synthesized_exprs = Arc::from(synthesized_expressions.clone().into_boxed_slice());
-    let full_exprs = Arc::from(full_expressions.clone().into_boxed_slice());
-
-    if full_expressions.len() == 1 {
+    let (
+        synthesized_regex,
+        full_regex,
+        full_to_synthesized,
+    ) =
+        if full_expressions.len() == 1 {
             let pair = compile_terminal_expression_pair_with_structural_map(
                 &full_expressions[0],
                 &synthesized_expressions[0],
@@ -1177,37 +1152,12 @@ fn prepare_structural_tokenizer_pair(
                 max_token_len,
                 &relevant_bytes,
             )?;
-            let mut full = pair.full.into_tokenizer(
-                expression_count,
-                Some(Arc::clone(&full_exprs)),
-            );
-            let full_state_count = full.num_states() as usize;
-            let mut synthesized = pair.synthesized.into_tokenizer(
-                expression_count,
-                Some(Arc::clone(&synthesized_exprs)),
-            );
-            let synthesized_nullable =
-                synthesized.isolate_start_state_and_drain_nullable_terminals();
-            if !synthesized_nullable.is_empty() {
-                return None;
-            }
-            let full_to_synthesized = pair.full_to_synthesized;
-            return Some(PreparedStructuralTokenizerPair {
-                synthesized,
-                full_state_count,
-                finish: Box::new(move || {
-                    let full_nullable =
-                        full.isolate_start_state_and_drain_nullable_terminals();
-                    full_nullable.is_empty().then_some((
-                        full,
-                        CertifiedFullToSynthesizedStateMap {
-                            full_to_synthesized,
-                        },
-                    ))
-                }),
-            });
-        }
-
+            (
+                pair.synthesized,
+                pair.full,
+                pair.full_to_synthesized,
+            )
+        } else {
             let labels = grammar
                 .terminals
                 .iter()
@@ -1216,7 +1166,7 @@ fn prepare_structural_tokenizer_pair(
                 .collect::<Vec<_>>();
             let adaptive = adaptive_override
                 .unwrap_or_else(|| env_flag_enabled_by_default("GLRMASK_LEXER_ADAPTIVE"));
-            let prepared = prepare_partitioned_expression_pair_with_structural_map(
+            let pair = compile_partitioned_expression_pair_with_structural_map(
                 &full_expressions,
                 &synthesized_expressions,
                 Some(&labels),
@@ -1228,31 +1178,34 @@ fn prepare_structural_tokenizer_pair(
                 max_token_len,
                 &relevant_bytes,
             )?;
-            let full_state_count = prepared.full_state_count();
-            let (synthesized_regex, finish_partitioned) = prepared.into_parts();
-            let mut synthesized = synthesized_regex.into_tokenizer(
+            (
+                pair.synthesized,
+                pair.full,
+                pair.full_to_synthesized,
+            )
+        };
+
+    let expression_count = full_expressions.len() as u32;
+    let mut synthesized = synthesized_regex.into_tokenizer(
         expression_count,
-        Some(synthesized_exprs),
+        Some(Arc::from(synthesized_expressions.into_boxed_slice())),
+    );
+    let mut full = full_regex.into_tokenizer(
+        expression_count,
+        Some(Arc::from(full_expressions.into_boxed_slice())),
     );
     let synthesized_nullable = synthesized.isolate_start_state_and_drain_nullable_terminals();
-    if !synthesized_nullable.is_empty() {
+    let full_nullable = full.isolate_start_state_and_drain_nullable_terminals();
+    if !synthesized_nullable.is_empty() || !full_nullable.is_empty() {
         return None;
     }
-    Some(PreparedStructuralTokenizerPair {
+    Some((
         synthesized,
-        full_state_count,
-        finish: Box::new(move || {
-            let (full_regex, full_to_synthesized) = finish_partitioned()?;
-            let mut full = full_regex.into_tokenizer(expression_count, Some(full_exprs));
-            let full_nullable = full.isolate_start_state_and_drain_nullable_terminals();
-            full_nullable.is_empty().then_some((
-                full,
-                CertifiedFullToSynthesizedStateMap {
-                    full_to_synthesized,
-                },
-            ))
-        }),
-    })
+        full,
+        CertifiedFullToSynthesizedStateMap {
+            full_to_synthesized,
+        },
+    ))
 }
 
 fn collect_special_token_terminals(grammar: &GrammarDef) -> Vec<SpecialTokenTerminal> {
@@ -1559,13 +1512,6 @@ struct CompileDagResult {
     templates_finished_ms: f64,
     terminal_run_collapse_ms: f64,
     prebuilt_parser_dwa: Option<(MappedParserDwa, f64, f64, f64)>,
-}
-
-struct DeferredRuntimeTokenizerResult {
-    tokenizer: Tokenizer,
-    state_map: CertifiedFullToSynthesizedStateMap,
-    assembly_ms: f64,
-    finished_ms: f64,
 }
 
 fn build_parser_dwa_for_terminal_family(
@@ -2115,14 +2061,12 @@ fn compile_prepared_with_profile_and_table_construction(
         let parser_state = Mutex::new(ParserDagJoinState::default());
         let compile_dag_result = Mutex::new(None);
         let cpm_result = Mutex::new(None);
-        let deferred_runtime_result = Mutex::new(None);
 
         rayon::scope(|scope| {
             let terminal_state_ref = &terminal_state;
             let parser_state_ref = &parser_state;
             let compile_dag_result_ref = &compile_dag_result;
             let cpm_result_ref = &cpm_result;
-            let deferred_runtime_result_ref = &deferred_runtime_result;
             let prepared_grammar_ref = &prepared_grammar;
             let synthetic_tokenizer_plan_ref = synthetic_tokenizer_plan.as_ref();
             let analysis_started_for_tokenizer = analysis_started_at.clone();
@@ -2137,8 +2081,8 @@ fn compile_prepared_with_profile_and_table_construction(
                     full_to_synthesized_state_map,
                     synthetic_certification_ms,
                 ) = if let Some(plan) = synthetic_tokenizer_plan_ref {
-                    if let Some(prepared) =
-                        prepare_structural_tokenizer_pair(
+                    if let Some((synthesized, full, certified)) =
+                        build_structural_tokenizer_pair(
                             prepared_grammar_ref,
                             plan,
                             vocab,
@@ -2146,50 +2090,27 @@ fn compile_prepared_with_profile_and_table_construction(
                         )
                     {
                         let profitable = structural_state_reduction_is_profitable(
-                            prepared.full_state_count,
-                            prepared.synthesized.num_states() as usize,
+                            full.num_states() as usize,
+                            synthesized.num_states() as usize,
                         );
                         if profitable {
-                            let PreparedStructuralTokenizerPair {
-                                synthesized,
-                                finish,
-                                ..
-                            } = prepared;
-                            let compile_started_for_runtime =
-                                compile_started_for_tokenizer.clone();
-                            scope.spawn(move |_| {
-                                let assembly_started_at = Instant::now();
-                                let (tokenizer, state_map) = finish().expect(
-                                    "prepared structural runtime assembly must remain valid",
-                                );
-                                let assembly_ms = elapsed_ms(assembly_started_at);
-                                let finished_ms = elapsed_ms(compile_started_for_runtime);
-                                *deferred_runtime_result_ref
-                                    .lock()
-                                    .expect("deferred runtime tokenizer result poisoned") =
-                                    Some(DeferredRuntimeTokenizerResult {
-                                        tokenizer,
-                                        state_map,
-                                        assembly_ms,
-                                        finished_ms,
-                                    });
-                            });
                             (
                                 synthesized,
-                                None,
-                                None,
+                                Some(full),
+                                Some(certified),
                                 0.0,
                             )
                         } else {
                             if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some() {
                                 eprintln!(
                                     "[glrmask/profile][tokenizer] synthetic_certification_skipped reason=insufficient_state_reduction path=structural_product full_states={} synthesized_states={} absolute_saving={}",
-                                    prepared.full_state_count,
-                                    prepared.synthesized.num_states(),
-                                    prepared.full_state_count.saturating_sub(prepared.synthesized.num_states() as usize),
+                                    full.num_states(),
+                                    synthesized.num_states(),
+                                    full.num_states().saturating_sub(synthesized.num_states()),
                                 );
                             }
-                            drop(prepared);
+                            drop(synthesized);
+                            drop(full);
                             (
                                 build_ordinary_compile_tokenizer(
                                     prepared_grammar_ref,
@@ -2587,18 +2508,14 @@ fn compile_prepared_with_profile_and_table_construction(
             });
         });
 
-        let deferred_runtime_result = deferred_runtime_result
-            .into_inner()
-            .expect("deferred runtime tokenizer result poisoned");
-
         let (cpm_result, possible_matches_started_ms, possible_matches_finished_ms) = cpm_result
             .into_inner()
             .expect("possible-matches result slot poisoned")
             .expect("possible-matches task did not complete");
         let CompileDagResult {
             tokenizer,
-            mut runtime_tokenizer,
-            mut full_to_synthesized_state_map,
+            runtime_tokenizer,
+            full_to_synthesized_state_map,
             synthetic_candidate_terminals,
             synthetic_certification_ms,
             compile_tokenizer_states,
@@ -2635,23 +2552,6 @@ fn compile_prepared_with_profile_and_table_construction(
             .into_inner()
             .expect("compile DAG result slot poisoned")
             .expect("compile DAG did not produce a result");
-        if let Some(deferred) = deferred_runtime_result {
-            assert!(
-                runtime_tokenizer.is_none() && full_to_synthesized_state_map.is_none(),
-                "deferred structural runtime result must be the sole runtime tokenizer source",
-            );
-            if compile_profile_enabled()
-                || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some()
-            {
-                eprintln!(
-                    "[glrmask/profile][tokenizer] deferred_runtime_assembly_ms={:.3} finished_ms={:.3}",
-                    deferred.assembly_ms,
-                    deferred.finished_ms,
-                );
-            }
-            runtime_tokenizer = Some(Arc::new(deferred.tokenizer));
-            full_to_synthesized_state_map = Some(deferred.state_map);
-        }
         let tokenizer = Arc::try_unwrap(tokenizer)
             .unwrap_or_else(|_| panic!("tokenizer references outlived compile DAG"));
         let runtime_tokenizer = runtime_tokenizer.map(|tokenizer| {

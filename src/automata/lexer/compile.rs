@@ -2872,108 +2872,6 @@ pub(crate) struct CompiledPartitionedExpressionPair {
     pub(crate) full_to_synthesized: Vec<u32>,
 }
 
-pub(crate) struct PreparedPartitionedExpressionPair {
-    pub(crate) synthesized: Regex,
-    completion: PartitionedExpressionPairCompletion,
-}
-
-struct PartitionedExpressionPairCompletion {
-    pairs: Vec<LexerComponentPair>,
-    synthesized_offsets: Vec<u32>,
-    total_groups: usize,
-}
-
-impl PartitionedExpressionPairCompletion {
-    fn full_state_count(&self) -> usize {
-        1usize
-            + self
-                .pairs
-                .iter()
-                .map(|pair| pair.full.num_states())
-                .sum::<usize>()
-    }
-
-    fn finish(self) -> Option<(Regex, Vec<u32>)> {
-        let Self {
-            pairs,
-            synthesized_offsets,
-            total_groups,
-        } = self;
-        let total_states = 1usize
-            + pairs
-                .iter()
-                .map(|pair| pair.full.num_states())
-                .sum::<usize>();
-        let mut full = DFA::new(1);
-        full.ensure_group_capacity(total_groups);
-        full.states_mut().reserve(total_states.saturating_sub(1));
-        let mut root_futures = BitSet::new(total_groups);
-        let mut full_to_synthesized = Vec::with_capacity(total_states);
-        full_to_synthesized.push(0);
-        for (component_index, pair) in pairs.into_iter().enumerate() {
-            let LexerComponentPair {
-                terminal_ids,
-                synthesized: _,
-                full: mut component,
-                full_to_synthesized: component_map,
-                protected_residual: _,
-            } = pair;
-            let synthesized_offset = synthesized_offsets[component_index];
-            let full_offset = full.num_states() as u32;
-            debug_assert_eq!(full_to_synthesized.len(), full_offset as usize);
-            if component_map.len() != component.num_states() {
-                return None;
-            }
-
-            full.add_epsilon_transition(0, full_offset);
-            for (local_group, &terminal_id) in terminal_ids.iter().enumerate() {
-                full.set_group_u8set(
-                    terminal_id as u32,
-                    *component.group_id_to_u8set(local_group as u32),
-                );
-            }
-            component.rebase_component_in_place(full_offset, &terminal_ids, total_groups);
-            root_futures.union_with(component.possible_future_group_ids(0));
-            full.states_mut().append(component.states_mut());
-            full_to_synthesized.extend(
-                component_map
-                    .into_iter()
-                    .map(|state| synthesized_offset + state),
-            );
-        }
-        full.set_possible_future_group_ids(0, root_futures);
-        if full.num_states() != total_states || full_to_synthesized.len() != total_states {
-            return None;
-        }
-        Some((Regex { dfa: full }, full_to_synthesized))
-    }
-}
-
-impl PreparedPartitionedExpressionPair {
-    pub(crate) fn full_state_count(&self) -> usize {
-        self.completion.full_state_count()
-    }
-
-    pub(crate) fn finish(self) -> Option<CompiledPartitionedExpressionPair> {
-        let (full, full_to_synthesized) = self.completion.finish()?;
-        Some(CompiledPartitionedExpressionPair {
-            synthesized: self.synthesized,
-            full,
-            full_to_synthesized,
-        })
-    }
-
-    pub(crate) fn into_parts(
-        self,
-    ) -> (Regex, impl FnOnce() -> Option<(Regex, Vec<u32>)> + Send) {
-        let Self {
-            synthesized,
-            completion,
-        } = self;
-        (synthesized, move || completion.finish())
-    }
-}
-
 fn compile_partition_components(
     exprs: &[Expr],
     visible_labels: Option<&[String]>,
@@ -3771,7 +3669,7 @@ fn combine_component_pairs_under_epsilon_root(
 /// certified local product maps. Adaptive prefix determinization remains
 /// available for the ordinary components but never crosses a protected
 /// residual coordinate.
-pub(crate) fn prepare_partitioned_expression_pair_with_structural_map(
+pub(crate) fn compile_partitioned_expression_pair_with_structural_map(
     full_exprs: &[Expr],
     synthesized_exprs: &[Expr],
     visible_labels: Option<&[String]>,
@@ -3782,7 +3680,7 @@ pub(crate) fn prepare_partitioned_expression_pair_with_structural_map(
     repeat_horizons: &VocabularyRepeatHorizonCache,
     max_token_len: usize,
     relevant_bytes: &[u8],
-) -> Option<PreparedPartitionedExpressionPair> {
+) -> Option<CompiledPartitionedExpressionPair> {
     let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
     if full_exprs.len() != synthesized_exprs.len()
         || full_exprs.len() != partitions.len()
@@ -3982,41 +3880,32 @@ pub(crate) fn prepare_partitioned_expression_pair_with_structural_map(
 
     let (synthesized, synthesized_offsets) =
         combine_component_pairs_under_epsilon_root(&pairs, full_exprs.len(), false);
-    Some(PreparedPartitionedExpressionPair {
-        synthesized: Regex { dfa: synthesized },
-        completion: PartitionedExpressionPairCompletion {
-            pairs,
-            synthesized_offsets,
-            total_groups: full_exprs.len(),
-        },
-    })
-}
+    let (full, full_offsets) =
+        combine_component_pairs_under_epsilon_root(&pairs, full_exprs.len(), true);
+    let mut full_to_synthesized = Vec::with_capacity(full.num_states());
+    full_to_synthesized.push(0);
+    for (component_index, pair) in pairs.iter().enumerate() {
+        let synthesized_offset = synthesized_offsets[component_index];
+        let full_offset = full_offsets[component_index];
+        debug_assert_eq!(full_to_synthesized.len(), full_offset as usize);
+        if pair.full_to_synthesized.len() != pair.full.num_states() {
+            return None;
+        }
+        full_to_synthesized.extend(
+            pair.full_to_synthesized
+                .iter()
+                .map(|&state| synthesized_offset + state),
+        );
+    }
+    if full_to_synthesized.len() != full.num_states() {
+        return None;
+    }
 
-pub(crate) fn compile_partitioned_expression_pair_with_structural_map(
-    full_exprs: &[Expr],
-    synthesized_exprs: &[Expr],
-    visible_labels: Option<&[String]>,
-    partitions: &[u32],
-    residual_isolation_classes: &[Option<u32>],
-    adaptive: bool,
-    vocab: &Vocab,
-    repeat_horizons: &VocabularyRepeatHorizonCache,
-    max_token_len: usize,
-    relevant_bytes: &[u8],
-) -> Option<CompiledPartitionedExpressionPair> {
-    prepare_partitioned_expression_pair_with_structural_map(
-        full_exprs,
-        synthesized_exprs,
-        visible_labels,
-        partitions,
-        residual_isolation_classes,
-        adaptive,
-        vocab,
-        repeat_horizons,
-        max_token_len,
-        relevant_bytes,
-    )?
-    .finish()
+    Some(CompiledPartitionedExpressionPair {
+        synthesized: Regex { dfa: synthesized },
+        full: Regex { dfa: full },
+        full_to_synthesized,
+    })
 }
 
 fn product_state_metadata(
