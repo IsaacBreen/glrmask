@@ -621,6 +621,45 @@ impl DFA {
         &mut self.states
     }
 
+    /// Rebase an owned component DFA for insertion below a global epsilon
+    /// root. State targets are shifted in place and local group bits are
+    /// remapped to their global terminal ids, avoiding a second allocation of
+    /// every transition row during component concatenation.
+    pub(super) fn rebase_component_in_place(
+        &mut self,
+        state_offset: u32,
+        terminal_ids: &[usize],
+        total_groups: usize,
+    ) {
+        debug_assert_eq!(self.num_groups(), terminal_ids.len());
+        for (state_index, state) in self.states.iter_mut().enumerate() {
+            if state_index != 0 && state_index % 4096 == 0 {
+                let _ = rayon::yield_now();
+            }
+            for (_, target) in state.transitions.iter_mut() {
+                *target = target
+                    .checked_add(state_offset)
+                    .expect("rebased lexer state id overflow");
+            }
+            for target in &mut state.epsilon_transitions {
+                *target = target
+                    .checked_add(state_offset)
+                    .expect("rebased lexer epsilon state id overflow");
+            }
+
+            let mut finalizers = BitSet::new(total_groups);
+            for local_group in state.finalizers.iter() {
+                finalizers.set(terminal_ids[local_group]);
+            }
+            let mut futures = BitSet::new(total_groups);
+            for local_group in state.possible_future_group_ids.iter() {
+                futures.set(terminal_ids[local_group]);
+            }
+            state.finalizers = finalizers;
+            state.possible_future_group_ids = futures;
+        }
+    }
+
     pub(super) fn num_groups(&self) -> usize {
         self.group_id_to_u8set.len()
     }
