@@ -3775,7 +3775,7 @@ fn simple_pattern_max_length_above_former_cap_preserves_upper_bound() {
 }
 
 #[test]
-fn shorter_word_pattern_preserves_upper_bound_despite_product_cost() {
+fn shorter_word_pattern_respects_pattern_length_product_budget() {
     let _env_lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
     let _synthetic_guard =
         EnvVarGuard::set("GLRMASK_SYNTHETIC_BOUNDED_TERMINALS", "1");
@@ -3794,12 +3794,13 @@ fn shorter_word_pattern_preserves_upper_bound_despite_product_cost() {
         .expect("expected terminalized constrained string rule");
 
     let GrammarExpr::Intersect { intersect, .. } = &rule.expr else {
-        panic!("expected pattern terminal intersected with exact length envelope: {:?}", rule.expr);
+        panic!("expected pattern terminal intersected with lower-bound envelope: {:?}", rule.expr);
     };
     let GrammarExpr::RawRegex(regex) = intersect.as_ref() else {
         panic!("expected raw regex length envelope: {:?}", intersect);
     };
-    assert!(regex.contains("{2,120}"), "{regex}");
+    assert!(regex.contains("{2,}"), "{regex}");
+    assert!(!regex.contains("120"), "{regex}");
     lower(&grammar).unwrap();
 }
 
@@ -3848,14 +3849,14 @@ fn large_pattern_max_length_env_intersects_json_string_length_envelope() {
 
 
 #[test]
-fn pathological_pattern_max_length_budget_does_not_drop_upper_bound() {
+fn pathological_pattern_max_length_budget_still_applies_with_synthesis_enabled() {
     let _env_lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
     let _synthetic_guard =
         EnvVarGuard::set("GLRMASK_SYNTHETIC_BOUNDED_TERMINALS", "1");
     let _preserve_guard = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PRESERVE_PATTERN_MAX_LENGTH", "1");
     let _limit_guard = EnvVarGuard::set(
         "GLRMASK_JSON_SCHEMA_PATTERN_MAX_LENGTH_COMPLEXITY_LIMIT",
-        "50000",
+        "1",
     );
 
     let schema = json!({
@@ -3873,12 +3874,13 @@ fn pathological_pattern_max_length_budget_does_not_drop_upper_bound() {
         .expect("expected terminalized constrained string rule");
 
     let GrammarExpr::Intersect { intersect, .. } = &rule.expr else {
-        panic!("expected pattern terminal intersected with exact length envelope: {:?}", rule.expr);
+        panic!("expected pattern terminal intersected with lower-bound envelope: {:?}", rule.expr);
     };
     let GrammarExpr::RawRegex(regex) = intersect.as_ref() else {
         panic!("expected raw regex length envelope: {:?}", intersect);
     };
-    assert!(regex.contains("{2,500}"), "{regex}");
+    assert!(regex.contains("{2,}"), "{regex}");
+    assert!(!regex.contains("500"), "{regex}");
     lower(&grammar).unwrap();
 }
 

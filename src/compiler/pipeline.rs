@@ -593,8 +593,14 @@ pub(crate) fn build_tokenizer_with_partition_options(
 mod lexer_partition_plan_tests {
     use std::collections::BTreeSet;
 
-    use super::lexer_partition_ids_with_options;
+    use super::{
+        build_structural_tokenizer_pair, lexer_partition_ids_with_options,
+        plan_synthetic_tokenizer,
+    };
+    use crate::automata::lexer::Lexer;
+    use crate::automata::regex::Expr;
     use crate::grammar::flat::{GrammarDef, Terminal};
+    use crate::Vocab;
 
     fn grammar_with_terminals(count: u32) -> GrammarDef {
         GrammarDef {
@@ -651,6 +657,73 @@ mod lexer_partition_plan_tests {
         assert_ne!(ids[0], ids[1]);
         assert_ne!(ids[0], ids[2]);
         assert_ne!(ids[1], ids[2]);
+    }
+
+    #[test]
+    fn structural_pair_preisolates_ordinary_nullable_components() {
+        let grammar = GrammarDef {
+            terminals: vec![
+                Terminal::Expr {
+                    id: 0,
+                    expr: Expr::Repeat {
+                        expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+                        min: 1,
+                        max: Some(500),
+                    },
+                },
+                Terminal::Expr {
+                    id: 1,
+                    expr: Expr::Repeat {
+                        expr: Box::new(Expr::U8Seq(b"b".to_vec())),
+                        min: 0,
+                        max: Some(1),
+                    },
+                },
+            ],
+            ..GrammarDef::default()
+        };
+        let vocab = Vocab::new(vec![
+            (0, Vec::new()),
+            (1, b"a".to_vec()),
+            (2, b"aaaa".to_vec()),
+            (3, b"b".to_vec()),
+        ]);
+        let plan = plan_synthetic_tokenizer(&grammar, &vocab)
+            .expect("large bounded terminal should be selected for synthesis");
+        let (synthesized, full, certified) =
+            build_structural_tokenizer_pair(&grammar, &plan, &vocab, Some(false))
+                .expect("nullable structural pair");
+
+        assert_eq!(
+            certified.full_to_synthesized.len(),
+            full.num_states() as usize,
+        );
+        assert!(certified
+            .full_to_synthesized
+            .iter()
+            .all(|&state| state < synthesized.num_states()));
+        assert!(full.matched_terminals(full.initial_state()).is_empty());
+        assert!(synthesized
+            .matched_terminals(synthesized.initial_state())
+            .is_empty());
+        let full_after_a = full.step_all(&[full.initial_state()], b'a');
+        let synthesized_after_a =
+            synthesized.step_all(&[synthesized.initial_state()], b'a');
+        assert!(full_after_a
+            .iter()
+            .any(|&state| full.matched_terminals(state).contains(&0)));
+        assert!(synthesized_after_a
+            .iter()
+            .any(|&state| synthesized.matched_terminals(state).contains(&0)));
+        let full_after_b = full.step_all(&[full.initial_state()], b'b');
+        let synthesized_after_b =
+            synthesized.step_all(&[synthesized.initial_state()], b'b');
+        assert!(full_after_b
+            .iter()
+            .any(|&state| full.matched_terminals(state).contains(&1)));
+        assert!(synthesized_after_b
+            .iter()
+            .any(|&state| synthesized.matched_terminals(state).contains(&1)));
     }
 }
 
@@ -834,6 +907,7 @@ fn structural_state_reduction_is_profitable(
     full_states: usize,
     synthesized_states: usize,
 ) -> bool {
+    const SMALL_SYNTHESIZED_COMPILE_STATES: usize = 20_000;
     const MIN_ABSOLUTE_STATE_SAVING: usize = 10_000;
     // A compile tokenizer this large still makes every downstream vocabulary
     // partition pay substantial state-classification and transition-table
@@ -841,10 +915,15 @@ fn structural_state_reduction_is_profitable(
     // quotients, so reject large stencils rather than turning an attempted
     // optimization into a multi-second regression.
     const MAX_SYNTHESIZED_COMPILE_STATES: usize = 100_000;
-    full_states.saturating_sub(synthesized_states) >= MIN_ABSOLUTE_STATE_SAVING
+    let is_reduction = synthesized_states < full_states;
+    let small_compile_domain =
+        is_reduction && synthesized_states <= SMALL_SYNTHESIZED_COMPILE_STATES;
+    let substantial_large_reduction = full_states.saturating_sub(synthesized_states)
+        >= MIN_ABSOLUTE_STATE_SAVING
         && (synthesized_states <= MAX_SYNTHESIZED_COMPILE_STATES
             || std::env::var_os("GLRMASK_ALLOW_LARGE_SYNTHETIC").is_some())
-        && synthesized_states.saturating_mul(2) <= full_states
+        && synthesized_states.saturating_mul(2) <= full_states;
+    small_compile_domain || substantial_large_reduction
 }
 
 fn plan_synthetic_tokenizer(
@@ -987,6 +1066,14 @@ fn build_structural_tokenizer_pair(
     Tokenizer,
     CertifiedFullToSynthesizedStateMap,
 )> {
+    // Importer-split residual terminals can overlap terminals in another
+    // parser construction family. Their compiler contract deliberately
+    // requires grammar-wide terminal observation, while the structural pair
+    // proof below maps independently isolated lexer components. Do not extend
+    // that proof across the stronger cross-family observation boundary.
+    if grammar.requires_global_terminal_observation {
+        return None;
+    }
     let full_expressions = plan
         .full_expressions
         .iter()

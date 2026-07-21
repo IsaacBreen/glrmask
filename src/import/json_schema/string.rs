@@ -2483,7 +2483,7 @@ fn cheap_pattern_length_bound_body_regex(
     min: usize,
     max: Option<usize>,
     preserve_pattern_max_length: bool,
-    _pattern_max_length_complexity_limit: usize,
+    pattern_max_length_complexity_limit: usize,
 ) -> Option<String> {
     if min == 0 && max.is_none() {
         return None;
@@ -2495,15 +2495,18 @@ fn cheap_pattern_length_bound_body_regex(
     }
 
     if let Some(max) = max {
-        // The complexity budget may choose another lowering strategy, but it
-        // must not weaken the imported language. Large exact envelopes are
-        // handled by compile-time terminal synthesis and late full-lexer state
-        // expansion. The explicit compatibility switch remains available for
-        // callers that deliberately request the historical approximation.
+        // Preserve the exact upper bound only while the importer-level product
+        // estimate remains inside its configured budget. Compile-time residual
+        // synthesis can make many such products cheap, but not every product:
+        // a bounded pattern component can remain fully observable over one
+        // tokenizer token and force a very large synchronized DFA. In that
+        // case the established compatibility fallback keeps only the lower
+        // bound rather than turning synthesis into a build-time regression.
+        // Callers that require the exact envelope can raise the complexity
+        // limit explicitly.
         if preserve_pattern_max_length
-            && (crate::compiler::synthetic_bounded_terminals_enabled()
-                || pattern_max_length_complexity_score(&pattern, max)
-                    <= _pattern_max_length_complexity_limit)
+            && pattern_max_length_complexity_score(&pattern, max)
+                <= pattern_max_length_complexity_limit
         {
             return Some(bounded_json_string_body_regex(string_char_regex, min, Some(max)));
         }

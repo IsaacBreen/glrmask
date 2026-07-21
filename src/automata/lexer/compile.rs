@@ -2541,6 +2541,12 @@ struct LexerComponentPair {
     protected_residual: bool,
 }
 
+fn isolate_component_nullable_start(dfa: DFA, num_terminals: usize) -> (DFA, BTreeSet<u32>) {
+    let mut tokenizer = Regex { dfa }.into_tokenizer(num_terminals as u32, None);
+    let nullable = tokenizer.isolate_start_state_and_drain_nullable_terminals();
+    (tokenizer.dfa, nullable)
+}
+
 pub(crate) struct CompiledPartitionedExpressionPair {
     pub(crate) synthesized: Regex,
     pub(crate) full: Regex,
@@ -3487,10 +3493,23 @@ pub(crate) fn compile_partitioned_expression_pair_with_structural_map(
                 }
                 return None;
             };
+            let (synthesized, synthesized_nullable) =
+                isolate_component_nullable_start(pair.synthesized.dfa, terminal_ids.len());
+            let (full, full_nullable) =
+                isolate_component_nullable_start(pair.full.dfa, terminal_ids.len());
+            if !synthesized_nullable.is_empty() || !full_nullable.is_empty() {
+                if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some() {
+                    eprintln!(
+                        "[glrmask/profile][tokenizer] structural_partition_pair_rejected reason=nullable_protected_terminal terminal={} synthesized_nullable={:?} full_nullable={:?}",
+                        terminal, synthesized_nullable, full_nullable,
+                    );
+                }
+                return None;
+            }
             Some(LexerComponentPair {
                 terminal_ids,
-                synthesized: pair.synthesized.dfa,
-                full: pair.full.dfa,
+                synthesized,
+                full,
                 full_to_synthesized: pair.full_to_synthesized,
                 protected_residual: true,
             })
@@ -3519,11 +3538,13 @@ pub(crate) fn compile_partitioned_expression_pair_with_structural_map(
     let mut pairs = ordinary
         .into_iter()
         .map(|component| {
-            let state_count = component.dfa.num_states() as u32;
+            let terminal_ids = component.terminal_ids;
+            let (dfa, _) = isolate_component_nullable_start(component.dfa, terminal_ids.len());
+            let state_count = dfa.num_states() as u32;
             LexerComponentPair {
-                terminal_ids: component.terminal_ids,
-                synthesized: component.dfa.clone(),
-                full: component.dfa,
+                terminal_ids,
+                synthesized: dfa.clone(),
+                full: dfa,
                 full_to_synthesized: (0..state_count).collect(),
                 protected_residual: false,
             }
