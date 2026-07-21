@@ -1521,11 +1521,18 @@ fn set_zero_min_repeat_suffix_metadata(
     dfa.overwrite_state_metadata(state_id, finalizers, future);
 }
 
-fn build_zero_min_repeat_suffix_dominance_dfa(
+struct ZeroMinRepeatSuffixBuild {
+    dfa: DFA,
+    states: Vec<ZeroMinRepeatSuffixState>,
+    state_by_key: FxHashMap<ZeroMinRepeatSuffixState, u32>,
+}
+
+fn build_zero_min_repeat_suffix_dominance_dfa_internal(
     body_dfa: &DFA,
     suffix_dfa: &DFA,
     max: usize,
-) -> Option<DFA> {
+    preserve_coordinates: bool,
+) -> Option<ZeroMinRepeatSuffixBuild> {
     if max == 0
         || body_dfa.num_states() == 0
         || suffix_dfa.num_states() == 0
@@ -1555,6 +1562,7 @@ fn build_zero_min_repeat_suffix_dominance_dfa(
     set_zero_min_repeat_suffix_metadata(&mut dfa, 0, &start, suffix_dfa);
     let mut state_map = FxHashMap::<ZeroMinRepeatSuffixState, u32>::default();
     state_map.insert(start.clone(), 0);
+    let mut states = vec![start.clone()];
     let mut worklist = VecDeque::from([(0u32, start)]);
 
     while let Some((state_id, state)) = worklist.pop_front() {
@@ -1600,6 +1608,7 @@ fn build_zero_min_repeat_suffix_dominance_dfa(
                 let target = dfa.add_state();
                 set_zero_min_repeat_suffix_metadata(&mut dfa, target, &next, suffix_dfa);
                 state_map.insert(next.clone(), target);
+                states.push(next.clone());
                 worklist.push_back((target, next));
                 target
             };
@@ -1615,14 +1624,36 @@ fn build_zero_min_repeat_suffix_dominance_dfa(
     // components. Keep minimization for compact results where it is cheap and
     // useful, but preserve the exact direct DFA as-is above that threshold.
     let transitions = dfa_transition_count(&dfa);
-    if dfa.num_states() <= 2_048 && transitions <= 100_000 {
-        Some(dfa.minimize())
-    } else {
-        Some(dfa)
+    if !preserve_coordinates && dfa.num_states() <= 2_048 && transitions <= 100_000 {
+        dfa = dfa.minimize();
+        states.clear();
+        state_map.clear();
     }
+    Some(ZeroMinRepeatSuffixBuild {
+        dfa,
+        states,
+        state_by_key: state_map,
+    })
 }
 
-fn build_bounded_repeat_with_regex_suffix(parts: &[Expr]) -> Option<(DFA, bool)> {
+fn build_zero_min_repeat_suffix_dominance_dfa(
+    body_dfa: &DFA,
+    suffix_dfa: &DFA,
+    max: usize,
+) -> Option<DFA> {
+    build_zero_min_repeat_suffix_dominance_dfa_internal(
+        body_dfa,
+        suffix_dfa,
+        max,
+        false,
+    )
+    .map(|built| built.dfa)
+}
+
+fn build_bounded_repeat_with_regex_suffix_with_options(
+    parts: &[Expr],
+    preserve_coordinates: bool,
+) -> Option<(DFA, bool)> {
     let profile_timing = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
     let total_started_at = profile_timing.then(Instant::now);
     if parts.len() < 2 {
@@ -1713,12 +1744,14 @@ fn build_bounded_repeat_with_regex_suffix(parts: &[Expr]) -> Option<(DFA, bool)>
     const DOMINANCE_MAX_BODY_STATES: usize = 256;
     if min == 0
         && body_dfa.num_states() <= DOMINANCE_MAX_BODY_STATES
-        && let Some(dfa) = build_zero_min_repeat_suffix_dominance_dfa(
+        && let Some(built) = build_zero_min_repeat_suffix_dominance_dfa_internal(
             &body_dfa,
             &suffix_dfa,
             max,
+            preserve_coordinates,
         )
     {
+        let dfa = built.dfa;
         if let Some(total_started_at) = total_started_at {
             eprintln!(
                 "[glrmask/profile][tokenizer] bounded_repeat_regex_suffix_dominance body_states={} suffix_states={} max={} final_states={} final_transitions={} body_ms={:.3} suffix_ms={:.3} total_ms={:.3}",
@@ -1903,6 +1936,10 @@ fn build_bounded_repeat_with_regex_suffix(parts: &[Expr]) -> Option<(DFA, bool)>
     Some((dfa, false))
 }
 
+fn build_bounded_repeat_with_regex_suffix(parts: &[Expr]) -> Option<(DFA, bool)> {
+    build_bounded_repeat_with_regex_suffix_with_options(parts, false)
+}
+
 fn prepend_literal_prefix_to_dfa(prefix_bytes: &[u8], tail_dfa: DFA) -> Option<DFA> {
     if prefix_bytes.is_empty() {
         return Some(tail_dfa);
@@ -1945,7 +1982,10 @@ fn prepend_literal_prefix_to_dfa(prefix_bytes: &[u8], tail_dfa: DFA) -> Option<D
     Some(dfa)
 }
 
-fn build_prefixed_bounded_repeat_with_suffix_dfa(parts: &[Expr]) -> Option<(DFA, bool)> {
+fn build_prefixed_bounded_repeat_with_suffix_dfa_with_options(
+    parts: &[Expr],
+    preserve_coordinates: bool,
+) -> Option<(DFA, bool)> {
     let mut flat_parts = Vec::new();
     for part in parts {
         match part {
@@ -1976,7 +2016,12 @@ fn build_prefixed_bounded_repeat_with_suffix_dfa(parts: &[Expr]) -> Option<(DFA,
         let tail_parts: Vec<Expr> = parts[repeat_index..].to_vec();
         let (tail_dfa, needs_future_recompute) =
             build_bounded_repeat_with_suffix_dfa(&tail_parts)
-                .or_else(|| build_bounded_repeat_with_regex_suffix(&tail_parts))?;
+                .or_else(|| {
+                    build_bounded_repeat_with_regex_suffix_with_options(
+                        &tail_parts,
+                        preserve_coordinates,
+                    )
+                })?;
         let dfa = prepend_literal_prefix_to_dfa(&prefix_bytes, tail_dfa)?;
         return Some((dfa, needs_future_recompute));
     }
@@ -1987,7 +2032,12 @@ fn build_prefixed_bounded_repeat_with_suffix_dfa(parts: &[Expr]) -> Option<(DFA,
         if tail_parts.len() >= 2 {
             let (tail_dfa, needs_future_recompute) =
                 build_bounded_repeat_with_suffix_dfa(&tail_parts)
-                    .or_else(|| build_bounded_repeat_with_regex_suffix(&tail_parts))?;
+                    .or_else(|| {
+                        build_bounded_repeat_with_regex_suffix_with_options(
+                            &tail_parts,
+                            preserve_coordinates,
+                        )
+                    })?;
             let mut dfa = prepend_literal_prefix_to_dfa(&prefix_bytes, tail_dfa)?;
             mark_state_accepting(&mut dfa, prefix_bytes.len() as u32);
             return Some((dfa, needs_future_recompute));
@@ -1995,6 +2045,10 @@ fn build_prefixed_bounded_repeat_with_suffix_dfa(parts: &[Expr]) -> Option<(DFA,
     }
 
     None
+}
+
+fn build_prefixed_bounded_repeat_with_suffix_dfa(parts: &[Expr]) -> Option<(DFA, bool)> {
+    build_prefixed_bounded_repeat_with_suffix_dfa_with_options(parts, false)
 }
 
 fn append_bounded_repeat_expr(expr: &Expr, min: usize, max: usize, nfa: &mut NFA, start: u32, end: u32) {
@@ -3795,9 +3849,14 @@ fn mark_state_accepting(dfa: &mut DFA, state_id: u32) {
     dfa.overwrite_state_metadata(state_id, finalizers, future);
 }
 
-fn compile_product_component_dfa_direct(expr: &Expr) -> Option<(DFA, bool)> {
+fn compile_product_component_dfa_direct_with_options(
+    expr: &Expr,
+    preserve_coordinates: bool,
+) -> Option<(DFA, bool)> {
     match expr {
-        Expr::Shared(inner) => compile_product_component_dfa_direct(inner),
+        Expr::Shared(inner) => {
+            compile_product_component_dfa_direct_with_options(inner, preserve_coordinates)
+        }
         Expr::U8Seq(bytes) => {
             let mut dfa = DFA::new(bytes.len() + 1);
             dfa.ensure_group_capacity(1);
@@ -3833,7 +3892,10 @@ fn compile_product_component_dfa_direct(expr: &Expr) -> Option<(DFA, bool)> {
         Expr::Choice(_) => {
             let non_epsilon = optional_choice_non_epsilon(expr)?;
             let (mut dfa, needs_future_recompute) =
-                compile_product_component_dfa_direct(non_epsilon)?;
+                compile_product_component_dfa_direct_with_options(
+                    non_epsilon,
+                    preserve_coordinates,
+                )?;
             mark_state_accepting(&mut dfa, 0);
             Some((dfa, needs_future_recompute))
         }
@@ -3843,20 +3905,39 @@ fn compile_product_component_dfa_direct(expr: &Expr) -> Option<(DFA, bool)> {
             max: Some(max),
         } => build_bounded_repeat_dfa(expr, *min, *max).map(|dfa| (dfa, false)),
         Expr::Seq(parts) => build_bounded_repeat_with_suffix_dfa(parts)
-            .or_else(|| build_bounded_repeat_with_regex_suffix(parts))
-            .or_else(|| build_prefixed_bounded_repeat_with_suffix_dfa(parts)),
+            .or_else(|| {
+                build_bounded_repeat_with_regex_suffix_with_options(
+                    parts,
+                    preserve_coordinates,
+                )
+            })
+            .or_else(|| {
+                build_prefixed_bounded_repeat_with_suffix_dfa_with_options(
+                    parts,
+                    preserve_coordinates,
+                )
+            }),
         _ => None,
     }
+}
+
+fn compile_product_component_dfa_direct(expr: &Expr) -> Option<(DFA, bool)> {
+    compile_product_component_dfa_direct_with_options(expr, false)
 }
 
 fn compile_product_component_dfa(expr: &Expr) -> DFA {
     compile_with_plan(build_exclusion_compile_plan(std::slice::from_ref(expr)))
 }
 
-fn compile_product_component_materialized_dfa(expr: &Expr) -> DFA {
+fn compile_product_component_materialized_dfa_with_options(
+    expr: &Expr,
+    preserve_coordinates: bool,
+) -> DFA {
     let profile_timing = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
     let direct_started_at = profile_timing.then(Instant::now);
-    if let Some((mut dfa, needs_future_recompute)) = compile_product_component_dfa_direct(expr) {
+    if let Some((mut dfa, needs_future_recompute)) =
+        compile_product_component_dfa_direct_with_options(expr, preserve_coordinates)
+    {
         let direct_ms = direct_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         dfa.ensure_group_capacity(1);
         dfa.set_group_u8set(0, expr_u8set(expr));
@@ -3891,6 +3972,10 @@ fn compile_product_component_materialized_dfa(expr: &Expr) -> DFA {
         }
         dfa
     }
+}
+
+fn compile_product_component_materialized_dfa(expr: &Expr) -> DFA {
+    compile_product_component_materialized_dfa_with_options(expr, false)
 }
 
 #[derive(Clone)]
@@ -4075,6 +4160,347 @@ struct DirectBoundedSuffixShape<'a> {
     suffix: Vec<u8>,
 }
 
+struct ZeroMinRepeatSuffixComponentTrace {
+    dfa: DFA,
+    prefix_len: usize,
+    body_dfa: DFA,
+    suffix_dfa: DFA,
+    max: usize,
+    tail_states: Vec<ZeroMinRepeatSuffixState>,
+    tail_state_by_key: FxHashMap<ZeroMinRepeatSuffixState, u32>,
+}
+
+fn dfa_has_same_numbered_layout(left: &DFA, right: &DFA) -> bool {
+    left.num_groups() == right.num_groups()
+        && left.num_states() == right.num_states()
+        && (0..left.num_groups()).all(|group| {
+            left.group_id_to_u8set(group as u32)
+                == right.group_id_to_u8set(group as u32)
+        })
+        && left
+            .states()
+            .iter()
+            .zip(right.states())
+            .enumerate()
+            .all(|(state, (left_state, right_state))| {
+                left_state.transitions == right_state.transitions
+                    && left_state.epsilon_transitions == right_state.epsilon_transitions
+                    && left_state.finalizers == right_state.finalizers
+                    && left.possible_future_group_ids(state as u32)
+                        == right.possible_future_group_ids(state as u32)
+            })
+}
+
+fn zero_min_repeat_suffix_component_trace(
+    expr: &Expr,
+) -> Option<ZeroMinRepeatSuffixComponentTrace> {
+    let expr = unwrap_shared(expr);
+    let Expr::Seq(parts) = expr else {
+        return None;
+    };
+    let mut flat_parts = Vec::<Expr>::new();
+    for part in parts {
+        match unwrap_shared(part) {
+            Expr::Seq(inner) => flat_parts.extend(inner.iter().cloned()),
+            _ => flat_parts.push(part.clone()),
+        }
+    }
+
+    for repeat_index in 0..flat_parts.len().saturating_sub(1) {
+        let Expr::Repeat {
+            expr: body,
+            min: 0,
+            max: Some(max),
+        } = unwrap_shared(&flat_parts[repeat_index])
+        else {
+            continue;
+        };
+        if *max == 0 {
+            continue;
+        }
+        let prefix = collect_suffix_bytes(&flat_parts[..repeat_index])?;
+        let suffix_expr = seq_from_parts(flat_parts[repeat_index + 1..].to_vec());
+        let body_dfa = compile_expr_to_dfa(body);
+        let suffix_dfa = compile_expr_to_dfa(&suffix_expr);
+        if body_dfa.num_states() == 0
+            || body_dfa.num_states() > 256
+            || body_dfa.finalizers(0).contains(0)
+            || suffix_dfa.num_states() == 0
+            || suffix_dfa.finalizers(0).contains(0)
+        {
+            continue;
+        }
+        let built = build_zero_min_repeat_suffix_dominance_dfa_internal(
+            &body_dfa,
+            &suffix_dfa,
+            *max,
+            true,
+        )?;
+        let mut dfa = prepend_literal_prefix_to_dfa(&prefix, built.dfa)?;
+        dfa.ensure_group_capacity(1);
+        dfa.set_group_u8set(0, expr_u8set(expr));
+        return Some(ZeroMinRepeatSuffixComponentTrace {
+            dfa,
+            prefix_len: prefix.len(),
+            body_dfa,
+            suffix_dfa,
+            max: *max,
+            tail_states: built.states,
+            tail_state_by_key: built.state_by_key,
+        });
+    }
+    None
+}
+
+struct ZeroMinRepeatSuffixStateMap {
+    primary: Vec<u32>,
+    candidates: Vec<Box<[u32]>>,
+}
+
+impl ZeroMinRepeatSuffixStateMap {
+    fn primary(&self) -> &[u32] {
+        &self.primary
+    }
+
+    fn visit_candidates(&self, full_state: u32, mut visit: impl FnMut(u32) -> bool) -> bool {
+        self.candidates[full_state as usize]
+            .iter()
+            .copied()
+            .any(&mut visit)
+    }
+}
+
+fn zero_min_repeat_suffix_state_map(
+    full_expr: &Expr,
+    synthesized_expr: &Expr,
+    full: &DFA,
+    synthesized: &DFA,
+    max_token_len: usize,
+) -> Option<ZeroMinRepeatSuffixStateMap> {
+    let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
+    let Some(full_trace) = zero_min_repeat_suffix_component_trace(full_expr) else {
+        return None;
+    };
+    let Some(synthesized_trace) = zero_min_repeat_suffix_component_trace(synthesized_expr) else {
+        if profile {
+            eprintln!(
+                "[glrmask/profile][tokenizer] dominance_state_map_rejected stage=synthesized_trace full_states={} synthesized_states={}",
+                full.num_states(), synthesized.num_states(),
+            );
+        }
+        return None;
+    };
+    let full_layout = dfa_has_same_numbered_layout(&full_trace.dfa, full);
+    let synthesized_layout =
+        dfa_has_same_numbered_layout(&synthesized_trace.dfa, synthesized);
+    let body_state_map = deterministic_component_homomorphism_state_map(
+        &full_trace.body_dfa,
+        &synthesized_trace.body_dfa,
+    );
+    let suffix_state_map = deterministic_component_homomorphism_state_map(
+        &full_trace.suffix_dfa,
+        &synthesized_trace.suffix_dfa,
+    );
+    if full_trace.prefix_len != synthesized_trace.prefix_len
+        || full_trace.max < synthesized_trace.max
+        || !full_layout
+        || !synthesized_layout
+        || body_state_map.is_none()
+        || suffix_state_map.is_none()
+    {
+        if profile {
+            eprintln!(
+                "[glrmask/profile][tokenizer] dominance_state_map_rejected stage=shape prefix={}/{} max={}/{} trace_states={}/{} actual_states={}/{} full_layout={} synthesized_layout={} body_map={} suffix_map={}",
+                full_trace.prefix_len,
+                synthesized_trace.prefix_len,
+                full_trace.max,
+                synthesized_trace.max,
+                full_trace.dfa.num_states(),
+                synthesized_trace.dfa.num_states(),
+                full.num_states(),
+                synthesized.num_states(),
+                full_layout,
+                synthesized_layout,
+                body_state_map.is_some(),
+                suffix_state_map.is_some(),
+            );
+        }
+        return None;
+    }
+    let body_state_map = body_state_map.unwrap();
+    let suffix_state_map = suffix_state_map.unwrap();
+
+    let minimum_body_width = full_trace.body_dfa.min_match_byte_len()?.max(1);
+    let crossed_boundaries = max_token_len
+        .div_ceil(minimum_body_width)
+        .saturating_add(1);
+    if synthesized_trace.max <= crossed_boundaries {
+        if profile {
+            eprintln!(
+                "[glrmask/profile][tokenizer] dominance_state_map_rejected stage=horizon full_max={} synthesized_max={} body_width={} crossed_boundaries={}",
+                full_trace.max,
+                synthesized_trace.max,
+                minimum_body_width,
+                crossed_boundaries,
+            );
+        }
+        return None;
+    }
+    let interior_representative = synthesized_trace
+        .max
+        .checked_sub(crossed_boundaries.saturating_add(1))? as u32;
+    let full_max = full_trace.max as u32;
+    let synthesized_max = synthesized_trace.max as u32;
+
+    let mut mapping = Vec::with_capacity(full.num_states());
+    let mut candidates = Vec::with_capacity(full.num_states());
+    for state in 0..full_trace.prefix_len {
+        mapping.push(state as u32);
+        candidates.push(vec![state as u32].into_boxed_slice());
+    }
+    for state in &full_trace.tail_states {
+        let minimum_completed = state
+            .body_min_counts
+            .iter()
+            .copied()
+            .filter(|&count| count != u32::MAX)
+            .min();
+        let mapped_minimum = if let Some(minimum) = minimum_completed {
+            let distance_to_upper = full_max.checked_sub(minimum)?;
+            if distance_to_upper <= crossed_boundaries as u32 {
+                Some(synthesized_max.checked_sub(distance_to_upper)?)
+            } else {
+                Some(interior_representative)
+            }
+        } else {
+            None
+        };
+        let mapped_suffix_states = state
+            .suffix_states
+            .iter()
+            .map(|&state| suffix_state_map[state as usize])
+            .collect::<Vec<_>>();
+        let build_candidate = |mapped_minimum: Option<u32>| {
+            let mut body_min_counts =
+                vec![u32::MAX; synthesized_trace.body_dfa.num_states()];
+            for (full_body_state, &completed) in state.body_min_counts.iter().enumerate() {
+                if completed == u32::MAX {
+                    continue;
+                }
+                let minimum = minimum_completed?;
+                let mapped_completed = mapped_minimum?
+                    .checked_add(completed.checked_sub(minimum)?)?;
+                if mapped_completed > synthesized_max {
+                    return None;
+                }
+                let mapped_body_state = body_state_map[full_body_state] as usize;
+                body_min_counts[mapped_body_state] =
+                    body_min_counts[mapped_body_state].min(mapped_completed);
+            }
+            let mut suffix_states = mapped_suffix_states.clone();
+            close_zero_min_repeat_suffix_state(
+                &mut body_min_counts,
+                &mut suffix_states,
+                &synthesized_trace.body_dfa,
+                &synthesized_trace.suffix_dfa,
+                synthesized_trace.max,
+            );
+            let mapped_key = ZeroMinRepeatSuffixState {
+                body_min_counts: body_min_counts.into_boxed_slice(),
+                suffix_states: suffix_states.into_boxed_slice(),
+            };
+            synthesized_trace
+                .tail_state_by_key
+                .get(&mapped_key)
+                .copied()
+                .map(|tail| (tail, mapped_key))
+        };
+
+        let Some((mapped_tail, mapped_key)) = build_candidate(mapped_minimum) else {
+            if profile {
+                let full_counts = state
+                    .body_min_counts
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(body_state, &count)| {
+                        (count != u32::MAX).then_some((body_state, count))
+                    })
+                    .collect::<Vec<_>>();
+                eprintln!(
+                    "[glrmask/profile][tokenizer] dominance_state_map_rejected stage=missing_key full_state={} full_max={} synthesized_max={} body_width={} crossed_boundaries={} full_counts={:?} mapped_minimum={:?} suffix_states={:?}",
+                    mapping.len(),
+                    full_trace.max,
+                    synthesized_trace.max,
+                    minimum_body_width,
+                    crossed_boundaries,
+                    full_counts,
+                    mapped_minimum,
+                    mapped_suffix_states,
+                );
+            }
+            return None;
+        };
+        let mapped = synthesized_trace.prefix_len as u32 + mapped_tail;
+        let full_state = mapping.len() as u32;
+        if full.finalizers(full_state) != synthesized.finalizers(mapped)
+            || full.possible_future_group_ids(full_state)
+                != synthesized.possible_future_group_ids(mapped)
+        {
+            if profile {
+                eprintln!(
+                    "[glrmask/profile][tokenizer] dominance_state_map_rejected stage=metadata full_state={} synthesized_state={}",
+                    full_state, mapped,
+                );
+            }
+            return None;
+        }
+        mapping.push(mapped);
+
+        let distance_to_upper = minimum_completed
+            .and_then(|minimum| full_max.checked_sub(minimum));
+        let may_shift_interior = distance_to_upper
+            .is_some_and(|distance| distance > crossed_boundaries as u32);
+        let mut state_candidates = vec![mapped];
+        if may_shift_interior {
+            for alternative_minimum in 0..=synthesized_max {
+                if Some(alternative_minimum) == mapped_minimum {
+                    continue;
+                }
+                let Some((alternative_tail, _)) = build_candidate(Some(alternative_minimum)) else {
+                    continue;
+                };
+                let alternative = synthesized_trace.prefix_len as u32 + alternative_tail;
+                if full.finalizers(full_state) == synthesized.finalizers(alternative)
+                    && full.possible_future_group_ids(full_state)
+                        == synthesized.possible_future_group_ids(alternative)
+                    && !state_candidates.contains(&alternative)
+                {
+                    state_candidates.push(alternative);
+                }
+            }
+        }
+        candidates.push(state_candidates.into_boxed_slice());
+    }
+    if mapping.len() != full.num_states() {
+        return None;
+    }
+    if profile {
+        eprintln!(
+            "[glrmask/profile][tokenizer] dominance_state_map_accepted full_states={} synthesized_states={} full_max={} synthesized_max={} body_width={} crossed_boundaries={}",
+            full.num_states(),
+            synthesized.num_states(),
+            full_trace.max,
+            synthesized_trace.max,
+            minimum_body_width,
+            crossed_boundaries,
+        );
+    }
+    Some(ZeroMinRepeatSuffixStateMap {
+        primary: mapping,
+        candidates,
+    })
+}
+
 struct DirectBoundedSuffixStateMap {
     primary: Vec<u32>,
     prefix_states: usize,
@@ -4134,6 +4560,7 @@ impl DirectBoundedSuffixStateMap {
 enum ProductComponentStateMap {
     Fixed(Vec<u32>),
     Layered(DirectBoundedSuffixStateMap),
+    Dominance(ZeroMinRepeatSuffixStateMap),
 }
 
 impl ProductComponentStateMap {
@@ -4141,6 +4568,7 @@ impl ProductComponentStateMap {
         match self {
             Self::Fixed(mapping) => mapping,
             Self::Layered(mapping) => mapping.primary(),
+            Self::Dominance(mapping) => mapping.primary(),
         }
     }
 
@@ -4151,11 +4579,12 @@ impl ProductComponentStateMap {
                 visit(mapping[full_state as usize])
             }
             Self::Layered(mapping) => mapping.visit_candidates(full_state, visit),
+            Self::Dominance(mapping) => mapping.visit_candidates(full_state, visit),
         }
     }
 
     fn is_flexible(&self) -> bool {
-        matches!(self, Self::Layered(_))
+        matches!(self, Self::Layered(_) | Self::Dominance(_))
     }
 }
 
@@ -4722,6 +5151,19 @@ pub(crate) fn compile_terminal_expression_pair_with_structural_map(
                     relevant_bytes,
                 )
             };
+            let dominance_mapping = if used_homomorphism_mapping
+                || layered_mapping.is_some()
+            {
+                None
+            } else {
+                zero_min_repeat_suffix_state_map(
+                    full_expr,
+                    synthesized_expr,
+                    &full,
+                    &synthesized,
+                    max_token_len,
+                )
+            };
             let unsafe_override_horizon = std::env::var(
                 "GLRMASK_UNSAFE_STRUCTURAL_MAP_HORIZON",
             )
@@ -4730,6 +5172,7 @@ pub(crate) fn compile_terminal_expression_pair_with_structural_map(
             .filter(|&horizon| horizon < max_token_len);
             let override_layered_mapping = if used_homomorphism_mapping
                 || layered_mapping.is_some()
+                || dominance_mapping.is_some()
             {
                 None
             } else {
@@ -4744,14 +5187,37 @@ pub(crate) fn compile_terminal_expression_pair_with_structural_map(
                     )
                 })
             };
+            let override_dominance_mapping = if used_homomorphism_mapping
+                || layered_mapping.is_some()
+                || dominance_mapping.is_some()
+                || override_layered_mapping.is_some()
+            {
+                None
+            } else {
+                unsafe_override_horizon.and_then(|horizon| {
+                    zero_min_repeat_suffix_state_map(
+                        full_expr,
+                        synthesized_expr,
+                        &full,
+                        &synthesized,
+                        horizon,
+                    )
+                })
+            };
             let used_layered_mapping = layered_mapping.is_some();
+            let used_dominance_mapping = dominance_mapping.is_some();
             let used_override_layered_mapping = override_layered_mapping.is_some();
+            let used_override_dominance_mapping = override_dominance_mapping.is_some();
             let mapping = if let Some(mapping) = homomorphism_mapping {
                 Some(ProductComponentStateMap::Fixed(mapping))
             } else if let Some(mapping) = layered_mapping {
                 Some(ProductComponentStateMap::Layered(mapping))
+            } else if let Some(mapping) = dominance_mapping {
+                Some(ProductComponentStateMap::Dominance(mapping))
             } else if let Some(mapping) = override_layered_mapping {
                 Some(ProductComponentStateMap::Layered(mapping))
+            } else if let Some(mapping) = override_dominance_mapping {
+                Some(ProductComponentStateMap::Dominance(mapping))
             } else {
                 exact_kbounded_single_group_state_map(
                     &full,
@@ -4778,8 +5244,12 @@ pub(crate) fn compile_terminal_expression_pair_with_structural_map(
                         "deterministic_homomorphism"
                     } else if used_layered_mapping {
                         "layered_bounded_suffix"
+                    } else if used_dominance_mapping {
+                        "zero_min_repeat_suffix_dominance"
                     } else if used_override_layered_mapping {
                         "UNSAFE_layered_bounded_suffix_override"
+                    } else if used_override_dominance_mapping {
+                        "UNSAFE_zero_min_repeat_suffix_dominance_override"
                     } else {
                         "moore"
                     },
@@ -4887,6 +5357,41 @@ pub(crate) fn compile_terminal_expression_pair_with_structural_map(
                         return found;
                     }
                 }
+
+                if full_states.iter().all(|&state| state != u32::MAX)
+                    && component_maps.iter().all(ProductComponentStateMap::is_flexible)
+                {
+                    let mut left_candidates = SmallVec::<[u32; 8]>::new();
+                    let mut right_candidates = SmallVec::<[u32; 8]>::new();
+                    component_maps[0].visit_candidates(full_states[0], |candidate| {
+                        left_candidates.push(candidate);
+                        false
+                    });
+                    component_maps[1].visit_candidates(full_states[1], |candidate| {
+                        right_candidates.push(candidate);
+                        false
+                    });
+                    for &left in &left_candidates {
+                        coordinates[0] = if synthesized_component_dead_states[0] == Some(left) {
+                            0
+                        } else {
+                            left as usize + 1
+                        };
+                        for &right in &right_candidates {
+                            coordinates[1] =
+                                if synthesized_component_dead_states[1] == Some(right) {
+                                    0
+                                } else {
+                                    right as usize + 1
+                                };
+                            let state = state_by_key
+                                [coordinates[0] * right_extent + coordinates[1]];
+                            if state != u32::MAX {
+                                return state;
+                            }
+                        }
+                    }
+                }
                 u32::MAX
             })
             .collect::<Vec<_>>()
@@ -4952,6 +5457,24 @@ pub(crate) fn compile_terminal_expression_pair_with_structural_map(
     let lookup_ms = lookup_started_at
         .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
+    if std::env::var_os("GLRMASK_MINIMIZE_SYNTHETIC_PRODUCT").is_some() {
+        let minimize_started_at = Instant::now();
+        let states_before = synthesized_dfa.num_states();
+        let (minimized, old_to_new) = synthesized_dfa.minimize_with_state_mapping();
+        for state in &mut full_to_synthesized {
+            *state = old_to_new[*state as usize];
+        }
+        synthesized_dfa = minimized;
+        if profile {
+            eprintln!(
+                "[glrmask/profile][tokenizer] structural_pair_minimize states_before={} states_after={} elapsed_ms={:.3}",
+                states_before,
+                synthesized_dfa.num_states(),
+                minimize_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+    }
+
     if let Some(total_started_at) = total_started_at {
         eprintln!(
             "[glrmask/profile][tokenizer] structural_pair full_states={} synthesized_states_before={} synthesized_states_after={} mapped_tuples={} missing_before={} product_build_ms={:.3} component_maps_ms={:.3} tuple_map_ms={:.3} augment_ms={:.3} lookup_ms={:.3} total_ms={:.3}",
@@ -4999,9 +5522,14 @@ impl ProductComponent {
     }
 }
 
-fn compile_product_component(expr: &Expr) -> ProductComponent {
+fn compile_product_component_with_options(
+    expr: &Expr,
+    preserve_coordinates: bool,
+) -> ProductComponent {
     match expr {
-        Expr::Shared(inner) => compile_product_component(inner),
+        Expr::Shared(inner) => {
+            compile_product_component_with_options(inner, preserve_coordinates)
+        }
         Expr::Repeat {
             expr: repeat_expr,
             min,
@@ -5015,14 +5543,24 @@ fn compile_product_component(expr: &Expr) -> ProductComponent {
                 };
             }
 
-            ProductComponent::Materialized(Arc::new(compile_product_component_materialized_dfa(
-                expr,
-            )))
+            ProductComponent::Materialized(Arc::new(
+                compile_product_component_materialized_dfa_with_options(
+                    expr,
+                    preserve_coordinates,
+                ),
+            ))
         }
         _ => ProductComponent::Materialized(Arc::new(
-            compile_product_component_materialized_dfa(expr),
+            compile_product_component_materialized_dfa_with_options(
+                expr,
+                preserve_coordinates,
+            ),
         )),
     }
+}
+
+fn compile_product_component(expr: &Expr) -> ProductComponent {
+    compile_product_component_with_options(expr, false)
 }
 
 fn deterministic_component_homomorphism_state_map(
@@ -5076,6 +5614,7 @@ struct ProductComponentCompileProfile {
 fn compile_product_components_profiled(
     exprs: &[Expr],
     profile_detail: bool,
+    preserve_coordinates: bool,
 ) -> (
     Vec<ProductComponent>,
     usize,
@@ -5105,13 +5644,17 @@ fn compile_product_components_profiled(
         .map(|expr| {
             if profile_detail {
                 let started_at = Instant::now();
-                let component = compile_product_component(expr);
+                let component =
+                    compile_product_component_with_options(expr, preserve_coordinates);
                 (
                     component,
                     Some(started_at.elapsed().as_secs_f64() * 1000.0),
                 )
             } else {
-                (compile_product_component(expr), None)
+                (
+                    compile_product_component_with_options(expr, preserve_coordinates),
+                    None,
+                )
             }
         })
         .collect();
@@ -5143,7 +5686,8 @@ fn compile_product_components_profiled(
 }
 
 fn compile_product_components(exprs: &[Expr]) -> (Vec<ProductComponent>, usize) {
-    let (components, cache_hits, _) = compile_product_components_profiled(exprs, false);
+    let (components, cache_hits, _) =
+        compile_product_components_profiled(exprs, false, false);
     (components, cache_hits)
 }
 
@@ -5163,7 +5707,7 @@ fn build_product_dfa(
     let profile_started_at = Instant::now();
     let component_compile_started_at = Instant::now();
     let (components, component_cache_hits, component_profiles) =
-        compile_product_components_profiled(exprs, profile_detail);
+        compile_product_components_profiled(exprs, profile_detail, capture_trace);
     let component_compile_ms = profile_timing
         .then(|| component_compile_started_at.elapsed().as_secs_f64() * 1000.0);
     if profile_timing {

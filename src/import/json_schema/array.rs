@@ -25,22 +25,28 @@ impl<'a> Lowerer<'a> {
                     else {
                         return Ok(None);
                     };
-                    Ok(Some(if lowerer.should_terminalize_whole_isolated_array(
+                    if lowerer.should_terminalize_whole_isolated_array(
                         repeat_complexity,
                         schema.max_items,
                     ) {
-                        lowerer.isolated_homogeneous_array_terminal(
+                        Ok(Some(lowerer.isolated_homogeneous_array_terminal(
                             item,
                             schema.min_items,
                             schema.max_items,
-                        )
+                        )))
+                    } else if std::env::var_os(
+                        "GLRMASK_DISABLE_CONTEXTUAL_ARRAY_TERMINALS",
+                    )
+                    .is_some()
+                    {
+                        Ok(None)
                     } else {
-                        lowerer.contextualized_homogeneous_array_terminals(
+                        Ok(Some(lowerer.contextualized_homogeneous_array_terminals(
                             item,
                             schema.min_items,
                             schema.max_items,
-                        )
-                    }))
+                        )))
+                    }
                 },
             )?;
             if let Some(expr) = isolated {
