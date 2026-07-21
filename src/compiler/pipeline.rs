@@ -47,7 +47,8 @@ use crate::compiler::stages::id_map_and_terminal_dwa::types::{
 };
 use crate::compiler::stages::id_map_and_terminal_dwa::synthetic_state_map::{
     CertifiedFullToSynthesizedStateMap, certify_full_to_synthesized_state_map,
-    synthesize_bounded_terminal_expressions, synthesize_terminal_expressions_for_horizon,
+    estimated_synthesis_state_volume, synthesize_bounded_terminal_expressions,
+    synthesize_terminal_expressions_for_horizon,
 };
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::compiler::stages::mapped_artifact::{
@@ -668,7 +669,7 @@ mod lexer_partition_plan_tests {
                     expr: Expr::Repeat {
                         expr: Box::new(Expr::U8Seq(b"a".to_vec())),
                         min: 1,
-                        max: Some(500),
+                        max: Some(5_000),
                     },
                 },
                 Terminal::Expr {
@@ -949,7 +950,7 @@ fn plan_synthetic_tokenizer(
     let repeat_horizons = Arc::new(
         crate::automata::lexer::compile::VocabularyRepeatHorizonCache::new(),
     );
-    let synthesized = if aggressive_partition_horizon {
+    let mut synthesized = if aggressive_partition_horizon {
         // Experimental candidate generation may shorten terminals that are
         // reducible only at the common partition horizon. The resulting
         // tokenizer is never trusted directly: the full-vocabulary
@@ -966,6 +967,69 @@ fn plan_synthetic_tokenizer(
             repeat_horizons.as_ref(),
         )
     };
+
+    if !aggressive_partition_horizon {
+        const MAX_LOCAL_PREFLIGHT_ESTIMATE: u128 = 4_000_000;
+        const MIN_LOCAL_STATE_SAVING: usize = 1_024;
+        const MAX_SYNTHESIZED_RATIO_NUMERATOR: usize = 3;
+        const MAX_SYNTHESIZED_RATIO_DENOMINATOR: usize = 4;
+
+        let max_token_len = vocab.entries.values().map(Vec::len).max().unwrap_or(0);
+        let mut relevant_bytes = vocab
+            .entries
+            .values()
+            .flat_map(|bytes| bytes.iter().copied())
+            .collect::<Vec<_>>();
+        relevant_bytes.sort_unstable();
+        relevant_bytes.dedup();
+
+        synthesized.changed_terminals.retain(|&terminal| {
+            let terminal = terminal as usize;
+            let full = &full_expressions[terminal];
+            let candidate = &synthesized.expressions[terminal];
+            if estimated_synthesis_state_volume(full) > MAX_LOCAL_PREFLIGHT_ESTIMATE {
+                return true;
+            }
+
+            let full = factor_regex_expr(full.clone());
+            let candidate = factor_regex_expr(candidate.clone());
+            let pair = compile_terminal_expression_pair_with_structural_map(
+                &full,
+                &candidate,
+                vocab,
+                repeat_horizons.as_ref(),
+                max_token_len,
+                &relevant_bytes,
+            );
+            let keep = pair.as_ref().is_some_and(|pair| {
+                let full_states = pair.full.num_states();
+                let synthesized_states = pair.synthesized.num_states();
+                synthesized_states < full_states
+                    && full_states.saturating_sub(synthesized_states)
+                        >= MIN_LOCAL_STATE_SAVING
+                    && synthesized_states
+                        .saturating_mul(MAX_SYNTHESIZED_RATIO_DENOMINATOR)
+                        <= full_states.saturating_mul(MAX_SYNTHESIZED_RATIO_NUMERATOR)
+            });
+            if std::env::var_os("GLRMASK_PROFILE_SYNTHETIC_PLAN").is_some() {
+                let (full_states, synthesized_states) = pair.as_ref().map_or((0, 0), |pair| {
+                    (pair.full.num_states(), pair.synthesized.num_states())
+                });
+                eprintln!(
+                    "[glrmask/profile][synthetic_preflight] terminal={} keep={} full_states={} synthesized_states={} absolute_saving={}",
+                    terminal,
+                    keep,
+                    full_states,
+                    synthesized_states,
+                    full_states.saturating_sub(synthesized_states),
+                );
+            }
+            if !keep {
+                synthesized.expressions[terminal] = full_expressions[terminal].clone();
+            }
+            keep
+        });
+    }
     let changed_terminal_ids = synthesized.changed_terminals.clone();
     if changed_terminal_ids.is_empty() {
         return None;

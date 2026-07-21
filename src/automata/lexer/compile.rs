@@ -63,6 +63,13 @@ impl VocabularyRepeatHorizonCache {
     }
 
     pub(crate) fn horizon_for_expr(&self, body: &Expr, vocab: &Vocab) -> Option<usize> {
+        // The ordinary expression-to-DFA helper requires nested language
+        // operations to be lowered before NFA compilation. Repeat synthesis is
+        // an optimization, so unsupported body shapes must fail closed rather
+        // than reaching that internal invariant.
+        if expr_contains_group_op(body) {
+            return None;
+        }
         self.horizon_for_dfa(&compile_expr_to_dfa(body), vocab)
     }
 }
@@ -5319,6 +5326,37 @@ pub(crate) struct CompiledTerminalExpressionPair {
     pub(crate) synthesized: Regex,
     pub(crate) full: Regex,
     pub(crate) full_to_synthesized: Vec<u32>,
+}
+
+/// Return the number of structurally aligned product components available to
+/// the paired terminal compiler without constructing either DFA.
+///
+/// Vocabulary-only repeat reductions currently rely on the explicit
+/// component maps below. A single-component pair would instead require the
+/// generic finite-horizon equivalence search, which is exact but can create a
+/// large and input-sensitive planning cliff. Callers may therefore use this as
+/// a cheap fail-closed capability check before selecting a new optimization
+/// candidate.
+pub(crate) fn structural_pair_component_count(
+    full_expression: &Expr,
+    synthesized_expression: &Expr,
+) -> Option<usize> {
+    let normalized_full = lift_single_nested_intersection(full_expression);
+    let normalized_synthesized = lift_single_nested_intersection(synthesized_expression);
+    let full_expression = normalized_full.as_ref().unwrap_or(full_expression);
+    let synthesized_expression = normalized_synthesized
+        .as_ref()
+        .unwrap_or(synthesized_expression);
+    let full_plan = build_exclusion_compile_plan(std::slice::from_ref(full_expression));
+    let synthesized_plan =
+        build_exclusion_compile_plan(std::slice::from_ref(synthesized_expression));
+    (full_plan.visible_groups == 1
+        && synthesized_plan.visible_groups == 1
+        && full_plan.compiled_exprs.len() == synthesized_plan.compiled_exprs.len()
+        && full_plan.exclusions == synthesized_plan.exclusions
+        && full_plan.intersections == synthesized_plan.intersections
+        && !full_plan.compiled_exprs.is_empty())
+    .then_some(full_plan.compiled_exprs.len())
 }
 
 pub(crate) fn compile_terminal_expression_pair_with_structural_map(

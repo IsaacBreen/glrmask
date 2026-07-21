@@ -8,7 +8,9 @@
 use std::sync::Arc;
 
 use crate::Vocab;
-use crate::automata::lexer::compile::VocabularyRepeatHorizonCache;
+use crate::automata::lexer::compile::{
+    VocabularyRepeatHorizonCache, structural_pair_component_count,
+};
 use crate::automata::lexer::Lexer;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::regex::Expr;
@@ -780,37 +782,74 @@ fn synthesize_expression_for_vocab(
     max_token_len: usize,
     vocab: &Vocab,
     horizons: &VocabularyRepeatHorizonCache,
-) -> (Expr, bool) {
+) -> (Expr, bool, bool) {
+    const MAX_VOCAB_HORIZON_BODY_ESTIMATE: u128 = 4_096;
+    const MIN_HORIZON_IMPROVEMENT_FACTOR: usize = 4;
+
     match expr {
         Expr::Repeat { expr: body, min, max } => {
-            let (child, child_changed) =
+            let (child, child_changed, child_used_vocab) =
                 synthesize_expression_for_vocab(body, max_token_len, vocab, horizons);
             let child_min = minimum_consumed_bytes(&child);
             let mut changed = child_changed;
+            let mut used_vocab = child_used_vocab;
             let synthesized_max = max.map(|max| {
                 if child_min == 0 {
                     return max;
                 }
                 let fallback = max_token_len.div_ceil(child_min).saturating_add(1);
-                let crossed_per_token = horizons.horizon_for_expr(body, vocab).unwrap_or(fallback);
-                let stencil_max = min
+                let conservative_stencil_max = min
                     .saturating_add(
-                        crossed_per_token.saturating_mul(STENCIL_TOKEN_NEIGHBORHOODS),
+                        fallback.saturating_mul(STENCIL_TOKEN_NEIGHBORHOODS),
                     )
                     .saturating_add(1);
-                if max > stencil_max
+                let conservative_reduction = max > conservative_stencil_max
                     && estimated_repeat_reduction_is_material(
                         body,
                         &child,
                         max,
-                        stencil_max,
-                    )
-                {
+                        conservative_stencil_max,
+                    );
+                let mut selected_max = if conservative_reduction {
                     changed = true;
-                    stencil_max
+                    conservative_stencil_max
                 } else {
                     max
+                };
+
+                // The finite-vocabulary proof is useful only when it removes a
+                // genuinely large amount of conservatism. Running it for a
+                // one-layer improvement creates brittle planning cliffs, while
+                // compiling a large repeat-body DFA can cost more than the
+                // tokenizer optimization can save. The ordinary byte-length
+                // proof remains the fail-closed baseline in both cases.
+                if estimated_expression_state_volume(body)
+                    <= MAX_VOCAB_HORIZON_BODY_ESTIMATE
+                    && let Some(vocab_horizon) = horizons.horizon_for_expr(body, vocab)
+                    && vocab_horizon
+                        .saturating_mul(MIN_HORIZON_IMPROVEMENT_FACTOR)
+                        <= fallback
+                {
+                    let vocab_stencil_max = min
+                        .saturating_add(
+                            vocab_horizon.saturating_mul(STENCIL_TOKEN_NEIGHBORHOODS),
+                        )
+                        .saturating_add(1);
+                    if vocab_stencil_max < selected_max
+                        && max > vocab_stencil_max
+                        && estimated_repeat_reduction_is_material(
+                            body,
+                            &child,
+                            max,
+                            vocab_stencil_max,
+                        )
+                    {
+                        selected_max = vocab_stencil_max;
+                        changed = true;
+                        used_vocab = true;
+                    }
                 }
+                selected_max
             });
             (
                 Expr::Repeat {
@@ -819,12 +858,13 @@ fn synthesize_expression_for_vocab(
                     max: synthesized_max,
                 },
                 changed,
+                used_vocab,
             )
         }
         Expr::Intersect { expr, intersect } => {
-            let (expr, left_changed) =
+            let (expr, left_changed, left_used_vocab) =
                 synthesize_expression_for_vocab(expr, max_token_len, vocab, horizons);
-            let (intersect, right_changed) =
+            let (intersect, right_changed, right_used_vocab) =
                 synthesize_expression_for_vocab(intersect, max_token_len, vocab, horizons);
             (
                 Expr::Intersect {
@@ -832,38 +872,43 @@ fn synthesize_expression_for_vocab(
                     intersect: Box::new(intersect),
                 },
                 left_changed || right_changed,
+                left_used_vocab || right_used_vocab,
             )
         }
         Expr::Seq(parts) => {
             let mut changed = false;
+            let mut used_vocab = false;
             let parts = parts
                 .iter()
                 .map(|part| {
-                    let (part, part_changed) =
+                    let (part, part_changed, part_used_vocab) =
                         synthesize_expression_for_vocab(part, max_token_len, vocab, horizons);
                     changed |= part_changed;
+                    used_vocab |= part_used_vocab;
                     part
                 })
                 .collect();
-            (Expr::Seq(parts), changed)
+            (Expr::Seq(parts), changed, used_vocab)
         }
         Expr::Choice(options) => {
             let mut changed = false;
+            let mut used_vocab = false;
             let options = options
                 .iter()
                 .map(|option| {
-                    let (option, option_changed) =
+                    let (option, option_changed, option_used_vocab) =
                         synthesize_expression_for_vocab(option, max_token_len, vocab, horizons);
                     changed |= option_changed;
+                    used_vocab |= option_used_vocab;
                     option
                 })
                 .collect();
-            (Expr::Choice(options), changed)
+            (Expr::Choice(options), changed, used_vocab)
         }
         Expr::Exclude { expr, exclude } => {
-            let (expr, left_changed) =
+            let (expr, left_changed, left_used_vocab) =
                 synthesize_expression_for_vocab(expr, max_token_len, vocab, horizons);
-            let (exclude, right_changed) =
+            let (exclude, right_changed, right_used_vocab) =
                 synthesize_expression_for_vocab(exclude, max_token_len, vocab, horizons);
             (
                 Expr::Exclude {
@@ -871,14 +916,19 @@ fn synthesize_expression_for_vocab(
                     exclude: Box::new(exclude),
                 },
                 left_changed || right_changed,
+                left_used_vocab || right_used_vocab,
             )
         }
         Expr::Shared(inner) => {
-            let (inner, changed) =
+            let (inner, changed, used_vocab) =
                 synthesize_expression_for_vocab(inner, max_token_len, vocab, horizons);
-            (Expr::Shared(std::sync::Arc::new(inner)), changed)
+            (
+                Expr::Shared(std::sync::Arc::new(inner)),
+                changed,
+                used_vocab,
+            )
         }
-        leaf => (leaf.clone(), false),
+        leaf => (leaf.clone(), false, false),
     }
 }
 
@@ -923,6 +973,10 @@ fn estimated_expression_state_volume_inner(
 
 fn estimated_expression_state_volume(expr: &Expr) -> u128 {
     estimated_expression_state_volume_inner(expr, &mut FxHashMap::default())
+}
+
+pub(crate) fn estimated_synthesis_state_volume(expr: &Expr) -> u128 {
+    estimated_expression_state_volume(expr)
 }
 
 fn estimated_repeat_reduction_is_material(
@@ -1004,15 +1058,37 @@ pub(crate) fn synthesize_bounded_terminal_expressions(
             if !estimated_expression_is_large_enough_for_synthesis(expression) {
                 return expression.clone();
             }
-            let (candidate, changed) =
+            let conservative_pathological =
+                reducible_repeat_stats(expression, max_token_len).is_pathological_candidate();
+            // New vocabulary-only reductions currently require an explicit
+            // multi-component structural product. Single-component candidates
+            // fall back to generic finite-horizon equivalence and have shown
+            // large, input-sensitive planning costs. Check the full expression
+            // shape before compiling any repeat-body DFA.
+            if !conservative_pathological
+                && !structural_pair_component_count(expression, expression)
+                    .is_some_and(|components| components >= 2)
+            {
+                return expression.clone();
+            }
+            let (candidate, changed, used_vocab) =
                 synthesize_expression_for_vocab(expression, max_token_len, vocab, horizons);
+            let vocabulary_shape_supported = !used_vocab
+                || conservative_pathological
+                || structural_pair_component_count(expression, &candidate)
+                    .is_some_and(|components| components >= 2);
             let profitable = changed
+                && (conservative_pathological || used_vocab)
+                && vocabulary_shape_supported
                 && estimated_synthesis_reduction_is_profitable(expression, &candidate);
             if std::env::var_os("GLRMASK_PROFILE_SYNTHETIC_PLAN").is_some() && changed {
                 eprintln!(
-                    "[glrmask/profile][synthetic_candidate] terminal={} selected={} full_estimate={} synthesized_estimate={}",
+                    "[glrmask/profile][synthetic_candidate] terminal={} selected={} conservative_pathological={} used_vocab={} vocabulary_shape_supported={} full_estimate={} synthesized_estimate={}",
                     terminal,
                     profitable,
+                    conservative_pathological,
+                    used_vocab,
+                    vocabulary_shape_supported,
                     estimated_expression_state_volume(expression),
                     estimated_expression_state_volume(&candidate),
                 );
