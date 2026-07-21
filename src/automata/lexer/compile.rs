@@ -5907,12 +5907,21 @@ pub(crate) fn compile_terminal_expression_pair_with_structural_map(
     let lookup_ms = lookup_started_at
         .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
-    if std::env::var_os("GLRMASK_MINIMIZE_SYNTHETIC_PRODUCT").is_some() {
+    let augmented_state_count = synthesized_dfa
+        .num_states()
+        .saturating_sub(states_before_augment);
+    if std::env::var_os("GLRMASK_MINIMIZE_SYNTHETIC_PRODUCT").is_some()
+        && augmented_state_count == 0
+    {
         let minimize_started_at = Instant::now();
         let states_before = synthesized_dfa.num_states();
         let (minimized, old_to_new) = synthesized_dfa.minimize_with_state_mapping();
         for state in &mut full_to_synthesized {
-            *state = old_to_new[*state as usize];
+            let mapped = old_to_new[*state as usize];
+            if mapped == u32::MAX {
+                return None;
+            }
+            *state = mapped;
         }
         synthesized_dfa = minimized;
         if profile {
@@ -5923,6 +5932,13 @@ pub(crate) fn compile_terminal_expression_pair_with_structural_map(
                 minimize_started_at.elapsed().as_secs_f64() * 1000.0,
             );
         }
+    } else if profile
+        && std::env::var_os("GLRMASK_MINIMIZE_SYNTHETIC_PRODUCT").is_some()
+    {
+        eprintln!(
+            "[glrmask/profile][tokenizer] structural_pair_minimize_skipped reason=augmented_residual_roots augmented_states={}",
+            augmented_state_count,
+        );
     }
 
     if let Some(total_started_at) = total_started_at {
