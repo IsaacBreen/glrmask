@@ -3984,12 +3984,20 @@ fn set_single_group_futures_from_class_graph(
 ) {
     let states = dfa.num_states();
     debug_assert_eq!(states, class_transitions.len());
-    let edge_count = class_transitions.iter().map(Vec::len).sum::<usize>();
     let mut predecessor_counts = vec![0u32; states];
+    let mut seen_target_epoch = vec![0u32; states];
+    let mut epoch = 1u32;
+    let mut edge_count = 0usize;
     for transitions in class_transitions {
         for &(_, target) in transitions {
+            if seen_target_epoch[target as usize] == epoch {
+                continue;
+            }
+            seen_target_epoch[target as usize] = epoch;
             predecessor_counts[target as usize] += 1;
+            edge_count += 1;
         }
+        epoch = epoch.checked_add(1).expect("product state epoch overflow");
     }
 
     let mut offsets = vec![0usize; states + 1];
@@ -3999,12 +4007,19 @@ fn set_single_group_futures_from_class_graph(
     debug_assert_eq!(offsets[states], edge_count);
     let mut write_offsets = offsets[..states].to_vec();
     let mut predecessors = vec![0u32; edge_count];
+    seen_target_epoch.fill(0);
+    epoch = 1;
     for (source, transitions) in class_transitions.iter().enumerate() {
         for &(_, target) in transitions {
+            if seen_target_epoch[target as usize] == epoch {
+                continue;
+            }
+            seen_target_epoch[target as usize] = epoch;
             let slot = &mut write_offsets[target as usize];
             predecessors[*slot] = source as u32;
             *slot += 1;
         }
+        epoch = epoch.checked_add(1).expect("product state epoch overflow");
     }
 
     let mut can_reach_final = vec![false; states];
@@ -6193,7 +6208,6 @@ fn build_product_dfa(
         && pure_binary_intersection(exclusions, intersections)
         && let Some(result) = try_build_dense_binary_intersection_product(
             &components,
-            &class_map,
             &class_members,
             &component_class_transitions,
             capture_trace,
@@ -6549,27 +6563,6 @@ fn pure_binary_intersection(
             .is_some_and(|required| required.len() == 1 && required.contains(&1))
 }
 
-fn materialized_dense_class_targets(
-    component: &ProductComponent,
-    transitions: &ProductComponentClassTransitions,
-    num_classes: usize,
-) -> Option<Vec<u32>> {
-    let ProductComponent::Materialized(dfa) = component else {
-        return None;
-    };
-    let ProductComponentClassTransitions::Materialized(transitions) = transitions else {
-        return None;
-    };
-    let mut dense = vec![u32::MAX; dfa.num_states().checked_mul(num_classes)?];
-    for (state, entries) in transitions.iter().enumerate() {
-        let row = &mut dense[state * num_classes..(state + 1) * num_classes];
-        for &(class, target) in entries {
-            row[class as usize] = target;
-        }
-    }
-    Some(dense)
-}
-
 /// Exact dense compiler for a single visible terminal defined as the
 /// intersection of two materialized deterministic components.
 ///
@@ -6580,7 +6573,6 @@ fn materialized_dense_class_targets(
 /// the same construction with constant-time array lookup and no tuple hashing.
 fn try_build_dense_binary_intersection_product(
     components: &[ProductComponent],
-    class_map: &[u8],
     class_members: &[Vec<u8>],
     component_class_transitions: &[ProductComponentClassTransitions],
     capture_trace: bool,
@@ -6603,16 +6595,16 @@ fn try_build_dense_binary_intersection_product(
         return None;
     }
     let num_classes = class_members.len();
-    let left_targets = materialized_dense_class_targets(
-        &components[0],
-        &component_class_transitions[0],
-        num_classes,
-    )?;
-    let right_targets = materialized_dense_class_targets(
-        &components[1],
-        &component_class_transitions[1],
-        num_classes,
-    )?;
+    let ProductComponentClassTransitions::Materialized(left_transitions) =
+        &component_class_transitions[0]
+    else {
+        return None;
+    };
+    let ProductComponentClassTransitions::Materialized(right_transitions) =
+        &component_class_transitions[1]
+    else {
+        return None;
+    };
     let left_dead = components[0].dead_state();
     let right_dead = components[1].dead_state();
 
@@ -6620,14 +6612,8 @@ fn try_build_dense_binary_intersection_product(
     let discovery_started_at = profile_timing.then(Instant::now);
     let mut state_by_pair = vec![u32::MAX; pair_cells];
     state_by_pair[0] = 0;
-    let mut pairs = Vec::with_capacity(pair_cells.min(1_000_000));
-    pairs.push((0u32, 0u32));
-    let target_capacity = pair_cells
-        .min(1_000_000)
-        .checked_mul(num_classes)
-        .unwrap_or(0);
-    let mut product_targets = Vec::<u32>::with_capacity(target_capacity);
-    product_targets.resize(num_classes, u32::MAX);
+    let mut pairs = vec![(0u32, 0u32)];
+    let mut pending_class_transitions = vec![Vec::<(u8, u32)>::new()];
     let mut dfa = DFA::new(1);
     dfa.ensure_group_capacity(1);
     let set_metadata = |dfa: &mut DFA, state: u32, left_state: u32, right_state: u32| {
@@ -6644,13 +6630,24 @@ fn try_build_dense_binary_intersection_product(
     let mut cursor = 0usize;
     while cursor < pairs.len() {
         let (left_state, right_state) = pairs[cursor];
-        let left_row = &left_targets
-            [left_state as usize * num_classes..(left_state as usize + 1) * num_classes];
-        let right_row = &right_targets
-            [right_state as usize * num_classes..(right_state as usize + 1) * num_classes];
-        for class in 0..num_classes {
-            let left_target = left_row[class];
-            let right_target = right_row[class];
+        let left_row = &left_transitions[left_state as usize];
+        let right_row = &right_transitions[right_state as usize];
+        let mut class_transitions = Vec::with_capacity(num_classes);
+        let mut left_index = 0usize;
+        let mut right_index = 0usize;
+        while left_index < left_row.len() && right_index < right_row.len() {
+            let (left_class, left_target) = left_row[left_index];
+            let (right_class, right_target) = right_row[right_index];
+            if left_class < right_class {
+                left_index += 1;
+                continue;
+            }
+            if right_class < left_class {
+                right_index += 1;
+                continue;
+            }
+            left_index += 1;
+            right_index += 1;
             if left_target == u32::MAX
                 || right_target == u32::MAX
                 || left_dead == Some(left_target)
@@ -6667,96 +6664,41 @@ fn try_build_dense_binary_intersection_product(
                 let target = u32::try_from(pairs.len()).ok()?;
                 state_by_pair[pair_index] = target;
                 pairs.push((left_target, right_target));
-                product_targets.resize(
-                    pairs.len().checked_mul(num_classes)?,
-                    u32::MAX,
-                );
+                pending_class_transitions.push(Vec::new());
                 let added = dfa.add_state();
                 debug_assert_eq!(added, target);
                 set_metadata(&mut dfa, target, left_target, right_target);
                 target
             };
-            product_targets[cursor * num_classes + class] = target;
+            class_transitions.push((left_class, target));
         }
+        pending_class_transitions[cursor] = class_transitions;
         cursor += 1;
     }
     let discovery_ms = discovery_started_at
         .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
     let future_started_at = profile_timing.then(Instant::now);
-    let states = pairs.len();
-    let edge_count = product_targets
-        .iter()
-        .filter(|&&target| target != u32::MAX)
-        .count();
-    let mut predecessor_counts = vec![0u32; states];
-    for &target in &product_targets {
-        if target != u32::MAX {
-            predecessor_counts[target as usize] += 1;
-        }
-    }
-    let mut predecessor_offsets = vec![0usize; states + 1];
-    for state in 0..states {
-        predecessor_offsets[state + 1] =
-            predecessor_offsets[state] + predecessor_counts[state] as usize;
-    }
-    debug_assert_eq!(predecessor_offsets[states], edge_count);
-    let mut write_offsets = predecessor_offsets[..states].to_vec();
-    let mut predecessors = vec![0u32; edge_count];
-    for source in 0..states {
-        for &target in
-            &product_targets[source * num_classes..(source + 1) * num_classes]
-        {
-            if target == u32::MAX {
-                continue;
-            }
-            let slot = &mut write_offsets[target as usize];
-            predecessors[*slot] = source as u32;
-            *slot += 1;
-        }
-    }
-    let mut can_reach_final = vec![false; states];
-    let mut queue = VecDeque::<u32>::new();
-    for state in 0..states {
-        if dfa.finalizers(state as u32).contains(0) {
-            can_reach_final[state] = true;
-            queue.push_back(state as u32);
-        }
-    }
-    while let Some(target) = queue.pop_front() {
-        let target = target as usize;
-        for &source in
-            &predecessors[predecessor_offsets[target]..predecessor_offsets[target + 1]]
-        {
-            if !can_reach_final[source as usize] {
-                can_reach_final[source as usize] = true;
-                queue.push_back(source);
-            }
-        }
-    }
-    for source in 0..states {
-        let mut future = BitSet::new(1);
-        if product_targets[source * num_classes..(source + 1) * num_classes]
-            .iter()
-            .any(|&target| target != u32::MAX && can_reach_final[target as usize])
-        {
-            future.set(0);
-        }
-        dfa.set_possible_future_group_ids(source as u32, future);
-    }
+    set_single_group_futures_from_class_graph(&mut dfa, &pending_class_transitions);
     let future_ms = future_started_at
         .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     let expansion_started_at = profile_timing.then(Instant::now);
     let expanded_transitions: Vec<crate::ds::char_transitions::CharTransitions<u32>> =
-        product_targets
-            .par_chunks(num_classes)
-            .map(|class_targets| {
-                let mut entries = Vec::with_capacity(256);
-                for byte in 0u16..=255 {
-                    let target = class_targets[class_map[byte as usize] as usize];
-                    if target != u32::MAX {
-                        entries.push((byte as u8, target));
+        pending_class_transitions
+            .into_par_iter()
+            .map(|class_transitions| {
+                let capacity = class_transitions
+                    .iter()
+                    .map(|(class, _)| class_members[*class as usize].len())
+                    .sum();
+                let mut entries = Vec::with_capacity(capacity);
+                for (class, target) in class_transitions {
+                    for &byte in &class_members[class as usize] {
+                        entries.push((byte, target));
                     }
+                }
+                if entries.len() > 1 {
+                    entries.sort_unstable_by_key(|entry| entry.0);
                 }
                 crate::ds::char_transitions::CharTransitions::from_sorted_entries(entries)
             })
@@ -7031,7 +6973,6 @@ mod tests {
                 super::build_product_class_transitions(&components, &class_map);
             let (product, _, trace) = super::try_build_dense_binary_intersection_product(
                 &components,
-                &class_map,
                 &class_members,
                 &class_transitions,
                 true,
