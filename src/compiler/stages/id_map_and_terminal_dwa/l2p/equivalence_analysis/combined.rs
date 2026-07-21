@@ -321,6 +321,65 @@ pub(crate) struct CombinedEquivalenceProfile {
     pub(crate) exact_rep_confirmation_used: bool,
 }
 
+pub(crate) fn trusted_token_exact_initial_id_map(
+    vocab: &Vocab,
+    tokenizer_states: &ManyToOneIdMap,
+) -> (InternalIdMap, CombinedEquivalenceProfile) {
+    let max_token_id = vocab.max_token_id() as usize;
+    let mut original_to_internal = vec![u32::MAX; max_token_id.saturating_add(1)];
+    let mut representative_original_ids = Vec::with_capacity(vocab.len());
+    for &token_id in vocab.entries.keys() {
+        original_to_internal[token_id as usize] = representative_original_ids.len() as u32;
+        representative_original_ids.push(token_id);
+    }
+    let vocab_tokens = ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
+        original_to_internal,
+        representative_original_ids,
+    );
+    let token_bytes = vocab
+        .entries
+        .values()
+        .map(Vec::as_slice)
+        .collect::<Vec<_>>();
+    let max_token_len = token_bytes.iter().map(|bytes| bytes.len()).max().unwrap_or(0);
+    let stats = token_length_stats(&token_bytes);
+    let representatives = tokenizer_states.num_internal_ids() as usize;
+    (
+        InternalIdMap {
+            tokenizer_states: tokenizer_states.clone(),
+            vocab_tokens,
+            deferred_vocab_singleton_original_ids: None,
+        },
+        CombinedEquivalenceProfile {
+            initial_states_considered: representatives,
+            max_length_skipped: true,
+            max_token_len,
+            token_len_gt_4: stats.gt_4,
+            token_len_gt_8: stats.gt_8,
+            token_len_gt_16: stats.gt_16,
+            token_len_gt_32: stats.gt_32,
+            token_len_gt_64: stats.gt_64,
+            raw_analysis_base_init_ms: 0.0,
+            analysis_view_build_ms: 0.0,
+            active_mask_filter_ms: 0.0,
+            effective_follows_normalize_ms: 0.0,
+            prepare_inputs_ms: 0.0,
+            byte_class_setup_ms: 0.0,
+            vocab_analysis_dfa_build_ms: 0.0,
+            token_dedup_ms: 0.0,
+            restricted_observation_state_equiv_ms: 0.0,
+            max_length_state_equiv_ms: 0.0,
+            vocab_equiv_ms: 0.0,
+            exact_state_equiv_ms: 0.0,
+            id_map_finalize_ms: 0.0,
+            restricted_observation_reps: representatives,
+            max_length_reps: representatives,
+            exact_reps: representatives,
+            exact_rep_confirmation_used: false,
+        },
+    )
+}
+
 struct TokenLengthStats {
     gt_4: usize,
     gt_8: usize,

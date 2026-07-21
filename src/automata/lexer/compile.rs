@@ -251,6 +251,45 @@ fn split_top_level_group_ops(expr: &Expr) -> (Expr, Vec<Expr>, Vec<Expr>) {
     }
 }
 
+/// Expose one intersection nested under a common sequence shell. This is an
+/// exact distributive rewrite:
+///
+///     prefix · (left ∩ right) · suffix
+///       = (prefix · left · suffix) ∩ (prefix · right · suffix)
+///
+/// Keeping the operands visible lets structural full/stencil compilation map
+/// their residual coordinates independently and materialize missing correlated
+/// product tuples. We deliberately handle exactly one nested intersection to
+/// avoid an exponential distribution over multiple group operations.
+fn lift_single_nested_intersection(expr: &Expr) -> Option<Expr> {
+    let Expr::Seq(parts) = expr else {
+        return None;
+    };
+    let mut intersection = None;
+    for (index, part) in parts.iter().enumerate() {
+        let part = match part {
+            Expr::Shared(inner) => inner.as_ref(),
+            other => other,
+        };
+        if let Expr::Intersect { expr, intersect } = part {
+            if intersection.is_some() {
+                return None;
+            }
+            intersection = Some((index, expr.as_ref(), intersect.as_ref()));
+        }
+    }
+    let (index, left, right) = intersection?;
+    let branch = |replacement: &Expr| {
+        let mut branch = parts.to_vec();
+        branch[index] = replacement.clone();
+        Expr::Seq(branch).optimize()
+    };
+    Some(Expr::Intersect {
+        expr: Box::new(branch(left)),
+        intersect: Box::new(branch(right)),
+    })
+}
+
 #[derive(Default)]
 struct NestedGroupOpCache {
     compiled: FxHashMap<Expr, Arc<DFA>>,
@@ -2494,6 +2533,49 @@ struct LexerComponent {
     protected_residual: bool,
 }
 
+struct LexerComponentPair {
+    terminal_ids: Vec<usize>,
+    synthesized: DFA,
+    full: DFA,
+    full_to_synthesized: Vec<u32>,
+    synthesized_state_representatives_by_horizon: Vec<(usize, Vec<u32>)>,
+    analysis_horizons: Vec<LexerComponentAnalysisHorizon>,
+    protected_residual: bool,
+}
+
+struct LexerComponentAnalysisHorizon {
+    horizon: usize,
+    tokenizer_dfa: DFA,
+    source_to_analysis: Vec<u32>,
+}
+
+pub(crate) struct CompiledPartitionedExpressionPair {
+    pub(crate) synthesized: Regex,
+    pub(crate) full: Regex,
+    pub(crate) full_to_synthesized: Vec<u32>,
+    pub(crate) synthesized_state_representatives_by_horizon: Vec<(usize, Vec<u32>)>,
+    pub(crate) component_quotient_plans: Vec<StructuralComponentQuotientPlan>,
+}
+
+#[derive(Clone)]
+pub(crate) struct StructuralComponentQuotientPlan {
+    pub(crate) global_offset: u32,
+    pub(crate) source_state_count: usize,
+    /// Local terminal id `i` in each horizon tokenizer corresponds to
+    /// `terminal_ids[i]` in the grammar-wide terminal domain.
+    pub(crate) terminal_ids: Vec<u32>,
+    pub(crate) horizons: Vec<StructuralComponentHorizonPlan>,
+}
+
+#[derive(Clone)]
+pub(crate) struct StructuralComponentHorizonPlan {
+    pub(crate) horizon: usize,
+    pub(crate) tokenizer: Tokenizer,
+    /// Source component state -> analysis-tokenizer state. The map is
+    /// certified for every byte string up to `horizon` bytes.
+    pub(crate) source_to_analysis: Vec<u32>,
+}
+
 fn compile_partition_components(
     exprs: &[Expr],
     visible_labels: Option<&[String]>,
@@ -3211,6 +3293,503 @@ fn compile_terminal_partitions(
     combined
 }
 
+fn combine_component_pairs_under_epsilon_root(
+    components: &[LexerComponentPair],
+    total_groups: usize,
+    full_side: bool,
+) -> (DFA, Vec<u32>) {
+    let total_states = 1usize
+        + components
+            .iter()
+            .map(|component| {
+                if full_side {
+                    component.full.num_states()
+                } else {
+                    component.synthesized.num_states()
+                }
+            })
+            .sum::<usize>();
+    let mut combined = DFA::new(total_states);
+    combined.ensure_group_capacity(total_groups);
+    let mut root_futures = BitSet::new(total_groups);
+    let mut offsets = Vec::with_capacity(components.len());
+
+    let mut offset = 1u32;
+    for component_pair in components {
+        offsets.push(offset);
+        let terminal_ids = &component_pair.terminal_ids;
+        let component = if full_side {
+            &component_pair.full
+        } else {
+            &component_pair.synthesized
+        };
+        debug_assert_eq!(component.num_groups(), terminal_ids.len());
+        combined.add_epsilon_transition(0, offset);
+
+        for (local_group, &terminal_id) in terminal_ids.iter().enumerate() {
+            combined.set_group_u8set(
+                terminal_id as u32,
+                *component.group_id_to_u8set(local_group as u32),
+            );
+        }
+        for local_group in component.possible_future_group_ids(0).iter() {
+            root_futures.set(terminal_ids[local_group]);
+        }
+
+        for (state_index, state) in component.states().iter().enumerate() {
+            let mapped_state = offset + state_index as u32;
+            combined.set_transitions_from_sorted_entries(
+                mapped_state,
+                state
+                    .transitions
+                    .iter()
+                    .map(|(byte, &target)| (byte, offset + target))
+                    .collect(),
+            );
+            for &target in &state.epsilon_transitions {
+                combined.add_epsilon_transition(mapped_state, offset + target);
+            }
+
+            let mut finalizers = BitSet::new(total_groups);
+            let mut futures = BitSet::new(total_groups);
+            for local_group in state.finalizers.iter() {
+                finalizers.set(terminal_ids[local_group]);
+            }
+            for local_group in component.possible_future_group_ids(state_index as u32).iter() {
+                futures.set(terminal_ids[local_group]);
+            }
+            combined.overwrite_state_metadata(mapped_state, finalizers, futures);
+        }
+        offset += component.num_states() as u32;
+    }
+    combined.set_possible_future_group_ids(0, root_futures);
+    (combined, offsets)
+}
+
+/// Compile independently protected terminal partitions as exact/synthesized
+/// pairs while compiling every unchanged partition only once. The returned
+/// state map is structural: the global epsilon root maps to the global root,
+/// unchanged components map identically, and protected components use their
+/// certified local product maps. Adaptive prefix determinization remains
+/// available for the ordinary components but never crosses a protected
+/// residual coordinate.
+pub(crate) fn compile_partitioned_expression_pair_with_structural_maps(
+    full_exprs: &[Expr],
+    synthesized_exprs: &[Expr],
+    partition_stencil: Option<(usize, &[Expr])>,
+    visible_labels: Option<&[String]>,
+    partitions: &[u32],
+    residual_isolation_classes: &[Option<u32>],
+    adaptive: bool,
+    max_token_len: usize,
+    relevant_bytes: &[u8],
+) -> Option<CompiledPartitionedExpressionPair> {
+    let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
+    if full_exprs.len() != synthesized_exprs.len()
+        || partition_stencil.is_some_and(|(_, exprs)| exprs.len() != full_exprs.len())
+        || full_exprs.len() != partitions.len()
+        || full_exprs.len() != residual_isolation_classes.len()
+        || visible_labels.is_some_and(|labels| labels.len() != full_exprs.len())
+        || full_exprs.is_empty()
+    {
+        return None;
+    }
+
+    let changed = full_exprs
+        .iter()
+        .zip(synthesized_exprs)
+        .zip(residual_isolation_classes)
+        .map(|((full, synthesized), isolation_class)| {
+            isolation_class.is_some() && full != synthesized
+        })
+        .collect::<Vec<_>>();
+    if !changed.iter().any(|&changed| changed) {
+        return None;
+    }
+
+    let mut grouped = BTreeMap::<u32, Vec<usize>>::new();
+    for (terminal, &partition) in partitions.iter().enumerate() {
+        grouped.entry(partition).or_default().push(terminal);
+    }
+
+    // Only ordinary terminals participate in repeated-subexpression sharing.
+    // Replacing changed expressions with epsilon avoids compiling their large
+    // exact bodies merely to prepare a cache they cannot use.
+    let mut ordinary_exprs = synthesized_exprs.to_vec();
+    for (terminal, &is_changed) in changed.iter().enumerate() {
+        if is_changed {
+            ordinary_exprs[terminal] = Expr::Epsilon;
+        }
+    }
+    let rewritten_ordinary = materialize_repeated_subexpression_dfas(&ordinary_exprs);
+    let ordinary_exprs = rewritten_ordinary.as_deref().unwrap_or(&ordinary_exprs);
+    let ordinary_groups = grouped
+        .iter()
+        .filter_map(|(&partition, terminals)| {
+            terminals
+                .iter()
+                .all(|&terminal| !changed[terminal])
+                .then_some((partition, terminals.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let shared_duplicates = shared_duplicate_nested_group_op_cache(ordinary_exprs, &ordinary_groups);
+    if let Some(shared_duplicates) = &shared_duplicates {
+        prewarm_shared_duplicate_nested_group_ops(shared_duplicates);
+    }
+
+    let compiled = grouped
+        .into_iter()
+        .collect::<Vec<_>>()
+        .into_par_iter()
+        .map(|(_partition, terminal_ids)| {
+            let changed_terminals = terminal_ids
+                .iter()
+                .copied()
+                .filter(|&terminal| changed[terminal])
+                .collect::<Vec<_>>();
+            if changed_terminals.is_empty() {
+                // A bound can be visible to the longest token in the complete
+                // vocabulary while remaining unobservable inside the dominant
+                // <=64-byte partitions. For a large singleton component, build
+                // one exact/stencil pair now and retain the exact DFA as the
+                // compile/runtime source coordinate. The stencil is analysis
+                // only and is selected later solely for partitions within its
+                // certified horizon.
+                if terminal_ids.len() == 1
+                    && let Some((stencil_horizon, stencil_exprs)) = partition_stencil
+                {
+                    let terminal = terminal_ids[0];
+                    if stencil_exprs[terminal] != full_exprs[terminal] {
+                        let pair = compile_terminal_expression_pair_with_structural_map(
+                            &full_exprs[terminal],
+                            &stencil_exprs[terminal],
+                            stencil_horizon,
+                            relevant_bytes,
+                        );
+                        if pair.is_none() && profile {
+                            eprintln!(
+                                "[glrmask/profile][tokenizer] partition_analysis_stencil_rejected terminal={} horizon={} reason=structural_pair_failed full={:?} stencil={:?}",
+                                terminal,
+                                stencil_horizon,
+                                expr_profile_summary(&full_exprs[terminal]),
+                                expr_profile_summary(&stencil_exprs[terminal]),
+                            );
+                        }
+                        if let Some(pair) = pair {
+                            let exact_states = pair.full.dfa.num_states();
+                            let stencil_states = pair.synthesized.dfa.num_states();
+                            let profitable = exact_states >= 10_000
+                                && stencil_states < exact_states
+                                && stencil_states.saturating_mul(4)
+                                    <= exact_states.saturating_mul(3);
+                            if profitable {
+                                let exact_dfa = pair.full.dfa;
+                                let stencil_dfa = pair.synthesized.dfa;
+                                let full_to_stencil = pair.full_to_synthesized;
+                                let stencil_quotients =
+                                    pair.synthesized_state_representatives_by_horizon;
+                                let state_count = exact_dfa.num_states() as u32;
+                                let horizons = structural_quotient_horizons(max_token_len);
+                                let identity_horizons = horizons
+                                    .iter()
+                                    .copied()
+                                    .map(|horizon| (horizon, (0..state_count).collect()))
+                                    .collect();
+                                let mut analysis_horizons = stencil_quotients
+                                    .into_iter()
+                                    .filter(|(horizon, _)| *horizon <= stencil_horizon)
+                                    .map(|(horizon, stencil_to_representative)| {
+                                        let source_to_analysis = full_to_stencil
+                                            .iter()
+                                            .map(|&stencil_state| {
+                                                stencil_to_representative
+                                                    [stencil_state as usize]
+                                            })
+                                            .collect();
+                                        LexerComponentAnalysisHorizon {
+                                            horizon,
+                                            tokenizer_dfa: stencil_dfa.clone(),
+                                            source_to_analysis,
+                                        }
+                                    })
+                                    .collect::<Vec<_>>();
+                                if stencil_horizon < max_token_len {
+                                    analysis_horizons.push(LexerComponentAnalysisHorizon {
+                                        horizon: max_token_len,
+                                        tokenizer_dfa: exact_dfa.clone(),
+                                        source_to_analysis: (0..state_count).collect(),
+                                    });
+                                }
+                                if profile {
+                                    eprintln!(
+                                        "[glrmask/profile][tokenizer] partition_analysis_stencil terminal={} horizon={} exact_states={} stencil_states={} saving={}",
+                                        terminal,
+                                        stencil_horizon,
+                                        exact_states,
+                                        stencil_states,
+                                        exact_states.saturating_sub(stencil_states),
+                                    );
+                                }
+                                return Some(LexerComponentPair {
+                                    terminal_ids,
+                                    synthesized: exact_dfa.clone(),
+                                    full: exact_dfa,
+                                    full_to_synthesized: (0..state_count).collect(),
+                                    synthesized_state_representatives_by_horizon: identity_horizons,
+                                    analysis_horizons,
+                                    // Preserve this component boundary so adaptive
+                                    // determinization cannot erase the source
+                                    // coordinate used by the horizon maps.
+                                    protected_residual: true,
+                                });
+                            }
+                            if profile {
+                                eprintln!(
+                                    "[glrmask/profile][tokenizer] partition_analysis_stencil_rejected terminal={} horizon={} reason=insufficient_reduction exact_states={} stencil_states={}",
+                                    terminal,
+                                    stencil_horizon,
+                                    exact_states,
+                                    stencil_states,
+                                );
+                            }
+                        }
+                    } else if profile {
+                        eprintln!(
+                            "[glrmask/profile][tokenizer] partition_analysis_stencil_rejected terminal={} horizon={} reason=expression_unchanged",
+                            terminal,
+                            stencil_horizon,
+                        );
+                    }
+                }
+
+                let dfa = compile_terminal_ids_with_shared_duplicate_cache(
+                    ordinary_exprs,
+                    visible_labels,
+                    &terminal_ids,
+                    shared_duplicates.as_ref(),
+                );
+                let minimize_started_at = profile.then(Instant::now);
+                let before_states = dfa.num_states();
+                let dfa = dfa.minimize();
+                if profile {
+                    let labels = visible_labels
+                        .map(|labels| {
+                            terminal_ids
+                                .iter()
+                                .filter_map(|&terminal| labels.get(terminal))
+                                .take(4)
+                                .cloned()
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    eprintln!(
+                        "[glrmask/profile][tokenizer] paired_ordinary_minimize terminals={} terminal_ids={:?} labels={:?} states_before={} states_after={} elapsed_ms={:.3}",
+                        terminal_ids.len(),
+                        terminal_ids,
+                        labels,
+                        before_states,
+                        dfa.num_states(),
+                        minimize_started_at
+                            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
+                    );
+                }
+                let state_count = dfa.num_states() as u32;
+                let analysis_dfa = dfa.clone();
+                return Some(LexerComponentPair {
+                    terminal_ids,
+                    synthesized: dfa.clone(),
+                    full: dfa,
+                    full_to_synthesized: (0..state_count).collect(),
+                    synthesized_state_representatives_by_horizon:
+                        structural_quotient_horizons(max_token_len)
+                            .into_iter()
+                            .map(|horizon| (horizon, (0..state_count).collect()))
+                            .collect(),
+                    analysis_horizons: vec![LexerComponentAnalysisHorizon {
+                        horizon: max_token_len,
+                        tokenizer_dfa: analysis_dfa,
+                        source_to_analysis: (0..state_count).collect(),
+                    }],
+                    protected_residual: false,
+                });
+            }
+
+            if changed_terminals.len() != 1 || terminal_ids.len() != 1 {
+                if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some() {
+                    eprintln!(
+                        "[glrmask/profile][tokenizer] structural_partition_pair_rejected reason=non_singleton_partition terminals={:?} changed={:?}",
+                        terminal_ids,
+                        changed_terminals,
+                    );
+                }
+                return None;
+            }
+            let terminal = changed_terminals[0];
+            residual_isolation_classes[terminal]?;
+            let pair = compile_terminal_expression_pair_with_structural_map(
+                &full_exprs[terminal],
+                &synthesized_exprs[terminal],
+                max_token_len,
+                relevant_bytes,
+            );
+            let Some(pair) = pair else {
+                if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some() {
+                    eprintln!(
+                        "[glrmask/profile][tokenizer] structural_partition_pair_rejected reason=local_pair_failed terminal={} full_expr={:?} synthesized_expr={:?}",
+                        terminal,
+                        expr_profile_summary(&full_exprs[terminal]),
+                        expr_profile_summary(&synthesized_exprs[terminal]),
+                    );
+                }
+                return None;
+            };
+            let synthesized_dfa = pair.synthesized.dfa;
+            let analysis_horizons = pair
+                .synthesized_state_representatives_by_horizon
+                .iter()
+                .map(|(horizon, representatives)| LexerComponentAnalysisHorizon {
+                    horizon: *horizon,
+                    tokenizer_dfa: synthesized_dfa.clone(),
+                    source_to_analysis: representatives.clone(),
+                })
+                .collect();
+            Some(LexerComponentPair {
+                terminal_ids,
+                synthesized: synthesized_dfa,
+                full: pair.full.dfa,
+                full_to_synthesized: pair.full_to_synthesized,
+                synthesized_state_representatives_by_horizon:
+                    pair.synthesized_state_representatives_by_horizon,
+                analysis_horizons,
+                protected_residual: true,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+
+    let mut protected = Vec::new();
+    let mut ordinary = Vec::new();
+    for pair in compiled {
+        if pair.protected_residual {
+            protected.push(pair);
+        } else {
+            ordinary.push(LexerComponent {
+                terminal_ids: pair.terminal_ids,
+                dfa: pair.full,
+                protected_residual: false,
+            });
+        }
+    }
+
+    let ordinary = if adaptive && ordinary.len() >= 2 {
+        adaptively_determinize_components(ordinary, adaptive_lexer_state_limit())
+    } else {
+        ordinary
+    };
+    let mut pairs = ordinary
+        .into_iter()
+        .map(|component| {
+            let state_count = component.dfa.num_states() as u32;
+            let analysis_dfa = component.dfa.clone();
+            LexerComponentPair {
+                terminal_ids: component.terminal_ids,
+                synthesized: component.dfa.clone(),
+                full: component.dfa,
+                full_to_synthesized: (0..state_count).collect(),
+                synthesized_state_representatives_by_horizon:
+                    structural_quotient_horizons(max_token_len)
+                        .into_iter()
+                        .map(|horizon| (horizon, (0..state_count).collect()))
+                        .collect(),
+                analysis_horizons: vec![LexerComponentAnalysisHorizon {
+                    horizon: max_token_len,
+                    tokenizer_dfa: analysis_dfa,
+                    source_to_analysis: (0..state_count).collect(),
+                }],
+                protected_residual: false,
+            }
+        })
+        .collect::<Vec<_>>();
+    pairs.append(&mut protected);
+    pairs.sort_unstable_by_key(|pair| {
+        pair.terminal_ids.first().copied().unwrap_or(usize::MAX)
+    });
+
+    let (synthesized, synthesized_offsets) =
+        combine_component_pairs_under_epsilon_root(&pairs, full_exprs.len(), false);
+    let (full, full_offsets) =
+        combine_component_pairs_under_epsilon_root(&pairs, full_exprs.len(), true);
+    let mut full_to_synthesized = Vec::with_capacity(full.num_states());
+    let horizons = structural_quotient_horizons(max_token_len);
+    let mut synthesized_state_representatives_by_horizon = horizons
+        .iter()
+        .copied()
+        .map(|horizon| (horizon, vec![0u32]))
+        .collect::<Vec<_>>();
+    full_to_synthesized.push(0);
+    for (component_index, pair) in pairs.iter().enumerate() {
+        let synthesized_offset = synthesized_offsets[component_index];
+        let full_offset = full_offsets[component_index];
+        debug_assert_eq!(full_to_synthesized.len(), full_offset as usize);
+        if pair.full_to_synthesized.len() != pair.full.num_states() {
+            return None;
+        }
+        full_to_synthesized.extend(
+            pair.full_to_synthesized
+                .iter()
+                .map(|&state| synthesized_offset + state),
+        );
+        if pair.synthesized_state_representatives_by_horizon.len() != horizons.len() {
+            return None;
+        }
+        for ((expected_horizon, global), (pair_horizon, local)) in
+            synthesized_state_representatives_by_horizon
+                .iter_mut()
+                .zip(&pair.synthesized_state_representatives_by_horizon)
+        {
+            if expected_horizon != pair_horizon || local.len() != pair.synthesized.num_states() {
+                return None;
+            }
+            global.extend(local.iter().map(|&state| synthesized_offset + state));
+        }
+    }
+    if full_to_synthesized.len() != full.num_states()
+        || synthesized_state_representatives_by_horizon
+            .iter()
+            .any(|(_, representatives)| representatives.len() != synthesized.num_states())
+    {
+        return None;
+    }
+    let component_quotient_plans = pairs
+        .iter()
+        .enumerate()
+        .map(|(component_index, pair)| StructuralComponentQuotientPlan {
+            global_offset: synthesized_offsets[component_index],
+            source_state_count: pair.synthesized.num_states(),
+            terminal_ids: pair.terminal_ids.iter().map(|&terminal| terminal as u32).collect(),
+            horizons: pair
+                .analysis_horizons
+                .iter()
+                .map(|analysis| StructuralComponentHorizonPlan {
+                    horizon: analysis.horizon,
+                    tokenizer: Regex {
+                        dfa: analysis.tokenizer_dfa.clone(),
+                    }
+                    .into_tokenizer(pair.terminal_ids.len() as u32, None),
+                    source_to_analysis: analysis.source_to_analysis.clone(),
+                })
+                .collect(),
+        })
+        .collect();
+
+    Some(CompiledPartitionedExpressionPair {
+        synthesized: Regex { dfa: synthesized },
+        full: Regex { dfa: full },
+        full_to_synthesized,
+        synthesized_state_representatives_by_horizon,
+        component_quotient_plans,
+    })
+}
+
 fn product_state_metadata(
     components: &[ProductComponent],
     state_tuple: &ProductStateTuple,
@@ -3604,7 +4183,7 @@ fn exact_kbounded_single_group_state_map(
     depth: usize,
     relevant_bytes: &[u8],
 ) -> Option<Vec<u32>> {
-    if full.num_groups() != 1 || synthesized.num_groups() != 1 {
+    if full.num_groups() != synthesized.num_groups() {
         return None;
     }
     let relevant_bytes =
@@ -3612,8 +4191,10 @@ fn exact_kbounded_single_group_state_map(
     let synthesized_states = synthesized.num_states();
     let full_states = full.num_states();
     let label = |dfa: &DFA, state: u32| {
-        u8::from(dfa.finalizers(state).contains(0))
-            | (u8::from(dfa.possible_future_group_ids(state).contains(0)) << 1)
+        (
+            dfa.finalizers(state).clone(),
+            dfa.possible_future_group_ids(state).clone(),
+        )
     };
     let synthesized_labels = (0..synthesized_states as u32)
         .map(|state| label(synthesized, state))
@@ -3622,12 +4203,12 @@ fn exact_kbounded_single_group_state_map(
         .map(|state| label(full, state))
         .collect::<Vec<_>>();
 
-    let mut label_classes = FxHashMap::<u8, u32>::default();
+    let mut label_classes = FxHashMap::<(BitSet, BitSet), u32>::default();
     let mut synthesized_classes = synthesized_labels
         .iter()
-        .map(|&state_label| {
+        .map(|state_label| {
             let next = label_classes.len() as u32;
-            *label_classes.entry(state_label).or_insert(next)
+            *label_classes.entry(state_label.clone()).or_insert(next)
         })
         .collect::<Vec<_>>();
     let mut full_classes = full_labels
@@ -3640,7 +4221,7 @@ fn exact_kbounded_single_group_state_map(
         let mut signature_to_class = FxHashMap::<Vec<u32>, u32>::default();
         let mut next_synthesized = vec![0u32; synthesized_states];
         for state in 0..synthesized_states as u32 {
-            synthesized_signature[0] = synthesized_labels[state as usize] as u32;
+            synthesized_signature[0] = label_classes[&synthesized_labels[state as usize]];
             for (slot, &byte) in relevant_bytes.iter().enumerate() {
                 synthesized_signature[slot + 1] = synthesized
                     .step(state, byte)
@@ -3657,7 +4238,7 @@ fn exact_kbounded_single_group_state_map(
             .map_init(
                 || vec![0u32; 1 + relevant_bytes.len()],
                 |signature, state| {
-                    signature[0] = full_labels[state as usize] as u32;
+                    signature[0] = label_classes[&full_labels[state as usize]];
                     for (slot, &byte) in relevant_bytes.iter().enumerate() {
                         signature[slot + 1] = full
                             .step(state, byte)
@@ -3697,6 +4278,90 @@ struct DirectBoundedSuffixShape<'a> {
     min: usize,
     max: usize,
     suffix: Vec<u8>,
+}
+
+struct DirectBoundedSuffixStateMap {
+    primary: Vec<u32>,
+    prefix_states: usize,
+    full_base_states: usize,
+    synthesized_base_states: usize,
+    full_max: usize,
+    synthesized_max: usize,
+    min: usize,
+    crossed_boundaries: usize,
+    base_state_map: Vec<u32>,
+    full_suffix_start: usize,
+    synthesized_suffix_start: usize,
+}
+
+impl DirectBoundedSuffixStateMap {
+    fn primary(&self) -> &[u32] {
+        &self.primary
+    }
+
+    fn visit_candidates(&self, full_state: u32, mut visit: impl FnMut(u32) -> bool) -> bool {
+        let full_state = full_state as usize;
+        let primary = self.primary[full_state];
+        if visit(primary) {
+            return true;
+        }
+        if full_state < self.prefix_states || full_state >= self.full_suffix_start {
+            return false;
+        }
+
+        let local = full_state - self.prefix_states;
+        let completed = local / self.full_base_states;
+        let body_state = local % self.full_base_states;
+        let distance_to_upper = self.full_max - completed;
+        if completed < self.min || distance_to_upper <= self.crossed_boundaries {
+            return false;
+        }
+
+        let Some(last_interior) = self
+            .synthesized_max
+            .checked_sub(self.crossed_boundaries.saturating_add(1))
+        else {
+            return false;
+        };
+        let mapped_body_state = self.base_state_map[body_state] as usize;
+        for mapped_completed in self.min..=last_interior {
+            let candidate = (self.prefix_states
+                + mapped_completed * self.synthesized_base_states
+                + mapped_body_state) as u32;
+            if candidate != primary && visit(candidate) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+enum ProductComponentStateMap {
+    Fixed(Vec<u32>),
+    Layered(DirectBoundedSuffixStateMap),
+}
+
+impl ProductComponentStateMap {
+    fn primary(&self) -> &[u32] {
+        match self {
+            Self::Fixed(mapping) => mapping,
+            Self::Layered(mapping) => mapping.primary(),
+        }
+    }
+
+    fn visit_candidates(&self, full_state: u32, visit: impl FnMut(u32) -> bool) -> bool {
+        match self {
+            Self::Fixed(mapping) => {
+                let mut visit = visit;
+                visit(mapping[full_state as usize])
+            }
+            Self::Layered(mapping) => mapping.visit_candidates(full_state, visit),
+        }
+    }
+
+    fn is_flexible(&self) -> bool {
+        matches!(self, Self::Layered(_))
+    }
 }
 
 fn direct_bounded_suffix_shape(expr: &Expr) -> Option<DirectBoundedSuffixShape<'_>> {
@@ -3775,7 +4440,7 @@ fn direct_bounded_suffix_state_map(
     synthesized: &DFA,
     max_token_len: usize,
     relevant_bytes: &[u8],
-) -> Option<Vec<u32>> {
+) -> Option<DirectBoundedSuffixStateMap> {
     let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
     let Some(full_shape) = direct_bounded_suffix_shape(full_expr)
     else {
@@ -3916,7 +4581,19 @@ fn direct_bounded_suffix_state_map(
         debug_assert_eq!(mapping.len(), full_suffix_start + suffix_state);
         mapping.push((synthesized_suffix_start + suffix_state) as u32);
     }
-    Some(mapping)
+    Some(DirectBoundedSuffixStateMap {
+        primary: mapping,
+        prefix_states,
+        full_base_states,
+        synthesized_base_states,
+        full_max: full_shape.max,
+        synthesized_max: synthesized_shape.max,
+        min: full_shape.min,
+        crossed_boundaries,
+        base_state_map,
+        full_suffix_start,
+        synthesized_suffix_start,
+    })
 }
 
 fn add_product_tuple_state(
@@ -4074,6 +4751,79 @@ pub(crate) struct CompiledTerminalExpressionPair {
     pub(crate) synthesized: Regex,
     pub(crate) full: Regex,
     pub(crate) full_to_synthesized: Vec<u32>,
+    pub(crate) synthesized_state_representatives_by_horizon: Vec<(usize, Vec<u32>)>,
+    pub(crate) component_quotient_plans: Vec<StructuralComponentQuotientPlan>,
+}
+
+fn structural_quotient_horizons(max_token_len: usize) -> Vec<usize> {
+    let mut horizons = [4usize, 8, 16, 32, 64]
+        .into_iter()
+        .filter(|&horizon| horizon < max_token_len)
+        .collect::<Vec<_>>();
+    horizons.push(max_token_len);
+    horizons.sort_unstable();
+    horizons.dedup();
+    horizons
+}
+
+#[derive(Hash, PartialEq, Eq)]
+struct ProductStateKBoundedKey {
+    component_representatives: ProductStateTuple,
+    finalizers: BitSet,
+    possible_futures: BitSet,
+}
+
+fn product_trace_kbounded_state_representatives(
+    trace: &ProductBuildTrace,
+    dfa: &DFA,
+    max_token_len: usize,
+    relevant_bytes: &[u8],
+) -> Option<Vec<u32>> {
+    if trace.state_tuples.len() != dfa.num_states() {
+        return None;
+    }
+    let component_maps = trace
+        .components
+        .par_iter()
+        .map(|component| {
+            let dfa = product_component_mapping_dfa(component)?;
+            exact_kbounded_single_group_state_map(
+                &dfa,
+                &dfa,
+                max_token_len,
+                relevant_bytes,
+            )
+        })
+        .collect::<Option<Vec<_>>>()?;
+
+    let mut classes = FxHashMap::<ProductStateKBoundedKey, u32>::default();
+    let mut representatives = Vec::<u32>::new();
+    let mut state_representatives = Vec::with_capacity(dfa.num_states());
+    for (state, tuple) in trace.state_tuples.iter().enumerate() {
+        let mut component_representatives = ProductStateTuple::new();
+        for &(component, component_state) in tuple {
+            component_representatives.push((
+                component,
+                component_maps[component as usize][component_state as usize],
+            ));
+        }
+        let key = ProductStateKBoundedKey {
+            component_representatives,
+            finalizers: dfa.finalizers(state as u32).clone(),
+            possible_futures: dfa.possible_future_group_ids(state as u32).clone(),
+        };
+        let class = match classes.entry(key) {
+            std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let class = representatives.len() as u32;
+                representatives.push(state as u32);
+                entry.insert(class);
+                class
+            }
+        };
+        state_representatives.push(representatives[class as usize]);
+    }
+    Some(state_representatives)
 }
 
 pub(crate) fn compile_terminal_expression_pair_with_structural_map(
@@ -4084,6 +4834,12 @@ pub(crate) fn compile_terminal_expression_pair_with_structural_map(
 ) -> Option<CompiledTerminalExpressionPair> {
     let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
     let total_started_at = profile.then(Instant::now);
+    let normalized_full = lift_single_nested_intersection(full_expression);
+    let normalized_synthesized = lift_single_nested_intersection(synthesized_expression);
+    let full_expression = normalized_full.as_ref().unwrap_or(full_expression);
+    let synthesized_expression = normalized_synthesized
+        .as_ref()
+        .unwrap_or(synthesized_expression);
     let full_plan = build_exclusion_compile_plan(std::slice::from_ref(full_expression));
     let synthesized_plan =
         build_exclusion_compile_plan(std::slice::from_ref(synthesized_expression));
@@ -4092,14 +4848,121 @@ pub(crate) fn compile_terminal_expression_pair_with_structural_map(
         || full_plan.compiled_exprs.len() != synthesized_plan.compiled_exprs.len()
         || full_plan.exclusions != synthesized_plan.exclusions
         || full_plan.intersections != synthesized_plan.intersections
-        || full_plan.compiled_exprs.len() < 2
+        || full_plan.compiled_exprs.is_empty()
     {
+        if profile {
+            eprintln!(
+                "[glrmask/profile][tokenizer] structural_pair_rejected stage=plan_shape full_visible={} synthesized_visible={} full_components={} synthesized_components={} exclusions_equal={} intersections_equal={}",
+                full_plan.visible_groups,
+                synthesized_plan.visible_groups,
+                full_plan.compiled_exprs.len(),
+                synthesized_plan.compiled_exprs.len(),
+                full_plan.exclusions == synthesized_plan.exclusions,
+                full_plan.intersections == synthesized_plan.intersections,
+            );
+        }
         return None;
     }
     let exclusions = synthesized_plan.exclusions.clone();
     let intersections = synthesized_plan.intersections.clone();
     let full_component_expressions = full_plan.compiled_exprs.clone();
     let synthesized_component_expressions = synthesized_plan.compiled_exprs.clone();
+
+    // A nested intersection/exclusion can already have been resolved into one
+    // visible expression by the grammar lowerer. The previous implementation
+    // unnecessarily required at least two hidden product components, even
+    // though one deterministic component admits the same exact finite-horizon
+    // refinement directly.
+    if full_component_expressions.len() == 1 {
+        let product_build_started_at = profile.then(Instant::now);
+        let (full_dfa, synthesized_dfa) = rayon::join(
+            || compile_with_plan(full_plan),
+            || compile_with_plan(synthesized_plan),
+        );
+        let product_build_ms = product_build_started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let map_started_at = profile.then(Instant::now);
+        let homomorphism = deterministic_component_homomorphism_state_map(
+            &full_dfa,
+            &synthesized_dfa,
+        );
+        let used_homomorphism = homomorphism.is_some();
+        let full_to_synthesized = homomorphism.or_else(|| {
+            exact_kbounded_single_group_state_map(
+                &full_dfa,
+                &synthesized_dfa,
+                max_token_len,
+                relevant_bytes,
+            )
+        });
+        let Some(full_to_synthesized) = full_to_synthesized else {
+            if profile {
+                eprintln!(
+                    "[glrmask/profile][tokenizer] structural_pair_rejected stage=single_component_map full_states={} synthesized_states={} depth={}",
+                    full_dfa.num_states(),
+                    synthesized_dfa.num_states(),
+                    max_token_len,
+                );
+            }
+            return None;
+        };
+        let map_ms = map_started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let quotient_started_at = profile.then(Instant::now);
+        let synthesized_state_representatives_by_horizon =
+            structural_quotient_horizons(max_token_len)
+                .into_iter()
+                .map(|horizon| {
+                    exact_kbounded_single_group_state_map(
+                        &synthesized_dfa,
+                        &synthesized_dfa,
+                        horizon,
+                        relevant_bytes,
+                    )
+                    .map(|representatives| (horizon, representatives))
+                })
+                .collect::<Option<Vec<_>>>()?;
+        let quotient_ms = quotient_started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        if profile {
+            eprintln!(
+                "[glrmask/profile][tokenizer] structural_single_component_pair full_states={} synthesized_states={} depth={} path={} build_ms={:.3} map_ms={:.3} quotient_ms={:.3}",
+                full_dfa.num_states(),
+                synthesized_dfa.num_states(),
+                max_token_len,
+                if used_homomorphism { "deterministic_homomorphism" } else { "moore" },
+                product_build_ms,
+                map_ms,
+                quotient_ms,
+            );
+        }
+        let component_quotient_plans = vec![StructuralComponentQuotientPlan {
+            global_offset: 0,
+            source_state_count: synthesized_dfa.num_states(),
+            terminal_ids: vec![0],
+            horizons: synthesized_state_representatives_by_horizon
+                .iter()
+                .map(|(horizon, representatives)| StructuralComponentHorizonPlan {
+                    horizon: *horizon,
+                    tokenizer: Regex {
+                        dfa: synthesized_dfa.clone(),
+                    }
+                    .into_tokenizer(1, None),
+                    source_to_analysis: representatives.clone(),
+                })
+                .collect(),
+        }];
+        return Some(CompiledTerminalExpressionPair {
+            synthesized: Regex {
+                dfa: synthesized_dfa,
+            },
+            full: Regex { dfa: full_dfa },
+            full_to_synthesized,
+            synthesized_state_representatives_by_horizon,
+            component_quotient_plans,
+        });
+    }
+
     let product_build_started_at = profile.then(Instant::now);
     let ((full_dfa, full_trace), (mut synthesized_dfa, synthesized_trace)) = rayon::join(
         || compile_with_plan_internal(full_plan, true),
@@ -4107,9 +4970,34 @@ pub(crate) fn compile_terminal_expression_pair_with_structural_map(
     );
     let product_build_ms = product_build_started_at
         .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-    let full_trace = full_trace?;
-    let mut synthesized_trace = synthesized_trace?;
+    let Some(full_trace) = full_trace else {
+        if profile {
+            eprintln!(
+                "[glrmask/profile][tokenizer] structural_pair_rejected stage=missing_full_trace full_states={} synthesized_states={}",
+                full_dfa.num_states(),
+                synthesized_dfa.num_states(),
+            );
+        }
+        return None;
+    };
+    let Some(mut synthesized_trace) = synthesized_trace else {
+        if profile {
+            eprintln!(
+                "[glrmask/profile][tokenizer] structural_pair_rejected stage=missing_synthesized_trace full_states={} synthesized_states={}",
+                full_dfa.num_states(),
+                synthesized_dfa.num_states(),
+            );
+        }
+        return None;
+    };
     if full_trace.components.len() != synthesized_trace.components.len() {
+        if profile {
+            eprintln!(
+                "[glrmask/profile][tokenizer] structural_pair_rejected stage=component_count full_components={} synthesized_components={}",
+                full_trace.components.len(),
+                synthesized_trace.components.len(),
+            );
+        }
         return None;
     }
 
@@ -4132,23 +5020,35 @@ pub(crate) fn compile_terminal_expression_pair_with_structural_map(
             let started_at = profile.then(Instant::now);
             let full = product_component_mapping_dfa(full_component)?;
             let synthesized = product_component_mapping_dfa(synthesized_component)?;
-            let structural_mapping = direct_bounded_suffix_state_map(
-                full_expr,
-                synthesized_expr,
-                &full,
-                &synthesized,
-                max_token_len,
-                relevant_bytes,
-            );
-            let used_structural_mapping = structural_mapping.is_some();
-            let mapping = structural_mapping.or_else(|| {
+            let homomorphism_mapping =
+                deterministic_component_homomorphism_state_map(&full, &synthesized);
+            let used_homomorphism_mapping = homomorphism_mapping.is_some();
+            let layered_mapping = if used_homomorphism_mapping {
+                None
+            } else {
+                direct_bounded_suffix_state_map(
+                    full_expr,
+                    synthesized_expr,
+                    &full,
+                    &synthesized,
+                    max_token_len,
+                    relevant_bytes,
+                )
+            };
+            let used_layered_mapping = layered_mapping.is_some();
+            let mapping = if let Some(mapping) = homomorphism_mapping {
+                Some(ProductComponentStateMap::Fixed(mapping))
+            } else if let Some(mapping) = layered_mapping {
+                Some(ProductComponentStateMap::Layered(mapping))
+            } else {
                 exact_kbounded_single_group_state_map(
                     &full,
                     &synthesized,
                     max_token_len,
                     relevant_bytes,
                 )
-            });
+                .map(ProductComponentStateMap::Fixed)
+            };
             if profile {
                 let kind = |component: &ProductComponent| match component {
                     ProductComponent::Materialized(_) => "materialized",
@@ -4162,7 +5062,13 @@ pub(crate) fn compile_terminal_expression_pair_with_structural_map(
                     full.num_states(),
                     synthesized.num_states(),
                     max_token_len,
-                    if used_structural_mapping { "layered_bounded_suffix" } else { "moore" },
+                    if used_homomorphism_mapping {
+                        "deterministic_homomorphism"
+                    } else if used_layered_mapping {
+                        "layered_bounded_suffix"
+                    } else {
+                        "moore"
+                    },
                     mapping.is_some(),
                     started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
                     expr_profile_summary(full_expr),
@@ -4171,7 +5077,18 @@ pub(crate) fn compile_terminal_expression_pair_with_structural_map(
             mapping
         },
         )
-        .collect::<Option<Vec<_>>>()?;
+        .collect::<Option<Vec<_>>>();
+    let Some(component_maps) = component_maps else {
+        if profile {
+            eprintln!(
+                "[glrmask/profile][tokenizer] structural_pair_rejected stage=component_map full_states={} synthesized_states={} components={}",
+                full_dfa.num_states(),
+                synthesized_dfa.num_states(),
+                full_trace.components.len(),
+            );
+        }
+        return None;
+    };
     let component_maps_ms = component_maps_started_at
         .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     let synthesized_component_dead_states = synthesized_trace
@@ -4186,6 +5103,7 @@ pub(crate) fn compile_terminal_expression_pair_with_structural_map(
         .iter()
         .map(|mapping| {
             mapping
+                .primary()
                 .iter()
                 .copied()
                 .max()
@@ -4212,14 +5130,50 @@ pub(crate) fn compile_terminal_expression_pair_with_structural_map(
             .par_iter()
             .map(|tuple| {
                 let mut coordinates = [0usize; 2];
+                let mut full_states = [u32::MAX; 2];
                 for &(component_id, full_state) in tuple {
                     let component = component_id as usize;
-                    let synthesized_state = component_maps[component][full_state as usize];
+                    full_states[component] = full_state;
+                    let synthesized_state =
+                        component_maps[component].primary()[full_state as usize];
                     if synthesized_component_dead_states[component] != Some(synthesized_state) {
                         coordinates[component] = synthesized_state as usize + 1;
                     }
                 }
-                state_by_key[coordinates[0] * right_extent + coordinates[1]]
+                let primary = state_by_key[coordinates[0] * right_extent + coordinates[1]];
+                if primary != u32::MAX {
+                    return primary;
+                }
+
+                for component in 0..2 {
+                    let full_state = full_states[component];
+                    if full_state == u32::MAX || !component_maps[component].is_flexible() {
+                        continue;
+                    }
+                    let original_coordinate = coordinates[component];
+                    let mut found = u32::MAX;
+                    component_maps[component].visit_candidates(full_state, |candidate| {
+                        coordinates[component] = if synthesized_component_dead_states[component]
+                            == Some(candidate)
+                        {
+                            0
+                        } else {
+                            candidate as usize + 1
+                        };
+                        let state = state_by_key[coordinates[0] * right_extent + coordinates[1]];
+                        if state != u32::MAX {
+                            found = state;
+                            true
+                        } else {
+                            false
+                        }
+                    });
+                    coordinates[component] = original_coordinate;
+                    if found != u32::MAX {
+                        return found;
+                    }
+                }
+                u32::MAX
             })
             .collect::<Vec<_>>()
     } else {
@@ -4230,7 +5184,8 @@ pub(crate) fn compile_terminal_expression_pair_with_structural_map(
                 let mut mapped = ProductStateTuple::new();
                 for &(component_id, full_state) in tuple {
                     let component = component_id as usize;
-                    let synthesized_state = component_maps[component][full_state as usize];
+                    let synthesized_state =
+                        component_maps[component].primary()[full_state as usize];
                     if synthesized_component_dead_states[component] != Some(synthesized_state) {
                         mapped.push((component_id, synthesized_state));
                     }
@@ -4257,7 +5212,7 @@ pub(crate) fn compile_terminal_expression_pair_with_structural_map(
             let mut mapped = ProductStateTuple::new();
             for &(component_id, full_state) in &full_trace.state_tuples[position] {
                 let component = component_id as usize;
-                let synthesized_state = component_maps[component][full_state as usize];
+                let synthesized_state = component_maps[component].primary()[full_state as usize];
                 if synthesized_component_dead_states[component] != Some(synthesized_state) {
                     mapped.push((component_id, synthesized_state));
                 }
@@ -4282,13 +5237,53 @@ pub(crate) fn compile_terminal_expression_pair_with_structural_map(
     }
     let lookup_ms = lookup_started_at
         .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    let quotient_started_at = profile.then(Instant::now);
+    let synthesized_state_representatives_by_horizon = structural_quotient_horizons(max_token_len)
+        .into_iter()
+        .map(|horizon| {
+            product_trace_kbounded_state_representatives(
+                &synthesized_trace,
+                &synthesized_dfa,
+                horizon,
+                relevant_bytes,
+            )
+            .map(|representatives| (horizon, representatives))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let quotient_ms = quotient_started_at
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    let synthesized_kbounded_reps = synthesized_state_representatives_by_horizon
+        .last()
+        .map(|(_, representatives)| {
+            representatives.iter().copied().collect::<FxHashSet<_>>().len()
+        })
+        .unwrap_or(0);
+    if profile {
+        let counts = synthesized_state_representatives_by_horizon
+            .iter()
+            .map(|(horizon, representatives)| {
+                format!(
+                    "{}:{}",
+                    horizon,
+                    representatives.iter().copied().collect::<FxHashSet<_>>().len()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        eprintln!(
+            "[glrmask/profile][tokenizer] structural_quotient_horizons states={} reps={}",
+            synthesized_dfa.num_states(),
+            counts,
+        );
+    }
 
     if let Some(total_started_at) = total_started_at {
         eprintln!(
-            "[glrmask/profile][tokenizer] structural_pair full_states={} synthesized_states_before={} synthesized_states_after={} mapped_tuples={} missing_before={} product_build_ms={:.3} component_maps_ms={:.3} tuple_map_ms={:.3} augment_ms={:.3} lookup_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][tokenizer] structural_pair full_states={} synthesized_states_before={} synthesized_states_after={} synthesized_kbounded_reps={} mapped_tuples={} missing_before={} product_build_ms={:.3} component_maps_ms={:.3} tuple_map_ms={:.3} augment_ms={:.3} lookup_ms={:.3} quotient_ms={:.3} total_ms={:.3}",
             full_dfa.num_states(),
             states_before_augment,
             synthesized_dfa.num_states(),
+            synthesized_kbounded_reps,
             full_to_synthesized.len(),
             missing_before,
             product_build_ms,
@@ -4296,16 +5291,35 @@ pub(crate) fn compile_terminal_expression_pair_with_structural_map(
             tuple_map_ms,
             augment_ms,
             lookup_ms,
+            quotient_ms,
             total_started_at.elapsed().as_secs_f64() * 1000.0,
         );
     }
 
+    let component_quotient_plans = vec![StructuralComponentQuotientPlan {
+        global_offset: 0,
+        source_state_count: synthesized_dfa.num_states(),
+        terminal_ids: vec![0],
+        horizons: synthesized_state_representatives_by_horizon
+            .iter()
+            .map(|(horizon, representatives)| StructuralComponentHorizonPlan {
+                horizon: *horizon,
+                tokenizer: Regex {
+                    dfa: synthesized_dfa.clone(),
+                }
+                .into_tokenizer(1, None),
+                source_to_analysis: representatives.clone(),
+            })
+            .collect(),
+    }];
     Some(CompiledTerminalExpressionPair {
         synthesized: Regex {
             dfa: synthesized_dfa,
         },
         full: Regex { dfa: full_dfa },
         full_to_synthesized,
+        synthesized_state_representatives_by_horizon,
+        component_quotient_plans,
     })
 }
 
@@ -4354,6 +5368,45 @@ fn compile_product_component(expr: &Expr) -> ProductComponent {
             compile_product_component_materialized_dfa(expr),
         )),
     }
+}
+
+fn deterministic_component_homomorphism_state_map(
+    full: &DFA,
+    synthesized: &DFA,
+) -> Option<Vec<u32>> {
+    if full.num_groups() != synthesized.num_groups() {
+        return None;
+    }
+    let mut mapping = vec![u32::MAX; full.num_states()];
+    let mut worklist = VecDeque::from([(0u32, 0u32)]);
+    mapping[0] = 0;
+
+    while let Some((full_state, synthesized_state)) = worklist.pop_front() {
+        if full.finalizers(full_state) != synthesized.finalizers(synthesized_state)
+            || full.possible_future_group_ids(full_state)
+                != synthesized.possible_future_group_ids(synthesized_state)
+        {
+            return None;
+        }
+        for byte in 0u16..=255 {
+            let full_target = full.step(full_state, byte as u8);
+            let synthesized_target = synthesized.step(synthesized_state, byte as u8);
+            match (full_target, synthesized_target) {
+                (None, None) => {}
+                (Some(full_target), Some(synthesized_target)) => {
+                    let slot = &mut mapping[full_target as usize];
+                    if *slot == u32::MAX {
+                        *slot = synthesized_target;
+                        worklist.push_back((full_target, synthesized_target));
+                    } else if *slot != synthesized_target {
+                        return None;
+                    }
+                }
+                _ => return None,
+            }
+        }
+    }
+    mapping.iter().all(|&state| state != u32::MAX).then_some(mapping)
 }
 
 #[derive(Debug)]
@@ -5045,10 +6098,10 @@ mod tests {
                 alphabet,
             )
             .expect("direct layered transport");
-            assert_eq!(mapping.len(), full.num_states());
+            assert_eq!(mapping.primary().len(), full.num_states());
 
             for full_state in 0..full.num_states() as u32 {
-                let synthesized_state = mapping[full_state as usize];
+                let synthesized_state = mapping.primary()[full_state as usize];
                 for input in &inputs {
                     assert_eq!(
                         dfa_state_observation(&full, full_state, input),

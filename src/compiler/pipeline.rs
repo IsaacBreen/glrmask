@@ -18,6 +18,7 @@ use crate::automata::lexer::compile::{
     build_regex_partitioned_with_profile_labels_and_residual_isolation,
     build_regex_partitioned_with_residual_isolation,
     build_regex_with_profile_labels,
+    compile_partitioned_expression_pair_with_structural_maps,
     compile_terminal_expression_pair_with_structural_map,
     factor_regex_expr,
 };
@@ -45,8 +46,9 @@ use crate::compiler::stages::id_map_and_terminal_dwa::types::{
     TerminalDwaPhaseProfile,
 };
 use crate::compiler::stages::id_map_and_terminal_dwa::synthetic_state_map::{
-    CertifiedFullToSynthesizedStateMap, synthesize_bounded_terminal_expressions,
-    certify_full_to_synthesized_state_map,
+    BoundedTerminalAnalysisCache, CertifiedFullToSynthesizedStateMap,
+    certify_full_to_synthesized_state_map, synthesize_bounded_terminal_expressions,
+    synthesize_terminal_expressions_for_horizon,
 };
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::compiler::stages::mapped_artifact::{
@@ -497,6 +499,24 @@ fn lexer_partition_ids_with_options(
     grammar: &GrammarDef,
     singleton_all_terminals: bool,
 ) -> Vec<u32> {
+    let residual_isolation_classes = lexer_residual_isolation_classes(grammar);
+    lexer_partition_ids_with_residual_classes(
+        grammar,
+        singleton_all_terminals,
+        &residual_isolation_classes,
+    )
+}
+
+fn lexer_partition_ids_with_residual_classes(
+    grammar: &GrammarDef,
+    singleton_all_terminals: bool,
+    residual_isolation_classes: &[Option<u32>],
+) -> Vec<u32> {
+    assert_eq!(
+        grammar.terminals.len(),
+        residual_isolation_classes.len(),
+        "one residual-isolation entry is required per terminal",
+    );
     // Named lexer groups opt into partitioning. Unspecified terminals remain
     // monolithic by default so existing grammars keep their historical lexer
     // shape. The global singleton override deliberately takes precedence over
@@ -508,7 +528,7 @@ fn lexer_partition_ids_with_options(
             let terminal = terminal as u32;
             let key = if singleton_all_terminals {
                 format!("terminal:{terminal}")
-            } else if let Some(class) = grammar.residual_isolation_classes.get(&terminal) {
+            } else if let Some(class) = residual_isolation_classes[terminal as usize] {
                 format!("residual-isolation:{class}")
             } else {
                 grammar
@@ -790,6 +810,9 @@ fn terminal_expr(terminal: &Terminal) -> Expr {
 struct SyntheticTokenizerPlan {
     full_expressions: Vec<Expr>,
     synthesized_expressions: Vec<Expr>,
+    changed_terminal_ids: Vec<u32>,
+    partition_ids: Vec<u32>,
+    residual_isolation_classes: Vec<Option<u32>>,
     changed_terminal_count: usize,
 }
 
@@ -813,53 +836,115 @@ fn structural_state_reduction_is_profitable(
     synthesized_states: usize,
 ) -> bool {
     const MIN_ABSOLUTE_STATE_SAVING: usize = 10_000;
+    // A compile tokenizer this large still makes every downstream vocabulary
+    // partition pay substantial state-classification and transition-table
+    // costs. The exact fallback already has mature max-length/vocabulary
+    // quotients, so reject large stencils rather than turning an attempted
+    // optimization into a multi-second regression.
+    const MAX_SYNTHESIZED_COMPILE_STATES: usize = 100_000;
     full_states.saturating_sub(synthesized_states) >= MIN_ABSOLUTE_STATE_SAVING
+        && (synthesized_states <= MAX_SYNTHESIZED_COMPILE_STATES
+            || std::env::var_os("GLRMASK_ALLOW_LARGE_SYNTHETIC").is_some())
         && synthesized_states.saturating_mul(2) <= full_states
 }
 
 fn plan_synthetic_tokenizer(
-    grammar: &mut GrammarDef,
+    grammar: &GrammarDef,
     vocab: &Vocab,
 ) -> Option<SyntheticTokenizerPlan> {
     if !crate::compiler::synthetic_bounded_terminals_enabled() {
         return None;
     }
 
+    // A terminal that can only be shortened for the common <=64-byte
+    // partitions, but not for the vocabulary's true maximum token length,
+    // remains a large exact coordinate beside the global candidate. That shape
+    // has repeatedly made the candidate DWA slower than the mature exact path.
+    // Fail closed before building either candidate lexer. This is only a
+    // profitability gate; it cannot change the accepted language.
+    const COMMON_PARTITION_HORIZON: usize = 64;
+    let max_token_len = vocab.entries.values().map(Vec::len).max().unwrap_or(0);
+    let mut global_analysis = BoundedTerminalAnalysisCache::new(max_token_len);
+    let mut local_analysis = BoundedTerminalAnalysisCache::new(COMMON_PARTITION_HORIZON);
+    let mut changed_terminal_ids = Vec::new();
+    let mut first_partition_only_terminal = None;
+    for (terminal_index, terminal) in grammar.terminals.iter().enumerate() {
+        let mut inspect = |expr: &Expr| {
+            (
+                global_analysis.is_pathological_candidate(expr),
+                max_token_len > COMMON_PARTITION_HORIZON
+                    && local_analysis.has_reducible_repeat(expr),
+            )
+        };
+        let (globally_changed, locally_reducible) = match terminal {
+            Terminal::Literal { .. } | Terminal::SpecialToken { .. } => (false, false),
+            Terminal::Pattern { pattern, utf8, .. } => inspect(&parse_regex(pattern, *utf8)),
+            Terminal::Expr { expr, .. } => inspect(expr),
+        };
+        if globally_changed {
+            changed_terminal_ids.push(terminal_index as u32);
+        } else if locally_reducible && first_partition_only_terminal.is_none() {
+            first_partition_only_terminal = Some(terminal_index as u32);
+        }
+    }
+    if changed_terminal_ids.is_empty() {
+        return None;
+    }
+    if let Some(extra_terminal) = first_partition_only_terminal
+        && std::env::var_os("GLRMASK_ALLOW_PARTITION_ONLY_SYNTHETIC").is_none()
+    {
+        if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some() {
+            eprintln!(
+                "[glrmask/profile][tokenizer] synthetic_plan_skipped reason=partition_only_large_terminal terminal={} global_horizon={} local_horizon={}",
+                extra_terminal,
+                max_token_len,
+                COMMON_PARTITION_HORIZON,
+            );
+        }
+        return None;
+    }
+
+    // Only now allocate the full/synthesized expression domains. Rejected
+    // candidates above perform a read-only tree walk and leave the ordinary
+    // exact compiler with the same memory state as synthesis-disabled mode.
     let full_expressions = grammar
         .terminals
         .iter()
         .map(terminal_expr)
         .collect::<Vec<_>>();
     let synthesized = synthesize_bounded_terminal_expressions(&full_expressions, vocab);
-    if synthesized.changed_terminals.is_empty() {
-        return None;
-    }
-    let changed_terminal_count = synthesized.changed_terminals.len();
+    debug_assert_eq!(synthesized.changed_terminals, changed_terminal_ids);
+    let changed_terminal_count = changed_terminal_ids.len();
 
-    let mut next_class = grammar
-        .residual_isolation_classes
-        .values()
+    let mut residual_isolation_classes = lexer_residual_isolation_classes(grammar);
+    let mut next_class = residual_isolation_classes
+        .iter()
+        .flatten()
         .copied()
         .max()
         .map_or(0, |class| class.saturating_add(1));
-    for terminal in synthesized.changed_terminals {
-        grammar
-            .residual_isolation_classes
-            .insert(terminal, next_class);
+    for &terminal in &changed_terminal_ids {
+        residual_isolation_classes[terminal as usize] = Some(next_class);
         next_class = next_class
             .checked_add(1)
             .expect("residual isolation class id overflow");
     }
+    let partition_ids =
+        lexer_partition_ids_with_residual_classes(grammar, false, &residual_isolation_classes);
 
     Some(SyntheticTokenizerPlan {
         full_expressions,
         synthesized_expressions: synthesized.expressions,
+        changed_terminal_ids,
+        partition_ids,
+        residual_isolation_classes,
         changed_terminal_count,
     })
 }
 
 fn build_tokenizer_from_planned_expressions(
     grammar: &GrammarDef,
+    plan: &SyntheticTokenizerPlan,
     expressions: &[Expr],
     adaptive_override: Option<bool>,
 ) -> Tokenizer {
@@ -874,15 +959,176 @@ fn build_tokenizer_from_planned_expressions(
         .enumerate()
         .map(|(index, _)| grammar.terminal_display_name(index as u32))
         .collect::<Vec<_>>();
-    let partition_ids = lexer_partition_ids_with_options(grammar, false);
-    let residual_isolation_classes = lexer_residual_isolation_classes(grammar);
     build_tokenizer_from_exprs_partitioned_impl(
         &expressions,
         Some(&labels),
-        &partition_ids,
-        Some(&residual_isolation_classes),
+        &plan.partition_ids,
+        Some(&plan.residual_isolation_classes),
         adaptive_override,
     )
+}
+
+fn build_ordinary_compile_tokenizer(
+    grammar: &GrammarDef,
+    adaptive_override: Option<bool>,
+) -> Tokenizer {
+    adaptive_override.map_or_else(
+        || build_tokenizer(grammar),
+        |adaptive| build_tokenizer_with_partition_options(grammar, false, adaptive),
+    )
+}
+
+fn build_structural_tokenizer_pair(
+    grammar: &GrammarDef,
+    plan: &SyntheticTokenizerPlan,
+    vocab: &Vocab,
+    adaptive_override: Option<bool>,
+) -> Option<(
+    Tokenizer,
+    Tokenizer,
+    CertifiedFullToSynthesizedStateMap,
+    Vec<(usize, ManyToOneIdMap)>,
+    Vec<crate::automata::lexer::compile::StructuralComponentQuotientPlan>,
+)> {
+    let full_expressions = plan
+        .full_expressions
+        .iter()
+        .cloned()
+        .map(factor_regex_expr)
+        .collect::<Vec<_>>();
+    let synthesized_expressions = plan
+        .synthesized_expressions
+        .iter()
+        .cloned()
+        .map(factor_regex_expr)
+        .collect::<Vec<_>>();
+    let max_token_len = vocab.entries.values().map(Vec::len).max().unwrap_or(0);
+    const PARTITION_STENCIL_HORIZON: usize = 64;
+    let partition_stencil = (max_token_len > PARTITION_STENCIL_HORIZON)
+        .then(|| {
+            let stencil = synthesize_terminal_expressions_for_horizon(
+                &plan.full_expressions,
+                PARTITION_STENCIL_HORIZON,
+            );
+            (!stencil.changed_terminals.is_empty()).then(|| {
+                (
+                    PARTITION_STENCIL_HORIZON,
+                    stencil
+                        .expressions
+                        .into_iter()
+                        .map(factor_regex_expr)
+                        .collect::<Vec<_>>(),
+                )
+            })
+        })
+        .flatten();
+    let mut relevant_bytes = vocab
+        .entries
+        .values()
+        .flat_map(|bytes| bytes.iter().copied())
+        .collect::<Vec<_>>();
+    relevant_bytes.sort_unstable();
+    relevant_bytes.dedup();
+
+    let (
+        synthesized_regex,
+        full_regex,
+        full_to_synthesized,
+        synthesized_state_representatives_by_horizon,
+        component_quotient_plans,
+    ) =
+        if full_expressions.len() == 1 {
+            let pair = compile_terminal_expression_pair_with_structural_map(
+                &full_expressions[0],
+                &synthesized_expressions[0],
+                max_token_len,
+                &relevant_bytes,
+            )?;
+            (
+                pair.synthesized,
+                pair.full,
+                pair.full_to_synthesized,
+                pair.synthesized_state_representatives_by_horizon,
+                pair.component_quotient_plans,
+            )
+        } else {
+            let labels = grammar
+                .terminals
+                .iter()
+                .enumerate()
+                .map(|(index, _)| grammar.terminal_display_name(index as u32))
+                .collect::<Vec<_>>();
+            let adaptive = adaptive_override
+                .unwrap_or_else(|| env_flag_enabled_by_default("GLRMASK_LEXER_ADAPTIVE"));
+            let pair = compile_partitioned_expression_pair_with_structural_maps(
+                &full_expressions,
+                &synthesized_expressions,
+                partition_stencil
+                    .as_ref()
+                    .map(|(horizon, expressions)| (*horizon, expressions.as_slice())),
+                Some(&labels),
+                &plan.partition_ids,
+                &plan.residual_isolation_classes,
+                adaptive,
+                max_token_len,
+                &relevant_bytes,
+            )?;
+            (
+                pair.synthesized,
+                pair.full,
+                pair.full_to_synthesized,
+                pair.synthesized_state_representatives_by_horizon,
+                pair.component_quotient_plans,
+            )
+        };
+
+    let expression_count = full_expressions.len() as u32;
+    let mut synthesized = synthesized_regex.into_tokenizer(
+        expression_count,
+        Some(Arc::from(synthesized_expressions.into_boxed_slice())),
+    );
+    let mut full = full_regex.into_tokenizer(
+        expression_count,
+        Some(Arc::from(full_expressions.into_boxed_slice())),
+    );
+    let synthesized_nullable = synthesized.isolate_start_state_and_drain_nullable_terminals();
+    let full_nullable = full.isolate_start_state_and_drain_nullable_terminals();
+    if !synthesized_nullable.is_empty() || !full_nullable.is_empty() {
+        return None;
+    }
+    let synthesized_state_quotients = synthesized_state_representatives_by_horizon
+        .into_iter()
+        .map(|(horizon, state_representatives)| {
+            let mut class_by_representative = BTreeMap::<u32, u32>::new();
+            let mut original_to_internal = Vec::with_capacity(state_representatives.len());
+            let mut representatives = Vec::<u32>::new();
+            for representative in state_representatives {
+                let class = *class_by_representative.entry(representative).or_insert_with(|| {
+                    let class = representatives.len() as u32;
+                    representatives.push(representative);
+                    class
+                });
+                original_to_internal.push(class);
+            }
+            (
+                horizon,
+                ManyToOneIdMap::from_original_to_internal_with_representatives(
+                    original_to_internal,
+                    representatives.len() as u32,
+                    representatives,
+                ),
+            )
+        })
+        .collect();
+    Some((
+        synthesized,
+        full,
+        CertifiedFullToSynthesizedStateMap {
+            full_to_synthesized,
+        },
+        synthesized_state_quotients,
+        component_quotient_plans,
+    ))
 }
 
 fn collect_special_token_terminals(grammar: &GrammarDef) -> Vec<SpecialTokenTerminal> {
@@ -1063,6 +1309,9 @@ struct TokenizerDagLane {
     tokenizer: Arc<Tokenizer>,
     runtime_tokenizer: Option<Arc<Tokenizer>>,
     full_to_synthesized_state_map: Option<CertifiedFullToSynthesizedStateMap>,
+    synthetic_state_quotients: Option<Vec<(usize, ManyToOneIdMap)>>,
+    synthetic_component_quotient_plans:
+        Option<Vec<crate::automata::lexer::compile::StructuralComponentQuotientPlan>>,
     synthetic_candidate_terminals: usize,
     synthetic_certification_ms: f64,
     compile_tokenizer_states: usize,
@@ -1588,6 +1837,8 @@ fn launch_terminal_dag_if_ready<'scope>(
                 &analysis.disallowed_follows,
                 Arc::clone(&flat_global.flat_trans),
                 &flat_global.global_max_length_state_map,
+                tokenizer.synthetic_state_quotients.as_deref(),
+                tokenizer.synthetic_component_quotient_plans.as_deref(),
                 Some(&classify.shared_classify_cache),
                 Some(flat_global.shared_transition_cache.as_ref()),
             );
@@ -1711,12 +1962,21 @@ fn compile_prepared_with_profile(
 }
 
 fn compile_prepared_with_profile_and_table_construction(
-    mut prepared_grammar: GrammarDef,
+    prepared_grammar: GrammarDef,
     vocab: &Vocab,
     default_table_construction: GlrTableConstruction,
     lexer_adaptive_override: Option<bool>,
 ) -> (Constraint, CompilePhaseProfile) {
-    let synthetic_tokenizer_plan = plan_synthetic_tokenizer(&mut prepared_grammar, vocab);
+    let synthetic_plan_started_at = Instant::now();
+    let synthetic_tokenizer_plan = plan_synthetic_tokenizer(&prepared_grammar, vocab);
+    if std::env::var_os("GLRMASK_PROFILE_SYNTHETIC_PLAN").is_some() {
+        eprintln!(
+            "[glrmask/profile][synthetic_plan] selected={} terminals={} ms={:.3}",
+            synthetic_tokenizer_plan.is_some(),
+            prepared_grammar.terminals.len(),
+            elapsed_ms(synthetic_plan_started_at),
+        );
+    }
     let interner_cleanup = crate::ds::weight::defer_weight_interner_cleanup();
     let result = run_with_compile_thread_pool(|| {
         let compile_started_at = Instant::now();
@@ -1747,164 +2007,139 @@ fn compile_prepared_with_profile_and_table_construction(
                     mut tokenizer,
                     mut runtime_tokenizer,
                     full_to_synthesized_state_map,
+                    synthetic_state_quotients,
+                    synthetic_component_quotient_plans,
                     synthetic_certification_ms,
                 ) = if let Some(plan) = synthetic_tokenizer_plan_ref {
-                    let structural_pair = if plan.full_expressions.len() == 1 {
-                        let full_expression =
-                            factor_regex_expr(plan.full_expressions[0].clone());
-                        let synthesized_expression =
-                            factor_regex_expr(plan.synthesized_expressions[0].clone());
-                        let max_token_len =
-                            vocab.entries.values().map(Vec::len).max().unwrap_or(0);
-                        let mut relevant_bytes = vocab
-                            .entries
-                            .values()
-                            .flat_map(|bytes| bytes.iter().copied())
-                            .collect::<Vec<_>>();
-                        relevant_bytes.sort_unstable();
-                        relevant_bytes.dedup();
-                        compile_terminal_expression_pair_with_structural_map(
-                            &full_expression,
-                            &synthesized_expression,
-                            max_token_len,
-                            &relevant_bytes,
+                    if let Some((synthesized, full, certified, quotients, component_plans)) =
+                        build_structural_tokenizer_pair(
+                            prepared_grammar_ref,
+                            plan,
+                            vocab,
+                            lexer_adaptive_override,
                         )
-                        .map(|pair| (pair, full_expression, synthesized_expression))
-                    } else {
-                        None
-                    };
-                    if let Some((pair, full_expression, synthesized_expression)) = structural_pair {
-                        let mut synthesized = pair.synthesized.into_tokenizer(
-                            1,
-                            Some(Arc::from(vec![synthesized_expression].into_boxed_slice())),
+                    {
+                        let profitable = structural_state_reduction_is_profitable(
+                            full.num_states() as usize,
+                            synthesized.num_states() as usize,
                         );
-                        let mut full = pair.full.into_tokenizer(
-                            1,
-                            Some(Arc::from(vec![full_expression].into_boxed_slice())),
-                        );
-                        let synthesized_nullable =
-                            synthesized.isolate_start_state_and_drain_nullable_terminals();
-                        let full_nullable = full.isolate_start_state_and_drain_nullable_terminals();
-                        if synthesized_nullable.is_empty() && full_nullable.is_empty() {
-                                let profitable = structural_state_reduction_is_profitable(
-                                    full.num_states() as usize,
-                                    synthesized.num_states() as usize,
+                        if profitable {
+                            (
+                                synthesized,
+                                Some(full),
+                                Some(certified),
+                                Some(quotients),
+                                Some(component_plans),
+                                0.0,
+                            )
+                        } else {
+                            if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some() {
+                                eprintln!(
+                                    "[glrmask/profile][tokenizer] synthetic_certification_skipped reason=insufficient_state_reduction path=structural_product full_states={} synthesized_states={} absolute_saving={}",
+                                    full.num_states(),
+                                    synthesized.num_states(),
+                                    full.num_states().saturating_sub(synthesized.num_states()),
                                 );
-                            if profitable {
+                            }
+                            drop(synthesized);
+                            drop(full);
+                            (
+                                build_ordinary_compile_tokenizer(
+                                    prepared_grammar_ref,
+                                    lexer_adaptive_override,
+                                ),
+                                None,
+                                None,
+                                None,
+                                None,
+                                0.0,
+                            )
+                        }
+                    } else {
+                        let (mut synthesized, mut full) = rayon::join(
+                            || {
+                                build_tokenizer_from_planned_expressions(
+                                    prepared_grammar_ref,
+                                    plan,
+                                    &plan.synthesized_expressions,
+                                    lexer_adaptive_override,
+                                )
+                            },
+                            || {
+                                build_tokenizer_from_planned_expressions(
+                                    prepared_grammar_ref,
+                                    plan,
+                                    &plan.full_expressions,
+                                    lexer_adaptive_override,
+                                )
+                            },
+                        );
+                        synthesized.isolate_start_state_and_drain_nullable_terminals();
+                        full.isolate_start_state_and_drain_nullable_terminals();
+                        let profitable = synthetic_state_reduction_is_profitable(
+                            full.num_states() as usize,
+                            synthesized.num_states() as usize,
+                        );
+                        let certification_started_at = Instant::now();
+                        let certification = profitable
+                            .then(|| {
+                                certify_full_to_synthesized_state_map(
+                                    &full,
+                                    &synthesized,
+                                    vocab,
+                                    None,
+                                )
+                            })
+                            .flatten();
+                        let certification_ms = elapsed_ms(certification_started_at);
+                        if !profitable
+                            && std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some()
+                        {
+                            eprintln!(
+                                "[glrmask/profile][tokenizer] synthetic_certification_skipped reason=insufficient_state_reduction full_states={} synthesized_states={} absolute_saving={}",
+                                full.num_states(),
+                                synthesized.num_states(),
+                                full.num_states().saturating_sub(synthesized.num_states()),
+                            );
+                        }
+                        match certification {
+                            Some(certified) => {
                                 (
                                     synthesized,
                                     Some(full),
-                                    Some(CertifiedFullToSynthesizedStateMap {
-                                        full_to_synthesized: pair.full_to_synthesized,
-                                    }),
-                                    0.0,
+                                    Some(certified),
+                                    None,
+                                    None,
+                                    certification_ms,
                                 )
-                            } else {
-                                if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING")
-                                    .is_some()
-                                {
-                                    eprintln!(
-                                        "[glrmask/profile][tokenizer] synthetic_certification_skipped reason=insufficient_state_reduction path=structural_product full_states={} synthesized_states={} absolute_saving={}",
-                                        full.num_states(),
-                                        synthesized.num_states(),
-                                        full.num_states().saturating_sub(synthesized.num_states()),
-                                    );
-                                }
-                                (full, None, None, 0.0)
                             }
-                        } else {
-                            // Nullable-start isolation can clone and renumber
-                            // states. The structural map is intentionally used
-                            // only when isolation is a no-op; fall through to
-                            // the generic paired build otherwise.
-                            let (mut synthesized, mut full) = rayon::join(
-                                || {
-                                    build_tokenizer_from_planned_expressions(
+                            None => {
+                                drop(synthesized);
+                                drop(full);
+                                (
+                                    build_ordinary_compile_tokenizer(
                                         prepared_grammar_ref,
-                                        &plan.synthesized_expressions,
                                         lexer_adaptive_override,
-                                    )
-                                },
-                                || {
-                                    build_tokenizer_from_planned_expressions(
-                                        prepared_grammar_ref,
-                                        &plan.full_expressions,
-                                        lexer_adaptive_override,
-                                    )
-                                },
-                            );
-                            synthesized.isolate_start_state_and_drain_nullable_terminals();
-                            full.isolate_start_state_and_drain_nullable_terminals();
-                            (full, None, None, 0.0)
+                                    ),
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    certification_ms,
+                                )
+                            }
                         }
-                    } else {
-                    let (mut synthesized, mut full) = rayon::join(
-                        || {
-                            build_tokenizer_from_planned_expressions(
-                                prepared_grammar_ref,
-                                &plan.synthesized_expressions,
-                                lexer_adaptive_override,
-                            )
-                        },
-                        || {
-                            build_tokenizer_from_planned_expressions(
-                                prepared_grammar_ref,
-                                &plan.full_expressions,
-                                lexer_adaptive_override,
-                            )
-                        },
-                    );
-                    synthesized.isolate_start_state_and_drain_nullable_terminals();
-                    full.isolate_start_state_and_drain_nullable_terminals();
-                    let profitable = synthetic_state_reduction_is_profitable(
-                        full.num_states() as usize,
-                        synthesized.num_states() as usize,
-                    );
-                    let certification_started_at = Instant::now();
-                    let certification = profitable
-                        .then(|| {
-                            certify_full_to_synthesized_state_map(
-                                &full,
-                                &synthesized,
-                                vocab,
-                                None,
-                            )
-                        })
-                        .flatten();
-                    let certification_ms = elapsed_ms(certification_started_at);
-                    if !profitable
-                        && std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some()
-                    {
-                        eprintln!(
-                            "[glrmask/profile][tokenizer] synthetic_certification_skipped reason=insufficient_state_reduction full_states={} synthesized_states={} absolute_saving={}",
-                            full.num_states(),
-                            synthesized.num_states(),
-                            full.num_states().saturating_sub(synthesized.num_states()),
-                        );
-                    }
-                    match certification {
-                        Some(certified) => {
-                            (synthesized, Some(full), Some(certified), certification_ms)
-                        }
-                        None => (full, None, None, certification_ms),
-                    }
                     }
                 } else {
-                    let tokenizer = lexer_adaptive_override.map_or_else(
-                        || build_tokenizer(prepared_grammar_ref),
-                        |adaptive| {
-                            build_tokenizer_with_partition_options(
-                                prepared_grammar_ref,
-                                false,
-                                adaptive,
-                            )
-                        },
+                    let tokenizer = build_ordinary_compile_tokenizer(
+                        prepared_grammar_ref,
+                        lexer_adaptive_override,
                     );
-                    (tokenizer, None, None, 0.0)
+                    (tokenizer, None, None, None, None, 0.0)
                 };
                 let tokenizer_construct_ms = elapsed_ms(tok_started);
                 let isolate_started = Instant::now();
-                if synthetic_tokenizer_plan_ref.is_none() {
+                if runtime_tokenizer.is_none() {
                     tokenizer.isolate_start_state_and_drain_nullable_terminals();
                 }
                 if let Some(runtime) = runtime_tokenizer.as_mut() {
@@ -1924,6 +2159,8 @@ fn compile_prepared_with_profile_and_table_construction(
                     tokenizer: Arc::new(tokenizer),
                     runtime_tokenizer: runtime_tokenizer.map(Arc::new),
                     full_to_synthesized_state_map,
+                    synthetic_state_quotients,
+                    synthetic_component_quotient_plans,
                     synthetic_candidate_terminals: synthetic_tokenizer_plan_ref
                         .map_or(0, |plan| plan.changed_terminal_count),
                     synthetic_certification_ms,
@@ -2068,6 +2305,7 @@ fn compile_prepared_with_profile_and_table_construction(
             let parser_state_ref = &parser_state;
             let compile_dag_result_ref = &compile_dag_result;
             let prepared_grammar_ref = &prepared_grammar;
+            let synthetic_tokenizer_plan_for_analysis = synthetic_tokenizer_plan.as_ref();
             let analysis_started_for_analysis = analysis_started_at.clone();
             let compile_started_for_analysis = compile_started_at.clone();
             let table_construction = default_table_construction.clone();
@@ -2097,11 +2335,17 @@ fn compile_prepared_with_profile_and_table_construction(
 
                     if use_terminal_coloring {
                         let coloring_table = Arc::clone(&table);
-                        let protected_terminal_ids = glr_analyzed_grammar
+                        let mut protected_terminal_ids = glr_analyzed_grammar
                             .residual_isolation_classes
                             .keys()
                             .copied()
                             .collect::<Vec<_>>();
+                        if let Some(plan) = synthetic_tokenizer_plan_for_analysis {
+                            protected_terminal_ids
+                                .extend(plan.changed_terminal_ids.iter().copied());
+                            protected_terminal_ids.sort_unstable();
+                            protected_terminal_ids.dedup();
+                        }
                         let compile_started_for_coloring = compile_started_for_glr.clone();
                         scope.spawn(move |scope| {
                             let terminal_coloring_started_at = Instant::now();

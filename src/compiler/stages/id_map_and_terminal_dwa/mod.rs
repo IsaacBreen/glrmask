@@ -16,10 +16,11 @@ pub(crate) mod partition;
 pub(crate) mod types;
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
+use crate::automata::lexer::compile::StructuralComponentQuotientPlan;
 use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::terminal_automaton::TerminalAutomaton;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
@@ -28,6 +29,7 @@ use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
 use crate::grammar::flat::TerminalID;
 use crate::Vocab;
+use rustc_hash::FxHashMap;
 
 use classify::classify_vocab_char_type;
 use finalize_ignore::erase_ignore_after_ti;
@@ -39,6 +41,245 @@ use types::{
     compile_profile_enabled, compile_profile_uses_serial_partition_schedule,
     LocalIdMapTerminalDwa, TerminalColoring, TerminalDwaFamilies, TerminalDwaPhaseProfile,
 };
+
+fn build_component_structural_state_map(
+    plans: &[StructuralComponentQuotientPlan],
+    total_states: usize,
+    horizon: usize,
+) -> Option<ManyToOneIdMap> {
+    if plans.is_empty() || total_states == 0 {
+        return None;
+    }
+
+    let mut original_to_internal = vec![u32::MAX; total_states];
+    let mut representatives = Vec::<u32>::new();
+    // Partitioned lexers have one epsilon-dispatch root followed by disjoint
+    // contiguous component ranges. Keep component identities separate: equal
+    // local analysis-state numbers in different components are not equivalent.
+    original_to_internal[0] = 0;
+    representatives.push(0);
+
+    for plan in plans {
+        let offset = plan.global_offset as usize;
+        let local_states = plan.source_state_count;
+        if offset == 0 || offset.saturating_add(local_states) > total_states {
+            return None;
+        }
+        let analysis = plan
+            .horizons
+            .iter()
+            .find(|analysis| analysis.horizon >= horizon)?;
+        if analysis.source_to_analysis.len() != local_states {
+            return None;
+        }
+
+        let mut analysis_to_internal = vec![u32::MAX; analysis.tokenizer.num_states() as usize];
+        for (local_state, &analysis_state) in analysis.source_to_analysis.iter().enumerate() {
+            let slot = analysis_to_internal.get_mut(analysis_state as usize)?;
+            let internal = if *slot == u32::MAX {
+                let internal = representatives.len() as u32;
+                *slot = internal;
+                representatives.push(plan.global_offset + local_state as u32);
+                internal
+            } else {
+                *slot
+            };
+            let global_state = offset + local_state;
+            if original_to_internal[global_state] != u32::MAX {
+                return None;
+            }
+            original_to_internal[global_state] = internal;
+        }
+    }
+    if original_to_internal.iter().any(|&internal| internal == u32::MAX) {
+        return None;
+    }
+    Some(ManyToOneIdMap::from_original_to_internal_with_representatives(
+        original_to_internal,
+        representatives.len() as u32,
+        representatives,
+    ))
+}
+
+fn build_component_structural_state_maps(
+    plans: &[StructuralComponentQuotientPlan],
+    total_states: usize,
+    max_token_len: usize,
+) -> Option<Vec<(usize, ManyToOneIdMap)>> {
+    let started_at = Instant::now();
+    let mut horizons = vec![4, 8, 16, 32, 64, max_token_len];
+    horizons.retain(|&horizon| horizon <= max_token_len);
+    horizons.sort_unstable();
+    horizons.dedup();
+    let maps = horizons
+        .into_iter()
+        .map(|horizon| {
+            build_component_structural_state_map(plans, total_states, horizon)
+                .map(|map| (horizon, map))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if std::env::var_os("GLRMASK_PROFILE_COMPONENT_MAP").is_some() {
+        eprintln!(
+            "[glrmask/profile][component_structural_maps] components={} states={} horizons={} reps={:?} ms={:.3}",
+            plans.len(),
+            total_states,
+            maps.len(),
+            maps.iter()
+                .map(|(horizon, map)| (*horizon, map.num_internal_ids()))
+                .collect::<Vec<_>>(),
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    Some(maps)
+}
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct ActiveStructuralMapKey {
+    horizon: usize,
+    active_terminal_words: Vec<u64>,
+    relevant_byte_words: [u64; 4],
+}
+
+#[derive(Default)]
+pub(crate) struct ActiveStructuralMapCache {
+    maps: Mutex<FxHashMap<ActiveStructuralMapKey, Arc<ManyToOneIdMap>>>,
+}
+
+fn bool_mask_words(mask: &[bool]) -> Vec<u64> {
+    let mut words = vec![0u64; mask.len().div_ceil(64)];
+    for (index, &active) in mask.iter().enumerate() {
+        if active {
+            words[index / 64] |= 1u64 << (index % 64);
+        }
+    }
+    words
+}
+
+fn vocab_relevant_bytes(vocab: &Vocab) -> ([bool; 256], [u64; 4], usize) {
+    let mut relevant = [false; 256];
+    let mut words = [0u64; 4];
+    let mut max_token_len = 0usize;
+    for bytes in vocab.entries.values() {
+        max_token_len = max_token_len.max(bytes.len());
+        for &byte in bytes {
+            relevant[byte as usize] = true;
+            words[byte as usize / 64] |= 1u64 << (byte as usize % 64);
+        }
+    }
+    (relevant, words, max_token_len)
+}
+
+fn build_active_component_structural_state_map(
+    plans: &[StructuralComponentQuotientPlan],
+    total_states: usize,
+    vocab: &Vocab,
+    active_terminals: &[bool],
+    cache: &ActiveStructuralMapCache,
+) -> Option<Arc<ManyToOneIdMap>> {
+    if plans.is_empty() || total_states == 0 {
+        return None;
+    }
+    let (relevant_bytes, relevant_byte_words, horizon) = vocab_relevant_bytes(vocab);
+    let key = ActiveStructuralMapKey {
+        horizon,
+        active_terminal_words: bool_mask_words(active_terminals),
+        relevant_byte_words,
+    };
+    if let Some(map) = cache.maps.lock().ok()?.get(&key).cloned() {
+        return Some(map);
+    }
+
+    let started_at = Instant::now();
+    let mut original_to_internal = vec![u32::MAX; total_states];
+    let mut representatives = Vec::<u32>::new();
+    original_to_internal[0] = 0;
+    representatives.push(0);
+
+    for plan in plans {
+        let offset = plan.global_offset as usize;
+        let local_states = plan.source_state_count;
+        if offset == 0 || offset.saturating_add(local_states) > total_states {
+            return None;
+        }
+        let analysis = plan
+            .horizons
+            .iter()
+            .find(|analysis| analysis.horizon >= horizon)?;
+        if analysis.source_to_analysis.len() != local_states
+            || analysis.tokenizer.num_terminals() as usize != plan.terminal_ids.len()
+        {
+            return None;
+        }
+        let local_active = plan
+            .terminal_ids
+            .iter()
+            .map(|&terminal| {
+                active_terminals
+                    .get(terminal as usize)
+                    .copied()
+                    .unwrap_or(false)
+            })
+            .collect::<Vec<_>>();
+
+        let local_representatives = if !local_active.iter().any(|&active| active) {
+            vec![0u32; local_states]
+        } else if plan.terminal_ids.len() == 1 {
+            analysis.source_to_analysis.clone()
+        } else {
+            let view = l2p::equivalence_analysis::compat::TokenizerView::new(&analysis.tokenizer);
+            let byte_to_class =
+                l2p::equivalence_analysis::compat::compute_byte_classes(view.dfa());
+            let analysis_states = (0..analysis.tokenizer.num_states() as usize).collect::<Vec<_>>();
+            let active_mapping =
+                l2p::equivalence_analysis::state::max_length::find_state_equivalence_classes_kbounded(
+                    &view,
+                    &analysis_states,
+                    horizon,
+                    Some(&local_active),
+                    Some(&relevant_bytes),
+                    Some(&byte_to_class),
+                    "synthetic_active_terminal",
+                );
+            analysis
+                .source_to_analysis
+                .iter()
+                .map(|&state| active_mapping[state as usize] as u32)
+                .collect()
+        };
+
+        let mut representative_to_internal = FxHashMap::<u32, u32>::default();
+        for (local_state, &local_representative) in local_representatives.iter().enumerate() {
+            let internal = *representative_to_internal
+                .entry(local_representative)
+                .or_insert_with(|| {
+                    let internal = representatives.len() as u32;
+                    representatives.push(plan.global_offset + local_state as u32);
+                    internal
+                });
+            original_to_internal[offset + local_state] = internal;
+        }
+    }
+    if original_to_internal.iter().any(|&internal| internal == u32::MAX) {
+        return None;
+    }
+    let map = Arc::new(ManyToOneIdMap::from_original_to_internal_with_representatives(
+        original_to_internal,
+        representatives.len() as u32,
+        representatives,
+    ));
+    if std::env::var_os("GLRMASK_PROFILE_COMPONENT_MAP").is_some() {
+        eprintln!(
+            "[glrmask/profile][active_component_map] horizon={} tokens={} active_terminals={} reps={} ms={:.3}",
+            horizon,
+            vocab.len(),
+            active_terminals.iter().filter(|&&active| active).count(),
+            map.num_internal_ids(),
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    cache.maps.lock().ok()?.insert(key, Arc::clone(&map));
+    Some(map)
+}
 
 fn l2p_partition_cost_fn_from_env() -> classify::L2pPartitionCostFn {
     match std::env::var("GLRMASK_L2P_COST_FN").as_deref() {
@@ -158,6 +399,32 @@ fn build_char_type_sub_vocabs(vocab: &Vocab) -> Arc<[Vocab]> {
         sub_vocabs: Arc::clone(&sub_vocabs),
     }));
     sub_vocabs
+}
+
+fn split_sub_vocabs_by_token_horizon(
+    sub_vocabs: &[Vocab],
+) -> (Arc<[Vocab]>, Arc<[usize]>) {
+    const HORIZONS: [usize; 6] = [4, 8, 16, 32, 64, usize::MAX];
+    let mut split_vocabs = Vec::new();
+    let mut base_partition_ids = Vec::new();
+    for (base_partition, vocab) in sub_vocabs.iter().enumerate() {
+        let mut buckets = HORIZONS.map(|_| Vec::<(u32, Vec<u8>)>::new());
+        for (&token_id, bytes) in vocab.entries.iter() {
+            let bucket = HORIZONS
+                .iter()
+                .position(|&horizon| bytes.len() <= horizon)
+                .expect("final token-horizon bucket is unbounded");
+            buckets[bucket].push((token_id, bytes.clone()));
+        }
+        for entries in buckets {
+            if entries.is_empty() {
+                continue;
+            }
+            split_vocabs.push(Vocab::new(entries));
+            base_partition_ids.push(base_partition);
+        }
+    }
+    (split_vocabs.into(), base_partition_ids.into())
 }
 
 pub(crate) fn prepare_vocab_for_terminal_dwa(vocab: &Vocab) {
@@ -340,6 +607,8 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
     disallowed_follows: &BTreeMap<u32, BitSet>,
     flat_trans: Arc<[u32]>,
     global_max_length_state_map: &ManyToOneIdMap,
+    structural_state_quotients: Option<&[(usize, ManyToOneIdMap)]>,
+    structural_component_plans: Option<&[StructuralComponentQuotientPlan]>,
     external_classify_cache: Option<&classify::SharedClassifyCache>,
     external_transition_cache: Option<
         &OnceLock<l2p::equivalence_analysis::compat::FlatTransitionCache>,
@@ -372,7 +641,7 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
     let requested_partition_scheme =
         std::env::var("GLRMASK_PARTITION_SCHEME").unwrap_or_else(|_| "char_type".to_string());
     let partition_scheme = requested_partition_scheme.as_str();
-    let sub_vocabs: Arc<[Vocab]> = match partition_scheme {
+    let base_sub_vocabs: Arc<[Vocab]> = match partition_scheme {
         "char_type" => build_char_type_sub_vocabs(vocab),
         "l2p_cost" => {
             let cost_fn = l2p_partition_cost_fn_from_env();
@@ -524,8 +793,19 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
             "Invalid GLRMASK_PARTITION_SCHEME={other}; expected one of: char_type, l2p_cost, auto_l2p_cost"
         ),
     };
+    let (sub_vocabs, base_partition_ids): (Arc<[Vocab]>, Arc<[usize]>) =
+        if structural_component_plans.is_some() {
+            split_sub_vocabs_by_token_horizon(&base_sub_vocabs)
+        } else {
+            (
+                Arc::clone(&base_sub_vocabs),
+                (0..base_sub_vocabs.len()).collect::<Vec<_>>().into(),
+            )
+        };
     let partition_vocab_ms = partition_vocab_started_at.elapsed().as_secs_f64() * 1000.0;
     profile.id_map_ms += partition_vocab_ms;
+
+    let active_structural_map_cache = ActiveStructuralMapCache::default();
 
     // Lazily-initialized shared compact transition table cache over the one
     // raw lexer DFA used by every L2P partition. Subsequent partitions reuse
@@ -555,7 +835,27 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
                            sub_vocab: &Vocab|
      -> (Option<(types::PartitionTerminalDwas, f64)>, usize) {
         let started_at = Instant::now();
-        let label = format!("p{}", idx);
+        let label = format!("p{}", base_partition_ids[idx]);
+        let partition_max_token_len = sub_vocab
+            .entries
+            .values()
+            .map(Vec::len)
+            .max()
+            .unwrap_or(0);
+        let structural_state_map = structural_state_quotients.and_then(|quotients| {
+            quotients
+                .iter()
+                .find(|(horizon, _)| *horizon >= partition_max_token_len)
+                .map(|(_, map)| map)
+        });
+        let mut initial_state_map = global_max_length_state_map;
+        let mut initial_state_map_token_exact = false;
+        if let Some(structural) = structural_state_map
+            && structural.num_internal_ids() < initial_state_map.num_internal_ids()
+        {
+            initial_state_map = structural;
+            initial_state_map_token_exact = true;
+        }
         let result = partition::build_partition_id_map_and_terminal_dwa(
             &label,
             tokenizer,
@@ -569,7 +869,10 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
             &token_path_disallowed_follows,
             &normalized_token_path_disallowed_follows,
             &flat_trans,
-            Some(global_max_length_state_map),
+            Some(initial_state_map),
+            initial_state_map_token_exact,
+            structural_component_plans,
+            structural_component_plans.map(|_| &active_structural_map_cache),
             Some(&shared_vocab_dfa_cache),
             Some(&shared_original_vocab_dfa_cache),
             Some(&shared_original_vocab_analysis_dfa_cache),
@@ -608,6 +911,40 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
         }
         ms
     };
+    if std::env::var_os("GLRMASK_PROFILE_PARTITION_WALL").is_some() {
+        let mut rows = sub_vocabs
+            .iter()
+            .enumerate()
+            .map(|(idx, sub_vocab)| {
+                let phase = partition_results
+                    .iter()
+                    .find(|(_, result_idx)| *result_idx == idx)
+                    .and_then(|(result, _)| result.as_ref())
+                    .map(|(parts, _)| parts.profile)
+                    .unwrap_or_default();
+                let max_len = sub_vocab.entries.values().map(Vec::len).max().unwrap_or(0);
+                (
+                    partition_ms[idx],
+                    idx,
+                    base_partition_ids[idx],
+                    sub_vocab.len(),
+                    max_len,
+                    global_max_length_state_map.num_internal_ids(),
+                    phase.id_map_ms,
+                    phase.terminal_dwa_ms,
+                    phase.compact_ms,
+                    phase.split_terminal_dwa_total_ms,
+                )
+            })
+            .collect::<Vec<_>>();
+        rows.sort_unstable_by(|left, right| right.0.total_cmp(&left.0));
+        eprintln!(
+            "[glrmask/profile][partition_wall] partitions={} wall_ms={:.3} rows={:?}",
+            rows.len(),
+            partition_build_wall_ms,
+            rows,
+        );
+    }
     let dominant_partition_profile = partition_results
         .iter()
         .filter_map(|(result, _)| result.as_ref().map(|(parts, ms)| (parts.profile, *ms)))
@@ -827,6 +1164,8 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
             disallowed_follows,
             flat_trans,
             global_max_length_state_map,
+            None,
+            None,
             external_classify_cache,
             None,
         );

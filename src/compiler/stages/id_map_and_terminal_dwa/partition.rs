@@ -8,9 +8,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::automata::lexer::tokenizer::Tokenizer;
+use crate::automata::lexer::tokenizer::{Lexer, Tokenizer};
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
+use crate::automata::lexer::compile::StructuralComponentQuotientPlan;
 use crate::compiler::stages::id_map_and_terminal_dwa::classify::{
     classify_terminal_path_lengths, split_vocab_for_active_l2p_terminals,
 };
@@ -56,6 +57,9 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     normalized_token_path_disallowed_follows: &Arc<[BitSet]>,
     flat_trans: &Arc<[u32]>,
     initial_state_map: Option<&ManyToOneIdMap>,
+    initial_state_map_token_exact: bool,
+    structural_component_plans: Option<&[StructuralComponentQuotientPlan]>,
+    active_structural_map_cache: Option<&super::ActiveStructuralMapCache>,
     shared_vocab_dfa_cache: Option<&super::l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
     shared_original_vocab_dfa_cache: Option<&super::l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
     shared_original_vocab_analysis_dfa_cache: Option<&super::l2p::equivalence_analysis::vocab::fast::SharedVocabAnalysisDfaCache>,
@@ -144,6 +148,57 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     }).flatten();
     let routing_ms = routing_started_at.elapsed().as_secs_f64() * 1000.0;
 
+    let l1_active_structural_map = if has_l1 {
+        structural_component_plans
+            .zip(active_structural_map_cache)
+            .and_then(|(plans, cache)| {
+                super::build_active_component_structural_state_map(
+                    plans,
+                    tokenizer.num_states() as usize,
+                    vocab,
+                    &l1_mask,
+                    cache,
+                )
+            })
+    } else {
+        None
+    };
+    let l2p_active_structural_map = if has_l2p {
+        structural_component_plans
+            .zip(active_structural_map_cache)
+            .and_then(|(plans, cache)| {
+                super::build_active_component_structural_state_map(
+                    plans,
+                    tokenizer.num_states() as usize,
+                    vocab,
+                    &l2p_mask,
+                    cache,
+                )
+            })
+    } else {
+        None
+    };
+    let (l1_initial_state_map, l1_initial_state_map_token_exact) =
+        if let Some(active_map) = l1_active_structural_map.as_ref()
+            && initial_state_map.is_none_or(|base| {
+                active_map.num_internal_ids() < base.num_internal_ids()
+            })
+        {
+            (Some(active_map.as_ref()), true)
+        } else {
+            (initial_state_map, initial_state_map_token_exact)
+        };
+    let (l2p_initial_state_map, l2p_initial_state_map_token_exact) =
+        if let Some(active_map) = l2p_active_structural_map.as_ref()
+            && initial_state_map.is_none_or(|base| {
+                active_map.num_internal_ids() < base.num_internal_ids()
+            })
+        {
+            (Some(active_map.as_ref()), true)
+        } else {
+            (initial_state_map, initial_state_map_token_exact)
+        };
+
     // Build L1 and L2+ terminal DWAs in parallel. L2+ terminals get an
     // additional token split: only tokens that can actually cross an active
     // L2+ terminal boundary go through the expensive L2P NWA builder; the
@@ -165,7 +220,8 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                     &l1_mask,
                     flat_trans,
                     l1_transitions_by_byte,
-                    initial_state_map,
+                    l1_initial_state_map,
+                    l1_initial_state_map_token_exact,
                     None,
                 );
                 (result, started_at.elapsed().as_secs_f64() * 1000.0)
@@ -198,7 +254,8 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                         // All L2P work keeps raw lexer-state coordinates; equivalence
                         // analysis verifies flat-table compatibility before using it.
                         Some(flat_trans),
-                        initial_state_map,
+                        l2p_initial_state_map,
+                        l2p_initial_state_map_token_exact,
                     );
                     let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
                     return ((result, 0.0), (None, 0.0), elapsed_ms);
@@ -248,7 +305,8 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                                         // All L2P work keeps raw lexer-state coordinates; equivalence
                                 // analysis verifies flat-table compatibility before using it.
                                 Some(flat_trans),
-                                initial_state_map,
+                                l2p_initial_state_map,
+                                l2p_initial_state_map_token_exact,
                             );
                             (result, started_at.elapsed().as_secs_f64() * 1000.0)
                         }
@@ -270,7 +328,8 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                                 &l2p_mask,
                                 flat_trans,
                                 l1_transitions_by_byte,
-                                initial_state_map,
+                                l2p_initial_state_map,
+                                l2p_initial_state_map_token_exact,
                                 None,
                             );
                             (result, started_at.elapsed().as_secs_f64() * 1000.0)

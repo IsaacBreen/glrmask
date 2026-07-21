@@ -5,6 +5,8 @@
 //! exact K-bounded residual observer, and require every full residual state to
 //! share a class with at least one synthesized residual state.
 
+use std::sync::Arc;
+
 use crate::Vocab;
 use crate::automata::lexer::Lexer;
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -495,7 +497,7 @@ struct ReducibleRepeatStats {
     count: usize,
 }
 
-const STENCIL_TOKEN_NEIGHBORHOODS: usize = 3;
+const STENCIL_TOKEN_NEIGHBORHOODS: usize = 1;
 
 impl ReducibleRepeatStats {
     fn include(&mut self, max: usize) {
@@ -525,11 +527,69 @@ impl ReducibleRepeatStats {
     }
 }
 
-fn reducible_repeat_stats(expr: &Expr, max_token_len: usize) -> ReducibleRepeatStats {
-    let mut stats = ReducibleRepeatStats::default();
+fn reducible_repeat_analysis_inner(
+    expr: &Expr,
+    max_token_len: usize,
+    shared_cache: &mut FxHashMap<usize, (usize, ReducibleRepeatStats)>,
+) -> (usize, ReducibleRepeatStats) {
     match expr {
+        Expr::U8Seq(bytes) => (bytes.len(), ReducibleRepeatStats::default()),
+        Expr::U8Class(_) => (1, ReducibleRepeatStats::default()),
+        Expr::Dfa(dfa) => (
+            dfa.min_match_byte_len().unwrap_or(0),
+            ReducibleRepeatStats::default(),
+        ),
+        Expr::Epsilon => (0, ReducibleRepeatStats::default()),
+        Expr::Shared(inner) => {
+            let key = Arc::as_ptr(inner) as usize;
+            if let Some(&cached) = shared_cache.get(&key) {
+                return cached;
+            }
+            let result = reducible_repeat_analysis_inner(inner, max_token_len, shared_cache);
+            shared_cache.insert(key, result);
+            result
+        }
+        Expr::Intersect { expr, intersect } => {
+            let (left_min, mut left_stats) =
+                reducible_repeat_analysis_inner(expr, max_token_len, shared_cache);
+            let (right_min, right_stats) =
+                reducible_repeat_analysis_inner(intersect, max_token_len, shared_cache);
+            left_stats.merge(right_stats);
+            (left_min.max(right_min), left_stats)
+        }
+        Expr::Exclude { expr, exclude } => {
+            let (base_min, mut base_stats) =
+                reducible_repeat_analysis_inner(expr, max_token_len, shared_cache);
+            let (_, excluded_stats) =
+                reducible_repeat_analysis_inner(exclude, max_token_len, shared_cache);
+            base_stats.merge(excluded_stats);
+            (base_min, base_stats)
+        }
+        Expr::Seq(parts) => {
+            let mut minimum = 0usize;
+            let mut stats = ReducibleRepeatStats::default();
+            for part in parts {
+                let (part_min, part_stats) =
+                    reducible_repeat_analysis_inner(part, max_token_len, shared_cache);
+                minimum = minimum.saturating_add(part_min);
+                stats.merge(part_stats);
+            }
+            (minimum, stats)
+        }
+        Expr::Choice(parts) => {
+            let mut minimum = None;
+            let mut stats = ReducibleRepeatStats::default();
+            for part in parts {
+                let (part_min, part_stats) =
+                    reducible_repeat_analysis_inner(part, max_token_len, shared_cache);
+                minimum = Some(minimum.map_or(part_min, |current: usize| current.min(part_min)));
+                stats.merge(part_stats);
+            }
+            (minimum.unwrap_or(0), stats)
+        }
         Expr::Repeat { expr, min, max } => {
-            let child_min = minimum_consumed_bytes(expr);
+            let (child_min, mut stats) =
+                reducible_repeat_analysis_inner(expr, max_token_len, shared_cache);
             if let Some(max) = *max
                 && child_min != 0
             {
@@ -543,25 +603,70 @@ fn reducible_repeat_stats(expr: &Expr, max_token_len: usize) -> ReducibleRepeatS
                     stats.include(max);
                 }
             }
-            stats.merge(reducible_repeat_stats(expr, max_token_len));
+            (child_min.saturating_mul(*min), stats)
         }
-        Expr::Intersect { expr, intersect } => {
-            stats.merge(reducible_repeat_stats(expr, max_token_len));
-            stats.merge(reducible_repeat_stats(intersect, max_token_len));
-        }
-        Expr::Seq(parts) | Expr::Choice(parts) => {
-            for part in parts {
-                stats.merge(reducible_repeat_stats(part, max_token_len));
-            }
-        }
-        Expr::Exclude { expr, exclude } => {
-            stats.merge(reducible_repeat_stats(expr, max_token_len));
-            stats.merge(reducible_repeat_stats(exclude, max_token_len));
-        }
-        Expr::Shared(inner) => stats.merge(reducible_repeat_stats(inner, max_token_len)),
-        Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Dfa(_) | Expr::Epsilon => {}
     }
-    stats
+}
+
+fn reducible_repeat_analysis(
+    expr: &Expr,
+    max_token_len: usize,
+) -> (usize, ReducibleRepeatStats) {
+    reducible_repeat_analysis_inner(expr, max_token_len, &mut FxHashMap::default())
+}
+
+fn reducible_repeat_stats(expr: &Expr, max_token_len: usize) -> ReducibleRepeatStats {
+    reducible_repeat_analysis(expr, max_token_len).1
+}
+
+pub(crate) struct BoundedTerminalAnalysisCache {
+    max_token_len: usize,
+    shared_cache: FxHashMap<usize, (usize, ReducibleRepeatStats)>,
+}
+
+impl BoundedTerminalAnalysisCache {
+    pub(crate) fn new(max_token_len: usize) -> Self {
+        Self {
+            max_token_len,
+            shared_cache: FxHashMap::default(),
+        }
+    }
+
+    fn stats(&mut self, expr: &Expr) -> ReducibleRepeatStats {
+        reducible_repeat_analysis_inner(expr, self.max_token_len, &mut self.shared_cache).1
+    }
+
+    pub(crate) fn is_pathological_candidate(&mut self, expr: &Expr) -> bool {
+        self.stats(expr).is_pathological_candidate()
+    }
+
+    pub(crate) fn has_reducible_repeat(&mut self, expr: &Expr) -> bool {
+        self.stats(expr).count != 0
+    }
+}
+
+pub(crate) fn debug_reducible_repeat_stats(
+    expr: &Expr,
+    max_token_len: usize,
+) -> (usize, u128, usize, bool) {
+    let stats = reducible_repeat_stats(expr, max_token_len);
+    (
+        stats.largest_max,
+        stats.max_product,
+        stats.count,
+        stats.is_pathological_candidate(),
+    )
+}
+
+pub(crate) fn is_pathological_bounded_terminal_candidate(
+    expr: &Expr,
+    max_token_len: usize,
+) -> bool {
+    reducible_repeat_stats(expr, max_token_len).is_pathological_candidate()
+}
+
+pub(crate) fn has_reducible_bounded_repeat(expr: &Expr, max_token_len: usize) -> bool {
+    reducible_repeat_stats(expr, max_token_len).count != 0
 }
 
 fn synthesize_expression(expr: &Expr, max_token_len: usize) -> (Expr, bool) {
@@ -653,6 +758,33 @@ fn synthesize_expression(expr: &Expr, max_token_len: usize) -> (Expr, bool) {
             (Expr::Shared(std::sync::Arc::new(inner)), changed)
         }
         leaf => (leaf.clone(), false),
+    }
+}
+
+/// Build a finite-token-horizon stencil without applying the global
+/// pathological-candidate threshold. This is used for partition-local
+/// analysis lexers: a terminal whose exact bound is observable by the longest
+/// token in the full vocabulary can still be safely shortened for a vocabulary
+/// partition whose tokens are all substantially shorter.
+pub(crate) fn synthesize_terminal_expressions_for_horizon(
+    expressions: &[Expr],
+    max_token_len: usize,
+) -> SynthesizedTerminalExpressions {
+    let mut changed_terminals = Vec::new();
+    let expressions = expressions
+        .iter()
+        .enumerate()
+        .map(|(terminal, expression)| {
+            let (synthesized, changed) = synthesize_expression(expression, max_token_len);
+            if changed {
+                changed_terminals.push(terminal as u32);
+            }
+            synthesized.optimize()
+        })
+        .collect();
+    SynthesizedTerminalExpressions {
+        expressions,
+        changed_terminals,
     }
 }
 
@@ -1021,9 +1153,10 @@ mod tests {
         let Expr::Repeat { max, .. } = &synthesized.expressions[0] else {
             panic!("expected repeat");
         };
-        // ceil(10 / 5) + 1 = 3 crossed repetitions; retain three full
-        // token-width neighbourhoods plus one boundary state.
-        assert_eq!(*max, Some(10));
+        // ceil(10 / 5) + 1 = 3 crossed repetitions; retain one full
+        // token-width neighbourhood plus one boundary state. Cross-component
+        // synchronization is handled by structural tuple materialization.
+        assert_eq!(*max, Some(4));
         assert_eq!(synthesized.expressions[1], expressions[1]);
     }
 
