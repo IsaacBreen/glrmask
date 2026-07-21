@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::automata::lexer::Lexer;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
@@ -165,6 +166,33 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     let shared_l1_parent_order = derive_l1_subset_order
         .then(|| super::l1::prepared_l1_identity_vocab_order(vocab));
 
+    // The split-off L1 branch observes only the L2P terminal set. Large lexer
+    // components belonging exclusively to other terminals are exact empty
+    // residuals for this branch and can be collapsed before token replay.
+    let split_l1_structural_state_map = has_split_l1
+        .then(|| {
+            super::synthetic_state_map::inactive_dispatch_component_state_map(
+                tokenizer,
+                &l2p_mask,
+            )
+        })
+        .flatten()
+        .filter(|map| {
+            initial_state_map.is_none_or(|initial| {
+                map.num_internal_ids() < initial.num_internal_ids()
+            })
+        });
+    let split_l1_initial_state_map = split_l1_structural_state_map.as_ref().or(initial_state_map);
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][inactive_component_state_map] partition={} raw_states={} inherited_reps={} split_l1_reps={}",
+            partition_label,
+            tokenizer.num_states(),
+            initial_state_map.map_or(tokenizer.num_states(), ManyToOneIdMap::num_internal_ids),
+            split_l1_initial_state_map.map_or(tokenizer.num_states(), ManyToOneIdMap::num_internal_ids),
+        );
+    }
+
     // Build L1 and L2+ terminal DWAs in parallel. L2+ terminals get an
     // additional token split: only tokens that can actually cross an active
     // L2+ terminal boundary go through the expensive L2P NWA builder; the
@@ -295,7 +323,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                                 &l2p_mask,
                                 flat_trans,
                                 l1_transitions_by_byte,
-                                initial_state_map,
+                                split_l1_initial_state_map,
                                 None,
                                 shared_l1_token_trie.as_deref(),
                                 shared_l1_parent_order.as_deref(),

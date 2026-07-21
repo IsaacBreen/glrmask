@@ -37,6 +37,85 @@ pub(crate) struct SynthesizedTerminalExpressions {
     pub(crate) changed_terminals: Vec<u32>,
 }
 
+/// Collapse every closed dispatch component that can never observe an active
+/// terminal. Active components remain state-for-state identity classes.
+///
+/// Once a scanner residual is inside an inactive component, no future byte
+/// string can produce an active match or active continuation because byte and
+/// epsilon edges do not leave the component. All such residuals therefore
+/// have the same active-language behavior: the empty observation.
+pub(crate) fn inactive_dispatch_component_state_map(
+    tokenizer: &Tokenizer,
+    active_terminals: &[bool],
+) -> Option<ManyToOneIdMap> {
+    if std::env::var_os("GLRMASK_DISABLE_INACTIVE_COMPONENT_STATE_MAP").is_some() {
+        return None;
+    }
+    let components = tokenizer.disjoint_dispatch_components()?;
+    let num_states = tokenizer.num_states() as usize;
+    let start = tokenizer.start_state() as usize;
+    let mut original_to_internal = vec![u32::MAX; num_states];
+    let mut representatives = Vec::new();
+    let add_class = |original_to_internal: &mut [u32],
+                     representatives: &mut Vec<u32>,
+                     states: &[u32]| {
+        let internal = representatives.len() as u32;
+        representatives.push(states[0]);
+        for &state in states {
+            original_to_internal[state as usize] = internal;
+        }
+    };
+
+    add_class(
+        &mut original_to_internal,
+        &mut representatives,
+        &[start as u32],
+    );
+    let mut inactive_states = Vec::new();
+    for states in components {
+        let active = states.iter().any(|&state| {
+            let (matched, future) = filtered_state_label(tokenizer, state, Some(active_terminals));
+            !matched.is_empty() || !future.is_empty()
+        });
+        if active {
+            for state in states {
+                add_class(
+                    &mut original_to_internal,
+                    &mut representatives,
+                    &[state],
+                );
+            }
+        } else {
+            inactive_states.extend(states);
+        }
+    }
+    if !inactive_states.is_empty() {
+        add_class(
+            &mut original_to_internal,
+            &mut representatives,
+            &inactive_states,
+        );
+    }
+    // Nullable-start isolation and structural augmentation can retain states
+    // outside the live dispatcher components. Keep them singleton rather than
+    // extending the component proof beyond its verified domain.
+    for state in 0..num_states {
+        if original_to_internal[state] == u32::MAX {
+            add_class(
+                &mut original_to_internal,
+                &mut representatives,
+                &[state as u32],
+            );
+        }
+    }
+
+    Some(ManyToOneIdMap::from_original_to_internal_with_representatives(
+        original_to_internal,
+        representatives.len() as u32,
+        representatives,
+    ))
+}
+
 const BYTE_COLUMN_HASH_MULTIPLIER: u64 = 0x517c_c1b7_2722_0a95;
 
 fn byte_columns_equal(
@@ -1317,7 +1396,10 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::automata::lexer::compile::build_regex;
+    use crate::automata::lexer::compile::{
+        build_regex,
+        build_regex_partitioned_with_adaptive,
+    };
     use crate::automata::regex::Expr;
     use crate::{Constraint, DynamicConstraint};
 
@@ -1331,6 +1413,62 @@ mod tests {
             1,
             Some(Arc::from(expressions.into_boxed_slice())),
         )
+    }
+
+    #[test]
+    fn inactive_dispatch_components_collapse_without_touching_active_components() {
+        let expressions = vec![
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+                min: 1,
+                max: Some(4),
+            },
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Seq(b"b".to_vec())),
+                min: 1,
+                max: Some(5),
+            },
+        ];
+        let tokenizer = build_regex_partitioned_with_adaptive(&expressions, &[0, 1], false)
+            .into_tokenizer(2, Some(Arc::from(expressions.into_boxed_slice())));
+        let components = tokenizer
+            .disjoint_dispatch_components()
+            .expect("partitioned lexer dispatch components");
+        assert_eq!(components.len(), 2);
+
+        let map = inactive_dispatch_component_state_map(&tokenizer, &[true, false])
+            .expect("inactive component quotient");
+        let active_component = components
+            .iter()
+            .find(|states| {
+                states.iter().any(|&state| {
+                    tokenizer.matched_terminals_iter(state).any(|terminal| terminal == 0)
+                        || tokenizer
+                            .possible_future_terminals_iter(state)
+                            .any(|terminal| terminal == 0)
+                })
+            })
+            .expect("active component");
+        let inactive_component = components
+            .iter()
+            .find(|states| !std::ptr::eq(*states, active_component))
+            .expect("inactive component");
+
+        let inactive_class = map.original_to_internal[inactive_component[0] as usize];
+        assert!(inactive_component
+            .iter()
+            .all(|&state| map.original_to_internal[state as usize] == inactive_class));
+        let mut active_classes = active_component
+            .iter()
+            .map(|&state| map.original_to_internal[state as usize])
+            .collect::<Vec<_>>();
+        active_classes.sort_unstable();
+        active_classes.dedup();
+        assert_eq!(active_classes.len(), active_component.len());
+        assert!(!active_classes.contains(&inactive_class));
+        let start_class = map.original_to_internal[tokenizer.start_state() as usize];
+        assert_ne!(start_class, inactive_class);
+        assert!(!active_classes.contains(&start_class));
     }
 
     #[test]
