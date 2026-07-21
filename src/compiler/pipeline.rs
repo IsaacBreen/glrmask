@@ -18,7 +18,7 @@ use crate::automata::lexer::compile::{
     build_regex_partitioned_with_profile_labels_and_residual_isolation,
     build_regex_partitioned_with_residual_isolation,
     build_regex_with_profile_labels,
-    compile_partitioned_expression_pair_with_structural_maps,
+    compile_partitioned_expression_pair_with_structural_map,
     compile_terminal_expression_pair_with_structural_map,
     factor_regex_expr,
 };
@@ -48,7 +48,6 @@ use crate::compiler::stages::id_map_and_terminal_dwa::types::{
 use crate::compiler::stages::id_map_and_terminal_dwa::synthetic_state_map::{
     BoundedTerminalAnalysisCache, CertifiedFullToSynthesizedStateMap,
     certify_full_to_synthesized_state_map, synthesize_bounded_terminal_expressions,
-    synthesize_terminal_expressions_for_horizon,
 };
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::compiler::stages::mapped_artifact::{
@@ -987,8 +986,6 @@ fn build_structural_tokenizer_pair(
     Tokenizer,
     Tokenizer,
     CertifiedFullToSynthesizedStateMap,
-    Vec<(usize, ManyToOneIdMap)>,
-    Vec<crate::automata::lexer::compile::StructuralComponentQuotientPlan>,
 )> {
     let full_expressions = plan
         .full_expressions
@@ -1003,25 +1000,6 @@ fn build_structural_tokenizer_pair(
         .map(factor_regex_expr)
         .collect::<Vec<_>>();
     let max_token_len = vocab.entries.values().map(Vec::len).max().unwrap_or(0);
-    const PARTITION_STENCIL_HORIZON: usize = 64;
-    let partition_stencil = (max_token_len > PARTITION_STENCIL_HORIZON)
-        .then(|| {
-            let stencil = synthesize_terminal_expressions_for_horizon(
-                &plan.full_expressions,
-                PARTITION_STENCIL_HORIZON,
-            );
-            (!stencil.changed_terminals.is_empty()).then(|| {
-                (
-                    PARTITION_STENCIL_HORIZON,
-                    stencil
-                        .expressions
-                        .into_iter()
-                        .map(factor_regex_expr)
-                        .collect::<Vec<_>>(),
-                )
-            })
-        })
-        .flatten();
     let mut relevant_bytes = vocab
         .entries
         .values()
@@ -1034,8 +1012,6 @@ fn build_structural_tokenizer_pair(
         synthesized_regex,
         full_regex,
         full_to_synthesized,
-        synthesized_state_representatives_by_horizon,
-        component_quotient_plans,
     ) =
         if full_expressions.len() == 1 {
             let pair = compile_terminal_expression_pair_with_structural_map(
@@ -1048,8 +1024,6 @@ fn build_structural_tokenizer_pair(
                 pair.synthesized,
                 pair.full,
                 pair.full_to_synthesized,
-                pair.synthesized_state_representatives_by_horizon,
-                pair.component_quotient_plans,
             )
         } else {
             let labels = grammar
@@ -1060,12 +1034,9 @@ fn build_structural_tokenizer_pair(
                 .collect::<Vec<_>>();
             let adaptive = adaptive_override
                 .unwrap_or_else(|| env_flag_enabled_by_default("GLRMASK_LEXER_ADAPTIVE"));
-            let pair = compile_partitioned_expression_pair_with_structural_maps(
+            let pair = compile_partitioned_expression_pair_with_structural_map(
                 &full_expressions,
                 &synthesized_expressions,
-                partition_stencil
-                    .as_ref()
-                    .map(|(horizon, expressions)| (*horizon, expressions.as_slice())),
                 Some(&labels),
                 &plan.partition_ids,
                 &plan.residual_isolation_classes,
@@ -1077,8 +1048,6 @@ fn build_structural_tokenizer_pair(
                 pair.synthesized,
                 pair.full,
                 pair.full_to_synthesized,
-                pair.synthesized_state_representatives_by_horizon,
-                pair.component_quotient_plans,
             )
         };
 
@@ -1096,38 +1065,12 @@ fn build_structural_tokenizer_pair(
     if !synthesized_nullable.is_empty() || !full_nullable.is_empty() {
         return None;
     }
-    let synthesized_state_quotients = synthesized_state_representatives_by_horizon
-        .into_iter()
-        .map(|(horizon, state_representatives)| {
-            let mut class_by_representative = BTreeMap::<u32, u32>::new();
-            let mut original_to_internal = Vec::with_capacity(state_representatives.len());
-            let mut representatives = Vec::<u32>::new();
-            for representative in state_representatives {
-                let class = *class_by_representative.entry(representative).or_insert_with(|| {
-                    let class = representatives.len() as u32;
-                    representatives.push(representative);
-                    class
-                });
-                original_to_internal.push(class);
-            }
-            (
-                horizon,
-                ManyToOneIdMap::from_original_to_internal_with_representatives(
-                    original_to_internal,
-                    representatives.len() as u32,
-                    representatives,
-                ),
-            )
-        })
-        .collect();
     Some((
         synthesized,
         full,
         CertifiedFullToSynthesizedStateMap {
             full_to_synthesized,
         },
-        synthesized_state_quotients,
-        component_quotient_plans,
     ))
 }
 
@@ -1309,9 +1252,6 @@ struct TokenizerDagLane {
     tokenizer: Arc<Tokenizer>,
     runtime_tokenizer: Option<Arc<Tokenizer>>,
     full_to_synthesized_state_map: Option<CertifiedFullToSynthesizedStateMap>,
-    synthetic_state_quotients: Option<Vec<(usize, ManyToOneIdMap)>>,
-    synthetic_component_quotient_plans:
-        Option<Vec<crate::automata::lexer::compile::StructuralComponentQuotientPlan>>,
     synthetic_candidate_terminals: usize,
     synthetic_certification_ms: f64,
     compile_tokenizer_states: usize,
@@ -1837,8 +1777,6 @@ fn launch_terminal_dag_if_ready<'scope>(
                 &analysis.disallowed_follows,
                 Arc::clone(&flat_global.flat_trans),
                 &flat_global.global_max_length_state_map,
-                tokenizer.synthetic_state_quotients.as_deref(),
-                tokenizer.synthetic_component_quotient_plans.as_deref(),
                 Some(&classify.shared_classify_cache),
                 Some(flat_global.shared_transition_cache.as_ref()),
             );
@@ -2007,11 +1945,9 @@ fn compile_prepared_with_profile_and_table_construction(
                     mut tokenizer,
                     mut runtime_tokenizer,
                     full_to_synthesized_state_map,
-                    synthetic_state_quotients,
-                    synthetic_component_quotient_plans,
                     synthetic_certification_ms,
                 ) = if let Some(plan) = synthetic_tokenizer_plan_ref {
-                    if let Some((synthesized, full, certified, quotients, component_plans)) =
+                    if let Some((synthesized, full, certified)) =
                         build_structural_tokenizer_pair(
                             prepared_grammar_ref,
                             plan,
@@ -2028,8 +1964,6 @@ fn compile_prepared_with_profile_and_table_construction(
                                 synthesized,
                                 Some(full),
                                 Some(certified),
-                                Some(quotients),
-                                Some(component_plans),
                                 0.0,
                             )
                         } else {
@@ -2048,8 +1982,6 @@ fn compile_prepared_with_profile_and_table_construction(
                                     prepared_grammar_ref,
                                     lexer_adaptive_override,
                                 ),
-                                None,
-                                None,
                                 None,
                                 None,
                                 0.0,
@@ -2108,8 +2040,6 @@ fn compile_prepared_with_profile_and_table_construction(
                                     synthesized,
                                     Some(full),
                                     Some(certified),
-                                    None,
-                                    None,
                                     certification_ms,
                                 )
                             }
@@ -2123,8 +2053,6 @@ fn compile_prepared_with_profile_and_table_construction(
                                     ),
                                     None,
                                     None,
-                                    None,
-                                    None,
                                     certification_ms,
                                 )
                             }
@@ -2135,7 +2063,7 @@ fn compile_prepared_with_profile_and_table_construction(
                         prepared_grammar_ref,
                         lexer_adaptive_override,
                     );
-                    (tokenizer, None, None, None, None, 0.0)
+                    (tokenizer, None, None, 0.0)
                 };
                 let tokenizer_construct_ms = elapsed_ms(tok_started);
                 let isolate_started = Instant::now();
@@ -2159,8 +2087,6 @@ fn compile_prepared_with_profile_and_table_construction(
                     tokenizer: Arc::new(tokenizer),
                     runtime_tokenizer: runtime_tokenizer.map(Arc::new),
                     full_to_synthesized_state_map,
-                    synthetic_state_quotients,
-                    synthetic_component_quotient_plans,
                     synthetic_candidate_terminals: synthetic_tokenizer_plan_ref
                         .map_or(0, |plan| plan.changed_terminal_count),
                     synthetic_certification_ms,

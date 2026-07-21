@@ -314,7 +314,6 @@ fn fast_projected_l1_id_map_max_tsids() -> usize {
 fn should_use_fast_projected_l1_id_map(
     initial_state_map: Option<&ManyToOneIdMap>,
     num_dfa_states: usize,
-    initial_state_map_token_exact: bool,
 ) -> bool {
     if !fast_projected_l1_id_map_enabled() {
         return false;
@@ -325,8 +324,7 @@ fn should_use_fast_projected_l1_id_map(
     let projected_states = map.num_internal_ids() as usize;
     map.original_to_internal.len() == num_dfa_states
         && projected_states < num_dfa_states
-        && (initial_state_map_token_exact
-            || projected_states <= fast_projected_l1_id_map_max_tsids())
+        && projected_states <= fast_projected_l1_id_map_max_tsids()
 }
 
 /// Hash contribution of a single (start, end) range.
@@ -592,67 +590,6 @@ fn compact_l1_terminal_dwa_enabled() -> bool {
 /// than L2P's NWA-based approach.
 pub(crate) const MAX_L1_TSIDS: usize = 50;
 
-/// Refine a certified finite-horizon component quotient against the exact
-/// token observations of one vocabulary partition. All local terminal groups
-/// remain active, so the result is safe to reuse for any grammar-level active
-/// subset or follow restriction. The caller composes component-local classes
-/// into the global epsilon-dispatch coordinate.
-pub(crate) fn build_exact_component_vocab_state_map(
-    analysis_tokenizer: &Tokenizer,
-    vocab: &Vocab,
-    source_to_analysis: &[u32],
-) -> ManyToOneIdMap {
-    assert!(source_to_analysis
-        .iter()
-        .all(|&state| state < analysis_tokenizer.num_states()));
-    let mut states = source_to_analysis
-        .iter()
-        .copied()
-        .map(|state| state as usize)
-        .collect::<Vec<_>>();
-    states.sort_unstable();
-    states.dedup();
-    if states.is_empty() {
-        return ManyToOneIdMap::empty();
-    }
-
-    let active_terminals = vec![true; analysis_tokenizer.num_terminals() as usize];
-    let order = l1_identity_vocab_order(vocab);
-    let flat_trans = build_flat_transition_table(analysis_tokenizer);
-    let (exact_mapping, _) = find_l1_exact_state_equivalence_by_token_signatures(
-        analysis_tokenizer,
-        order.as_ref(),
-        &states,
-        &active_terminals,
-        flat_trans.as_slice(),
-        None,
-    );
-    let rep_to_exact = states
-        .iter()
-        .copied()
-        .zip(exact_mapping.iter().copied())
-        .collect::<FxHashMap<_, _>>();
-    let mut exact_to_internal = FxHashMap::<usize, u32>::default();
-    let mut representatives = Vec::<u32>::new();
-    let original_to_internal = source_to_analysis
-        .iter()
-        .enumerate()
-        .map(|(source_state, &analysis_state)| {
-            let exact = rep_to_exact[&(analysis_state as usize)];
-            *exact_to_internal.entry(exact).or_insert_with(|| {
-                let internal = representatives.len() as u32;
-                representatives.push(source_state as u32);
-                internal
-            })
-        })
-        .collect::<Vec<_>>();
-    ManyToOneIdMap::from_original_to_internal_with_representatives(
-        original_to_internal,
-        representatives.len() as u32,
-        representatives,
-    )
-}
-
 /// Quickly count L1 equivalence classes for the given active terminals.
 ///
 /// Used by the partition builder to decide whether L1 should be attempted
@@ -725,7 +662,6 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
     flat_trans: &Arc<[u32]>,
     transitions_by_byte: Option<&[u32]>,
     initial_state_map: Option<&ManyToOneIdMap>,
-    initial_state_map_token_exact: bool,
     shared_generic_nfa_topology: Option<
         &super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTopology,
     >,
@@ -759,7 +695,6 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
                 flat_trans,
                 transitions_by_byte,
                 initial_state_map,
-                initial_state_map_token_exact,
             )
         };
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -1589,7 +1524,6 @@ fn build_l1_id_map<'a>(
     flat_trans: &Arc<[u32]>,
     transitions_by_byte: Option<&[u32]>,
     initial_state_map: Option<&ManyToOneIdMap>,
-    initial_state_map_token_exact: bool,
 ) -> (
     InternalIdMap,
     Arc<L1IdentityVocabOrder>,
@@ -1608,11 +1542,7 @@ fn build_l1_id_map<'a>(
     };
     let projected_by_global = initial_state_map.is_some() && states.len() < num_dfa_states;
 
-    if should_use_fast_projected_l1_id_map(
-        initial_state_map,
-        num_dfa_states,
-        initial_state_map_token_exact,
-    ) {
+    if should_use_fast_projected_l1_id_map(initial_state_map, num_dfa_states) {
         let token_bytes: Vec<&[u8]> = vocab
             .entries
             .values()
@@ -6193,7 +6123,6 @@ mod packed_suffix_product_tests {
             &flat_trans,
             None,
             None,
-            false,
         );
         let exact_profile_reuse =
             exact_profile_reuse.expect("structured dispatch must retain exact L1 profiles");
@@ -6295,7 +6224,6 @@ mod packed_suffix_product_tests {
             &flat_trans,
             None,
             None,
-            false,
         );
         let exact_profile_reuse =
             exact_profile_reuse.expect("structured dispatch must retain exact L1 profiles");

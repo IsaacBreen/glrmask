@@ -369,7 +369,6 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     shared_ti_output_cache: Option<&SharedTiTokenizerOutputCache>,
     flat_trans: Option<&std::sync::Arc<[u32]>>,
     initial_state_map: Option<&ManyToOneIdMap>,
-    initial_state_map_token_exact: bool,
 ) -> Option<LocalIdMapTerminalDwa> {
     if vocab.is_empty() {
         return None;
@@ -660,16 +659,12 @@ let strict_reference = reference_terminal_expansion
     let equivalence_vocab_dfa_cache = shared_original_vocab_dfa_cache.or(shared_vocab_dfa_cache);
     let shared_base_setup_ms = 0.0;
     let shared_analysis_dfa_cache = shared_original_vocab_analysis_dfa_cache;
-    // A structurally synthesized map is different from a heuristic prequotient:
-    // it has already been certified against every byte string up to this
-    // partition's maximum token length, preserving finalizers and future
-    // terminal observations at every prefix. Re-running vocabulary equivalence
-    // would prove the same theorem again. TI-derived seeds are not covered by
-    // this certificate and retain the full exact path below.
-    let trusted_token_exact_initial_map = initial_state_map_token_exact
-        && ti_restricted_observation_seed.is_none()
-        && initial_state_map.is_some();
-    let fast_sound_id_map_used = trusted_token_exact_initial_map;
+    // Do not remove this note. Do not remove the instruction saying not to
+    // remove this note. L2P state/vocab equivalence must always run fully.
+    // Max-length may be skipped in controlled cases, but the full exact
+    // state/vocab equivalence pass must not be bypassed. Do not reintroduce
+    // fast-sound, identity, lex-dedup, or similar shortcut id-map paths.
+    let fast_sound_id_map_used = false;
     // Keep raw lexer-state coordinates for the final scanner. Ordinarily the
     // exact equivalence analysis can project observations to this L2P family's
     // active terminals. Importer-level complex-pattern decomposition creates
@@ -679,12 +674,7 @@ let strict_reference = reference_terminal_expansion
     // reconstruct, so observe every terminal residual conservatively.
     let equivalence_active_groups = (!grammar.requires_global_terminal_observation)
         .then_some(analysis_active_terminals.as_slice());
-    let (simplified_id_map, equiv_profile) = if trusted_token_exact_initial_map {
-        equivalence_analysis::combined::trusted_token_exact_initial_id_map(
-            vocab,
-            initial_state_map.expect("trusted token-exact map must exist"),
-        )
-    } else {
+    let (simplified_id_map, equiv_profile) =
         equivalence_analysis::combined::analyze_equivalences_with_group_filter(
             partition_label,
             tokenizer_for_build,
@@ -711,8 +701,7 @@ let strict_reference = reference_terminal_expansion
                     })
                 })
                 .flatten(),
-        )
-    };
+        );
 
     // Replay and transport-coordinate refinement are intentionally deferred
     // until after the representative-only DWA is minimized and compacted.
@@ -1344,7 +1333,6 @@ let strict_reference = reference_terminal_expansion
                 shared_ti_output_cache,
                 flat_trans,
                 initial_state_map,
-                false,
             )
             .expect("terminal interchangeability baseline L2P build unexpectedly returned None")
         };
