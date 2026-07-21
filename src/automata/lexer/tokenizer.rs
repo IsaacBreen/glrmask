@@ -303,44 +303,6 @@ impl Tokenizer {
         self.deterministic_dispatch_roots().is_some()
     }
 
-    /// Return the closed, pairwise-disjoint state sets below the global
-    /// epsilon dispatcher. Components may contain internal epsilon structure,
-    /// but no byte or epsilon edge may cross between returned sets.
-    pub(crate) fn disjoint_dispatch_components(&self) -> Option<Vec<Vec<u32>>> {
-        let roots = self.deterministic_dispatch_roots()?;
-        let mut owner = vec![usize::MAX; self.dfa.states().len()];
-        owner[self.start_state() as usize] = roots.len();
-        let mut components = Vec::with_capacity(roots.len());
-
-        for (component_index, &root) in roots.iter().enumerate() {
-            if owner.get(root as usize).copied().unwrap_or(roots.len()) != usize::MAX {
-                return None;
-            }
-            let mut states = Vec::new();
-            let mut stack = vec![root];
-            while let Some(state) = stack.pop() {
-                let slot = owner.get_mut(state as usize)?;
-                if *slot == component_index {
-                    continue;
-                }
-                if *slot != usize::MAX {
-                    return None;
-                }
-                *slot = component_index;
-                states.push(state);
-                let dfa_state = self.dfa.states().get(state as usize)?;
-                stack.extend(dfa_state.transitions.iter().map(|(_, &target)| target));
-                stack.extend(dfa_state.epsilon_transitions.iter().copied());
-            }
-            if states.is_empty() {
-                return None;
-            }
-            states.sort_unstable();
-            components.push(states);
-        }
-        Some(components)
-    }
-
     /// Scanner states to use after a terminal boundary.  A conventional DFA
     /// has one reset state.  A partitioned lexer has one deterministic reset
     /// state per component; keeping them separate avoids materializing their

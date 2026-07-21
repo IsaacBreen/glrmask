@@ -1826,25 +1826,14 @@ fn build_l1_id_map<'a>(
     max_length_representatives.sort_unstable();
     max_length_representatives.dedup();
     let (exact_mapping, mut exact_profile_reuse) =
-        find_l1_exact_state_equivalence_by_dispatch_components(
+        find_l1_exact_state_equivalence_by_token_signatures(
             tokenizer,
             order.as_ref(),
             &max_length_representatives,
             active_terminals,
             flat_trans.as_ref(),
             transitions_by_byte,
-            max_length_skipped && !projected_by_global,
-        )
-        .unwrap_or_else(|| {
-            find_l1_exact_state_equivalence_by_token_signatures(
-                tokenizer,
-                order.as_ref(),
-                &max_length_representatives,
-                active_terminals,
-                flat_trans.as_ref(),
-                transitions_by_byte,
-            )
-        });
+        );
     let exact_state_equiv_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
     let mut max_rep_to_exact_rep = FxHashMap::<usize, usize>::default();
     for (&max_rep, &exact_rep) in max_length_representatives.iter().zip(exact_mapping.iter()) {
@@ -2136,99 +2125,6 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
         transitions_by_byte,
         None,
     )
-}
-
-fn find_l1_exact_state_equivalence_by_dispatch_components(
-    tokenizer: &Tokenizer,
-    vocab_order: &L1IdentityVocabOrder,
-    states: &[usize],
-    active_terminals: &[bool],
-    flat_trans: &[u32],
-    transitions_by_byte: Option<&[u32]>,
-    eligible: bool,
-) -> Option<(Vec<usize>, Option<L1ExactProfileReuse>)> {
-    const MIN_STATES: usize = 10_000;
-    const MIN_TOKENS: usize = 10_000;
-    if std::env::var_os("GLRMASK_DISABLE_L1_DISPATCH_COMPONENT_EQUIV").is_some()
-        || !eligible
-        || states.len() < MIN_STATES
-        || vocab_order.token_entries_sorted.len() < MIN_TOKENS
-    {
-        return None;
-    }
-
-    let components = tokenizer.disjoint_dispatch_components()?;
-    if components.len() < 2 {
-        return None;
-    }
-    let mut owner = vec![usize::MAX; tokenizer.num_states() as usize];
-    for (component, component_states) in components.iter().enumerate() {
-        for &state in component_states {
-            owner[state as usize] = component;
-        }
-    }
-
-    let mut groups = vec![Vec::<(usize, usize)>::new(); components.len()];
-    let mut result = vec![usize::MAX; states.len()];
-    let mut unowned = 0usize;
-    for (position, &state) in states.iter().enumerate() {
-        let component = owner.get(state).copied().unwrap_or(usize::MAX);
-        if component == usize::MAX {
-            // The global dispatcher and structurally unreachable residual
-            // states remain singleton classes. This is conservative and keeps
-            // the component proof independent of how those states were added.
-            result[position] = state;
-            unowned += 1;
-        } else {
-            groups[component].push((position, state));
-        }
-    }
-    let nonempty_groups = groups.iter().filter(|group| !group.is_empty()).count();
-    let largest_group = groups.iter().map(Vec::len).max().unwrap_or(0);
-    if nonempty_groups < 2 || largest_group.saturating_mul(8) > states.len().saturating_mul(7) {
-        return None;
-    }
-
-    let started_at = compile_profile_enabled().then(Instant::now);
-    let mapped_groups = groups
-        .par_iter()
-        .filter(|group| !group.is_empty())
-        .map(|group| {
-            let component_states = group.iter().map(|&(_, state)| state).collect::<Vec<_>>();
-            let (mapping, _) =
-                find_l1_exact_state_equivalence_by_token_signatures_with_first_target_cache(
-                    tokenizer,
-                    vocab_order,
-                    &component_states,
-                    active_terminals,
-                    flat_trans,
-                    transitions_by_byte,
-                    None,
-                );
-            (group, mapping)
-        })
-        .collect::<Vec<_>>();
-    for (group, mapping) in mapped_groups {
-        for (&(position, _), representative) in group.iter().zip(mapping) {
-            result[position] = representative;
-        }
-    }
-    if result.iter().any(|&state| state == usize::MAX) {
-        return None;
-    }
-    if let Some(started_at) = started_at {
-        eprintln!(
-            "[glrmask/profile][l1_dispatch_component_equiv] states={} tokens={} components={} group_sizes={:?} unowned={} reps={} elapsed_ms={:.3}",
-            states.len(),
-            vocab_order.token_entries_sorted.len(),
-            nonempty_groups,
-            groups.iter().map(Vec::len).collect::<Vec<_>>(),
-            unowned,
-            result.iter().copied().collect::<rustc_hash::FxHashSet<_>>().len(),
-            started_at.elapsed().as_secs_f64() * 1000.0,
-        );
-    }
-    Some((result, None))
 }
 
 fn find_l1_exact_state_equivalence_by_token_signatures_with_first_target_cache(
