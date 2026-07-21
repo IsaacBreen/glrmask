@@ -501,6 +501,21 @@ impl DFA {
         self.minimize_impl(true)
     }
 
+    /// Minimize every state in the supplied deterministic residual domain,
+    /// including states not reachable from state zero.
+    ///
+    /// Structural lexer synthesis deliberately materializes residual states as
+    /// additional observation roots. They may be unreachable from the smaller
+    /// synthesized start state while corresponding to reachable states of the
+    /// exact runtime lexer, so ordinary start-reachability pruning is invalid
+    /// for that use case.
+    pub(super) fn minimize_all_states_with_mapping(&self) -> (DFA, Vec<u32>) {
+        if self.has_epsilon_transitions() {
+            return (self.clone(), (0..self.states().len() as u32).collect());
+        }
+        self.minimize_impl(false)
+    }
+
     fn minimize_impl(&self, drop_unreachable: bool) -> (DFA, Vec<u32>) {
         let orig_n = self.states().len();
         if orig_n == 0 {

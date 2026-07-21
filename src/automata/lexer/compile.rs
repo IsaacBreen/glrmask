@@ -5890,6 +5890,7 @@ pub(crate) fn compile_terminal_expression_pair_with_structural_map(
         })
         .collect::<Vec<_>>();
     let states_before_augment = synthesized_dfa.num_states();
+    let base_synthesized_dfa = synthesized_dfa.clone();
     let augment_started_at = profile.then(Instant::now);
     augment_product_dfa_from_seed_tuples(
         &mut synthesized_dfa,
@@ -5910,16 +5911,54 @@ pub(crate) fn compile_terminal_expression_pair_with_structural_map(
     if std::env::var_os("GLRMASK_MINIMIZE_SYNTHETIC_PRODUCT").is_some() {
         let minimize_started_at = Instant::now();
         let states_before = synthesized_dfa.num_states();
-        let (minimized, old_to_new) = synthesized_dfa.minimize_with_state_mapping();
-        for state in &mut full_to_synthesized {
-            *state = old_to_new[*state as usize];
+        let (minimized, old_to_new) = synthesized_dfa.minimize_all_states_with_mapping();
+        let minimized_states = minimized.num_states();
+        let mut class_to_base_state = vec![u32::MAX; minimized_states];
+        for (base_state, &class) in old_to_new.iter().take(states_before_augment).enumerate() {
+            let slot = &mut class_to_base_state[class as usize];
+            if *slot == u32::MAX {
+                *slot = base_state as u32;
+            }
         }
-        synthesized_dfa = minimized;
+        if profile {
+            let classes_without_base_state = class_to_base_state
+                .iter()
+                .filter(|&&state| state == u32::MAX)
+                .count();
+            eprintln!(
+                "[glrmask/profile][tokenizer] structural_pair_minimize_coverage base_states={} augmented_states={} final_states={} classes_without_base_state={}",
+                states_before_augment,
+                states_before.saturating_sub(states_before_augment),
+                minimized_states,
+                classes_without_base_state,
+            );
+        }
+        let use_base_representatives = std::env::var_os(
+            "GLRMASK_SYNTHETIC_BASE_REPRESENTATIVES",
+        )
+        .is_some();
+        if use_base_representatives {
+            if class_to_base_state.iter().any(|&state| state == u32::MAX) {
+                return None;
+            }
+            for state in &mut full_to_synthesized {
+                let class = old_to_new[*state as usize];
+                *state = class_to_base_state[class as usize];
+            }
+            synthesized_dfa = base_synthesized_dfa;
+        } else {
+            for state in &mut full_to_synthesized {
+                *state = old_to_new[*state as usize];
+            }
+            synthesized_dfa = minimized;
+        }
         if profile {
             eprintln!(
-                "[glrmask/profile][tokenizer] structural_pair_minimize states_before={} states_after={} elapsed_ms={:.3}",
+                "[glrmask/profile][tokenizer] structural_pair_minimize states_before={} states_after={} returned_states={} base_representatives={} elapsed_ms={:.3}",
                 states_before,
+                minimized_states,
                 synthesized_dfa.num_states(),
+                use_base_representatives,
                 minimize_started_at.elapsed().as_secs_f64() * 1000.0,
             );
         }
