@@ -10,8 +10,9 @@ use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 
 use super::super::compat::{FlatDfa, FlatDfaState, TokenizerView};
 
-const RAW_POWERSET_TARGET_VIEW_CACHE_MIN_CONFIGURATIONS: usize = 8_192;
 const RAW_POWERSET_TARGET_VIEW_CACHE_MAX_CELLS: usize = 8 * 1024 * 1024;
+const RAW_POWERSET_TARGET_VIEW_CACHE_MIN_EXPANSIONS: usize = 65_536;
+const RAW_POWERSET_TARGET_VIEW_CACHE_MAX_CELLS_PER_EXPANSION: usize = 32;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum RefinementDepth {
@@ -853,14 +854,19 @@ fn try_build_relevant_powerset_view(
     } else {
         let cache_raw_target_views =
             std::env::var_os("GLRMASK_RAW_POWERSET_CACHED_TARGET_VIEWS").is_some();
+        let profile_raw_target_views = cache_raw_target_views
+            && std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
         let cached_target_cell_count = raw_state_count
             .checked_mul(bytes.len())
             .filter(|&cells| cells <= RAW_POWERSET_TARGET_VIEW_CACHE_MAX_CELLS);
         let mut cached_raw_target_views = None;
+        let mut cache_activation = None::<(usize, usize, usize, f64)>;
+        let mut observed_expansions = 0usize;
+        let mut cached_expansions = 0usize;
         let mut byte_marks = [0u32; 256];
         let mut byte_epoch = 0u32;
         let mut candidate_bytes = Vec::<u8>::new();
-        let mut target_marks = vec![0u32; raw_state_count];
+        let mut target_marks = None::<Vec<u32>>;
         let mut target_epoch = 0u32;
         while let Some(state) = worklist.pop_front() {
             assert_eq!(
@@ -897,29 +903,6 @@ fn try_build_relevant_powerset_view(
                 continue;
             }
 
-            if cached_raw_target_views.is_none()
-                && cache_raw_target_views
-                && configs.len() >= RAW_POWERSET_TARGET_VIEW_CACHE_MIN_CONFIGURATIONS
-                && let Some(cell_count) = cached_target_cell_count
-            {
-                let byte_count = bytes.len();
-                let mut byte_slot = [usize::MAX; 256];
-                for (slot, &byte) in bytes.iter().enumerate() {
-                    byte_slot[byte as usize] = slot;
-                }
-                let mut targets = vec![u32::MAX; cell_count];
-                for source in 0..raw_state_count as u32 {
-                    for (byte, raw_target) in tokenizer.transitions_from(source) {
-                        let slot = byte_slot[byte as usize];
-                        if slot != usize::MAX {
-                            targets[source as usize * byte_count + slot] =
-                                raw_start_to_view[raw_target as usize];
-                        }
-                    }
-                }
-                cached_raw_target_views = Some((byte_slot, targets));
-            }
-
             byte_epoch = byte_epoch.wrapping_add(1);
             if byte_epoch == 0 {
                 byte_marks.fill(0);
@@ -936,13 +919,51 @@ fn try_build_relevant_powerset_view(
                 }
             }
             candidate_bytes.sort_unstable();
+            let encountered_expansions = observed_expansions.saturating_add(candidate_bytes.len());
+            if cached_raw_target_views.is_none()
+                && cache_raw_target_views
+                && let Some(cell_count) = cached_target_cell_count
+                && encountered_expansions >= RAW_POWERSET_TARGET_VIEW_CACHE_MIN_EXPANSIONS
+                && encountered_expansions.saturating_mul(
+                    RAW_POWERSET_TARGET_VIEW_CACHE_MAX_CELLS_PER_EXPANSION,
+                ) >= cell_count
+            {
+                let cache_started_at = std::time::Instant::now();
+                let byte_count = bytes.len();
+                let mut byte_slot = [usize::MAX; 256];
+                for (slot, &byte) in bytes.iter().enumerate() {
+                    byte_slot[byte as usize] = slot;
+                }
+                let mut targets = vec![u32::MAX; cell_count];
+                for source in 0..raw_state_count as u32 {
+                    for (byte, raw_target) in tokenizer.transitions_from(source) {
+                        let slot = byte_slot[byte as usize];
+                        if slot != usize::MAX {
+                            targets[source as usize * byte_count + slot] =
+                                raw_start_to_view[raw_target as usize];
+                        }
+                    }
+                }
+                cached_raw_target_views = Some((byte_slot, targets));
+                target_marks = Some(vec![0u32; raw_state_count]);
+                cache_activation = Some((
+                    configs.len(),
+                    edges.len(),
+                    encountered_expansions,
+                    cache_started_at.elapsed().as_secs_f64() * 1e3,
+                ));
+            }
             for &byte in &candidate_bytes {
                 let projected = if let Some((byte_slot, cached_targets)) =
                     cached_raw_target_views.as_ref()
                 {
+                    cached_expansions += 1;
                     let slot = byte_slot[byte as usize];
                     debug_assert_ne!(slot, usize::MAX);
                     target_epoch = target_epoch.wrapping_add(1);
+                    let target_marks = target_marks
+                        .as_mut()
+                        .expect("cached raw targets must retain target marks");
                     if target_epoch == 0 {
                         target_marks.fill(0);
                         target_epoch = 1;
@@ -988,7 +1009,40 @@ fn try_build_relevant_powerset_view(
                     worklist.push_back(target);
                 }
             }
+            if cached_raw_target_views.is_none() {
+                observed_expansions = encountered_expansions;
+            }
             edge_offsets.push(edges.len() as u32);
+        }
+        if profile_raw_target_views {
+            if let Some((activation_configs, activation_edges, activation_expansions, build_ms)) =
+                cache_activation
+            {
+                eprintln!(
+                    "[glrmask/profile][raw_powerset_target_view_cache] raw_states={} bytes={} cells={} activation_configs={} activation_edges={} activation_expansions={} final_configs={} final_edges={} cached_expansions={} build_ms={:.3}",
+                    raw_state_count,
+                    bytes.len(),
+                    cached_target_cell_count.expect("cache activation requires bounded cells"),
+                    activation_configs,
+                    activation_edges,
+                    activation_expansions,
+                    configs.len(),
+                    edges.len(),
+                    cached_expansions,
+                    build_ms,
+                );
+            } else {
+                eprintln!(
+                    "[glrmask/profile][raw_powerset_target_view_cache] raw_states={} bytes={} cells={} activation=none final_configs={} final_edges={}",
+                    raw_state_count,
+                    bytes.len(),
+                    cached_target_cell_count
+                        .map(|cells| cells.to_string())
+                        .unwrap_or_else(|| "over_budget".to_string()),
+                    configs.len(),
+                    edges.len(),
+                );
+            }
         }
     }
 
