@@ -119,6 +119,18 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
         }
     }
 
+    let use_prebuilt_l1_token_trie = std::env::var("GLRMASK_USE_PREBUILT_L1_TOKEN_TRIE")
+        .map(|value| {
+            let trimmed = value.trim();
+            trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or(true);
+    let shared_l1_token_trie = if use_prebuilt_l1_token_trie && (has_l1 || has_l2p) {
+        super::l1::prepared_l1_token_bounded_analysis_trie(vocab)
+    } else {
+        None
+    };
+
     let use_l2p_vocab_split = has_l2p && split_l2p_vocab_enabled();
     let l2p_vocab_split = use_l2p_vocab_split.then(|| {
         split_vocab_for_active_l2p_terminals(
@@ -129,6 +141,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
             num_terminals,
             &l2p_mask,
             shared_classify_cache,
+            shared_l1_token_trie.as_deref(),
         )
     });
     let has_split_l1 = l2p_vocab_split
@@ -143,6 +156,14 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
             .map(|bytesets| bytesets.transitions_by_byte())
     }).flatten();
     let routing_ms = routing_started_at.elapsed().as_secs_f64() * 1000.0;
+    let derive_l1_subset_order = std::env::var("GLRMASK_DERIVE_L1_SUBSET_ORDER")
+        .map(|value| {
+            let trimmed = value.trim();
+            trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or(true);
+    let shared_l1_parent_order = derive_l1_subset_order
+        .then(|| super::l1::prepared_l1_identity_vocab_order(vocab));
 
     // Build L1 and L2+ terminal DWAs in parallel. L2+ terminals get an
     // additional token split: only tokens that can actually cross an active
@@ -166,6 +187,8 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                     flat_trans,
                     l1_transitions_by_byte,
                     initial_state_map,
+                    None,
+                    shared_l1_token_trie.as_deref(),
                     None,
                 );
                 (result, started_at.elapsed().as_secs_f64() * 1000.0)
@@ -198,6 +221,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                         // All L2P work keeps raw lexer-state coordinates; equivalence
                         // analysis verifies flat-table compatibility before using it.
                         Some(flat_trans),
+                        shared_l1_token_trie.as_deref(),
                         initial_state_map,
                     );
                     let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
@@ -246,8 +270,9 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                                 shared_transition_cache,
                                 shared_ti_output_cache,
                                         // All L2P work keeps raw lexer-state coordinates; equivalence
-                                // analysis verifies flat-table compatibility before using it.
+                                        // analysis verifies flat-table compatibility before using it.
                                 Some(flat_trans),
+                                shared_l1_token_trie.as_deref(),
                                 initial_state_map,
                             );
                             (result, started_at.elapsed().as_secs_f64() * 1000.0)
@@ -272,6 +297,8 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                                 l1_transitions_by_byte,
                                 initial_state_map,
                                 None,
+                                shared_l1_token_trie.as_deref(),
+                                shared_l1_parent_order.as_deref(),
                             );
                             (result, started_at.elapsed().as_secs_f64() * 1000.0)
                         }
