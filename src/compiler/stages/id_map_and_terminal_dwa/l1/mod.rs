@@ -2342,14 +2342,14 @@ fn find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
     let target_profiles_started_at = profile_enabled.then(Instant::now);
     let self_loop_bytes_by_state = (0..num_tokenizer_states)
         .map(|state| {
-            let mut bytes = U8Set::empty();
+            let mut words = [0u64; 4];
             let row = &flat_trans[state * 256..state * 256 + 256];
             for (byte, &target) in row.iter().enumerate() {
                 if target == state as u32 {
-                    bytes.insert(byte as u8);
+                    words[byte / 64] |= 1u64 << (byte % 64);
                 }
             }
-            bytes
+            U8Set::from_words(words)
         })
         .collect::<Vec<_>>();
     let mut targets_by_first_byte = vec![Vec::<u32>::new(); 256];
@@ -6385,14 +6385,14 @@ mod packed_suffix_product_tests {
         let flat_trans = build_flat_transition_table(&tokenizer);
         let self_loop_bytes_by_state = (0..tokenizer.num_states() as usize)
             .map(|state| {
-                let mut bytes = U8Set::empty();
+                let mut words = [0u64; 4];
                 let row = &flat_trans[state * 256..state * 256 + 256];
                 for (byte, &target) in row.iter().enumerate() {
                     if target == state as u32 {
-                        bytes.insert(byte as u8);
+                        words[byte / 64] |= 1u64 << (byte % 64);
                     }
                 }
-                bytes
+                U8Set::from_words(words)
             })
             .collect::<Vec<_>>();
         let targets: Vec<u32> = (0..tokenizer.num_states()).collect();
