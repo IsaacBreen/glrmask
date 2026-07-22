@@ -744,10 +744,45 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
      -> (Option<(types::PartitionTerminalDwas, f64)>, usize) {
         let started_at = Instant::now();
         let label = format!("p{}", idx);
+        let overlap_started_at = Instant::now();
+        let (local_tokenizer, preclassified_terminal_path_lengths) =
+            if let Some(plan) = partition_local_synthesis_plan {
+                let (local, classified) = rayon::join(
+                    || build_partition_local_tokenizer(tokenizer, sub_vocab, plan),
+                    || {
+                        partition::classify_partition_terminal_path_lengths(
+                            &label,
+                            tokenizer,
+                            sub_vocab,
+                            token_path_disallowed_follows.as_ref(),
+                            grammar.num_terminals,
+                            Some(shared_classify_cache),
+                        )
+                    },
+                );
+                (local, Some(classified))
+            } else {
+                (None, None)
+            };
+        let synthesis_classify_overlap_ms =
+            overlap_started_at.elapsed().as_secs_f64() * 1000.0;
 
-        if let Some(local) = partition_local_synthesis_plan
-            .and_then(|plan| build_partition_local_tokenizer(tokenizer, sub_vocab, plan))
-        {
+        if let Some(local) = local_tokenizer {
+            if std::env::var_os("GLRMASK_VERIFY_PARTITION_LOCAL_CLASSIFICATION").is_some() {
+                let local_classification = partition::classify_partition_terminal_path_lengths(
+                    &label,
+                    &local.tokenizer,
+                    sub_vocab,
+                    token_path_disallowed_follows.as_ref(),
+                    grammar.num_terminals,
+                    Some(&classify::SharedClassifyCache::new()),
+                );
+                assert_eq!(
+                    preclassified_terminal_path_lengths.as_deref(),
+                    Some(local_classification.as_slice()),
+                    "partition-local synthesis changed exact terminal-path classification for {label}",
+                );
+            }
             let local_flat_trans: Arc<[u32]> =
                 Arc::from(l1::build_flat_transition_table(&local.tokenizer));
             let local_vocab_dfa_cache =
@@ -779,20 +814,22 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
                 Some(&local_transition_cache),
                 Some(&local_ti_output_cache),
                 Some(&local_classify_cache),
+                preclassified_terminal_path_lengths.as_deref(),
             );
             if let Some(parts) = local_result.as_mut()
                 && lift_partition_terminal_dwas_to_global(parts, &local.global_to_local).is_some()
             {
-                parts.profile.id_map_ms += local.build_ms;
+                parts.profile.id_map_ms += synthesis_classify_overlap_ms;
                 if compile_profile_enabled() {
                     eprintln!(
-                        "[glrmask/profile][partition_local_synthesis] partition={} horizon={} global_states={} local_states={} local_transitions={} build_ms={:.3} selected=true",
+                        "[glrmask/profile][partition_local_synthesis] partition={} horizon={} global_states={} local_states={} local_transitions={} build_ms={:.3} synthesis_classify_overlap_ms={:.3} selected=true",
                         label,
                         sub_vocab.entries.values().map(Vec::len).max().unwrap_or(0),
                         tokenizer.num_states(),
                         local.tokenizer.num_states(),
                         local.tokenizer.transition_count(),
                         local.build_ms,
+                        synthesis_classify_overlap_ms,
                     );
                 }
                 return (
@@ -835,8 +872,14 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
             Some(shared_transition_cache),
             Some(&shared_ti_output_cache),
             Some(&shared_classify_cache),
+            preclassified_terminal_path_lengths.as_deref(),
         )
-        .map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0));
+        .map(|mut pair| {
+            if preclassified_terminal_path_lengths.is_some() {
+                pair.profile.id_map_ms += synthesis_classify_overlap_ms;
+            }
+            (pair, started_at.elapsed().as_secs_f64() * 1000.0)
+        });
         (result, idx)
     };
     let serial_profile_partition_schedule = compile_profile_uses_serial_partition_schedule();
