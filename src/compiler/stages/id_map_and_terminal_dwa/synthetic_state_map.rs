@@ -37,6 +37,36 @@ pub(crate) struct SynthesizedTerminalExpressions {
     pub(crate) changed_terminals: Vec<u32>,
 }
 
+pub(crate) struct StructurallyProjectedActiveTokenizer {
+    pub(crate) tokenizer: Tokenizer,
+    pub(crate) full_to_active: CertifiedFullToSynthesizedStateMap,
+    pub(crate) build_ms: f64,
+}
+
+pub(crate) fn structurally_project_active_tokenizer(
+    tokenizer: &Tokenizer,
+    active_terminals: &[bool],
+) -> Option<StructurallyProjectedActiveTokenizer> {
+    let started_at = std::time::Instant::now();
+    let (projected, full_to_synthesized) =
+        tokenizer.structurally_project_active_language(active_terminals)?;
+    let source_states = tokenizer.num_states() as usize;
+    let projected_states = projected.num_states() as usize;
+    if projected_states >= source_states
+        || source_states.saturating_sub(projected_states) < 512
+        || projected_states.saturating_mul(20) > source_states.saturating_mul(19)
+    {
+        return None;
+    }
+    Some(StructurallyProjectedActiveTokenizer {
+        tokenizer: projected,
+        full_to_active: CertifiedFullToSynthesizedStateMap {
+            full_to_synthesized,
+        },
+        build_ms: started_at.elapsed().as_secs_f64() * 1000.0,
+    })
+}
+
 pub(crate) struct MaterializedActiveTokenizer {
     pub(crate) tokenizer: Tokenizer,
     pub(crate) initial_state_map: ManyToOneIdMap,

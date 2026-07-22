@@ -156,6 +156,121 @@ fn group_matches_by_width(matches: Vec<TokenizerMatch>) -> Vec<(usize, BTreeSet<
 }
 
 impl Tokenizer {
+    /// Project this tokenizer to one active-terminal language without rebuilding
+    /// terminal definitions or running semantic state equivalence.
+    ///
+    /// States whose filtered finalizer and possible-future sets are both empty
+    /// are exact dead residuals for the branch. They are all mapped to one dead
+    /// state; every other state is cloned with inactive labels removed. The
+    /// possible-future invariant is verified against outgoing byte and epsilon
+    /// edges before selection, making the returned source map structural.
+    pub(crate) fn structurally_project_active_language(
+        &self,
+        active_terminals: &[bool],
+    ) -> Option<(Tokenizer, Vec<u32>)> {
+        if active_terminals.len() != self.num_terminals as usize || self.num_states() == 0 {
+            return None;
+        }
+        let filtered = |bits: &BitSet| {
+            let mut result = BitSet::new(self.num_terminals as usize);
+            for terminal in bits.iter() {
+                if active_terminals.get(terminal).copied().unwrap_or(false) {
+                    result.set(terminal);
+                }
+            }
+            result
+        };
+        let start = self.start_state() as usize;
+        let mut live = (0..self.num_states() as usize)
+            .map(|state| {
+                !filtered(self.dfa.finalizers(state as u32)).is_empty()
+                    || !filtered(self.dfa.possible_future_group_ids(state as u32)).is_empty()
+            })
+            .collect::<Vec<_>>();
+        live[start] = true;
+        let live_count = live.iter().filter(|&&value| value).count();
+        if live_count == self.num_states() as usize {
+            return None;
+        }
+
+        // A state declared dead for the active language must not have a direct
+        // route back into the live subgraph. This independently checks the
+        // possible-future metadata used by the projection proof.
+        for state in 0..self.num_states() as usize {
+            if live[state] {
+                continue;
+            }
+            if self.dfa.states()[state]
+                .transitions
+                .iter()
+                .any(|(_, &target)| live[target as usize])
+                || self.dfa.states()[state]
+                    .epsilon_transitions
+                    .iter()
+                    .any(|&target| live[target as usize])
+            {
+                return None;
+            }
+        }
+
+        let mut source_to_projected = vec![u32::MAX; self.num_states() as usize];
+        source_to_projected[start] = 0;
+        let mut next_state = 1u32;
+        for state in 0..self.num_states() as usize {
+            if state != start && live[state] {
+                source_to_projected[state] = next_state;
+                next_state += 1;
+            }
+        }
+        let dead_state = next_state;
+        for (state, mapped) in source_to_projected.iter_mut().enumerate() {
+            if !live[state] {
+                *mapped = dead_state;
+            }
+        }
+        let mut dfa = DFA::new(dead_state as usize + 1);
+        dfa.ensure_group_capacity(self.num_terminals as usize);
+        for terminal in 0..self.num_terminals as usize {
+            if active_terminals[terminal] {
+                dfa.set_group_u8set(
+                    terminal as u32,
+                    *self.dfa.group_id_to_u8set(terminal as u32),
+                );
+            }
+        }
+        for source in 0..self.num_states() as usize {
+            if !live[source] {
+                continue;
+            }
+            let projected = source_to_projected[source];
+            let transitions = self.dfa.states()[source]
+                .transitions
+                .iter()
+                .map(|(byte, &target)| (byte, source_to_projected[target as usize]))
+                .collect::<Vec<_>>();
+            dfa.set_transitions_from_sorted_entries(projected, transitions);
+            for &target in &self.dfa.states()[source].epsilon_transitions {
+                if live[target as usize] {
+                    dfa.add_epsilon_transition(projected, source_to_projected[target as usize]);
+                }
+            }
+            dfa.overwrite_state_metadata(
+                projected,
+                filtered(self.dfa.finalizers(source as u32)),
+                filtered(self.dfa.possible_future_group_ids(source as u32)),
+            );
+        }
+        Some((
+            Tokenizer {
+                dfa,
+                num_terminals: self.num_terminals,
+                exprs: None,
+                singleton_epsilon_closures: OnceLock::new(),
+            },
+            source_to_projected,
+        ))
+    }
+
     /// Materialize a deterministic compile-time analysis view as a tokenizer.
     /// The view may be a powerset of this tokenizers epsilon-NFA. State zero is
     /// reserved for the supplied start state, and the returned old-to-new map
