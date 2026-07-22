@@ -23,10 +23,7 @@ use crate::ds::bitset::BitSet;
 use crate::grammar::flat::TerminalID;
 use crate::Vocab;
 
-use super::{
-    PartitionLocalSynthesisPlan, build_branch_active_state_map, build_branch_local_tokenizer,
-    lift_local_terminal_dwa_to_source,
-};
+use super::build_branch_active_state_map;
 
 fn split_l2p_vocab_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -68,7 +65,6 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     shared_transition_cache: Option<&std::sync::OnceLock<super::l2p::equivalence_analysis::compat::FlatTransitionCache>>,
     shared_ti_output_cache: Option<&super::l2p::SharedTiTokenizerOutputCache>,
     shared_classify_cache: Option<&super::classify::SharedClassifyCache>,
-    branch_local_synthesis_plan: Option<&PartitionLocalSynthesisPlan>,
 ) -> Option<PartitionTerminalDwas> {
     if vocab.is_empty() {
         return None;
@@ -209,43 +205,6 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
         || {
             if has_l1 {
                 let started_at = Instant::now();
-                if let Some(local) = branch_local_synthesis_plan.and_then(|plan| {
-                    build_branch_local_tokenizer(
-                        tokenizer,
-                        vocab,
-                        plan,
-                        &l1_mask,
-                        &format!("{partition_label}.l1"),
-                    )
-                }) {
-                    let local_flat_trans: Arc<[u32]> =
-                        Arc::from(super::l1::build_flat_transition_table(&local.tokenizer));
-                    let local_l1_token_trie =
-                        super::l1::prepared_l1_token_bounded_analysis_trie(vocab);
-                    let mut result = super::l1::build_l1_id_map_and_terminal_dwa(
-                        partition_label,
-                        &local.tokenizer,
-                        vocab,
-                        terminal_coloring,
-                        use_terminal_coloring,
-                        ignore_terminal,
-                        grammar,
-                        &l1_mask,
-                        &local_flat_trans,
-                        None,
-                        None,
-                        None,
-                        local_l1_token_trie.as_deref(),
-                        shared_l1_parent_order.as_deref(),
-                    );
-                    if let Some(part) = result.as_mut() {
-                        if lift_local_terminal_dwa_to_source(part, &local.source_to_local).is_some()
-                        {
-                            part.profile.id_map_ms += local.build_ms;
-                            return (result, started_at.elapsed().as_secs_f64() * 1000.0);
-                        }
-                    }
-                }
                 let branch_state_map = build_branch_active_state_map(
                     tokenizer,
                     vocab,
@@ -321,64 +280,6 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                         } else {
                             let started_at = Instant::now();
                             let boundary_vocab = split.boundary_vocab(vocab);
-                            if let Some(local) = branch_local_synthesis_plan.and_then(|plan| {
-                                build_branch_local_tokenizer(
-                                    tokenizer,
-                                    &boundary_vocab,
-                                    plan,
-                                    &l2p_mask,
-                                    &format!("{partition_label}.l2p"),
-                                )
-                            }) {
-                                let local_flat_trans: Arc<[u32]> = Arc::from(
-                                    super::l1::build_flat_transition_table(&local.tokenizer),
-                                );
-                                let local_vocab_dfa_cache = super::l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache::new();
-                                let local_original_vocab_dfa_cache = super::l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache::new();
-                                let local_original_vocab_analysis_dfa_cache = super::l2p::equivalence_analysis::vocab::fast::SharedVocabAnalysisDfaCache::default();
-                                let local_transition_cache = std::sync::OnceLock::new();
-                                let local_ti_output_cache = super::l2p::SharedTiTokenizerOutputCache::new();
-                                let local_l1_token_trie =
-                                    super::l1::prepared_l1_token_bounded_analysis_trie(
-                                        &boundary_vocab,
-                                    );
-                                let mut result = super::l2p::build_l2p_id_map_and_terminal_dwa(
-                                    partition_label,
-                                    &local.tokenizer,
-                                    &boundary_vocab,
-                                    terminal_coloring,
-                                    use_terminal_coloring,
-                                    ignore_terminal,
-                                    grammar,
-                                    always_allowed_follows,
-                                    &l2p_mask,
-                                    disallowed_follows,
-                                    Some(token_path_disallowed_follows.as_ref()),
-                                    Some(normalized_token_path_disallowed_follows.as_ref()),
-                                    Some(&local_vocab_dfa_cache),
-                                    Some(&local_original_vocab_dfa_cache),
-                                    Some(&local_original_vocab_analysis_dfa_cache),
-                                    Some(&local_transition_cache),
-                                    Some(&local_ti_output_cache),
-                                    Some(&local_flat_trans),
-                                    local_l1_token_trie.as_deref(),
-                                    None,
-                                );
-                                if let Some(part) = result.as_mut() {
-                                    if lift_local_terminal_dwa_to_source(
-                                        part,
-                                        &local.source_to_local,
-                                    )
-                                    .is_some()
-                                    {
-                                        part.profile.id_map_ms += local.build_ms;
-                                        return (
-                                            result,
-                                            started_at.elapsed().as_secs_f64() * 1000.0,
-                                        );
-                                    }
-                                }
-                            }
                             if std::env::var_os("GLRMASK_DUMP_L2P_BOUNDARY_VOCAB").is_some()
                                 && matches!(partition_label, "p7" | "p8")
                             {

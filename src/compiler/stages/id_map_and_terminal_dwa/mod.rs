@@ -6,7 +6,6 @@
 
 use crate::automata::lexer::Lexer;
 use crate::automata::lexer::compile::{
-    build_regex_partitioned_with_adaptive_and_residual_isolation,
     compile_partitioned_expression_pair_with_structural_map, factor_regex_expr,
     VocabularyRepeatHorizonCache,
 };
@@ -63,12 +62,6 @@ struct PartitionLocalTokenizer {
     build_ms: f64,
 }
 
-pub(crate) struct BranchLocalTokenizer {
-    pub(crate) tokenizer: Tokenizer,
-    pub(crate) source_to_local: synthetic_state_map::CertifiedFullToSynthesizedStateMap,
-    pub(crate) build_ms: f64,
-}
-
 fn partition_local_synthesis_enabled() -> bool {
     std::env::var("GLRMASK_PARTITION_LOCAL_SYNTHESIS")
         .map(|value| {
@@ -76,173 +69,6 @@ fn partition_local_synthesis_enabled() -> bool {
             !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
         })
         .unwrap_or(true)
-}
-
-fn branch_local_synthesis_enabled() -> bool {
-    std::env::var("GLRMASK_BRANCH_LOCAL_SYNTHESIS")
-        .map(|value| {
-            let value = value.trim();
-            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
-        })
-        .unwrap_or(false)
-}
-
-/// Build a tokenizer for one L1/L2P branch before running that branch's state
-/// equivalence and terminal-DWA construction. Terminals outside `active` are
-/// compiled as the empty language, so their dispatch components never enter
-/// the branch tokenizer. The returned map is certified against the actual
-/// source tokenizer while observing only active terminal matches/futures.
-///
-/// This is an optimization only: any failed construction or certification
-/// returns `None`, preserving the existing exact source-tokenizer path.
-pub(crate) fn build_branch_local_tokenizer(
-    source_tokenizer: &Tokenizer,
-    vocab: &Vocab,
-    plan: &PartitionLocalSynthesisPlan,
-    active: &[bool],
-    branch_label: &str,
-) -> Option<BranchLocalTokenizer> {
-    if let Ok(filter) = std::env::var("GLRMASK_BRANCH_LOCAL_SYNTHESIS_FILTER")
-        && !filter
-            .split(',')
-            .map(str::trim)
-            .filter(|item| !item.is_empty())
-            .any(|item| branch_label.contains(item))
-    {
-        return None;
-    }
-    if !branch_local_synthesis_enabled()
-        || vocab.is_empty()
-        || active.len() < source_tokenizer.num_terminals() as usize
-    {
-        return None;
-    }
-    let active_count = active.iter().filter(|&&value| value).count();
-    if active_count == 0 || active_count == active.len() {
-        return None;
-    }
-
-    let started_at = Instant::now();
-    let reject = |stage: &str, local_states: usize| {
-        if compile_profile_enabled() {
-            eprintln!(
-                "[glrmask/profile][branch_local_synthesis] branch={} stage={} active_terminals={} vocab_tokens={} source_states={} local_states={} elapsed_ms={:.3} selected=false",
-                branch_label,
-                stage,
-                active_count,
-                vocab.len(),
-                source_tokenizer.num_states(),
-                local_states,
-                started_at.elapsed().as_secs_f64() * 1000.0,
-            );
-        }
-        None
-    };
-    let max_token_len = vocab.entries.values().map(Vec::len).max().unwrap_or(0);
-    let Some(source_expressions) = (0..source_tokenizer.num_terminals())
-        .map(|terminal| source_tokenizer.terminal_expr(terminal).cloned())
-        .collect::<Option<Vec<_>>>()
-    else {
-        return reject("missing_expressions", 0);
-    };
-    let protected = plan
-        .protected_terminal_ids
-        .iter()
-        .copied()
-        .collect::<std::collections::BTreeSet<_>>();
-    let horizon_candidate = (max_token_len > 0)
-        .then(|| {
-            synthetic_state_map::synthesize_terminal_expressions_for_horizon(
-                &source_expressions,
-                max_token_len,
-            )
-        });
-    // Keep one omitted terminal as an all-byte inactive sink. Under the active
-    // projection every omitted-component residual has empty behavior forever,
-    // but certification still needs a concrete local state for that class.
-    let inactive_sink_terminal = active.iter().position(|&value| !value);
-    let mut branch_expressions = Vec::with_capacity(source_expressions.len());
-    for (terminal, expression) in source_expressions.into_iter().enumerate() {
-        let expression = if !active[terminal] {
-            if Some(terminal) == inactive_sink_terminal {
-                Expr::Repeat {
-                    expr: Box::new(Expr::U8Class(U8Set::all())),
-                    min: 1,
-                    max: None,
-                }
-            } else {
-                Expr::U8Class(U8Set::empty())
-            }
-        } else if protected.contains(&(terminal as u32)) {
-            horizon_candidate
-                .as_ref()
-                .map(|candidate| candidate.expressions[terminal].clone())
-                .unwrap_or(expression)
-        } else {
-            expression
-        };
-        branch_expressions.push(factor_regex_expr(expression));
-    }
-
-    let regex = build_regex_partitioned_with_adaptive_and_residual_isolation(
-        &branch_expressions,
-        &plan.partition_ids,
-        &plan.residual_isolation_classes,
-        plan.adaptive,
-    );
-    let mut tokenizer = regex.into_tokenizer(
-        source_tokenizer.num_terminals(),
-        Some(Arc::from(branch_expressions.into_boxed_slice())),
-    );
-    let nullable = tokenizer.isolate_start_state_and_drain_nullable_terminals();
-    if nullable
-        .iter()
-        .any(|terminal| active.get(*terminal as usize).copied().unwrap_or(false))
-    {
-        return reject("active_nullable", tokenizer.num_states() as usize);
-    }
-
-    let source_states = source_tokenizer.num_states() as usize;
-    let local_states = tokenizer.num_states() as usize;
-    if local_states >= source_states || source_states.saturating_sub(local_states) < 512 {
-        return reject("insufficient_reduction", local_states);
-    }
-    let Some(source_to_local) = synthetic_state_map::certify_full_to_synthesized_state_map(
-        source_tokenizer,
-        &tokenizer,
-        vocab,
-        Some(active),
-    ) else {
-        return reject("certification", local_states);
-    };
-    let build_ms = started_at.elapsed().as_secs_f64() * 1000.0;
-    if compile_profile_enabled() {
-        eprintln!(
-            "[glrmask/profile][branch_local_synthesis] branch={} active_terminals={} vocab_tokens={} horizon={} source_states={} local_states={} local_transitions={} build_ms={:.3} selected=true",
-            branch_label,
-            active_count,
-            vocab.len(),
-            max_token_len,
-            source_states,
-            local_states,
-            tokenizer.transition_count(),
-            build_ms,
-        );
-    }
-    Some(BranchLocalTokenizer {
-        tokenizer,
-        source_to_local,
-        build_ms,
-    })
-}
-
-pub(crate) fn lift_local_terminal_dwa_to_source(
-    part: &mut LocalIdMapTerminalDwa,
-    source_to_local: &synthetic_state_map::CertifiedFullToSynthesizedStateMap,
-) -> Option<()> {
-    part.id_map.tokenizer_states =
-        source_to_local.lift_internal_tsid_map(&part.id_map.tokenizer_states)?;
-    Some(())
 }
 
 fn branch_active_state_map_enabled() -> bool {
@@ -1063,7 +889,6 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
                 Some(&local_transition_cache),
                 Some(&local_ti_output_cache),
                 Some(&local_classify_cache),
-                partition_local_synthesis_plan,
             );
             if let Some(parts) = local_result.as_mut()
                 && lift_partition_terminal_dwas_to_global(parts, &local.global_to_local).is_some()
@@ -1120,7 +945,6 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
             Some(shared_transition_cache),
             Some(&shared_ti_output_cache),
             Some(&shared_classify_cache),
-            partition_local_synthesis_plan,
         )
         .map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0));
         (result, idx)
