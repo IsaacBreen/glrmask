@@ -12,4 +12,5 @@ pyo3 = { version = "0.24.2", features = ["extension-module"] }
 numpy = "0.24.0"
 glrmask = { path = "..", features = ["internal-api"] }
 self_cell = "1"
-mimalloc = "0.1"
+mimalloc = "=0.1.52"
+libmimalloc-sys = { version = "=0.1.49", default-features = false, features = ["extended"] }
