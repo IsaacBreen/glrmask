@@ -2720,51 +2720,21 @@ fn exact_terminal_path_two_plus_candidate_dfa(
             witnesses: vec![None; candidates.len()],
         };
     }
-    let compile_started_at = std::time::Instant::now();
-    // Reuse the original tokenizer for broad candidate sets and for every
-    // epsilon tokenizer. Recompiling an epsilon lexer from a small terminal
-    // subset can destroy sharing and produce a much larger determinized scanner
-    // than the original combined lexer. The powerset scanner filters matched
-    // and future masks through `terminal_to_local`, so scanning the original
-    // tokenizer remains exact while avoiding that subset-compilation cliff.
-    let uses_original_tokenizer =
-        tokenizer.has_epsilon_transitions() || candidate_ids.len() >= 64;
-    let terminal_to_local = uses_original_tokenizer.then(|| {
-        let mut map = vec![u32::MAX; tokenizer.num_terminals() as usize];
-        for (local, &terminal) in candidate_ids.iter().enumerate() {
-            map[terminal] = local as u32;
-        }
-        map.into_boxed_slice()
-    });
-    let owned_candidate_tokenizer = if uses_original_tokenizer {
-        None
-    } else {
-        let exprs = Arc::<[crate::automata::lexer::ast::Expr]>::from(
-            candidate_ids
-                .iter()
-                .map(|&terminal| {
-                    tokenizer
-                        .terminal_expr(terminal as u32)
-                        .unwrap_or_else(|| panic!("missing terminal expression for terminal {terminal}"))
-                        .clone()
-                })
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-        );
-        Some(Arc::new(
-            build_regex(exprs.as_ref())
-                .into_tokenizer(candidate_ids.len() as u32, Some(Arc::clone(&exprs))),
-        ))
-    };
-    let candidate_tokenizer = owned_candidate_tokenizer.as_deref().unwrap_or(tokenizer);
-    let compile_ms = compile_started_at.elapsed().as_secs_f64() * 1000.0;
+    let candidate_count = candidate_ids.len();
+    let words_per_mask = candidate_count.div_ceil(64);
+    let use_pair_index = std::env::var("GLRMASK_CLASSIFY_PAIR_INDEX")
+        .map(|value| {
+            let trimmed = value.trim();
+            trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or(true);
 
     let mut local_disallowed = BTreeMap::<u32, BitSet>::new();
     for (local_1, &terminal_1) in candidate_ids.iter().enumerate() {
         let Some(blocked) = disallowed_follows.get(&(terminal_1 as u32)) else {
             continue;
         };
-        let mut local_blocked = BitSet::new(candidate_ids.len());
+        let mut local_blocked = BitSet::new(candidate_count);
         for (local_2, &terminal_2) in candidate_ids.iter().enumerate() {
             if blocked.contains(terminal_2) {
                 local_blocked.set(local_2);
@@ -2795,16 +2765,88 @@ fn exact_terminal_path_two_plus_candidate_dfa(
         feasible_follow_bytes_by_last_byte[bytes[split_after] as usize]
             .contains(bytes[split_after + 1])
     };
-    let analyze_started_at = std::time::Instant::now();
-    let candidate_count = candidate_ids.len();
-    let words_per_mask = candidate_count.div_ceil(64);
-    let use_pair_index = std::env::var("GLRMASK_CLASSIFY_PAIR_INDEX")
+    let adjacent_pair_index = use_pair_index.then(|| vocab_adjacent_pair_index(vocab));
+    let feasible_split_work = if candidate_count < 64 {
+        adjacent_pair_index.as_ref().map_or(0usize, |index| {
+            (0u8..=u8::MAX)
+                .map(|left| {
+                    feasible_follow_bytes_by_last_byte[left as usize]
+                        .iter()
+                        .map(|right| index.occurrences_for_pair(left, right).len())
+                        .sum::<usize>()
+                })
+                .sum()
+        })
+    } else {
+        0
+    };
+
+    let compile_started_at = std::time::Instant::now();
+    // Reuse the original tokenizer for broad candidate sets and for every
+    // epsilon tokenizer. Recompiling an epsilon lexer from a small terminal
+    // subset can destroy sharing and produce a much larger determinized scanner
+    // than the original combined lexer. The powerset scanner filters matched
+    // and future masks through `terminal_to_local`, so scanning the original
+    // tokenizer remains exact while avoiding that subset-compilation cliff.
+    let force_subset_tokenizer = std::env::var("GLRMASK_CLASSIFY_FORCE_SUBSET_TOKENIZER")
         .map(|value| {
             let trimmed = value.trim();
             trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
         })
-        .unwrap_or(true);
-    let adjacent_pair_index = use_pair_index.then(|| vocab_adjacent_pair_index(vocab));
+        .unwrap_or(false);
+    let subset_min_split_work = std::env::var("GLRMASK_CLASSIFY_SUBSET_MIN_SPLIT_WORK")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(100_000);
+    let automatic_subset_attempt = tokenizer.has_epsilon_transitions()
+        && candidate_count < 64
+        && feasible_split_work >= subset_min_split_work;
+    let normally_requires_original =
+        tokenizer.has_epsilon_transitions() || candidate_count >= 64;
+    let attempt_subset = force_subset_tokenizer
+        || automatic_subset_attempt
+        || !normally_requires_original;
+    let compiled_subset_tokenizer = attempt_subset.then(|| {
+        let exprs = Arc::<[crate::automata::lexer::ast::Expr]>::from(
+            candidate_ids
+                .iter()
+                .map(|&terminal| {
+                    tokenizer
+                        .terminal_expr(terminal as u32)
+                        .unwrap_or_else(|| panic!("missing terminal expression for terminal {terminal}"))
+                        .clone()
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        Arc::new(
+            build_regex(exprs.as_ref())
+                .into_tokenizer(candidate_ids.len() as u32, Some(Arc::clone(&exprs))),
+        )
+    });
+    // Subset compilation is exact, but epsilon sharing can make its DFA larger
+    // than the original combined scanner. Automatic selection therefore
+    // remains fail-closed: pay the small probe cost, then retain the original
+    // representation unless the candidate DFA is strictly smaller.
+    let automatic_subset_tokenizer = automatic_subset_attempt
+        && compiled_subset_tokenizer
+            .as_ref()
+            .is_some_and(|subset| subset.num_states() < tokenizer.num_states());
+    let uses_original_tokenizer = normally_requires_original
+        && !(force_subset_tokenizer || automatic_subset_tokenizer);
+    let terminal_to_local = uses_original_tokenizer.then(|| {
+        let mut map = vec![u32::MAX; tokenizer.num_terminals() as usize];
+        for (local, &terminal) in candidate_ids.iter().enumerate() {
+            map[terminal] = local as u32;
+        }
+        map.into_boxed_slice()
+    });
+    let owned_candidate_tokenizer = (!uses_original_tokenizer)
+        .then(|| compiled_subset_tokenizer.expect("selected subset tokenizer was compiled"));
+    let candidate_tokenizer = owned_candidate_tokenizer.as_deref().unwrap_or(tokenizer);
+    let compile_ms = compile_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let analyze_started_at = std::time::Instant::now();
     let total_splits = adjacent_pair_index.as_ref().map_or_else(
         || {
             vocab
@@ -3308,11 +3350,14 @@ fn exact_terminal_path_two_plus_candidate_dfa(
     }
     if super::types::compile_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][terminal_path_candidate_dfa] tokens={} candidates={} states={} transitions={} prefix_entries={} suffix_splits={} candidate_splits={} prefix_configs={} split_checks={} allowed_pairs={} two_plus={} compile_ms={:.3} trie_ms={:.3} prefix_ms={:.3} suffix_ms={:.3} combine_ms={:.3} analyze_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][terminal_path_candidate_dfa] tokens={} candidates={} states={} transitions={} uses_original_tokenizer={} automatic_subset_tokenizer={} feasible_split_work={} prefix_entries={} suffix_splits={} candidate_splits={} prefix_configs={} split_checks={} allowed_pairs={} two_plus={} compile_ms={:.3} trie_ms={:.3} prefix_ms={:.3} suffix_ms={:.3} combine_ms={:.3} analyze_ms={:.3} total_ms={:.3}",
             vocab.entries.len(),
             candidate_ids.len(),
             candidate_tokenizer.num_states(),
             candidate_tokenizer.transition_count(),
+            uses_original_tokenizer,
+            automatic_subset_tokenizer,
+            feasible_split_work,
             total_splits,
             total_splits,
             candidate_splits,
