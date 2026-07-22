@@ -2368,16 +2368,8 @@ fn find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
         let estimated_work = token_ids.len().saturating_mul(targets.len());
         let parallel_bucket = token_ids.len() >= 10_000
             || estimated_work >= LARGE_BUCKET_WORK_PRODUCT;
-        let requested = std::env::var("GLRMASK_L1_PROFILE_BUILDER")
-            .unwrap_or_else(|_| "auto".to_owned());
-        let flat_supported = transitions_by_byte.is_none() && horizon_maps.is_none();
-        let force_flat = flat_supported && requested == "flat";
 
-        if !force_flat
-            && parallel_bucket
-            && targets.len() >= 32
-            && rayon::current_num_threads() > 1
-        {
+        if parallel_bucket && targets.len() >= 32 && rayon::current_num_threads() > 1 {
             let prebuilt_trie = token_buckets.packed_suffix_tries_by_first_byte[byte_idx]
                 .get_or_init(|| {
                     Arc::new(L1PackedSuffixTrie::build(
@@ -2442,6 +2434,9 @@ fn find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
             }
             chunked_profiles
         } else {
+            let requested = std::env::var("GLRMASK_L1_PROFILE_BUILDER")
+                .unwrap_or_else(|_| "auto".to_owned());
+            let flat_supported = transitions_by_byte.is_none() && horizon_maps.is_none();
             let build_flat = || {
                 l1_bucket_suffix_signature_profiles_batched_arc(
                     *byte,
