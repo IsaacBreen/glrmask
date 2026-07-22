@@ -10,13 +10,14 @@ pub mod stages;
 
 pub(crate) use compile::compile_owned;
 
-/// Exact bounded-terminal synthesis is enabled by default. The full exact
-/// lexer is built concurrently, while terminal/parser DWA construction uses a
-/// certified smaller representative lexer. Retain an explicit opt-out for
-/// diagnostics and conservative fallback on unforeseen external workloads.
+/// Exact bounded-terminal synthesis is an explicit opt-in. The full exact
+/// lexer remains the production default because synthesis planning has a
+/// material fixed cost on ordinary grammars and did not pass the full-corpus
+/// default-performance gate. When enabled, terminal/parser DWA construction
+/// uses a certified smaller representative while runtime keeps the exact lexer.
 pub(crate) fn synthetic_bounded_terminals_enabled() -> bool {
     match std::env::var("GLRMASK_SYNTHETIC_BOUNDED_TERMINALS") {
-        Err(_) => true,
+        Err(_) => false,
         Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
             "1" | "true" | "yes" | "on" => true,
             "0" | "false" | "no" | "off" => false,

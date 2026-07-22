@@ -12,9 +12,10 @@
 
 ### Changed
 
-- Exact bounded-terminal synthesis is enabled by default. Set
-  `GLRMASK_SYNTHETIC_BOUNDED_TERMINALS=0` to disable the optimization and use
-  the full exact tokenizer throughout compilation.
+- Exact bounded-terminal synthesis is now an explicit opt-in. Set
+  `GLRMASK_SYNTHETIC_BOUNDED_TERMINALS=1` to enable the certified representative
+  lexer path. The full exact tokenizer remains the default because synthesis
+  planning did not pass the broad compile-latency gate on ordinary grammars.
 
 ## 0.1.1 — 2026-07-19 — runtime, integration, and tail-latency update
 

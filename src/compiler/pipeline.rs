@@ -596,7 +596,7 @@ mod lexer_partition_plan_tests {
 
     use super::{
         build_structural_tokenizer_pair, lexer_partition_ids_with_options,
-        plan_synthetic_tokenizer,
+        plan_synthetic_tokenizer_enabled,
     };
     use crate::automata::lexer::Lexer;
     use crate::automata::regex::Expr;
@@ -689,7 +689,7 @@ mod lexer_partition_plan_tests {
             (2, b"aaaa".to_vec()),
             (3, b"b".to_vec()),
         ]);
-        let plan = plan_synthetic_tokenizer(&grammar, &vocab)
+        let plan = plan_synthetic_tokenizer_enabled(&grammar, &vocab)
             .expect("large bounded terminal should be selected for synthesis");
         let (synthesized, full, certified) =
             build_structural_tokenizer_pair(&grammar, &plan, &vocab, Some(false))
@@ -932,10 +932,15 @@ fn plan_synthetic_tokenizer(
     grammar: &GrammarDef,
     vocab: &Vocab,
 ) -> Option<SyntheticTokenizerPlan> {
-    if !crate::compiler::synthetic_bounded_terminals_enabled() {
-        return None;
-    }
+    crate::compiler::synthetic_bounded_terminals_enabled()
+        .then(|| plan_synthetic_tokenizer_enabled(grammar, vocab))
+        .flatten()
+}
 
+fn plan_synthetic_tokenizer_enabled(
+    grammar: &GrammarDef,
+    vocab: &Vocab,
+) -> Option<SyntheticTokenizerPlan> {
     // The normal path uses exact vocabulary-relative repeat horizons. The
     // legacy fixed 64-byte candidate remains available only as an explicitly
     // unsafe diagnostic probe whose result must still pass full certification.
