@@ -2371,7 +2371,10 @@ fn find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
         let requested = std::env::var("GLRMASK_L1_PROFILE_BUILDER")
             .unwrap_or_else(|_| "auto".to_owned());
         let flat_supported = transitions_by_byte.is_none() && horizon_maps.is_none();
-        let force_flat = flat_supported && requested == "flat";
+        let force_flat = flat_supported
+            && (requested == "flat"
+                || (requested == "medium-flat"
+                    && (7_000..=10_000).contains(&token_ids.len())));
 
         if !force_flat
             && parallel_bucket
