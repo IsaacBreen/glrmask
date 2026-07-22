@@ -2390,10 +2390,8 @@ fn find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
                 .min(rayon::current_num_threads())
                 .min(targets.len());
             let chunk_size = targets.len().div_ceil(chunk_count);
-            let balanced_chunks = (std::env::var_os("GLRMASK_L1_BALANCED_TARGET_CHUNKS")
+            let balanced_chunks = std::env::var_os("GLRMASK_L1_BALANCED_TARGET_CHUNKS")
                 .is_some()
-                && token_ids.len() >= 20_000
-                && estimated_work >= 20_000_000)
                 .then(|| {
                     l1_balance_packed_targets(
                         targets,
