@@ -3771,6 +3771,72 @@ struct ExtractedDispatchComponent {
     dfa: DFA,
 }
 
+pub(crate) struct PrecompiledFurtherSynthesisPairs {
+    pairs: Mutex<BTreeMap<usize, CompiledTerminalExpressionPair>>,
+    pub(crate) build_ms: f64,
+}
+
+impl PrecompiledFurtherSynthesisPairs {
+    fn take(&self, terminal: usize) -> Option<CompiledTerminalExpressionPair> {
+        self.pairs
+            .lock()
+            .expect("precompiled synthesis-pair cache poisoned")
+            .remove(&terminal)
+    }
+}
+
+pub(crate) fn precompile_further_synthesis_pairs(
+    source_expressions: &[Expr],
+    synthesized_expressions: &[Expr],
+    protected_terminal_ids: &[u32],
+    vocab: &Vocab,
+    repeat_horizons: &VocabularyRepeatHorizonCache,
+    max_token_len: usize,
+    relevant_bytes: &[u8],
+) -> Option<Arc<PrecompiledFurtherSynthesisPairs>> {
+    if source_expressions.len() != synthesized_expressions.len() {
+        return None;
+    }
+    let protected = protected_terminal_ids
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let changed = source_expressions
+        .iter()
+        .zip(synthesized_expressions)
+        .enumerate()
+        .filter_map(|(terminal, (source, synthesized))| {
+            (source != synthesized).then_some(terminal)
+        })
+        .collect::<Vec<_>>();
+    if changed.is_empty()
+        || changed
+            .iter()
+            .any(|&terminal| !protected.contains(&(terminal as u32)))
+    {
+        return None;
+    }
+    let started_at = Instant::now();
+    let pairs = changed
+        .par_iter()
+        .map(|&terminal| {
+            compile_terminal_expression_pair_with_structural_map(
+                &source_expressions[terminal],
+                &synthesized_expressions[terminal],
+                vocab,
+                repeat_horizons,
+                max_token_len,
+                relevant_bytes,
+            )
+            .map(|pair| (terminal, pair))
+        })
+        .collect::<Option<BTreeMap<_, _>>>()?;
+    Some(Arc::new(PrecompiledFurtherSynthesisPairs {
+        pairs: Mutex::new(pairs),
+        build_ms: started_at.elapsed().as_secs_f64() * 1000.0,
+    }))
+}
+
 fn extract_dispatch_components(tokenizer: &Tokenizer) -> Option<Vec<ExtractedDispatchComponent>> {
     let roots = tokenizer.deterministic_dispatch_roots()?;
     let components = tokenizer.disjoint_dispatch_components()?;
@@ -3938,6 +4004,7 @@ pub(crate) fn compile_further_synthesized_tokenizer_with_structural_map(
     repeat_horizons: &VocabularyRepeatHorizonCache,
     max_token_len: usize,
     relevant_bytes: &[u8],
+    precompiled_pairs: Option<&PrecompiledFurtherSynthesisPairs>,
 ) -> Option<(Tokenizer, Vec<u32>)> {
     let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some()
         || std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
@@ -4005,14 +4072,19 @@ pub(crate) fn compile_further_synthesized_tokenizer_with_structural_map(
         }
         let terminal = changed_terminals[0];
         handled_changed[terminal] = true;
-        let Some(pair) = compile_terminal_expression_pair_with_structural_map(
-            &source_expressions[terminal],
-            &synthesized_expressions[terminal],
-            vocab,
-            repeat_horizons,
-            max_token_len,
-            relevant_bytes,
-        ) else {
+        let Some(pair) = precompiled_pairs
+            .and_then(|pairs| pairs.take(terminal))
+            .or_else(|| {
+                compile_terminal_expression_pair_with_structural_map(
+                    &source_expressions[terminal],
+                    &synthesized_expressions[terminal],
+                    vocab,
+                    repeat_horizons,
+                    max_token_len,
+                    relevant_bytes,
+                )
+            })
+        else {
             return reject("protected_pair");
         };
         let (mut synthesized, synthesized_nullable) =
