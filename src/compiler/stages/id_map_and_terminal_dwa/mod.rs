@@ -251,7 +251,7 @@ fn branch_active_state_map_enabled() -> bool {
             let value = value.trim();
             !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
         })
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 pub(crate) fn build_branch_active_state_map(
@@ -264,49 +264,84 @@ pub(crate) fn build_branch_active_state_map(
     if !branch_active_state_map_enabled() || vocab.is_empty() {
         return None;
     }
-    if let Ok(filter) = std::env::var("GLRMASK_BRANCH_ACTIVE_STATE_MAP_FILTER")
-        && !filter
-            .split(',')
-            .map(str::trim)
-            .filter(|item| !item.is_empty())
-            .any(|item| branch_label.contains(item))
-    {
-        return None;
-    }
     let source_reps = initial_state_map
         .map(ManyToOneIdMap::num_internal_ids)
         .unwrap_or(tokenizer.num_states()) as usize;
     if source_reps <= 1 {
         return None;
     }
+    if let Ok(filter) = std::env::var("GLRMASK_BRANCH_ACTIVE_STATE_MAP_FILTER") {
+        if !filter
+            .split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .any(|item| branch_label.contains(item))
+        {
+            return None;
+        }
+    } else {
+        // Stable active-language refinement has a real fixed cost. The corpus
+        // gate is the large L1 branch where exact whole-token profiles dominate:
+        // 50k+ tokens and at least 300M raw state-token pairs. Smaller branches
+        // either finish before the refinement amortizes or are hidden behind a
+        // different partition. This is a strategy gate only; the quotient itself
+        // remains exact and has an explicit diagnostic opt-out above.
+        let work = source_reps.saturating_mul(vocab.len());
+        if !branch_label.ends_with(".l1") || vocab.len() < 50_000 || work < 300_000_000 {
+            return None;
+        }
+    }
     let started_at = Instant::now();
     let statistic =
         l2p::equivalence_analysis::state_equivalence::max_length::cached_statistic(vocab);
-    let mode = match std::env::var("GLRMASK_BRANCH_ACTIVE_STATE_MAP_MODE").as_deref() {
-        Ok("stable") => l2p::equivalence_analysis::state_equivalence::max_length::MaxLengthMode::StableByteRestricted,
-        Ok("kbounded") | Err(_) => l2p::equivalence_analysis::state_equivalence::max_length::MaxLengthMode::KBoundedByteRestricted,
-        Ok(other) => panic!(
-            "invalid GLRMASK_BRANCH_ACTIVE_STATE_MAP_MODE={other:?}; expected stable or kbounded"
+    let requested_mode =
+        std::env::var("GLRMASK_BRANCH_ACTIVE_STATE_MAP_MODE").unwrap_or_else(|_| "stable".into());
+    let (state_map, mode_label) = match requested_mode.as_str() {
+        "structural" => {
+            if initial_state_map.is_some() {
+                return None;
+            }
+            (
+                synthetic_state_map::inactive_dispatch_component_state_map(tokenizer, active)?,
+                "structural",
+            )
+        }
+        "stable" => (
+            l2p::equivalence_analysis::state_equivalence::max_length::compute_state_map(
+                tokenizer,
+                &statistic,
+                initial_state_map,
+                Some(active),
+                l2p::equivalence_analysis::state_equivalence::max_length::MaxLengthMode::StableByteRestricted,
+                None,
+                None,
+            ),
+            "stable",
+        ),
+        "kbounded" => (
+            l2p::equivalence_analysis::state_equivalence::max_length::compute_state_map(
+                tokenizer,
+                &statistic,
+                initial_state_map,
+                Some(active),
+                l2p::equivalence_analysis::state_equivalence::max_length::MaxLengthMode::KBoundedByteRestricted,
+                None,
+                None,
+            ),
+            "kbounded",
+        ),
+        other => panic!(
+            "invalid GLRMASK_BRANCH_ACTIVE_STATE_MAP_MODE={other:?}; expected structural, stable, or kbounded"
         ),
     };
-    let state_map =
-        l2p::equivalence_analysis::state_equivalence::max_length::compute_state_map(
-            tokenizer,
-            &statistic,
-            initial_state_map,
-            Some(active),
-            mode,
-            None,
-            None,
-        );
     let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
     let reps = state_map.num_internal_ids() as usize;
     let selected = reps < source_reps && source_reps.saturating_sub(reps) >= 512;
     if compile_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][branch_active_state_map] branch={} mode={:?} active_terminals={} vocab_tokens={} horizon={} source_reps={} reps={} reduction_pct={:.2} ms={:.3} selected={}",
+            "[glrmask/profile][branch_active_state_map] branch={} mode={} active_terminals={} vocab_tokens={} horizon={} source_reps={} reps={} reduction_pct={:.2} ms={:.3} selected={}",
             branch_label,
-            mode,
+            mode_label,
             active.iter().filter(|&&value| value).count(),
             vocab.len(),
             statistic.max_token_len(),
