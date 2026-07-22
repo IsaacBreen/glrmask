@@ -4065,13 +4065,44 @@ pub(crate) fn compile_further_synthesized_tokenizer_with_structural_map(
         }
         offset = offset.checked_add(component.dfa.num_states() as u32)?;
     }
-    if source_to_synthesized.iter().any(|&state| state == u32::MAX) {
-        return reject("unmapped_source_state");
-    }
-    let dfa = combine_lexer_components_under_epsilon_root(
+    let mut dfa = combine_lexer_components_under_epsilon_root(
         output_components,
         source_expressions.len(),
     );
+    // Nullable-start isolation and prior structural augmentation may retain
+    // unreachable raw states outside the live dispatch components. They remain
+    // part of the compiler's raw-state coordinate, so clone them after the live
+    // component layout is fixed and redirect every edge through the completed
+    // source-state map.
+    let extra_source_states = source_to_synthesized
+        .iter()
+        .enumerate()
+        .filter_map(|(state, &mapped)| (mapped == u32::MAX).then_some(state))
+        .collect::<Vec<_>>();
+    for &source_state in &extra_source_states {
+        source_to_synthesized[source_state] = dfa.add_state();
+    }
+    for source_state in extra_source_states {
+        let target_state = source_to_synthesized[source_state];
+        let source_dfa_state = &source.dfa.states()[source_state];
+        let transitions = source_dfa_state
+            .transitions
+            .iter()
+            .map(|(byte, &target)| (byte, source_to_synthesized[target as usize]))
+            .collect::<Vec<_>>();
+        dfa.set_transitions_from_sorted_entries(target_state, transitions);
+        for &target in &source_dfa_state.epsilon_transitions {
+            dfa.add_epsilon_transition(target_state, source_to_synthesized[target as usize]);
+        }
+        dfa.overwrite_state_metadata(
+            target_state,
+            source.dfa.finalizers(source_state as u32).clone(),
+            source
+                .dfa
+                .possible_future_group_ids(source_state as u32)
+                .clone(),
+        );
+    }
     let tokenizer = Regex { dfa }.into_tokenizer(
         source_expressions.len() as u32,
         Some(Arc::from(synthesized_expressions.to_vec().into_boxed_slice())),
