@@ -2390,31 +2390,77 @@ fn find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
                 .min(rayon::current_num_threads())
                 .min(targets.len());
             let chunk_size = targets.len().div_ceil(chunk_count);
-            let mut chunked_profiles: Vec<((u8, u32), Arc<[(u32, u32, u32)]>)> = targets
-                .par_chunks(chunk_size.max(1))
-                .map(|target_chunk| {
-                    l1_bucket_suffix_signature_profiles_packed(
-                        *byte,
-                        target_chunk,
-                        sorted_entries,
-                        token_ids,
-                        suffix_lcps,
-                        &token_buckets.suffix_subtree_bytes[byte_idx],
-                        &token_buckets.suffix_first_bytes_by_bucket[byte_idx],
-                        token_buckets.has_empty_suffix_by_bucket[byte_idx],
-                        &state_to_terminal_signature,
+            let balanced_chunks = std::env::var_os("GLRMASK_L1_BALANCED_TARGET_CHUNKS")
+                .is_some()
+                .then(|| {
+                    l1_balance_packed_targets(
+                        targets,
+                        chunk_count,
+                        prebuilt_trie.as_ref(),
                         &self_loop_bytes_by_state,
                         flat_trans,
                         transitions_by_byte,
                         num_tokenizer_states,
                         Some(&active_language),
                         horizon_maps.as_deref(),
-                        suffix_horizon_by_first_byte[byte_idx],
-                        Some(prebuilt_trie.as_ref()),
                     )
-                })
-                .flatten()
-                .collect();
+                });
+            let mut chunked_profiles: Vec<((u8, u32), Arc<[(u32, u32, u32)]>)> = if let Some(
+                balanced_chunks,
+            ) = balanced_chunks.as_ref()
+            {
+                balanced_chunks
+                    .par_iter()
+                    .map(|target_chunk| {
+                        l1_bucket_suffix_signature_profiles_packed(
+                            *byte,
+                            target_chunk,
+                            sorted_entries,
+                            token_ids,
+                            suffix_lcps,
+                            &token_buckets.suffix_subtree_bytes[byte_idx],
+                            &token_buckets.suffix_first_bytes_by_bucket[byte_idx],
+                            token_buckets.has_empty_suffix_by_bucket[byte_idx],
+                            &state_to_terminal_signature,
+                            &self_loop_bytes_by_state,
+                            flat_trans,
+                            transitions_by_byte,
+                            num_tokenizer_states,
+                            Some(&active_language),
+                            horizon_maps.as_deref(),
+                            suffix_horizon_by_first_byte[byte_idx],
+                            Some(prebuilt_trie.as_ref()),
+                        )
+                    })
+                    .flatten()
+                    .collect()
+            } else {
+                targets
+                    .par_chunks(chunk_size.max(1))
+                    .map(|target_chunk| {
+                        l1_bucket_suffix_signature_profiles_packed(
+                            *byte,
+                            target_chunk,
+                            sorted_entries,
+                            token_ids,
+                            suffix_lcps,
+                            &token_buckets.suffix_subtree_bytes[byte_idx],
+                            &token_buckets.suffix_first_bytes_by_bucket[byte_idx],
+                            token_buckets.has_empty_suffix_by_bucket[byte_idx],
+                            &state_to_terminal_signature,
+                            &self_loop_bytes_by_state,
+                            flat_trans,
+                            transitions_by_byte,
+                            num_tokenizer_states,
+                            Some(&active_language),
+                            horizon_maps.as_deref(),
+                            suffix_horizon_by_first_byte[byte_idx],
+                            Some(prebuilt_trie.as_ref()),
+                        )
+                    })
+                    .flatten()
+                    .collect()
+            };
             // The packed builder interns equal behaviors only within one target
             // batch.  Chunking a large bucket for latency must not turn equal
             // cross-chunk profiles into distinct pointer identities, because
@@ -3157,6 +3203,7 @@ struct L1PackedSuffixTrie {
     edges: Vec<L1PackedSuffixTrieEdge>,
     remaining_horizon_by_node: Vec<usize>,
     subtree_bytes_by_node: Vec<[u64; 4]>,
+    subtree_nodes_by_node: Vec<usize>,
 }
 
 impl L1PackedSuffixTrie {
@@ -3254,6 +3301,7 @@ impl L1PackedSuffixTrie {
         }
         let mut remaining_horizon_by_node = vec![0usize; nodes.len()];
         let mut subtree_bytes_by_node = vec![[0u64; 4]; nodes.len()];
+        let mut subtree_nodes_by_node = vec![1usize; nodes.len()];
         for node_index in (0..nodes.len()).rev() {
             let node = nodes[node_index];
             let mut remaining_horizon = 0usize;
@@ -3262,6 +3310,8 @@ impl L1PackedSuffixTrie {
                 let child = edge.child as usize;
                 remaining_horizon =
                     remaining_horizon.max(1 + remaining_horizon_by_node[child]);
+                subtree_nodes_by_node[node_index] = subtree_nodes_by_node[node_index]
+                    .saturating_add(subtree_nodes_by_node[child]);
                 subtree_bytes_by_node[node_index][edge.byte as usize / 64] |=
                     1u64 << (edge.byte as usize % 64);
                 for word in 0..4 {
@@ -3275,8 +3325,122 @@ impl L1PackedSuffixTrie {
             edges,
             remaining_horizon_by_node,
             subtree_bytes_by_node,
+            subtree_nodes_by_node,
         }
     }
+}
+
+fn l1_estimate_packed_target_work(
+    trie: &L1PackedSuffixTrie,
+    node_index: usize,
+    state: u32,
+    probe_depth: usize,
+    self_loop_bytes_by_state: &[[u64; 4]],
+    flat_trans: &[u32],
+    transitions_by_byte: Option<&[u32]>,
+    num_lexer_states: usize,
+    active_language: Option<&[bool]>,
+    horizon_maps: Option<&[Arc<[u32]>]>,
+) -> usize {
+    if state == u32::MAX {
+        return 0;
+    }
+    let subtree = &trie.subtree_bytes_by_node[node_index];
+    let self_loops = &self_loop_bytes_by_state[state as usize];
+    if (0..4).all(|word| subtree[word] & !self_loops[word] == 0) {
+        return 0;
+    }
+    if probe_depth == 0 {
+        return trie.subtree_nodes_by_node[node_index];
+    }
+
+    let node = trie.nodes[node_index];
+    let mut estimate = 1usize;
+    for edge_offset in 0..node.edge_len as usize {
+        let edge = trie.edges[node.first_edge as usize + edge_offset];
+        let child = edge.child as usize;
+        let canonical_state = horizon_maps
+            .map(|maps| maps[trie.remaining_horizon_by_node[child]].as_ref());
+        let next = l1_transition(
+            flat_trans,
+            transitions_by_byte,
+            num_lexer_states,
+            active_language,
+            state,
+            edge.byte as usize,
+            canonical_state,
+        );
+        estimate = estimate.saturating_add(l1_estimate_packed_target_work(
+            trie,
+            child,
+            next,
+            probe_depth - 1,
+            self_loop_bytes_by_state,
+            flat_trans,
+            transitions_by_byte,
+            num_lexer_states,
+            active_language,
+            horizon_maps,
+        ));
+    }
+    estimate
+}
+
+fn l1_balance_packed_targets(
+    targets: &[u32],
+    chunk_count: usize,
+    trie: &L1PackedSuffixTrie,
+    self_loop_bytes_by_state: &[[u64; 4]],
+    flat_trans: &[u32],
+    transitions_by_byte: Option<&[u32]>,
+    num_lexer_states: usize,
+    active_language: Option<&[bool]>,
+    horizon_maps: Option<&[Arc<[u32]>]>,
+) -> Vec<Vec<u32>> {
+    const PROBE_DEPTH: usize = 3;
+    let mut weighted = targets
+        .iter()
+        .copied()
+        .map(|target| {
+            let work = l1_estimate_packed_target_work(
+                trie,
+                0,
+                target,
+                PROBE_DEPTH,
+                self_loop_bytes_by_state,
+                flat_trans,
+                transitions_by_byte,
+                num_lexer_states,
+                active_language,
+                horizon_maps,
+            );
+            (work, target)
+        })
+        .collect::<Vec<_>>();
+    weighted.sort_unstable_by(|left, right| right.cmp(left));
+
+    let mut chunks = (0..chunk_count)
+        .map(|_| (0usize, Vec::<u32>::new()))
+        .collect::<Vec<_>>();
+    for (work, target) in weighted {
+        let (load, targets) = chunks
+            .iter_mut()
+            .min_by_key(|(load, _)| *load)
+            .expect("at least one packed target chunk");
+        *load = load.saturating_add(work.max(1));
+        targets.push(target);
+    }
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][l1_balanced_target_chunks] targets={} chunks={} probe_depth={} estimated_loads={:?} chunk_sizes={:?}",
+            targets.len(),
+            chunk_count,
+            PROBE_DEPTH,
+            chunks.iter().map(|(load, _)| *load).collect::<Vec<_>>(),
+            chunks.iter().map(|(_, targets)| targets.len()).collect::<Vec<_>>(),
+        );
+    }
+    chunks.into_iter().map(|(_, targets)| targets).collect()
 }
 
 #[derive(Clone, Copy, Default)]
