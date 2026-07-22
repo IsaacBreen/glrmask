@@ -18,6 +18,20 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+// `libmimalloc-sys` intentionally does not publish constants for experimental
+// options. This is `mi_option_purge_delay` in the exactly pinned mimalloc v3
+// API; keep the dependency pin and this ordinal in sync.
+const MIMALLOC_PURGE_DELAY_OPTION: libmimalloc_sys::mi_option_t = 15;
+
+fn configure_mimalloc_latency_default() {
+    // `mi_option_set_default` preserves an explicit environment or
+    // programmatic setting. Without one, automatic OS-page purging can charge
+    // hundreds of microseconds to an otherwise cheap mask/commit operation.
+    unsafe {
+        libmimalloc_sys::mi_option_set_default(MIMALLOC_PURGE_DELAY_OPTION, -1);
+    }
+}
+
 use numpy::{PyArray1, PyReadwriteArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -1342,12 +1356,14 @@ fn add_internal_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     internal.add_function(wrap_pyfunction!(parser_path_count, &internal)?)?;
     internal.add_function(wrap_pyfunction!(debug_parser_stacks, &internal)?)?;
     internal.add_function(wrap_pyfunction!(commit_token_per_advance, &internal)?)?;
+    internal.add_function(wrap_pyfunction!(mimalloc_purge_delay, &internal)?)?;
     m.add_submodule(&internal)?;
     Ok(())
 }
 
 #[pymodule]
 fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    configure_mimalloc_latency_default();
     glrmask::Constraint::warm_ti_pool();
     m.add_class::<PyVocab>()?;
     m.add_class::<PyConstraint>()?;
@@ -1367,6 +1383,11 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
         ],
     )?;
     Ok(())
+}
+
+#[pyfunction]
+fn mimalloc_purge_delay() -> i64 {
+    unsafe { libmimalloc_sys::mi_option_get(MIMALLOC_PURGE_DELAY_OPTION) as i64 }
 }
 
 #[pyfunction]
