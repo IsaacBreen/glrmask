@@ -2370,26 +2370,6 @@ fn find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
             || estimated_work >= LARGE_BUCKET_WORK_PRODUCT;
 
         if parallel_bucket && targets.len() >= 32 && rayon::current_num_threads() > 1 {
-            if profile_enabled {
-                let compression = l1_bucket_compression_estimate(
-                    targets,
-                    &token_buckets.suffix_subtree_bytes[byte_idx],
-                    &token_buckets.suffix_first_bytes_by_bucket[byte_idx],
-                    token_buckets.has_empty_suffix_by_bucket[byte_idx],
-                    flat_trans,
-                );
-                eprintln!(
-                    "[glrmask/profile][l1_global_target_compression] byte={} tokens={} targets={} self_loop_targets={} first_dead_targets={} first_groups={} effective_targets={} first_unique_states={}",
-                    byte_idx,
-                    token_ids.len(),
-                    targets.len(),
-                    compression.self_loop_targets,
-                    compression.first_step_dead_targets,
-                    compression.first_step_groups,
-                    compression.effective_targets,
-                    compression.first_step_unique_states,
-                );
-            }
             let prebuilt_trie = token_buckets.packed_suffix_tries_by_first_byte[byte_idx]
                 .get_or_init(|| {
                     Arc::new(L1PackedSuffixTrie::build(
