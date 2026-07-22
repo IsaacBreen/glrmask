@@ -68,7 +68,7 @@ fn partition_local_synthesis_enabled() -> bool {
             let value = value.trim();
             !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
         })
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 fn build_partition_local_tokenizer(
