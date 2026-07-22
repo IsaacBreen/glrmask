@@ -71,6 +71,17 @@ fn partition_local_synthesis_enabled() -> bool {
         .unwrap_or(true)
 }
 
+fn partition_local_synthesis_selected(partition_label: &str) -> bool {
+    let Ok(filter) = std::env::var("GLRMASK_PARTITION_LOCAL_SYNTHESIS_FILTER") else {
+        return true;
+    };
+    filter
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .any(|item| partition_label == item)
+}
+
 fn branch_active_state_map_enabled() -> bool {
     std::env::var("GLRMASK_BRANCH_ACTIVE_STATE_MAP")
         .map(|value| {
@@ -406,10 +417,29 @@ fn l2p_auto_min_grammar_terminals_from_env() -> usize {
 
 #[derive(Debug)]
 struct CharTypeSubVocabs {
+    p2_overflow_threshold: Option<usize>,
     sub_vocabs: Arc<[Vocab]>,
 }
 
 impl crate::vocab::VocabDerivedArtifact for CharTypeSubVocabs {}
+
+fn p2_long_token_overflow_threshold() -> Option<usize> {
+    std::env::var("GLRMASK_P2_LONG_TOKEN_OVERFLOW_THRESHOLD")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&threshold| threshold > 0)
+}
+
+fn char_type_partition_index(bytes: &[u8], p2_overflow_threshold: Option<usize>) -> usize {
+    let partition = classify_vocab_char_type(bytes) as usize;
+    if partition == 2
+        && p2_overflow_threshold.is_some_and(|threshold| bytes.len() > threshold)
+    {
+        9
+    } else {
+        partition
+    }
+}
 
 fn vocab_from_token_partitions(vocab: &Vocab, token_partitions: Vec<Vec<u32>>) -> Arc<[Vocab]> {
     token_partitions
@@ -426,16 +456,21 @@ fn vocab_from_token_partitions(vocab: &Vocab, token_partitions: Vec<Vec<u32>>) -
 }
 
 fn build_char_type_sub_vocabs(vocab: &Vocab) -> Arc<[Vocab]> {
+    let p2_overflow_threshold = p2_long_token_overflow_threshold();
     if let Some(cached) = vocab.vocab_derived_cache_get::<CharTypeSubVocabs>() {
-        return Arc::clone(&cached.sub_vocabs);
+        if cached.p2_overflow_threshold == p2_overflow_threshold {
+            return Arc::clone(&cached.sub_vocabs);
+        }
     }
 
-    let mut partition_entries: Vec<Vec<(u32, Vec<u8>)>> = (0..9).map(|_| Vec::new()).collect();
-    let mut partition_bytes = [U8Set::empty(); 9];
+    let partition_count = if p2_overflow_threshold.is_some() { 10 } else { 9 };
+    let mut partition_entries: Vec<Vec<(u32, Vec<u8>)>> =
+        (0..partition_count).map(|_| Vec::new()).collect();
+    let mut partition_bytes = vec![U8Set::empty(); partition_count];
     let mut partition_follow_bytes: Vec<[U8Set; 256]> =
-        (0..9).map(|_| [U8Set::empty(); 256]).collect();
+        (0..partition_count).map(|_| [U8Set::empty(); 256]).collect();
     for (&token_id, bytes) in vocab.entries.iter() {
-        let idx = classify_vocab_char_type(bytes) as usize;
+        let idx = char_type_partition_index(bytes, p2_overflow_threshold);
         for &byte in bytes {
             partition_bytes[idx].insert(byte);
         }
@@ -459,6 +494,7 @@ fn build_char_type_sub_vocabs(vocab: &Vocab) -> Arc<[Vocab]> {
         .collect::<Vec<_>>()
         .into();
     vocab.vocab_derived_cache_set(Arc::new(CharTypeSubVocabs {
+        p2_overflow_threshold,
         sub_vocabs: Arc::clone(&sub_vocabs),
     }));
     sub_vocabs
@@ -855,7 +891,8 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
         let started_at = Instant::now();
         let label = format!("p{}", idx);
 
-        if let Some(local) = partition_local_synthesis_plan
+        if partition_local_synthesis_selected(&label)
+            && let Some(local) = partition_local_synthesis_plan
             .and_then(|plan| build_partition_local_tokenizer(tokenizer, sub_vocab, plan))
         {
             let local_flat_trans: Arc<[u32]> =
