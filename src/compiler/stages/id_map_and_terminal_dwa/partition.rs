@@ -35,6 +35,15 @@ fn split_l2p_vocab_enabled() -> bool {
     })
 }
 
+fn main_inactive_component_state_map_enabled() -> bool {
+    std::env::var("GLRMASK_MAIN_INACTIVE_COMPONENT_STATE_MAP")
+        .map(|value| {
+            let trimmed = value.trim();
+            trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or(false)
+}
+
 /// Build an id_map and terminal DWA for a single vocab partition.
 ///
 /// 1. Classify terminal path lengths into L1 / L2+ masks.
@@ -166,6 +175,30 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     let shared_l1_parent_order = derive_l1_subset_order
         .then(|| super::l1::prepared_l1_identity_vocab_order(vocab));
 
+    let select_smaller_structural_map = |active_terminals: &[bool]| {
+        main_inactive_component_state_map_enabled()
+            .then(|| {
+                super::synthetic_state_map::inactive_dispatch_component_state_map(
+                    tokenizer,
+                    active_terminals,
+                )
+            })
+            .flatten()
+            .filter(|map| {
+                initial_state_map.is_none_or(|initial| {
+                    map.num_internal_ids() < initial.num_internal_ids()
+                })
+            })
+    };
+    let l1_structural_state_map = has_l1
+        .then(|| select_smaller_structural_map(&l1_mask))
+        .flatten();
+    let l2p_structural_state_map = has_l2p
+        .then(|| select_smaller_structural_map(&l2p_mask))
+        .flatten();
+    let l1_initial_state_map = l1_structural_state_map.as_ref().or(initial_state_map);
+    let l2p_initial_state_map = l2p_structural_state_map.as_ref().or(initial_state_map);
+
     // The split-off L1 branch observes only the L2P terminal set. Large lexer
     // components belonging exclusively to other terminals are exact empty
     // residuals for this branch and can be collapsed before token replay.
@@ -182,13 +215,18 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                 map.num_internal_ids() < initial.num_internal_ids()
             })
         });
-    let split_l1_initial_state_map = split_l1_structural_state_map.as_ref().or(initial_state_map);
+    let split_l1_initial_state_map = split_l1_structural_state_map
+        .as_ref()
+        .or(l2p_structural_state_map.as_ref())
+        .or(initial_state_map);
     if compile_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][inactive_component_state_map] partition={} raw_states={} inherited_reps={} split_l1_reps={}",
+            "[glrmask/profile][inactive_component_state_map] partition={} raw_states={} inherited_reps={} l1_reps={} l2p_reps={} split_l1_reps={}",
             partition_label,
             tokenizer.num_states(),
             initial_state_map.map_or(tokenizer.num_states(), ManyToOneIdMap::num_internal_ids),
+            l1_initial_state_map.map_or(tokenizer.num_states(), ManyToOneIdMap::num_internal_ids),
+            l2p_initial_state_map.map_or(tokenizer.num_states(), ManyToOneIdMap::num_internal_ids),
             split_l1_initial_state_map.map_or(tokenizer.num_states(), ManyToOneIdMap::num_internal_ids),
         );
     }
@@ -214,7 +252,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                     &l1_mask,
                     flat_trans,
                     l1_transitions_by_byte,
-                    initial_state_map,
+                    l1_initial_state_map,
                     None,
                     shared_l1_token_trie.as_deref(),
                     None,
@@ -250,7 +288,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                         // analysis verifies flat-table compatibility before using it.
                         Some(flat_trans),
                         shared_l1_token_trie.as_deref(),
-                        initial_state_map,
+                        l2p_initial_state_map,
                     );
                     let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
                     return ((result, 0.0), (None, 0.0), elapsed_ms);
@@ -301,7 +339,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                                         // analysis verifies flat-table compatibility before using it.
                                 Some(flat_trans),
                                 shared_l1_token_trie.as_deref(),
-                                initial_state_map,
+                                l2p_initial_state_map,
                             );
                             (result, started_at.elapsed().as_secs_f64() * 1000.0)
                         }
