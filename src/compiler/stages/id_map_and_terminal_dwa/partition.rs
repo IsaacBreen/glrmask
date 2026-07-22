@@ -35,31 +35,6 @@ fn split_l2p_vocab_enabled() -> bool {
     })
 }
 
-pub(crate) fn classify_partition_terminal_path_lengths(
-    partition_label: &str,
-    tokenizer: &Tokenizer,
-    vocab: &Vocab,
-    token_path_disallowed_follows: &BTreeMap<u32, BitSet>,
-    num_terminals: u32,
-    shared_classify_cache: Option<&super::classify::SharedClassifyCache>,
-) -> Vec<TerminalPathLength> {
-    // Set GLRMASK_FORCE_ALL_L2P=1 to skip L1 and route everything through L2P.
-    let force_all_l2p =
-        std::env::var("GLRMASK_FORCE_ALL_L2P").is_ok_and(|value| value == "1");
-    if force_all_l2p {
-        vec![TerminalPathLength::TwoPlus; num_terminals as usize]
-    } else {
-        classify_terminal_path_lengths(
-            partition_label,
-            tokenizer,
-            vocab,
-            token_path_disallowed_follows,
-            num_terminals,
-            shared_classify_cache,
-        )
-    }
-}
-
 /// Build an id_map and terminal DWA for a single vocab partition.
 ///
 /// 1. Classify terminal path lengths into L1 / L2+ masks.
@@ -88,7 +63,6 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     shared_transition_cache: Option<&std::sync::OnceLock<super::l2p::equivalence_analysis::compat::FlatTransitionCache>>,
     shared_ti_output_cache: Option<&super::l2p::SharedTiTokenizerOutputCache>,
     shared_classify_cache: Option<&super::classify::SharedClassifyCache>,
-    preclassified_terminal_path_lengths: Option<&[TerminalPathLength]>,
 ) -> Option<PartitionTerminalDwas> {
     if vocab.is_empty() {
         return None;
@@ -97,21 +71,19 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     let total_started_at = Instant::now();
     let pre_classify_setup_started_at = Instant::now();
     let num_terminals = grammar.num_terminals as u32;
+    // Classify terminals into L1 (single-byte paths) vs L2+ by default.
+    // Set GLRMASK_FORCE_ALL_L2P=1 to skip L1 and route everything through L2P.
+    let force_all_l2p =
+        std::env::var("GLRMASK_FORCE_ALL_L2P").map_or(false, |v| v == "1");
+
     let pre_classify_setup_ms =
         pre_classify_setup_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let classify_started_at = Instant::now();
-    let terminal_path_lengths = if let Some(preclassified) = preclassified_terminal_path_lengths {
-        if preclassified.len() != num_terminals as usize {
-            crate::error::fail_internal_invariant(format!(
-                "preclassified terminal-path vector has wrong length: partition={partition_label} expected={} actual={}",
-                num_terminals,
-                preclassified.len(),
-            ));
-        }
-        preclassified.to_vec()
+    let terminal_path_lengths = if force_all_l2p {
+        vec![TerminalPathLength::TwoPlus; num_terminals as usize]
     } else {
-        classify_partition_terminal_path_lengths(
+        classify_terminal_path_lengths(
             partition_label,
             tokenizer,
             vocab,
@@ -120,11 +92,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
             shared_classify_cache,
         )
     };
-    let classify_ms = if preclassified_terminal_path_lengths.is_some() {
-        0.0
-    } else {
-        classify_started_at.elapsed().as_secs_f64() * 1000.0
-    };
+    let classify_ms = classify_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let routing_started_at = Instant::now();
     let mut l1_mask = vec![false; num_terminals as usize];
