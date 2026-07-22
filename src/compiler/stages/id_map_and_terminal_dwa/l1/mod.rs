@@ -687,6 +687,9 @@ fn l1_exact_profile_reuse_enabled() -> bool {
 }
 
 fn l1_remaining_horizon_quotients_enabled(state_count: usize, vocab_count: usize) -> bool {
+    if std::env::var_os("GLRMASK_FORCE_L1_REMAINING_HORIZON_QUOTIENTS").is_some() {
+        return true;
+    }
     // Building every finite-depth quotient costs O(k * states * byte_classes).
     // The 82k-token O9961 p2 path repays that prepass with a ~3k-state scanner,
     // but 10k-19k-state epsilon-NFA cases spend hundreds of milliseconds
@@ -703,6 +706,9 @@ fn l1_remaining_horizon_target_probe_supports_quotients(
     state_count: usize,
     raw_unique_targets: usize,
 ) -> bool {
+    if std::env::var_os("GLRMASK_FORCE_L1_REMAINING_HORIZON_QUOTIENTS").is_some() {
+        return true;
+    }
     // A depth quotient has to amortize O(depth * states * byte_classes) work.
     // If the unquotiented first-byte frontier is already small, the direct
     // packed suffix walk is cheaper than constructing the quotient family.
