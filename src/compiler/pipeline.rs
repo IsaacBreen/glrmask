@@ -2322,14 +2322,24 @@ fn compile_prepared_with_profile_and_table_construction(
 
                 if let Some(deferred_runtime_tokenizer) = deferred_runtime_tokenizer {
                     scope.spawn(move |_| {
+                        let start_delay_ms = std::env::var(
+                            "GLRMASK_DEFERRED_RUNTIME_START_DELAY_MS",
+                        )
+                        .ok()
+                        .and_then(|value| value.parse::<u64>().ok())
+                        .unwrap_or(0);
+                        if start_delay_ms != 0 {
+                            std::thread::sleep(std::time::Duration::from_millis(start_delay_ms));
+                        }
                         let runtime_started_at = Instant::now();
                         let runtime_tokenizer = deferred_runtime_tokenizer.finish();
                         let finish_ms = elapsed_ms(runtime_started_at);
                         if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some() {
                             eprintln!(
-                                "[glrmask/profile][tokenizer] deferred_runtime_finish states={} transitions={} elapsed_ms={:.3}",
+                                "[glrmask/profile][tokenizer] deferred_runtime_finish states={} transitions={} start_delay_ms={} elapsed_ms={:.3}",
                                 runtime_tokenizer.num_states(),
                                 runtime_tokenizer.transition_count(),
+                                start_delay_ms,
                                 finish_ms,
                             );
                         }
