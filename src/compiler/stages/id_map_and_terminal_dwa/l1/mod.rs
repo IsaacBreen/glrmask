@@ -4197,13 +4197,20 @@ fn l1_bucket_suffix_signature_profiles_packed(
     });
     if let Some(total_started_at) = total_started_at {
         eprintln!(
-            "[glrmask/profile][l1_packed_product] first_byte={} tokens={} targets={} trie_nodes={} active_nodes={} states={} uniform_subtree_transitions={} trie_ms={:.3} propagate_ms={:.3} behavior_ms={:.3} materialize_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][l1_packed_product] first_byte={} tokens={} targets={} trie_nodes={} active_nodes={} states={} states_capacity={} transition_maps={} transition_maps_capacity={} behavior_ids={} behavior_ids_capacity={} records={} record_child_behaviors={} uniform_subtree_transitions={} trie_ms={:.3} propagate_ms={:.3} behavior_ms={:.3} materialize_ms={:.3} total_ms={:.3}",
             first_byte,
             token_ids.len(),
             walk_targets.len(),
             trie.nodes.len(),
             active_nodes.len(),
             states.len(),
+            states.capacity(),
+            transition_maps.len(),
+            transition_maps.capacity(),
+            behavior_ids.len(),
+            behavior_ids.capacity(),
+            records.len(),
+            record_child_behaviors.len(),
             uniform_subtree_transitions,
             trie_ms,
             propagate_ms,
