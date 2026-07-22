@@ -1841,6 +1841,40 @@ struct ZeroMinRepeatSuffixBuild {
     state_by_key: FxHashMap<ZeroMinRepeatSuffixState, u32>,
 }
 
+fn compute_dfa_byte_equivalence_classes(dfas: &[&DFA]) -> (Vec<u8>, Vec<Vec<u8>>) {
+    let mut partitions = vec![U8Set::all()];
+    let mut seen_sets = FxHashSet::default();
+
+    for dfa in dfas {
+        for state in dfa.states() {
+            let mut bytes_by_target = FxHashMap::<u32, U8Set>::default();
+            for (byte, &target) in state.transitions.iter() {
+                bytes_by_target
+                    .entry(target)
+                    .and_modify(|set| {
+                        set.insert(byte);
+                    })
+                    .or_insert_with(|| U8Set::single(byte));
+            }
+            for byte_set in bytes_by_target.into_values() {
+                if seen_sets.insert(byte_set) {
+                    partitions = refine_u8_partitions(partitions, byte_set);
+                }
+            }
+        }
+    }
+
+    let mut class_map = vec![0u8; 256];
+    let mut class_members = vec![Vec::new(); partitions.len()];
+    for (class_id, partition) in partitions.iter().enumerate() {
+        for byte in partition.iter() {
+            class_map[byte as usize] = class_id as u8;
+            class_members[class_id].push(byte);
+        }
+    }
+    (class_map, class_members)
+}
+
 fn build_zero_min_repeat_suffix_dominance_dfa_internal(
     body_dfa: &DFA,
     suffix_dfa: &DFA,
@@ -1878,11 +1912,13 @@ fn build_zero_min_repeat_suffix_dominance_dfa_internal(
     state_map.insert(start.clone(), 0);
     let mut states = vec![start.clone()];
     let mut worklist = VecDeque::from([(0u32, start)]);
+    let (byte_to_class, class_members) =
+        compute_dfa_byte_equivalence_classes(&[body_dfa, suffix_dfa]);
 
     while let Some((state_id, state)) = worklist.pop_front() {
-        let mut transitions = Vec::new();
-        for byte_value in 0u16..=255 {
-            let byte = byte_value as u8;
+        let mut target_by_class = vec![u32::MAX; class_members.len()];
+        for (class, members) in class_members.iter().enumerate() {
+            let byte = members[0];
             let mut next_body = vec![u32::MAX; body_dfa.num_states()];
             for (body_state, &completed) in state.body_min_counts.iter().enumerate() {
                 if completed == u32::MAX {
@@ -1926,8 +1962,16 @@ fn build_zero_min_repeat_suffix_dominance_dfa_internal(
                 worklist.push_back((target, next));
                 target
             };
-            transitions.push((byte, target));
+            target_by_class[class] = target;
         }
+        let transitions = byte_to_class
+            .iter()
+            .enumerate()
+            .filter_map(|(byte, &class)| {
+                let target = target_by_class[class as usize];
+                (target != u32::MAX).then_some((byte as u8, target))
+            })
+            .collect();
         dfa.set_transitions_from_sorted_entries(state_id, transitions);
     }
 
