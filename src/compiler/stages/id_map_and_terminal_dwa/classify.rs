@@ -4271,19 +4271,53 @@ fn compute_token_l2p_map(
 }
 
 pub(crate) fn partition_vocab_char_type_tokens(vocab: &Vocab) -> Vec<Vec<u32>> {
+    let p0_overflow_threshold = std::env::var("GLRMASK_P0_LONG_TOKEN_OVERFLOW_THRESHOLD")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&threshold| threshold > 0);
+    let p1_overflow_threshold = std::env::var("GLRMASK_P1_LONG_TOKEN_OVERFLOW_THRESHOLD")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&threshold| threshold > 0);
     let p2_overflow_threshold = std::env::var("GLRMASK_P2_LONG_TOKEN_OVERFLOW_THRESHOLD")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|&threshold| threshold > 0);
-    let partition_count = if p2_overflow_threshold.is_some() { 10 } else { 9 };
+    let p4_overflow_threshold = std::env::var("GLRMASK_P4_LONG_TOKEN_OVERFLOW_THRESHOLD")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&threshold| threshold > 0);
+    let partition_count = if p0_overflow_threshold.is_some() {
+        13
+    } else if p4_overflow_threshold.is_some() {
+        12
+    } else if p1_overflow_threshold.is_some() {
+        11
+    } else if p2_overflow_threshold.is_some() {
+        10
+    } else {
+        9
+    };
     let mut partitions: Vec<Vec<u32>> =
         (0..partition_count).map(|_| Vec::new()).collect();
     for (&token_id, bytes) in vocab.entries.iter() {
         let mut idx = classify_vocab_char_type(bytes) as usize;
-        if idx == 2
+        if idx == 0
+            && p0_overflow_threshold.is_some_and(|threshold| bytes.len() > threshold)
+        {
+            idx = 12;
+        } else if idx == 1
+            && p1_overflow_threshold.is_some_and(|threshold| bytes.len() > threshold)
+        {
+            idx = 10;
+        } else if idx == 2
             && p2_overflow_threshold.is_some_and(|threshold| bytes.len() > threshold)
         {
             idx = 9;
+        } else if idx == 4
+            && p4_overflow_threshold.is_some_and(|threshold| bytes.len() > threshold)
+        {
+            idx = 11;
         }
         partitions[idx].push(token_id);
     }

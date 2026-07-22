@@ -464,7 +464,10 @@ fn l2p_auto_min_grammar_terminals_from_env() -> usize {
 
 #[derive(Debug)]
 struct CharTypeSubVocabs {
+    p0_overflow_threshold: Option<usize>,
+    p1_overflow_threshold: Option<usize>,
     p2_overflow_threshold: Option<usize>,
+    p4_overflow_threshold: Option<usize>,
     sub_vocabs: Arc<[Vocab]>,
 }
 
@@ -477,12 +480,51 @@ fn p2_long_token_overflow_threshold() -> Option<usize> {
         .filter(|&threshold| threshold > 0)
 }
 
-fn char_type_partition_index(bytes: &[u8], p2_overflow_threshold: Option<usize>) -> usize {
+fn p1_long_token_overflow_threshold() -> Option<usize> {
+    std::env::var("GLRMASK_P1_LONG_TOKEN_OVERFLOW_THRESHOLD")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&threshold| threshold > 0)
+}
+
+fn p0_long_token_overflow_threshold() -> Option<usize> {
+    std::env::var("GLRMASK_P0_LONG_TOKEN_OVERFLOW_THRESHOLD")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&threshold| threshold > 0)
+}
+
+fn p4_long_token_overflow_threshold() -> Option<usize> {
+    std::env::var("GLRMASK_P4_LONG_TOKEN_OVERFLOW_THRESHOLD")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&threshold| threshold > 0)
+}
+
+fn char_type_partition_index(
+    bytes: &[u8],
+    p0_overflow_threshold: Option<usize>,
+    p1_overflow_threshold: Option<usize>,
+    p2_overflow_threshold: Option<usize>,
+    p4_overflow_threshold: Option<usize>,
+) -> usize {
     let partition = classify_vocab_char_type(bytes) as usize;
-    if partition == 2
+    if partition == 0
+        && p0_overflow_threshold.is_some_and(|threshold| bytes.len() > threshold)
+    {
+        12
+    } else if partition == 1
+        && p1_overflow_threshold.is_some_and(|threshold| bytes.len() > threshold)
+    {
+        10
+    } else if partition == 2
         && p2_overflow_threshold.is_some_and(|threshold| bytes.len() > threshold)
     {
         9
+    } else if partition == 4
+        && p4_overflow_threshold.is_some_and(|threshold| bytes.len() > threshold)
+    {
+        11
     } else {
         partition
     }
@@ -503,21 +545,44 @@ fn vocab_from_token_partitions(vocab: &Vocab, token_partitions: Vec<Vec<u32>>) -
 }
 
 fn build_char_type_sub_vocabs(vocab: &Vocab) -> Arc<[Vocab]> {
+    let p0_overflow_threshold = p0_long_token_overflow_threshold();
+    let p1_overflow_threshold = p1_long_token_overflow_threshold();
     let p2_overflow_threshold = p2_long_token_overflow_threshold();
+    let p4_overflow_threshold = p4_long_token_overflow_threshold();
     if let Some(cached) = vocab.vocab_derived_cache_get::<CharTypeSubVocabs>() {
-        if cached.p2_overflow_threshold == p2_overflow_threshold {
+        if cached.p0_overflow_threshold == p0_overflow_threshold
+            && cached.p1_overflow_threshold == p1_overflow_threshold
+            && cached.p2_overflow_threshold == p2_overflow_threshold
+            && cached.p4_overflow_threshold == p4_overflow_threshold
+        {
             return Arc::clone(&cached.sub_vocabs);
         }
     }
 
-    let partition_count = if p2_overflow_threshold.is_some() { 10 } else { 9 };
+    let partition_count = if p0_overflow_threshold.is_some() {
+        13
+    } else if p4_overflow_threshold.is_some() {
+        12
+    } else if p1_overflow_threshold.is_some() {
+        11
+    } else if p2_overflow_threshold.is_some() {
+        10
+    } else {
+        9
+    };
     let mut partition_entries: Vec<Vec<(u32, Vec<u8>)>> =
         (0..partition_count).map(|_| Vec::new()).collect();
     let mut partition_bytes = vec![U8Set::empty(); partition_count];
     let mut partition_follow_bytes: Vec<[U8Set; 256]> =
         (0..partition_count).map(|_| [U8Set::empty(); 256]).collect();
     for (&token_id, bytes) in vocab.entries.iter() {
-        let idx = char_type_partition_index(bytes, p2_overflow_threshold);
+        let idx = char_type_partition_index(
+            bytes,
+            p0_overflow_threshold,
+            p1_overflow_threshold,
+            p2_overflow_threshold,
+            p4_overflow_threshold,
+        );
         for &byte in bytes {
             partition_bytes[idx].insert(byte);
         }
@@ -541,7 +606,10 @@ fn build_char_type_sub_vocabs(vocab: &Vocab) -> Arc<[Vocab]> {
         .collect::<Vec<_>>()
         .into();
     vocab.vocab_derived_cache_set(Arc::new(CharTypeSubVocabs {
+        p0_overflow_threshold,
+        p1_overflow_threshold,
         p2_overflow_threshold,
+        p4_overflow_threshold,
         sub_vocabs: Arc::clone(&sub_vocabs),
     }));
     sub_vocabs
