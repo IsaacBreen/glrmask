@@ -1438,6 +1438,9 @@ fn build_templates_for_compile(
 #[derive(Clone)]
 struct TokenizerDagLane {
     tokenizer: Arc<Tokenizer>,
+    partition_local_synthesis_plan: Option<Arc<
+        crate::compiler::stages::id_map_and_terminal_dwa::PartitionLocalSynthesisPlan,
+    >>,
     synthetic_candidate_terminals: usize,
     synthetic_certification_ms: f64,
     compile_tokenizer_states: usize,
@@ -1967,6 +1970,7 @@ fn launch_terminal_dag_if_ready<'scope>(
                 &flat_global.global_max_length_state_map,
                 Some(&classify.shared_classify_cache),
                 Some(flat_global.shared_transition_cache.as_ref()),
+                tokenizer.partition_local_synthesis_plan.as_deref(),
             );
         let special_started_at = Instant::now();
         let special_token_terminals = collect_special_token_terminals(prepared_grammar);
@@ -2271,6 +2275,50 @@ fn compile_prepared_with_profile_and_table_construction(
                 }
                 let compile_tokenizer_states = tokenizer.num_states() as usize;
                 let compile_tokenizer_transitions = tokenizer.transition_count();
+                let partition_local_synthesis_plan = deferred_runtime_tokenizer
+                    .is_some()
+                    .then(|| {
+                        synthetic_tokenizer_plan_ref.map(|plan| {
+                            Arc::new(
+                                crate::compiler::stages::id_map_and_terminal_dwa::PartitionLocalSynthesisPlan {
+                                    expressions: Arc::from(
+                                        plan.synthesized_expressions.clone().into_boxed_slice(),
+                                    ),
+                                    partition_ids: Arc::from(
+                                        plan.partition_ids.clone().into_boxed_slice(),
+                                    ),
+                                    residual_isolation_classes: Arc::from(
+                                        plan.residual_isolation_classes.clone().into_boxed_slice(),
+                                    ),
+                                    protected_terminal_ids: Arc::from(
+                                        plan.changed_terminal_ids.clone().into_boxed_slice(),
+                                    ),
+                                    labels: Arc::from(
+                                        prepared_grammar_ref
+                                            .terminals
+                                            .iter()
+                                            .enumerate()
+                                            .map(|(index, _)| {
+                                                prepared_grammar_ref
+                                                    .terminal_display_name(index as u32)
+                                            })
+                                            .collect::<Vec<_>>()
+                                            .into_boxed_slice(),
+                                    ),
+                                    adaptive: lexer_adaptive_override.unwrap_or_else(|| {
+                                        env_flag_enabled_by_default("GLRMASK_LEXER_ADAPTIVE")
+                                    }),
+                                    global_max_token_len: vocab
+                                        .entries
+                                        .values()
+                                        .map(Vec::len)
+                                        .max()
+                                        .unwrap_or(0),
+                                },
+                            )
+                        })
+                    })
+                    .flatten();
 
                 if let Some(deferred_runtime_tokenizer) = deferred_runtime_tokenizer {
                     scope.spawn(move |_| {
@@ -2307,6 +2355,7 @@ fn compile_prepared_with_profile_and_table_construction(
 
                 let tokenizer_lane = TokenizerDagLane {
                     tokenizer: Arc::new(tokenizer),
+                    partition_local_synthesis_plan,
                     synthetic_candidate_terminals: synthetic_tokenizer_plan_ref
                         .map_or(0, |plan| plan.changed_terminal_count),
                     synthetic_certification_ms,
