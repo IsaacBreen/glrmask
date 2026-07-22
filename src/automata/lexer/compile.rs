@@ -3765,6 +3765,292 @@ fn combine_lexer_components_under_epsilon_root(
     combined
 }
 
+struct ExtractedDispatchComponent {
+    terminal_ids: Vec<usize>,
+    source_states: Vec<u32>,
+    dfa: DFA,
+}
+
+fn extract_dispatch_components(tokenizer: &Tokenizer) -> Option<Vec<ExtractedDispatchComponent>> {
+    let roots = tokenizer.deterministic_dispatch_roots()?;
+    let components = tokenizer.disjoint_dispatch_components()?;
+    if roots.len() != components.len() {
+        return None;
+    }
+
+    roots
+        .iter()
+        .copied()
+        .zip(components)
+        .map(|(root, mut source_states)| {
+            source_states.sort_unstable();
+            let root_position = source_states.iter().position(|&state| state == root)?;
+            source_states.swap(0, root_position);
+
+            let terminal_ids = tokenizer
+                .dfa
+                .possible_future_group_ids(root)
+                .iter()
+                .collect::<Vec<_>>();
+            if terminal_ids.is_empty() {
+                return None;
+            }
+            let mut local_group_by_terminal = vec![usize::MAX; tokenizer.num_terminals as usize];
+            for (local_group, &terminal) in terminal_ids.iter().enumerate() {
+                *local_group_by_terminal.get_mut(terminal)? = local_group;
+            }
+            let mut local_state_by_source = vec![u32::MAX; tokenizer.dfa.num_states()];
+            for (local_state, &source_state) in source_states.iter().enumerate() {
+                local_state_by_source[source_state as usize] = local_state as u32;
+            }
+
+            let mut dfa = DFA::new(source_states.len());
+            dfa.ensure_group_capacity(terminal_ids.len());
+            for (local_group, &terminal) in terminal_ids.iter().enumerate() {
+                dfa.set_group_u8set(
+                    local_group as u32,
+                    *tokenizer.dfa.group_id_to_u8set(terminal as u32),
+                );
+            }
+            for (local_state, &source_state) in source_states.iter().enumerate() {
+                let source_dfa_state = tokenizer.dfa.states().get(source_state as usize)?;
+                let transitions = source_dfa_state
+                    .transitions
+                    .iter()
+                    .map(|(byte, &target)| {
+                        let target = *local_state_by_source.get(target as usize)?;
+                        (target != u32::MAX).then_some((byte, target))
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                dfa.set_transitions_from_sorted_entries(local_state as u32, transitions);
+                for &target in &source_dfa_state.epsilon_transitions {
+                    let target = *local_state_by_source.get(target as usize)?;
+                    if target == u32::MAX {
+                        return None;
+                    }
+                    dfa.add_epsilon_transition(local_state as u32, target);
+                }
+
+                let mut finalizers = BitSet::new(terminal_ids.len());
+                let mut futures = BitSet::new(terminal_ids.len());
+                for terminal in tokenizer.dfa.finalizers(source_state).iter() {
+                    let local_group = *local_group_by_terminal.get(terminal)?;
+                    if local_group == usize::MAX {
+                        return None;
+                    }
+                    finalizers.set(local_group);
+                }
+                for terminal in tokenizer
+                    .dfa
+                    .possible_future_group_ids(source_state)
+                    .iter()
+                {
+                    let local_group = *local_group_by_terminal.get(terminal)?;
+                    if local_group == usize::MAX {
+                        return None;
+                    }
+                    futures.set(local_group);
+                }
+                dfa.overwrite_state_metadata(local_state as u32, finalizers, futures);
+            }
+            Some(ExtractedDispatchComponent {
+                terminal_ids,
+                source_states,
+                dfa,
+            })
+        })
+        .collect()
+}
+
+fn augment_component_from_verified_prefix(
+    source: &DFA,
+    rebuilt: &DFA,
+    synthesized: &mut DFA,
+    rebuilt_to_synthesized: &[u32],
+) -> Option<Vec<u32>> {
+    if source.num_groups() != rebuilt.num_groups()
+        || source.num_groups() != synthesized.num_groups()
+        || rebuilt_to_synthesized.len() != rebuilt.num_states()
+        || rebuilt.num_states() > source.num_states()
+    {
+        return None;
+    }
+    for state in 0..rebuilt.num_states() {
+        let state = state as u32;
+        if source.finalizers(state) != rebuilt.finalizers(state)
+            || source.possible_future_group_ids(state)
+                != rebuilt.possible_future_group_ids(state)
+            || source.states()[state as usize].epsilon_transitions
+                != rebuilt.states()[state as usize].epsilon_transitions
+            || source.states()[state as usize].transitions
+                != rebuilt.states()[state as usize].transitions
+        {
+            return None;
+        }
+    }
+
+    let mut source_to_synthesized = vec![u32::MAX; source.num_states()];
+    source_to_synthesized[..rebuilt.num_states()].copy_from_slice(rebuilt_to_synthesized);
+    for source_state in rebuilt.num_states()..source.num_states() {
+        source_to_synthesized[source_state] = synthesized.add_state();
+    }
+    for source_state in rebuilt.num_states()..source.num_states() {
+        let source_state_u32 = source_state as u32;
+        let target_state = source_to_synthesized[source_state];
+        let source_dfa_state = &source.states()[source_state];
+        if !source_dfa_state.epsilon_transitions.is_empty() {
+            return None;
+        }
+        let transitions = source_dfa_state
+            .transitions
+            .iter()
+            .map(|(byte, &target)| {
+                Some((byte, *source_to_synthesized.get(target as usize)?))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        if transitions.iter().any(|&(_, target)| target == u32::MAX) {
+            return None;
+        }
+        synthesized.set_transitions_from_sorted_entries(target_state, transitions);
+        synthesized.overwrite_state_metadata(
+            target_state,
+            source.finalizers(source_state_u32).clone(),
+            source.possible_future_group_ids(source_state_u32).clone(),
+        );
+    }
+    Some(source_to_synthesized)
+}
+
+/// Further synthesize protected singleton components of an already-built
+/// partitioned tokenizer without recompiling its ordinary components.
+///
+/// Every unchanged dispatch component is cloned exactly. Changed protected
+/// components use the same structural terminal-pair proof as the global
+/// synthesis, then clone any externally-entered residual states appended to
+/// the actual source component. The returned map covers the actual source
+/// tokenizer's raw-state domain.
+pub(crate) fn compile_further_synthesized_tokenizer_with_structural_map(
+    source: &Tokenizer,
+    source_expressions: &[Expr],
+    synthesized_expressions: &[Expr],
+    protected_terminal_ids: &[u32],
+    vocab: &Vocab,
+    repeat_horizons: &VocabularyRepeatHorizonCache,
+    max_token_len: usize,
+    relevant_bytes: &[u8],
+) -> Option<(Tokenizer, Vec<u32>)> {
+    if source_expressions.len() != synthesized_expressions.len()
+        || source_expressions.len() != source.num_terminals as usize
+    {
+        return None;
+    }
+    let protected = protected_terminal_ids
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let changed = source_expressions
+        .iter()
+        .zip(synthesized_expressions)
+        .map(|(source, synthesized)| source != synthesized)
+        .collect::<Vec<_>>();
+    if !changed.iter().any(|&changed| changed) {
+        return None;
+    }
+
+    let extracted = extract_dispatch_components(source)?;
+    let mut output_components = Vec::<LexerComponent>::with_capacity(extracted.len());
+    let mut component_maps = Vec::<(Vec<u32>, Vec<u32>)>::with_capacity(extracted.len());
+    let mut handled_changed = vec![false; changed.len()];
+
+    for component in extracted {
+        let changed_terminals = component
+            .terminal_ids
+            .iter()
+            .copied()
+            .filter(|&terminal| changed.get(terminal).copied().unwrap_or(false))
+            .collect::<Vec<_>>();
+        if changed_terminals.is_empty() {
+            let state_count = component.dfa.num_states() as u32;
+            component_maps.push((
+                component.source_states,
+                (0..state_count).collect::<Vec<_>>(),
+            ));
+            output_components.push(LexerComponent {
+                terminal_ids: component.terminal_ids,
+                dfa: component.dfa,
+                protected_residual: false,
+            });
+            continue;
+        }
+        if changed_terminals.len() != 1
+            || component.terminal_ids.len() != 1
+            || !protected.contains(&(changed_terminals[0] as u32))
+        {
+            return None;
+        }
+        let terminal = changed_terminals[0];
+        handled_changed[terminal] = true;
+        let pair = compile_terminal_expression_pair_with_structural_map(
+            &source_expressions[terminal],
+            &synthesized_expressions[terminal],
+            vocab,
+            repeat_horizons,
+            max_token_len,
+            relevant_bytes,
+        )?;
+        let (mut synthesized, synthesized_nullable) =
+            isolate_component_nullable_start(pair.synthesized.dfa, 1);
+        let (rebuilt, rebuilt_nullable) = isolate_component_nullable_start(pair.full.dfa, 1);
+        if !synthesized_nullable.is_empty() || !rebuilt_nullable.is_empty() {
+            return None;
+        }
+        let source_to_synthesized = augment_component_from_verified_prefix(
+            &component.dfa,
+            &rebuilt,
+            &mut synthesized,
+            &pair.full_to_synthesized,
+        )?;
+        component_maps.push((component.source_states, source_to_synthesized));
+        output_components.push(LexerComponent {
+            terminal_ids: component.terminal_ids,
+            dfa: synthesized,
+            protected_residual: true,
+        });
+    }
+    if changed
+        .iter()
+        .enumerate()
+        .any(|(terminal, &changed)| changed && !handled_changed[terminal])
+    {
+        return None;
+    }
+
+    let mut source_to_synthesized = vec![u32::MAX; source.dfa.num_states()];
+    source_to_synthesized[0] = 0;
+    let mut offset = 1u32;
+    for (component, (source_states, local_map)) in output_components.iter().zip(&component_maps) {
+        if source_states.len() != local_map.len() {
+            return None;
+        }
+        for (&source_state, &local_state) in source_states.iter().zip(local_map) {
+            source_to_synthesized[source_state as usize] = offset + local_state;
+        }
+        offset = offset.checked_add(component.dfa.num_states() as u32)?;
+    }
+    if source_to_synthesized.iter().any(|&state| state == u32::MAX) {
+        return None;
+    }
+    let dfa = combine_lexer_components_under_epsilon_root(
+        output_components,
+        source_expressions.len(),
+    );
+    let tokenizer = Regex { dfa }.into_tokenizer(
+        source_expressions.len() as u32,
+        Some(Arc::from(synthesized_expressions.to_vec().into_boxed_slice())),
+    );
+    Some((tokenizer, source_to_synthesized))
+}
+
 /// Compile independently protected terminal partitions as exact/synthesized
 /// pairs while compiling every unchanged partition only once. The returned
 /// state map is structural: the global epsilon root maps to the global root,
