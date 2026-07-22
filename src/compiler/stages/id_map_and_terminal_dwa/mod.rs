@@ -94,8 +94,12 @@ fn build_partition_local_tokenizer(
     if max_token_len == 0 || max_token_len >= plan.global_max_token_len {
         return None;
     }
-    let allow_half_horizon =
-        std::env::var_os("GLRMASK_PARTITION_LOCAL_SYNTHESIS_ALLOW_HALF_HORIZON").is_some();
+    let allow_half_horizon = std::env::var("GLRMASK_PARTITION_LOCAL_SYNTHESIS_ALLOW_HALF_HORIZON")
+        .map(|value| {
+            let value = value.trim();
+            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(true);
     // A local structural pair has a non-trivial fixed construction cost. Very
     // small vocabulary partitions are already cheap, while a horizon close to
     // the global maximum cannot remove enough protected residual depth to
