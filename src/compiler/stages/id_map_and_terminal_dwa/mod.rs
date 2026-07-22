@@ -123,6 +123,7 @@ pub(crate) fn build_branch_active_state_map(
     active: &[bool],
     initial_state_map: Option<&ManyToOneIdMap>,
     branch_label: &str,
+    force: bool,
 ) -> Option<(ManyToOneIdMap, f64)> {
     if !branch_active_state_map_enabled() || vocab.is_empty() {
         return None;
@@ -142,13 +143,12 @@ pub(crate) fn build_branch_active_state_map(
         {
             return None;
         }
-    } else {
+    } else if !force {
         // Stable active-language refinement has a real fixed cost. The corpus
         // gate is the large L1 branch where exact whole-token profiles dominate:
-        // 50k+ tokens and at least 300M raw state-token pairs. Smaller branches
-        // either finish before the refinement amortizes or are hidden behind a
-        // different partition. This is a strategy gate only; the quotient itself
-        // remains exact and has an explicit diagnostic opt-out above.
+        // 50k+ tokens and at least 300M raw state-token pairs. Branch-tokenizer
+        // materialization can explicitly force this exact refinement for a
+        // separately gated branch.
         let work = source_reps.saturating_mul(vocab.len());
         if !branch_label.ends_with(".l1") || vocab.len() < 50_000 || work < 300_000_000 {
             return None;
@@ -252,8 +252,12 @@ fn build_partition_local_tokenizer(
     // the global maximum cannot remove enough protected residual depth to
     // amortize that cost. This gate chooses an optimization strategy only; the
     // ordinary global-tokenizer path remains the exact fallback.
+    let min_local_horizon = std::env::var("GLRMASK_PARTITION_LOCAL_SYNTHESIS_MIN_HORIZON")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(16);
     if vocab.len() < 2_000
-        || max_token_len < 16
+        || max_token_len < min_local_horizon
         || if allow_half_horizon {
             max_token_len.saturating_mul(2) > plan.global_max_token_len
         } else {

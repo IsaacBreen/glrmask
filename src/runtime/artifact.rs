@@ -2274,6 +2274,11 @@ pub struct Constraint {
     /// Runtime-only vocabulary data for direct dynamic masking.
     #[serde(skip, default)]
     pub(crate) dynamic_mask_vocab: DynamicMaskVocab,
+    /// Lazily materialized static-mode fallback vocabulary. Ordinary static
+    /// masking never touches this; it is initialized only if an empty
+    /// possible-matches table encounters a token-start exclusion.
+    #[serde(skip, default)]
+    pub(crate) lazy_dynamic_mask_vocab: OnceLock<DynamicMaskVocab>,
 
     /// possible_matches keyed by grammar terminal id.
     ///

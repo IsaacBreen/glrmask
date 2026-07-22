@@ -25,25 +25,45 @@ use crate::Vocab;
 
 use super::build_branch_active_state_map;
 
-fn structural_branch_tokenizer_selected(branch_label: &str) -> bool {
-    let enabled = std::env::var("GLRMASK_STRUCTURAL_BRANCH_TOKENIZER")
-        .map(|value| {
-            let value = value.trim();
-            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
-        })
-        .unwrap_or(false);
-    if !enabled {
-        return false;
+fn structural_branch_tokenizer_selected(
+    branch_label: &str,
+    vocab_tokens: usize,
+    active_terminals: usize,
+    source_states: usize,
+) -> bool {
+    if let Ok(value) = std::env::var("GLRMASK_STRUCTURAL_BRANCH_TOKENIZER") {
+        let value = value.trim();
+        if value.is_empty() || value == "0" || value.eq_ignore_ascii_case("false") {
+            return false;
+        }
+        return std::env::var("GLRMASK_STRUCTURAL_BRANCH_TOKENIZER_FILTER")
+            .map(|filter| {
+                filter
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|item| !item.is_empty())
+                    .any(|item| branch_label.contains(item))
+            })
+            .unwrap_or(true);
     }
-    std::env::var("GLRMASK_STRUCTURAL_BRANCH_TOKENIZER_FILTER")
-        .map(|filter| {
-            filter
-                .split(',')
-                .map(str::trim)
-                .filter(|item| !item.is_empty())
-                .any(|item| branch_label.contains(item))
-        })
-        .unwrap_or(true)
+
+    // Automatic strategy gate, based on branch structure rather than schema
+    // identity. The structural-token partition's tiny L1 family becomes almost
+    // free after projection. The mixed-token partition's L2P family benefits
+    // only in the medium active-terminal / medium tokenizer regime; very small
+    // active families retain stronger token canonicalization on the raw path,
+    // while very large tokenizers make active refinement itself dominant.
+    match branch_label {
+        "p0.l1" => {
+            active_terminals <= 4 && vocab_tokens >= 2_000 && source_states >= 5_000
+        }
+        "p1.l2p" => {
+            (48..=128).contains(&active_terminals)
+                && (8_000..=30_000).contains(&vocab_tokens)
+                && (10_000..=24_000).contains(&source_states)
+        }
+        _ => false,
+    }
 }
 
 fn materialize_branch_active_tokenizer_selected(branch_label: &str) -> bool {
@@ -164,37 +184,6 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
         }
     }
 
-    if std::env::var_os("GLRMASK_DUMP_BRANCH_COMPONENTS").is_some()
-        && let (Some(roots), Some(components)) = (
-            tokenizer.deterministic_dispatch_roots(),
-            tokenizer.disjoint_dispatch_components(),
-        )
-    {
-        for (component, (&root, states)) in roots.iter().zip(&components).enumerate() {
-            let terminals = tokenizer
-                .possible_future_terminals_iter(root)
-                .collect::<Vec<_>>();
-            let l1 = terminals
-                .iter()
-                .filter(|&&terminal| l1_mask[terminal as usize])
-                .count();
-            let l2p = terminals
-                .iter()
-                .filter(|&&terminal| l2p_mask[terminal as usize])
-                .count();
-            eprintln!(
-                "[glrmask/dump][branch_component] partition={} component={} states={} terminals={} l1={} l2p={} inactive={}",
-                partition_label,
-                component,
-                states.len(),
-                terminals.len(),
-                l1,
-                l2p,
-                terminals.len().saturating_sub(l1 + l2p),
-            );
-        }
-    }
-
     let use_prebuilt_l1_token_trie = std::env::var("GLRMASK_USE_PREBUILT_L1_TOKEN_TRIE")
         .map(|value| {
             let trimmed = value.trim();
@@ -278,27 +267,24 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
         || {
             if has_l1 {
                 let started_at = Instant::now();
+                let branch_label = format!("{partition_label}.l1");
+                let projection_requested = structural_branch_tokenizer_selected(
+                    &branch_label,
+                    vocab.len(),
+                    l1_mask.iter().filter(|&&active| active).count(),
+                    initial_state_map
+                        .map(ManyToOneIdMap::num_internal_ids)
+                        .unwrap_or_else(|| tokenizer.num_states()) as usize,
+                ) || materialize_branch_active_tokenizer_selected(&branch_label);
                 let branch_state_map = build_branch_active_state_map(
                     tokenizer,
                     vocab,
                     &l1_mask,
                     initial_state_map,
-                    &format!("{partition_label}.l1"),
+                    &branch_label,
+                    projection_requested,
                 );
-                let structural = structural_branch_tokenizer_selected(
-                    &format!("{partition_label}.l1"),
-                )
-                .then(|| {
-                    super::synthetic_state_map::structurally_project_active_tokenizer(
-                        tokenizer,
-                        &l1_mask,
-                    )
-                })
-                .flatten();
-                let materialized = structural.is_none().then(|| {
-                    materialize_branch_active_tokenizer_selected(
-                        &format!("{partition_label}.l1"),
-                    )
+                let materialized = projection_requested
                     .then(|| {
                         branch_state_map.as_ref().and_then(|(map, _)| {
                             super::synthetic_state_map::materialize_active_tokenizer(
@@ -309,37 +295,8 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                             )
                         })
                     })
-                    .flatten()
-                })
-                .flatten();
-                let mut result = if let Some(structural) = structural.as_ref() {
-                    let branch_flat_trans: Arc<[u32]> =
-                        Arc::from(super::l1::build_flat_transition_table(&structural.tokenizer));
-                    let mut result = super::l1::build_l1_id_map_and_terminal_dwa(
-                        partition_label,
-                        &structural.tokenizer,
-                        vocab,
-                        terminal_coloring,
-                        use_terminal_coloring,
-                        ignore_terminal,
-                        grammar,
-                        &l1_mask,
-                        &branch_flat_trans,
-                        None,
-                        None,
-                        None,
-                        shared_l1_token_trie.as_deref(),
-                        None,
-                    );
-                    if let Some(part) = result.as_mut() {
-                        part.id_map.tokenizer_states = structural
-                            .full_to_active
-                            .lift_internal_tsid_map(&part.id_map.tokenizer_states)
-                            .expect("structural active-tokenizer lift must cover every source state");
-                        part.profile.id_map_ms += structural.build_ms;
-                    }
-                    result
-                } else if let Some(materialized) = materialized.as_ref() {
+                    .flatten();
+                let mut result = if let Some(materialized) = materialized.as_ref() {
                     let branch_flat_trans: Arc<[u32]> =
                         Arc::from(super::l1::build_flat_transition_table(&materialized.tokenizer));
                     let mut result = super::l1::build_l1_id_map_and_terminal_dwa(
@@ -353,7 +310,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                         &l1_mask,
                         &branch_flat_trans,
                         None,
-                        Some(&materialized.initial_state_map),
+                        None,
                         None,
                         shared_l1_token_trie.as_deref(),
                         None,
@@ -397,17 +354,11 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                     eprintln!(
                         "[glrmask/profile][branch_active_tokenizer] branch={}.l1 path={} selected={} source_states={} compact_states={} materialize_ms={:.3}",
                         partition_label,
-                        if structural.is_some() { "structural" } else if materialized.is_some() { "powerset" } else { "none" },
-                        structural.is_some() || materialized.is_some(),
+                        if materialized.is_some() { "active_quotient" } else { "none" },
+                        materialized.is_some(),
                         tokenizer.num_states(),
-                        structural.as_ref().map_or_else(
-                            || materialized.as_ref().map_or(tokenizer.num_states(), |value| value.tokenizer.num_states()),
-                            |value| value.tokenizer.num_states(),
-                        ),
-                        structural.as_ref().map_or_else(
-                            || materialized.as_ref().map_or(0.0, |value| value.build_ms),
-                            |value| value.build_ms,
-                        ),
+                        materialized.as_ref().map_or(tokenizer.num_states(), |value| value.tokenizer.num_states()),
+                        materialized.as_ref().map_or(0.0, |value| value.build_ms),
                     );
                 }
                 (result, started_at.elapsed().as_secs_f64() * 1000.0)
@@ -470,27 +421,24 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                                     );
                                 }
                             }
+                            let branch_label = format!("{partition_label}.l2p");
+                            let projection_requested = structural_branch_tokenizer_selected(
+                                &branch_label,
+                                boundary_vocab.len(),
+                                l2p_mask.iter().filter(|&&active| active).count(),
+                                initial_state_map
+                                    .map(ManyToOneIdMap::num_internal_ids)
+                                    .unwrap_or_else(|| tokenizer.num_states()) as usize,
+                            ) || materialize_branch_active_tokenizer_selected(&branch_label);
                             let branch_state_map = build_branch_active_state_map(
                                 tokenizer,
                                 &boundary_vocab,
                                 &l2p_mask,
                                 initial_state_map,
-                                &format!("{partition_label}.l2p"),
+                                &branch_label,
+                                projection_requested,
                             );
-                            let structural = structural_branch_tokenizer_selected(
-                                &format!("{partition_label}.l2p"),
-                            )
-                            .then(|| {
-                                super::synthetic_state_map::structurally_project_active_tokenizer(
-                                    tokenizer,
-                                    &l2p_mask,
-                                )
-                            })
-                            .flatten();
-                            let materialized = structural.is_none().then(|| {
-                                materialize_branch_active_tokenizer_selected(
-                                    &format!("{partition_label}.l2p"),
-                                )
+                            let materialized = projection_requested
                                 .then(|| {
                                     branch_state_map.as_ref().and_then(|(map, _)| {
                                         super::synthetic_state_map::materialize_active_tokenizer(
@@ -501,49 +449,8 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                                         )
                                     })
                                 })
-                                .flatten()
-                            })
-                            .flatten();
-                            let mut result = if let Some(structural) = structural.as_ref() {
-                                let branch_flat_trans: Arc<[u32]> = Arc::from(
-                                    super::l1::build_flat_transition_table(&structural.tokenizer),
-                                );
-                                let local_vocab_dfa_cache = super::l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache::new();
-                                let local_original_vocab_dfa_cache = super::l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache::new();
-                                let local_original_vocab_analysis_dfa_cache = super::l2p::equivalence_analysis::vocab::fast::SharedVocabAnalysisDfaCache::default();
-                                let local_transition_cache = std::sync::OnceLock::new();
-                                let local_ti_output_cache = super::l2p::SharedTiTokenizerOutputCache::new();
-                                let mut result = super::l2p::build_l2p_id_map_and_terminal_dwa(
-                                    partition_label,
-                                    &structural.tokenizer,
-                                    &boundary_vocab,
-                                    terminal_coloring,
-                                    use_terminal_coloring,
-                                    ignore_terminal,
-                                    grammar,
-                                    always_allowed_follows,
-                                    &l2p_mask,
-                                    disallowed_follows,
-                                    Some(token_path_disallowed_follows.as_ref()),
-                                    Some(normalized_token_path_disallowed_follows.as_ref()),
-                                    Some(&local_vocab_dfa_cache),
-                                    Some(&local_original_vocab_dfa_cache),
-                                    Some(&local_original_vocab_analysis_dfa_cache),
-                                    Some(&local_transition_cache),
-                                    Some(&local_ti_output_cache),
-                                    Some(&branch_flat_trans),
-                                    shared_l1_token_trie.as_deref(),
-                                    None,
-                                );
-                                if let Some(part) = result.as_mut() {
-                                    part.id_map.tokenizer_states = structural
-                                        .full_to_active
-                                        .lift_internal_tsid_map(&part.id_map.tokenizer_states)
-                                        .expect("structural active-tokenizer lift must cover every source state");
-                                    part.profile.id_map_ms += structural.build_ms;
-                                }
-                                result
-                            } else if let Some(materialized) = materialized.as_ref() {
+                                .flatten();
+                            let mut result = if let Some(materialized) = materialized.as_ref() {
                                 let branch_flat_trans: Arc<[u32]> = Arc::from(
                                     super::l1::build_flat_transition_table(&materialized.tokenizer),
                                 );
@@ -572,7 +479,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                                     Some(&local_ti_output_cache),
                                     Some(&branch_flat_trans),
                                     shared_l1_token_trie.as_deref(),
-                                    Some(&materialized.initial_state_map),
+                                    None,
                                 );
                                 if let Some(part) = result.as_mut() {
                                     part.id_map.tokenizer_states = materialized
@@ -619,17 +526,11 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                                 eprintln!(
                                     "[glrmask/profile][branch_active_tokenizer] branch={}.l2p path={} selected={} source_states={} compact_states={} materialize_ms={:.3}",
                                     partition_label,
-                                    if structural.is_some() { "structural" } else if materialized.is_some() { "powerset" } else { "none" },
-                                    structural.is_some() || materialized.is_some(),
+                                    if materialized.is_some() { "active_quotient" } else { "none" },
+                                    materialized.is_some(),
                                     tokenizer.num_states(),
-                                    structural.as_ref().map_or_else(
-                                        || materialized.as_ref().map_or(tokenizer.num_states(), |value| value.tokenizer.num_states()),
-                                        |value| value.tokenizer.num_states(),
-                                    ),
-                                    structural.as_ref().map_or_else(
-                                        || materialized.as_ref().map_or(0.0, |value| value.build_ms),
-                                        |value| value.build_ms,
-                                    ),
+                                    materialized.as_ref().map_or(tokenizer.num_states(), |value| value.tokenizer.num_states()),
+                                    materialized.as_ref().map_or(0.0, |value| value.build_ms),
                                 );
                             }
                             (result, started_at.elapsed().as_secs_f64() * 1000.0)

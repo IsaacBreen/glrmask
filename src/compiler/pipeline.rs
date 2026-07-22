@@ -3010,6 +3010,7 @@ fn compile_prepared_with_profile_and_table_construction(
             ignore_terminal: prepared_grammar.ignore_terminal,
             special_token_terminals,
             dynamic_mask_vocab: runtime_dynamic_vocab.vocab,
+            lazy_dynamic_mask_vocab: std::sync::OnceLock::new(),
             possible_matches: possible_matches.into_artifact(),
             state_to_internal_tsid: runtime_tokenizer_state_map.original_to_internal.clone(),
             internal_tsid_to_states: runtime_tokenizer_state_map.internal_to_originals_vecs(),

@@ -179,6 +179,7 @@ impl DynamicConstraint {
             ignore_terminal: payload.ignore_terminal,
             special_token_terminals,
             dynamic_mask_vocab,
+            lazy_dynamic_mask_vocab: std::sync::OnceLock::new(),
             possible_matches: BTreeMap::new(),
             state_to_internal_tsid: Vec::new(),
             internal_tsid_to_states: Vec::new(),

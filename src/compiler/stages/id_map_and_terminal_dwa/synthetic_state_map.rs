@@ -37,153 +37,8 @@ pub(crate) struct SynthesizedTerminalExpressions {
     pub(crate) changed_terminals: Vec<u32>,
 }
 
-pub(crate) struct StructurallyProjectedActiveTokenizer {
-    pub(crate) tokenizer: Tokenizer,
-    pub(crate) full_to_active: CertifiedFullToSynthesizedStateMap,
-    pub(crate) build_ms: f64,
-}
-
-pub(crate) fn structurally_project_active_tokenizer(
-    tokenizer: &Tokenizer,
-    vocab: &Vocab,
-    active_terminals: &[bool],
-) -> Option<StructurallyProjectedActiveTokenizer> {
-    let started_at = std::time::Instant::now();
-    let statistic = max_length::cached_statistic(vocab);
-    let direct = tokenizer.structurally_project_active_language(
-        active_terminals,
-        statistic.relevant_bytes(),
-    );
-    let (projected, full_to_synthesized, path) = if let Some((projected, mapping)) = direct {
-        (projected, mapping, "raw_dfa")
-    } else {
-        // The dispatch tokenizer contains a small number of non-root epsilon
-        // states. Build the exact closure-configuration DFA once, then minimize
-        // that deterministic view immediately under active outputs. This avoids
-        // the earlier prototype's second stable-equivalence pass over the
-        // materialized tokenizer.
-        let view = super::l2p::equivalence_analysis::state_equivalence::nfa::build_relevant_powerset_view(
-            tokenizer,
-            statistic.relevant_bytes(),
-            Some(active_terminals),
-            None,
-        );
-        let mut output_classes = FxHashMap::<(Vec<usize>, Vec<usize>), u32>::default();
-        let mut classes = view
-            .states
-            .iter()
-            .map(|state| {
-                let key = (
-                    state.finalizers.clone(),
-                    state.possible_future_group_ids.clone(),
-                );
-                let next = output_classes.len() as u32;
-                *output_classes.entry(key).or_insert(next)
-            })
-            .collect::<Vec<_>>();
-        loop {
-            let old_count = classes.iter().copied().max().map_or(0, |value| value + 1);
-            let mut signatures = FxHashMap::<Vec<u32>, u32>::default();
-            let mut next_classes = Vec::with_capacity(classes.len());
-            for state in 0..view.states.len() {
-                let mut signature = Vec::new();
-                signature.push(classes[state]);
-                let edge_start = view.edge_offsets[state] as usize;
-                let edge_end = view.edge_offsets[state + 1] as usize;
-                for &(byte, target) in &view.edges[edge_start..edge_end] {
-                    signature.push(byte as u32 + 1);
-                    signature.push(classes[target as usize] + 1);
-                }
-                let next = signatures.len() as u32;
-                next_classes.push(*signatures.entry(signature).or_insert(next));
-            }
-            let next_count = next_classes
-                .iter()
-                .copied()
-                .max()
-                .map_or(0, |value| value + 1);
-            classes = next_classes;
-            if next_count == old_count {
-                break;
-            }
-        }
-        let class_count = classes.iter().copied().max().map_or(0, |value| value + 1) as usize;
-        let mut representatives = vec![usize::MAX; class_count];
-        for (state, &class) in classes.iter().enumerate() {
-            representatives[class as usize] = representatives[class as usize].min(state);
-        }
-        if representatives.iter().any(|&state| state == usize::MAX) {
-            return None;
-        }
-        let mut finalizers = Vec::with_capacity(class_count);
-        let mut futures = Vec::with_capacity(class_count);
-        let mut edge_offsets = Vec::with_capacity(class_count + 1);
-        let mut edges = Vec::new();
-        edge_offsets.push(0);
-        for &representative in &representatives {
-            finalizers.push(view.states[representative].finalizers.clone());
-            futures.push(view.states[representative].possible_future_group_ids.clone());
-            let start = view.edge_offsets[representative] as usize;
-            let end = view.edge_offsets[representative + 1] as usize;
-            edges.extend(
-                view.edges[start..end]
-                    .iter()
-                    .map(|&(byte, target)| (byte, classes[target as usize])),
-            );
-            edge_offsets.push(edges.len() as u32);
-        }
-        let start_class = classes[view.start_state] as usize;
-        let (projected, class_to_projected) = tokenizer.materialize_deterministic_view(
-            start_class,
-            &finalizers,
-            &futures,
-            &edge_offsets,
-            &edges,
-            active_terminals,
-        )?;
-        let full_to_synthesized = view
-            .raw_start_to_view
-            .iter()
-            .map(|&view_state| {
-                let class = *classes.get(view_state as usize)?;
-                class_to_projected
-                    .get(class as usize)
-                    .copied()
-                    .filter(|&state| state != u32::MAX)
-            })
-            .collect::<Option<Vec<_>>>()?;
-        (projected, full_to_synthesized, "closure_dfa")
-    };
-    let source_states = tokenizer.num_states() as usize;
-    let projected_states = projected.num_states() as usize;
-    if projected_states >= source_states
-        || source_states.saturating_sub(projected_states) < 512
-        || projected_states.saturating_mul(20) > source_states.saturating_mul(19)
-    {
-        return None;
-    }
-    let build_ms = started_at.elapsed().as_secs_f64() * 1000.0;
-    if std::env::var_os("GLRMASK_DUMP_STRUCTURAL_BRANCH_QUOTIENT").is_some() {
-        eprintln!(
-            "[glrmask/dump][structural_branch_quotient] stage=selected path={} source_states={} projected_states={} build_ms={:.3}",
-            path,
-            source_states,
-            projected_states,
-            build_ms,
-        );
-    }
-    Some(StructurallyProjectedActiveTokenizer {
-        tokenizer: projected,
-        full_to_active: CertifiedFullToSynthesizedStateMap {
-            full_to_synthesized,
-        },
-        build_ms,
-    })
-}
-
 pub(crate) struct MaterializedActiveTokenizer {
     pub(crate) tokenizer: Tokenizer,
-    pub(crate) initial_state_map: ManyToOneIdMap,
     pub(crate) full_to_active: CertifiedFullToSynthesizedStateMap,
     pub(crate) build_ms: f64,
 }
@@ -264,19 +119,17 @@ pub(crate) fn materialize_active_tokenizer(
         )?;
         (compact, state_map.original_to_internal)
     };
-    let initial_state_map = max_length::compute_state_map(
-        &compact,
-        &statistic,
-        None,
-        Some(active_terminals),
-        MaxLengthMode::StableByteRestricted,
-        None,
-        None,
-    );
+    let source_states = tokenizer.num_states() as usize;
+    let compact_states = compact.num_states() as usize;
+    if compact_states >= source_states
+        || source_states.saturating_sub(compact_states) < 1_024
+        || compact_states.saturating_mul(10) > source_states.saturating_mul(9)
+    {
+        return None;
+    }
     let build_ms = started_at.elapsed().as_secs_f64() * 1000.0;
     Some(MaterializedActiveTokenizer {
         tokenizer: compact,
-        initial_state_map,
         full_to_active: CertifiedFullToSynthesizedStateMap {
             full_to_synthesized,
         },
