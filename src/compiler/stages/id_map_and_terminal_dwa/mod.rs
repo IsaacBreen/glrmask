@@ -6,7 +6,8 @@
 
 use crate::automata::lexer::Lexer;
 use crate::automata::lexer::compile::{
-    build_regex_partitioned_with_profile_labels_and_adaptive_and_residual_isolation,
+    compile_partitioned_expression_pair_with_structural_map, factor_regex_expr,
+    VocabularyRepeatHorizonCache,
 };
 pub(crate) mod classify;
 mod finalize_ignore;
@@ -75,11 +76,33 @@ fn build_partition_local_tokenizer(
     vocab: &Vocab,
     plan: &PartitionLocalSynthesisPlan,
 ) -> Option<PartitionLocalTokenizer> {
+    let reject = |stage: &str, horizon: usize| {
+        if compile_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][partition_local_synthesis] selected=false stage={} horizon={} global_states={}",
+                stage,
+                horizon,
+                global_tokenizer.num_states(),
+            );
+        }
+        None
+    };
     if !partition_local_synthesis_enabled() || vocab.is_empty() {
         return None;
     }
     let max_token_len = vocab.entries.values().map(Vec::len).max().unwrap_or(0);
     if max_token_len == 0 || max_token_len >= plan.global_max_token_len {
+        return None;
+    }
+    // A local structural pair has a non-trivial fixed construction cost. Very
+    // small vocabulary partitions are already cheap, while a horizon close to
+    // the global maximum cannot remove enough protected residual depth to
+    // amortize that cost. This gate chooses an optimization strategy only; the
+    // ordinary global-tokenizer path remains the exact fallback.
+    if vocab.len() < 2_000
+        || max_token_len < 16
+        || max_token_len.saturating_mul(2) >= plan.global_max_token_len
+    {
         return None;
     }
 
@@ -102,44 +125,78 @@ fn build_partition_local_tokenizer(
         }
     }
     if !changed {
-        return None;
+        return reject("unchanged_candidate", max_token_len);
     }
 
-    let local_expressions: Arc<[Expr]> = Arc::from(candidate.expressions.into_boxed_slice());
-    let local_regex = build_regex_partitioned_with_profile_labels_and_adaptive_and_residual_isolation(
+    let rebuilt_expressions = plan
+        .expressions
+        .iter()
+        .cloned()
+        .map(factor_regex_expr)
+        .collect::<Vec<_>>();
+    let local_expressions = candidate
+        .expressions
+        .into_iter()
+        .map(factor_regex_expr)
+        .collect::<Vec<_>>();
+    let mut relevant_bytes = vocab
+        .entries
+        .values()
+        .flat_map(|bytes| bytes.iter().copied())
+        .collect::<Vec<_>>();
+    relevant_bytes.sort_unstable();
+    relevant_bytes.dedup();
+    let Some(pair) = compile_partitioned_expression_pair_with_structural_map(
+        &rebuilt_expressions,
         &local_expressions,
-        &plan.labels,
+        Some(&plan.labels),
         &plan.partition_ids,
         &plan.residual_isolation_classes,
         plan.adaptive,
-    );
+        vocab,
+        &VocabularyRepeatHorizonCache::new(),
+        max_token_len,
+        &relevant_bytes,
+    ) else {
+        return reject("structural_pair", max_token_len);
+    };
     let terminal_count = plan.expressions.len() as u32;
-    let mut local_tokenizer = local_regex.into_tokenizer(
+    let mut rebuilt_tokenizer = pair.full.into_tokenizer(
         terminal_count,
-        Some(local_expressions),
+        Some(Arc::from(rebuilt_expressions.into_boxed_slice())),
+    );
+    let rebuilt_nullable = rebuilt_tokenizer.isolate_start_state_and_drain_nullable_terminals();
+    if !rebuilt_nullable.is_empty() {
+        return reject("rebuilt_nullable", max_token_len);
+    }
+    let mut local_tokenizer = pair.synthesized.into_tokenizer(
+        terminal_count,
+        Some(Arc::from(local_expressions.into_boxed_slice())),
     );
     let local_nullable = local_tokenizer.isolate_start_state_and_drain_nullable_terminals();
     if !local_nullable.is_empty() {
-        return None;
+        return reject("local_nullable", max_token_len);
     }
+    let Some(global_to_local) = local_tokenizer.augment_from_verified_component_prefixes(
+        global_tokenizer,
+        &rebuilt_tokenizer,
+        &pair.full_to_synthesized,
+    ) else {
+        return reject("component_prefix", max_token_len);
+    };
     let local_states = local_tokenizer.num_states() as usize;
     let global_states = global_tokenizer.num_states() as usize;
     if local_states >= global_states
         || global_states.saturating_sub(local_states) < 1_024
         || local_states.saturating_mul(4) > global_states.saturating_mul(3)
     {
-        return None;
+        return reject("insufficient_reduction", max_token_len);
     }
-    let global_to_local = synthetic_state_map::certify_full_to_synthesized_state_map(
-        global_tokenizer,
-        &local_tokenizer,
-        vocab,
-        None,
-    )?;
-
     Some(PartitionLocalTokenizer {
         tokenizer: local_tokenizer,
-        global_to_local,
+        global_to_local: synthetic_state_map::CertifiedFullToSynthesizedStateMap {
+            full_to_synthesized: global_to_local,
+        },
         build_ms: started_at.elapsed().as_secs_f64() * 1000.0,
     })
 }

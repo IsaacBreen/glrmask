@@ -156,6 +156,135 @@ fn group_matches_by_width(matches: Vec<TokenizerMatch>) -> Vec<(usize, BTreeSet<
 }
 
 impl Tokenizer {
+    /// Extend `self` with the source-only residual states that were appended to
+    /// `source` after `rebuilt` was constructed.  `rebuilt_to_self` must be a
+    /// structural state map from the rebuilt expression DFA into `self`.
+    ///
+    /// Protected residual synthesis appends externally-entered product states
+    /// to otherwise identical deterministic dispatch components.  The original
+    /// component states remain an exact prefix.  Verify that prefix relation
+    /// state-for-state, then clone only the appended states while redirecting
+    /// every edge through the completed source-to-self map.  The result is a
+    /// transition homomorphism over the actual source tokenizer, not a bounded
+    /// semantic approximation.
+    pub(crate) fn augment_from_verified_component_prefixes(
+        &mut self,
+        source: &Tokenizer,
+        rebuilt: &Tokenizer,
+        rebuilt_to_self: &[u32],
+    ) -> Option<Vec<u32>> {
+        if source.num_terminals != rebuilt.num_terminals
+            || source.num_terminals != self.num_terminals
+            || rebuilt_to_self.len() != rebuilt.num_states() as usize
+        {
+            return None;
+        }
+
+        let source_components = source.disjoint_dispatch_components()?;
+        let rebuilt_components = rebuilt.disjoint_dispatch_components()?;
+        if source_components.len() != rebuilt_components.len() {
+            return None;
+        }
+
+        let mut source_to_rebuilt = vec![u32::MAX; source.num_states() as usize];
+        source_to_rebuilt[source.start_state() as usize] = rebuilt.start_state();
+        for (source_states, rebuilt_states) in
+            source_components.iter().zip(&rebuilt_components)
+        {
+            if rebuilt_states.len() > source_states.len() {
+                return None;
+            }
+            for (&source_state, &rebuilt_state) in source_states.iter().zip(rebuilt_states) {
+                source_to_rebuilt[source_state as usize] = rebuilt_state;
+            }
+        }
+
+        // Verify that the mapped prefix is exactly the rebuilt DFA after state
+        // renumbering.  This guards the append-only invariant rather than
+        // relying on component construction order as an undocumented fact.
+        for (source_state, &rebuilt_state) in source_to_rebuilt.iter().enumerate() {
+            if rebuilt_state == u32::MAX {
+                continue;
+            }
+            let source_state = source_state as u32;
+            if source.dfa.finalizers(source_state) != rebuilt.dfa.finalizers(rebuilt_state)
+                || source.dfa.possible_future_group_ids(source_state)
+                    != rebuilt.dfa.possible_future_group_ids(rebuilt_state)
+                || source.state_has_epsilon_transitions(source_state)
+                    != rebuilt.state_has_epsilon_transitions(rebuilt_state)
+            {
+                return None;
+            }
+            let source_epsilon = &source.dfa.states()[source_state as usize].epsilon_transitions;
+            let rebuilt_epsilon = &rebuilt.dfa.states()[rebuilt_state as usize].epsilon_transitions;
+            let mapped_epsilon = source_epsilon
+                .iter()
+                .map(|&target| *source_to_rebuilt.get(target as usize).unwrap_or(&u32::MAX))
+                .collect::<Vec<_>>();
+            if mapped_epsilon != *rebuilt_epsilon {
+                return None;
+            }
+            let source_transitions = source
+                .transitions_from(source_state)
+                .map(|(byte, target)| {
+                    Some((byte, *source_to_rebuilt.get(target as usize)?))
+                })
+                .collect::<Option<Vec<_>>>()?;
+            if source_transitions.iter().any(|&(_, target)| target == u32::MAX)
+                || source_transitions
+                    != rebuilt.transitions_from(rebuilt_state).collect::<Vec<_>>()
+            {
+                return None;
+            }
+        }
+
+        let original_self_states = self.num_states() as usize;
+        let mut source_to_self = vec![u32::MAX; source.num_states() as usize];
+        for (source_state, &rebuilt_state) in source_to_rebuilt.iter().enumerate() {
+            if rebuilt_state != u32::MAX {
+                source_to_self[source_state] = *rebuilt_to_self.get(rebuilt_state as usize)?;
+            }
+        }
+        for source_state in 0..source.num_states() as usize {
+            if source_to_self[source_state] == u32::MAX {
+                source_to_self[source_state] = self.dfa.add_state();
+            }
+        }
+
+        for source_state in 0..source.num_states() as usize {
+            if source_to_rebuilt[source_state] != u32::MAX {
+                continue;
+            }
+            let target_state = source_to_self[source_state];
+            let source_state_u32 = source_state as u32;
+            if source.state_has_epsilon_transitions(source_state_u32) {
+                return None;
+            }
+            let transitions = source
+                .transitions_from(source_state_u32)
+                .map(|(byte, target)| (byte, source_to_self[target as usize]))
+                .collect::<Vec<_>>();
+            self.dfa
+                .set_transitions_from_sorted_entries(target_state, transitions);
+            self.dfa.overwrite_state_metadata(
+                target_state,
+                source.dfa.finalizers(source_state_u32).clone(),
+                source
+                    .dfa
+                    .possible_future_group_ids(source_state_u32)
+                    .clone(),
+            );
+        }
+        debug_assert_eq!(
+            self.num_states() as usize - original_self_states,
+            source_to_rebuilt
+                .iter()
+                .filter(|&&state| state == u32::MAX)
+                .count(),
+        );
+        Some(source_to_self)
+    }
+
     pub(super) fn from_parts(
         dfa: DFA,
         num_terminals: u32,
@@ -781,6 +910,53 @@ pub(crate) fn arbitrary_epsilon_l1_test_tokenizer() -> Tokenizer {
 mod tests {
     use super::*;
     use crate::automata::lexer::dfa::DFA;
+
+    fn dispatch_prefix_tokenizer(with_appended_residual: bool) -> Tokenizer {
+        let mut dfa = DFA::new(if with_appended_residual { 5 } else { 4 });
+        dfa.ensure_group_capacity(1);
+        dfa.add_epsilon_transition(0, 1);
+        dfa.add_epsilon_transition(0, 3);
+        dfa.add_transition(1, b'a', 2);
+        dfa.add_transition(2, b'a', 2);
+        dfa.add_transition(3, b'x', 3);
+        let mut accepting = BitSet::new(1);
+        accepting.set(0);
+        dfa.overwrite_state_metadata(2, accepting.clone(), BitSet::new(1));
+        if with_appended_residual {
+            // This state is deliberately not reset-reachable. It models the
+            // externally-entered residuals appended by structural synthesis.
+            dfa.add_transition(4, b'a', 2);
+            dfa.add_transition(4, b'b', 4);
+            dfa.overwrite_state_metadata(4, accepting, BitSet::new(1));
+        }
+        dfa.recompute_possible_futures();
+        Tokenizer::from_parts(dfa, 1, None)
+    }
+
+    #[test]
+    fn structural_prefix_augmentation_clones_only_appended_residuals() {
+        let source = dispatch_prefix_tokenizer(true);
+        let rebuilt = dispatch_prefix_tokenizer(false);
+        let mut local = rebuilt.clone();
+        let rebuilt_to_local = (0..rebuilt.num_states()).collect::<Vec<_>>();
+
+        let source_to_local = local
+            .augment_from_verified_component_prefixes(
+                &source,
+                &rebuilt,
+                &rebuilt_to_local,
+            )
+            .expect("verified append-only component relation");
+
+        assert_eq!(local.num_states(), source.num_states());
+        assert_eq!(source_to_local, vec![0, 1, 2, 3, 4]);
+        for input in [b"".as_slice(), b"a", b"b", b"ba", b"bba"] {
+            let source_result = source.execute_from_state_all_widths(input, 4);
+            let local_result = local.execute_from_state_all_widths(input, source_to_local[4]);
+            assert_eq!(source_result.matches, local_result.matches, "input={input:?}");
+            assert_eq!(source_result.end_state, local_result.end_state, "input={input:?}");
+        }
+    }
 
     #[test]
     fn execution_handles_epsilon_edges_before_and_after_a_byte() {
