@@ -4,21 +4,6 @@ Extremely fast grammar-constrained decoding for LLMs.
 
 The `glrmask` package compiles a grammar together with a model vocabulary and exposes an incremental next-token mask for use inside a decoding loop.
 
-## Allocator policy
-
-The Python extension uses mimalloc and defaults automatic page purging off.
-This avoids periodic OS-page purge work appearing inside latency-critical
-`mask` or `commit_token` calls. Set `MIMALLOC_PURGE_DELAY` before importing
-`glrmask` to override the policy, for example:
-
-```bash
-MIMALLOC_PURGE_DELAY=1000 python service.py
-```
-
-Disabling automatic purging can increase resident memory in long-lived
-processes. The default favors predictable request latency; memory-constrained
-deployments should choose an explicit purge delay and measure their workload.
-
 ## Installation
 
 ```bash
