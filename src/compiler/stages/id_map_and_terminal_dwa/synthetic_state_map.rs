@@ -37,6 +37,109 @@ pub(crate) struct SynthesizedTerminalExpressions {
     pub(crate) changed_terminals: Vec<u32>,
 }
 
+pub(crate) struct MaterializedActiveTokenizer {
+    pub(crate) tokenizer: Tokenizer,
+    pub(crate) initial_state_map: ManyToOneIdMap,
+    pub(crate) full_to_active: CertifiedFullToSynthesizedStateMap,
+    pub(crate) build_ms: f64,
+}
+
+/// Turn an exact active-language state quotient into the tokenizer actually
+/// consumed by an L1/L2P branch. Previously the quotient was only threaded as
+/// an initial ID map, leaving downstream token replay and profile construction
+/// on the full raw tokenizer. Materialization removes that hidden raw-state
+/// cost while retaining an explicit lift back to the source coordinate.
+pub(crate) fn materialize_active_tokenizer(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    active_terminals: &[bool],
+    mut state_map: ManyToOneIdMap,
+) -> Option<MaterializedActiveTokenizer> {
+    if state_map.original_to_internal.len() != tokenizer.num_states() as usize
+        || state_map.num_internal_ids() >= tokenizer.num_states()
+    {
+        return None;
+    }
+    let started_at = std::time::Instant::now();
+    let statistic = max_length::cached_statistic(vocab);
+
+    let (compact, full_to_synthesized) = if tokenizer.has_epsilon_transitions() {
+        // NFA state equivalence is defined over epsilon-closed configurations,
+        // not raw physical edges. Materialize that exact powerset coordinate,
+        // seeded by the already-computed active-language quotient, instead of
+        // attempting an invalid raw-edge quotient.
+        let view = super::l2p::equivalence_analysis::state_equivalence::nfa::build_relevant_powerset_view(
+            tokenizer,
+            statistic.relevant_bytes(),
+            Some(active_terminals),
+            Some(&state_map),
+        );
+        let finalizers = view
+            .states
+            .iter()
+            .map(|state| state.finalizers.clone())
+            .collect::<Vec<_>>();
+        let futures = view
+            .states
+            .iter()
+            .map(|state| state.possible_future_group_ids.clone())
+            .collect::<Vec<_>>();
+        let (compact, old_to_new) = tokenizer.materialize_deterministic_view(
+            view.start_state,
+            &finalizers,
+            &futures,
+            &view.edge_offsets,
+            &view.edges,
+            active_terminals,
+        )?;
+        let full_to_synthesized = view
+            .raw_start_to_view
+            .iter()
+            .map(|&view_state| {
+                old_to_new
+                    .get(view_state as usize)
+                    .copied()
+                    .filter(|&state| state != u32::MAX)
+            })
+            .collect::<Option<Vec<_>>>()?;
+        (compact, full_to_synthesized)
+    } else {
+        let start = tokenizer.start_state();
+        state_map.isolate_original(start);
+        state_map.reorder_internal_by_representative_key(|representative| {
+            (representative != start, representative)
+        });
+        if state_map.original_to_internal[start as usize] != 0 {
+            return None;
+        }
+        let compact = tokenizer.materialize_active_quotient(
+            &state_map.original_to_internal,
+            &state_map.representative_original_ids,
+            active_terminals,
+            statistic.relevant_bytes(),
+        )?;
+        (compact, state_map.original_to_internal)
+    };
+    let initial_state_map = max_length::compute_state_map(
+        &compact,
+        &statistic,
+        None,
+        Some(active_terminals),
+        MaxLengthMode::StableByteRestricted,
+        None,
+        None,
+    );
+    let build_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+    Some(MaterializedActiveTokenizer {
+        tokenizer: compact,
+        initial_state_map,
+        full_to_active: CertifiedFullToSynthesizedStateMap {
+            full_to_synthesized,
+        },
+        build_ms,
+    })
+}
+
 /// Collapse every closed dispatch component that can never observe an active
 /// terminal. Active components remain state-for-state identity classes.
 ///

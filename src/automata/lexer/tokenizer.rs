@@ -156,6 +156,222 @@ fn group_matches_by_width(matches: Vec<TokenizerMatch>) -> Vec<(usize, BTreeSet<
 }
 
 impl Tokenizer {
+    /// Materialize a deterministic compile-time analysis view as a tokenizer.
+    /// The view may be a powerset of this tokenizers epsilon-NFA. State zero is
+    /// reserved for the supplied start state, and the returned old-to-new map
+    /// lets callers lift raw-start mappings into the materialized coordinate.
+    pub(crate) fn materialize_deterministic_view(
+        &self,
+        start_state: usize,
+        finalizers: &[Vec<usize>],
+        futures: &[Vec<usize>],
+        edge_offsets: &[u32],
+        edges: &[(u8, u32)],
+        active_terminals: &[bool],
+    ) -> Option<(Tokenizer, Vec<u32>)> {
+        let state_count = finalizers.len();
+        if state_count == 0
+            || futures.len() != state_count
+            || edge_offsets.len() != state_count + 1
+            || start_state >= state_count
+            || active_terminals.len() != self.num_terminals as usize
+        {
+            return None;
+        }
+        let mut new_to_old = Vec::with_capacity(state_count);
+        new_to_old.push(start_state);
+        new_to_old.extend((0..state_count).filter(|&state| state != start_state));
+        let mut old_to_new = vec![u32::MAX; state_count];
+        for (new, &old) in new_to_old.iter().enumerate() {
+            old_to_new[old] = new as u32;
+        }
+
+        let mut dfa = DFA::new(state_count);
+        dfa.ensure_group_capacity(self.num_terminals as usize);
+        for terminal in 0..self.num_terminals as usize {
+            if active_terminals[terminal] {
+                dfa.set_group_u8set(
+                    terminal as u32,
+                    *self.dfa.group_id_to_u8set(terminal as u32),
+                );
+            }
+        }
+        for (new_state, &old_state) in new_to_old.iter().enumerate() {
+            let start = *edge_offsets.get(old_state)? as usize;
+            let end = *edge_offsets.get(old_state + 1)? as usize;
+            let transitions = edges
+                .get(start..end)?
+                .iter()
+                .map(|&(byte, target)| {
+                    old_to_new
+                        .get(target as usize)
+                        .copied()
+                        .filter(|&target| target != u32::MAX)
+                        .map(|target| (byte, target))
+                })
+                .collect::<Option<Vec<_>>>()?;
+            dfa.set_transitions_from_sorted_entries(new_state as u32, transitions);
+            let to_bits = |groups: &[usize]| {
+                let mut bits = BitSet::new(self.num_terminals as usize);
+                for &group in groups {
+                    if group >= active_terminals.len() || !active_terminals[group] {
+                        return None;
+                    }
+                    bits.set(group);
+                }
+                Some(bits)
+            };
+            dfa.overwrite_state_metadata(
+                new_state as u32,
+                to_bits(&finalizers[old_state])?,
+                to_bits(&futures[old_state])?,
+            );
+        }
+        Some((
+            Tokenizer {
+                dfa,
+                num_terminals: self.num_terminals,
+                exprs: None,
+                singleton_epsilon_closures: OnceLock::new(),
+            },
+            old_to_new,
+        ))
+    }
+
+    /// Materialize an exact deterministic quotient for one compile-time branch.
+    ///
+    /// `original_to_quotient` must be a congruence for every vocabulary-relevant
+    /// byte after filtering labels to `active_terminals`. The method verifies
+    /// that property over every class member before constructing the smaller
+    /// tokenizer, so callers can fail closed to the original tokenizer.
+    pub(crate) fn materialize_active_quotient(
+        &self,
+        original_to_quotient: &[u32],
+        representatives: &[u32],
+        active_terminals: &[bool],
+        relevant_bytes: &[bool; 256],
+    ) -> Option<Tokenizer> {
+        if original_to_quotient.len() != self.num_states() as usize
+            || active_terminals.len() != self.num_terminals as usize
+            || representatives.is_empty()
+            || original_to_quotient.get(self.start_state() as usize).copied() != Some(0)
+        {
+            return None;
+        }
+        let quotient_states = representatives.len();
+        if original_to_quotient
+            .iter()
+            .any(|&state| state == u32::MAX || state as usize >= quotient_states)
+        {
+            return None;
+        }
+
+        let filtered = |bits: &BitSet| {
+            let mut result = BitSet::new(self.num_terminals as usize);
+            for terminal in bits.iter() {
+                if active_terminals.get(terminal).copied().unwrap_or(false) {
+                    result.set(terminal);
+                }
+            }
+            result
+        };
+
+        // Verify output labels and every relevant transition for all members,
+        // rather than trusting the refinement implementation as an implicit
+        // construction contract.
+        let mut class_members = vec![Vec::<u32>::new(); quotient_states];
+        for (original, &quotient) in original_to_quotient.iter().enumerate() {
+            class_members[quotient as usize].push(original as u32);
+        }
+        for (class, members) in class_members.iter().enumerate() {
+            let representative = *representatives.get(class)?;
+            if !members.contains(&representative) {
+                return None;
+            }
+            let representative_finalizers = filtered(self.dfa.finalizers(representative));
+            let representative_futures =
+                filtered(self.dfa.possible_future_group_ids(representative));
+            for &member in members {
+                if filtered(self.dfa.finalizers(member)) != representative_finalizers
+                    || filtered(self.dfa.possible_future_group_ids(member))
+                        != representative_futures
+                {
+                    return None;
+                }
+                for byte in 0u16..=255 {
+                    if !relevant_bytes[byte as usize] {
+                        continue;
+                    }
+                    let mapped = self
+                        .step(member, byte as u8)
+                        .map(|target| original_to_quotient[target as usize]);
+                    let representative_mapped = self
+                        .step(representative, byte as u8)
+                        .map(|target| original_to_quotient[target as usize]);
+                    if mapped != representative_mapped {
+                        return None;
+                    }
+                }
+                let mapped_epsilon = |state: u32| {
+                    let mut targets = self.dfa.states()[state as usize]
+                        .epsilon_transitions
+                        .iter()
+                        .map(|&target| original_to_quotient[target as usize])
+                        .collect::<Vec<_>>();
+                    targets.sort_unstable();
+                    targets.dedup();
+                    targets
+                };
+                if mapped_epsilon(member) != mapped_epsilon(representative) {
+                    return None;
+                }
+            }
+        }
+
+        let mut dfa = DFA::new(quotient_states);
+        dfa.ensure_group_capacity(self.num_terminals as usize);
+        for terminal in 0..self.num_terminals as usize {
+            if active_terminals[terminal] {
+                dfa.set_group_u8set(
+                    terminal as u32,
+                    *self.dfa.group_id_to_u8set(terminal as u32),
+                );
+            }
+        }
+        for (class, &representative) in representatives.iter().enumerate() {
+            let transitions = (0u16..=255)
+                .filter(|&byte| relevant_bytes[byte as usize])
+                .filter_map(|byte| {
+                    self.step(representative, byte as u8).map(|target| {
+                        (byte as u8, original_to_quotient[target as usize])
+                    })
+                })
+                .collect::<Vec<_>>();
+            dfa.set_transitions_from_sorted_entries(class as u32, transitions);
+            let mut epsilon_targets = self.dfa.states()[representative as usize]
+                .epsilon_transitions
+                .iter()
+                .map(|&target| original_to_quotient[target as usize])
+                .collect::<Vec<_>>();
+            epsilon_targets.sort_unstable();
+            epsilon_targets.dedup();
+            for target in epsilon_targets {
+                dfa.add_epsilon_transition(class as u32, target);
+            }
+            dfa.overwrite_state_metadata(
+                class as u32,
+                filtered(self.dfa.finalizers(representative)),
+                filtered(self.dfa.possible_future_group_ids(representative)),
+            );
+        }
+        Some(Tokenizer {
+            dfa,
+            num_terminals: self.num_terminals,
+            exprs: None,
+            singleton_epsilon_closures: OnceLock::new(),
+        })
+    }
+
     /// Extend `self` with the source-only residual states that were appended to
     /// `source` after `rebuilt` was constructed.  `rebuilt_to_self` must be a
     /// structural state map from the rebuilt expression DFA into `self`.
