@@ -5035,9 +5035,58 @@ impl ProductComponent {
 
 struct ProductBuildTrace {
     components: Vec<ProductComponent>,
-    state_tuples: Vec<ProductStateTuple>,
+    state_tuples: ProductStateTuples,
     state_lookup: ProductStateLookup,
     direct_single_visible_group: bool,
+}
+
+enum ProductStateTuples {
+    Generic(Vec<ProductStateTuple>),
+    DenseBinary(Vec<(u32, u32)>),
+}
+
+impl ProductStateTuples {
+    fn len(&self) -> usize {
+        match self {
+            Self::Generic(tuples) => tuples.len(),
+            Self::DenseBinary(pairs) => pairs.len(),
+        }
+    }
+
+    fn tuple(&self, state: usize) -> ProductStateTuple {
+        match self {
+            Self::Generic(tuples) => tuples[state].clone(),
+            Self::DenseBinary(pairs) => {
+                let (left, right) = pairs[state];
+                let mut tuple = ProductStateTuple::new();
+                tuple.push((0, left));
+                tuple.push((1, right));
+                tuple
+            }
+        }
+    }
+
+    fn push(&mut self, tuple: ProductStateTuple) {
+        match self {
+            Self::Generic(tuples) => tuples.push(tuple),
+            Self::DenseBinary(pairs)
+                if tuple.len() == 2 && tuple[0].0 == 0 && tuple[1].0 == 1 =>
+            {
+                pairs.push((tuple[0].1, tuple[1].1));
+            }
+            Self::DenseBinary(pairs) => {
+                let mut tuples = Vec::with_capacity(pairs.len() + 1);
+                tuples.extend(pairs.drain(..).map(|(left, right)| {
+                    let mut tuple = ProductStateTuple::new();
+                    tuple.push((0, left));
+                    tuple.push((1, right));
+                    tuple
+                }));
+                tuples.push(tuple);
+                *self = Self::Generic(tuples);
+            }
+        }
+    }
 }
 
 enum ProductStateLookup {
@@ -6599,22 +6648,30 @@ fn prepare_terminal_expression_pair_with_structural_map(
     let mut full_to_synthesized = if let Some(cells) = dense_two_component_cells {
         let right_extent = component_extents[1];
         let mut state_by_key = vec![u32::MAX; cells];
-        for (state, tuple) in synthesized_trace.state_tuples.iter().enumerate() {
-            let mut coordinates = [0usize; 2];
-            for &(component, component_state) in tuple {
-                coordinates[component as usize] = component_state as usize + 1;
+        match &synthesized_trace.state_tuples {
+            ProductStateTuples::Generic(tuples) => {
+                for (state, tuple) in tuples.iter().enumerate() {
+                    let mut coordinates = [0usize; 2];
+                    for &(component, component_state) in tuple {
+                        coordinates[component as usize] = component_state as usize + 1;
+                    }
+                    state_by_key[coordinates[0] * right_extent + coordinates[1]] = state as u32;
+                }
             }
-            state_by_key[coordinates[0] * right_extent + coordinates[1]] = state as u32;
+            ProductStateTuples::DenseBinary(pairs) => {
+                for (state, &(left, right)) in pairs.iter().enumerate() {
+                    state_by_key[(left as usize + 1) * right_extent + right as usize + 1] =
+                        state as u32;
+                }
+            }
         }
-        full_trace
-            .state_tuples
-            .par_iter()
-            .map(|tuple| {
+        let map_full_states = |full_states: [u32; 2]| {
                 let mut coordinates = [0usize; 2];
-                let mut full_states = [u32::MAX; 2];
-                for &(component_id, full_state) in tuple {
-                    let component = component_id as usize;
-                    full_states[component] = full_state;
+                for component in 0..2 {
+                    let full_state = full_states[component];
+                    if full_state == u32::MAX {
+                        continue;
+                    }
                     let synthesized_state =
                         component_maps[component].primary()[full_state as usize];
                     if synthesized_component_dead_states[component] != Some(synthesized_state) {
@@ -6690,25 +6747,44 @@ fn prepare_terminal_expression_pair_with_structural_map(
                     }
                 }
                 u32::MAX
-            })
-            .collect::<Vec<_>>()
-    } else {
-        full_trace
-            .state_tuples
-            .par_iter()
-            .map(|tuple| {
-                let mut mapped = ProductStateTuple::new();
-                for &(component_id, full_state) in tuple {
-                    let component = component_id as usize;
-                    let synthesized_state =
-                        component_maps[component].primary()[full_state as usize];
-                    if synthesized_component_dead_states[component] != Some(synthesized_state) {
-                        mapped.push((component_id, synthesized_state));
+            };
+        match &full_trace.state_tuples {
+            ProductStateTuples::Generic(tuples) => tuples
+                .par_iter()
+                .map(|tuple| {
+                    let mut full_states = [u32::MAX; 2];
+                    for &(component_id, full_state) in tuple {
+                        full_states[component_id as usize] = full_state;
                     }
+                    map_full_states(full_states)
+                })
+                .collect::<Vec<_>>(),
+            ProductStateTuples::DenseBinary(pairs) => pairs
+                .par_iter()
+                .map(|&(left, right)| map_full_states([left, right]))
+                .collect::<Vec<_>>(),
+        }
+    } else {
+        let map_tuple = |tuple: &[(u32, u32)]| {
+            let mut mapped = ProductStateTuple::new();
+            for &(component_id, full_state) in tuple {
+                let component = component_id as usize;
+                let synthesized_state = component_maps[component].primary()[full_state as usize];
+                if synthesized_component_dead_states[component] != Some(synthesized_state) {
+                    mapped.push((component_id, synthesized_state));
                 }
-                synthesized_trace.state_lookup.get(&mapped).unwrap_or(u32::MAX)
-            })
-            .collect::<Vec<_>>()
+            }
+            synthesized_trace.state_lookup.get(&mapped).unwrap_or(u32::MAX)
+        };
+        match &full_trace.state_tuples {
+            ProductStateTuples::Generic(tuples) => {
+                tuples.par_iter().map(|tuple| map_tuple(tuple)).collect()
+            }
+            ProductStateTuples::DenseBinary(pairs) => pairs
+                .par_iter()
+                .map(|&(left, right)| map_tuple(&[(0, left), (1, right)]))
+                .collect(),
+        }
     };
     let tuple_map_ms = tuple_map_started_at
         .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
@@ -6722,7 +6798,7 @@ fn prepare_terminal_expression_pair_with_structural_map(
         .par_iter()
         .map(|&position| {
             let mut mapped = ProductStateTuple::new();
-            for &(component_id, full_state) in &full_trace.state_tuples[position] {
+            for &(component_id, full_state) in &full_trace.state_tuples.tuple(position) {
                 let component = component_id as usize;
                 let synthesized_state = component_maps[component].primary()[full_state as usize];
                 if synthesized_component_dead_states[component] != Some(synthesized_state) {
@@ -7408,7 +7484,7 @@ fn build_product_dfa(
 
     let trace = state_tuples.map(|state_tuples| ProductBuildTrace {
         components,
-        state_tuples,
+        state_tuples: ProductStateTuples::Generic(state_tuples),
         state_lookup: ProductStateLookup::Hash(state_map),
         direct_single_visible_group,
     });
@@ -7799,26 +7875,15 @@ fn try_discover_dense_binary_intersection_product(
     let discovery_ms = discovery_started_at
         .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
-    let trace = capture_trace.then(|| {
-        let state_tuples = pairs
-            .into_iter()
-            .map(|(left, right)| {
-                let mut tuple = ProductStateTuple::new();
-                tuple.push((0, left));
-                tuple.push((1, right));
-                tuple
-            })
-            .collect();
-        ProductBuildTrace {
+    let trace = capture_trace.then(|| ProductBuildTrace {
             components: components.to_vec(),
-            state_tuples,
+            state_tuples: ProductStateTuples::DenseBinary(pairs),
             state_lookup: ProductStateLookup::DenseBinary {
                 right_states,
                 state_by_pair,
                 overflow: FxHashMap::default(),
             },
             direct_single_visible_group: true,
-        }
     });
 
     Some((
