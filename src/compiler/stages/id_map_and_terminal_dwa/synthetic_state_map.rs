@@ -59,6 +59,7 @@ pub(crate) fn materialize_active_tokenizer(
     {
         return None;
     }
+    let quotient_states = state_map.num_internal_ids() as usize;
     let started_at = std::time::Instant::now();
     let statistic = max_length::cached_statistic(vocab);
 
@@ -124,6 +125,14 @@ pub(crate) fn materialize_active_tokenizer(
     if compact_states >= source_states
         || source_states.saturating_sub(compact_states) < 1_024
         || compact_states.saturating_mul(10) > source_states.saturating_mul(9)
+        // Epsilon-view materialization may expand an exact quotient back into
+        // many powerset states. Downstream equivalence can consume the quotient
+        // directly, so a large expansion is negative work: it costs a build
+        // here and increases the later state-token product. Retain near-size
+        // materializations, which remove raw replay overhead, but fall back to
+        // the exact initial state map when the deterministic coordinate grows
+        // by more than 25 percent.
+        || compact_states.saturating_mul(4) > quotient_states.saturating_mul(5)
     {
         return None;
     }

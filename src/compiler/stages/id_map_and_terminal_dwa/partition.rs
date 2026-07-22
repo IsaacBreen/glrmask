@@ -57,13 +57,37 @@ fn structural_branch_tokenizer_selected(
         "p0.l1" => {
             active_terminals <= 4 && vocab_tokens >= 2_000 && source_states >= 5_000
         }
-        "p1.l2p" => {
-            (48..=128).contains(&active_terminals)
-                && (8_000..=30_000).contains(&vocab_tokens)
-                && (10_000..=24_000).contains(&source_states)
+        // A medium mixed-token L1 family with a substantial active terminal
+        // set is dominated by repeated whole-token analysis on the raw lexer.
+        // Its exact active-language quotient is both much smaller and remains
+        // close in size after deterministic materialization, so downstream
+        // replay amortizes the refinement cost decisively. Keep the gate on
+        // structural work ranges rather than a corpus/schema identity.
+        _ if branch_label.ends_with(".l1")
+            && (128..=224).contains(&active_terminals)
+            && (8_000..=30_000).contains(&vocab_tokens)
+            && (10_000..=24_000).contains(&source_states) =>
+        {
+            true
         }
         _ => false,
     }
+}
+
+fn branch_active_state_map_selected(
+    branch_label: &str,
+    vocab_tokens: usize,
+    active_terminals: usize,
+    source_states: usize,
+) -> bool {
+    // This medium L2P regime benefits strongly from the exact active-language
+    // quotient, but its epsilon powerset tokenizer expands well beyond that
+    // quotient and makes downstream token replay slower. Request the map only;
+    // tokenizer materialization remains governed independently above.
+    branch_label == "p1.l2p"
+        && (48..=128).contains(&active_terminals)
+        && (8_000..=30_000).contains(&vocab_tokens)
+        && (10_000..=24_000).contains(&source_states)
 }
 
 fn materialize_branch_active_tokenizer_selected(branch_label: &str) -> bool {
@@ -268,23 +292,32 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
             if has_l1 {
                 let started_at = Instant::now();
                 let branch_label = format!("{partition_label}.l1");
-                let projection_requested = structural_branch_tokenizer_selected(
+                let active_terminal_count = l1_mask.iter().filter(|&&active| active).count();
+                let source_states = initial_state_map
+                    .map(ManyToOneIdMap::num_internal_ids)
+                    .unwrap_or_else(|| tokenizer.num_states()) as usize;
+                let materialization_requested = structural_branch_tokenizer_selected(
                     &branch_label,
                     vocab.len(),
-                    l1_mask.iter().filter(|&&active| active).count(),
-                    initial_state_map
-                        .map(ManyToOneIdMap::num_internal_ids)
-                        .unwrap_or_else(|| tokenizer.num_states()) as usize,
+                    active_terminal_count,
+                    source_states,
                 ) || materialize_branch_active_tokenizer_selected(&branch_label);
+                let state_map_requested = materialization_requested
+                    || branch_active_state_map_selected(
+                        &branch_label,
+                        vocab.len(),
+                        active_terminal_count,
+                        source_states,
+                    );
                 let branch_state_map = build_branch_active_state_map(
                     tokenizer,
                     vocab,
                     &l1_mask,
                     initial_state_map,
                     &branch_label,
-                    projection_requested,
+                    state_map_requested,
                 );
-                let materialized = projection_requested
+                let materialized = materialization_requested
                     .then(|| {
                         branch_state_map.as_ref().and_then(|(map, _)| {
                             super::synthetic_state_map::materialize_active_tokenizer(
@@ -422,23 +455,33 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                                 }
                             }
                             let branch_label = format!("{partition_label}.l2p");
-                            let projection_requested = structural_branch_tokenizer_selected(
+                            let active_terminal_count =
+                                l2p_mask.iter().filter(|&&active| active).count();
+                            let source_states = initial_state_map
+                                .map(ManyToOneIdMap::num_internal_ids)
+                                .unwrap_or_else(|| tokenizer.num_states()) as usize;
+                            let materialization_requested = structural_branch_tokenizer_selected(
                                 &branch_label,
                                 boundary_vocab.len(),
-                                l2p_mask.iter().filter(|&&active| active).count(),
-                                initial_state_map
-                                    .map(ManyToOneIdMap::num_internal_ids)
-                                    .unwrap_or_else(|| tokenizer.num_states()) as usize,
+                                active_terminal_count,
+                                source_states,
                             ) || materialize_branch_active_tokenizer_selected(&branch_label);
+                            let state_map_requested = materialization_requested
+                                || branch_active_state_map_selected(
+                                    &branch_label,
+                                    boundary_vocab.len(),
+                                    active_terminal_count,
+                                    source_states,
+                                );
                             let branch_state_map = build_branch_active_state_map(
                                 tokenizer,
                                 &boundary_vocab,
                                 &l2p_mask,
                                 initial_state_map,
                                 &branch_label,
-                                projection_requested,
+                                state_map_requested,
                             );
-                            let materialized = projection_requested
+                            let materialized = materialization_requested
                                 .then(|| {
                                     branch_state_map.as_ref().and_then(|(map, _)| {
                                         super::synthetic_state_map::materialize_active_tokenizer(

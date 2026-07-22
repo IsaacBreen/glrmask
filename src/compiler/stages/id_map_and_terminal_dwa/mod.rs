@@ -97,6 +97,24 @@ fn partition_local_synthesis_enabled() -> bool {
         .unwrap_or(true)
 }
 
+pub(crate) fn prebuild_partition_local_synthesis_enabled() -> bool {
+    std::env::var("GLRMASK_PREBUILD_PARTITION_LOCAL_SYNTHESIS")
+        .map(|value| {
+            let value = value.trim();
+            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(true)
+}
+
+fn fast_partition_local_synthesis_enabled() -> bool {
+    std::env::var("GLRMASK_FAST_PARTITION_LOCAL_SYNTHESIS")
+        .map(|value| {
+            let value = value.trim();
+            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(true)
+}
+
 fn partition_local_synthesis_selected(partition_label: &str) -> bool {
     let Ok(filter) = std::env::var("GLRMASK_PARTITION_LOCAL_SYNTHESIS_FILTER") else {
         return true;
@@ -307,7 +325,7 @@ fn build_partition_local_tokenizer(
         .collect::<Vec<_>>();
     relevant_bytes.sort_unstable();
     relevant_bytes.dedup();
-    if std::env::var_os("GLRMASK_FAST_PARTITION_LOCAL_SYNTHESIS").is_some()
+    if fast_partition_local_synthesis_enabled()
         && let Some((mut local_tokenizer, global_to_local)) =
             compile_further_synthesized_tokenizer_with_structural_map(
                 global_tokenizer,
@@ -576,13 +594,7 @@ pub(crate) fn prepare_partition_local_tokenizers(
     vocab: &Vocab,
     plan: &PartitionLocalSynthesisPlan,
 ) -> Option<Arc<PreparedPartitionLocalTokenizers>> {
-    if std::env::var("GLRMASK_PREBUILD_PARTITION_LOCAL_SYNTHESIS")
-        .map(|value| {
-            let value = value.trim();
-            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
-        })
-        .unwrap_or(false)
-        == false
+    if !prebuild_partition_local_synthesis_enabled()
         || std::env::var("GLRMASK_PARTITION_SCHEME")
             .as_deref()
             .unwrap_or("char_type")
@@ -591,7 +603,7 @@ pub(crate) fn prepare_partition_local_tokenizers(
         return None;
     }
     use rayon::prelude::*;
-    let sub_vocabs = build_char_type_sub_vocabs(vocab);
+    let sub_vocabs = build_char_type_sub_vocabs(vocab, true);
     let entries = sub_vocabs
         .par_iter()
         .enumerate()
@@ -705,32 +717,17 @@ struct CharTypeSubVocabs {
 
 impl crate::vocab::VocabDerivedArtifact for CharTypeSubVocabs {}
 
-fn p2_long_token_overflow_threshold() -> Option<usize> {
-    std::env::var("GLRMASK_P2_LONG_TOKEN_OVERFLOW_THRESHOLD")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|&threshold| threshold > 0)
-}
-
-fn p1_long_token_overflow_threshold() -> Option<usize> {
-    std::env::var("GLRMASK_P1_LONG_TOKEN_OVERFLOW_THRESHOLD")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|&threshold| threshold > 0)
-}
-
-fn p0_long_token_overflow_threshold() -> Option<usize> {
-    std::env::var("GLRMASK_P0_LONG_TOKEN_OVERFLOW_THRESHOLD")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|&threshold| threshold > 0)
-}
-
-fn p4_long_token_overflow_threshold() -> Option<usize> {
-    std::env::var("GLRMASK_P4_LONG_TOKEN_OVERFLOW_THRESHOLD")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|&threshold| threshold > 0)
+fn long_token_overflow_threshold(
+    name: &str,
+    automatic: Option<usize>,
+) -> Option<usize> {
+    match std::env::var(name) {
+        Ok(value) => value
+            .parse::<usize>()
+            .ok()
+            .filter(|&threshold| threshold > 0),
+        Err(_) => automatic,
+    }
 }
 
 fn char_type_partition_index(
@@ -776,11 +773,26 @@ fn vocab_from_token_partitions(vocab: &Vocab, token_partitions: Vec<Vec<u32>>) -
         .into()
 }
 
-fn build_char_type_sub_vocabs(vocab: &Vocab) -> Arc<[Vocab]> {
-    let p0_overflow_threshold = p0_long_token_overflow_threshold();
-    let p1_overflow_threshold = p1_long_token_overflow_threshold();
-    let p2_overflow_threshold = p2_long_token_overflow_threshold();
-    let p4_overflow_threshold = p4_long_token_overflow_threshold();
+fn build_char_type_sub_vocabs(
+    vocab: &Vocab,
+    automatic_bounded_synthesis_overflow: bool,
+) -> Arc<[Vocab]> {
+    let p0_overflow_threshold = long_token_overflow_threshold(
+        "GLRMASK_P0_LONG_TOKEN_OVERFLOW_THRESHOLD",
+        automatic_bounded_synthesis_overflow.then_some(16),
+    );
+    let p1_overflow_threshold = long_token_overflow_threshold(
+        "GLRMASK_P1_LONG_TOKEN_OVERFLOW_THRESHOLD",
+        automatic_bounded_synthesis_overflow.then_some(20),
+    );
+    let p2_overflow_threshold = long_token_overflow_threshold(
+        "GLRMASK_P2_LONG_TOKEN_OVERFLOW_THRESHOLD",
+        automatic_bounded_synthesis_overflow.then_some(32),
+    );
+    let p4_overflow_threshold = long_token_overflow_threshold(
+        "GLRMASK_P4_LONG_TOKEN_OVERFLOW_THRESHOLD",
+        automatic_bounded_synthesis_overflow.then_some(32),
+    );
     if let Some(cached) = vocab.vocab_derived_cache_get::<CharTypeSubVocabs>() {
         if cached.p0_overflow_threshold == p0_overflow_threshold
             && cached.p1_overflow_threshold == p1_overflow_threshold
@@ -853,7 +865,7 @@ pub(crate) fn prepare_vocab_for_terminal_dwa(vocab: &Vocab) {
     l1::prepare_l1_token_bounded_analysis_trie(vocab);
 
     if std::env::var("GLRMASK_PARTITION_SCHEME").as_deref().unwrap_or("char_type") == "char_type" {
-        for sub_vocab in build_char_type_sub_vocabs(vocab).iter() {
+        for sub_vocab in build_char_type_sub_vocabs(vocab, false).iter() {
             classify::prepare_vocab_for_terminal_classification(sub_vocab);
             l1::prepare_l1_identity_vocab_order(sub_vocab);
             l1::prepare_l1_token_bounded_analysis_trie(sub_vocab);
@@ -1055,7 +1067,10 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
         std::env::var("GLRMASK_PARTITION_SCHEME").unwrap_or_else(|_| "char_type".to_string());
     let partition_scheme = requested_partition_scheme.as_str();
     let sub_vocabs: Arc<[Vocab]> = match partition_scheme {
-        "char_type" => build_char_type_sub_vocabs(vocab),
+        "char_type" => build_char_type_sub_vocabs(
+            vocab,
+            partition_local_synthesis_plan.is_some(),
+        ),
         "l2p_cost" => {
             let cost_fn = l2p_partition_cost_fn_from_env();
             let objective = l2p_partition_objective_from_env();
@@ -1092,7 +1107,10 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
             let objective = l2p_partition_objective_from_env();
             let num_partitions = l2p_partition_count_from_env();
             let min_grammar_terminals_limit = l2p_auto_min_grammar_terminals_from_env();
-            let char_token_partitions = classify::partition_vocab_char_type_tokens(vocab);
+            let char_token_partitions = classify::partition_vocab_char_type_tokens(
+                vocab,
+                partition_local_synthesis_plan.is_some(),
+            );
             let char_partition_sizes = char_token_partitions
                 .iter()
                 .map(|partition| partition.len())

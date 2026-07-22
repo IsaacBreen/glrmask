@@ -37,10 +37,11 @@ pub(super) fn execute_tokenizer_from_state_small_into(
     let mut tokenizer_state = start_state;
 
     for (index, &byte) in bytes.iter().enumerate() {
-		let next_state = constraint
-			.tokenizer_fast_transitions
-			.get(tokenizer_state as usize)
-			.map_or(u32::MAX, |transitions| transitions[byte as usize]);
+        let next_state = constraint.tokenizer_fast_transitions.transition(
+            &constraint.tokenizer,
+            tokenizer_state,
+            byte,
+        );
         if next_state == u32::MAX {
             return;
         }

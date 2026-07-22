@@ -224,8 +224,11 @@ impl<'a> DynamicNfaScanCache<'a> {
         let closed_targets = {
             let mut targets = Vec::<u32>::new();
             for &state in self.configs[config_index].iter() {
-                let target = self.constraint.tokenizer_fast_transitions[state as usize]
-                    [byte as usize];
+                let target = self.constraint.tokenizer_fast_transitions.transition(
+                    &self.constraint.tokenizer,
+                    state,
+                    byte,
+                );
                 if target != u32::MAX {
                     self.check_growth(targets.len(), self.epsilon_closures[target as usize].len())?;
                     targets.extend_from_slice(&self.epsilon_closures[target as usize]);

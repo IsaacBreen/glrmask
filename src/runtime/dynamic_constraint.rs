@@ -214,7 +214,7 @@ impl DynamicConstraint {
             seed_terminal_dense: Default::default(),
             seed_universe_dense: Arc::from(Vec::<u64>::new().into_boxed_slice()),
             dwa_fast_transitions: Vec::new(),
-            tokenizer_fast_transitions: Vec::new(),
+            tokenizer_fast_transitions: Default::default(),
             heavy_token_dense_masks: Vec::new(),
             internal_token_buf_flat: Box::new([]),
             internal_token_buf_offsets: Box::new([]),

@@ -4,7 +4,8 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, OnceLock};
 
 use rustc_hash::FxHashMap;
-use serde::{Deserialize, Serialize};
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Serialize, Serializer};
 use smallvec::SmallVec;
 
 use super::dfa::DFA;
@@ -13,10 +14,15 @@ use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
 use crate::grammar::flat::TerminalID;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Tokenizer {
     pub(super) dfa: DFA,
     pub(super) num_terminals: u32,
+    /// Runtime-only exact byte-class transition segments. The historical
+    /// serialized tokenizer shape contains only `dfa` and `num_terminals`; the
+    /// custom serializer expands these segments into that same DFA wire form.
+    #[serde(default, skip)]
+    pub(super) compressed_transition_segments: Arc<[CompressedTransitionSegment]>,
     /// Per-terminal regex expressions used to (re)build this tokenizer.
     /// Skipped during (de)serialization because they are only needed during
     /// compile-time simplification for active-terminal rebuilds.
@@ -28,6 +34,219 @@ pub struct Tokenizer {
     /// raw state.
     #[serde(default, skip)]
     pub(super) singleton_epsilon_closures: OnceLock<Arc<[Box<[u32]>]>>,
+}
+
+/// Exact deterministic transition rows over a byte-equivalence-class alphabet.
+/// Targets and row coordinates are local to one DFA component; `state_offset`
+/// rebases both into the final partitioned runtime tokenizer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CompressedTransitionSegment {
+    pub(crate) state_offset: u32,
+    pub(crate) state_count: u32,
+    pub(crate) byte_to_class: Arc<[u8]>,
+    pub(crate) class_members: Arc<[Box<[u8]>]>,
+    pub(crate) row_offsets: Arc<[u32]>,
+    pub(crate) entries: Arc<[(u8, u32)]>,
+    pub(crate) expanded_transition_count: usize,
+}
+
+pub(crate) mod artifact_serde {
+    use super::*;
+    use serde::{Deserializer, Serializer};
+
+    #[derive(Serialize)]
+    struct TokenizerArtifactRef<'a> {
+        dfa: &'a DFA,
+        num_terminals: u32,
+        compressed_transition_segments: &'a [CompressedTransitionSegment],
+    }
+
+    #[derive(Deserialize)]
+    struct TokenizerArtifact {
+        dfa: DFA,
+        num_terminals: u32,
+        compressed_transition_segments: Vec<CompressedTransitionSegment>,
+    }
+
+    pub(crate) fn serialize<S>(tokenizer: &Tokenizer, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        TokenizerArtifactRef {
+            dfa: &tokenizer.dfa,
+            num_terminals: tokenizer.num_terminals,
+            compressed_transition_segments: &tokenizer.compressed_transition_segments,
+        }
+        .serialize(serializer)
+    }
+
+    pub(crate) fn deserialize<'de, D>(deserializer: D) -> Result<Tokenizer, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let artifact = TokenizerArtifact::deserialize(deserializer)?;
+        Ok(Tokenizer {
+            dfa: artifact.dfa,
+            num_terminals: artifact.num_terminals,
+            compressed_transition_segments: Arc::from(
+                artifact.compressed_transition_segments.into_boxed_slice(),
+            ),
+            exprs: None,
+            singleton_epsilon_closures: OnceLock::new(),
+        })
+    }
+}
+
+impl CompressedTransitionSegment {
+    #[inline]
+    fn contains_state(&self, state: u32) -> bool {
+        state >= self.state_offset && state - self.state_offset < self.state_count
+    }
+
+    #[inline]
+    fn local_transition(&self, local_state: u32, byte: u8) -> Option<u32> {
+        let class = self.byte_to_class[byte as usize];
+        let start = self.row_offsets[local_state as usize] as usize;
+        let end = self.row_offsets[local_state as usize + 1] as usize;
+        self.entries[start..end]
+            .binary_search_by_key(&class, |&(existing, _)| existing)
+            .ok()
+            .map(|index| self.entries[start + index].1)
+    }
+
+    #[inline]
+    fn transition(&self, state: u32, byte: u8) -> Option<u32> {
+        self.local_transition(state - self.state_offset, byte)
+            .map(|target| self.state_offset + target)
+    }
+
+    fn expanded_entries(&self, state: u32) -> Vec<(u8, u32)> {
+        let local_state = state - self.state_offset;
+        let start = self.row_offsets[local_state as usize] as usize;
+        let end = self.row_offsets[local_state as usize + 1] as usize;
+        let row = &self.entries[start..end];
+        let mut target_by_class = vec![u32::MAX; self.class_members.len()];
+        let mut capacity = 0usize;
+        for &(class, target) in row {
+            target_by_class[class as usize] = target;
+            capacity += self.class_members[class as usize].len();
+        }
+        let mut entries = Vec::with_capacity(capacity);
+        for byte in 0u16..=255 {
+            let class = self.byte_to_class[byte as usize] as usize;
+            let target = target_by_class[class];
+            if target != u32::MAX {
+                entries.push((byte as u8, self.state_offset + target));
+            }
+        }
+        entries
+    }
+
+    fn fill_transition_row(&self, state: u32, row: &mut [u32; 256]) {
+        row.fill(u32::MAX);
+        let local_state = state - self.state_offset;
+        let start = self.row_offsets[local_state as usize] as usize;
+        let end = self.row_offsets[local_state as usize + 1] as usize;
+        for &(class, target) in &self.entries[start..end] {
+            let target = self.state_offset + target;
+            for &byte in self.class_members[class as usize].iter() {
+                row[byte as usize] = target;
+            }
+        }
+    }
+
+    fn transition_count(&self, state: u32) -> usize {
+        let local_state = state - self.state_offset;
+        let start = self.row_offsets[local_state as usize] as usize;
+        let end = self.row_offsets[local_state as usize + 1] as usize;
+        self.entries[start..end]
+            .iter()
+            .map(|(class, _)| self.class_members[*class as usize].len())
+            .sum()
+    }
+}
+
+enum TokenizerTransitionsIterInner<'a> {
+    Dense(crate::ds::char_transitions::CharTransitionsIter<'a, u32>),
+    Compressed {
+        segment: &'a CompressedTransitionSegment,
+        state: u32,
+        next_byte: u16,
+    },
+    Empty,
+}
+
+pub(crate) struct TokenizerTransitionsIter<'a> {
+    inner: TokenizerTransitionsIterInner<'a>,
+}
+
+impl Iterator for TokenizerTransitionsIter<'_> {
+    type Item = (u8, u32);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match &mut self.inner {
+            TokenizerTransitionsIterInner::Dense(iter) => {
+                iter.next().map(|(byte, target)| (byte, *target))
+            }
+            TokenizerTransitionsIterInner::Compressed {
+                segment,
+                state,
+                next_byte,
+            } => {
+                while *next_byte <= 255 {
+                    let byte = *next_byte as u8;
+                    *next_byte += 1;
+                    if let Some(target) = segment.transition(*state, byte) {
+                        return Some((byte, target));
+                    }
+                }
+                None
+            }
+            TokenizerTransitionsIterInner::Empty => None,
+        }
+    }
+
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match &self.inner {
+            TokenizerTransitionsIterInner::Dense(iter) => iter.size_hint(),
+            TokenizerTransitionsIterInner::Compressed { segment, state, .. } => {
+                let count = segment.transition_count(*state);
+                (count, Some(count))
+            }
+            TokenizerTransitionsIterInner::Empty => (0, Some(0)),
+        }
+    }
+
+    fn count(self) -> usize {
+        match self.inner {
+            TokenizerTransitionsIterInner::Dense(iter) => iter.count(),
+            TokenizerTransitionsIterInner::Compressed { segment, state, .. } => {
+                segment.transition_count(state)
+            }
+            TokenizerTransitionsIterInner::Empty => 0,
+        }
+    }
+}
+
+impl Serialize for Tokenizer {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let materialized;
+        let dfa = if self.compressed_transition_segments.is_empty() {
+            &self.dfa
+        } else {
+            materialized = self.materialized_dfa();
+            &materialized
+        };
+        // Match the historical derived-serialization field order exactly.
+        let mut state = serializer.serialize_struct("Tokenizer", 2)?;
+        state.serialize_field("dfa", dfa)?;
+        state.serialize_field("num_terminals", &self.num_terminals)?;
+        state.end()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -231,6 +450,7 @@ impl Tokenizer {
             Tokenizer {
                 dfa,
                 num_terminals: self.num_terminals,
+                compressed_transition_segments: Arc::from([]),
                 exprs: None,
                 singleton_epsilon_closures: OnceLock::new(),
             },
@@ -367,6 +587,7 @@ impl Tokenizer {
         Some(Tokenizer {
             dfa,
             num_terminals: self.num_terminals,
+            compressed_transition_segments: Arc::from([]),
             exprs: None,
             singleton_epsilon_closures: OnceLock::new(),
         })
@@ -509,9 +730,56 @@ impl Tokenizer {
         Self {
             dfa,
             num_terminals,
+            compressed_transition_segments: Arc::from([]),
             exprs,
             singleton_epsilon_closures: OnceLock::new(),
         }
+    }
+
+    pub(crate) fn from_parts_with_compressed_transitions(
+        dfa: DFA,
+        num_terminals: u32,
+        exprs: Option<Arc<[Expr]>>,
+        compressed_transition_segments: Vec<CompressedTransitionSegment>,
+    ) -> Self {
+        debug_assert!(compressed_transition_segments
+            .windows(2)
+            .all(|pair| pair[0].state_offset + pair[0].state_count <= pair[1].state_offset));
+        Self {
+            dfa,
+            num_terminals,
+            compressed_transition_segments: Arc::from(compressed_transition_segments),
+            exprs,
+            singleton_epsilon_closures: OnceLock::new(),
+        }
+    }
+
+    fn compressed_segment_for_state(
+        &self,
+        state: u32,
+    ) -> Option<&CompressedTransitionSegment> {
+        let index = self
+            .compressed_transition_segments
+            .partition_point(|segment| segment.state_offset <= state);
+        index.checked_sub(1).and_then(|index| {
+            let segment = &self.compressed_transition_segments[index];
+            segment.contains_state(state).then_some(segment)
+        })
+    }
+
+    pub(crate) fn has_compressed_transition_state(&self, state: u32) -> bool {
+        self.compressed_segment_for_state(state).is_some()
+    }
+
+    fn materialized_dfa(&self) -> DFA {
+        let mut dfa = self.dfa.clone();
+        for segment in self.compressed_transition_segments.iter() {
+            for local_state in 0..segment.state_count {
+                let state = segment.state_offset + local_state;
+                dfa.set_transitions_from_sorted_entries(state, segment.expanded_entries(state));
+            }
+        }
+        dfa
     }
 
     /// Put two tokenizers with the same terminal-id domain under one fresh
@@ -697,15 +965,32 @@ impl Tokenizer {
             .unwrap_or_else(|| TokenizerStateSet::from_buf([self.initial_state_id()]))
     }
 
-    fn transitions_from(&self, state: u32) -> impl Iterator<Item = (u8, u32)> + '_ {
-        self.dfa
-            .states()
-            .get(state as usize)
-            .into_iter()
-            .flat_map(|state| state.transitions.iter().map(|(byte, &target)| (byte, target)))
+    fn transitions_from(&self, state: u32) -> TokenizerTransitionsIter<'_> {
+        if let Some(segment) = self.compressed_segment_for_state(state) {
+            return TokenizerTransitionsIter {
+                inner: TokenizerTransitionsIterInner::Compressed {
+                    segment,
+                    state,
+                    next_byte: 0,
+                },
+            };
+        }
+        TokenizerTransitionsIter {
+            inner: self
+                .dfa
+                .states()
+                .get(state as usize)
+                .map_or(TokenizerTransitionsIterInner::Empty, |state| {
+                    TokenizerTransitionsIterInner::Dense(state.transitions.iter())
+                }),
+        }
     }
 
     fn fill_transition_row(&self, state: u32, row: &mut [u32; 256]) {
+        if let Some(segment) = self.compressed_segment_for_state(state) {
+            segment.fill_transition_row(state, row);
+            return;
+        }
         row.fill(u32::MAX);
         for (byte, target) in self.transitions_from(state) {
             row[byte as usize] = target;
@@ -719,6 +1004,20 @@ impl Tokenizer {
     }
 
     fn self_loop_bytes(&self, state: u32) -> U8Set {
+        if let Some(segment) = self.compressed_segment_for_state(state) {
+            let mut bytes = U8Set::empty();
+            let local_state = state - segment.state_offset;
+            let start = segment.row_offsets[local_state as usize] as usize;
+            let end = segment.row_offsets[local_state as usize + 1] as usize;
+            for &(class, target) in &segment.entries[start..end] {
+                if target == local_state {
+                    for &byte in segment.class_members[class as usize].iter() {
+                        bytes.insert(byte);
+                    }
+                }
+            }
+            return bytes;
+        }
         let mut bytes = U8Set::empty();
         for (byte, target) in self.transitions_from(state) {
             if target == state {
@@ -729,9 +1028,22 @@ impl Tokenizer {
     }
 
     fn transition_count(&self) -> usize {
-        (0..self.num_states())
-            .map(|state| self.transitions_from(state).count())
-            .sum()
+        let compressed = self
+            .compressed_transition_segments
+            .iter()
+            .map(|segment| segment.expanded_transition_count)
+            .sum::<usize>();
+        let dense = self
+            .dfa
+            .states()
+            .iter()
+            .enumerate()
+            .filter(|(state, _)| {
+                self.compressed_segment_for_state(*state as u32).is_none()
+            })
+            .map(|(_, state)| state.transitions.len())
+            .sum::<usize>();
+        compressed + dense
     }
 
     /// Detect nullable terminals (those that match the empty string) by
@@ -820,15 +1132,40 @@ impl Tokenizer {
     }
 
     fn step(&self, state: u32, byte: u8) -> Option<u32> {
-        self.dfa.step(state, byte)
+        self.compressed_segment_for_state(state)
+            .map_or_else(|| self.dfa.step(state, byte), |segment| segment.transition(state, byte))
     }
 
     fn step_all(&self, states: &[u32], byte: u8) -> TokenizerStateSet {
-        self.dfa.step_all(states, byte)
+        if self.compressed_transition_segments.is_empty() {
+            return self.dfa.step_all(states, byte);
+        }
+        if states.len() == 1 {
+            let state = states[0];
+            if self.dfa.states()[state as usize].epsilon_transitions.is_empty()
+                && let Some(target) = self.step(state, byte)
+                && self.dfa.states()[target as usize].epsilon_transitions.is_empty()
+            {
+                return TokenizerStateSet::from_buf([target]);
+            }
+        }
+        let closure = self.dfa.epsilon_closure(states);
+        let mut targets = TokenizerStateSet::new();
+        for state in closure {
+            if let Some(target) = self.step(state, byte) {
+                targets.push(target);
+            }
+        }
+        if targets.is_empty() {
+            return targets;
+        }
+        targets.sort_unstable();
+        targets.dedup();
+        self.dfa.epsilon_closure(&targets)
     }
 
     fn get_transition(&self, state: u32, byte: u8) -> u32 {
-        self.dfa.get_transition(state, byte)
+        self.step(state, byte).unwrap_or(u32::MAX)
     }
 
     pub fn run(&self, input: &[u8]) -> TokenizerStateSet {

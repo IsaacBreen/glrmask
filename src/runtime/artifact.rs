@@ -30,7 +30,60 @@ pub(crate) type SparseWeightBufMaskCache = FxHashMap<usize, Box<[(u16, u32)]>>;
 pub(crate) type DirectSparseWeightTokenSetCache = FxHashSet<usize>;
 pub(crate) type SeedTerminalDenseMasks = FxHashMap<(u32, TerminalID), DenseWords>;
 pub(crate) type FastDwaTransitions = Vec<FxHashMap<i32, (u32, Weight)>>;
-pub(crate) type FastTokenizerTransitions = Vec<Box<[u32; 256]>>;
+#[derive(Debug, Clone)]
+pub(crate) enum FastTokenizerTransitions {
+    Dense(Vec<Box<[u32; 256]>>),
+    Hybrid {
+        state_to_dense_row: Vec<u32>,
+        dense_rows: Vec<Box<[u32; 256]>>,
+    },
+}
+
+impl Default for FastTokenizerTransitions {
+    fn default() -> Self {
+        Self::Dense(Vec::new())
+    }
+}
+
+impl FastTokenizerTransitions {
+    #[inline]
+    pub(crate) fn transition(
+        &self,
+        tokenizer: &Tokenizer,
+        state: u32,
+        byte: u8,
+    ) -> u32 {
+        match self {
+            Self::Dense(rows) => rows
+                .get(state as usize)
+                .map_or(u32::MAX, |row| row[byte as usize]),
+            Self::Hybrid {
+                state_to_dense_row,
+                dense_rows,
+            } => {
+                let dense = state_to_dense_row
+                    .get(state as usize)
+                    .copied()
+                    .unwrap_or(u32::MAX);
+                if dense == u32::MAX {
+                    tokenizer.get_transition(state, byte)
+                } else {
+                    dense_rows[dense as usize][byte as usize]
+                }
+            }
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            Self::Dense(rows) => rows.len(),
+            Self::Hybrid {
+                state_to_dense_row,
+                ..
+            } => state_to_dense_row.len(),
+        }
+    }
+}
 pub(crate) type TemplateDfasByTerminal = Vec<Option<Arc<CommitTemplateDfas>>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -2265,6 +2318,7 @@ pub struct Constraint {
     pub(crate) table: GLRTable,
     #[serde(default)]
     pub(crate) terminal_display_names: Vec<String>,
+    #[serde(with = "crate::automata::lexer::tokenizer::artifact_serde")]
     pub(crate) tokenizer: Tokenizer,
     #[serde(default)]
     pub(crate) ignore_terminal: Option<TerminalID>,

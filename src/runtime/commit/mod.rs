@@ -1617,10 +1617,11 @@ fn choose_direct_linear_step(
     let mut actionable_terminals = carried_top_state.map(ActionableTerminals::SingleState);
 
     for (index, &byte) in bytes.iter().enumerate() {
-        let next_state = constraint
-            .tokenizer_fast_transitions
-            .get(tokenizer_state as usize)
-            .map_or(u32::MAX, |transitions| transitions[byte as usize]);
+        let next_state = constraint.tokenizer_fast_transitions.transition(
+            &constraint.tokenizer,
+            tokenizer_state,
+            byte,
+        );
         if next_state == u32::MAX {
             consumed_all = false;
             break;
@@ -1667,10 +1668,11 @@ fn choose_direct_linear_step(
             && index + 1 < bytes.len()
         {
             let next_byte = bytes[index + 1];
-            let next_state = constraint
-                .tokenizer_fast_transitions
-                .get(tokenizer_state as usize)
-                .map_or(u32::MAX, |transitions| transitions[next_byte as usize]);
+            let next_state = constraint.tokenizer_fast_transitions.transition(
+                &constraint.tokenizer,
+                tokenizer_state,
+                next_byte,
+            );
             if next_state == u32::MAX {
                 let (_, terminal, _) = chosen.unwrap();
                 return Some(DirectLinearStep {

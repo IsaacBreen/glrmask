@@ -1238,10 +1238,8 @@ impl DeferredRuntimeTokenizer {
                 expressions,
                 ..
             } => {
-                let mut tokenizer = full.finish().into_tokenizer(
-                    num_terminals,
-                    Some(expressions),
-                );
+                let mut tokenizer =
+                    full.finish_runtime_tokenizer(num_terminals, expressions);
                 let nullable = tokenizer.isolate_start_state_and_drain_nullable_terminals();
                 debug_assert!(
                     nullable.is_empty(),
@@ -2392,14 +2390,8 @@ fn compile_prepared_with_profile_and_table_construction(
                                         (tokenizer, None, None, 0.0)
                                     }
                 };
-                let prebuild_partition_locals = std::env::var(
-                    "GLRMASK_PREBUILD_PARTITION_LOCAL_SYNTHESIS",
-                )
-                .map(|value| {
-                    let value = value.trim();
-                    !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
-                })
-                .unwrap_or(false);
+                let prebuild_partition_locals = partition_local_synthesis_plan_ref.is_some()
+                    && crate::compiler::stages::id_map_and_terminal_dwa::prebuild_partition_local_synthesis_enabled();
                 let (global_tokenizer_result, prepared_partition_local_tokenizers) =
                     if prebuild_partition_locals {
                         rayon::join(
@@ -2447,13 +2439,19 @@ fn compile_prepared_with_profile_and_table_construction(
                     .flatten();
 
                 if let Some(deferred_runtime_tokenizer) = deferred_runtime_tokenizer {
+                    let default_start_delay_ms =
+                        if deferred_runtime_tokenizer.num_states() >= 100_000 {
+                            150
+                        } else {
+                            0
+                        };
                     scope.spawn(move |_| {
                         let start_delay_ms = std::env::var(
                             "GLRMASK_DEFERRED_RUNTIME_START_DELAY_MS",
                         )
                         .ok()
                         .and_then(|value| value.parse::<u64>().ok())
-                        .unwrap_or(0);
+                        .unwrap_or(default_start_delay_ms);
                         if start_delay_ms != 0 {
                             std::thread::sleep(std::time::Duration::from_millis(start_delay_ms));
                         }
@@ -3144,7 +3142,7 @@ fn compile_prepared_with_profile_and_table_construction(
             seed_terminal_dense: rustc_hash::FxHashMap::default(),
             seed_universe_dense: std::sync::Arc::<[u64]>::from(Vec::<u64>::new().into_boxed_slice()),
             dwa_fast_transitions: Vec::new(),
-            tokenizer_fast_transitions: Vec::new(),
+            tokenizer_fast_transitions: Default::default(),
             heavy_token_dense_masks: Vec::new(),
             heavy_token_indices: Vec::new(),
             internal_token_buf_flat: Box::new([]),

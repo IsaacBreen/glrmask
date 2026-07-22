@@ -212,9 +212,11 @@ impl crate::vocab::VocabDerivedArtifact for VocabClassificationFacts {}
 #[derive(Debug)]
 struct VocabAdjacentPairIndex {
     pair_offsets: Box<[u32]>,
+    /// `(entry_index << 32) | split_after`, grouped by adjacent byte pair.
+    /// Entry indices let hot classification loops address a precollected slice
+    /// directly instead of performing one ordered-map lookup per occurrence.
     occurrences: Box<[u64]>,
     entry_split_offsets: Box<[usize]>,
-    split_offset_by_token_id: Box<[u32]>,
     total_splits: usize,
 }
 
@@ -228,17 +230,6 @@ impl VocabAdjacentPairIndex {
         let end = self.pair_offsets[pair + 1] as usize;
         &self.occurrences[start..end]
     }
-
-    #[inline]
-    fn split_offset_for_token(&self, token_id: u32) -> usize {
-        let offset = self
-            .split_offset_by_token_id
-            .get(token_id as usize)
-            .copied()
-            .unwrap_or(u32::MAX);
-        assert_ne!(offset, u32::MAX, "token missing from adjacent-pair index");
-        offset as usize
-    }
 }
 
 fn vocab_adjacent_pair_index(vocab: &Vocab) -> Arc<VocabAdjacentPairIndex> {
@@ -248,12 +239,10 @@ fn vocab_adjacent_pair_index(vocab: &Vocab) -> Arc<VocabAdjacentPairIndex> {
 
     let mut counts = vec![0u32; 1 << 16];
     let mut entry_split_offsets = Vec::with_capacity(vocab.len() + 1);
-    let mut split_offset_by_token_id = vec![u32::MAX; vocab.max_token_id() as usize + 1];
     let mut total_splits = 0usize;
     entry_split_offsets.push(0);
-    for (&token_id, bytes) in vocab.entries.iter() {
+    for bytes in vocab.entries.values() {
         assert!(total_splits <= u32::MAX as usize);
-        split_offset_by_token_id[token_id as usize] = total_splits as u32;
         for pair in bytes.windows(2) {
             counts[((pair[0] as usize) << 8) | pair[1] as usize] += 1;
         }
@@ -267,11 +256,12 @@ fn vocab_adjacent_pair_index(vocab: &Vocab) -> Arc<VocabAdjacentPairIndex> {
     }
     let mut next = pair_offsets[..1 << 16].to_vec();
     let mut occurrences = vec![0u64; total_splits];
-    for (&token_id, bytes) in vocab.entries.iter() {
+    for (entry_index, bytes) in vocab.entries.values().enumerate() {
+        assert!(entry_index <= u32::MAX as usize);
         for (split_after, pair) in bytes.windows(2).enumerate() {
             let pair_id = ((pair[0] as usize) << 8) | pair[1] as usize;
             let slot = &mut next[pair_id];
-            occurrences[*slot as usize] = ((token_id as u64) << 32) | split_after as u64;
+            occurrences[*slot as usize] = ((entry_index as u64) << 32) | split_after as u64;
             *slot += 1;
         }
     }
@@ -280,7 +270,6 @@ fn vocab_adjacent_pair_index(vocab: &Vocab) -> Arc<VocabAdjacentPairIndex> {
         pair_offsets: pair_offsets.into_boxed_slice(),
         occurrences: occurrences.into_boxed_slice(),
         entry_split_offsets: entry_split_offsets.into_boxed_slice(),
-        split_offset_by_token_id: split_offset_by_token_id.into_boxed_slice(),
         total_splits,
     });
     vocab.vocab_derived_cache_set(Arc::clone(&index));
@@ -2890,15 +2879,13 @@ fn exact_terminal_path_two_plus_candidate_dfa(
     let mut any_viable_suffix = false;
     if words_per_mask == 1 && adjacent_pair_index.is_some() {
         let index = adjacent_pair_index.as_ref().expect("checked above");
+        let vocab_entries = vocab.entries.iter().collect::<Vec<_>>();
         for left in 0u8..=u8::MAX {
             for right in feasible_follow_bytes_by_last_byte[left as usize].iter() {
                 for &packed in index.occurrences_for_pair(left, right) {
-                    let token_id = (packed >> 32) as u32;
+                    let entry_index = (packed >> 32) as usize;
                     let split_after = packed as u32 as usize;
-                    let bytes = vocab
-                        .entries
-                        .get(&token_id)
-                        .expect("indexed token must remain in vocabulary");
+                    let (&_token_id, bytes) = vocab_entries[entry_index];
                     candidate_splits += 1;
                     let mut state = continuation_reset_state;
                     let mut matched = 0u64;
@@ -2936,7 +2923,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
                         };
                     }
                     any_viable_suffix |= matched != 0;
-                    let split_index = index.split_offset_for_token(token_id) + split_after;
+                    let split_index = index.entry_split_offsets[entry_index] + split_after;
                     suffix_viable_masks[split_index] = matched;
                 }
             }
@@ -4270,23 +4257,21 @@ fn compute_token_l2p_map(
     token_l2p_map
 }
 
-pub(crate) fn partition_vocab_char_type_tokens(vocab: &Vocab) -> Vec<Vec<u32>> {
-    let p0_overflow_threshold = std::env::var("GLRMASK_P0_LONG_TOKEN_OVERFLOW_THRESHOLD")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|&threshold| threshold > 0);
-    let p1_overflow_threshold = std::env::var("GLRMASK_P1_LONG_TOKEN_OVERFLOW_THRESHOLD")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|&threshold| threshold > 0);
-    let p2_overflow_threshold = std::env::var("GLRMASK_P2_LONG_TOKEN_OVERFLOW_THRESHOLD")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|&threshold| threshold > 0);
-    let p4_overflow_threshold = std::env::var("GLRMASK_P4_LONG_TOKEN_OVERFLOW_THRESHOLD")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|&threshold| threshold > 0);
+pub(crate) fn partition_vocab_char_type_tokens(
+    vocab: &Vocab,
+    automatic_bounded_synthesis_overflow: bool,
+) -> Vec<Vec<u32>> {
+    let threshold = |name: &str, automatic: usize| match std::env::var(name) {
+        Ok(value) => value
+            .parse::<usize>()
+            .ok()
+            .filter(|&threshold| threshold > 0),
+        Err(_) => automatic_bounded_synthesis_overflow.then_some(automatic),
+    };
+    let p0_overflow_threshold = threshold("GLRMASK_P0_LONG_TOKEN_OVERFLOW_THRESHOLD", 16);
+    let p1_overflow_threshold = threshold("GLRMASK_P1_LONG_TOKEN_OVERFLOW_THRESHOLD", 20);
+    let p2_overflow_threshold = threshold("GLRMASK_P2_LONG_TOKEN_OVERFLOW_THRESHOLD", 32);
+    let p4_overflow_threshold = threshold("GLRMASK_P4_LONG_TOKEN_OVERFLOW_THRESHOLD", 32);
     let partition_count = if p0_overflow_threshold.is_some() {
         13
     } else if p4_overflow_threshold.is_some() {

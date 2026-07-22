@@ -1080,11 +1080,40 @@ impl Constraint {
     }
 
     fn compute_tokenizer_fast_transitions(&self) -> FastTokenizerTransitions {
-        let build = |state| self.tokenizer.transition_row(state);
-        if rayon::current_num_threads() == 1 {
-            (0..self.tokenizer.num_states()).map(build).collect()
+        let num_states = self.tokenizer.num_states();
+        let has_compressed =
+            (0..num_states).any(|state| self.tokenizer.has_compressed_transition_state(state));
+        if !has_compressed {
+            let build = |state| self.tokenizer.transition_row(state);
+            let rows = if rayon::current_num_threads() == 1 {
+                (0..num_states).map(build).collect()
+            } else {
+                (0..num_states).into_par_iter().map(build).collect()
+            };
+            return FastTokenizerTransitions::Dense(rows);
+        }
+
+        let dense_states = (0..num_states)
+            .filter(|&state| !self.tokenizer.has_compressed_transition_state(state))
+            .collect::<Vec<_>>();
+        let dense_rows = if rayon::current_num_threads() == 1 {
+            dense_states
+                .iter()
+                .map(|&state| self.tokenizer.transition_row(state))
+                .collect::<Vec<_>>()
         } else {
-            (0..self.tokenizer.num_states()).into_par_iter().map(build).collect()
+            dense_states
+                .par_iter()
+                .map(|&state| self.tokenizer.transition_row(state))
+                .collect::<Vec<_>>()
+        };
+        let mut state_to_dense_row = vec![u32::MAX; num_states as usize];
+        for (row, &state) in dense_states.iter().enumerate() {
+            state_to_dense_row[state as usize] = row as u32;
+        }
+        FastTokenizerTransitions::Hybrid {
+            state_to_dense_row,
+            dense_rows,
         }
     }
 
