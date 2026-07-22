@@ -6,6 +6,7 @@
 
 use crate::automata::lexer::Lexer;
 use crate::automata::lexer::compile::{
+    compile_further_synthesized_tokenizer_with_structural_map,
     compile_partitioned_expression_pair_with_structural_map, factor_regex_expr,
     VocabularyRepeatHorizonCache,
 };
@@ -156,6 +157,52 @@ fn build_partition_local_tokenizer(
         .collect::<Vec<_>>();
     relevant_bytes.sort_unstable();
     relevant_bytes.dedup();
+    if std::env::var_os("GLRMASK_FAST_PARTITION_LOCAL_SYNTHESIS").is_some()
+        && let Some((mut local_tokenizer, global_to_local)) =
+            compile_further_synthesized_tokenizer_with_structural_map(
+                global_tokenizer,
+                &rebuilt_expressions,
+                &local_expressions,
+                &plan.protected_terminal_ids,
+                vocab,
+                &VocabularyRepeatHorizonCache::new(),
+                max_token_len,
+                &relevant_bytes,
+            )
+    {
+        let local_nullable = local_tokenizer.isolate_start_state_and_drain_nullable_terminals();
+        if local_nullable.is_empty() {
+            let local_states = local_tokenizer.num_states() as usize;
+            let global_states = global_tokenizer.num_states() as usize;
+            let ratio_rejected = if allow_half_horizon {
+                local_states.saturating_mul(20) > global_states.saturating_mul(19)
+            } else {
+                local_states.saturating_mul(4) > global_states.saturating_mul(3)
+            };
+            if local_states < global_states
+                && global_states.saturating_sub(local_states) >= 1_024
+                && !ratio_rejected
+            {
+                if compile_profile_enabled() {
+                    eprintln!(
+                        "[glrmask/profile][partition_local_synthesis_fast] horizon={} global_states={} local_states={} local_transitions={} build_ms={:.3} selected=true",
+                        max_token_len,
+                        global_states,
+                        local_states,
+                        local_tokenizer.transition_count(),
+                        started_at.elapsed().as_secs_f64() * 1000.0,
+                    );
+                }
+                return Some(PartitionLocalTokenizer {
+                    tokenizer: local_tokenizer,
+                    global_to_local: synthetic_state_map::CertifiedFullToSynthesizedStateMap {
+                        full_to_synthesized: global_to_local,
+                    },
+                    build_ms: started_at.elapsed().as_secs_f64() * 1000.0,
+                });
+            }
+        }
+    }
     let Some(pair) = compile_partitioned_expression_pair_with_structural_map(
         &rebuilt_expressions,
         &local_expressions,
