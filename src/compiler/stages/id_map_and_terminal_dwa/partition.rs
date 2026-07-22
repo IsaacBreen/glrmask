@@ -24,7 +24,7 @@ use crate::grammar::flat::TerminalID;
 use crate::Vocab;
 
 use super::{
-    PartitionLocalSynthesisPlan, build_branch_local_tokenizer,
+    PartitionLocalSynthesisPlan, build_branch_active_state_map, build_branch_local_tokenizer,
     lift_local_terminal_dwa_to_source,
 };
 
@@ -246,7 +246,18 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                         }
                     }
                 }
-                let result = super::l1::build_l1_id_map_and_terminal_dwa(
+                let branch_state_map = build_branch_active_state_map(
+                    tokenizer,
+                    vocab,
+                    &l1_mask,
+                    initial_state_map,
+                    &format!("{partition_label}.l1"),
+                );
+                let branch_initial_state_map = branch_state_map
+                    .as_ref()
+                    .map(|(map, _)| map)
+                    .or(initial_state_map);
+                let mut result = super::l1::build_l1_id_map_and_terminal_dwa(
                     partition_label,
                     tokenizer,
                     vocab,
@@ -257,11 +268,16 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                     &l1_mask,
                     flat_trans,
                     l1_transitions_by_byte,
-                    initial_state_map,
+                    branch_initial_state_map,
                     None,
                     shared_l1_token_trie.as_deref(),
                     None,
                 );
+                if let (Some(part), Some((_, map_ms))) =
+                    (result.as_mut(), branch_state_map.as_ref())
+                {
+                    part.profile.id_map_ms += *map_ms;
+                }
                 (result, started_at.elapsed().as_secs_f64() * 1000.0)
             } else {
                 (None, 0.0)
@@ -380,7 +396,18 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                                     );
                                 }
                             }
-                            let result = super::l2p::build_l2p_id_map_and_terminal_dwa(
+                            let branch_state_map = build_branch_active_state_map(
+                                tokenizer,
+                                &boundary_vocab,
+                                &l2p_mask,
+                                initial_state_map,
+                                &format!("{partition_label}.l2p"),
+                            );
+                            let branch_initial_state_map = branch_state_map
+                                .as_ref()
+                                .map(|(map, _)| map)
+                                .or(initial_state_map);
+                            let mut result = super::l2p::build_l2p_id_map_and_terminal_dwa(
                                 partition_label,
                                 tokenizer,
                                 &boundary_vocab,
@@ -402,8 +429,13 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                                         // analysis verifies flat-table compatibility before using it.
                                 Some(flat_trans),
                                 shared_l1_token_trie.as_deref(),
-                                initial_state_map,
+                                branch_initial_state_map,
                             );
+                            if let (Some(part), Some((_, map_ms))) =
+                                (result.as_mut(), branch_state_map.as_ref())
+                            {
+                                part.profile.id_map_ms += *map_ms;
+                            }
                             (result, started_at.elapsed().as_secs_f64() * 1000.0)
                         }
                     },

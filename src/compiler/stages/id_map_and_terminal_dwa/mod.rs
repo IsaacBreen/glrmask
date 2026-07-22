@@ -102,6 +102,15 @@ pub(crate) fn build_branch_local_tokenizer(
     active: &[bool],
     branch_label: &str,
 ) -> Option<BranchLocalTokenizer> {
+    if let Ok(filter) = std::env::var("GLRMASK_BRANCH_LOCAL_SYNTHESIS_FILTER")
+        && !filter
+            .split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .any(|item| branch_label.contains(item))
+    {
+        return None;
+    }
     if !branch_local_synthesis_enabled()
         || vocab.is_empty()
         || active.len() < source_tokenizer.num_terminals() as usize
@@ -114,10 +123,28 @@ pub(crate) fn build_branch_local_tokenizer(
     }
 
     let started_at = Instant::now();
+    let reject = |stage: &str, local_states: usize| {
+        if compile_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][branch_local_synthesis] branch={} stage={} active_terminals={} vocab_tokens={} source_states={} local_states={} elapsed_ms={:.3} selected=false",
+                branch_label,
+                stage,
+                active_count,
+                vocab.len(),
+                source_tokenizer.num_states(),
+                local_states,
+                started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        None
+    };
     let max_token_len = vocab.entries.values().map(Vec::len).max().unwrap_or(0);
-    let source_expressions = (0..source_tokenizer.num_terminals())
+    let Some(source_expressions) = (0..source_tokenizer.num_terminals())
         .map(|terminal| source_tokenizer.terminal_expr(terminal).cloned())
-        .collect::<Option<Vec<_>>>()?;
+        .collect::<Option<Vec<_>>>()
+    else {
+        return reject("missing_expressions", 0);
+    };
     let protected = plan
         .protected_terminal_ids
         .iter()
@@ -130,10 +157,22 @@ pub(crate) fn build_branch_local_tokenizer(
                 max_token_len,
             )
         });
+    // Keep one omitted terminal as an all-byte inactive sink. Under the active
+    // projection every omitted-component residual has empty behavior forever,
+    // but certification still needs a concrete local state for that class.
+    let inactive_sink_terminal = active.iter().position(|&value| !value);
     let mut branch_expressions = Vec::with_capacity(source_expressions.len());
     for (terminal, expression) in source_expressions.into_iter().enumerate() {
         let expression = if !active[terminal] {
-            Expr::U8Class(U8Set::empty())
+            if Some(terminal) == inactive_sink_terminal {
+                Expr::Repeat {
+                    expr: Box::new(Expr::U8Class(U8Set::all())),
+                    min: 1,
+                    max: None,
+                }
+            } else {
+                Expr::U8Class(U8Set::empty())
+            }
         } else if protected.contains(&(terminal as u32)) {
             horizon_candidate
                 .as_ref()
@@ -160,20 +199,22 @@ pub(crate) fn build_branch_local_tokenizer(
         .iter()
         .any(|terminal| active.get(*terminal as usize).copied().unwrap_or(false))
     {
-        return None;
+        return reject("active_nullable", tokenizer.num_states() as usize);
     }
 
     let source_states = source_tokenizer.num_states() as usize;
     let local_states = tokenizer.num_states() as usize;
     if local_states >= source_states || source_states.saturating_sub(local_states) < 512 {
-        return None;
+        return reject("insufficient_reduction", local_states);
     }
-    let source_to_local = synthetic_state_map::certify_full_to_synthesized_state_map(
+    let Some(source_to_local) = synthetic_state_map::certify_full_to_synthesized_state_map(
         source_tokenizer,
         &tokenizer,
         vocab,
         Some(active),
-    )?;
+    ) else {
+        return reject("certification", local_states);
+    };
     let build_ms = started_at.elapsed().as_secs_f64() * 1000.0;
     if compile_profile_enabled() {
         eprintln!(
@@ -202,6 +243,81 @@ pub(crate) fn lift_local_terminal_dwa_to_source(
     part.id_map.tokenizer_states =
         source_to_local.lift_internal_tsid_map(&part.id_map.tokenizer_states)?;
     Some(())
+}
+
+fn branch_active_state_map_enabled() -> bool {
+    std::env::var("GLRMASK_BRANCH_ACTIVE_STATE_MAP")
+        .map(|value| {
+            let value = value.trim();
+            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false)
+}
+
+pub(crate) fn build_branch_active_state_map(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    active: &[bool],
+    initial_state_map: Option<&ManyToOneIdMap>,
+    branch_label: &str,
+) -> Option<(ManyToOneIdMap, f64)> {
+    if !branch_active_state_map_enabled() || vocab.is_empty() {
+        return None;
+    }
+    if let Ok(filter) = std::env::var("GLRMASK_BRANCH_ACTIVE_STATE_MAP_FILTER")
+        && !filter
+            .split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .any(|item| branch_label.contains(item))
+    {
+        return None;
+    }
+    let source_reps = initial_state_map
+        .map(ManyToOneIdMap::num_internal_ids)
+        .unwrap_or(tokenizer.num_states()) as usize;
+    if source_reps <= 1 {
+        return None;
+    }
+    let started_at = Instant::now();
+    let statistic =
+        l2p::equivalence_analysis::state_equivalence::max_length::cached_statistic(vocab);
+    let mode = match std::env::var("GLRMASK_BRANCH_ACTIVE_STATE_MAP_MODE").as_deref() {
+        Ok("stable") => l2p::equivalence_analysis::state_equivalence::max_length::MaxLengthMode::StableByteRestricted,
+        Ok("kbounded") | Err(_) => l2p::equivalence_analysis::state_equivalence::max_length::MaxLengthMode::KBoundedByteRestricted,
+        Ok(other) => panic!(
+            "invalid GLRMASK_BRANCH_ACTIVE_STATE_MAP_MODE={other:?}; expected stable or kbounded"
+        ),
+    };
+    let state_map =
+        l2p::equivalence_analysis::state_equivalence::max_length::compute_state_map(
+            tokenizer,
+            &statistic,
+            initial_state_map,
+            Some(active),
+            mode,
+            None,
+            None,
+        );
+    let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+    let reps = state_map.num_internal_ids() as usize;
+    let selected = reps < source_reps && source_reps.saturating_sub(reps) >= 512;
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][branch_active_state_map] branch={} mode={:?} active_terminals={} vocab_tokens={} horizon={} source_reps={} reps={} reduction_pct={:.2} ms={:.3} selected={}",
+            branch_label,
+            mode,
+            active.iter().filter(|&&value| value).count(),
+            vocab.len(),
+            statistic.max_token_len(),
+            source_reps,
+            reps,
+            100.0 * source_reps.saturating_sub(reps) as f64 / source_reps as f64,
+            elapsed_ms,
+            selected,
+        );
+    }
+    selected.then_some((state_map, elapsed_ms))
 }
 
 fn build_partition_local_tokenizer(
