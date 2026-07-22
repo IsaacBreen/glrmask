@@ -734,6 +734,13 @@ fn compact_l1_terminal_dwa_enabled() -> bool {
     })
 }
 
+fn l1_exact_transition_map_reserve_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("GLRMASK_L1_EXACT_TRANSITION_MAP_RESERVE").is_some()
+    })
+}
+
 /// Maximum L1 equivalence class count before falling back to L2+.
 ///
 /// When the tokenizer DFA has more than this many distinct equivalence classes
@@ -3637,6 +3644,13 @@ fn l1_bucket_suffix_signature_profiles_packed(
     let mut edge_data = vec![L1PackedProductEdgeData::default(); trie.edges.len()];
     let mut states = Vec::<u32>::new();
     let mut transition_maps = Vec::<u32>::new();
+    let transition_map_structural_ceiling = trie
+        .edges
+        .len()
+        .checked_mul(walk_targets.len())
+        .expect("packed L1 transition-map structural ceiling overflow");
+    let exact_transition_map_reserve = l1_exact_transition_map_reserve_enabled();
+    let mut transition_map_exact_reserves = 0usize;
     states.extend_from_slice(&walk_targets);
     data[0].states_start = 0;
     data[0].states_len = walk_targets.len() as u32;
@@ -3662,6 +3676,24 @@ fn l1_bucket_suffix_signature_profiles_packed(
             let canonical_state = horizon_maps
                 .map(|maps| maps[remaining_horizon_by_node[child]].as_ref());
             edge_data[edge_index].map_start = transition_maps.len() as u32;
+            if exact_transition_map_reserve {
+                let required = transition_maps
+                    .len()
+                    .checked_add(parent_len)
+                    .expect("packed L1 transition-map length overflow");
+                let capacity = transition_maps.capacity();
+                if required > capacity
+                    && capacity != 0
+                    && transition_map_structural_ceiling
+                        < capacity.saturating_mul(2)
+                {
+                    debug_assert!(transition_map_structural_ceiling >= required);
+                    transition_maps.reserve_exact(
+                        transition_map_structural_ceiling - transition_maps.len(),
+                    );
+                    transition_map_exact_reserves += 1;
+                }
+            }
             let child_start = states.len() as u32;
             let uniform_transition = |next: u32| -> Option<u32> {
                 if next == dead {
@@ -4197,7 +4229,7 @@ fn l1_bucket_suffix_signature_profiles_packed(
     });
     if let Some(total_started_at) = total_started_at {
         eprintln!(
-            "[glrmask/profile][l1_packed_product] first_byte={} tokens={} targets={} trie_nodes={} active_nodes={} states={} states_capacity={} transition_maps={} transition_maps_capacity={} behavior_ids={} behavior_ids_capacity={} records={} record_child_behaviors={} uniform_subtree_transitions={} trie_ms={:.3} propagate_ms={:.3} behavior_ms={:.3} materialize_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][l1_packed_product] first_byte={} tokens={} targets={} trie_nodes={} active_nodes={} states={} states_capacity={} transition_maps={} transition_maps_capacity={} transition_map_ceiling={} transition_map_exact_reserves={} behavior_ids={} behavior_ids_capacity={} records={} record_child_behaviors={} uniform_subtree_transitions={} trie_ms={:.3} propagate_ms={:.3} behavior_ms={:.3} materialize_ms={:.3} total_ms={:.3}",
             first_byte,
             token_ids.len(),
             walk_targets.len(),
@@ -4207,6 +4239,8 @@ fn l1_bucket_suffix_signature_profiles_packed(
             states.capacity(),
             transition_maps.len(),
             transition_maps.capacity(),
+            transition_map_structural_ceiling,
+            transition_map_exact_reserves,
             behavior_ids.len(),
             behavior_ids.capacity(),
             records.len(),
