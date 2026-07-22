@@ -734,6 +734,13 @@ fn compact_l1_terminal_dwa_enabled() -> bool {
     })
 }
 
+fn l1_uniform_transition_cache_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("GLRMASK_L1_UNIFORM_TRANSITION_CACHE").is_some()
+    })
+}
+
 /// Maximum L1 equivalence class count before falling back to L2+.
 ///
 /// When the tokenizer DFA has more than this many distinct equivalence classes
@@ -3644,6 +3651,9 @@ fn l1_bucket_suffix_signature_profiles_packed(
     let mut seen_stamp = vec![0u32; num_lexer_states];
     let mut seen_index = vec![0u32; num_lexer_states];
     let mut stamp = 0u32;
+    let cache_uniform_transitions = l1_uniform_transition_cache_enabled();
+    let mut uniform_transition_checks = 0usize;
+    let mut uniform_transition_cache_hits = 0usize;
     let mut uniform_subtree_transitions = 0usize;
     let mut active_nodes = Vec::<usize>::with_capacity(trie.nodes.len().min(states.len().max(1)));
     active_nodes.push(0);
@@ -3663,7 +3673,8 @@ fn l1_bucket_suffix_signature_profiles_packed(
                 .map(|maps| maps[remaining_horizon_by_node[child]].as_ref());
             edge_data[edge_index].map_start = transition_maps.len() as u32;
             let child_start = states.len() as u32;
-            let uniform_transition = |next: u32| -> Option<u32> {
+            let mut uniform_transition = |next: u32| -> Option<u32> {
+                uniform_transition_checks += 1;
                 if next == dead {
                     return Some(L1_NONE);
                 }
@@ -3725,7 +3736,14 @@ fn l1_bucket_suffix_signature_profiles_packed(
                     first_added_raw = Some(first);
                     0
                 };
-                let second_index = if let Some(encoded) = uniform_transition(second) {
+                let second_index = if cache_uniform_transitions && second == first {
+                    if first_index == L1_NONE
+                        || l1_uniform_behavior_signature(first_index).is_some()
+                    {
+                        uniform_transition_cache_hits += 1;
+                    }
+                    first_index
+                } else if let Some(encoded) = uniform_transition(second) {
                     uniform_subtree_transitions += usize::from(second != dead);
                     encoded
                 } else if first_added_raw == Some(second) {
@@ -3754,7 +3772,34 @@ fn l1_bucket_suffix_signature_profiles_packed(
                         edge.byte as usize,
                         canonical_state,
                     );
-                    if let Some(encoded) = uniform_transition(next) {
+                    if cache_uniform_transitions {
+                        if next == dead {
+                            transition_maps.push(L1_NONE);
+                            continue;
+                        }
+                        if seen_stamp[next as usize] == stamp {
+                            let cached = seen_index[next as usize];
+                            if cached == L1_NONE
+                                || l1_uniform_behavior_signature(cached).is_some()
+                            {
+                                uniform_transition_cache_hits += 1;
+                            }
+                            transition_maps.push(cached);
+                            continue;
+                        }
+                        if let Some(encoded) = uniform_transition(next) {
+                            uniform_subtree_transitions += 1;
+                            seen_stamp[next as usize] = stamp;
+                            seen_index[next as usize] = encoded;
+                            transition_maps.push(encoded);
+                        } else {
+                            let child_index = states.len() as u32 - child_start;
+                            seen_stamp[next as usize] = stamp;
+                            seen_index[next as usize] = child_index;
+                            states.push(next);
+                            transition_maps.push(child_index);
+                        }
+                    } else if let Some(encoded) = uniform_transition(next) {
                         uniform_subtree_transitions += usize::from(next != dead);
                         transition_maps.push(encoded);
                     } else if seen_stamp[next as usize] == stamp {
@@ -4197,7 +4242,7 @@ fn l1_bucket_suffix_signature_profiles_packed(
     });
     if let Some(total_started_at) = total_started_at {
         eprintln!(
-            "[glrmask/profile][l1_packed_product] first_byte={} tokens={} targets={} trie_nodes={} active_nodes={} states={} states_capacity={} transition_maps={} transition_maps_capacity={} behavior_ids={} behavior_ids_capacity={} records={} record_child_behaviors={} uniform_subtree_transitions={} trie_ms={:.3} propagate_ms={:.3} behavior_ms={:.3} materialize_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][l1_packed_product] first_byte={} tokens={} targets={} trie_nodes={} active_nodes={} states={} states_capacity={} transition_maps={} transition_maps_capacity={} behavior_ids={} behavior_ids_capacity={} records={} record_child_behaviors={} uniform_transition_checks={} uniform_transition_cache_hits={} uniform_subtree_transitions={} trie_ms={:.3} propagate_ms={:.3} behavior_ms={:.3} materialize_ms={:.3} total_ms={:.3}",
             first_byte,
             token_ids.len(),
             walk_targets.len(),
@@ -4211,6 +4256,8 @@ fn l1_bucket_suffix_signature_profiles_packed(
             behavior_ids.capacity(),
             records.len(),
             record_child_behaviors.len(),
+            uniform_transition_checks,
+            uniform_transition_cache_hits,
             uniform_subtree_transitions,
             trie_ms,
             propagate_ms,
