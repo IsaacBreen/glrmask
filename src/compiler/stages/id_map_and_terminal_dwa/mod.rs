@@ -122,10 +122,20 @@ fn build_partition_local_tokenizer(
         .iter()
         .copied()
         .collect::<std::collections::BTreeSet<_>>();
-    let mut candidate = synthetic_state_map::synthesize_terminal_expressions_for_horizon(
-        &plan.expressions,
-        max_token_len,
-    );
+    let repeat_horizons = VocabularyRepeatHorizonCache::new();
+    let mut candidate =
+        if std::env::var_os("GLRMASK_PARTITION_VOCABULARY_HORIZONS").is_some() {
+            synthetic_state_map::synthesize_bounded_terminal_expressions(
+                &plan.expressions,
+                vocab,
+                &repeat_horizons,
+            )
+        } else {
+            synthetic_state_map::synthesize_terminal_expressions_for_horizon(
+                &plan.expressions,
+                max_token_len,
+            )
+        };
     let mut changed = false;
     for terminal in 0..candidate.expressions.len() {
         if protected.contains(&(terminal as u32)) {
@@ -164,7 +174,7 @@ fn build_partition_local_tokenizer(
         &plan.residual_isolation_classes,
         plan.adaptive,
         vocab,
-        &VocabularyRepeatHorizonCache::new(),
+        &repeat_horizons,
         max_token_len,
         &relevant_bytes,
     ) else {
