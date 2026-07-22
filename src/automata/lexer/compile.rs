@@ -2857,9 +2857,41 @@ struct LexerComponent {
 struct LexerComponentPair {
     terminal_ids: Vec<usize>,
     synthesized: DFA,
-    full: DFA,
+    full: DeferredDfa,
     full_to_synthesized: Vec<u32>,
     protected_residual: bool,
+}
+
+enum DeferredDfa {
+    Ready(DFA),
+    DenseBinary(DeferredDenseBinaryIntersectionProduct),
+}
+
+impl DeferredDfa {
+    fn dfa(&self) -> &DFA {
+        match self {
+            Self::Ready(dfa) => dfa,
+            Self::DenseBinary(product) => product.dfa(),
+        }
+    }
+
+    fn dfa_mut(&mut self) -> &mut DFA {
+        match self {
+            Self::Ready(dfa) => dfa,
+            Self::DenseBinary(product) => product.dfa_mut(),
+        }
+    }
+
+    fn num_states(&self) -> usize {
+        self.dfa().num_states()
+    }
+
+    fn finish(self) -> DFA {
+        match self {
+            Self::Ready(dfa) => dfa,
+            Self::DenseBinary(product) => product.finish(),
+        }
+    }
 }
 
 fn isolate_component_nullable_start(dfa: DFA, num_terminals: usize) -> (DFA, BTreeSet<u32>) {
@@ -2872,6 +2904,64 @@ pub(crate) struct CompiledPartitionedExpressionPair {
     pub(crate) synthesized: Regex,
     pub(crate) full: Regex,
     pub(crate) full_to_synthesized: Vec<u32>,
+}
+
+pub(crate) struct PreparedPartitionedExpressionPair {
+    pub(crate) synthesized: Regex,
+    full: DeferredPartitionedRegex,
+    pub(crate) full_to_synthesized: Vec<u32>,
+}
+
+impl PreparedPartitionedExpressionPair {
+    pub(crate) fn full_num_states(&self) -> usize {
+        self.full.num_states()
+    }
+
+    pub(crate) fn finish_full(self) -> CompiledPartitionedExpressionPair {
+        CompiledPartitionedExpressionPair {
+            synthesized: self.synthesized,
+            full: self.full.finish(),
+            full_to_synthesized: self.full_to_synthesized,
+        }
+    }
+
+    pub(crate) fn into_parts(self) -> (Regex, DeferredPartitionedRegex, Vec<u32>) {
+        (
+            self.synthesized,
+            self.full,
+            self.full_to_synthesized,
+        )
+    }
+}
+
+pub(crate) struct DeferredPartitionedRegex {
+    components: Vec<LexerComponentPair>,
+    total_groups: usize,
+}
+
+impl DeferredPartitionedRegex {
+    pub(crate) fn num_states(&self) -> usize {
+        1 + self
+            .components
+            .iter()
+            .map(|component| component.full.num_states())
+            .sum::<usize>()
+    }
+
+    pub(crate) fn finish(self) -> Regex {
+        let components = self
+            .components
+            .into_iter()
+            .map(|component| LexerComponent {
+                terminal_ids: component.terminal_ids,
+                dfa: component.full.finish(),
+                protected_residual: component.protected_residual,
+            })
+            .collect::<Vec<_>>();
+        Regex {
+            dfa: combine_lexer_components_under_epsilon_root(components, self.total_groups),
+        }
+    }
 }
 
 fn compile_partition_components(
@@ -3591,21 +3681,14 @@ fn compile_terminal_partitions(
     combined
 }
 
-fn combine_component_pairs_under_epsilon_root(
+fn combine_synthesized_component_pairs_under_epsilon_root(
     components: &[LexerComponentPair],
     total_groups: usize,
-    full_side: bool,
 ) -> (DFA, Vec<u32>) {
     let total_states = 1usize
         + components
             .iter()
-            .map(|component| {
-                if full_side {
-                    component.full.num_states()
-                } else {
-                    component.synthesized.num_states()
-                }
-            })
+            .map(|component| component.synthesized.num_states())
             .sum::<usize>();
     let mut combined = DFA::new(total_states);
     combined.ensure_group_capacity(total_groups);
@@ -3616,11 +3699,7 @@ fn combine_component_pairs_under_epsilon_root(
     for component_pair in components {
         offsets.push(offset);
         let terminal_ids = &component_pair.terminal_ids;
-        let component = if full_side {
-            &component_pair.full
-        } else {
-            &component_pair.synthesized
-        };
+        let component = &component_pair.synthesized;
         debug_assert_eq!(component.num_groups(), terminal_ids.len());
         combined.add_epsilon_transition(0, offset);
 
@@ -3664,6 +3743,28 @@ fn combine_component_pairs_under_epsilon_root(
     (combined, offsets)
 }
 
+fn combine_lexer_components_under_epsilon_root(
+    components: Vec<LexerComponent>,
+    total_groups: usize,
+) -> DFA {
+    let mut combined = DFA::new(1);
+    combined.ensure_group_capacity(total_groups);
+    let mut root_futures = BitSet::new(total_groups);
+
+    for lexer_component in components {
+        let terminal_ids = lexer_component.terminal_ids;
+        let component = lexer_component.dfa;
+        debug_assert_eq!(component.num_groups(), terminal_ids.len());
+        for local_group in component.possible_future_group_ids(0).iter() {
+            root_futures.set(terminal_ids[local_group]);
+        }
+        let offset = combined.append_rebased_component(component, &terminal_ids);
+        combined.add_epsilon_transition(0, offset);
+    }
+    combined.set_possible_future_group_ids(0, root_futures);
+    combined
+}
+
 /// Compile independently protected terminal partitions as exact/synthesized
 /// pairs while compiling every unchanged partition only once. The returned
 /// state map is structural: the global epsilon root maps to the global root,
@@ -3671,7 +3772,7 @@ fn combine_component_pairs_under_epsilon_root(
 /// certified local product maps. Adaptive prefix determinization remains
 /// available for the ordinary components but never crosses a protected
 /// residual coordinate.
-pub(crate) fn compile_partitioned_expression_pair_with_structural_map(
+pub(crate) fn prepare_partitioned_expression_pair_with_structural_map(
     full_exprs: &[Expr],
     synthesized_exprs: &[Expr],
     visible_labels: Option<&[String]>,
@@ -3682,7 +3783,7 @@ pub(crate) fn compile_partitioned_expression_pair_with_structural_map(
     repeat_horizons: &VocabularyRepeatHorizonCache,
     max_token_len: usize,
     relevant_bytes: &[u8],
-) -> Option<CompiledPartitionedExpressionPair> {
+) -> Option<PreparedPartitionedExpressionPair> {
     let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
     if full_exprs.len() != synthesized_exprs.len()
         || full_exprs.len() != partitions.len()
@@ -3781,7 +3882,7 @@ pub(crate) fn compile_partitioned_expression_pair_with_structural_map(
                 return Some(LexerComponentPair {
                     terminal_ids,
                     synthesized: dfa.clone(),
-                    full: dfa,
+                    full: DeferredDfa::Ready(dfa),
                     full_to_synthesized: (0..state_count).collect(),
                     protected_residual: false,
                 });
@@ -3799,7 +3900,7 @@ pub(crate) fn compile_partitioned_expression_pair_with_structural_map(
             }
             let terminal = changed_terminals[0];
             residual_isolation_classes[terminal]?;
-            let pair = compile_terminal_expression_pair_with_structural_map(
+            let pair = prepare_terminal_expression_pair_with_structural_map(
                 &full_exprs[terminal],
                 &synthesized_exprs[terminal],
                 vocab,
@@ -3820,8 +3921,17 @@ pub(crate) fn compile_partitioned_expression_pair_with_structural_map(
             };
             let (synthesized, synthesized_nullable) =
                 isolate_component_nullable_start(pair.synthesized.dfa, terminal_ids.len());
-            let (full, full_nullable) =
-                isolate_component_nullable_start(pair.full.dfa, terminal_ids.len());
+            let mut full = pair.full;
+            let full_nullable = if full.dfa().finalizers(0).is_empty()
+                && !full.dfa().has_epsilon_transitions()
+            {
+                BTreeSet::new()
+            } else {
+                let (dfa, nullable) =
+                    isolate_component_nullable_start(full.finish(), terminal_ids.len());
+                full = DeferredDfa::Ready(dfa);
+                nullable
+            };
             if !synthesized_nullable.is_empty() || !full_nullable.is_empty() {
                 if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some() {
                     eprintln!(
@@ -3847,9 +3957,15 @@ pub(crate) fn compile_partitioned_expression_pair_with_structural_map(
         if pair.protected_residual {
             protected.push(pair);
         } else {
+            let dfa = match pair.full {
+                DeferredDfa::Ready(dfa) => dfa,
+                DeferredDfa::DenseBinary(_) => {
+                    unreachable!("ordinary lexer components are never deferred")
+                }
+            };
             ordinary.push(LexerComponent {
                 terminal_ids: pair.terminal_ids,
-                dfa: pair.full,
+                dfa,
                 protected_residual: false,
             });
         }
@@ -3869,7 +3985,7 @@ pub(crate) fn compile_partitioned_expression_pair_with_structural_map(
             LexerComponentPair {
                 terminal_ids,
                 synthesized: dfa.clone(),
-                full: dfa,
+                full: DeferredDfa::Ready(dfa),
                 full_to_synthesized: (0..state_count).collect(),
                 protected_residual: false,
             }
@@ -3881,10 +3997,14 @@ pub(crate) fn compile_partitioned_expression_pair_with_structural_map(
     });
 
     let (synthesized, synthesized_offsets) =
-        combine_component_pairs_under_epsilon_root(&pairs, full_exprs.len(), false);
-    let (full, full_offsets) =
-        combine_component_pairs_under_epsilon_root(&pairs, full_exprs.len(), true);
-    let mut full_to_synthesized = Vec::with_capacity(full.num_states());
+        combine_synthesized_component_pairs_under_epsilon_root(&pairs, full_exprs.len());
+    let mut full_offsets = Vec::with_capacity(pairs.len());
+    let mut full_state_count = 1usize;
+    for pair in &pairs {
+        full_offsets.push(full_state_count as u32);
+        full_state_count = full_state_count.checked_add(pair.full.num_states())?;
+    }
+    let mut full_to_synthesized = Vec::with_capacity(full_state_count);
     full_to_synthesized.push(0);
     for (component_index, pair) in pairs.iter().enumerate() {
         let synthesized_offset = synthesized_offsets[component_index];
@@ -3899,15 +4019,45 @@ pub(crate) fn compile_partitioned_expression_pair_with_structural_map(
                 .map(|&state| synthesized_offset + state),
         );
     }
-    if full_to_synthesized.len() != full.num_states() {
+    if full_to_synthesized.len() != full_state_count {
         return None;
     }
 
-    Some(CompiledPartitionedExpressionPair {
+    Some(PreparedPartitionedExpressionPair {
         synthesized: Regex { dfa: synthesized },
-        full: Regex { dfa: full },
+        full: DeferredPartitionedRegex {
+            components: pairs,
+            total_groups: full_exprs.len(),
+        },
         full_to_synthesized,
     })
+}
+
+pub(crate) fn compile_partitioned_expression_pair_with_structural_map(
+    full_exprs: &[Expr],
+    synthesized_exprs: &[Expr],
+    visible_labels: Option<&[String]>,
+    partitions: &[u32],
+    residual_isolation_classes: &[Option<u32>],
+    adaptive: bool,
+    vocab: &Vocab,
+    repeat_horizons: &VocabularyRepeatHorizonCache,
+    max_token_len: usize,
+    relevant_bytes: &[u8],
+) -> Option<CompiledPartitionedExpressionPair> {
+    prepare_partitioned_expression_pair_with_structural_map(
+        full_exprs,
+        synthesized_exprs,
+        visible_labels,
+        partitions,
+        residual_isolation_classes,
+        adaptive,
+        vocab,
+        repeat_horizons,
+        max_token_len,
+        relevant_bytes,
+    )
+    .map(PreparedPartitionedExpressionPair::finish_full)
 }
 
 fn product_state_metadata(
@@ -5330,6 +5480,12 @@ pub(crate) struct CompiledTerminalExpressionPair {
     pub(crate) full_to_synthesized: Vec<u32>,
 }
 
+struct PreparedTerminalExpressionPair {
+    synthesized: Regex,
+    full: DeferredDfa,
+    full_to_synthesized: Vec<u32>,
+}
+
 /// Return the number of structurally aligned product components available to
 /// the paired terminal compiler without constructing either DFA.
 ///
@@ -5361,14 +5517,14 @@ pub(crate) fn structural_pair_component_count(
     .then_some(full_plan.compiled_exprs.len())
 }
 
-pub(crate) fn compile_terminal_expression_pair_with_structural_map(
+fn prepare_terminal_expression_pair_with_structural_map(
     full_expression: &Expr,
     synthesized_expression: &Expr,
     vocab: &Vocab,
     repeat_horizons: &VocabularyRepeatHorizonCache,
     max_token_len: usize,
     relevant_bytes: &[u8],
-) -> Option<CompiledTerminalExpressionPair> {
+) -> Option<PreparedTerminalExpressionPair> {
     let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
     let total_started_at = profile.then(Instant::now);
     let normalized_full = lift_single_nested_intersection(full_expression);
@@ -5456,22 +5612,28 @@ pub(crate) fn compile_terminal_expression_pair_with_structural_map(
                 map_ms,
             );
         }
-        return Some(CompiledTerminalExpressionPair {
+        return Some(PreparedTerminalExpressionPair {
             synthesized: Regex {
                 dfa: synthesized_dfa,
             },
-            full: Regex { dfa: full_dfa },
+            full: DeferredDfa::Ready(full_dfa),
             full_to_synthesized,
         });
     }
 
     let product_build_started_at = profile.then(Instant::now);
-    let ((full_dfa, full_trace, full_build_ms), (mut synthesized_dfa, synthesized_trace, synthesized_build_ms)) = rayon::join(
+    let ((full, full_trace, full_build_ms), (mut synthesized_dfa, synthesized_trace, synthesized_build_ms)) = rayon::join(
         || {
             let started_at = profile.then(Instant::now);
-            let (dfa, trace) = compile_with_plan_internal(full_plan, true);
+            let (full, trace) = match try_compile_with_plan_deferred_dense(full_plan) {
+                Ok(prepared) => prepared,
+                Err(full_plan) => {
+                    let (dfa, trace) = compile_with_plan_internal(full_plan, true);
+                    (DeferredDfa::Ready(dfa), trace)
+                }
+            };
             (
-                dfa,
+                full,
                 trace,
                 started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
             )
@@ -5496,6 +5658,7 @@ pub(crate) fn compile_terminal_expression_pair_with_structural_map(
             product_build_ms,
         );
     }
+    let full_dfa = full.dfa();
     let Some(full_trace) = full_trace else {
         if profile {
             eprintln!(
@@ -5960,12 +6123,37 @@ pub(crate) fn compile_terminal_expression_pair_with_structural_map(
         );
     }
 
-    Some(CompiledTerminalExpressionPair {
+    Some(PreparedTerminalExpressionPair {
         synthesized: Regex {
             dfa: synthesized_dfa,
         },
-        full: Regex { dfa: full_dfa },
+        full,
         full_to_synthesized,
+    })
+}
+
+pub(crate) fn compile_terminal_expression_pair_with_structural_map(
+    full_expression: &Expr,
+    synthesized_expression: &Expr,
+    vocab: &Vocab,
+    repeat_horizons: &VocabularyRepeatHorizonCache,
+    max_token_len: usize,
+    relevant_bytes: &[u8],
+) -> Option<CompiledTerminalExpressionPair> {
+    let prepared = prepare_terminal_expression_pair_with_structural_map(
+        full_expression,
+        synthesized_expression,
+        vocab,
+        repeat_horizons,
+        max_token_len,
+        relevant_bytes,
+    )?;
+    Some(CompiledTerminalExpressionPair {
+        synthesized: prepared.synthesized,
+        full: Regex {
+            dfa: prepared.full.finish(),
+        },
+        full_to_synthesized: prepared.full_to_synthesized,
     })
 }
 
@@ -6619,21 +6807,93 @@ fn pure_binary_intersection(
             .is_some_and(|required| required.len() == 1 && required.contains(&1))
 }
 
-/// Exact dense compiler for a single visible terminal defined as the
-/// intersection of two materialized deterministic components.
-///
-/// The ordinary product builder stores each reachable tuple in a hash table.
-/// For a binary intersection every live product state is exactly one pair and
-/// any transition with a dead component is dead for the logical terminal. A
-/// dense `(left_state, right_state) -> product_state` table therefore provides
-/// the same construction with constant-time array lookup and no tuple hashing.
-fn try_build_dense_binary_intersection_product(
+struct DeferredDenseBinaryIntersectionProduct {
+    dfa: DFA,
+    pending_class_transitions: Vec<Vec<(u8, u32)>>,
+    class_members: Vec<Vec<u8>>,
+    left_states: usize,
+    right_states: usize,
+    pair_cells: usize,
+    num_classes: usize,
+    discovery_ms: f64,
+    started_at: Option<Instant>,
+}
+
+impl DeferredDenseBinaryIntersectionProduct {
+    fn dfa(&self) -> &DFA {
+        &self.dfa
+    }
+
+    fn dfa_mut(&mut self) -> &mut DFA {
+        &mut self.dfa
+    }
+
+    fn finish(mut self) -> DFA {
+        let profile_timing = self.started_at.is_some();
+        let future_started_at = profile_timing.then(Instant::now);
+        set_single_group_futures_from_class_graph(
+            &mut self.dfa,
+            &self.pending_class_transitions,
+        );
+        let future_ms = future_started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+
+        let expansion_started_at = profile_timing.then(Instant::now);
+        let expanded_transitions: Vec<crate::ds::char_transitions::CharTransitions<u32>> =
+            self.pending_class_transitions
+                .into_iter()
+                .map(|class_transitions| {
+                    let capacity = class_transitions
+                        .iter()
+                        .map(|(class, _)| self.class_members[*class as usize].len())
+                        .sum();
+                    let mut entries = Vec::with_capacity(capacity);
+                    for (class, target) in class_transitions {
+                        for &byte in &self.class_members[class as usize] {
+                            entries.push((byte, target));
+                        }
+                    }
+                    if entries.len() > 1 {
+                        entries.sort_unstable_by_key(|entry| entry.0);
+                    }
+                    crate::ds::char_transitions::CharTransitions::from_sorted_entries(entries)
+                })
+                .collect();
+        for (state, transitions) in self.dfa.states_mut().iter_mut().zip(expanded_transitions) {
+            state.transitions = transitions;
+        }
+        let expansion_ms = expansion_started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+
+        if let Some(started_at) = self.started_at {
+            eprintln!(
+                "[glrmask/profile][tokenizer] dense_binary_intersection left_states={} right_states={} pair_cells={} reachable_states={} classes={} discovery_ms={:.3} future_ms={:.3} expansion_ms={:.3} total_ms={:.3}",
+                self.left_states,
+                self.right_states,
+                self.pair_cells,
+                self.dfa.num_states(),
+                self.num_classes,
+                self.discovery_ms,
+                future_ms,
+                expansion_ms,
+                started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+
+        self.dfa
+    }
+}
+
+fn try_discover_dense_binary_intersection_product(
     components: &[ProductComponent],
     class_members: &[Vec<u8>],
     component_class_transitions: &[ProductComponentClassTransitions],
     capture_trace: bool,
     profile_timing: bool,
-) -> Option<(DFA, bool, Option<ProductBuildTrace>)> {
+) -> Option<(
+    DeferredDenseBinaryIntersectionProduct,
+    Option<ProductBuildTrace>,
+)> {
     const MAX_DENSE_PAIR_CELLS: usize = 40_000_000;
 
     if components.len() != 2 || component_class_transitions.len() != 2 {
@@ -6734,52 +6994,6 @@ fn try_build_dense_binary_intersection_product(
     let discovery_ms = discovery_started_at
         .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
-    let future_started_at = profile_timing.then(Instant::now);
-    set_single_group_futures_from_class_graph(&mut dfa, &pending_class_transitions);
-    let future_ms = future_started_at
-        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-    let expansion_started_at = profile_timing.then(Instant::now);
-    let expanded_transitions: Vec<crate::ds::char_transitions::CharTransitions<u32>> =
-        pending_class_transitions
-            .into_par_iter()
-            .map(|class_transitions| {
-                let capacity = class_transitions
-                    .iter()
-                    .map(|(class, _)| class_members[*class as usize].len())
-                    .sum();
-                let mut entries = Vec::with_capacity(capacity);
-                for (class, target) in class_transitions {
-                    for &byte in &class_members[class as usize] {
-                        entries.push((byte, target));
-                    }
-                }
-                if entries.len() > 1 {
-                    entries.sort_unstable_by_key(|entry| entry.0);
-                }
-                crate::ds::char_transitions::CharTransitions::from_sorted_entries(entries)
-            })
-            .collect();
-    for (state, transitions) in dfa.states_mut().iter_mut().zip(expanded_transitions) {
-        state.transitions = transitions;
-    }
-    let expansion_ms = expansion_started_at
-        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-
-    if let Some(started_at) = started_at {
-        eprintln!(
-            "[glrmask/profile][tokenizer] dense_binary_intersection left_states={} right_states={} pair_cells={} reachable_states={} classes={} discovery_ms={:.3} future_ms={:.3} expansion_ms={:.3} total_ms={:.3}",
-            left_states,
-            right_states,
-            pair_cells,
-            dfa.num_states(),
-            num_classes,
-            discovery_ms,
-            future_ms,
-            expansion_ms,
-            started_at.elapsed().as_secs_f64() * 1000.0,
-        );
-    }
-
     let trace = capture_trace.then(|| {
         let state_tuples = pairs
             .into_iter()
@@ -6801,7 +7015,89 @@ fn try_build_dense_binary_intersection_product(
             direct_single_visible_group: true,
         }
     });
-    Some((dfa, true, trace))
+
+    Some((
+        DeferredDenseBinaryIntersectionProduct {
+            dfa,
+            pending_class_transitions,
+            class_members: class_members.to_vec(),
+            left_states,
+            right_states,
+            pair_cells,
+            num_classes,
+            discovery_ms,
+            started_at,
+        },
+        trace,
+    ))
+}
+
+/// Exact dense compiler for a single visible terminal defined as the
+/// intersection of two materialized deterministic components.
+///
+/// The ordinary product builder stores each reachable tuple in a hash table.
+/// For a binary intersection every live product state is exactly one pair and
+/// any transition with a dead component is dead for the logical terminal. A
+/// dense `(left_state, right_state) -> product_state` table therefore provides
+/// the same construction with constant-time array lookup and no tuple hashing.
+fn try_build_dense_binary_intersection_product(
+    components: &[ProductComponent],
+    class_members: &[Vec<u8>],
+    component_class_transitions: &[ProductComponentClassTransitions],
+    capture_trace: bool,
+    profile_timing: bool,
+) -> Option<(DFA, bool, Option<ProductBuildTrace>)> {
+    let (deferred, trace) = try_discover_dense_binary_intersection_product(
+        components,
+        class_members,
+        component_class_transitions,
+        capture_trace,
+        profile_timing,
+    )?;
+    Some((deferred.finish(), true, trace))
+}
+
+fn try_compile_with_plan_deferred_dense(
+    plan: ExclusionCompilePlan,
+) -> Result<(DeferredDfa, Option<ProductBuildTrace>), ExclusionCompilePlan> {
+    if plan.visible_groups != 1
+        || plan.compiled_exprs.len() != 2
+        || !pure_binary_intersection(&plan.exclusions, &plan.intersections)
+    {
+        return Err(plan);
+    }
+
+    let profile_detail = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TRACE").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some();
+    let profile_timing = profile_detail
+        || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
+    let (components, component_cache_hits, _) =
+        compile_product_components_profiled(&plan.compiled_exprs, profile_detail, true);
+    if profile_timing {
+        eprintln!(
+            "[glrmask/profile][tokenizer] deferred_product_component_cache groups={} unique_components={} cache_hits={}",
+            plan.compiled_exprs.len(),
+            plan.compiled_exprs.len() - component_cache_hits,
+            component_cache_hits,
+        );
+    }
+    let (class_map, class_members) = compute_product_equivalence_classes(&components);
+    let component_class_transitions = build_product_class_transitions(&components, &class_map);
+    let Some((mut deferred, trace)) = try_discover_dense_binary_intersection_product(
+        &components,
+        &class_members,
+        &component_class_transitions,
+        true,
+        profile_timing,
+    ) else {
+        return Err(plan);
+    };
+
+    deferred.dfa_mut().ensure_group_capacity(1);
+    deferred
+        .dfa_mut()
+        .set_group_u8set(0, expr_u8set(&plan.compiled_exprs[0]));
+    Ok((DeferredDfa::DenseBinary(deferred), trace))
 }
 
 fn refine_u8_partitions(partitions: Vec<U8Set>, split: U8Set) -> Vec<U8Set> {
@@ -8750,6 +9046,39 @@ mod tests {
             !product.possible_future_group_ids(0).contains(0),
             "an epsilon-only terminal is final now but is not reachable after another byte",
         );
+    }
+
+    #[test]
+    fn deferred_dense_binary_intersection_matches_eager_product() {
+        let bounded_string = |max| {
+            Expr::Seq(vec![
+                Expr::U8Seq(b"\"".to_vec()),
+                Expr::Repeat {
+                    expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"ab"))),
+                    min: 0,
+                    max: Some(max),
+                },
+                Expr::U8Seq(b"\"".to_vec()),
+            ])
+        };
+        let expression = Expr::Intersect {
+            expr: Box::new(bounded_string(31)),
+            intersect: Box::new(bounded_string(17)),
+        };
+
+        let eager = super::compile_with_plan(super::build_exclusion_compile_plan(
+            std::slice::from_ref(&expression),
+        ));
+        let (deferred, trace) = match super::try_compile_with_plan_deferred_dense(
+            super::build_exclusion_compile_plan(std::slice::from_ref(&expression)),
+        ) {
+            Ok(prepared) => prepared,
+            Err(_) => panic!("binary intersection should admit deferred dense construction"),
+        };
+        assert!(trace.is_some(), "deferred construction must retain its state tuples");
+        let finished = deferred.finish();
+
+        assert_eq!(finished, eager);
     }
 
     #[test]
