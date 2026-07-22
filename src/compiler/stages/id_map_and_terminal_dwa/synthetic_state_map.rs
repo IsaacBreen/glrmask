@@ -426,7 +426,7 @@ fn certify_deterministic_dispatch_state_map(
     active_terminals: Option<&[bool]>,
 ) -> Option<CertifiedFullToSynthesizedStateMap> {
     let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
-    let max_token_len = vocab.entries.values().map(Vec::len).max().unwrap_or(0);
+    let max_token_len = vocab.max_token_byte_len();
     let mut relevant_bytes = vocab
         .entries
         .values()
@@ -701,6 +701,82 @@ fn reducible_repeat_stats(expr: &Expr, max_token_len: usize) -> ReducibleRepeatS
     reducible_repeat_analysis(expr, max_token_len).1
 }
 
+fn potential_pathological_repeat_stats_inner(
+    expr: &Expr,
+    shared_cache: &mut FxHashMap<usize, ReducibleRepeatStats>,
+) -> ReducibleRepeatStats {
+    match expr {
+        Expr::Shared(inner) => {
+            let key = Arc::as_ptr(inner) as usize;
+            if let Some(&cached) = shared_cache.get(&key) {
+                return cached;
+            }
+            let stats = potential_pathological_repeat_stats_inner(inner, shared_cache);
+            shared_cache.insert(key, stats);
+            stats
+        }
+        Expr::Repeat { expr, max, .. } => {
+            let mut stats = potential_pathological_repeat_stats_inner(expr, shared_cache);
+            if let Some(max) = *max
+                && minimum_consumed_bytes(expr) != 0
+            {
+                stats.include(max);
+            }
+            stats
+        }
+        Expr::Intersect { expr, intersect } => {
+            let mut stats = potential_pathological_repeat_stats_inner(expr, shared_cache);
+            stats.merge(potential_pathological_repeat_stats_inner(
+                intersect,
+                shared_cache,
+            ));
+            stats
+        }
+        Expr::Exclude { expr, exclude } => {
+            let mut stats = potential_pathological_repeat_stats_inner(expr, shared_cache);
+            stats.merge(potential_pathological_repeat_stats_inner(
+                exclude,
+                shared_cache,
+            ));
+            stats
+        }
+        Expr::Seq(parts) | Expr::Choice(parts) => {
+            let mut stats = ReducibleRepeatStats::default();
+            for part in parts {
+                stats.merge(potential_pathological_repeat_stats_inner(
+                    part,
+                    shared_cache,
+                ));
+            }
+            stats
+        }
+        Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Dfa(_) | Expr::Epsilon => {
+            ReducibleRepeatStats::default()
+        }
+    }
+}
+
+/// Cheap vocabulary-independent prefilter for the production synthesis lane.
+///
+/// This may admit false positives because token length is not yet known, but it
+/// must not reject any terminal that the conservative pathological selector can
+/// accept. Avoiding a full vocabulary scan on the overwhelmingly common false
+/// path is more important than making this prefilter exact.
+pub(crate) fn has_potential_pathological_bounded_terminal(expressions: &[Expr]) -> bool {
+    let mut shared_cache = FxHashMap::default();
+    let mut stats = ReducibleRepeatStats::default();
+    for expression in expressions {
+        stats.merge(potential_pathological_repeat_stats_inner(
+            expression,
+            &mut shared_cache,
+        ));
+        if stats.is_pathological_candidate() {
+            return true;
+        }
+    }
+    false
+}
+
 pub(crate) struct BoundedTerminalAnalysisCache {
     max_token_len: usize,
     shared_cache: FxHashMap<usize, (usize, ReducibleRepeatStats)>,
@@ -902,8 +978,16 @@ fn synthesize_expression_for_vocab(
                 // compiling a large repeat-body DFA can cost more than the
                 // tokenizer optimization can save. The ordinary byte-length
                 // proof remains the fail-closed baseline in both cases.
-                if estimated_expression_state_volume(body)
-                    <= MAX_VOCAB_HORIZON_BODY_ESTIMATE
+                // Even a zero-boundary vocabulary horizon yields a stencil of
+                // `min + 1`. Do not compile the repeat-body DFA or scan the
+                // vocabulary when that best possible result cannot shorten the
+                // repeat. This is the common case for small bounded helpers
+                // nested inside otherwise large terminal expressions.
+                let best_possible_vocab_stencil = min.saturating_add(1);
+                if max > best_possible_vocab_stencil
+                    && selected_max > best_possible_vocab_stencil
+                    && estimated_expression_state_volume(body)
+                        <= MAX_VOCAB_HORIZON_BODY_ESTIMATE
                     && let Some(vocab_horizon) = horizons.horizon_for_expr(body, vocab)
                     && vocab_horizon
                         .saturating_mul(MIN_HORIZON_IMPROVEMENT_FACTOR)
@@ -1128,7 +1212,9 @@ pub(crate) fn synthesize_bounded_terminal_expressions(
     vocab: &Vocab,
     horizons: &VocabularyRepeatHorizonCache,
 ) -> SynthesizedTerminalExpressions {
-    let max_token_len = vocab.entries.values().map(Vec::len).max().unwrap_or(0);
+    let max_token_len = vocab.max_token_byte_len();
+    let allow_vocab_only_candidates =
+        std::env::var_os("GLRMASK_SYNTHETIC_VOCAB_ONLY_CANDIDATES").is_some();
     let mut changed_terminals = Vec::new();
     let expressions = expressions
         .iter()
@@ -1139,6 +1225,15 @@ pub(crate) fn synthesize_bounded_terminal_expressions(
             }
             let conservative_pathological =
                 reducible_repeat_stats(expression, max_token_len).is_pathological_candidate();
+            // Vocabulary-only candidate discovery is materially more expensive
+            // than the conservative repeat analysis because it compiles repeat
+            // bodies and scans the full vocabulary. Keep that speculative lane
+            // out of the production planner until a caller explicitly requests
+            // it. Conservative-pathological terminals still use vocabulary
+            // horizons to tighten an already justified synthesis attempt.
+            if !conservative_pathological && !allow_vocab_only_candidates {
+                return expression.clone();
+            }
             // New vocabulary-only reductions currently require an explicit
             // multi-component structural product. Single-component candidates
             // fall back to generic finite-horizon equivalence and have shown

@@ -1,7 +1,7 @@
 use std::any::{Any, TypeId};
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Model vocabulary used when compiling a grammar constraint.
 ///
@@ -12,6 +12,8 @@ pub struct Vocab {
     pub entries: Arc<BTreeMap<u32, Vec<u8>>>,
     #[serde(skip)]
     compiler_cache: VocabCompilerCache,
+    #[serde(skip)]
+    max_token_byte_len: OnceLock<usize>,
 }
 
 #[derive(Default)]
@@ -52,9 +54,14 @@ impl fmt::Debug for Vocab {
 
 impl Clone for Vocab {
     fn clone(&self) -> Self {
+        let max_token_byte_len = OnceLock::new();
+        if let Some(&length) = self.max_token_byte_len.get() {
+            let _ = max_token_byte_len.set(length);
+        }
         Self {
             entries: Arc::clone(&self.entries),
             compiler_cache: VocabCompilerCache::default(),
+            max_token_byte_len,
         }
     }
 }
@@ -62,10 +69,25 @@ impl Clone for Vocab {
 impl Vocab {
     /// Build a vocabulary from `(token_id, token_bytes)` pairs.
     pub fn new(entries: Vec<(u32, Vec<u8>)>) -> Self {
+        let entries = Arc::new(entries.into_iter().collect::<BTreeMap<_, _>>());
+        let max_token_byte_len = OnceLock::new();
+        let _ = max_token_byte_len.set(entries.values().map(Vec::len).max().unwrap_or(0));
         Self {
-            entries: Arc::new(entries.into_iter().collect()),
+            entries,
             compiler_cache: VocabCompilerCache::default(),
+            max_token_byte_len,
         }
+    }
+
+    /// Maximum byte length of any token in this vocabulary.
+    ///
+    /// Fresh vocabularies compute this while being constructed. Deserialized
+    /// vocabularies fill it lazily on first use, after which clones preserve the
+    /// value instead of rescanning every token for every grammar compilation.
+    pub(crate) fn max_token_byte_len(&self) -> usize {
+        *self
+            .max_token_byte_len
+            .get_or_init(|| self.entries.values().map(Vec::len).max().unwrap_or(0))
     }
 
     /// Return the number of vocabulary entries.
