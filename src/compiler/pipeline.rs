@@ -2137,41 +2137,6 @@ fn compile_prepared_with_profile_and_table_construction(
                     full_to_synthesized_state_map,
                     synthetic_certification_ms,
                 ) = if let Some(plan) = synthetic_tokenizer_plan_ref {
-                    if std::env::var_os("GLRMASK_PROBE_PARTITION_LOCAL_SYNTHESIS").is_some() {
-                        let protected = plan
-                            .changed_terminal_ids
-                            .iter()
-                            .copied()
-                            .collect::<std::collections::BTreeSet<_>>();
-                        for horizon in [34usize, 42, 64] {
-                            let started_at = Instant::now();
-                            let mut local = synthesize_terminal_expressions_for_horizon(
-                                &plan.synthesized_expressions,
-                                horizon,
-                            );
-                            for terminal in 0..local.expressions.len() {
-                                if !protected.contains(&(terminal as u32)) {
-                                    local.expressions[terminal] =
-                                        plan.synthesized_expressions[terminal].clone();
-                                }
-                            }
-                            let mut local_tokenizer = build_tokenizer_from_planned_expressions(
-                                prepared_grammar_ref,
-                                plan,
-                                &local.expressions,
-                                lexer_adaptive_override,
-                            );
-                            local_tokenizer
-                                .isolate_start_state_and_drain_nullable_terminals();
-                            eprintln!(
-                                "[glrmask/profile][partition_local_synthesis_probe] horizon={} states={} transitions={} elapsed_ms={:.3}",
-                                horizon,
-                                local_tokenizer.num_states(),
-                                local_tokenizer.transition_count(),
-                                elapsed_ms(started_at),
-                            );
-                        }
-                    }
                     if let Some((synthesized, full, certified)) =
                         prepare_structural_tokenizer_pair(
                             prepared_grammar_ref,
