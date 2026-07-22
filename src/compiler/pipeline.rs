@@ -1038,6 +1038,21 @@ fn plan_synthetic_tokenizer_enabled(
         });
     }
     let changed_terminal_ids = synthesized.changed_terminals.clone();
+    if std::env::var_os("GLRMASK_DUMP_SYNTH_REPEAT_BOUNDS").is_some() {
+        for &terminal in &changed_terminal_ids {
+            let terminal = terminal as usize;
+            eprintln!(
+                "[glrmask/dump][synth_repeat_bounds] scope=global terminal={} full={:?} synthesized={:?}",
+                terminal,
+                crate::compiler::stages::id_map_and_terminal_dwa::synthetic_state_map::debug_repeat_bounds(
+                    &full_expressions[terminal]
+                ),
+                crate::compiler::stages::id_map_and_terminal_dwa::synthetic_state_map::debug_repeat_bounds(
+                    &synthesized.expressions[terminal]
+                ),
+            );
+        }
+    }
     if changed_terminal_ids.is_empty() {
         return None;
     }
