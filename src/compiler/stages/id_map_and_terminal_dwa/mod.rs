@@ -94,6 +94,8 @@ fn build_partition_local_tokenizer(
     if max_token_len == 0 || max_token_len >= plan.global_max_token_len {
         return None;
     }
+    let allow_half_horizon =
+        std::env::var_os("GLRMASK_PARTITION_LOCAL_SYNTHESIS_ALLOW_HALF_HORIZON").is_some();
     // A local structural pair has a non-trivial fixed construction cost. Very
     // small vocabulary partitions are already cheap, while a horizon close to
     // the global maximum cannot remove enough protected residual depth to
@@ -101,7 +103,11 @@ fn build_partition_local_tokenizer(
     // ordinary global-tokenizer path remains the exact fallback.
     if vocab.len() < 2_000
         || max_token_len < 16
-        || max_token_len.saturating_mul(2) >= plan.global_max_token_len
+        || if allow_half_horizon {
+            max_token_len.saturating_mul(2) > plan.global_max_token_len
+        } else {
+            max_token_len.saturating_mul(2) >= plan.global_max_token_len
+        }
     {
         return None;
     }
@@ -186,9 +192,14 @@ fn build_partition_local_tokenizer(
     };
     let local_states = local_tokenizer.num_states() as usize;
     let global_states = global_tokenizer.num_states() as usize;
+    let ratio_rejected = if allow_half_horizon {
+        local_states.saturating_mul(20) > global_states.saturating_mul(19)
+    } else {
+        local_states.saturating_mul(4) > global_states.saturating_mul(3)
+    };
     if local_states >= global_states
         || global_states.saturating_sub(local_states) < 1_024
-        || local_states.saturating_mul(4) > global_states.saturating_mul(3)
+        || ratio_rejected
     {
         return reject("insufficient_reduction", max_token_len);
     }
