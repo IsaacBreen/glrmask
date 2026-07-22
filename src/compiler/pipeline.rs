@@ -1441,6 +1441,9 @@ struct TokenizerDagLane {
     partition_local_synthesis_plan: Option<Arc<
         crate::compiler::stages::id_map_and_terminal_dwa::PartitionLocalSynthesisPlan,
     >>,
+    prepared_partition_local_tokenizers: Option<Arc<
+        crate::compiler::stages::id_map_and_terminal_dwa::PreparedPartitionLocalTokenizers,
+    >>,
     synthetic_candidate_terminals: usize,
     synthetic_certification_ms: f64,
     compile_tokenizer_states: usize,
@@ -1971,6 +1974,7 @@ fn launch_terminal_dag_if_ready<'scope>(
                 Some(&classify.shared_classify_cache),
                 Some(flat_global.shared_transition_cache.as_ref()),
                 tokenizer.partition_local_synthesis_plan.as_deref(),
+                tokenizer.prepared_partition_local_tokenizers.as_deref(),
             );
         let special_started_at = Instant::now();
         let special_token_terminals = collect_special_token_terminals(prepared_grammar);
@@ -2107,6 +2111,37 @@ fn compile_prepared_with_profile_and_table_construction(
             elapsed_ms(synthetic_plan_started_at),
         );
     }
+    let partition_local_synthesis_plan = synthetic_tokenizer_plan.as_ref().map(|plan| {
+        Arc::new(
+            crate::compiler::stages::id_map_and_terminal_dwa::PartitionLocalSynthesisPlan {
+                expressions: Arc::from(plan.synthesized_expressions.clone().into_boxed_slice()),
+                partition_ids: Arc::from(plan.partition_ids.clone().into_boxed_slice()),
+                residual_isolation_classes: Arc::from(
+                    plan.residual_isolation_classes.clone().into_boxed_slice(),
+                ),
+                protected_terminal_ids: Arc::from(
+                    plan.changed_terminal_ids.clone().into_boxed_slice(),
+                ),
+                labels: Arc::from(
+                    prepared_grammar
+                        .terminals
+                        .iter()
+                        .enumerate()
+                        .map(|(index, _)| prepared_grammar.terminal_display_name(index as u32))
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
+                ),
+                adaptive: lexer_adaptive_override
+                    .unwrap_or_else(|| env_flag_enabled_by_default("GLRMASK_LEXER_ADAPTIVE")),
+                global_max_token_len: vocab
+                    .entries
+                    .values()
+                    .map(Vec::len)
+                    .max()
+                    .unwrap_or(0),
+            },
+        )
+    });
     let interner_cleanup = crate::ds::weight::defer_weight_interner_cleanup();
     let result = run_with_compile_thread_pool(|| {
         let compile_started_at = Instant::now();
@@ -2129,137 +2164,165 @@ fn compile_prepared_with_profile_and_table_construction(
             let cpm_result_ref = &cpm_result;
             let prepared_grammar_ref = &prepared_grammar;
             let synthetic_tokenizer_plan_ref = synthetic_tokenizer_plan.as_ref();
+            let partition_local_synthesis_plan_ref = partition_local_synthesis_plan.as_ref();
             let analysis_started_for_tokenizer = analysis_started_at.clone();
             let compile_started_for_tokenizer = compile_started_at.clone();
             let lexer_adaptive_override = lexer_adaptive_override;
 
             scope.spawn(move |scope| {
                 let tok_started = Instant::now();
+                let build_global_tokenizer = || {
+                    if let Some(plan) = synthetic_tokenizer_plan_ref {
+                                        if let Some((synthesized, full, certified)) =
+                                            prepare_structural_tokenizer_pair(
+                                                prepared_grammar_ref,
+                                                plan,
+                                                vocab,
+                                                lexer_adaptive_override,
+                                            )
+                                        {
+                                            let profitable = structural_state_reduction_is_profitable(
+                                                full.num_states(),
+                                                synthesized.num_states() as usize,
+                                            );
+                                            if profitable {
+                                                (
+                                                    synthesized,
+                                                    Some(full),
+                                                    Some(certified),
+                                                    0.0,
+                                                )
+                                            } else {
+                                                if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some() {
+                                                    eprintln!(
+                                                        "[glrmask/profile][tokenizer] synthetic_certification_skipped reason=insufficient_state_reduction path=structural_product full_states={} synthesized_states={} absolute_saving={}",
+                                                        full.num_states(),
+                                                        synthesized.num_states(),
+                                                        full.num_states()
+                                                            .saturating_sub(synthesized.num_states() as usize),
+                                                    );
+                                                }
+                                                drop(synthesized);
+                                                drop(full);
+                                                (
+                                                    build_ordinary_compile_tokenizer(
+                                                        prepared_grammar_ref,
+                                                        lexer_adaptive_override,
+                                                    ),
+                                                    None,
+                                                    None,
+                                                    0.0,
+                                                )
+                                            }
+                                        } else {
+                                            let (mut synthesized, mut full) = rayon::join(
+                                                || {
+                                                    build_tokenizer_from_planned_expressions(
+                                                        prepared_grammar_ref,
+                                                        plan,
+                                                        &plan.synthesized_expressions,
+                                                        lexer_adaptive_override,
+                                                    )
+                                                },
+                                                || {
+                                                    build_tokenizer_from_planned_expressions(
+                                                        prepared_grammar_ref,
+                                                        plan,
+                                                        &plan.full_expressions,
+                                                        lexer_adaptive_override,
+                                                    )
+                                                },
+                                            );
+                                            synthesized.isolate_start_state_and_drain_nullable_terminals();
+                                            full.isolate_start_state_and_drain_nullable_terminals();
+                                            let profitable = synthetic_state_reduction_is_profitable(
+                                                full.num_states() as usize,
+                                                synthesized.num_states() as usize,
+                                            );
+                                            let certification_started_at = Instant::now();
+                                            let certification = profitable
+                                                .then(|| {
+                                                    certify_full_to_synthesized_state_map(
+                                                        &full,
+                                                        &synthesized,
+                                                        vocab,
+                                                        None,
+                                                    )
+                                                })
+                                                .flatten();
+                                            let certification_ms = elapsed_ms(certification_started_at);
+                                            if !profitable
+                                                && std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some()
+                                            {
+                                                eprintln!(
+                                                    "[glrmask/profile][tokenizer] synthetic_certification_skipped reason=insufficient_state_reduction full_states={} synthesized_states={} absolute_saving={}",
+                                                    full.num_states(),
+                                                    synthesized.num_states(),
+                                                    full.num_states().saturating_sub(synthesized.num_states()),
+                                                );
+                                            }
+                                            match certification {
+                                                Some(certified) => {
+                                                    (
+                                                        synthesized,
+                                                        Some(DeferredRuntimeTokenizer::Ready(full)),
+                                                        Some(certified),
+                                                        certification_ms,
+                                                    )
+                                                }
+                                                None => {
+                                                    drop(synthesized);
+                                                    drop(full);
+                                                    (
+                                                        build_ordinary_compile_tokenizer(
+                                                            prepared_grammar_ref,
+                                                            lexer_adaptive_override,
+                                                        ),
+                                                        None,
+                                                        None,
+                                                        certification_ms,
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        let tokenizer = build_ordinary_compile_tokenizer(
+                                            prepared_grammar_ref,
+                                            lexer_adaptive_override,
+                                        );
+                                        (tokenizer, None, None, 0.0)
+                                    }
+                };
+                let prebuild_partition_locals = std::env::var(
+                    "GLRMASK_PREBUILD_PARTITION_LOCAL_SYNTHESIS",
+                )
+                .map(|value| {
+                    let value = value.trim();
+                    !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+                })
+                .unwrap_or(false);
+                let (global_tokenizer_result, prepared_partition_local_tokenizers) =
+                    if prebuild_partition_locals {
+                        rayon::join(
+                            build_global_tokenizer,
+                            || {
+                                partition_local_synthesis_plan_ref.and_then(|plan| {
+                                    crate::compiler::stages::id_map_and_terminal_dwa::prepare_partition_local_tokenizers(
+                                        vocab,
+                                        plan,
+                                    )
+                                })
+                            },
+                        )
+                    } else {
+                        (build_global_tokenizer(), None)
+                    };
                 let (
                     mut tokenizer,
                     deferred_runtime_tokenizer,
                     full_to_synthesized_state_map,
                     synthetic_certification_ms,
-                ) = if let Some(plan) = synthetic_tokenizer_plan_ref {
-                    if let Some((synthesized, full, certified)) =
-                        prepare_structural_tokenizer_pair(
-                            prepared_grammar_ref,
-                            plan,
-                            vocab,
-                            lexer_adaptive_override,
-                        )
-                    {
-                        let profitable = structural_state_reduction_is_profitable(
-                            full.num_states(),
-                            synthesized.num_states() as usize,
-                        );
-                        if profitable {
-                            (
-                                synthesized,
-                                Some(full),
-                                Some(certified),
-                                0.0,
-                            )
-                        } else {
-                            if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some() {
-                                eprintln!(
-                                    "[glrmask/profile][tokenizer] synthetic_certification_skipped reason=insufficient_state_reduction path=structural_product full_states={} synthesized_states={} absolute_saving={}",
-                                    full.num_states(),
-                                    synthesized.num_states(),
-                                    full.num_states()
-                                        .saturating_sub(synthesized.num_states() as usize),
-                                );
-                            }
-                            drop(synthesized);
-                            drop(full);
-                            (
-                                build_ordinary_compile_tokenizer(
-                                    prepared_grammar_ref,
-                                    lexer_adaptive_override,
-                                ),
-                                None,
-                                None,
-                                0.0,
-                            )
-                        }
-                    } else {
-                        let (mut synthesized, mut full) = rayon::join(
-                            || {
-                                build_tokenizer_from_planned_expressions(
-                                    prepared_grammar_ref,
-                                    plan,
-                                    &plan.synthesized_expressions,
-                                    lexer_adaptive_override,
-                                )
-                            },
-                            || {
-                                build_tokenizer_from_planned_expressions(
-                                    prepared_grammar_ref,
-                                    plan,
-                                    &plan.full_expressions,
-                                    lexer_adaptive_override,
-                                )
-                            },
-                        );
-                        synthesized.isolate_start_state_and_drain_nullable_terminals();
-                        full.isolate_start_state_and_drain_nullable_terminals();
-                        let profitable = synthetic_state_reduction_is_profitable(
-                            full.num_states() as usize,
-                            synthesized.num_states() as usize,
-                        );
-                        let certification_started_at = Instant::now();
-                        let certification = profitable
-                            .then(|| {
-                                certify_full_to_synthesized_state_map(
-                                    &full,
-                                    &synthesized,
-                                    vocab,
-                                    None,
-                                )
-                            })
-                            .flatten();
-                        let certification_ms = elapsed_ms(certification_started_at);
-                        if !profitable
-                            && std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some()
-                        {
-                            eprintln!(
-                                "[glrmask/profile][tokenizer] synthetic_certification_skipped reason=insufficient_state_reduction full_states={} synthesized_states={} absolute_saving={}",
-                                full.num_states(),
-                                synthesized.num_states(),
-                                full.num_states().saturating_sub(synthesized.num_states()),
-                            );
-                        }
-                        match certification {
-                            Some(certified) => {
-                                (
-                                    synthesized,
-                                    Some(DeferredRuntimeTokenizer::Ready(full)),
-                                    Some(certified),
-                                    certification_ms,
-                                )
-                            }
-                            None => {
-                                drop(synthesized);
-                                drop(full);
-                                (
-                                    build_ordinary_compile_tokenizer(
-                                        prepared_grammar_ref,
-                                        lexer_adaptive_override,
-                                    ),
-                                    None,
-                                    None,
-                                    certification_ms,
-                                )
-                            }
-                        }
-                    }
-                } else {
-                    let tokenizer = build_ordinary_compile_tokenizer(
-                        prepared_grammar_ref,
-                        lexer_adaptive_override,
-                    );
-                    (tokenizer, None, None, 0.0)
-                };
+                ) = global_tokenizer_result;
                 let tokenizer_construct_ms = elapsed_ms(tok_started);
                 let isolate_started = Instant::now();
                 if deferred_runtime_tokenizer.is_none() {
@@ -2277,47 +2340,11 @@ fn compile_prepared_with_profile_and_table_construction(
                 let compile_tokenizer_transitions = tokenizer.transition_count();
                 let partition_local_synthesis_plan = deferred_runtime_tokenizer
                     .is_some()
-                    .then(|| {
-                        synthetic_tokenizer_plan_ref.map(|plan| {
-                            Arc::new(
-                                crate::compiler::stages::id_map_and_terminal_dwa::PartitionLocalSynthesisPlan {
-                                    expressions: Arc::from(
-                                        plan.synthesized_expressions.clone().into_boxed_slice(),
-                                    ),
-                                    partition_ids: Arc::from(
-                                        plan.partition_ids.clone().into_boxed_slice(),
-                                    ),
-                                    residual_isolation_classes: Arc::from(
-                                        plan.residual_isolation_classes.clone().into_boxed_slice(),
-                                    ),
-                                    protected_terminal_ids: Arc::from(
-                                        plan.changed_terminal_ids.clone().into_boxed_slice(),
-                                    ),
-                                    labels: Arc::from(
-                                        prepared_grammar_ref
-                                            .terminals
-                                            .iter()
-                                            .enumerate()
-                                            .map(|(index, _)| {
-                                                prepared_grammar_ref
-                                                    .terminal_display_name(index as u32)
-                                            })
-                                            .collect::<Vec<_>>()
-                                            .into_boxed_slice(),
-                                    ),
-                                    adaptive: lexer_adaptive_override.unwrap_or_else(|| {
-                                        env_flag_enabled_by_default("GLRMASK_LEXER_ADAPTIVE")
-                                    }),
-                                    global_max_token_len: vocab
-                                        .entries
-                                        .values()
-                                        .map(Vec::len)
-                                        .max()
-                                        .unwrap_or(0),
-                                },
-                            )
-                        })
-                    })
+                    .then(|| partition_local_synthesis_plan_ref.cloned())
+                    .flatten();
+                let prepared_partition_local_tokenizers = deferred_runtime_tokenizer
+                    .is_some()
+                    .then_some(prepared_partition_local_tokenizers)
                     .flatten();
 
                 if let Some(deferred_runtime_tokenizer) = deferred_runtime_tokenizer {
@@ -2366,6 +2393,7 @@ fn compile_prepared_with_profile_and_table_construction(
                 let tokenizer_lane = TokenizerDagLane {
                     tokenizer: Arc::new(tokenizer),
                     partition_local_synthesis_plan,
+                    prepared_partition_local_tokenizers,
                     synthetic_candidate_terminals: synthetic_tokenizer_plan_ref
                         .map_or(0, |plan| plan.changed_terminal_count),
                     synthetic_certification_ms,

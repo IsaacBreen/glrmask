@@ -21,7 +21,7 @@ pub(crate) mod partition;
 pub(crate) mod types;
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -61,6 +61,28 @@ struct PartitionLocalTokenizer {
     tokenizer: Tokenizer,
     global_to_local: synthetic_state_map::CertifiedFullToSynthesizedStateMap,
     build_ms: f64,
+}
+
+struct PreparedPartitionLocalTokenizer {
+    local_tokenizer: Tokenizer,
+    rebuilt_tokenizer: Tokenizer,
+    rebuilt_to_local: Vec<u32>,
+    max_token_len: usize,
+    build_ms: f64,
+}
+
+pub(crate) struct PreparedPartitionLocalTokenizers {
+    entries: Vec<Mutex<Option<PreparedPartitionLocalTokenizer>>>,
+}
+
+impl PreparedPartitionLocalTokenizers {
+    fn take(&self, partition: usize) -> Option<PreparedPartitionLocalTokenizer> {
+        self.entries
+            .get(partition)?
+            .lock()
+            .expect("prepared partition-local tokenizer slot poisoned")
+            .take()
+    }
 }
 
 fn partition_local_synthesis_enabled() -> bool {
@@ -382,6 +404,209 @@ fn build_partition_local_tokenizer(
         },
         build_ms: started_at.elapsed().as_secs_f64() * 1000.0,
     })
+}
+
+fn prepare_partition_local_tokenizer(
+    vocab: &Vocab,
+    plan: &PartitionLocalSynthesisPlan,
+) -> Option<PreparedPartitionLocalTokenizer> {
+    if !partition_local_synthesis_enabled() || vocab.is_empty() {
+        return None;
+    }
+    let max_token_len = vocab.entries.values().map(Vec::len).max().unwrap_or(0);
+    if max_token_len == 0 || max_token_len >= plan.global_max_token_len {
+        return None;
+    }
+    let allow_half_horizon = std::env::var("GLRMASK_PARTITION_LOCAL_SYNTHESIS_ALLOW_HALF_HORIZON")
+        .map(|value| {
+            let value = value.trim();
+            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(true);
+    if vocab.len() < 2_000
+        || max_token_len < 16
+        || if allow_half_horizon {
+            max_token_len.saturating_mul(2) > plan.global_max_token_len
+        } else {
+            max_token_len.saturating_mul(2) >= plan.global_max_token_len
+        }
+    {
+        return None;
+    }
+
+    let started_at = Instant::now();
+    let protected = plan
+        .protected_terminal_ids
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut candidate = synthetic_state_map::synthesize_terminal_expressions_for_horizon(
+        &plan.expressions,
+        max_token_len,
+    );
+    let mut changed = false;
+    for terminal in 0..candidate.expressions.len() {
+        if protected.contains(&(terminal as u32)) {
+            changed |= candidate.expressions[terminal] != plan.expressions[terminal];
+        } else {
+            candidate.expressions[terminal] = plan.expressions[terminal].clone();
+        }
+    }
+    if !changed {
+        return None;
+    }
+
+    let rebuilt_expressions = plan
+        .expressions
+        .iter()
+        .cloned()
+        .map(factor_regex_expr)
+        .collect::<Vec<_>>();
+    let local_expressions = candidate
+        .expressions
+        .into_iter()
+        .map(factor_regex_expr)
+        .collect::<Vec<_>>();
+    let mut relevant_bytes = vocab
+        .entries
+        .values()
+        .flat_map(|bytes| bytes.iter().copied())
+        .collect::<Vec<_>>();
+    relevant_bytes.sort_unstable();
+    relevant_bytes.dedup();
+    let pair = compile_partitioned_expression_pair_with_structural_map(
+        &rebuilt_expressions,
+        &local_expressions,
+        Some(&plan.labels),
+        &plan.partition_ids,
+        &plan.residual_isolation_classes,
+        plan.adaptive,
+        vocab,
+        &VocabularyRepeatHorizonCache::new(),
+        max_token_len,
+        &relevant_bytes,
+    )?;
+    let terminal_count = plan.expressions.len() as u32;
+    let mut rebuilt_tokenizer = pair.full.into_tokenizer(
+        terminal_count,
+        Some(Arc::from(rebuilt_expressions.into_boxed_slice())),
+    );
+    if !rebuilt_tokenizer
+        .isolate_start_state_and_drain_nullable_terminals()
+        .is_empty()
+    {
+        return None;
+    }
+    let mut local_tokenizer = pair.synthesized.into_tokenizer(
+        terminal_count,
+        Some(Arc::from(local_expressions.into_boxed_slice())),
+    );
+    if !local_tokenizer
+        .isolate_start_state_and_drain_nullable_terminals()
+        .is_empty()
+    {
+        return None;
+    }
+    Some(PreparedPartitionLocalTokenizer {
+        local_tokenizer,
+        rebuilt_tokenizer,
+        rebuilt_to_local: pair.full_to_synthesized,
+        max_token_len,
+        build_ms: started_at.elapsed().as_secs_f64() * 1000.0,
+    })
+}
+
+fn finish_prepared_partition_local_tokenizer(
+    global_tokenizer: &Tokenizer,
+    mut prepared: PreparedPartitionLocalTokenizer,
+) -> Option<PartitionLocalTokenizer> {
+    let global_to_local = prepared
+        .local_tokenizer
+        .augment_from_verified_component_prefixes(
+            global_tokenizer,
+            &prepared.rebuilt_tokenizer,
+            &prepared.rebuilt_to_local,
+        )?;
+    let local_states = prepared.local_tokenizer.num_states() as usize;
+    let global_states = global_tokenizer.num_states() as usize;
+    let allow_half_horizon = std::env::var("GLRMASK_PARTITION_LOCAL_SYNTHESIS_ALLOW_HALF_HORIZON")
+        .map(|value| {
+            let value = value.trim();
+            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(true);
+    let ratio_rejected = if allow_half_horizon {
+        local_states.saturating_mul(20) > global_states.saturating_mul(19)
+    } else {
+        local_states.saturating_mul(4) > global_states.saturating_mul(3)
+    };
+    if local_states >= global_states
+        || global_states.saturating_sub(local_states) < 1_024
+        || ratio_rejected
+    {
+        return None;
+    }
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][partition_local_synthesis_prebuilt] horizon={} global_states={} local_states={} local_transitions={} build_ms={:.3} selected=true",
+            prepared.max_token_len,
+            global_states,
+            local_states,
+            prepared.local_tokenizer.transition_count(),
+            prepared.build_ms,
+        );
+    }
+    Some(PartitionLocalTokenizer {
+        tokenizer: prepared.local_tokenizer,
+        global_to_local: synthetic_state_map::CertifiedFullToSynthesizedStateMap {
+            full_to_synthesized: global_to_local,
+        },
+        build_ms: prepared.build_ms,
+    })
+}
+
+pub(crate) fn prepare_partition_local_tokenizers(
+    vocab: &Vocab,
+    plan: &PartitionLocalSynthesisPlan,
+) -> Option<Arc<PreparedPartitionLocalTokenizers>> {
+    if std::env::var("GLRMASK_PREBUILD_PARTITION_LOCAL_SYNTHESIS")
+        .map(|value| {
+            let value = value.trim();
+            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false)
+        == false
+        || std::env::var("GLRMASK_PARTITION_SCHEME")
+            .as_deref()
+            .unwrap_or("char_type")
+            != "char_type"
+    {
+        return None;
+    }
+    use rayon::prelude::*;
+    let sub_vocabs = build_char_type_sub_vocabs(vocab);
+    let entries = sub_vocabs
+        .par_iter()
+        .enumerate()
+        .map(|(partition, sub_vocab)| {
+            let label = format!("p{partition}");
+            let selected = std::env::var("GLRMASK_PREBUILD_PARTITION_LOCAL_SYNTHESIS_FILTER")
+                .map(|filter| {
+                    filter
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|item| !item.is_empty())
+                        .any(|item| item == label)
+                })
+                .unwrap_or_else(|_| matches!(partition, 0 | 1 | 2 | 4));
+            Mutex::new(
+                selected
+                    .then(|| prepare_partition_local_tokenizer(sub_vocab, plan))
+                    .flatten(),
+            )
+        })
+        .collect();
+    Some(Arc::new(PreparedPartitionLocalTokenizers { entries }))
 }
 
 fn lift_partition_terminal_dwas_to_global(
@@ -793,6 +1018,7 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
         &OnceLock<l2p::equivalence_analysis::compat::FlatTransitionCache>,
     >,
     partition_local_synthesis_plan: Option<&PartitionLocalSynthesisPlan>,
+    prepared_partition_local_tokenizers: Option<&PreparedPartitionLocalTokenizers>,
 ) -> (TerminalDwaFamilies, TerminalDwaPhaseProfile) {
     let total_started_at = Instant::now();
     let mut profile = TerminalDwaPhaseProfile::default();
@@ -1006,9 +1232,14 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
         let started_at = Instant::now();
         let label = format!("p{}", idx);
 
+        let prepared_local = prepared_partition_local_tokenizers
+            .and_then(|prepared| prepared.take(idx))
+            .and_then(|prepared| finish_prepared_partition_local_tokenizer(tokenizer, prepared));
         if partition_local_synthesis_selected(&label)
-            && let Some(local) = partition_local_synthesis_plan
-            .and_then(|plan| build_partition_local_tokenizer(tokenizer, sub_vocab, plan))
+            && let Some(local) = prepared_local.or_else(|| {
+                partition_local_synthesis_plan
+                    .and_then(|plan| build_partition_local_tokenizer(tokenizer, sub_vocab, plan))
+            })
         {
             let local_flat_trans: Arc<[u32]> =
                 Arc::from(l1::build_flat_transition_table(&local.tokenizer));
@@ -1349,6 +1580,7 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
             flat_trans,
             global_max_length_state_map,
             external_classify_cache,
+            None,
             None,
             None,
         );
