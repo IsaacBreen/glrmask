@@ -549,10 +549,9 @@ impl<'a> Lowerer<'a> {
         }
 
         let mut expr = if let Some(pattern) = &schema.pattern {
-            // Preserve the inexpensive length envelope alongside the pattern.
-            // `cheap_pattern_length_bound_body_regex` keeps lower bounds and
-            // admits an upper bound only when the static pattern×length product
-            // stays inside its configured cost budget.
+            // Preserve the exact length envelope alongside the pattern. Static
+            // complexity estimates may choose a different construction strategy,
+            // but they must never delete a finite schema bound.
             if split_pattern {
                 if let Some(pattern_expr) = self.lower_string_pattern_expr(pattern)? {
                     pattern_expr
@@ -584,7 +583,6 @@ impl<'a> Lowerer<'a> {
                 schema.min_length,
                 schema.max_length,
                 self.config.preserve_pattern_max_length,
-                self.config.pattern_max_length_complexity_limit,
             )
         {
             constraints.push(quoted_string_body_regex(&length_bound_body));
@@ -2483,7 +2481,6 @@ fn cheap_pattern_length_bound_body_regex(
     min: usize,
     max: Option<usize>,
     preserve_pattern_max_length: bool,
-    pattern_max_length_complexity_limit: usize,
 ) -> Option<String> {
     if min == 0 && max.is_none() {
         return None;
@@ -2495,22 +2492,11 @@ fn cheap_pattern_length_bound_body_regex(
     }
 
     if let Some(max) = max {
-        // Preserve the exact upper bound only while the importer-level product
-        // estimate remains inside its configured budget. Compile-time residual
-        // synthesis can make many such products cheap, but not every product:
-        // a bounded pattern component can remain fully observable over one
-        // tokenizer token and force a very large synchronized DFA. In that
-        // case the established compatibility fallback keeps only the lower
-        // bound rather than turning synthesis into a build-time regression.
-        // Callers that require the exact envelope can raise the complexity
-        // limit explicitly.
-        let force_exact_pattern_max_length =
-            std::env::var_os("GLRMASK_FORCE_EXACT_PATTERN_MAX_LENGTH").is_some();
-        if preserve_pattern_max_length
-            && (force_exact_pattern_max_length
-                || pattern_max_length_complexity_score(&pattern, max)
-                    <= pattern_max_length_complexity_limit)
-        {
+        // A finite upper bound is part of the schema language. Preserve it
+        // regardless of the estimated product cost. The complexity score is a
+        // strategy selector elsewhere; using it as a semantic fallback made the
+        // importer silently accept strings that the schema rejects.
+        if preserve_pattern_max_length {
             return Some(bounded_json_string_body_regex(string_char_regex, min, Some(max)));
         }
     }
