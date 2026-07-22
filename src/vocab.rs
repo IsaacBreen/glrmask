@@ -21,6 +21,13 @@ struct VocabCompilerCache {
     artifacts: Mutex<BTreeMap<TypeId, Arc<dyn Any + Send + Sync>>>,
 }
 
+#[derive(Debug)]
+struct VocabRelevantBytes {
+    bytes: Arc<[u8]>,
+}
+
+impl VocabDerivedArtifact for VocabRelevantBytes {}
+
 /// Marker for artifacts that are pure functions of a `Vocab`'s token bytes.
 ///
 /// Do not implement this for grammar-, tokenizer-, or constraint-specific
@@ -88,6 +95,30 @@ impl Vocab {
         *self
             .max_token_byte_len
             .get_or_init(|| self.entries.values().map(Vec::len).max().unwrap_or(0))
+    }
+
+    /// Sorted byte alphabet observed anywhere in the vocabulary.
+    pub(crate) fn relevant_bytes(&self) -> Arc<[u8]> {
+        if let Some(cached) = self.vocab_derived_cache_get::<VocabRelevantBytes>() {
+            return Arc::clone(&cached.bytes);
+        }
+        let mut observed = [false; 256];
+        for token in self.entries.values() {
+            for &byte in token {
+                observed[byte as usize] = true;
+            }
+        }
+        let bytes = Arc::<[u8]>::from(
+            observed
+                .iter()
+                .enumerate()
+                .filter_map(|(byte, &present)| present.then_some(byte as u8))
+                .collect::<Vec<_>>(),
+        );
+        self.vocab_derived_cache_set(Arc::new(VocabRelevantBytes {
+            bytes: Arc::clone(&bytes),
+        }));
+        bytes
     }
 
     /// Return the number of vocabulary entries.

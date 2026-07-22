@@ -46,8 +46,8 @@ use crate::compiler::stages::id_map_and_terminal_dwa::types::{
     TerminalDwaPhaseProfile,
 };
 use crate::compiler::stages::id_map_and_terminal_dwa::synthetic_state_map::{
-    CertifiedFullToSynthesizedStateMap, certify_full_to_synthesized_state_map,
-    estimated_synthesis_state_volume, has_potential_pathological_bounded_terminal,
+    BoundedTerminalCandidateScanner, CertifiedFullToSynthesizedStateMap,
+    certify_full_to_synthesized_state_map, estimated_synthesis_state_volume,
     synthesize_bounded_terminal_expressions, synthesize_terminal_expressions_for_horizon,
 };
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
@@ -937,6 +937,23 @@ fn plan_synthetic_tokenizer(
         .flatten()
 }
 
+fn grammar_has_potential_bounded_terminal_synthesis(
+    grammar: &GrammarDef,
+    max_token_len: usize,
+) -> bool {
+    let mut scanner = BoundedTerminalCandidateScanner::new(max_token_len);
+    grammar.terminals.iter().any(|terminal| match terminal {
+        Terminal::Expr { expr, .. } => scanner.is_candidate(expr),
+        Terminal::Pattern { pattern, utf8, .. } if pattern.as_bytes().contains(&b'{') => {
+            let expr = parse_regex(pattern, *utf8);
+            scanner.is_candidate(&expr)
+        }
+        Terminal::Literal { .. }
+        | Terminal::Pattern { .. }
+        | Terminal::SpecialToken { .. } => false,
+    })
+}
+
 fn plan_synthetic_tokenizer_enabled(
     grammar: &GrammarDef,
     vocab: &Vocab,
@@ -949,6 +966,24 @@ fn plan_synthetic_tokenizer_enabled(
     const COMMON_PARTITION_HORIZON: usize = 64;
     let aggressive_partition_horizon =
         std::env::var_os("GLRMASK_AGGRESSIVE_PARTITION_HORIZON").is_some();
+    let allow_vocab_only_candidates =
+        std::env::var_os("GLRMASK_SYNTHETIC_VOCAB_ONLY_CANDIDATES").is_some();
+    if !aggressive_partition_horizon
+        && !allow_vocab_only_candidates
+        && !grammar_has_potential_bounded_terminal_synthesis(
+            grammar,
+            vocab.max_token_byte_len(),
+        )
+    {
+        if profile {
+            eprintln!(
+                "[glrmask/profile][synthetic_plan_detail] selected=false reason=no_pathological_shape terminals={} changed_terminals=0 full_expressions_ms=0.000 synthesize_ms=0.000 preflight_ms=0.000 total_ms={:.3}",
+                grammar.terminals.len(),
+                elapsed_ms(plan_started_at),
+            );
+        }
+        return None;
+    }
     let full_expressions_started_at = Instant::now();
     let full_expressions = grammar
         .terminals
@@ -956,22 +991,6 @@ fn plan_synthetic_tokenizer_enabled(
         .map(terminal_expr)
         .collect::<Vec<_>>();
     let full_expressions_ms = elapsed_ms(full_expressions_started_at);
-    let allow_vocab_only_candidates =
-        std::env::var_os("GLRMASK_SYNTHETIC_VOCAB_ONLY_CANDIDATES").is_some();
-    if !aggressive_partition_horizon
-        && !allow_vocab_only_candidates
-        && !has_potential_pathological_bounded_terminal(&full_expressions)
-    {
-        if profile {
-            eprintln!(
-                "[glrmask/profile][synthetic_plan_detail] selected=false reason=no_pathological_shape terminals={} changed_terminals=0 full_expressions_ms={:.3} synthesize_ms=0.000 preflight_ms=0.000 total_ms={:.3}",
-                grammar.terminals.len(),
-                full_expressions_ms,
-                elapsed_ms(plan_started_at),
-            );
-        }
-        return None;
-    }
     let repeat_horizons = Arc::new(
         crate::automata::lexer::compile::VocabularyRepeatHorizonCache::new(),
     );
@@ -1016,13 +1035,7 @@ fn plan_synthetic_tokenizer_enabled(
         const MAX_SYNTHESIZED_RATIO_DENOMINATOR: usize = 4;
 
         let max_token_len = vocab.max_token_byte_len();
-        let mut relevant_bytes = vocab
-            .entries
-            .values()
-            .flat_map(|bytes| bytes.iter().copied())
-            .collect::<Vec<_>>();
-        relevant_bytes.sort_unstable();
-        relevant_bytes.dedup();
+        let relevant_bytes = vocab.relevant_bytes();
 
         synthesized.changed_terminals.retain(|&terminal| {
             let terminal = terminal as usize;
@@ -1105,10 +1118,16 @@ fn plan_synthetic_tokenizer_enabled(
         lexer_partition_ids_with_residual_classes(grammar, false, &residual_isolation_classes);
 
     if profile {
+        let changed_terminal_labels = changed_terminal_ids
+            .iter()
+            .map(|&terminal| format!("{}:{}", terminal, grammar.terminal_display_name(terminal)))
+            .collect::<Vec<_>>()
+            .join(",");
         eprintln!(
-            "[glrmask/profile][synthetic_plan_detail] selected=true terminals={} changed_terminals={} full_expressions_ms={:.3} synthesize_ms={:.3} preflight_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][synthetic_plan_detail] selected=true terminals={} changed_terminals={} changed_terminal_labels=[{}] full_expressions_ms={:.3} synthesize_ms={:.3} preflight_ms={:.3} total_ms={:.3}",
             grammar.terminals.len(),
             changed_terminal_count,
+            changed_terminal_labels,
             full_expressions_ms,
             synthesize_ms,
             preflight_ms,
@@ -1194,13 +1213,7 @@ fn build_structural_tokenizer_pair(
         .map(factor_regex_expr)
         .collect::<Vec<_>>();
     let max_token_len = vocab.max_token_byte_len();
-    let mut relevant_bytes = vocab
-        .entries
-        .values()
-        .flat_map(|bytes| bytes.iter().copied())
-        .collect::<Vec<_>>();
-    relevant_bytes.sort_unstable();
-    relevant_bytes.dedup();
+    let relevant_bytes = vocab.relevant_bytes();
 
     let (
         synthesized_regex,
