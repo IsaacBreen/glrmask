@@ -167,11 +167,24 @@ impl Tokenizer {
     pub(crate) fn structurally_project_active_language(
         &self,
         active_terminals: &[bool],
+        relevant_bytes: &[bool; 256],
     ) -> Option<(Tokenizer, Vec<u32>)> {
-        if active_terminals.len() != self.num_terminals as usize || self.num_states() == 0 {
+        let diagnostic = std::env::var_os("GLRMASK_DUMP_STRUCTURAL_BRANCH_QUOTIENT").is_some();
+        if active_terminals.len() != self.num_terminals as usize || self.num_states() <= 1 {
             return None;
         }
-        let filtered = |bits: &BitSet| {
+        let start = self.start_state() as usize;
+        let filtered_ids = |bits: &BitSet| {
+            bits.iter()
+                .filter(|&terminal| {
+                    active_terminals
+                        .get(terminal)
+                        .copied()
+                        .unwrap_or(false)
+                })
+                .collect::<Vec<_>>()
+        };
+        let filtered_bits = |bits: &BitSet| {
             let mut result = BitSet::new(self.num_terminals as usize);
             for terminal in bits.iter() {
                 if active_terminals.get(terminal).copied().unwrap_or(false) {
@@ -180,55 +193,104 @@ impl Tokenizer {
             }
             result
         };
-        let start = self.start_state() as usize;
-        let mut live = (0..self.num_states() as usize)
-            .map(|state| {
-                !filtered(self.dfa.finalizers(state as u32)).is_empty()
-                    || !filtered(self.dfa.possible_future_group_ids(state as u32)).is_empty()
-            })
+
+        // Preserve every epsilon-bearing physical state as a singleton control
+        // state. Quotient only deterministic residuals. This avoids powerset
+        // construction while remaining a literal transition congruence over the
+        // complete raw scanner coordinate, including augmented residual roots.
+        let mut preserved = vec![start];
+        preserved.extend((0..self.num_states() as usize).filter(|&state| {
+            state != start && !self.dfa.states()[state].epsilon_transitions.is_empty()
+        }));
+        let mut preserved_by_raw = vec![u32::MAX; self.num_states() as usize];
+        for (id, &raw) in preserved.iter().enumerate() {
+            preserved_by_raw[raw] = id as u32;
+        }
+        let states = (0..self.num_states() as usize)
+            .filter(|&state| preserved_by_raw[state] == u32::MAX)
             .collect::<Vec<_>>();
-        live[start] = true;
-        let live_count = live.iter().filter(|&&value| value).count();
-        if live_count == self.num_states() as usize {
+        if states.is_empty() {
+            return None;
+        }
+        let mut local_by_raw = vec![u32::MAX; self.num_states() as usize];
+        for (local, &raw) in states.iter().enumerate() {
+            local_by_raw[raw] = local as u32;
+        }
+
+        let mut output_classes = FxHashMap::<(Vec<usize>, Vec<usize>), u32>::default();
+        let mut classes = Vec::with_capacity(states.len());
+        for &raw in &states {
+            let key = (
+                filtered_ids(self.dfa.finalizers(raw as u32)),
+                filtered_ids(self.dfa.possible_future_group_ids(raw as u32)),
+            );
+            let next = output_classes.len() as u32;
+            classes.push(*output_classes.entry(key).or_insert(next));
+        }
+        loop {
+            let old_class_count = classes.iter().copied().max().map_or(0, |value| value + 1);
+            let mut signatures = FxHashMap::<Vec<u32>, u32>::default();
+            let mut next_classes = Vec::with_capacity(states.len());
+            for (local, &raw) in states.iter().enumerate() {
+                let mut signature = Vec::with_capacity(
+                    1 + relevant_bytes.iter().filter(|&&active| active).count(),
+                );
+                signature.push(classes[local]);
+                for byte in 0u16..=255 {
+                    if !relevant_bytes[byte as usize] {
+                        continue;
+                    }
+                    let target = self.get_transition(raw as u32, byte as u8);
+                    if target == u32::MAX {
+                        signature.push(0);
+                        continue;
+                    }
+                    let preserved_target = preserved_by_raw[target as usize];
+                    if preserved_target != u32::MAX {
+                        signature.push(0x8000_0000 | preserved_target);
+                        continue;
+                    }
+                    let target_local = local_by_raw[target as usize];
+                    if target_local == u32::MAX {
+                        return None;
+                    }
+                    signature.push(classes[target_local as usize] + 1);
+                }
+                let next = signatures.len() as u32;
+                next_classes.push(*signatures.entry(signature).or_insert(next));
+            }
+            let next_class_count = next_classes
+                .iter()
+                .copied()
+                .max()
+                .map_or(0, |value| value + 1);
+            classes = next_classes;
+            if next_class_count == old_class_count {
+                break;
+            }
+        }
+
+        let class_count = classes.iter().copied().max().map_or(0, |value| value + 1) as usize;
+        let projected_count = preserved.len() + class_count;
+        if class_count == 0 || projected_count >= self.num_states() as usize {
+            return None;
+        }
+        let mut representatives = vec![u32::MAX; class_count];
+        let mut source_to_projected = vec![u32::MAX; self.num_states() as usize];
+        for (id, &raw) in preserved.iter().enumerate() {
+            source_to_projected[raw] = id as u32;
+        }
+        let class_offset = preserved.len() as u32;
+        for (local, &raw) in states.iter().enumerate() {
+            let class = classes[local] as usize;
+            representatives[class] = representatives[class].min(raw as u32);
+            source_to_projected[raw] = class_offset + class as u32;
+        }
+        if representatives.iter().any(|&raw| raw == u32::MAX) {
             return None;
         }
 
-        // A state declared dead for the active language must not have a direct
-        // route back into the live subgraph. This independently checks the
-        // possible-future metadata used by the projection proof.
-        for state in 0..self.num_states() as usize {
-            if live[state] {
-                continue;
-            }
-            if self.dfa.states()[state]
-                .transitions
-                .iter()
-                .any(|(_, &target)| live[target as usize])
-                || self.dfa.states()[state]
-                    .epsilon_transitions
-                    .iter()
-                    .any(|&target| live[target as usize])
-            {
-                return None;
-            }
-        }
-
-        let mut source_to_projected = vec![u32::MAX; self.num_states() as usize];
-        source_to_projected[start] = 0;
-        let mut next_state = 1u32;
-        for state in 0..self.num_states() as usize {
-            if state != start && live[state] {
-                source_to_projected[state] = next_state;
-                next_state += 1;
-            }
-        }
-        let dead_state = next_state;
-        for (state, mapped) in source_to_projected.iter_mut().enumerate() {
-            if !live[state] {
-                *mapped = dead_state;
-            }
-        }
-        let mut dfa = DFA::new(dead_state as usize + 1);
+        let mut dfa = DFA::new(projected_count);
         dfa.ensure_group_capacity(self.num_terminals as usize);
         for terminal in 0..self.num_terminals as usize {
             if active_terminals[terminal] {
@@ -238,26 +300,44 @@ impl Tokenizer {
                 );
             }
         }
-        for source in 0..self.num_states() as usize {
-            if !live[source] {
-                continue;
-            }
-            let projected = source_to_projected[source];
-            let transitions = self.dfa.states()[source]
-                .transitions
-                .iter()
-                .map(|(byte, &target)| (byte, source_to_projected[target as usize]))
+        let copy_state = |dfa: &mut DFA, source: u32, target: u32| {
+            let transitions = (0u16..=255)
+                .filter(|&byte| relevant_bytes[byte as usize])
+                .filter_map(|byte| {
+                    let raw_target = self.get_transition(source, byte as u8);
+                    (raw_target != u32::MAX)
+                        .then(|| (byte as u8, source_to_projected[raw_target as usize]))
+                })
                 .collect::<Vec<_>>();
-            dfa.set_transitions_from_sorted_entries(projected, transitions);
-            for &target in &self.dfa.states()[source].epsilon_transitions {
-                if live[target as usize] {
-                    dfa.add_epsilon_transition(projected, source_to_projected[target as usize]);
-                }
+            dfa.set_transitions_from_sorted_entries(target, transitions);
+            let mut epsilon_targets = self.dfa.states()[source as usize]
+                .epsilon_transitions
+                .iter()
+                .map(|&raw_target| source_to_projected[raw_target as usize])
+                .collect::<Vec<_>>();
+            epsilon_targets.sort_unstable();
+            epsilon_targets.dedup();
+            for epsilon_target in epsilon_targets {
+                dfa.add_epsilon_transition(target, epsilon_target);
             }
             dfa.overwrite_state_metadata(
-                projected,
-                filtered(self.dfa.finalizers(source as u32)),
-                filtered(self.dfa.possible_future_group_ids(source as u32)),
+                target,
+                filtered_bits(self.dfa.finalizers(source)),
+                filtered_bits(self.dfa.possible_future_group_ids(source)),
+            );
+        };
+        for (target, &source) in preserved.iter().enumerate() {
+            copy_state(&mut dfa, source as u32, target as u32);
+        }
+        for (class, &source) in representatives.iter().enumerate() {
+            copy_state(&mut dfa, source, class_offset + class as u32);
+        }
+        if diagnostic {
+            eprintln!(
+                "[glrmask/dump][structural_branch_quotient] stage=selected path=epsilon_singletons source_states={} projected_states={} epsilon_singletons={}",
+                self.num_states(),
+                projected_count,
+                preserved.len(),
             );
         }
         Some((
