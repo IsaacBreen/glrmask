@@ -137,23 +137,6 @@ fn build_partition_local_tokenizer(
     if !changed {
         return reject("unchanged_candidate", max_token_len);
     }
-    if std::env::var_os("GLRMASK_DUMP_SYNTH_REPEAT_BOUNDS").is_some() {
-        for &terminal in plan.protected_terminal_ids.iter() {
-            let terminal = terminal as usize;
-            eprintln!(
-                "[glrmask/dump][synth_repeat_bounds] scope=partition horizon={} vocab_tokens={} terminal={} global={:?} local={:?} exact_vocab_horizons={:?}",
-                max_token_len,
-                vocab.len(),
-                terminal,
-                synthetic_state_map::debug_repeat_bounds(&plan.expressions[terminal]),
-                synthetic_state_map::debug_repeat_bounds(&candidate.expressions[terminal]),
-                synthetic_state_map::debug_repeat_vocab_horizons(
-                    &plan.expressions[terminal],
-                    vocab,
-                ),
-            );
-        }
-    }
 
     let rebuilt_expressions = plan
         .expressions
