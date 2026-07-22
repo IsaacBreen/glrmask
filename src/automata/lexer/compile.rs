@@ -3939,10 +3939,23 @@ pub(crate) fn compile_further_synthesized_tokenizer_with_structural_map(
     max_token_len: usize,
     relevant_bytes: &[u8],
 ) -> Option<(Tokenizer, Vec<u32>)> {
+    let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
+    let started_at = profile.then(Instant::now);
+    let reject = |stage: &str| {
+        if profile {
+            eprintln!(
+                "[glrmask/profile][partition_local_component_reuse] selected=false stage={} elapsed_ms={:.3}",
+                stage,
+                started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
+            );
+        }
+        None
+    };
     if source_expressions.len() != synthesized_expressions.len()
         || source_expressions.len() != source.num_terminals as usize
     {
-        return None;
+        return reject("input_shape");
     }
     let protected = protected_terminal_ids
         .iter()
@@ -3954,10 +3967,12 @@ pub(crate) fn compile_further_synthesized_tokenizer_with_structural_map(
         .map(|(source, synthesized)| source != synthesized)
         .collect::<Vec<_>>();
     if !changed.iter().any(|&changed| changed) {
-        return None;
+        return reject("unchanged");
     }
 
-    let extracted = extract_dispatch_components(source)?;
+    let Some(extracted) = extract_dispatch_components(source) else {
+        return reject("extract_dispatch");
+    };
     let mut output_components = Vec::<LexerComponent>::with_capacity(extracted.len());
     let mut component_maps = Vec::<(Vec<u32>, Vec<u32>)>::with_capacity(extracted.len());
     let mut handled_changed = vec![false; changed.len()];
@@ -3986,30 +4001,43 @@ pub(crate) fn compile_further_synthesized_tokenizer_with_structural_map(
             || component.terminal_ids.len() != 1
             || !protected.contains(&(changed_terminals[0] as u32))
         {
-            return None;
+            return reject("changed_component_shape");
         }
         let terminal = changed_terminals[0];
         handled_changed[terminal] = true;
-        let pair = compile_terminal_expression_pair_with_structural_map(
+        let Some(pair) = compile_terminal_expression_pair_with_structural_map(
             &source_expressions[terminal],
             &synthesized_expressions[terminal],
             vocab,
             repeat_horizons,
             max_token_len,
             relevant_bytes,
-        )?;
+        ) else {
+            return reject("protected_pair");
+        };
         let (mut synthesized, synthesized_nullable) =
             isolate_component_nullable_start(pair.synthesized.dfa, 1);
         let (rebuilt, rebuilt_nullable) = isolate_component_nullable_start(pair.full.dfa, 1);
         if !synthesized_nullable.is_empty() || !rebuilt_nullable.is_empty() {
-            return None;
+            return reject("protected_nullable");
         }
-        let source_to_synthesized = augment_component_from_verified_prefix(
+        let Some(source_to_synthesized) = augment_component_from_verified_prefix(
             &component.dfa,
             &rebuilt,
             &mut synthesized,
             &pair.full_to_synthesized,
-        )?;
+        ) else {
+            if profile {
+                eprintln!(
+                    "[glrmask/profile][partition_local_component_reuse_detail] terminal={} source_states={} rebuilt_states={} synthesized_states={}",
+                    terminal,
+                    component.dfa.num_states(),
+                    rebuilt.num_states(),
+                    synthesized.num_states(),
+                );
+            }
+            return reject("protected_prefix");
+        };
         component_maps.push((component.source_states, source_to_synthesized));
         output_components.push(LexerComponent {
             terminal_ids: component.terminal_ids,
@@ -4022,7 +4050,7 @@ pub(crate) fn compile_further_synthesized_tokenizer_with_structural_map(
         .enumerate()
         .any(|(terminal, &changed)| changed && !handled_changed[terminal])
     {
-        return None;
+        return reject("unhandled_changed");
     }
 
     let mut source_to_synthesized = vec![u32::MAX; source.dfa.num_states()];
@@ -4030,7 +4058,7 @@ pub(crate) fn compile_further_synthesized_tokenizer_with_structural_map(
     let mut offset = 1u32;
     for (component, (source_states, local_map)) in output_components.iter().zip(&component_maps) {
         if source_states.len() != local_map.len() {
-            return None;
+            return reject("component_map_length");
         }
         for (&source_state, &local_state) in source_states.iter().zip(local_map) {
             source_to_synthesized[source_state as usize] = offset + local_state;
@@ -4038,7 +4066,7 @@ pub(crate) fn compile_further_synthesized_tokenizer_with_structural_map(
         offset = offset.checked_add(component.dfa.num_states() as u32)?;
     }
     if source_to_synthesized.iter().any(|&state| state == u32::MAX) {
-        return None;
+        return reject("unmapped_source_state");
     }
     let dfa = combine_lexer_components_under_epsilon_root(
         output_components,
@@ -4048,6 +4076,14 @@ pub(crate) fn compile_further_synthesized_tokenizer_with_structural_map(
         source_expressions.len() as u32,
         Some(Arc::from(synthesized_expressions.to_vec().into_boxed_slice())),
     );
+    if profile {
+        eprintln!(
+            "[glrmask/profile][partition_local_component_reuse] selected=true source_states={} synthesized_states={} elapsed_ms={:.3}",
+            source.dfa.num_states(),
+            tokenizer.dfa.num_states(),
+            started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
+        );
+    }
     Some((tokenizer, source_to_synthesized))
 }
 
