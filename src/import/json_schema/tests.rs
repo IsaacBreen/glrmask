@@ -2949,7 +2949,7 @@ fn very_large_fixed_width_pattern_array_uses_contextual_item_terminals() {
 }
 
 #[test]
-fn costly_bounded_pattern_string_arrays_use_contextual_item_terminals() {
+fn costly_bounded_pattern_string_arrays_reuse_one_item_terminal() {
     let schema = json!({
         "type": "array",
         "minItems": 1,
@@ -2965,13 +2965,13 @@ fn costly_bounded_pattern_string_arrays_use_contextual_item_terminals() {
     assert!(!grammar.rules.iter().any(|rule| {
         rule.is_terminal && rule.name.starts_with("bounded_scalar_array")
     }), "{:?}", grammar.rules);
-    assert!(grammar.rules.iter().any(|rule| {
+    assert!(!grammar.rules.iter().any(|rule| {
         rule.is_terminal && rule.name.starts_with("contextual_array_first_item")
     }), "{:?}", grammar.rules);
-    assert!(grammar.rules.iter().any(|rule| {
+    assert!(!grammar.rules.iter().any(|rule| {
         rule.is_terminal && rule.name.starts_with("contextual_array_next_item")
     }), "{:?}", grammar.rules);
-    assert!(!grammar.rules.iter().any(|rule| {
+    assert!(grammar.rules.iter().any(|rule| {
         rule.is_terminal && rule.name.starts_with("json_string_constrained")
     }), "{:?}", grammar.rules);
     lower(&grammar).unwrap();
@@ -2986,7 +2986,7 @@ fn costly_bounded_pattern_string_arrays_use_contextual_item_terminals() {
 }
 
 #[test]
-fn contextual_pattern_array_allows_empty_when_min_items_is_zero() {
+fn costly_pattern_array_fallback_allows_empty_when_min_items_is_zero() {
     let schema = json!({
         "type": "array",
         "minItems": 0,
@@ -2999,11 +2999,14 @@ fn contextual_pattern_array_allows_empty_when_min_items_is_zero() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    assert!(grammar.rules.iter().any(|rule| {
+    assert!(!grammar.rules.iter().any(|rule| {
         rule.is_terminal && rule.name.starts_with("contextual_array_first_item")
     }), "{:?}", grammar.rules);
-    assert!(grammar.rules.iter().any(|rule| {
+    assert!(!grammar.rules.iter().any(|rule| {
         rule.is_terminal && rule.name.starts_with("contextual_array_next_item")
+    }), "{:?}", grammar.rules);
+    assert!(grammar.rules.iter().any(|rule| {
+        rule.is_terminal && rule.name.starts_with("json_string_constrained")
     }), "{:?}", grammar.rules);
     lower(&grammar).unwrap();
     assert!(schema_accepts_bytes(&schema, br#"[]"#));
@@ -3019,7 +3022,7 @@ fn contextual_pattern_array_allows_empty_when_min_items_is_zero() {
 }
 
 #[test]
-fn contextual_pattern_array_enforces_unbounded_min_items() {
+fn costly_pattern_array_fallback_enforces_unbounded_min_items() {
     let schema = json!({
         "type": "array",
         "minItems": 2,
@@ -3031,11 +3034,14 @@ fn contextual_pattern_array_enforces_unbounded_min_items() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    assert!(grammar.rules.iter().any(|rule| {
+    assert!(!grammar.rules.iter().any(|rule| {
         rule.is_terminal && rule.name.starts_with("contextual_array_first_item")
     }), "{:?}", grammar.rules);
-    assert!(grammar.rules.iter().any(|rule| {
+    assert!(!grammar.rules.iter().any(|rule| {
         rule.is_terminal && rule.name.starts_with("contextual_array_next_item")
+    }), "{:?}", grammar.rules);
+    assert!(grammar.rules.iter().any(|rule| {
+        rule.is_terminal && rule.name.starts_with("json_string_constrained")
     }), "{:?}", grammar.rules);
     lower(&grammar).unwrap();
     assert!(!schema_accepts_bytes(&schema, br#"[]"#));

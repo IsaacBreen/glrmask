@@ -526,17 +526,12 @@ fn certify_deterministic_dispatch_state_map(
     active_terminals: Option<&[bool]>,
 ) -> Option<CertifiedFullToSynthesizedStateMap> {
     let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
-    let max_token_len = vocab.entries.values().map(Vec::len).max().unwrap_or(0);
-    let mut relevant_bytes = vocab
-        .entries
-        .values()
-        .flat_map(|bytes| bytes.iter().copied())
-        .collect::<Vec<_>>();
-    relevant_bytes.sort_unstable();
-    relevant_bytes.dedup();
-    let raw_relevant_byte_count = relevant_bytes.len();
+    let max_token_len = vocab.max_token_byte_len();
+    let vocabulary_bytes = vocab.relevant_bytes();
+    let raw_relevant_byte_count = vocabulary_bytes.len();
     let byte_quotient_started_at = profile.then(std::time::Instant::now);
-    relevant_bytes = exact_combined_byte_representatives(full, synthesized, &relevant_bytes);
+    let relevant_bytes =
+        exact_combined_byte_representatives(full, synthesized, &vocabulary_bytes);
     if profile {
         eprintln!(
             "[glrmask/profile][tokenizer] deterministic_certification_byte_quotient raw_bytes={} representative_bytes={} elapsed_ms={:.3}",
@@ -801,6 +796,61 @@ fn reducible_repeat_stats(expr: &Expr, max_token_len: usize) -> ReducibleRepeatS
     reducible_repeat_analysis(expr, max_token_len).1
 }
 
+const MIN_VOCAB_ONLY_PROBE_FULL_ESTIMATE: u128 = 16_000_000;
+const MIN_VOCAB_ONLY_PROBE_SAVING: u128 = 8_000_000;
+
+fn vocabulary_only_probe_is_worthwhile(expr: &Expr, full_estimate: u128) -> bool {
+    if full_estimate < MIN_VOCAB_ONLY_PROBE_FULL_ESTIMATE {
+        return false;
+    }
+
+    // A zero-byte conservative horizon is an optimistic lower bound on the
+    // representative expression attainable from any real vocabulary. Only pay
+    // for exact vocabulary analysis when even that optimistic candidate removes
+    // a large absolute amount of work and at least half of the estimated state
+    // product. Compute that lower bound without cloning or rewriting the
+    // expression; only inspect the more expensive structural compile plan after
+    // the arithmetic gate passes. The exact planner and certifier remain
+    // authoritative.
+    let optimistic = optimistic_synthesis_estimate(expr);
+    if !optimistic.changed {
+        return false;
+    }
+    if full_estimate.saturating_sub(optimistic.synthesized_volume)
+        < MIN_VOCAB_ONLY_PROBE_SAVING
+        || optimistic.synthesized_volume.saturating_mul(2) > full_estimate
+    {
+        return false;
+    }
+    structural_pair_component_count(expr, expr).is_some_and(|count| count >= 2)
+}
+
+/// Cheap prefilter for the production synthesis lane.
+///
+/// The vocabulary's maximum token length is already cached, so use the exact
+/// conservative repeat analysis here instead of a token-length-independent
+/// approximation. This prevents grammars with large but fully token-observable
+/// repeats from entering expensive synthesis only to reject every candidate.
+pub(crate) struct BoundedTerminalCandidateScanner {
+    analysis: BoundedTerminalAnalysisCache,
+}
+
+impl BoundedTerminalCandidateScanner {
+    pub(crate) fn new(max_token_len: usize) -> Self {
+        Self {
+            analysis: BoundedTerminalAnalysisCache::new(max_token_len),
+        }
+    }
+
+    pub(crate) fn is_candidate(&mut self, expression: &Expr) -> bool {
+        if self.analysis.is_pathological_candidate(expression) {
+            return true;
+        }
+        let full_estimate = estimated_expression_state_volume(expression);
+        vocabulary_only_probe_is_worthwhile(expression, full_estimate)
+    }
+}
+
 pub(crate) struct BoundedTerminalAnalysisCache {
     max_token_len: usize,
     shared_cache: FxHashMap<usize, (usize, ReducibleRepeatStats)>,
@@ -1002,8 +1052,16 @@ fn synthesize_expression_for_vocab(
                 // compiling a large repeat-body DFA can cost more than the
                 // tokenizer optimization can save. The ordinary byte-length
                 // proof remains the fail-closed baseline in both cases.
-                if estimated_expression_state_volume(body)
-                    <= MAX_VOCAB_HORIZON_BODY_ESTIMATE
+                // Even a zero-boundary vocabulary horizon yields a stencil of
+                // `min + 1`. Do not compile the repeat-body DFA or scan the
+                // vocabulary when that best possible result cannot shorten the
+                // repeat. This is the common case for small bounded helpers
+                // nested inside otherwise large terminal expressions.
+                let best_possible_vocab_stencil = min.saturating_add(1);
+                if max > best_possible_vocab_stencil
+                    && selected_max > best_possible_vocab_stencil
+                    && estimated_expression_state_volume(body)
+                        <= MAX_VOCAB_HORIZON_BODY_ESTIMATE
                     && let Some(vocab_horizon) = horizons.horizon_for_expr(body, vocab)
                     && vocab_horizon
                         .saturating_mul(MIN_HORIZON_IMPROVEMENT_FACTOR)
@@ -1154,6 +1212,169 @@ fn estimated_expression_state_volume(expr: &Expr) -> u128 {
     estimated_expression_state_volume_inner(expr, &mut FxHashMap::default())
 }
 
+#[derive(Clone, Copy)]
+struct OptimisticSynthesisEstimate {
+    minimum_bytes: usize,
+    full_volume: u128,
+    synthesized_volume: u128,
+    changed: bool,
+}
+
+fn optimistic_synthesis_estimate_inner(
+    expr: &Expr,
+    shared_cache: &mut FxHashMap<usize, OptimisticSynthesisEstimate>,
+) -> OptimisticSynthesisEstimate {
+    match expr {
+        Expr::U8Seq(bytes) => {
+            let volume = bytes.len().saturating_add(1) as u128;
+            OptimisticSynthesisEstimate {
+                minimum_bytes: bytes.len(),
+                full_volume: volume,
+                synthesized_volume: volume,
+                changed: false,
+            }
+        }
+        Expr::U8Class(_) => OptimisticSynthesisEstimate {
+            minimum_bytes: 1,
+            full_volume: 2,
+            synthesized_volume: 2,
+            changed: false,
+        },
+        Expr::Dfa(dfa) => {
+            let volume = dfa.num_states().max(1) as u128;
+            OptimisticSynthesisEstimate {
+                minimum_bytes: dfa.min_match_byte_len().unwrap_or(0),
+                full_volume: volume,
+                synthesized_volume: volume,
+                changed: false,
+            }
+        }
+        Expr::Epsilon => OptimisticSynthesisEstimate {
+            minimum_bytes: 0,
+            full_volume: 1,
+            synthesized_volume: 1,
+            changed: false,
+        },
+        Expr::Shared(inner) => {
+            let key = Arc::as_ptr(inner) as usize;
+            if let Some(&cached) = shared_cache.get(&key) {
+                return cached;
+            }
+            let estimate = optimistic_synthesis_estimate_inner(inner, shared_cache);
+            shared_cache.insert(key, estimate);
+            estimate
+        }
+        Expr::Seq(parts) => {
+            let mut estimate = OptimisticSynthesisEstimate {
+                minimum_bytes: 0,
+                full_volume: 1,
+                synthesized_volume: 1,
+                changed: false,
+            };
+            for part in parts {
+                let part = optimistic_synthesis_estimate_inner(part, shared_cache);
+                estimate.minimum_bytes = estimate
+                    .minimum_bytes
+                    .saturating_add(part.minimum_bytes);
+                estimate.full_volume = estimate.full_volume.saturating_add(part.full_volume);
+                estimate.synthesized_volume = estimate
+                    .synthesized_volume
+                    .saturating_add(part.synthesized_volume);
+                estimate.changed |= part.changed;
+            }
+            estimate
+        }
+        Expr::Choice(parts) => {
+            let mut estimate = OptimisticSynthesisEstimate {
+                minimum_bytes: usize::MAX,
+                full_volume: 1,
+                synthesized_volume: 1,
+                changed: false,
+            };
+            for part in parts {
+                let part = optimistic_synthesis_estimate_inner(part, shared_cache);
+                estimate.minimum_bytes = estimate.minimum_bytes.min(part.minimum_bytes);
+                estimate.full_volume = estimate.full_volume.saturating_add(part.full_volume);
+                estimate.synthesized_volume = estimate
+                    .synthesized_volume
+                    .saturating_add(part.synthesized_volume);
+                estimate.changed |= part.changed;
+            }
+            if parts.is_empty() {
+                estimate.minimum_bytes = 0;
+            }
+            estimate
+        }
+        Expr::Intersect { expr, intersect } => {
+            let left = optimistic_synthesis_estimate_inner(expr, shared_cache);
+            let right = optimistic_synthesis_estimate_inner(intersect, shared_cache);
+            OptimisticSynthesisEstimate {
+                minimum_bytes: left.minimum_bytes.max(right.minimum_bytes),
+                full_volume: left.full_volume.saturating_mul(right.full_volume),
+                synthesized_volume: left
+                    .synthesized_volume
+                    .saturating_mul(right.synthesized_volume),
+                changed: left.changed || right.changed,
+            }
+        }
+        Expr::Exclude { expr, exclude } => {
+            let base = optimistic_synthesis_estimate_inner(expr, shared_cache);
+            let excluded = optimistic_synthesis_estimate_inner(exclude, shared_cache);
+            OptimisticSynthesisEstimate {
+                minimum_bytes: base.minimum_bytes,
+                full_volume: base.full_volume.saturating_mul(excluded.full_volume),
+                synthesized_volume: base
+                    .synthesized_volume
+                    .saturating_mul(excluded.synthesized_volume),
+                changed: base.changed || excluded.changed,
+            }
+        }
+        Expr::Repeat { expr, min, max } => {
+            let child = optimistic_synthesis_estimate_inner(expr, shared_cache);
+            let full_max = max.unwrap_or(1);
+            let mut synthesized_max = full_max;
+            let mut changed = child.changed;
+            if max.is_some() && child.minimum_bytes != 0 {
+                let stencil_max = min
+                    .saturating_add(STENCIL_TOKEN_NEIGHBORHOODS)
+                    .saturating_add(1);
+                let full_repeat = child
+                    .full_volume
+                    .saturating_mul(full_max.saturating_add(1) as u128);
+                let synthesized_repeat = child
+                    .synthesized_volume
+                    .saturating_mul(stencil_max.saturating_add(1) as u128);
+                if full_max > stencil_max
+                    && full_repeat.saturating_sub(synthesized_repeat) >= 64
+                    && synthesized_repeat.saturating_mul(4)
+                        <= full_repeat.saturating_mul(3)
+                {
+                    synthesized_max = stencil_max;
+                    changed = true;
+                }
+            }
+            OptimisticSynthesisEstimate {
+                minimum_bytes: child.minimum_bytes.saturating_mul(*min),
+                full_volume: 1u128.saturating_add(
+                    child
+                        .full_volume
+                        .saturating_mul(full_max.saturating_add(1) as u128),
+                ),
+                synthesized_volume: 1u128.saturating_add(
+                    child
+                        .synthesized_volume
+                        .saturating_mul(synthesized_max.saturating_add(1) as u128),
+                ),
+                changed,
+            }
+        }
+    }
+}
+
+fn optimistic_synthesis_estimate(expr: &Expr) -> OptimisticSynthesisEstimate {
+    optimistic_synthesis_estimate_inner(expr, &mut FxHashMap::default())
+}
+
 pub(crate) fn estimated_synthesis_state_volume(expr: &Expr) -> u128 {
     estimated_expression_state_volume(expr)
 }
@@ -1191,11 +1412,6 @@ fn estimated_synthesis_reduction_is_profitable(full: &Expr, synthesized: &Expr) 
             <= full_estimate.saturating_mul(MAX_SYNTHESIZED_RATIO_NUMERATOR)
 }
 
-fn estimated_expression_is_large_enough_for_synthesis(expr: &Expr) -> bool {
-    const MIN_ESTIMATED_FULL_STATES: u128 = 8_192;
-    estimated_expression_state_volume(expr) >= MIN_ESTIMATED_FULL_STATES
-}
-
 /// Build a finite-token-horizon stencil without applying the global
 /// pathological-candidate threshold. This is used for partition-local
 /// analysis lexers: a terminal whose exact bound is observable by the longest
@@ -1228,17 +1444,33 @@ pub(crate) fn synthesize_bounded_terminal_expressions(
     vocab: &Vocab,
     horizons: &VocabularyRepeatHorizonCache,
 ) -> SynthesizedTerminalExpressions {
-    let max_token_len = vocab.entries.values().map(Vec::len).max().unwrap_or(0);
-    let mut changed_terminals = Vec::new();
-    let expressions = expressions
+    let max_token_len = vocab.max_token_byte_len();
+    let allow_vocab_only_candidates =
+        std::env::var_os("GLRMASK_SYNTHETIC_VOCAB_ONLY_CANDIDATES").is_some();
+    let mut analysis = BoundedTerminalAnalysisCache::new(max_token_len);
+    let candidates = expressions
         .iter()
         .enumerate()
-        .map(|(terminal, expression)| {
-            if !estimated_expression_is_large_enough_for_synthesis(expression) {
-                return expression.clone();
+        .filter_map(|(terminal, expression)| {
+            let full_estimate = estimated_expression_state_volume(expression);
+            if full_estimate < 8_192 {
+                return None;
             }
-            let conservative_pathological =
-                reducible_repeat_stats(expression, max_token_len).is_pathological_candidate();
+            let conservative_pathological = analysis.is_pathological_candidate(expression);
+            let guarded_large_candidate = !conservative_pathological
+                && vocabulary_only_probe_is_worthwhile(expression, full_estimate);
+            // Vocabulary-only candidate discovery is materially more expensive
+            // than the conservative repeat analysis because it compiles repeat
+            // bodies and scans the full vocabulary. Keep that speculative lane
+            // out of the production planner until a caller explicitly requests
+            // it. Conservative-pathological terminals still use vocabulary
+            // horizons to tighten an already justified synthesis attempt.
+            if !conservative_pathological
+                && !allow_vocab_only_candidates
+                && !guarded_large_candidate
+            {
+                return None;
+            }
             // New vocabulary-only reductions currently require an explicit
             // multi-component structural product. Single-component candidates
             // fall back to generic finite-horizon equivalence and have shown
@@ -1248,8 +1480,27 @@ pub(crate) fn synthesize_bounded_terminal_expressions(
                 && !structural_pair_component_count(expression, expression)
                     .is_some_and(|components| components >= 2)
             {
-                return expression.clone();
+                return None;
             }
+            Some((
+                terminal,
+                full_estimate,
+                conservative_pathological,
+                guarded_large_candidate,
+            ))
+        })
+        .collect::<Vec<_>>();
+
+    // Candidate discovery is deliberately scalar and cache-sharing: most
+    // grammars have zero or one candidate, and walking every terminal in the
+    // Rayon pool made one pathological terminal force unrelated ordinary
+    // helpers through vocabulary analysis. Only the small, already-qualified
+    // candidate set performs independent exact horizon proofs in parallel.
+    let synthesized_candidates = candidates
+        .par_iter()
+        .map(
+            |&(terminal, full_estimate, conservative_pathological, guarded_large_candidate)| {
+            let expression = &expressions[terminal];
             let (candidate, changed, used_vocab) =
                 synthesize_expression_for_vocab(expression, max_token_len, vocab, horizons);
             let vocabulary_shape_supported = !used_vocab
@@ -1257,33 +1508,42 @@ pub(crate) fn synthesize_bounded_terminal_expressions(
                 || structural_pair_component_count(expression, &candidate)
                     .is_some_and(|components| components >= 2);
             let profitable = changed
-                && (conservative_pathological || used_vocab)
+                && (conservative_pathological || used_vocab || guarded_large_candidate)
                 && vocabulary_shape_supported
                 && estimated_synthesis_reduction_is_profitable(expression, &candidate);
-            if std::env::var_os("GLRMASK_PROFILE_SYNTHETIC_PLAN").is_some() && changed {
+            if std::env::var_os("GLRMASK_PROFILE_SYNTHETIC_PLAN").is_some() {
                 eprintln!(
-                    "[glrmask/profile][synthetic_candidate] terminal={} selected={} conservative_pathological={} used_vocab={} vocabulary_shape_supported={} full_estimate={} synthesized_estimate={}",
+                    "[glrmask/profile][synthetic_candidate] terminal={} changed={} selected={} conservative_pathological={} guarded_large_candidate={} used_vocab={} vocabulary_shape_supported={} full_estimate={} synthesized_estimate={}",
                     terminal,
+                    changed,
                     profitable,
                     conservative_pathological,
+                    guarded_large_candidate,
                     used_vocab,
                     vocabulary_shape_supported,
-                    estimated_expression_state_volume(expression),
+                    full_estimate,
                     estimated_expression_state_volume(&candidate),
                 );
             }
             if profitable {
-                changed_terminals.push(terminal as u32);
-            }
-            if profitable {
-                candidate
+                (terminal, candidate, true)
             } else {
-                expression.clone()
+                (terminal, expression.clone(), false)
             }
-        })
-        .collect();
+        },
+        )
+        .collect::<Vec<_>>();
+
+    let mut changed_terminals = Vec::new();
+    let mut synthesized_expressions = expressions.to_vec();
+    for (terminal, expression, changed) in synthesized_candidates {
+        if changed {
+            changed_terminals.push(terminal as u32);
+            synthesized_expressions[terminal] = expression;
+        }
+    }
     SynthesizedTerminalExpressions {
-        expressions,
+        expressions: synthesized_expressions,
         changed_terminals,
     }
 }

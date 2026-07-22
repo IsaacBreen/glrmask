@@ -576,7 +576,7 @@ fn selected_bytes(mask: &[bool; 256]) -> Vec<u8> {
 
 fn position_byte_sets(vocab: &Vocab, tail_start_position: usize) -> PositionByteSets {
     assert!(tail_start_position >= MIN_TAIL_START_POSITION);
-    let max_token_length = vocab.entries.values().map(Vec::len).max().unwrap_or(0);
+    let max_token_length = vocab.max_token_byte_len();
     // Position `i` describes states active after exactly `i` position-wise
     // propagation steps. We need the boundary position after the final vocab
     // byte as well, because positions > 0 observe current F/U even when B_i is

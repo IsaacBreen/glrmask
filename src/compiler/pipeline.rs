@@ -47,9 +47,9 @@ use crate::compiler::stages::id_map_and_terminal_dwa::types::{
     TerminalDwaPhaseProfile,
 };
 use crate::compiler::stages::id_map_and_terminal_dwa::synthetic_state_map::{
-    CertifiedFullToSynthesizedStateMap, certify_full_to_synthesized_state_map,
-    estimated_synthesis_state_volume, synthesize_bounded_terminal_expressions,
-    synthesize_terminal_expressions_for_horizon,
+    BoundedTerminalCandidateScanner, CertifiedFullToSynthesizedStateMap,
+    certify_full_to_synthesized_state_map, estimated_synthesis_state_volume,
+    synthesize_bounded_terminal_expressions, synthesize_terminal_expressions_for_horizon,
 };
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::compiler::stages::mapped_artifact::{
@@ -690,7 +690,14 @@ mod lexer_partition_plan_tests {
             (2, b"aaaa".to_vec()),
             (3, b"b".to_vec()),
         ]);
-        let plan = plan_synthetic_tokenizer_enabled(&grammar, &vocab)
+        let plan = plan_synthetic_tokenizer_enabled(
+            &grammar,
+            &vocab,
+            false,
+            std::time::Instant::now(),
+            false,
+            false,
+        )
             .expect("large bounded terminal should be selected for synthesis");
         let (synthesized, full, certified) =
             prepare_structural_tokenizer_pair(&grammar, &plan, &vocab, Some(false))
@@ -934,29 +941,89 @@ fn plan_synthetic_tokenizer(
     grammar: &GrammarDef,
     vocab: &Vocab,
 ) -> Option<SyntheticTokenizerPlan> {
-    crate::compiler::synthetic_bounded_terminals_enabled()
-        .then(|| plan_synthetic_tokenizer_enabled(grammar, vocab))
-        .flatten()
+    let profile = std::env::var_os("GLRMASK_PROFILE_SYNTHETIC_PLAN").is_some();
+    let plan_started_at = Instant::now();
+    let synthesis_enabled = crate::compiler::synthetic_bounded_terminals_enabled();
+    let aggressive_partition_horizon =
+        std::env::var_os("GLRMASK_AGGRESSIVE_PARTITION_HORIZON").is_some();
+    let allow_vocab_only_candidates =
+        std::env::var_os("GLRMASK_SYNTHETIC_VOCAB_ONLY_CANDIDATES").is_some();
+    let has_candidate = aggressive_partition_horizon
+        || allow_vocab_only_candidates
+        || grammar_has_potential_bounded_terminal_synthesis(
+            grammar,
+            vocab.max_token_byte_len(),
+        );
+    if !has_candidate {
+        if profile {
+            eprintln!(
+                "[glrmask/profile][synthetic_plan_detail] selected=false reason=no_pathological_shape terminals={} changed_terminals=0 full_expressions_ms=0.000 synthesize_ms=0.000 preflight_ms=0.000 total_ms={:.3}",
+                grammar.terminals.len(),
+                elapsed_ms(plan_started_at),
+            );
+        }
+        return None;
+    }
+    if !synthesis_enabled {
+        if profile {
+            eprintln!(
+                "[glrmask/profile][synthetic_plan_detail] selected=false reason=disabled terminals={} changed_terminals=0 full_expressions_ms=0.000 synthesize_ms=0.000 preflight_ms=0.000 total_ms={:.3}",
+                grammar.terminals.len(),
+                elapsed_ms(plan_started_at),
+            );
+        }
+        return None;
+    }
+    plan_synthetic_tokenizer_enabled(
+        grammar,
+        vocab,
+        profile,
+        plan_started_at,
+        aggressive_partition_horizon,
+        allow_vocab_only_candidates,
+    )
+}
+
+fn grammar_has_potential_bounded_terminal_synthesis(
+    grammar: &GrammarDef,
+    max_token_len: usize,
+) -> bool {
+    let mut scanner = BoundedTerminalCandidateScanner::new(max_token_len);
+    grammar.terminals.iter().any(|terminal| match terminal {
+        Terminal::Expr { expr, .. } => scanner.is_candidate(expr),
+        Terminal::Pattern { pattern, utf8, .. } if pattern.as_bytes().contains(&b'{') => {
+            let expr = parse_regex(pattern, *utf8);
+            scanner.is_candidate(&expr)
+        }
+        Terminal::Literal { .. }
+        | Terminal::Pattern { .. }
+        | Terminal::SpecialToken { .. } => false,
+    })
 }
 
 fn plan_synthetic_tokenizer_enabled(
     grammar: &GrammarDef,
     vocab: &Vocab,
+    profile: bool,
+    plan_started_at: Instant,
+    aggressive_partition_horizon: bool,
+    allow_vocab_only_candidates: bool,
 ) -> Option<SyntheticTokenizerPlan> {
     // The normal path uses exact vocabulary-relative repeat horizons. The
     // legacy fixed 64-byte candidate remains available only as an explicitly
     // unsafe diagnostic probe whose result must still pass full certification.
     const COMMON_PARTITION_HORIZON: usize = 64;
-    let aggressive_partition_horizon =
-        std::env::var_os("GLRMASK_AGGRESSIVE_PARTITION_HORIZON").is_some();
+    let full_expressions_started_at = Instant::now();
     let full_expressions = grammar
         .terminals
         .iter()
         .map(terminal_expr)
         .collect::<Vec<_>>();
+    let full_expressions_ms = elapsed_ms(full_expressions_started_at);
     let repeat_horizons = Arc::new(
         crate::automata::lexer::compile::VocabularyRepeatHorizonCache::new(),
     );
+    let synthesize_started_at = Instant::now();
     let mut synthesized = if aggressive_partition_horizon {
         // Experimental candidate generation may shorten terminals that are
         // reducible only at the common partition horizon. The resulting
@@ -974,21 +1041,30 @@ fn plan_synthetic_tokenizer_enabled(
             repeat_horizons.as_ref(),
         )
     };
+    let synthesize_ms = elapsed_ms(synthesize_started_at);
 
+    if synthesized.changed_terminals.is_empty() {
+        if profile {
+            eprintln!(
+                "[glrmask/profile][synthetic_plan_detail] selected=false terminals={} changed_terminals=0 full_expressions_ms={:.3} synthesize_ms={:.3} preflight_ms=0.000 total_ms={:.3}",
+                grammar.terminals.len(),
+                full_expressions_ms,
+                synthesize_ms,
+                elapsed_ms(plan_started_at),
+            );
+        }
+        return None;
+    }
+
+    let preflight_started_at = Instant::now();
     if !aggressive_partition_horizon {
         const MAX_LOCAL_PREFLIGHT_ESTIMATE: u128 = 4_000_000;
         const MIN_LOCAL_STATE_SAVING: usize = 1_024;
         const MAX_SYNTHESIZED_RATIO_NUMERATOR: usize = 3;
         const MAX_SYNTHESIZED_RATIO_DENOMINATOR: usize = 4;
 
-        let max_token_len = vocab.entries.values().map(Vec::len).max().unwrap_or(0);
-        let mut relevant_bytes = vocab
-            .entries
-            .values()
-            .flat_map(|bytes| bytes.iter().copied())
-            .collect::<Vec<_>>();
-        relevant_bytes.sort_unstable();
-        relevant_bytes.dedup();
+        let max_token_len = vocab.max_token_byte_len();
+        let relevant_bytes = vocab.relevant_bytes();
 
         synthesized.changed_terminals.retain(|&terminal| {
             let terminal = terminal as usize;
@@ -1037,8 +1113,19 @@ fn plan_synthetic_tokenizer_enabled(
             keep
         });
     }
+    let preflight_ms = elapsed_ms(preflight_started_at);
     let changed_terminal_ids = synthesized.changed_terminals.clone();
     if changed_terminal_ids.is_empty() {
+        if profile {
+            eprintln!(
+                "[glrmask/profile][synthetic_plan_detail] selected=false terminals={} changed_terminals=0 full_expressions_ms={:.3} synthesize_ms={:.3} preflight_ms={:.3} total_ms={:.3}",
+                grammar.terminals.len(),
+                full_expressions_ms,
+                synthesize_ms,
+                preflight_ms,
+                elapsed_ms(plan_started_at),
+            );
+        }
         return None;
     }
     let changed_terminal_count = changed_terminal_ids.len();
@@ -1058,6 +1145,24 @@ fn plan_synthetic_tokenizer_enabled(
     }
     let partition_ids =
         lexer_partition_ids_with_residual_classes(grammar, false, &residual_isolation_classes);
+
+    if profile {
+        let changed_terminal_labels = changed_terminal_ids
+            .iter()
+            .map(|&terminal| format!("{}:{}", terminal, grammar.terminal_display_name(terminal)))
+            .collect::<Vec<_>>()
+            .join(",");
+        eprintln!(
+            "[glrmask/profile][synthetic_plan_detail] selected=true terminals={} changed_terminals={} changed_terminal_labels=[{}] full_expressions_ms={:.3} synthesize_ms={:.3} preflight_ms={:.3} total_ms={:.3}",
+            grammar.terminals.len(),
+            changed_terminal_count,
+            changed_terminal_labels,
+            full_expressions_ms,
+            synthesize_ms,
+            preflight_ms,
+            elapsed_ms(plan_started_at),
+        );
+    }
 
     Some(SyntheticTokenizerPlan {
         full_expressions,
@@ -1178,14 +1283,8 @@ fn prepare_structural_tokenizer_pair(
         .cloned()
         .map(factor_regex_expr)
         .collect::<Vec<_>>();
-    let max_token_len = vocab.entries.values().map(Vec::len).max().unwrap_or(0);
-    let mut relevant_bytes = vocab
-        .entries
-        .values()
-        .flat_map(|bytes| bytes.iter().copied())
-        .collect::<Vec<_>>();
-    relevant_bytes.sort_unstable();
-    relevant_bytes.dedup();
+    let max_token_len = vocab.max_token_byte_len();
+    let relevant_bytes = vocab.relevant_bytes();
 
     let expression_count = full_expressions.len() as u32;
     let (synthesized_regex, full, full_to_synthesized) = if full_expressions.len() == 1 {

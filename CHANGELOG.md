@@ -14,6 +14,16 @@
   compile tokenizer before full future analysis and byte-transition
   materialization, and runtime component assembly moves transition storage
   instead of copying it a second time.
+- Bounded-terminal synthesis candidate discovery now runs before terminal
+  materialization, uses cached vocabulary length/alphabet statistics, reuses
+  language-canonical repeat-horizon proofs, and parallelizes only the small set
+  of qualified candidates. Grammars with no viable candidate avoid synthesis
+  allocations entirely, and the diagnostic opt-out shares the same eligibility
+  scan so no-candidate ON/OFF builds follow the same planning path.
+- Expensive constrained array items are no longer duplicated into separate
+  first/next contextual terminals when one item already exceeds the importer
+  product budget. The item is compiled once and its count remains enforced at
+  grammar level.
 
 ### Changed
 

@@ -39,9 +39,59 @@ struct RepeatTranslationAutomaton {
     transitions: Vec<Box<[RepeatTranslationEdge; 256]>>,
 }
 
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct RepeatBodyLanguageState {
+    accepting: bool,
+    transitions: Box<[(u8, u32)]>,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct RepeatBodyLanguageKey(Box<[RepeatBodyLanguageState]>);
+
+impl RepeatBodyLanguageKey {
+    fn from_dfa(body: &DFA) -> Self {
+        if body.num_states() == 0 {
+            return Self(Box::new([]));
+        }
+
+        // Minimized equivalent DFAs may still carry different raw state ids
+        // depending on how their expressions were factored. Canonical BFS
+        // numbering from the start state makes the cache language-shaped rather
+        // than construction-shaped. Byte transitions are visited in sorted
+        // order, so the resulting key is deterministic.
+        let mut canonical = vec![u32::MAX; body.num_states()];
+        canonical[0] = 0;
+        let mut next_id = 1u32;
+        let mut queue = VecDeque::from([0u32]);
+        let mut states = Vec::with_capacity(body.num_states());
+        while let Some(state) = queue.pop_front() {
+            let mut transitions = Vec::new();
+            for (byte, &target) in body.states()[state as usize].transitions.iter() {
+                let mapped = if canonical[target as usize] == u32::MAX {
+                    let mapped = next_id;
+                    next_id += 1;
+                    canonical[target as usize] = mapped;
+                    queue.push_back(target);
+                    mapped
+                } else {
+                    canonical[target as usize]
+                };
+                transitions.push((byte, mapped));
+            }
+            states.push(RepeatBodyLanguageState {
+                accepting: body.finalizers(state).contains(0),
+                transitions: transitions.into_boxed_slice(),
+            });
+        }
+        Self(states.into_boxed_slice())
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct VocabularyRepeatHorizonCache {
-    horizons: Mutex<FxHashMap<DFA, Option<usize>>>,
+    horizons: Mutex<
+        FxHashMap<RepeatBodyLanguageKey, Arc<OnceLock<Option<usize>>>>,
+    >,
 }
 
 impl VocabularyRepeatHorizonCache {
@@ -50,16 +100,19 @@ impl VocabularyRepeatHorizonCache {
     }
 
     pub(crate) fn horizon_for_dfa(&self, body: &DFA, vocab: &Vocab) -> Option<usize> {
-        if let Ok(horizons) = self.horizons.lock()
-            && let Some(&horizon) = horizons.get(body)
-        {
-            return horizon;
-        }
-        let horizon = vocabulary_repeat_boundary_horizon_for_dfa_uncached(body, vocab);
-        if let Ok(mut horizons) = self.horizons.lock() {
-            horizons.entry(body.clone()).or_insert(horizon);
-        }
-        horizon
+        let key = RepeatBodyLanguageKey::from_dfa(body);
+        let cell = self
+            .horizons
+            .lock()
+            .ok()
+            .map(|mut horizons| {
+                Arc::clone(
+                    horizons
+                        .entry(key)
+                        .or_insert_with(|| Arc::new(OnceLock::new())),
+                )
+            })?;
+        *cell.get_or_init(|| vocabulary_repeat_boundary_horizon_for_dfa_uncached(body, vocab))
     }
 
     pub(crate) fn horizon_for_expr(&self, body: &Expr, vocab: &Vocab) -> Option<usize> {
@@ -252,13 +305,7 @@ fn vocabulary_repeat_boundary_horizon_for_dfa_uncached(
 ) -> Option<usize> {
     let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
     let started_at = profile.then(Instant::now);
-    let mut relevant_bytes = vocab
-        .entries
-        .values()
-        .flat_map(|token| token.iter().copied())
-        .collect::<Vec<_>>();
-    relevant_bytes.sort_unstable();
-    relevant_bytes.dedup();
+    let relevant_bytes = vocab.relevant_bytes();
     let automaton = build_repeat_translation_automaton(body, &relevant_bytes)?;
     let horizon = max_repeat_translation_over_vocab_suffixes(&automaton, vocab);
     if let Some(started_at) = started_at {
