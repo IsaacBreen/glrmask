@@ -383,12 +383,8 @@ impl<'a> Lowerer<'a> {
         }
 
         let preprocessed = preprocess_ascii_shorthand(pattern);
-        let preserved_max = schema.max_length.filter(|&max| {
-            pattern_matches_any_string(&preprocessed)
-                || (self.config.preserve_pattern_max_length
-                    && (crate::compiler::synthetic_bounded_terminals_enabled()
-                        || pattern_max_length_complexity_score(&preprocessed, max)
-                            <= self.config.pattern_max_length_complexity_limit))
+        let preserved_max = schema.max_length.filter(|_| {
+            pattern_matches_any_string(&preprocessed) || self.config.preserve_pattern_max_length
         });
         analyze_complex_anchored_pattern(&preprocessed, schema.min_length, preserved_max)
     }

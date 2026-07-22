@@ -38,6 +38,8 @@ impl<'a> Lowerer<'a> {
                         "GLRMASK_DISABLE_CONTEXTUAL_ARRAY_TERMINALS",
                     )
                     .is_some()
+                        || !lowerer
+                            .should_contextualize_isolated_array_item(repeat_complexity)
                     {
                         Ok(None)
                     } else {
@@ -120,6 +122,22 @@ impl<'a> Lowerer<'a> {
         let repetitions = max_items.unwrap_or(1).max(1);
         item_complexity.saturating_mul(repetitions)
             <= self.config.pattern_max_length_complexity_limit
+    }
+
+    /// Contextual first/next terminals avoid multiplying a moderately costly
+    /// item by every bounded array position, but they still duplicate the item
+    /// expression once. When one item already exceeds the importer product
+    /// budget, keep one ordinary item terminal and enforce the array count at
+    /// grammar level instead. This is both smaller and more reusable by bounded
+    /// terminal synthesis.
+    fn should_contextualize_isolated_array_item(
+        &self,
+        repeat_complexity: Option<usize>,
+    ) -> bool {
+        repeat_complexity
+            .is_none_or(|item_complexity| {
+                item_complexity <= self.config.pattern_max_length_complexity_limit
+            })
     }
 
     /// Keep a costly constrained item contextual without constructing one
