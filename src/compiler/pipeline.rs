@@ -689,7 +689,14 @@ mod lexer_partition_plan_tests {
             (2, b"aaaa".to_vec()),
             (3, b"b".to_vec()),
         ]);
-        let plan = plan_synthetic_tokenizer_enabled(&grammar, &vocab)
+        let plan = plan_synthetic_tokenizer_enabled(
+            &grammar,
+            &vocab,
+            false,
+            std::time::Instant::now(),
+            false,
+            false,
+        )
             .expect("large bounded terminal should be selected for synthesis");
         let (synthesized, full, certified) =
             build_structural_tokenizer_pair(&grammar, &plan, &vocab, Some(false))
@@ -932,9 +939,47 @@ fn plan_synthetic_tokenizer(
     grammar: &GrammarDef,
     vocab: &Vocab,
 ) -> Option<SyntheticTokenizerPlan> {
-    crate::compiler::synthetic_bounded_terminals_enabled()
-        .then(|| plan_synthetic_tokenizer_enabled(grammar, vocab))
-        .flatten()
+    let profile = std::env::var_os("GLRMASK_PROFILE_SYNTHETIC_PLAN").is_some();
+    let plan_started_at = Instant::now();
+    let synthesis_enabled = crate::compiler::synthetic_bounded_terminals_enabled();
+    let aggressive_partition_horizon =
+        std::env::var_os("GLRMASK_AGGRESSIVE_PARTITION_HORIZON").is_some();
+    let allow_vocab_only_candidates =
+        std::env::var_os("GLRMASK_SYNTHETIC_VOCAB_ONLY_CANDIDATES").is_some();
+    let has_candidate = aggressive_partition_horizon
+        || allow_vocab_only_candidates
+        || grammar_has_potential_bounded_terminal_synthesis(
+            grammar,
+            vocab.max_token_byte_len(),
+        );
+    if !has_candidate {
+        if profile {
+            eprintln!(
+                "[glrmask/profile][synthetic_plan_detail] selected=false reason=no_pathological_shape terminals={} changed_terminals=0 full_expressions_ms=0.000 synthesize_ms=0.000 preflight_ms=0.000 total_ms={:.3}",
+                grammar.terminals.len(),
+                elapsed_ms(plan_started_at),
+            );
+        }
+        return None;
+    }
+    if !synthesis_enabled {
+        if profile {
+            eprintln!(
+                "[glrmask/profile][synthetic_plan_detail] selected=false reason=disabled terminals={} changed_terminals=0 full_expressions_ms=0.000 synthesize_ms=0.000 preflight_ms=0.000 total_ms={:.3}",
+                grammar.terminals.len(),
+                elapsed_ms(plan_started_at),
+            );
+        }
+        return None;
+    }
+    plan_synthetic_tokenizer_enabled(
+        grammar,
+        vocab,
+        profile,
+        plan_started_at,
+        aggressive_partition_horizon,
+        allow_vocab_only_candidates,
+    )
 }
 
 fn grammar_has_potential_bounded_terminal_synthesis(
@@ -957,33 +1002,15 @@ fn grammar_has_potential_bounded_terminal_synthesis(
 fn plan_synthetic_tokenizer_enabled(
     grammar: &GrammarDef,
     vocab: &Vocab,
+    profile: bool,
+    plan_started_at: Instant,
+    aggressive_partition_horizon: bool,
+    allow_vocab_only_candidates: bool,
 ) -> Option<SyntheticTokenizerPlan> {
-    let profile = std::env::var_os("GLRMASK_PROFILE_SYNTHETIC_PLAN").is_some();
-    let plan_started_at = Instant::now();
     // The normal path uses exact vocabulary-relative repeat horizons. The
     // legacy fixed 64-byte candidate remains available only as an explicitly
     // unsafe diagnostic probe whose result must still pass full certification.
     const COMMON_PARTITION_HORIZON: usize = 64;
-    let aggressive_partition_horizon =
-        std::env::var_os("GLRMASK_AGGRESSIVE_PARTITION_HORIZON").is_some();
-    let allow_vocab_only_candidates =
-        std::env::var_os("GLRMASK_SYNTHETIC_VOCAB_ONLY_CANDIDATES").is_some();
-    if !aggressive_partition_horizon
-        && !allow_vocab_only_candidates
-        && !grammar_has_potential_bounded_terminal_synthesis(
-            grammar,
-            vocab.max_token_byte_len(),
-        )
-    {
-        if profile {
-            eprintln!(
-                "[glrmask/profile][synthetic_plan_detail] selected=false reason=no_pathological_shape terminals={} changed_terminals=0 full_expressions_ms=0.000 synthesize_ms=0.000 preflight_ms=0.000 total_ms={:.3}",
-                grammar.terminals.len(),
-                elapsed_ms(plan_started_at),
-            );
-        }
-        return None;
-    }
     let full_expressions_started_at = Instant::now();
     let full_expressions = grammar
         .terminals
