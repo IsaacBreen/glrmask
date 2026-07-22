@@ -6839,26 +6839,63 @@ impl DeferredDenseBinaryIntersectionProduct {
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
         let expansion_started_at = profile_timing.then(Instant::now);
+        let parallel_expansion = std::env::var("GLRMASK_PARALLEL_DEFERRED_BYTE_EXPANSION")
+            .map(|value| {
+                let value = value.trim();
+                !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+            })
+            .unwrap_or(false);
+        let dense_expansion_threshold = std::env::var(
+            "GLRMASK_DEFERRED_DENSE_BYTE_EXPANSION_THRESHOLD",
+        )
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(16);
+        let expand = |class_transitions: Vec<(u8, u32)>| {
+            let byte_capacity: usize = class_transitions
+                .iter()
+                .map(|(class, _)| self.class_members[*class as usize].len())
+                .sum();
+            let entries = if byte_capacity >= dense_expansion_threshold {
+                let mut target_by_byte = [u32::MAX; 256];
+                for (class, target) in class_transitions {
+                    for &byte in &self.class_members[class as usize] {
+                        target_by_byte[byte as usize] = target;
+                    }
+                }
+                target_by_byte
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(byte, target)| {
+                        (target != u32::MAX).then_some((byte as u8, target))
+                    })
+                    .collect()
+            } else {
+                let mut entries = Vec::with_capacity(byte_capacity);
+                for (class, target) in class_transitions {
+                    for &byte in &self.class_members[class as usize] {
+                        entries.push((byte, target));
+                    }
+                }
+                if entries.len() > 1 {
+                    entries.sort_unstable_by_key(|entry| entry.0);
+                }
+                entries
+            };
+            crate::ds::char_transitions::CharTransitions::from_sorted_entries(entries)
+        };
         let expanded_transitions: Vec<crate::ds::char_transitions::CharTransitions<u32>> =
-            self.pending_class_transitions
-                .into_iter()
-                .map(|class_transitions| {
-                    let capacity = class_transitions
-                        .iter()
-                        .map(|(class, _)| self.class_members[*class as usize].len())
-                        .sum();
-                    let mut entries = Vec::with_capacity(capacity);
-                    for (class, target) in class_transitions {
-                        for &byte in &self.class_members[class as usize] {
-                            entries.push((byte, target));
-                        }
-                    }
-                    if entries.len() > 1 {
-                        entries.sort_unstable_by_key(|entry| entry.0);
-                    }
-                    crate::ds::char_transitions::CharTransitions::from_sorted_entries(entries)
-                })
-                .collect();
+            if parallel_expansion {
+                self.pending_class_transitions
+                    .into_par_iter()
+                    .map(expand)
+                    .collect()
+            } else {
+                self.pending_class_transitions
+                    .into_iter()
+                    .map(expand)
+                    .collect()
+            };
         for (state, transitions) in self.dfa.states_mut().iter_mut().zip(expanded_transitions) {
             state.transitions = transitions;
         }
