@@ -12,7 +12,6 @@ use range_set_blaze::RangeSetBlaze;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
-use crate::ds::u8set::U8Set;
 use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 
 /// Exact first-byte target profiles computed for L1 state equivalence.
@@ -2342,11 +2341,11 @@ fn find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
     let target_profiles_started_at = profile_enabled.then(Instant::now);
     let self_loop_bytes_by_state = (0..num_tokenizer_states)
         .map(|state| {
-            let mut bytes = U8Set::empty();
+            let mut bytes = [0u64; 4];
             let row = &flat_trans[state * 256..state * 256 + 256];
             for (byte, &target) in row.iter().enumerate() {
                 if target == state as u32 {
-                    bytes.insert(byte as u8);
+                    bytes[byte / 64] |= 1u64 << (byte % 64);
                 }
             }
             bytes
@@ -3157,7 +3156,7 @@ struct L1PackedSuffixTrie {
     nodes: Vec<L1PackedSuffixTrieNode>,
     edges: Vec<L1PackedSuffixTrieEdge>,
     remaining_horizon_by_node: Vec<usize>,
-    subtree_bytes_by_node: Vec<U8Set>,
+    subtree_bytes_by_node: Vec<[u64; 4]>,
 }
 
 impl L1PackedSuffixTrie {
@@ -3254,7 +3253,7 @@ impl L1PackedSuffixTrie {
             nodes[node_index].edge_len = edges.len() as u32 - first_edge;
         }
         let mut remaining_horizon_by_node = vec![0usize; nodes.len()];
-        let mut subtree_bytes_by_node = vec![U8Set::empty(); nodes.len()];
+        let mut subtree_bytes_by_node = vec![[0u64; 4]; nodes.len()];
         for node_index in (0..nodes.len()).rev() {
             let node = nodes[node_index];
             let mut remaining_horizon = 0usize;
@@ -3263,9 +3262,11 @@ impl L1PackedSuffixTrie {
                 let child = edge.child as usize;
                 remaining_horizon =
                     remaining_horizon.max(1 + remaining_horizon_by_node[child]);
-                subtree_bytes_by_node[node_index].insert(edge.byte);
-                let child_subtree_bytes = subtree_bytes_by_node[child];
-                subtree_bytes_by_node[node_index] |= child_subtree_bytes;
+                subtree_bytes_by_node[node_index][edge.byte as usize / 64] |=
+                    1u64 << (edge.byte as usize % 64);
+                for word in 0..4 {
+                    subtree_bytes_by_node[node_index][word] |= subtree_bytes_by_node[child][word];
+                }
             }
             remaining_horizon_by_node[node_index] = remaining_horizon;
         }
@@ -3517,7 +3518,7 @@ fn l1_bucket_suffix_signature_profiles_packed(
     suffix_first_bytes: &[u64; 4],
     has_empty_suffix: bool,
     state_to_terminal_signature: &[u32],
-    self_loop_bytes_by_state: &[U8Set],
+    self_loop_bytes_by_state: &[[u64; 4]],
     flat_trans: &[u32],
     transitions_by_byte: Option<&[u32]>,
     num_lexer_states: usize,
@@ -3668,7 +3669,7 @@ fn l1_bucket_suffix_signature_profiles_packed(
                 }
                 let self_loops = &self_loop_bytes_by_state[next as usize];
                 let subtree = &subtree_bytes_by_node[child];
-                if subtree.is_subset(self_loops) {
+                if (0..4).all(|word| subtree[word] & !self_loops[word] == 0) {
                     let signature = state_to_terminal_signature[next as usize];
                     Some(if signature == 0 {
                         L1_NONE
@@ -6385,11 +6386,11 @@ mod packed_suffix_product_tests {
         let flat_trans = build_flat_transition_table(&tokenizer);
         let self_loop_bytes_by_state = (0..tokenizer.num_states() as usize)
             .map(|state| {
-                let mut bytes = U8Set::empty();
+                let mut bytes = [0u64; 4];
                 let row = &flat_trans[state * 256..state * 256 + 256];
                 for (byte, &target) in row.iter().enumerate() {
                     if target == state as u32 {
-                        bytes.insert(byte as u8);
+                        bytes[byte / 64] |= 1u64 << (byte % 64);
                     }
                 }
                 bytes
