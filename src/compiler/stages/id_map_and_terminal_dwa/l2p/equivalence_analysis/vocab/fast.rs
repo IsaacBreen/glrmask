@@ -740,6 +740,10 @@ fn first_transition_factor_max_work_ratio() -> f64 {
         .unwrap_or(0.25)
 }
 
+fn first_transition_factor_force_parallel_buckets() -> bool {
+    env_flag_enabled("GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_PARALLEL_BUCKETS")
+}
+
 fn default_vocab_batch_size(
     num_states: usize,
     num_groups: usize,
@@ -3202,9 +3206,10 @@ fn try_first_transition_factor_plan<S: AsRef<[u8]> + Sync>(
     // partition DAG when several partitions enter this path concurrently. Keep
     // the buckets sequential inside an existing Rayon worker; only use bucket
     // parallelism when the engine is invoked outside a Rayon job.
-    let parallel_buckets = rayon::current_thread_index().is_none()
+    let parallel_buckets = buckets.len() > 1
         && rayon::current_num_threads() > 1
-        && buckets.len() > 1;
+        && (rayon::current_thread_index().is_none()
+            || first_transition_factor_force_parallel_buckets());
     let bucket_results = if parallel_buckets {
         buckets.par_iter().map(process_bucket).collect::<Vec<_>>()
     } else {
