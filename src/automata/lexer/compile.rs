@@ -9,7 +9,9 @@ use smallvec::SmallVec;
 
 use crate::ds::{bitset::BitSet, u8set::U8Set};
 use crate::Vocab;
-use crate::compiler::stages::id_map_and_terminal_dwa::synthetic_state_map::certify_vocabulary_exact_state_map;
+use crate::compiler::stages::id_map_and_terminal_dwa::synthetic_state_map::{
+    CertifiedVocabularyExactStateCandidates, certify_vocabulary_exact_state_candidates,
+};
 
 use super::ast::Expr;
 use super::tokenizer::{CompressedTransitionSegment, Tokenizer};
@@ -5906,6 +5908,7 @@ enum ProductComponentStateMap {
     Fixed(Vec<u32>),
     Layered(DirectBoundedSuffixStateMap),
     Dominance(ZeroMinRepeatSuffixStateMap),
+    Vocabulary(CertifiedVocabularyExactStateCandidates),
 }
 
 impl ProductComponentStateMap {
@@ -5914,6 +5917,7 @@ impl ProductComponentStateMap {
             Self::Fixed(mapping) => mapping,
             Self::Layered(mapping) => mapping.primary(),
             Self::Dominance(mapping) => mapping.primary(),
+            Self::Vocabulary(mapping) => mapping.primary(),
         }
     }
 
@@ -5925,11 +5929,15 @@ impl ProductComponentStateMap {
             }
             Self::Layered(mapping) => mapping.visit_candidates(full_state, visit),
             Self::Dominance(mapping) => mapping.visit_candidates(full_state, visit),
+            Self::Vocabulary(mapping) => mapping.visit_candidates(full_state, visit),
         }
     }
 
     fn is_flexible(&self) -> bool {
-        matches!(self, Self::Layered(_) | Self::Dominance(_))
+        matches!(
+            self,
+            Self::Layered(_) | Self::Dominance(_) | Self::Vocabulary(_)
+        )
     }
 }
 
@@ -6717,13 +6725,12 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
                     let full_tokenizer = Regex { dfa: full.clone() }.into_tokenizer(1, None);
                     let synthesized_tokenizer =
                         Regex { dfa: synthesized.clone() }.into_tokenizer(1, None);
-                    certify_vocabulary_exact_state_map(
+                    certify_vocabulary_exact_state_candidates(
                         &full_tokenizer,
                         &synthesized_tokenizer,
                         vocab,
                         Some(&[true]),
                     )
-                    .map(|certified| certified.full_to_synthesized)
                 })
                 .flatten()
             };
@@ -6745,7 +6752,7 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
             } else if let Some(mapping) = override_dominance_mapping {
                 Some(ProductComponentStateMap::Dominance(mapping))
             } else if let Some(mapping) = vocabulary_mapping {
-                Some(ProductComponentStateMap::Fixed(mapping))
+                Some(ProductComponentStateMap::Vocabulary(mapping))
             } else {
                 exact_kbounded_single_group_state_map(
                     &full,
@@ -7057,7 +7064,9 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
     let augmented_state_count = synthesized_dfa
         .num_states()
         .saturating_sub(states_before_augment);
-    if std::env::var_os("GLRMASK_MINIMIZE_SYNTHETIC_PRODUCT").is_some() {
+    if std::env::var_os("GLRMASK_MINIMIZE_SYNTHETIC_PRODUCT").is_some()
+        && augmented_state_count == 0
+    {
         let minimize_started_at = Instant::now();
         let states_before = synthesized_dfa.num_states();
         let (minimized, old_to_new) = synthesized_dfa.minimize_with_state_mapping();
@@ -7077,6 +7086,13 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
                 minimize_started_at.elapsed().as_secs_f64() * 1000.0,
             );
         }
+    } else if profile
+        && std::env::var_os("GLRMASK_MINIMIZE_SYNTHETIC_PRODUCT").is_some()
+    {
+        eprintln!(
+            "[glrmask/profile][tokenizer] structural_pair_minimize_skipped reason=augmented_residual_roots augmented_states={}",
+            augmented_state_count,
+        );
     }
 
     if let Some(total_started_at) = total_started_at {
