@@ -1584,7 +1584,7 @@ impl CertifiedFullToSynthesizedStateMap {
     }
 }
 
-fn certify_vocabulary_exact_state_map(
+pub(crate) fn certify_vocabulary_exact_state_map(
     full: &Tokenizer,
     synthesized: &Tokenizer,
     vocab: &Vocab,

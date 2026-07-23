@@ -9,6 +9,7 @@ use smallvec::SmallVec;
 
 use crate::ds::{bitset::BitSet, u8set::U8Set};
 use crate::Vocab;
+use crate::compiler::stages::id_map_and_terminal_dwa::synthetic_state_map::certify_vocabulary_exact_state_map;
 
 use super::ast::Expr;
 use super::tokenizer::{CompressedTransitionSegment, Tokenizer};
@@ -6694,10 +6695,43 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
                     )
                 })
             };
+            let vocabulary_mapping = if used_identical_mapping
+                || used_homomorphism_mapping
+                || layered_mapping.is_some()
+                || dominance_mapping.is_some()
+                || override_layered_mapping.is_some()
+                || override_dominance_mapping.is_some()
+            {
+                None
+            } else {
+                const MAX_LOCAL_FULL_STATES: usize = 4_096;
+                const MAX_LOCAL_SYNTHESIZED_STATES: usize = 2_048;
+                const MAX_LOCAL_PAIR_CELLS: usize = 2_000_000;
+                (full.num_states() <= MAX_LOCAL_FULL_STATES
+                    && synthesized.num_states() <= MAX_LOCAL_SYNTHESIZED_STATES
+                    && full
+                        .num_states()
+                        .checked_mul(synthesized.num_states())
+                        .is_some_and(|cells| cells <= MAX_LOCAL_PAIR_CELLS))
+                .then(|| {
+                    let full_tokenizer = Regex { dfa: full.clone() }.into_tokenizer(1, None);
+                    let synthesized_tokenizer =
+                        Regex { dfa: synthesized.clone() }.into_tokenizer(1, None);
+                    certify_vocabulary_exact_state_map(
+                        &full_tokenizer,
+                        &synthesized_tokenizer,
+                        vocab,
+                        Some(&[true]),
+                    )
+                    .map(|certified| certified.full_to_synthesized)
+                })
+                .flatten()
+            };
             let used_layered_mapping = layered_mapping.is_some();
             let used_dominance_mapping = dominance_mapping.is_some();
             let used_override_layered_mapping = override_layered_mapping.is_some();
             let used_override_dominance_mapping = override_dominance_mapping.is_some();
+            let used_vocabulary_mapping = vocabulary_mapping.is_some();
             let mapping = if let Some(mapping) = identical_mapping {
                 Some(ProductComponentStateMap::Fixed(mapping))
             } else if let Some(mapping) = homomorphism_mapping {
@@ -6710,6 +6744,8 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
                 Some(ProductComponentStateMap::Layered(mapping))
             } else if let Some(mapping) = override_dominance_mapping {
                 Some(ProductComponentStateMap::Dominance(mapping))
+            } else if let Some(mapping) = vocabulary_mapping {
+                Some(ProductComponentStateMap::Fixed(mapping))
             } else {
                 exact_kbounded_single_group_state_map(
                     &full,
@@ -6745,6 +6781,8 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
                         "UNSAFE_layered_bounded_suffix_override"
                     } else if used_override_dominance_mapping {
                         "UNSAFE_zero_min_repeat_suffix_dominance_override"
+                    } else if used_vocabulary_mapping {
+                        "bounded_component_vocabulary_exact"
                     } else {
                         "moore"
                     },
@@ -6783,6 +6821,16 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
                 synthesized_dfa.num_states(),
                 full_trace.components.len(),
             );
+            if std::env::var_os("GLRMASK_PROFILE_FAILED_COMPONENT_EXPR").is_some() {
+                for &component in &failed_components {
+                    eprintln!(
+                        "[glrmask/profile][tokenizer] structural_component_identity_fallback_expr component={} full={:#?} synthesized={:#?}",
+                        component,
+                        full_component_expressions[component],
+                        synthesized_component_expressions[component],
+                    );
+                }
+            }
         }
         return prepare_terminal_expression_pair_with_structural_map_inner(
             full_expression,
@@ -6815,16 +6863,10 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
 
     let tuple_map_started_at = profile.then(Instant::now);
     const DENSE_PRODUCT_LOOKUP_MAX_CELLS: usize = 16 * 1024 * 1024;
-    let component_extents = component_maps
+    let component_extents = synthesized_trace
+        .components
         .iter()
-        .map(|mapping| {
-            mapping
-                .primary()
-                .iter()
-                .copied()
-                .max()
-                .map_or(1usize, |state| state as usize + 2)
-        })
+        .map(|component| component.partition_dfa().num_states().saturating_add(1))
         .collect::<Vec<_>>();
     let dense_two_component_cells = (component_maps.len() == 2)
         .then(|| component_extents[0].checked_mul(component_extents[1]))
@@ -7015,9 +7057,7 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
     let augmented_state_count = synthesized_dfa
         .num_states()
         .saturating_sub(states_before_augment);
-    if std::env::var_os("GLRMASK_MINIMIZE_SYNTHETIC_PRODUCT").is_some()
-        && augmented_state_count == 0
-    {
+    if std::env::var_os("GLRMASK_MINIMIZE_SYNTHETIC_PRODUCT").is_some() {
         let minimize_started_at = Instant::now();
         let states_before = synthesized_dfa.num_states();
         let (minimized, old_to_new) = synthesized_dfa.minimize_with_state_mapping();
@@ -7037,13 +7077,6 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
                 minimize_started_at.elapsed().as_secs_f64() * 1000.0,
             );
         }
-    } else if profile
-        && std::env::var_os("GLRMASK_MINIMIZE_SYNTHETIC_PRODUCT").is_some()
-    {
-        eprintln!(
-            "[glrmask/profile][tokenizer] structural_pair_minimize_skipped reason=augmented_residual_roots augmented_states={}",
-            augmented_state_count,
-        );
     }
 
     if let Some(total_started_at) = total_started_at {
