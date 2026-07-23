@@ -2180,6 +2180,65 @@ fn find_l1_exact_state_equivalence_by_flat_signatures(
     )
 }
 
+enum L1ExactStateKeyStorage {
+    Dense {
+        row_width: usize,
+        sig_cols: usize,
+        keys: Vec<u32>,
+    },
+    Sparse {
+        num_slots: usize,
+        signatures: Option<Vec<u32>>,
+        offsets: Vec<usize>,
+        entries: Vec<(u16, u32)>,
+    },
+}
+
+impl L1ExactStateKeyStorage {
+    fn rows_equal(&self, left: usize, right: usize) -> bool {
+        match self {
+            Self::Dense { row_width, keys, .. } => {
+                keys[left * row_width..(left + 1) * row_width]
+                    == keys[right * row_width..(right + 1) * row_width]
+            }
+            Self::Sparse {
+                signatures,
+                offsets,
+                entries,
+                ..
+            } => {
+                signatures
+                    .as_ref()
+                    .is_none_or(|signatures| signatures[left] == signatures[right])
+                    && entries[offsets[left]..offsets[left + 1]]
+                        == entries[offsets[right]..offsets[right + 1]]
+            }
+        }
+    }
+
+    fn representative_profile_ids(&self, state: usize) -> Arc<[u32]> {
+        match self {
+            Self::Dense {
+                row_width,
+                sig_cols,
+                keys,
+            } => Arc::from(&keys[state * row_width + sig_cols..(state + 1) * row_width]),
+            Self::Sparse {
+                num_slots,
+                offsets,
+                entries,
+                ..
+            } => {
+                let mut profile_ids = vec![0u32; *num_slots];
+                for &(slot, profile_id) in &entries[offsets[state]..offsets[state + 1]] {
+                    profile_ids[slot as usize] = profile_id;
+                }
+                Arc::from(profile_ids)
+            }
+        }
+    }
+}
+
 fn find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
     vocab_order: &L1IdentityVocabOrder,
     states: &[usize],
@@ -2624,16 +2683,12 @@ fn find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
         started.elapsed().as_secs_f64() * 1000.0
     });
 
-    // Materialize each state's exact equivalence key as a contiguous row, then
-    // group by a 64-bit fingerprint backed by full row equality. The key is the
-    // per-first-byte profile-id vector, optionally prefixed by the terminal
-    // signature when empty tokens exist. Columns are filled one first byte at a
-    // time through a single reused, state-sized profile column (interned from
-    // the small per-byte target list), so there is no num_slots*num_states dense
-    // profile table to allocate, zero, and stride through under partition-level
-    // memory contention. The byte-major transition column read and the column
-    // write are both contiguous, and exact equality / representative profile
-    // vectors read the same dense key matrix instead of re-walking transitions.
+    // Build an exact key from the per-first-byte profile IDs. Large protected
+    // residual products are sparse in their first-byte support: storing and
+    // hashing an all-zero entry for every absent byte turns the key pass into a
+    // large memory-bandwidth operation. The sparse path stores only non-zero
+    // (slot, profile) pairs in canonical slot order and verifies hash matches by
+    // exact slice equality. Small/narrow inputs retain the dense path.
     let state_keys_started_at = profile_enabled.then(Instant::now);
     let mut byte_slots = [u16::MAX; 256];
     for (slot, &byte) in nonempty_first_bytes.iter().enumerate() {
@@ -2650,76 +2705,173 @@ fn find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
     let sig_cols = usize::from(has_empty_tokens);
     let row_width = num_slots + sig_cols;
     let num_states_in = states.len();
-    let mut keys = vec![0u32; num_states_in.saturating_mul(row_width).max(1)];
-    if has_empty_tokens {
-        for (i, &state) in states.iter().enumerate() {
-            keys[i * row_width] = state_to_terminal_signature[state];
-        }
-    }
-    let mut profile_col = vec![0u32; num_tokenizer_states];
-    // Tile over states so a block of rows stays cache-resident while all of its
-    // first-byte columns are filled (the key matrix is written once per tile
-    // rather than re-swept once per first byte). The reused per-byte profile
-    // column is re-interned per tile from the small per-byte target list, which
-    // is far cheaper than either a num_slots*num_states dense table or a full
-    // matrix re-sweep.
-    const FILL_TILE: usize = 512;
-    let mut tile_start = 0;
-    while tile_start < num_states_in {
-        let tile_end = (tile_start + FILL_TILE).min(num_states_in);
-        for (slot, &byte) in nonempty_first_bytes.iter().enumerate() {
-            let col = sig_cols + slot;
-            let canonical_state = horizon_maps
-                .as_ref()
-                .map(|maps| maps[suffix_horizon_by_first_byte[byte]].as_ref());
-            for &(target, profile_id) in &slot_targets[slot] {
-                profile_col[target as usize] = profile_id;
-            }
-            for i in tile_start..tile_end {
-                let target = if let Some(first_targets) = first_targets.as_ref() {
-                    first_targets[slot * num_states_in + i]
-                } else {
-                    l1_transition(
-                        flat_trans,
-                        transitions_by_byte,
-                        num_tokenizer_states,
-                        Some(&active_language),
-                        states[i] as u32,
-                        byte,
-                        canonical_state,
-                    )
-                };
-                keys[i * row_width + col] = if target == dead {
-                    0
-                } else {
-                    profile_col[target as usize]
-                };
-            }
-            for &(target, _) in &slot_targets[slot] {
-                profile_col[target as usize] = 0;
-            }
-        }
-        tile_start = tile_end;
-    }
-    let row_hash = |row: &[u32]| -> u64 {
+    let hash_step = |mut hash: u64, slot: u64, value: u32| -> u64 {
+        hash ^= (value as u64)
+            .wrapping_add(0x9e37_79b9_7f4a_7c15)
+            .wrapping_add(slot.wrapping_mul(0x517c_c1b7_2722_0a95));
+        hash.rotate_left(17).wrapping_mul(0xbf58_476d_1ce4_e5b9)
+    };
+    let dense_row_hash = |row: &[u32]| -> u64 {
+        row.iter()
+            .copied()
+            .enumerate()
+            .fold(0x9e37_79b9_7f4a_7c15u64, |hash, (slot, value)| {
+                hash_step(hash, slot as u64, value)
+            })
+    };
+    let sparse_row_hash = |row: &[(u16, u32)], signature: Option<u32>| -> u64 {
         let mut hash = 0x9e37_79b9_7f4a_7c15u64;
-        for (slot, &value) in row.iter().enumerate() {
-            hash ^= (value as u64)
-                .wrapping_add(0x9e37_79b9_7f4a_7c15)
-                .wrapping_add((slot as u64).wrapping_mul(0x517c_c1b7_2722_0a95));
-            hash = hash.rotate_left(17).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        if let Some(signature) = signature {
+            hash = hash_step(hash, u64::MAX, signature);
+        }
+        for &(slot, value) in row {
+            hash = hash_step(hash, slot as u64, value);
         }
         hash
     };
-    let state_key_hashes: Vec<u64> = if rayon::current_num_threads() == 1 || num_states_in < 4096 {
-        (0..num_states_in)
-            .map(|i| row_hash(&keys[i * row_width..i * row_width + row_width]))
-            .collect()
+    let sparse_keys = num_slots >= 32 && num_states_in >= 16_384;
+    let mut profile_col = vec![0u32; num_tokenizer_states];
+    const FILL_TILE: usize = 512;
+    let (state_keys, state_key_hashes, sparse_entry_count) = if sparse_keys {
+        let signatures = has_empty_tokens.then(|| {
+            states
+                .iter()
+                .map(|&state| state_to_terminal_signature[state])
+                .collect::<Vec<_>>()
+        });
+        let mut offsets = Vec::with_capacity(num_states_in + 1);
+        let mut entries = Vec::<(u16, u32)>::new();
+        let mut hashes = Vec::with_capacity(num_states_in);
+        offsets.push(0);
+        let mut tile_start = 0;
+        while tile_start < num_states_in {
+            let tile_end = (tile_start + FILL_TILE).min(num_states_in);
+            let mut tile_rows = (tile_start..tile_end)
+                .map(|_| Vec::<(u16, u32)>::new())
+                .collect::<Vec<_>>();
+            for (slot, &byte) in nonempty_first_bytes.iter().enumerate() {
+                let canonical_state = horizon_maps
+                    .as_ref()
+                    .map(|maps| maps[suffix_horizon_by_first_byte[byte]].as_ref());
+                for &(target, profile_id) in &slot_targets[slot] {
+                    profile_col[target as usize] = profile_id;
+                }
+                for i in tile_start..tile_end {
+                    let target = if let Some(first_targets) = first_targets.as_ref() {
+                        first_targets[slot * num_states_in + i]
+                    } else {
+                        l1_transition(
+                            flat_trans,
+                            transitions_by_byte,
+                            num_tokenizer_states,
+                            Some(&active_language),
+                            states[i] as u32,
+                            byte,
+                            canonical_state,
+                        )
+                    };
+                    let profile_id = if target == dead {
+                        0
+                    } else {
+                        profile_col[target as usize]
+                    };
+                    if profile_id != 0 {
+                        tile_rows[i - tile_start].push((slot as u16, profile_id));
+                    }
+                }
+                for &(target, _) in &slot_targets[slot] {
+                    profile_col[target as usize] = 0;
+                }
+            }
+            for (local, row) in tile_rows.into_iter().enumerate() {
+                let state = tile_start + local;
+                hashes.push(sparse_row_hash(
+                    &row,
+                    signatures.as_ref().map(|signatures| signatures[state]),
+                ));
+                entries.extend(row);
+                offsets.push(entries.len());
+            }
+            tile_start = tile_end;
+        }
+        let entry_count = entries.len();
+        (
+            L1ExactStateKeyStorage::Sparse {
+                num_slots,
+                signatures,
+                offsets,
+                entries,
+            },
+            hashes,
+            entry_count,
+        )
     } else {
-        (0..num_states_in)
-            .into_par_iter()
-            .map(|i| row_hash(&keys[i * row_width..i * row_width + row_width]))
-            .collect()
+        let mut keys = vec![0u32; num_states_in.saturating_mul(row_width).max(1)];
+        if has_empty_tokens {
+            for (i, &state) in states.iter().enumerate() {
+                keys[i * row_width] = state_to_terminal_signature[state];
+            }
+        }
+        let mut tile_start = 0;
+        while tile_start < num_states_in {
+            let tile_end = (tile_start + FILL_TILE).min(num_states_in);
+            for (slot, &byte) in nonempty_first_bytes.iter().enumerate() {
+                let col = sig_cols + slot;
+                let canonical_state = horizon_maps
+                    .as_ref()
+                    .map(|maps| maps[suffix_horizon_by_first_byte[byte]].as_ref());
+                for &(target, profile_id) in &slot_targets[slot] {
+                    profile_col[target as usize] = profile_id;
+                }
+                for i in tile_start..tile_end {
+                    let target = if let Some(first_targets) = first_targets.as_ref() {
+                        first_targets[slot * num_states_in + i]
+                    } else {
+                        l1_transition(
+                            flat_trans,
+                            transitions_by_byte,
+                            num_tokenizer_states,
+                            Some(&active_language),
+                            states[i] as u32,
+                            byte,
+                            canonical_state,
+                        )
+                    };
+                    keys[i * row_width + col] = if target == dead {
+                        0
+                    } else {
+                        profile_col[target as usize]
+                    };
+                }
+                for &(target, _) in &slot_targets[slot] {
+                    profile_col[target as usize] = 0;
+                }
+            }
+            tile_start = tile_end;
+        }
+        let hashes = if rayon::current_num_threads() == 1 || num_states_in < 4096 {
+            (0..num_states_in)
+                .map(|i| {
+                    let row = &keys[i * row_width..(i + 1) * row_width];
+dense_row_hash(row)                })
+                .collect()
+        } else {
+            (0..num_states_in)
+                .into_par_iter()
+                .map(|i| {
+                    let row = &keys[i * row_width..(i + 1) * row_width];
+dense_row_hash(row)                })
+                .collect()
+        };
+        (
+            L1ExactStateKeyStorage::Dense {
+                row_width,
+                sig_cols,
+                keys,
+            },
+            hashes,
+            num_states_in.saturating_mul(row_width),
+        )
     };
     let state_keys_ms = state_keys_started_at.map_or(0.0, |started| {
         started.elapsed().as_secs_f64() * 1000.0
@@ -2734,13 +2886,12 @@ fn find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
     let mut representative_profile_ids = FxHashMap::<u32, Arc<[u32]>>::default();
     let mut groups_len = 0usize;
     for i in 0..num_states_in {
-        let row = &keys[i * row_width..i * row_width + row_width];
         let bucket = representatives_by_hash
             .entry(state_key_hashes[i])
             .or_default();
         let mut representative_pos = None;
         for &rep_pos in bucket.iter() {
-            if &keys[rep_pos * row_width..rep_pos * row_width + row_width] == row {
+            if state_keys.rows_equal(rep_pos, i) {
                 representative_pos = Some(rep_pos);
                 break;
             }
@@ -2753,7 +2904,7 @@ fn find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
                 let representative = states[i];
                 representative_profile_ids
                     .entry(representative as u32)
-                    .or_insert_with(|| Arc::from(&row[sig_cols..]));
+                    .or_insert_with(|| state_keys.representative_profile_ids(i));
                 representative
             }
         };
@@ -2765,7 +2916,7 @@ fn find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
 
     if let Some(total_started_at) = total_started_at {
         eprintln!(
-            "[glrmask/profile][l1_exact_equiv_detail] states={} first_bytes={} raw_unique_targets={} unique_targets={} horizon_selected={} profile_ids={} groups={} terminal_signature_ms={:.3} raw_target_probe_ms={:.3} horizon_quotient_ms={:.3} unique_targets_ms={:.3} target_profiles_ms={:.3} profile_id_intern_ms={:.3} profile_freeze_ms={:.3} profile_intern_ms={:.3} state_keys_ms={:.3} group_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][l1_exact_equiv_detail] states={} first_bytes={} raw_unique_targets={} unique_targets={} horizon_selected={} profile_ids={} groups={} terminal_signature_ms={:.3} raw_target_probe_ms={:.3} horizon_quotient_ms={:.3} unique_targets_ms={:.3} target_profiles_ms={:.3} profile_id_intern_ms={:.3} profile_freeze_ms={:.3} profile_intern_ms={:.3} state_keys_ms={:.3} sparse_keys={} key_entries={} group_ms={:.3} total_ms={:.3}",
             states.len(),
             nonempty_first_bytes.len(),
             raw_unique_targets_len,
@@ -2782,6 +2933,8 @@ fn find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
             profile_freeze_ms,
             profile_intern_ms,
             state_keys_ms,
+            sparse_keys,
+            sparse_entry_count,
             group_ms,
             total_started_at.elapsed().as_secs_f64() * 1000.0,
         );
