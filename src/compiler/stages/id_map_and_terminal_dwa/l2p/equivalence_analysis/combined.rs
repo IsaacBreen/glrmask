@@ -42,6 +42,65 @@ fn common_atom_preclass_strict_reference_enabled(partition_label: &str) -> bool 
         .is_some_and(|value| value == "1" || value == partition_label)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EquivalencePassOrder {
+    VocabFirst,
+    StateFirst,
+}
+
+impl EquivalencePassOrder {
+    fn vocab_first(self) -> bool {
+        matches!(self, Self::VocabFirst)
+    }
+}
+
+fn resolve_equivalence_pass_order_from_values(
+    partition_label: &str,
+    automatic_vocab_first: bool,
+    requested: Option<&str>,
+    filter: Option<&str>,
+) -> EquivalencePassOrder {
+    let automatic = if automatic_vocab_first {
+        EquivalencePassOrder::VocabFirst
+    } else {
+        EquivalencePassOrder::StateFirst
+    };
+    let Some(requested) = requested.map(str::trim).filter(|value| !value.is_empty()) else {
+        return automatic;
+    };
+    if filter.is_some_and(|filter| {
+        !filter
+            .split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .any(|item| partition_label.contains(item))
+    }) {
+        return automatic;
+    }
+    match requested.to_ascii_lowercase().replace('_', "-").as_str() {
+        "auto" | "automatic" => automatic,
+        "vocab-first" | "vocabulary-first" | "vocab" => EquivalencePassOrder::VocabFirst,
+        "state-first" | "states-first" | "state" => EquivalencePassOrder::StateFirst,
+        other => panic!(
+            "invalid GLRMASK_L2P_EQUIVALENCE_ORDER={other:?}; expected auto, vocab-first, or state-first"
+        ),
+    }
+}
+
+fn resolve_equivalence_pass_order(
+    partition_label: &str,
+    automatic_vocab_first: bool,
+) -> EquivalencePassOrder {
+    let requested = std::env::var("GLRMASK_L2P_EQUIVALENCE_ORDER").ok();
+    let filter = std::env::var("GLRMASK_L2P_EQUIVALENCE_ORDER_FILTER").ok();
+    resolve_equivalence_pass_order_from_values(
+        partition_label,
+        automatic_vocab_first,
+        requested.as_deref(),
+        filter.as_deref(),
+    )
+}
+
 fn common_atom_preclass_enabled() -> bool {
     std::env::var("GLRMASK_ENABLE_L2P_COMMON_ATOM_PRECLASS")
         .map(|value| {
@@ -1418,9 +1477,11 @@ fn try_analyze_equivalences_with_raw_quotient(
         (representatives, exact_rep_confirmation_used)
     };
 
-    let vocab_first = !matches!(partition_label, "p7" | "p8")
+    let automatic_vocab_first = !matches!(partition_label, "p7" | "p8")
         && dedup.representative_token_bytes.len() >= 512
         && pre_reduced_states.len() >= 256;
+    let vocab_first =
+        resolve_equivalence_pass_order(partition_label, automatic_vocab_first).vocab_first();
     if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
         eprintln!(
             "[glrmask/profile][raw_quotient_equivalence_order] partition={} dedup_tokens={} pre_states={} vocab_first={}",
@@ -2004,8 +2065,10 @@ fn analyze_equivalences_impl(
         let mut query_view_states = preclass_view_states.clone();
         query_view_states.sort_unstable();
         query_view_states.dedup();
-        let vocab_first = dedup.representative_token_bytes.len() >= 512
+        let automatic_vocab_first = dedup.representative_token_bytes.len() >= 512
             && query_view_states.len() >= 256;
+        let vocab_first =
+            resolve_equivalence_pass_order(partition_label, automatic_vocab_first).vocab_first();
         if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
             eprintln!(
                 "[glrmask/profile][epsilon_equivalence_order] partition={} dedup_tokens={} pre_states={} vocab_first={}",
@@ -2381,8 +2444,10 @@ fn analyze_equivalences_impl(
     // historical state-then-vocab order (see the commutativity regression
     // below), but the expensive state trellis sees hundreds of tokens instead
     // of tens of thousands.
-    let vocab_first = dedup.representative_token_bytes.len() >= 8_192
+    let automatic_vocab_first = dedup.representative_token_bytes.len() >= 8_192
         && pre_reduced_states.len() >= 256;
+    let vocab_first =
+        resolve_equivalence_pass_order(partition_label, automatic_vocab_first).vocab_first();
     if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
         eprintln!(
             "[glrmask/profile][combined_equivalence_order] partition={} dedup_tokens={} pre_states={} vocab_first={}",
@@ -2585,6 +2650,52 @@ mod prepass_selection_tests {
     };
     use crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::shared::representative_tokens_for_vocab_classes;
     use std::sync::Arc;
+
+    #[test]
+    fn equivalence_pass_order_override_is_filtered_and_preserves_automatic_default() {
+        use EquivalencePassOrder::{StateFirst, VocabFirst};
+
+        assert_eq!(
+            resolve_equivalence_pass_order_from_values("p1", true, None, None),
+            VocabFirst,
+        );
+        assert_eq!(
+            resolve_equivalence_pass_order_from_values(
+                "p1",
+                true,
+                Some("state-first"),
+                Some("p1"),
+            ),
+            StateFirst,
+        );
+        assert_eq!(
+            resolve_equivalence_pass_order_from_values(
+                "p2",
+                true,
+                Some("state-first"),
+                Some("p1"),
+            ),
+            VocabFirst,
+        );
+        assert_eq!(
+            resolve_equivalence_pass_order_from_values(
+                "p7",
+                false,
+                Some("auto"),
+                Some("p7"),
+            ),
+            StateFirst,
+        );
+        assert_eq!(
+            resolve_equivalence_pass_order_from_values(
+                "p7",
+                false,
+                Some("vocabulary_first"),
+                None,
+            ),
+            VocabFirst,
+        );
+    }
 
     #[test]
     fn adaptive_nfa_view_skips_powerset_probe_below_bounded_work_threshold() {
