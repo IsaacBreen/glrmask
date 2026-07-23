@@ -162,13 +162,29 @@ pub(crate) fn build_branch_active_state_map(
             return None;
         }
     } else if !force {
-        // Stable active-language refinement has a real fixed cost. The corpus
-        // gate is the large L1 branch where exact whole-token profiles dominate:
-        // 50k+ tokens and at least 300M raw state-token pairs. Branch-tokenizer
-        // materialization can explicitly force this exact refinement for a
-        // separately gated branch.
+        // Stable active-language refinement has a real fixed cost. Select it
+        // only when exact whole-token state profiling is predictably dominant.
+        //
+        // Two structural regimes amortize the quotient on protected-residual
+        // workloads:
+        //   * a very large vocabulary/state product (the existing broad gate);
+        //   * a dense L1 terminal family with at least 50M raw state-token
+        //     pairs, provided either the state frontier is large or the
+        //     vocabulary is compact enough that quotient construction does not
+        //     contend with another medium/large token lane.
+        //
+        // The second clause deliberately excludes the medium-state,
+        // medium-vocabulary regime: paired measurements show that adding a
+        // quotient there shifts the critical path and worsens tail latency even
+        // though its local CPU work falls.
         let work = source_reps.saturating_mul(vocab.len());
-        if !branch_label.ends_with(".l1") || vocab.len() < 50_000 || work < 300_000_000 {
+        let very_large_profile = vocab.len() >= 50_000 && work >= 300_000_000;
+        let dense_protected_profile = active.iter().filter(|&&value| value).count() >= 180
+            && work >= 50_000_000
+            && (source_reps >= 40_000 || vocab.len() <= 8_000);
+        if !branch_label.ends_with(".l1")
+            || (!very_large_profile && !dense_protected_profile)
+        {
             return None;
         }
     }
