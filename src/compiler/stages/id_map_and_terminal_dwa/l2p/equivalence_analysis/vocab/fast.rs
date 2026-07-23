@@ -2129,6 +2129,14 @@ fn trie_selective_work_enabled() -> bool {
     env_flag_enabled("GLRMASK_TRIE_SELECTIVE_WORK")
 }
 
+fn trie_selective_min_noop_pct() -> usize {
+    std::env::var("GLRMASK_TRIE_SELECTIVE_MIN_NOOP_PCT")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(50)
+        .min(100)
+}
+
 struct TrieSelectiveInitial {
     words: usize,
     live_bits: Box<[u64]>,
@@ -2138,6 +2146,30 @@ struct TrieSelectiveInitial {
 }
 
 impl TrieSelectiveInitial {
+    fn new_if_profitable(dfa: &Dfa, batch: &[usize]) -> Option<Self> {
+        if batch.is_empty() || dfa.num_classes == 0 {
+            return None;
+        }
+        let mut live_states = 0usize;
+        let mut noop_pairs = 0usize;
+        for &state in batch {
+            if dfa.is_dead_end[state] {
+                continue;
+            }
+            live_states += 1;
+            noop_pairs += dfa.noop_class_masks[state]
+                .iter()
+                .map(|word| word.count_ones() as usize)
+                .sum::<usize>();
+        }
+        let total_pairs = live_states.saturating_mul(dfa.num_classes);
+        let min_pct = trie_selective_min_noop_pct();
+        if total_pairs == 0 || noop_pairs.saturating_mul(100) < total_pairs.saturating_mul(min_pct) {
+            return None;
+        }
+        Some(Self::new(dfa, batch))
+    }
+
     fn new(dfa: &Dfa, batch: &[usize]) -> Self {
         debug_assert_eq!(dfa.noop_class_masks.len(), dfa.num_states);
         let words = batch.len().div_ceil(64);
@@ -4058,7 +4090,8 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
                 .saturating_mul(batch.len())
                 <= vocab_sequential_trie_work_max();
         let selective_initial = (use_trie_walk && trie_selective_work_enabled())
-            .then(|| TrieSelectiveInitial::new(dfa_ref, batch));
+            .then(|| TrieSelectiveInitial::new_if_profitable(dfa_ref, batch))
+            .flatten();
         sequential_trie_batches += usize::from(use_sequential_trie);
         used_trie_walk |= use_trie_walk;
         let active_sigs: Vec<(usize, u64)> = if use_trie_walk {
