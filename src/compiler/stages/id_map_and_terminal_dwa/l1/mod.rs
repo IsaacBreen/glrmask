@@ -4976,8 +4976,6 @@ fn build_l1_terminal_dwa(
     if l1_premerge_profile_keys_enabled()
         && let Some(walk_cache) = walk_cache.as_ref()
         && id_map.num_tsids() > 1
-        && sorted_entries.len() >= 50_000
-        && id_map.num_tsids() >= 5_000
     {
         let premerge_started_at = Instant::now();
         let old_num_tsids = id_map.num_tsids() as usize;
