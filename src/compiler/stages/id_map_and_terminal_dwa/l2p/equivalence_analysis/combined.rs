@@ -3,6 +3,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::OnceLock;
 use std::time::Instant;
 
+use rayon::prelude::*;
+
 use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
@@ -115,7 +117,7 @@ fn first_byte_factored_vocab_classes(
     let analysis_dfa_cache = vocab_equivalence_analysis::SharedVocabAnalysisDfaCache::default();
     let bucket_started_at = Instant::now();
     let bucket_results = token_buckets
-        .iter()
+        .par_iter()
         .enumerate()
         .filter(|(_, bucket)| !bucket.is_empty())
         .map(|(_first_class, bucket)| {
