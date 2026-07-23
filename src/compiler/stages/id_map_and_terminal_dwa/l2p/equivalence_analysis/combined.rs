@@ -2004,6 +2004,59 @@ fn analyze_equivalences_impl(
         let mut query_view_states = preclass_view_states.clone();
         query_view_states.sort_unstable();
         query_view_states.dedup();
+        if std::env::var_os("GLRMASK_PROFILE_L2P_FIRST_BYTE_VOCAB_FACTOR").is_some() {
+            let mut token_counts = [0usize; 256];
+            let mut one_byte_counts = [0usize; 256];
+            for token in &dedup.representative_token_bytes {
+                if let Some(&first) = token.first() {
+                    token_counts[first as usize] += 1;
+                    one_byte_counts[first as usize] += usize::from(token.len() == 1);
+                }
+            }
+            let mut factored_pairs = 0usize;
+            let mut active_buckets = 0usize;
+            let mut rows = Vec::<(usize, usize, usize, usize)>::new();
+            for byte in 0..256usize {
+                let tokens = token_counts[byte];
+                if tokens == 0 {
+                    continue;
+                }
+                active_buckets += 1;
+                let mut targets = query_view_states
+                    .iter()
+                    .map(|&state| analysis_view.dfa().trans(state, byte))
+                    .collect::<Vec<_>>();
+                targets.sort_unstable();
+                targets.dedup();
+                factored_pairs = factored_pairs.saturating_add(tokens.saturating_mul(targets.len()));
+                rows.push((tokens, targets.len(), byte, one_byte_counts[byte]));
+            }
+            rows.sort_unstable_by(|left, right| {
+                right
+                    .0
+                    .saturating_mul(right.1)
+                    .cmp(&left.0.saturating_mul(left.1))
+            });
+            let full_pairs = dedup
+                .representative_token_bytes
+                .len()
+                .saturating_mul(query_view_states.len());
+            eprintln!(
+                "[glrmask/profile][l2p_first_byte_vocab_factor] partition={} tokens={} states={} active_buckets={} full_pairs={} factored_pairs={} reduction_pct={:.2} top={:?}",
+                partition_label,
+                dedup.representative_token_bytes.len(),
+                query_view_states.len(),
+                active_buckets,
+                full_pairs,
+                factored_pairs,
+                if full_pairs == 0 {
+                    0.0
+                } else {
+                    100.0 * (1.0 - factored_pairs as f64 / full_pairs as f64)
+                },
+                rows.into_iter().take(16).collect::<Vec<_>>(),
+            );
+        }
         let vocab_first = dedup.representative_token_bytes.len() >= 512
             && query_view_states.len() >= 256;
         if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
