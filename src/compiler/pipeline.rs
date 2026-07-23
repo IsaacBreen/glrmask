@@ -2439,12 +2439,13 @@ fn compile_prepared_with_profile_and_table_construction(
                     .flatten();
 
                 if let Some(deferred_runtime_tokenizer) = deferred_runtime_tokenizer {
-                    let default_start_delay_ms =
-                        if deferred_runtime_tokenizer.num_states() >= 100_000 {
-                            150
-                        } else {
-                            0
-                        };
+                    // Finishing the exact runtime tokenizer is independent of
+                    // terminal-DWA construction. Delaying large tokenizers was
+                    // intended to reduce memory-bandwidth contention, but the
+                    // slow-build cohort consistently benefits from immediate
+                    // overlap, including the protected-residual cases this path
+                    // targets. Keep the environment override for diagnostics.
+                    let default_start_delay_ms = 0;
                     scope.spawn(move |_| {
                         let start_delay_ms = std::env::var(
                             "GLRMASK_DEFERRED_RUNTIME_START_DELAY_MS",
