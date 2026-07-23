@@ -39,7 +39,7 @@ use crate::automata::regex::Expr;
 use super::fast::VocabEquivalenceResult;
 
 const MIN_TOKENS: usize = 4_096;
-const MAX_ACTIVE_TERMINALS: usize = 64;
+const MAX_ACTIVE_TERMINALS: usize = 128;
 const MAX_ATOM_STAR_STATES: usize = 64;
 const MIN_REDUCTION_FACTOR: usize = 4;
 
