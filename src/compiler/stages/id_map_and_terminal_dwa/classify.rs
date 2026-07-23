@@ -2919,9 +2919,18 @@ fn exact_terminal_path_two_plus_candidate_dfa(
     let mut suffix_viable_masks = vec![0u64; total_splits * words_per_mask];
     let mut candidate_splits = 0usize;
     let mut any_viable_suffix = false;
+    let suffix_cache_enabled = std::env::var("GLRMASK_CLASSIFY_SUFFIX_CACHE")
+        .map(|value| {
+            let trimmed = value.trim();
+            !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false);
+    let mut suffix_cache_hits = 0usize;
+    let mut suffix_cache_misses = 0usize;
     if words_per_mask == 1 && adjacent_pair_index.is_some() {
         let index = adjacent_pair_index.as_ref().expect("checked above");
         let vocab_entries = vocab.entries.iter().collect::<Vec<_>>();
+        let mut suffix_cache = FxHashMap::<&[u8], u64>::default();
         for left in 0u8..=u8::MAX {
             for right in feasible_follow_bytes_by_last_byte[left as usize].iter() {
                 for &packed in index.occurrences_for_pair(left, right) {
@@ -2929,10 +2938,21 @@ fn exact_terminal_path_two_plus_candidate_dfa(
                     let split_after = packed as u32 as usize;
                     let (&_token_id, bytes) = vocab_entries[entry_index];
                     candidate_splits += 1;
+                    let suffix = &bytes[split_after + 1..];
+                    if suffix_cache_enabled {
+                        if let Some(&matched) = suffix_cache.get(suffix) {
+                            suffix_cache_hits += 1;
+                            any_viable_suffix |= matched != 0;
+                            let split_index = index.entry_split_offsets[entry_index] + split_after;
+                            suffix_viable_masks[split_index] = matched;
+                            continue;
+                        }
+                        suffix_cache_misses += 1;
+                    }
                     let mut state = continuation_reset_state;
                     let mut matched = 0u64;
                     let mut consumed_suffix = true;
-                    for &byte in &bytes[split_after + 1..] {
+                    for &byte in suffix {
                         if uses_original_tokenizer {
                             if prefix_scanner.future_mask(state)[0] == 0 {
                                 consumed_suffix = false;
@@ -2963,6 +2983,9 @@ fn exact_terminal_path_two_plus_candidate_dfa(
                         } else {
                             dense_future_masks[state as usize]
                         };
+                    }
+                    if suffix_cache_enabled {
+                        suffix_cache.insert(suffix, matched);
                     }
                     any_viable_suffix |= matched != 0;
                     let split_index = index.entry_split_offsets[entry_index] + split_after;
@@ -3350,7 +3373,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
     }
     if super::types::compile_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][terminal_path_candidate_dfa] tokens={} candidates={} states={} transitions={} uses_original_tokenizer={} automatic_subset_tokenizer={} feasible_split_work={} prefix_entries={} suffix_splits={} candidate_splits={} prefix_configs={} split_checks={} allowed_pairs={} two_plus={} compile_ms={:.3} trie_ms={:.3} prefix_ms={:.3} suffix_ms={:.3} combine_ms={:.3} analyze_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][terminal_path_candidate_dfa] tokens={} candidates={} states={} transitions={} uses_original_tokenizer={} automatic_subset_tokenizer={} feasible_split_work={} prefix_entries={} suffix_splits={} candidate_splits={} suffix_cache_hits={} suffix_cache_misses={} prefix_configs={} split_checks={} allowed_pairs={} two_plus={} compile_ms={:.3} trie_ms={:.3} prefix_ms={:.3} suffix_ms={:.3} combine_ms={:.3} analyze_ms={:.3} total_ms={:.3}",
             vocab.entries.len(),
             candidate_ids.len(),
             candidate_tokenizer.num_states(),
@@ -3361,6 +3384,8 @@ fn exact_terminal_path_two_plus_candidate_dfa(
             total_splits,
             total_splits,
             candidate_splits,
+            suffix_cache_hits,
+            suffix_cache_misses,
             prefix_scanner.configs.len(),
             split_checks,
             allowed_pairs,
