@@ -2004,19 +2004,8 @@ fn analyze_equivalences_impl(
         let mut query_view_states = preclass_view_states.clone();
         query_view_states.sort_unstable();
         query_view_states.dedup();
-        let auto_vocab_first = dedup.representative_token_bytes.len() >= 512
+        let vocab_first = dedup.representative_token_bytes.len() >= 512
             && query_view_states.len() >= 256;
-        let vocab_first = match std::env::var("GLRMASK_L2P_EQUIVALENCE_ORDER") {
-            Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
-                "" | "auto" => auto_vocab_first,
-                "vocab_first" | "vocab-first" | "vocab" => true,
-                "state_first" | "state-first" | "state" => false,
-                value => panic!(
-                    "invalid GLRMASK_L2P_EQUIVALENCE_ORDER={value:?}; expected auto, vocab_first, or state_first"
-                ),
-            },
-            Err(_) => auto_vocab_first,
-        };
         if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
             eprintln!(
                 "[glrmask/profile][epsilon_equivalence_order] partition={} dedup_tokens={} pre_states={} vocab_first={}",
@@ -2392,19 +2381,8 @@ fn analyze_equivalences_impl(
     // historical state-then-vocab order (see the commutativity regression
     // below), but the expensive state trellis sees hundreds of tokens instead
     // of tens of thousands.
-    let auto_vocab_first = dedup.representative_token_bytes.len() >= 8_192
+    let vocab_first = dedup.representative_token_bytes.len() >= 8_192
         && pre_reduced_states.len() >= 256;
-    let vocab_first = match std::env::var("GLRMASK_L2P_EQUIVALENCE_ORDER") {
-        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
-            "" | "auto" => auto_vocab_first,
-            "vocab_first" | "vocab-first" | "vocab" => true,
-            "state_first" | "state-first" | "state" => false,
-            value => panic!(
-                "invalid GLRMASK_L2P_EQUIVALENCE_ORDER={value:?}; expected auto, vocab_first, or state_first"
-            ),
-        },
-        Err(_) => auto_vocab_first,
-    };
     if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
         eprintln!(
             "[glrmask/profile][combined_equivalence_order] partition={} dedup_tokens={} pre_states={} vocab_first={}",
@@ -2501,17 +2479,6 @@ fn analyze_equivalences_impl(
         let mut final_state_representatives = reduced_state_reps_for_pre_reduced.clone();
         final_state_representatives.sort_unstable();
         final_state_representatives.dedup();
-        if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
-            eprintln!(
-                "[glrmask/profile][combined_state_first] partition={} pre_states={} mapping_entries={} unique_state_representatives={} mapping_min={} mapping_max={}",
-                partition_label,
-                pre_reduced_states.len(),
-                reduced_state_reps_for_pre_reduced.len(),
-                final_state_representatives.len(),
-                reduced_state_reps_for_pre_reduced.iter().copied().min().unwrap_or(0),
-                reduced_state_reps_for_pre_reduced.iter().copied().max().unwrap_or(0),
-            );
-        }
         let vocab_equiv_started_at = Instant::now();
         let (dedup_vocab_classes, vocab_analysis_dfa_build_ms) =
             vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter_profiled(
