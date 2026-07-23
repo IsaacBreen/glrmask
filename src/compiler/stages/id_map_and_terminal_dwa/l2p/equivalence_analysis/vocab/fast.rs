@@ -744,6 +744,10 @@ fn first_transition_factor_force_parallel_buckets() -> bool {
     env_flag_enabled("GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_PARALLEL_BUCKETS")
 }
 
+fn first_transition_factor_final_single_batch_enabled() -> bool {
+    env_flag_enabled("GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_FINAL_SINGLE_BATCH")
+}
+
 fn default_vocab_batch_size(
     num_states: usize,
     num_groups: usize,
@@ -4041,8 +4045,18 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
     // repeated trie traversal. Bound the default by the dominant
     // `match_positions` allocation so unusually wide terminal-group axes do
     // not inherit an unbounded memory increase. Keep the env override for A/B.
+    let default_batch_size =
+        default_vocab_batch_size(num_initial_states, num_groups, analysis_token_count);
+    let factor_final_single_batch = factor_plan.is_some()
+        && first_transition_factor_final_single_batch_enabled()
+        && analysis_token_count.saturating_mul(num_initial_states)
+            <= vocab_sequential_trie_work_max();
     let batch_size = vocab_batch_size_override().unwrap_or_else(|| {
-        default_vocab_batch_size(num_initial_states, num_groups, analysis_token_count)
+        if factor_final_single_batch {
+            num_initial_states
+        } else {
+            default_batch_size
+        }
     });
     let mut active_indices: Vec<usize> = factor_plan.as_ref().map_or_else(
         || (0..num_tokens).collect(),
@@ -4364,9 +4378,11 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
 
     if profiling {
         eprintln!(
-            "[glrmask/profile][vocab_equiv] strings={} initial_states={} batches={} sequential_trie_batches={} used_trie_walk={} active_final={} original_states={} effective_states={} compacted={} build_dfa_ms={:.3} compact_dfa_ms={:.3} state_order_ms={:.3} sort_tokens_ms={:.3} signature_ms={:.3} refinement_ms={:.3} final_groups_ms={:.3} dfs_step_ms={:.3} collect_targets_ms={:.3} single_target_suffix_ms={:.3} multi_target_suffix_ms={:.3} finish_signature_ms={:.3} dfs_steps={} dfs_steps_without_new_dirty={} dfs_states_visited={} dfs_dead_transitions={} dfs_dead_without_new_dirty={} dfs_new_dirty_groups={} dfs_new_dirty_states={} dfs_noop_self_loops={} clean_tokens={} dirty_tokens={} single_target_tokens={} multi_target_tokens={} total_targets={} scratch_pool_allocations={} scratch_pool_reuses={} total_ms={:.3}",
+            "[glrmask/profile][vocab_equiv] strings={} initial_states={} batch_size={} factor_final_single_batch={} batches={} sequential_trie_batches={} used_trie_walk={} active_final={} original_states={} effective_states={} compacted={} build_dfa_ms={:.3} compact_dfa_ms={:.3} state_order_ms={:.3} sort_tokens_ms={:.3} signature_ms={:.3} refinement_ms={:.3} final_groups_ms={:.3} dfs_step_ms={:.3} collect_targets_ms={:.3} single_target_suffix_ms={:.3} multi_target_suffix_ms={:.3} finish_signature_ms={:.3} dfs_steps={} dfs_steps_without_new_dirty={} dfs_states_visited={} dfs_dead_transitions={} dfs_dead_without_new_dirty={} dfs_new_dirty_groups={} dfs_new_dirty_states={} dfs_noop_self_loops={} clean_tokens={} dirty_tokens={} single_target_tokens={} multi_target_tokens={} total_targets={} scratch_pool_allocations={} scratch_pool_reuses={} total_ms={:.3}",
             num_tokens,
             num_initial_states,
+            batch_size,
+            factor_final_single_batch,
             batches,
             sequential_trie_batches,
             used_trie_walk,
