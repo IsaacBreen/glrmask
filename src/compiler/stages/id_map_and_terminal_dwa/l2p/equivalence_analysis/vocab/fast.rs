@@ -3105,21 +3105,12 @@ fn try_first_transition_factor_plan<S: AsRef<[u8]> + Sync>(
     let mut source_state_buckets_after = 0usize;
     let mut preliminary_state_token_pairs = 0usize;
 
-    for mut token_indices in tokens_by_class.into_iter().filter(|bucket| !bucket.is_empty()) {
+    for token_indices in tokens_by_class.into_iter().filter(|bucket| !bucket.is_empty()) {
         semantic_buckets += 1;
         if token_indices.len() < min_bucket_tokens {
             singleton_tokens.extend(token_indices);
             continue;
         }
-
-        // The leading byte has already been quotiented semantically. Sort by
-        // the remaining bytes so raw bytes in one DFA class share suffix trie
-        // paths instead of forming separate top-level lexical runs.
-        token_indices.sort_unstable_by(|&left, &right| {
-            strings[left].as_ref()[1..]
-                .cmp(&strings[right].as_ref()[1..])
-                .then_with(|| left.cmp(&right))
-        });
 
         let first_byte = strings[token_indices[0]].as_ref()[0];
         let mut initial_outcomes = Vec::with_capacity(initial_states.len());
@@ -3165,6 +3156,17 @@ fn try_first_transition_factor_plan<S: AsRef<[u8]> + Sync>(
         / full_state_token_pairs.max(1) as f64;
     if enforce_work_ratio && preliminary_ratio > first_transition_factor_max_work_ratio() {
         return None;
+    }
+
+    // Suffix sorting is required only for an accepted plan. Deferring it until
+    // after the structural work-ratio test keeps default-off/rejected attempts
+    // from sorting every large vocabulary a second time.
+    for bucket in &mut buckets {
+        bucket.token_indices.sort_unstable_by(|&left, &right| {
+            strings[left].as_ref()[1..]
+                .cmp(&strings[right].as_ref()[1..])
+                .then_with(|| left.cmp(&right))
+        });
     }
 
     let process_bucket = |bucket: &FirstTransitionBucket| {
@@ -3983,6 +3985,15 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
     let factor_plan = factor_plan.flatten();
     let preliminary_factor_ms = elapsed_ms(preliminary_factor_started_at);
     if profiling {
+        if factor_enabled {
+            eprintln!(
+                "[glrmask/profile][vocab_first_transition_factor_attempt] strings={} initial_states={} selected={} total_ms={:.3}",
+                num_tokens,
+                num_initial_states,
+                factor_plan.is_some(),
+                preliminary_factor_ms,
+            );
+        }
         if let Some(plan) = factor_plan.as_ref() {
             let stats = plan.stats;
             let reduction_pct = 100.0
