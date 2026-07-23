@@ -3043,6 +3043,13 @@ impl DeferredDfa {
         }
     }
 
+    fn has_deferred_runtime_materialization(&self) -> bool {
+        match self {
+            Self::Ready(_) => false,
+            Self::DenseBinary(product) => product.deferred_transition_rows.is_some(),
+        }
+    }
+
     fn finish(self) -> DFA {
         match self {
             Self::Ready(dfa) => dfa,
@@ -3117,6 +3124,12 @@ impl DeferredPartitionedRegex {
             .iter()
             .map(|component| component.full.num_states())
             .sum::<usize>()
+    }
+
+    pub(crate) fn has_deferred_runtime_materialization(&self) -> bool {
+        self.components
+            .iter()
+            .any(|component| component.full.has_deferred_runtime_materialization())
     }
 
     pub(crate) fn finish(self) -> Regex {
@@ -8665,14 +8678,13 @@ fn try_compile_with_plan_deferred_dense(
     }
     let (class_map, class_members) = compute_product_equivalence_classes(&components);
     let component_class_transitions = build_product_class_transitions(&components, &class_map);
-    let defer_runtime_materialization = std::env::var(
-        "GLRMASK_DEFER_DENSE_RUNTIME_MATERIALIZATION",
-    )
-    .map(|value| {
-        let value = value.trim();
-        !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
-    })
-    .unwrap_or(true);
+    let defer_runtime_materialization =
+        std::env::var("GLRMASK_DEFER_DENSE_RUNTIME_MATERIALIZATION")
+            .map(|value| {
+                let value = value.trim();
+                !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+            })
+            .unwrap_or_else(|_| rayon::current_num_threads() > 1);
     let Some((mut deferred, trace)) = try_discover_dense_binary_intersection_product(
         &components,
         &class_members,

@@ -1245,6 +1245,18 @@ impl DeferredRuntimeTokenizer {
         }
     }
 
+    fn default_start_delay_ms(&self) -> u64 {
+        let has_deferred_materialization = match self {
+            Self::Ready(_) => false,
+            Self::Partitioned { full, .. } => full.has_deferred_runtime_materialization(),
+        };
+        if has_deferred_materialization && rayon::current_num_threads() >= 9 {
+            100
+        } else {
+            0
+        }
+    }
+
     fn finish(self) -> Tokenizer {
         match self {
             Self::Ready(tokenizer) => tokenizer,
@@ -2467,7 +2479,8 @@ fn compile_prepared_with_profile_and_table_construction(
                     // slow-build cohort consistently benefits from immediate
                     // overlap, including the protected-residual cases this path
                     // targets. Keep the environment override for diagnostics.
-                    let default_start_delay_ms = 0;
+                    let default_start_delay_ms =
+                        deferred_runtime_tokenizer.default_start_delay_ms();
                     scope.spawn(move |_| {
                         let start_delay_ms = std::env::var(
                             "GLRMASK_DEFERRED_RUNTIME_START_DELAY_MS",
