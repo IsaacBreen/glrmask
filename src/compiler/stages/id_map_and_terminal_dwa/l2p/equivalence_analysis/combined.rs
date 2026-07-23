@@ -3,6 +3,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::OnceLock;
 use std::time::Instant;
 
+use rayon::prelude::*;
+
 use crate::Vocab;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
@@ -51,11 +53,20 @@ fn common_atom_preclass_enabled() -> bool {
         .unwrap_or(false)
 }
 
-fn first_byte_vocab_factor_enabled() -> bool {
+fn first_byte_vocab_factor_enabled(partition_label: &str) -> bool {
     std::env::var("GLRMASK_ENABLE_L2P_FIRST_BYTE_VOCAB_FACTOR")
         .map(|value| {
             let trimmed = value.trim();
-            trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
+            if trimmed.is_empty() || trimmed == "1" || trimmed.eq_ignore_ascii_case("true") {
+                return true;
+            }
+            if trimmed == "0" || trimmed.eq_ignore_ascii_case("false") {
+                return false;
+            }
+            trimmed
+                .split(',')
+                .map(str::trim)
+                .any(|label| label == partition_label)
         })
         .unwrap_or(false)
 }
@@ -69,6 +80,8 @@ fn first_byte_vocab_factor_strict_reference_enabled(partition_label: &str) -> bo
 #[derive(Debug, Clone, Copy, Default)]
 struct FirstByteVocabFactorProfile {
     buckets: usize,
+    factored_buckets: usize,
+    min_bucket_tokens: usize,
     source_states_before: usize,
     source_states_after: usize,
     preliminary_classes: usize,
@@ -100,58 +113,87 @@ fn first_byte_factored_vocab_classes(
     if tokens.len() < 2 || initial_states.len() < 2 || tokens.iter().any(|token| token.is_empty()) {
         return None;
     }
+    let min_bucket_tokens = std::env::var("GLRMASK_L2P_FIRST_BYTE_VOCAB_FACTOR_MIN_BUCKET_TOKENS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&value| value >= 2)
+        .unwrap_or(2);
 
     let total_started_at = Instant::now();
+    // A DFA byte class has one transition row across every analysis state.
+    // Tokens whose leading bytes share that class therefore admit the same
+    // first-successor quotient and can be classified in one exact bucket.
     let mut token_buckets = (0..256).map(|_| Vec::<usize>::new()).collect::<Vec<_>>();
     for (token, bytes) in tokens.iter().enumerate() {
-        token_buckets[bytes[0] as usize].push(token);
+        token_buckets[byte_to_class[bytes[0] as usize] as usize].push(token);
     }
 
     let analysis_dfa_cache = vocab_equivalence_analysis::SharedVocabAnalysisDfaCache::default();
-    let mut preliminary_classes = Vec::<Vec<usize>>::new();
-    let mut source_states_after = 0usize;
-    let mut dfa_build_ms = 0.0f64;
-    let mut buckets = 0usize;
     let bucket_started_at = Instant::now();
-    for (first_byte, bucket) in token_buckets.iter().enumerate() {
-        if bucket.is_empty() {
-            continue;
-        }
-        buckets += 1;
-        if bucket.len() == 1 {
-            preliminary_classes.push(vec![bucket[0]]);
-            continue;
-        }
+    let bucket_results = token_buckets
+        .par_iter()
+        .enumerate()
+        .filter(|(_, bucket)| !bucket.is_empty())
+        .map(|(_first_class, bucket)| {
+            if bucket.len() < min_bucket_tokens {
+                return (
+                    bucket.iter().copied().map(|token| vec![token]).collect(),
+                    0usize,
+                    0.0f64,
+                    false,
+                );
+            }
 
-        let mut source_for_target = BTreeMap::<u32, usize>::new();
-        for &source in initial_states {
-            let target = tokenizer.dfa().trans(source, first_byte);
-            source_for_target.entry(target).or_insert(source);
-        }
-        let reduced_sources = source_for_target.into_values().collect::<Vec<_>>();
-        source_states_after = source_states_after.saturating_add(reduced_sources.len());
-        let bucket_tokens = bucket.iter().map(|&token| tokens[token]).collect::<Vec<_>>();
-        let (bucket_classes, build_ms) =
-            vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter_profiled(
-                tokenizer,
-                &bucket_tokens,
-                &reduced_sources,
-                disallowed_follows,
-                Some(byte_to_class),
-                None,
-                None,
-                Some(&analysis_dfa_cache),
-            );
-        dfa_build_ms = dfa_build_ms.max(build_ms);
-        for local_class in bucket_classes {
-            let mut global_class = local_class
+            let first_byte = tokens[bucket[0]][0] as usize;
+            let mut source_for_target = BTreeMap::<u32, usize>::new();
+            for &source in initial_states {
+                let target = tokenizer.dfa().trans(source, first_byte);
+                source_for_target.entry(target).or_insert(source);
+            }
+            let reduced_sources = source_for_target.into_values().collect::<Vec<_>>();
+            let bucket_tokens = bucket.iter().map(|&token| tokens[token]).collect::<Vec<_>>();
+            let (bucket_classes, build_ms) =
+                vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter_profiled(
+                    tokenizer,
+                    &bucket_tokens,
+                    &reduced_sources,
+                    disallowed_follows,
+                    Some(byte_to_class),
+                    None,
+                    None,
+                    Some(&analysis_dfa_cache),
+                );
+            let classes = bucket_classes
                 .into_iter()
-                .map(|local_token| bucket[local_token])
+                .map(|local_class| {
+                    let mut global_class = local_class
+                        .into_iter()
+                        .map(|local_token| bucket[local_token])
+                        .collect::<Vec<_>>();
+                    global_class.sort_unstable();
+                    global_class
+                })
                 .collect::<Vec<_>>();
-            global_class.sort_unstable();
-            preliminary_classes.push(global_class);
-        }
-    }
+            (classes, reduced_sources.len(), build_ms, true)
+        })
+        .collect::<Vec<_>>();
+    let buckets = bucket_results.len();
+    let factored_buckets = bucket_results
+        .iter()
+        .filter(|(_, _, _, factored)| *factored)
+        .count();
+    let source_states_after = bucket_results
+        .iter()
+        .map(|(_, states, _, _)| *states)
+        .sum::<usize>();
+    let mut dfa_build_ms = bucket_results
+        .iter()
+        .map(|(_, _, build_ms, _)| *build_ms)
+        .fold(0.0f64, f64::max);
+    let mut preliminary_classes = bucket_results
+        .into_iter()
+        .flat_map(|(classes, _, _, _)| classes)
+        .collect::<Vec<_>>();
     let bucket_ms = bucket_started_at.elapsed().as_secs_f64() * 1000.0;
     preliminary_classes.sort_unstable_by_key(|class| class[0]);
 
@@ -199,7 +241,9 @@ fn first_byte_factored_vocab_classes(
         classes,
         FirstByteVocabFactorProfile {
             buckets,
-            source_states_before: initial_states.len().saturating_mul(buckets),
+            factored_buckets,
+            min_bucket_tokens,
+            source_states_before: initial_states.len().saturating_mul(factored_buckets),
             source_states_after,
             preliminary_classes: preliminary_classes.len(),
             bucket_ms,
@@ -2229,7 +2273,7 @@ fn analyze_equivalences_impl(
         }
         let (precomputed_vocab, state_tokens, vocab_equiv_ms) = if vocab_first {
             let vocab_equiv_started_at = Instant::now();
-            let first_byte_factored = first_byte_vocab_factor_enabled()
+            let first_byte_factored = first_byte_vocab_factor_enabled(partition_label)
                 .then(|| {
                     first_byte_factored_vocab_classes(
                         analysis_view,
@@ -2277,10 +2321,12 @@ fn analyze_equivalences_impl(
                     || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
                 {
                     eprintln!(
-                        "[glrmask/profile][l2p_first_byte_vocab_factor_selected] partition={} tokens={} buckets={} source_state_buckets_before={} source_state_buckets_after={} preliminary_classes={} final_classes={} bucket_ms={:.3} final_ms={:.3} dfa_build_ms={:.3} total_ms={:.3}",
+                        "[glrmask/profile][l2p_first_byte_vocab_factor_selected] partition={} tokens={} buckets={} factored_buckets={} min_bucket_tokens={} source_state_buckets_before={} source_state_buckets_after={} preliminary_classes={} final_classes={} bucket_ms={:.3} final_ms={:.3} dfa_build_ms={:.3} total_ms={:.3}",
                         partition_label,
                         dedup.representative_token_bytes.len(),
                         factor_profile.buckets,
+                        factor_profile.factored_buckets,
+                        factor_profile.min_bucket_tokens,
                         factor_profile.source_states_before,
                         factor_profile.source_states_after,
                         factor_profile.preliminary_classes,
