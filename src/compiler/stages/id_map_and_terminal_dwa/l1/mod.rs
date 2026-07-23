@@ -305,90 +305,6 @@ pub(crate) fn prepared_l1_identity_vocab_order(vocab: &Vocab) -> Arc<L1IdentityV
     l1_identity_vocab_order(vocab)
 }
 
-fn l1_active_language_analysis_order(
-    partition_label: &str,
-    tokenizer: &Tokenizer,
-    active_terminals: &[bool],
-    full_order: &L1IdentityVocabOrder,
-    state_count: usize,
-) -> Option<Arc<L1IdentityVocabOrder>> {
-    let enabled = std::env::var("GLRMASK_L1_ACTIVE_LANGUAGE_TOKEN_DEDUP")
-        .map(|value| {
-            let value = value.trim();
-            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
-        })
-        .unwrap_or(false);
-    if !enabled {
-        return None;
-    }
-    if let Ok(filter) = std::env::var("GLRMASK_L1_ACTIVE_LANGUAGE_TOKEN_DEDUP_FILTER")
-        && !filter
-            .split(',')
-            .map(str::trim)
-            .filter(|item| !item.is_empty())
-            .any(|item| partition_label.contains(item))
-    {
-        return None;
-    }
-    const MIN_STATE_TOKEN_WORK: usize = 20_000_000;
-    if state_count
-        .checked_mul(full_order.token_entries_sorted.len())
-        .is_none_or(|work| work < MIN_STATE_TOKEN_WORK)
-    {
-        return None;
-    }
-
-    let started_at = Instant::now();
-    let byte_to_class =
-        compute_active_terminal_language_byte_classes(tokenizer, active_terminals)?;
-    let mut seen = FxHashMap::<Vec<u8>, ()>::default();
-    let mut token_entries_sorted = Vec::new();
-    for (token_id, bytes) in full_order.token_entries_sorted.iter() {
-        let class_sequence = bytes
-            .iter()
-            .map(|&byte| byte_to_class[byte as usize])
-            .collect::<Vec<_>>();
-        if seen.insert(class_sequence, ()).is_none() {
-            token_entries_sorted.push((*token_id, Arc::clone(bytes)));
-        }
-    }
-    if token_entries_sorted.len() == full_order.token_entries_sorted.len() {
-        return None;
-    }
-
-    let mut original_to_internal = vec![u32::MAX; full_order.original_to_internal.len()];
-    let token_ids_sorted = token_entries_sorted
-        .iter()
-        .enumerate()
-        .map(|(internal_id, (token_id, _))| {
-            original_to_internal[*token_id as usize] = internal_id as u32;
-            *token_id
-        })
-        .collect::<Vec<_>>();
-    let token_buckets = build_l1_sorted_token_buckets(&token_entries_sorted);
-    if compile_profile_enabled() {
-        eprintln!(
-            "[glrmask/profile][l1_active_language_token_dedup] partition={} states={} full_tokens={} analysis_tokens={} byte_classes={} build_ms={:.3}",
-            partition_label,
-            state_count,
-            full_order.token_entries_sorted.len(),
-            token_entries_sorted.len(),
-            byte_to_class
-                .iter()
-                .copied()
-                .max()
-                .map_or(0, |class| class as usize + 1),
-            started_at.elapsed().as_secs_f64() * 1000.0,
-        );
-    }
-    Some(Arc::new(L1IdentityVocabOrder {
-        token_ids_sorted: token_ids_sorted.into(),
-        token_entries_sorted: token_entries_sorted.into(),
-        original_to_internal: original_to_internal.into(),
-        token_buckets,
-    }))
-}
-
 fn derive_l1_identity_vocab_order_from_parent(
     parent: &L1IdentityVocabOrder,
     subset_vocab: &Vocab,
@@ -754,7 +670,7 @@ use crate::grammar::flat::TerminalID;
 use crate::Vocab;
 
 use super::l2p::equivalence_analysis::compat::{
-    compute_active_terminal_language_byte_classes, compute_byte_classes, FlatDfa, TokenizerView,
+    compute_byte_classes, FlatDfa, TokenizerView,
 };
 use super::types::{compile_profile_enabled, TerminalColoring, TerminalDwaPhaseProfile};
 
@@ -1909,27 +1825,15 @@ fn build_l1_id_map<'a>(
     let mut max_length_representatives = equiv_mapping.clone();
     max_length_representatives.sort_unstable();
     max_length_representatives.dedup();
-    let analysis_order = l1_active_language_analysis_order(
-        partition_label,
-        tokenizer,
-        active_terminals,
-        order.as_ref(),
-        max_length_representatives.len(),
-    );
     let (exact_mapping, mut exact_profile_reuse) =
         find_l1_exact_state_equivalence_by_token_signatures(
             tokenizer,
-            analysis_order.as_deref().unwrap_or(order.as_ref()),
+            order.as_ref(),
             &max_length_representatives,
             active_terminals,
             flat_trans.as_ref(),
             transitions_by_byte,
         );
-    if analysis_order.is_some() {
-        // The cached profiles are indexed by the analysis-only representative
-        // vocabulary and cannot be replayed against the full output vocabulary.
-        exact_profile_reuse = None;
-    }
     let exact_state_equiv_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
     let mut max_rep_to_exact_rep = FxHashMap::<usize, usize>::default();
     for (&max_rep, &exact_rep) in max_length_representatives.iter().zip(exact_mapping.iter()) {

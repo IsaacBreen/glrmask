@@ -80,23 +80,6 @@ fn branch_active_state_map_selected(
     active_terminals: usize,
     source_states: usize,
 ) -> bool {
-    if std::env::var("GLRMASK_FORCE_BRANCH_ACTIVE_STATE_MAP")
-        .ok()
-        .is_some_and(|value| {
-            let value = value.trim();
-            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
-        })
-    {
-        return std::env::var("GLRMASK_FORCE_BRANCH_ACTIVE_STATE_MAP_FILTER")
-            .map(|filter| {
-                filter
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|item| !item.is_empty())
-                    .any(|item| branch_label.contains(item))
-            })
-            .unwrap_or(true);
-    }
     // This medium L2P regime benefits strongly from the exact active-language
     // quotient, but its epsilon powerset tokenizer expands well beyond that
     // quotient and makes downstream token replay slower. Request the map only;
