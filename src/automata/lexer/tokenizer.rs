@@ -28,26 +28,12 @@ pub struct Tokenizer {
     /// compile-time simplification for active-terminal rebuilds.
     #[serde(default, skip)]
     pub(super) exprs: Option<Arc<[Expr]>>,
-    /// Compile-only provenance for independently protected terminal
-    /// components. Each entry relates one component's synthesized state
-    /// coordinate back to exact residual states of the original full terminal
-    /// definition. Runtime serialization deliberately omits it.
-    #[serde(default, skip)]
-    pub(super) definition_provenance: Arc<[ProtectedDefinitionProvenance]>,
     /// Derived epsilon closures are shared by compile-time analyses.  A
     /// partitioned lexer is queried by many concurrent compiler lanes; without
     /// this cache each lane independently walks the same epsilon DAG for every
     /// raw state.
     #[serde(default, skip)]
     pub(super) singleton_epsilon_closures: OnceLock<Arc<[Box<[u32]>]>>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct ProtectedDefinitionProvenance {
-    pub(crate) terminal_id: u32,
-    pub(crate) state_offset: u32,
-    pub(crate) source_dfa: Arc<DFA>,
-    pub(crate) source_residuals_by_local_state: Arc<[Box<[u32]>]>,
 }
 
 /// Exact deterministic transition rows over a byte-equivalence-class alphabet.
@@ -106,7 +92,6 @@ pub(crate) mod artifact_serde {
                 artifact.compressed_transition_segments.into_boxed_slice(),
             ),
             exprs: None,
-            definition_provenance: Arc::from([]),
             singleton_epsilon_closures: OnceLock::new(),
         })
     }
@@ -467,7 +452,6 @@ impl Tokenizer {
                 num_terminals: self.num_terminals,
                 compressed_transition_segments: Arc::from([]),
                 exprs: None,
-                definition_provenance: Arc::from([]),
                 singleton_epsilon_closures: OnceLock::new(),
             },
             old_to_new,
@@ -605,7 +589,6 @@ impl Tokenizer {
             num_terminals: self.num_terminals,
             compressed_transition_segments: Arc::from([]),
             exprs: None,
-            definition_provenance: Arc::from([]),
             singleton_epsilon_closures: OnceLock::new(),
         })
     }
@@ -749,7 +732,6 @@ impl Tokenizer {
             num_terminals,
             compressed_transition_segments: Arc::from([]),
             exprs,
-            definition_provenance: Arc::from([]),
             singleton_epsilon_closures: OnceLock::new(),
         }
     }
@@ -768,20 +750,8 @@ impl Tokenizer {
             num_terminals,
             compressed_transition_segments: Arc::from(compressed_transition_segments),
             exprs,
-            definition_provenance: Arc::from([]),
             singleton_epsilon_closures: OnceLock::new(),
         }
-    }
-
-    pub(crate) fn set_definition_provenance(
-        &mut self,
-        provenance: Vec<ProtectedDefinitionProvenance>,
-    ) {
-        self.definition_provenance = Arc::from(provenance.into_boxed_slice());
-    }
-
-    pub(crate) fn definition_provenance(&self) -> &[ProtectedDefinitionProvenance] {
-        &self.definition_provenance
     }
 
     fn compressed_segment_for_state(

@@ -353,11 +353,6 @@ impl GenericPartitionAnalysis {
         let mut singleton_compiles = 0usize;
         let mut singleton_cache_reuses = 0usize;
         let mut global_states = 0usize;
-        let definition_provenance = tokenizer
-            .definition_provenance()
-            .iter()
-            .map(|provenance| (provenance.terminal_id as usize, provenance))
-            .collect::<HashMap<_, _>>();
 
         for terminal in 0..terminal_count {
             if !active_mask.get(terminal).copied().unwrap_or(false) {
@@ -368,13 +363,7 @@ impl GenericPartitionAnalysis {
                 continue;
             };
 
-            let singleton_result = catch_unwind(AssertUnwindSafe(|| {
-                if let Some(provenance) = definition_provenance.get(&terminal) {
-                    (Arc::clone(&provenance.source_dfa), false, Duration::ZERO)
-                } else {
-                    cached_singleton_dfa(expr)
-                }
-            }));
+            let singleton_result = catch_unwind(AssertUnwindSafe(|| cached_singleton_dfa(expr)));
             let Ok((dfa, compiled_here, source_time)) = singleton_result else {
                 failures[terminal] = Some("singleton_compile_panic");
                 continue;
@@ -964,37 +953,6 @@ fn report_physical_definition_coordinate(
         }
 
         let terminal = terminal as u32;
-        if let Some(provenance) = tokenizer
-            .definition_provenance()
-            .iter()
-            .find(|provenance| provenance.terminal_id == terminal)
-        {
-            if provenance.source_dfa.num_states() != singleton.num_states()
-                || provenance.source_residuals_by_local_state.len()
-                    > raw_states.saturating_sub(provenance.state_offset as usize)
-            {
-                terminal_failures += 1;
-                continue;
-            }
-            for (local_state, source_residuals) in provenance
-                .source_residuals_by_local_state
-                .iter()
-                .enumerate()
-            {
-                let raw_state = provenance.state_offset as usize + local_state;
-                for &source_residual in source_residuals.iter() {
-                    let Some(&quotient_state) =
-                        member.source_to_quotient.get(source_residual as usize)
-                    else {
-                        terminal_failures += 1;
-                        continue;
-                    };
-                    raw_configurations[raw_state].push((terminal, quotient_state));
-                    relation_pairs += 1;
-                }
-            }
-            continue;
-        }
         let supports_terminal = |physical_state: u32| {
             epsilon_closures[physical_state as usize]
                 .iter()
