@@ -2911,6 +2911,7 @@ struct FirstTransitionFactorStats {
     full_state_token_pairs: usize,
     preliminary_state_token_pairs: usize,
     preliminary_classes: usize,
+    parallel_buckets: bool,
     preliminary_signature_ms: f64,
     preliminary_grouping_ms: f64,
     trie_walk: TrieWalkChunkStats,
@@ -3038,74 +3039,85 @@ fn try_first_transition_factor_plan<S: AsRef<[u8]> + Sync>(
         return None;
     }
 
-    let bucket_results = buckets
-        .par_iter()
-        .map(|bucket| {
-            let signature_started_at = Instant::now();
-            let mut lease = scratch_pool.checkout(
-                bucket.source_representatives.len(),
-                dfa.num_groups,
-            );
-            let worker = lease.worker_mut();
-            let state_group_size = vocab_state_group_size(
-                bucket.source_representatives.len(),
-                dfa.num_groups,
-            );
-            let (active_sigs, trie_walk) = if bucket.token_indices.len() >= TRIE_WALK_MIN_TOKENS
-                && !*TRIE_WALK_DISABLED
-            {
-                trie_walk_chunk_signatures(
-                    dfa,
-                    strings,
-                    &bucket.token_indices,
-                    &bucket.source_representatives,
-                    state_group_size,
-                    &mut worker.scratch,
-                    &mut worker.trie_state,
-                    profiling,
-                )
-            } else {
-                let signatures = bucket
-                    .token_indices
-                    .iter()
-                    .map(|&token_idx| {
-                        (
-                            token_idx,
-                            token_signature(
-                                dfa,
-                                strings[token_idx].as_ref(),
-                                &bucket.source_representatives,
-                                state_group_size,
-                                &mut worker.scratch,
-                                false,
-                            ),
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                (signatures, TrieWalkChunkStats::default())
-            };
-            let signature_ms = signature_started_at.elapsed().as_secs_f64() * 1000.0;
+    let process_bucket = |bucket: &FirstTransitionBucket| {
+        let signature_started_at = Instant::now();
+        let mut lease = scratch_pool.checkout(
+            bucket.source_representatives.len(),
+            dfa.num_groups,
+        );
+        let worker = lease.worker_mut();
+        let state_group_size = vocab_state_group_size(
+            bucket.source_representatives.len(),
+            dfa.num_groups,
+        );
+        let (active_sigs, trie_walk) = if bucket.token_indices.len() >= TRIE_WALK_MIN_TOKENS
+            && !*TRIE_WALK_DISABLED
+        {
+            trie_walk_chunk_signatures(
+                dfa,
+                strings,
+                &bucket.token_indices,
+                &bucket.source_representatives,
+                state_group_size,
+                &mut worker.scratch,
+                &mut worker.trie_state,
+                profiling,
+            )
+        } else {
+            let signatures = bucket
+                .token_indices
+                .iter()
+                .map(|&token_idx| {
+                    (
+                        token_idx,
+                        token_signature(
+                            dfa,
+                            strings[token_idx].as_ref(),
+                            &bucket.source_representatives,
+                            state_group_size,
+                            &mut worker.scratch,
+                            false,
+                        ),
+                    )
+                })
+                .collect::<Vec<_>>();
+            (signatures, TrieWalkChunkStats::default())
+        };
+        let signature_ms = signature_started_at.elapsed().as_secs_f64() * 1000.0;
 
-            let grouping_started_at = Instant::now();
-            let mut by_signature = HashMap::<u64, Vec<usize>>::with_capacity(active_sigs.len());
-            for (token_idx, signature) in active_sigs {
-                by_signature.entry(signature).or_default().push(token_idx);
-            }
-            let mut classes = by_signature.into_values().collect::<Vec<_>>();
-            for class in &mut classes {
-                class.sort_unstable();
-            }
-            classes.sort_unstable_by_key(|class| class[0]);
-            let grouping_ms = grouping_started_at.elapsed().as_secs_f64() * 1000.0;
+        let grouping_started_at = Instant::now();
+        let mut by_signature = HashMap::<u64, Vec<usize>>::with_capacity(active_sigs.len());
+        for (token_idx, signature) in active_sigs {
+            by_signature.entry(signature).or_default().push(token_idx);
+        }
+        let mut classes = by_signature.into_values().collect::<Vec<_>>();
+        for class in &mut classes {
+            class.sort_unstable();
+        }
+        classes.sort_unstable_by_key(|class| class[0]);
+        let grouping_ms = grouping_started_at.elapsed().as_secs_f64() * 1000.0;
 
-            FirstTransitionBucketResult {
-                classes,
-                signature_ms,
-                grouping_ms,
-                trie_walk,
-            }
-        })
-        .collect::<Vec<_>>();
+        FirstTransitionBucketResult {
+            classes,
+            signature_ms,
+            grouping_ms,
+            trie_walk,
+        }
+    };
+
+    // This engine normally runs inside the partition-level Rayon scheduler.
+    // Spawning one nested task per semantic leading class can starve the outer
+    // partition DAG when several partitions enter this path concurrently. Keep
+    // the buckets sequential inside an existing Rayon worker; only use bucket
+    // parallelism when the engine is invoked outside a Rayon job.
+    let parallel_buckets = rayon::current_thread_index().is_none()
+        && rayon::current_num_threads() > 1
+        && buckets.len() > 1;
+    let bucket_results = if parallel_buckets {
+        buckets.par_iter().map(process_bucket).collect::<Vec<_>>()
+    } else {
+        buckets.iter().map(process_bucket).collect::<Vec<_>>()
+    };
 
     let mut stats = FirstTransitionFactorStats {
         semantic_buckets,
@@ -3115,6 +3127,7 @@ fn try_first_transition_factor_plan<S: AsRef<[u8]> + Sync>(
         source_state_buckets_after,
         full_state_token_pairs,
         preliminary_state_token_pairs,
+        parallel_buckets,
         ..FirstTransitionFactorStats::default()
     };
     let mut preliminary_classes = singleton_tokens
@@ -3876,11 +3889,12 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
                     - stats.preliminary_state_token_pairs as f64
                         / stats.full_state_token_pairs.max(1) as f64);
             eprintln!(
-                "[glrmask/profile][vocab_first_transition_factor] strings={} initial_states={} semantic_buckets={} factored_buckets={} min_bucket_tokens={} source_state_buckets_before={} source_state_buckets_after={} full_state_token_pairs={} preliminary_state_token_pairs={} work_reduction_pct={:.2} preliminary_classes={} representative_tokens={} signature_cpu_ms={:.3} grouping_cpu_ms={:.3} wall_ms={:.3}",
+                "[glrmask/profile][vocab_first_transition_factor] strings={} initial_states={} semantic_buckets={} factored_buckets={} parallel_buckets={} min_bucket_tokens={} source_state_buckets_before={} source_state_buckets_after={} full_state_token_pairs={} preliminary_state_token_pairs={} work_reduction_pct={:.2} preliminary_classes={} representative_tokens={} signature_cpu_ms={:.3} grouping_cpu_ms={:.3} wall_ms={:.3}",
                 num_tokens,
                 num_initial_states,
                 stats.semantic_buckets,
                 stats.factored_buckets,
+                stats.parallel_buckets,
                 stats.min_bucket_tokens,
                 stats.source_state_buckets_before,
                 stats.source_state_buckets_after,
