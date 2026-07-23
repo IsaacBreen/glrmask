@@ -563,6 +563,50 @@ fn split_top_level_group_ops(expr: &Expr) -> (Expr, Vec<Expr>, Vec<Expr>) {
     }
 }
 
+fn rebuild_single_visible_group_expression(
+    compiled_exprs: &[Expr],
+    exclusions: &BTreeMap<u32, BTreeSet<u32>>,
+    intersections: &BTreeMap<u32, BTreeSet<u32>>,
+) -> Option<Expr> {
+    let mut used = vec![false; compiled_exprs.len()];
+    let mut expression = compiled_exprs.first()?.clone();
+    used[0] = true;
+
+    let mut apply_hidden = |hidden: u32, intersect: bool| -> Option<()> {
+        let hidden = hidden as usize;
+        if hidden == 0 || hidden >= compiled_exprs.len() || used[hidden] {
+            return None;
+        }
+        used[hidden] = true;
+        let hidden_expression = compiled_exprs[hidden].clone();
+        expression = if intersect {
+            Expr::Intersect {
+                expr: Box::new(expression.clone()),
+                intersect: Box::new(hidden_expression),
+            }
+        } else {
+            Expr::Exclude {
+                expr: Box::new(expression.clone()),
+                exclude: Box::new(hidden_expression),
+            }
+        };
+        Some(())
+    };
+
+    if exclusions.keys().any(|&visible| visible != 0)
+        || intersections.keys().any(|&visible| visible != 0)
+    {
+        return None;
+    }
+    for &hidden in exclusions.get(&0).into_iter().flatten() {
+        apply_hidden(hidden, false)?;
+    }
+    for &hidden in intersections.get(&0).into_iter().flatten() {
+        apply_hidden(hidden, true)?;
+    }
+    used.into_iter().all(|used| used).then(|| expression.optimize())
+}
+
 /// Expose one intersection nested under a common sequence shell. This is an
 /// exact distributive rewrite:
 ///
@@ -3012,6 +3056,7 @@ pub(crate) struct PreparedPartitionedExpressionPair {
     pub(crate) synthesized: Regex,
     full: DeferredPartitionedRegex,
     pub(crate) full_to_synthesized: Vec<u32>,
+    pub(crate) synthesized_expressions: Vec<Expr>,
 }
 
 impl PreparedPartitionedExpressionPair {
@@ -3027,11 +3072,14 @@ impl PreparedPartitionedExpressionPair {
         }
     }
 
-    pub(crate) fn into_parts(self) -> (Regex, DeferredPartitionedRegex, Vec<u32>) {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (Regex, DeferredPartitionedRegex, Vec<u32>, Vec<Expr>) {
         (
             self.synthesized,
             self.full,
             self.full_to_synthesized,
+            self.synthesized_expressions,
         )
     }
 }
@@ -3878,6 +3926,47 @@ fn combine_synthesized_component_pairs_under_epsilon_root(
     (combined, offsets)
 }
 
+fn compose_partitioned_component_state_maps(
+    components: &[LexerComponentPair],
+    synthesized_offsets: &[u32],
+) -> Option<Vec<u32>> {
+    if components.len() != synthesized_offsets.len() {
+        return None;
+    }
+    let full_state_count = 1usize.checked_add(
+        components
+            .iter()
+            .map(|component| component.full.num_states())
+            .sum::<usize>(),
+    )?;
+    let mut full_to_synthesized = Vec::with_capacity(full_state_count);
+    full_to_synthesized.push(0);
+    let mut expected_synthesized_offset = 1u32;
+
+    for (component, &synthesized_offset) in components.iter().zip(synthesized_offsets) {
+        if synthesized_offset != expected_synthesized_offset
+            || component.full_to_synthesized.len() != component.full.num_states()
+            || component
+                .full_to_synthesized
+                .iter()
+                .any(|&state| state as usize >= component.synthesized.num_states())
+        {
+            return None;
+        }
+        full_to_synthesized.extend(
+            component
+                .full_to_synthesized
+                .iter()
+                .map(|&state| synthesized_offset.checked_add(state))
+                .collect::<Option<Vec<_>>>()?,
+        );
+        expected_synthesized_offset = expected_synthesized_offset
+            .checked_add(component.synthesized.num_states() as u32)?;
+    }
+
+    (full_to_synthesized.len() == full_state_count).then_some(full_to_synthesized)
+}
+
 fn combine_lexer_components_under_epsilon_root(
     components: Vec<LexerComponent>,
     total_groups: usize,
@@ -4178,6 +4267,7 @@ pub(crate) fn compile_further_synthesized_tokenizer_with_structural_map(
     let mut output_components = Vec::<LexerComponent>::with_capacity(extracted.len());
     let mut component_maps = Vec::<(Vec<u32>, Vec<u32>)>::with_capacity(extracted.len());
     let mut handled_changed = vec![false; changed.len()];
+    let mut effective_synthesized_expressions = synthesized_expressions.to_vec();
 
     for component in extracted {
         let changed_terminals = component
@@ -4222,6 +4312,7 @@ pub(crate) fn compile_further_synthesized_tokenizer_with_structural_map(
         else {
             return reject("protected_pair");
         };
+        effective_synthesized_expressions[terminal] = pair.synthesized_expression.clone();
         let (mut synthesized, synthesized_nullable) =
             isolate_component_nullable_start(pair.synthesized.dfa, 1);
         let (rebuilt, rebuilt_nullable) = isolate_component_nullable_start(pair.full.dfa, 1);
@@ -4312,7 +4403,9 @@ pub(crate) fn compile_further_synthesized_tokenizer_with_structural_map(
     }
     let tokenizer = Regex { dfa }.into_tokenizer(
         source_expressions.len() as u32,
-        Some(Arc::from(synthesized_expressions.to_vec().into_boxed_slice())),
+        Some(Arc::from(
+            effective_synthesized_expressions.into_boxed_slice(),
+        )),
     );
     if profile {
         eprintln!(
@@ -4439,13 +4532,16 @@ pub(crate) fn prepare_partitioned_expression_pair_with_structural_map(
                     );
                 }
                 let state_count = dfa.num_states() as u32;
-                return Some(LexerComponentPair {
-                    terminal_ids,
-                    synthesized: dfa.clone(),
-                    full: DeferredDfa::Ready(dfa),
-                    full_to_synthesized: (0..state_count).collect(),
-                    protected_residual: false,
-                });
+                return Some((
+                    LexerComponentPair {
+                        terminal_ids,
+                        synthesized: dfa.clone(),
+                        full: DeferredDfa::Ready(dfa),
+                        full_to_synthesized: (0..state_count).collect(),
+                        protected_residual: false,
+                    },
+                    None,
+                ));
             }
 
             if changed_terminals.len() != 1 || terminal_ids.len() != 1 {
@@ -4501,19 +4597,26 @@ pub(crate) fn prepare_partitioned_expression_pair_with_structural_map(
                 }
                 return None;
             }
-            Some(LexerComponentPair {
-                terminal_ids,
-                synthesized,
-                full,
-                full_to_synthesized: pair.full_to_synthesized,
-                protected_residual: true,
-            })
+            Some((
+                LexerComponentPair {
+                    terminal_ids,
+                    synthesized,
+                    full,
+                    full_to_synthesized: pair.full_to_synthesized,
+                    protected_residual: true,
+                },
+                Some((terminal, pair.synthesized_expression)),
+            ))
         })
         .collect::<Option<Vec<_>>>()?;
 
     let mut protected = Vec::new();
     let mut ordinary = Vec::new();
-    for pair in compiled {
+    let mut effective_synthesized_expressions = synthesized_exprs.to_vec();
+    for (pair, effective_expression) in compiled {
+        if let Some((terminal, expression)) = effective_expression {
+            effective_synthesized_expressions[terminal] = expression;
+        }
         if pair.protected_residual {
             protected.push(pair);
         } else {
@@ -4558,30 +4661,8 @@ pub(crate) fn prepare_partitioned_expression_pair_with_structural_map(
 
     let (synthesized, synthesized_offsets) =
         combine_synthesized_component_pairs_under_epsilon_root(&pairs, full_exprs.len());
-    let mut full_offsets = Vec::with_capacity(pairs.len());
-    let mut full_state_count = 1usize;
-    for pair in &pairs {
-        full_offsets.push(full_state_count as u32);
-        full_state_count = full_state_count.checked_add(pair.full.num_states())?;
-    }
-    let mut full_to_synthesized = Vec::with_capacity(full_state_count);
-    full_to_synthesized.push(0);
-    for (component_index, pair) in pairs.iter().enumerate() {
-        let synthesized_offset = synthesized_offsets[component_index];
-        let full_offset = full_offsets[component_index];
-        debug_assert_eq!(full_to_synthesized.len(), full_offset as usize);
-        if pair.full_to_synthesized.len() != pair.full.num_states() {
-            return None;
-        }
-        full_to_synthesized.extend(
-            pair.full_to_synthesized
-                .iter()
-                .map(|&state| synthesized_offset + state),
-        );
-    }
-    if full_to_synthesized.len() != full_state_count {
-        return None;
-    }
+    let full_to_synthesized =
+        compose_partitioned_component_state_maps(&pairs, &synthesized_offsets)?;
 
     Some(PreparedPartitionedExpressionPair {
         synthesized: Regex { dfa: synthesized },
@@ -4590,6 +4671,7 @@ pub(crate) fn prepare_partitioned_expression_pair_with_structural_map(
             total_groups: full_exprs.len(),
         },
         full_to_synthesized,
+        synthesized_expressions: effective_synthesized_expressions,
     })
 }
 
@@ -6244,12 +6326,14 @@ pub(crate) struct CompiledTerminalExpressionPair {
     pub(crate) synthesized: Regex,
     pub(crate) full: Regex,
     pub(crate) full_to_synthesized: Vec<u32>,
+    pub(crate) synthesized_expression: Expr,
 }
 
 struct PreparedTerminalExpressionPair {
     synthesized: Regex,
     full: DeferredDfa,
     full_to_synthesized: Vec<u32>,
+    synthesized_expression: Expr,
 }
 
 /// Return the number of structurally aligned product components available to
@@ -6290,6 +6374,26 @@ fn prepare_terminal_expression_pair_with_structural_map(
     repeat_horizons: &VocabularyRepeatHorizonCache,
     max_token_len: usize,
     relevant_bytes: &[u8],
+) -> Option<PreparedTerminalExpressionPair> {
+    prepare_terminal_expression_pair_with_structural_map_inner(
+        full_expression,
+        synthesized_expression,
+        vocab,
+        repeat_horizons,
+        max_token_len,
+        relevant_bytes,
+        true,
+    )
+}
+
+fn prepare_terminal_expression_pair_with_structural_map_inner(
+    full_expression: &Expr,
+    synthesized_expression: &Expr,
+    vocab: &Vocab,
+    repeat_horizons: &VocabularyRepeatHorizonCache,
+    max_token_len: usize,
+    relevant_bytes: &[u8],
+    allow_component_identity_fallback: bool,
 ) -> Option<PreparedTerminalExpressionPair> {
     let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
     let total_started_at = profile.then(Instant::now);
@@ -6384,6 +6488,7 @@ fn prepare_terminal_expression_pair_with_structural_map(
             },
             full: DeferredDfa::Ready(full_dfa),
             full_to_synthesized,
+            synthesized_expression: synthesized_expression.clone(),
         });
     }
 
@@ -6651,8 +6756,45 @@ fn prepare_terminal_expression_pair_with_structural_map(
             mapping
         },
         )
-        .collect::<Option<Vec<_>>>();
-    let Some(component_maps) = component_maps else {
+        .collect::<Vec<_>>();
+    let failed_components = component_maps
+        .iter()
+        .enumerate()
+        .filter_map(|(component, mapping)| mapping.is_none().then_some(component))
+        .collect::<Vec<_>>();
+    if !failed_components.is_empty() && allow_component_identity_fallback {
+        let mut effective_components = synthesized_component_expressions.clone();
+        for &component in &failed_components {
+            effective_components[component] = full_component_expressions[component].clone();
+        }
+        let effective_expression = rebuild_single_visible_group_expression(
+            &effective_components,
+            &exclusions,
+            &intersections,
+        )?;
+        if effective_expression == *synthesized_expression {
+            return None;
+        }
+        if profile {
+            eprintln!(
+                "[glrmask/profile][tokenizer] structural_component_identity_fallback components={:?} full_states={} synthesized_states={} total_components={}",
+                failed_components,
+                full_dfa.num_states(),
+                synthesized_dfa.num_states(),
+                full_trace.components.len(),
+            );
+        }
+        return prepare_terminal_expression_pair_with_structural_map_inner(
+            full_expression,
+            &effective_expression,
+            vocab,
+            repeat_horizons,
+            max_token_len,
+            relevant_bytes,
+            false,
+        );
+    }
+    let Some(component_maps) = component_maps.into_iter().collect::<Option<Vec<_>>>() else {
         if profile {
             eprintln!(
                 "[glrmask/profile][tokenizer] structural_pair_rejected stage=component_map full_states={} synthesized_states={} components={}",
@@ -6927,6 +7069,7 @@ fn prepare_terminal_expression_pair_with_structural_map(
         },
         full,
         full_to_synthesized,
+        synthesized_expression: synthesized_expression.clone(),
     })
 }
 
@@ -6952,6 +7095,7 @@ pub(crate) fn compile_terminal_expression_pair_with_structural_map(
             dfa: prepared.full.finish(),
         },
         full_to_synthesized: prepared.full_to_synthesized,
+        synthesized_expression: prepared.synthesized_expression,
     })
 }
 
@@ -8088,7 +8232,7 @@ mod tests {
     use crate::Vocab;
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
 
     fn byte_expr(byte: u8) -> Expr {
@@ -8141,6 +8285,115 @@ mod tests {
         let mut out = Vec::new();
         extend(&mut out, &mut Vec::new(), alphabet, max_len);
         out
+    }
+
+    fn component_pair_for_map_test(
+        full_states: usize,
+        synthesized_states: usize,
+        full_to_synthesized: Vec<u32>,
+        protected_residual: bool,
+    ) -> super::LexerComponentPair {
+        super::LexerComponentPair {
+            terminal_ids: vec![0],
+            synthesized: DFA::new(synthesized_states),
+            full: super::DeferredDfa::Ready(DFA::new(full_states)),
+            full_to_synthesized,
+            protected_residual,
+        }
+    }
+
+    #[test]
+    fn partitioned_component_maps_compose_identity_and_protected_offsets() {
+        let components = vec![
+            component_pair_for_map_test(2, 2, vec![0, 1], false),
+            component_pair_for_map_test(3, 2, vec![0, 1, 1], true),
+        ];
+        let map = super::compose_partitioned_component_state_maps(&components, &[1, 3])
+            .expect("complete component maps compose");
+
+        assert_eq!(map, vec![0, 1, 2, 3, 4, 4]);
+        assert_eq!(map.len(), 1 + 2 + 3);
+    }
+
+    #[test]
+    fn partitioned_component_map_composition_rejects_incomplete_or_invalid_maps() {
+        let incomplete = vec![component_pair_for_map_test(3, 2, vec![0, 1], true)];
+        assert!(super::compose_partitioned_component_state_maps(&incomplete, &[1]).is_none());
+
+        let invalid_target = vec![component_pair_for_map_test(2, 2, vec![0, 2], true)];
+        assert!(
+            super::compose_partitioned_component_state_maps(&invalid_target, &[1]).is_none()
+        );
+
+        let wrong_offset = vec![component_pair_for_map_test(2, 2, vec![0, 1], false)];
+        assert!(super::compose_partitioned_component_state_maps(&wrong_offset, &[2]).is_none());
+    }
+
+    #[test]
+    fn rebuilt_mixed_product_expression_preserves_group_operation_semantics() {
+        let components = vec![byte_choice(b"ab"), byte_expr(b'b'), byte_expr(b'a')];
+        let exclusions = BTreeMap::from([(0, BTreeSet::from([1]))]);
+        let intersections = BTreeMap::from([(0, BTreeSet::from([2]))]);
+        let rebuilt = super::rebuild_single_visible_group_expression(
+            &components,
+            &exclusions,
+            &intersections,
+        )
+        .expect("single visible product reconstruction");
+
+        for input in enumerate_inputs(b"ab", 2) {
+            assert_eq!(terminal_matches(rebuilt.clone(), &input), input == b"a");
+        }
+    }
+
+    #[test]
+    fn terminal_structural_map_matches_generic_certifier_on_small_repeat() {
+        let full_expression = Expr::Repeat {
+            expr: Box::new(byte_expr(b'a')),
+            min: 1,
+            max: Some(64),
+        };
+        let synthesized_expression = Expr::Repeat {
+            expr: Box::new(byte_expr(b'a')),
+            min: 1,
+            max: Some(6),
+        };
+        let vocab = Vocab::new(vec![
+            (0, b"a".to_vec()),
+            (1, b"aa".to_vec()),
+            (2, b"aaaa".to_vec()),
+            (3, b"x".to_vec()),
+        ]);
+        let horizons = super::VocabularyRepeatHorizonCache::new();
+        let pair = super::compile_terminal_expression_pair_with_structural_map(
+            &full_expression,
+            &synthesized_expression,
+            &vocab,
+            &horizons,
+            vocab.max_token_byte_len(),
+            &vocab.relevant_bytes(),
+        )
+        .expect("structural repeat map");
+        let structural_map = pair.full_to_synthesized.clone();
+        let full = pair.full.into_tokenizer(
+            1,
+            Some(Arc::from(vec![full_expression].into_boxed_slice())),
+        );
+        let synthesized = pair.synthesized.into_tokenizer(
+            1,
+            Some(Arc::from(
+                vec![pair.synthesized_expression].into_boxed_slice(),
+            )),
+        );
+        let generic = crate::compiler::stages::id_map_and_terminal_dwa::synthetic_state_map::certify_full_to_synthesized_state_map(
+            &full,
+            &synthesized,
+            &vocab,
+            Some(&[true]),
+        )
+        .expect("generic certification");
+
+        assert_eq!(structural_map, generic.full_to_synthesized);
     }
 
     #[test]
