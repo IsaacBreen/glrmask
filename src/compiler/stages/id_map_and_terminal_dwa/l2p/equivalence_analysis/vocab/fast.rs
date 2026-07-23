@@ -661,6 +661,10 @@ struct Scratch {
     /// For the active DFS path, how many initial states have their latest
     /// match for `(position, group)` at this slot.
     trie_target_group_counts: Vec<u32>,
+    /// Bitset of live groups at each token position. Optional experimental
+    /// materialization avoids rescanning all groups for every dirty token.
+    trie_target_group_bits: Vec<u64>,
+    trie_target_bits_enabled: bool,
     /// Number of live groups at each token position in the active DFS path.
     trie_target_position_counts: Vec<u32>,
     targets: Vec<usize>,
@@ -687,6 +691,8 @@ static VOCAB_ROW_CERT_DIAG: Lazy<bool> =
     Lazy::new(|| env_flag_enabled("GLRMASK_VOCAB_EQUIV_ROW_CERT_DIAG"));
 static VOCAB_SPARSE_DIRTY_FINISH_DISABLED: Lazy<bool> =
     Lazy::new(|| env_flag_enabled("GLRMASK_DISABLE_VOCAB_SPARSE_DIRTY_FINISH"));
+static VOCAB_TRIE_TARGET_BITS_ENABLED: Lazy<bool> =
+    Lazy::new(|| env_flag_enabled("GLRMASK_VOCAB_TRIE_TARGET_BITS"));
 
 #[inline]
 fn new_hasher() -> AHasher {
@@ -714,6 +720,45 @@ fn vocab_sequential_trie_work_max() -> usize {
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
         .unwrap_or(VOCAB_SEQUENTIAL_TRIE_WORK_MAX_DEFAULT)
+}
+
+fn first_transition_factor_enabled() -> bool {
+    env_flag_enabled("GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR")
+}
+
+fn first_transition_factor_strict_reference_enabled() -> bool {
+    env_flag_enabled("GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_STRICT_REFERENCE")
+}
+
+fn first_transition_factor_min_bucket_tokens() -> usize {
+    std::env::var("GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_MIN_BUCKET_TOKENS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&value| value >= 2)
+        .unwrap_or(2)
+}
+
+fn first_transition_factor_max_work_ratio() -> f64 {
+    std::env::var("GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_MAX_WORK_RATIO")
+        .ok()
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(0.25)
+}
+
+fn first_transition_factor_force_parallel_buckets() -> bool {
+    env_flag_enabled("GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_PARALLEL_BUCKETS")
+}
+
+fn first_transition_factor_final_single_batch_enabled() -> bool {
+    env_flag_enabled("GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_FINAL_SINGLE_BATCH")
+}
+
+fn first_transition_factor_authority_batch_size_override() -> Option<usize> {
+    std::env::var("GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_AUTHORITY_BATCH_SIZE")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&value| value > 0)
 }
 
 fn default_vocab_batch_size(
@@ -1018,6 +1063,8 @@ impl Scratch {
             dirty_words,
             num_groups,
             trie_target_group_counts: Vec::new(),
+            trie_target_group_bits: Vec::new(),
+            trie_target_bits_enabled: *VOCAB_TRIE_TARGET_BITS_ENABLED,
             trie_target_position_counts: Vec::new(),
             targets: Vec::new(),
             target_gids: HashMap::new(),
@@ -1078,11 +1125,17 @@ fn ensure_completion_weights(scratch: &mut Scratch, num_states: usize) {
 }
 
 fn reset_trie_target_aggregate(scratch: &mut Scratch, max_token_len: usize) {
-    let slots = (max_token_len + 1).saturating_mul(scratch.num_groups);
+    let positions = max_token_len + 1;
+    let slots = positions.saturating_mul(scratch.num_groups);
     scratch.trie_target_group_counts.resize(slots, 0);
     scratch.trie_target_group_counts[..slots].fill(0);
-    scratch.trie_target_position_counts.resize(max_token_len + 1, 0);
-    scratch.trie_target_position_counts[..=max_token_len].fill(0);
+    if scratch.trie_target_bits_enabled {
+        let bit_slots = positions.saturating_mul(scratch.dirty_words);
+        scratch.trie_target_group_bits.resize(bit_slots, 0);
+        scratch.trie_target_group_bits[..bit_slots].fill(0);
+    }
+    scratch.trie_target_position_counts.resize(positions, 0);
+    scratch.trie_target_position_counts[..positions].fill(0);
 }
 
 #[inline(always)]
@@ -1106,6 +1159,10 @@ fn update_trie_target_aggregate(
         if scratch.trie_target_group_counts[index] == 0 {
             debug_assert!(scratch.trie_target_position_counts[position] > 0);
             scratch.trie_target_position_counts[position] -= 1;
+            if scratch.trie_target_bits_enabled {
+                let bit_index = position * scratch.dirty_words + gid / 64;
+                scratch.trie_target_group_bits[bit_index] &= !(1u64 << (gid % 64));
+            }
         }
     };
     let add = |scratch: &mut Scratch, position: usize, gid: usize| {
@@ -1115,6 +1172,10 @@ fn update_trie_target_aggregate(
         let index = position * scratch.num_groups + gid;
         if scratch.trie_target_group_counts[index] == 0 {
             scratch.trie_target_position_counts[position] += 1;
+            if scratch.trie_target_bits_enabled {
+                let bit_index = position * scratch.dirty_words + gid / 64;
+                scratch.trie_target_group_bits[bit_index] |= 1u64 << (gid % 64);
+            }
         }
         scratch.trie_target_group_counts[index] += 1;
     };
@@ -1141,11 +1202,26 @@ fn collect_trie_targets(scratch: &mut Scratch, token_len: usize) {
         if scratch.trie_target_position_counts[position] == 0 {
             continue;
         }
-        let base = position * scratch.num_groups;
         let mut gids = SmallVec::<[usize; 16]>::new();
-        for gid in 0..scratch.num_groups {
-            if scratch.trie_target_group_counts[base + gid] != 0 {
-                gids.push(gid);
+        if scratch.trie_target_bits_enabled {
+            let bit_base = position * scratch.dirty_words;
+            for word_index in 0..scratch.dirty_words {
+                let mut bits = scratch.trie_target_group_bits[bit_base + word_index];
+                while bits != 0 {
+                    let bit = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    let gid = word_index * 64 + bit;
+                    if gid < scratch.num_groups {
+                        gids.push(gid);
+                    }
+                }
+            }
+        } else {
+            let base = position * scratch.num_groups;
+            for gid in 0..scratch.num_groups {
+                if scratch.trie_target_group_counts[base + gid] != 0 {
+                    gids.push(gid);
+                }
             }
         }
         debug_assert!(!gids.is_empty());
@@ -2260,6 +2336,7 @@ fn dfs_step(
     trie: &mut TrieWalkState,
     byte: u8,
     depth: usize,
+    position_offset: usize,
     batch_len: usize,
 ) {
     trie.ensure_depth(depth);
@@ -2280,7 +2357,7 @@ fn dfs_step(
 
     let num_groups = dfa.num_groups;
     let dirty_words = scratch.dirty_words;
-    let position = (depth + 1) as u32;
+    let position = (position_offset + depth + 1) as u32;
     let class = dfa.byte_to_class[byte as usize] as usize;
     let class_base = class * dfa.num_states;
 
@@ -2346,6 +2423,7 @@ fn dfs_step_profiled(
     trie: &mut TrieWalkState,
     byte: u8,
     depth: usize,
+    position_offset: usize,
     batch_len: usize,
 ) -> DfsStepStats {
     trie.ensure_depth(depth);
@@ -2368,7 +2446,7 @@ fn dfs_step_profiled(
 
     let num_groups = dfa.num_groups;
     let dirty_words = scratch.dirty_words;
-    let position = (depth + 1) as u32;
+    let position = (position_offset + depth + 1) as u32;
     let class = dfa.byte_to_class[byte as usize] as usize;
     let class_base = class * dfa.num_states;
 
@@ -2699,6 +2777,38 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
     trie: &mut TrieWalkState,
     profile: bool,
 ) -> (Vec<(usize, u64)>, TrieWalkChunkStats) {
+    trie_walk_chunk_signatures_from_prefix(
+        dfa,
+        strings,
+        chunk,
+        batch,
+        state_group_size,
+        0,
+        scratch,
+        trie,
+        profile,
+    )
+}
+
+/// Process tokens after a common already-consumed prefix.
+///
+/// `batch` is the DFA outcome coordinate after `position_offset` bytes. A
+/// `STATE_NONE` entry denotes an already-dead path. For the first-transition
+/// quotient `position_offset == 1`; finalizers of each live successor are
+/// seeded at match position 1 before the suffix trie walk begins. Tokens remain
+/// the original full byte strings so suffix-restart hashing observes the exact
+/// original positions.
+fn trie_walk_chunk_signatures_from_prefix<S: AsRef<[u8]> + Sync>(
+    dfa: &Dfa,
+    strings: &[S],
+    chunk: &[usize],
+    batch: &[usize],
+    _state_group_size: usize,
+    position_offset: usize,
+    scratch: &mut Scratch,
+    trie: &mut TrieWalkState,
+    profile: bool,
+) -> (Vec<(usize, u64)>, TrieWalkChunkStats) {
     let batch_len = batch.len();
     let num_groups = dfa.num_groups;
     let mut results = Vec::with_capacity(chunk.len());
@@ -2707,50 +2817,87 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
     };
     let mut stats = TrieWalkChunkStats::default();
 
-    // Initialize: copy initial states and mark dead-ends
     scratch.current_states[..batch_len].clone_from_slice(batch);
     trie.root_active_indices.clear();
     {
         let dirty_words = scratch.dirty_words;
         let mask_end = batch_len * dirty_words;
-        for v in scratch.dirty_group_masks[..mask_end].iter_mut() {
-            *v = 0;
-        }
+        scratch.dirty_group_masks[..mask_end].fill(0);
     }
-    for flag in scratch.dirty_state_flags[..batch_len].iter_mut() {
-        *flag = 0;
-    }
+    scratch.dirty_state_flags[..batch_len].fill(0);
     let dirty_state_words = batch_len.div_ceil(64);
     scratch.dirty_state_bits[..dirty_state_words].fill(0);
     ensure_completion_weights(scratch, batch_len);
     let all_none_signature = all_none_completion_signature(dfa, batch_len);
-    for i in 0..batch_len {
-        if dfa.is_dead_end[scratch.current_states[i]] {
-            scratch.current_states[i] = STATE_NONE;
-        } else {
-            trie.root_active_indices.push(i);
-        }
-    }
+
     let max_token_len = chunk
         .iter()
         .map(|&token_idx| strings[token_idx].as_ref().len())
         .max()
         .unwrap_or(0);
+    debug_assert!(chunk
+        .iter()
+        .all(|&token_idx| strings[token_idx].as_ref().len() >= position_offset));
     reset_trie_target_aggregate(scratch, max_token_len);
 
-    let mut current_depth: usize = 0;
-    let mut prev_token: &[u8] = &[];
-    // dirty_state_flag_changes records states that transition 0→1 at each depth.
-    let mut dirty_count: usize = 0;
+    let mut dirty_count = 0usize;
+    if position_offset == 0 {
+        for i in 0..batch_len {
+            let state = scratch.current_states[i];
+            debug_assert_ne!(state, STATE_NONE);
+            if dfa.is_dead_end[state] {
+                scratch.current_states[i] = STATE_NONE;
+            } else {
+                trie.root_active_indices.push(i);
+            }
+        }
+    } else {
+        let seeded_position = position_offset as u32;
+        for i in 0..batch_len {
+            let state = scratch.current_states[i];
+            if state == STATE_NONE {
+                continue;
+            }
+            debug_assert!(state < dfa.num_states);
+            let base = i * num_groups;
+            let mut state_became_dirty = false;
+            for &gid in &dfa.finalizers[state] {
+                if gid >= num_groups {
+                    continue;
+                }
+                let ix = base + gid;
+                debug_assert_eq!(scratch.match_positions[ix], NONE);
+                mark_dirty_group(scratch, i, gid);
+                update_trie_target_aggregate(scratch, gid, NONE, seeded_position);
+                scratch.match_positions[ix] = seeded_position;
+                state_became_dirty = true;
+            }
+            if state_became_dirty {
+                set_dirty_state_bit(&mut scratch.dirty_state_bits, i);
+                dirty_count += 1;
+            }
+            if dfa.is_dead_end[state] {
+                scratch.current_states[i] = STATE_NONE;
+            } else {
+                trie.root_active_indices.push(i);
+            }
+        }
+    }
+
+    let initial_dirty_count = dirty_count;
+    let mut current_depth = 0usize;
+    let mut prev_suffix: &[u8] = &[];
 
     for &token_idx in chunk {
         let token = strings[token_idx].as_ref();
+        let suffix = &token[position_offset..];
         let token_len = token.len();
+        let suffix_len = suffix.len();
         let dfs_started_at = profile.then(Instant::now);
 
-        let lcp = prev_token
+        let lcp = prev_suffix
             .iter()
-            .zip(token.iter())
+            .zip(suffix.iter())
             .take_while(|(left, right)| left == right)
             .count();
 
@@ -2761,17 +2908,17 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
             dfs_backtrack(scratch, trie, current_depth, lcp);
         }
 
-        for depth in lcp..token_len {
+        for depth in lcp..suffix_len {
             if profile {
-                let step_stats =
-                    dfs_step_profiled(
-                        dfa,
-                        scratch,
-                        trie,
-                        token[depth],
-                        depth,
-                        batch_len,
-                    );
+                let step_stats = dfs_step_profiled(
+                    dfa,
+                    scratch,
+                    trie,
+                    suffix[depth],
+                    depth,
+                    position_offset,
+                    batch_len,
+                );
                 dirty_count += trie.depth_logs[depth].dirty_state_flag_changes.len();
                 stats.dfs_steps += 1;
                 if step_stats.new_dirty_groups == 0 {
@@ -2788,19 +2935,20 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
                     dfa,
                     scratch,
                     trie,
-                    token[depth],
+                    suffix[depth],
                     depth,
+                    position_offset,
                     batch_len,
                 );
                 dirty_count += trie.depth_logs[depth].dirty_state_flag_changes.len();
             }
         }
         stats.dfs_step_ms += elapsed_ms(dfs_started_at);
-        current_depth = token_len;
-        let live_indices = if token_len == 0 {
+        current_depth = suffix_len;
+        let live_indices = if suffix_len == 0 {
             trie.root_active_indices.as_slice()
         } else {
-            trie.depth_logs[token_len - 1].active_indices.as_slice()
+            trie.depth_logs[suffix_len - 1].active_indices.as_slice()
         };
 
         let sig = if dirty_count == 0 {
@@ -2865,15 +3013,304 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
         };
 
         results.push((token_idx, sig));
-        prev_token = token;
+        prev_suffix = suffix;
     }
 
-    // Final backtrack to restore scratch to clean state
     if current_depth > 0 {
+        for depth in (0..current_depth).rev() {
+            dirty_count -= trie.depth_logs[depth].dirty_state_flag_changes.len();
+        }
         dfs_backtrack(scratch, trie, current_depth, 0);
+    }
+    debug_assert_eq!(dirty_count, initial_dirty_count);
+
+    // Prefix observations are the root baseline rather than trie-log changes,
+    // so remove them explicitly before returning the scratch worker to the pool.
+    if position_offset != 0 {
+        let seeded_position = position_offset as u32;
+        for (i, &state) in batch.iter().enumerate() {
+            if state == STATE_NONE {
+                continue;
+            }
+            let base = i * num_groups;
+            for &gid in &dfa.finalizers[state] {
+                if gid >= num_groups {
+                    continue;
+                }
+                let ix = base + gid;
+                debug_assert_eq!(scratch.match_positions[ix], seeded_position);
+                update_trie_target_aggregate(
+                    scratch,
+                    gid,
+                    scratch.match_positions[ix],
+                    NONE,
+                );
+                scratch.match_positions[ix] = NONE;
+            }
+        }
+        scratch.dirty_state_flags[..batch_len].fill(0);
+        scratch.dirty_state_bits[..dirty_state_words].fill(0);
+        let mask_end = batch_len * scratch.dirty_words;
+        scratch.dirty_group_masks[..mask_end].fill(0);
     }
 
     (results, stats)
+}
+
+#[derive(Clone, Copy, Default)]
+struct FirstTransitionFactorStats {
+    semantic_buckets: usize,
+    factored_buckets: usize,
+    min_bucket_tokens: usize,
+    source_state_buckets_before: usize,
+    source_state_buckets_after: usize,
+    full_state_token_pairs: usize,
+    preliminary_state_token_pairs: usize,
+    preliminary_classes: usize,
+    parallel_buckets: bool,
+    preliminary_signature_ms: f64,
+    preliminary_grouping_ms: f64,
+    trie_walk: TrieWalkChunkStats,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FirstTransitionFactorMode {
+    Disabled,
+    Environment,
+    Force,
+}
+
+struct FirstTransitionFactorPlan {
+    preliminary_classes: Vec<Vec<usize>>,
+    representative_tokens: Vec<usize>,
+    preliminary_class_for_representative: Vec<usize>,
+    stats: FirstTransitionFactorStats,
+}
+
+struct FirstTransitionBucket {
+    token_indices: Vec<usize>,
+    initial_outcomes: Vec<usize>,
+}
+
+struct FirstTransitionBucketResult {
+    classes: Vec<Vec<usize>>,
+    signature_ms: f64,
+    grouping_ms: f64,
+    trie_walk: TrieWalkChunkStats,
+}
+
+/// Build an exact token prepartition using deterministic first transitions.
+///
+/// The source coordinate is allowed to vary by semantic leading-byte class,
+/// but remains static for the complete traversal of that class. This is
+/// deliberately different from the rejected dynamic selective-frontier paths:
+/// no per-node membership structure is maintained or restored. Each class is
+/// classified once over one representative source per distinct first
+/// successor, using the already-built analysis DFA, one shared lexical order,
+/// and a shared scratch pool. A later ordinary all-source pass over one token
+/// representative per preliminary class is still the exact authority.
+fn try_first_transition_factor_plan<S: AsRef<[u8]> + Sync>(
+    dfa: &Dfa,
+    strings: &[S],
+    initial_states: &[usize],
+    lexical_order: &[usize],
+    scratch_pool: &Arc<ScratchPool>,
+    profiling: bool,
+    enforce_work_ratio: bool,
+) -> Option<FirstTransitionFactorPlan> {
+    if *TRIE_WALK_DISABLED
+        || strings.len() < 2
+        || initial_states.len() < 2
+        || strings.iter().any(|token| token.as_ref().is_empty())
+    {
+        return None;
+    }
+
+    let num_classes = dfa
+        .byte_to_class
+        .iter()
+        .copied()
+        .max()
+        .map_or(0usize, |max_class| max_class as usize + 1);
+    let mut tokens_by_class = (0..num_classes)
+        .map(|_| Vec::<usize>::new())
+        .collect::<Vec<_>>();
+    for &token_idx in lexical_order {
+        let first_byte = strings[token_idx].as_ref()[0];
+        let class = dfa.byte_to_class[first_byte as usize] as usize;
+        tokens_by_class[class].push(token_idx);
+    }
+
+    let min_bucket_tokens = first_transition_factor_min_bucket_tokens();
+    let mut buckets = Vec::<FirstTransitionBucket>::new();
+    let mut singleton_tokens = Vec::<usize>::new();
+    let mut semantic_buckets = 0usize;
+    let mut source_state_buckets_before = 0usize;
+    let mut source_state_buckets_after = 0usize;
+    let mut preliminary_state_token_pairs = 0usize;
+
+    for token_indices in tokens_by_class.into_iter().filter(|bucket| !bucket.is_empty()) {
+        semantic_buckets += 1;
+        if token_indices.len() < min_bucket_tokens {
+            singleton_tokens.extend(token_indices);
+            continue;
+        }
+
+        let first_byte = strings[token_indices[0]].as_ref()[0];
+        let mut initial_outcomes = Vec::with_capacity(initial_states.len());
+        for &source in initial_states {
+            // The ordinary engine suppresses a source marked dead before it
+            // consumes any token byte. A pre-dead source and a live source with
+            // no first transition therefore share STATE_NONE. A transition to
+            // a real dead-end state remains distinct because its first-byte
+            // finalizers are observable before the path dies.
+            let effective_outcome = if dfa.is_dead_end[source] {
+                STATE_NONE
+            } else {
+                let target = dfa.transition(source, first_byte);
+                if target == NONE {
+                    STATE_NONE
+                } else {
+                    target as usize
+                }
+            };
+            initial_outcomes.push(effective_outcome);
+        }
+        initial_outcomes.sort_unstable();
+        initial_outcomes.dedup();
+        source_state_buckets_before = source_state_buckets_before
+            .saturating_add(initial_states.len());
+        source_state_buckets_after = source_state_buckets_after
+            .saturating_add(initial_outcomes.len());
+        preliminary_state_token_pairs = preliminary_state_token_pairs.saturating_add(
+            token_indices.len().saturating_mul(initial_outcomes.len()),
+        );
+        buckets.push(FirstTransitionBucket {
+            token_indices,
+            initial_outcomes,
+        });
+    }
+
+    if buckets.is_empty() {
+        return None;
+    }
+
+    let full_state_token_pairs = strings.len().saturating_mul(initial_states.len());
+    let preliminary_ratio = preliminary_state_token_pairs as f64
+        / full_state_token_pairs.max(1) as f64;
+    if enforce_work_ratio && preliminary_ratio > first_transition_factor_max_work_ratio() {
+        return None;
+    }
+
+    // Suffix sorting is required only for an accepted plan. Deferring it until
+    // after the structural work-ratio test keeps default-off/rejected attempts
+    // from sorting every large vocabulary a second time.
+    for bucket in &mut buckets {
+        bucket.token_indices.sort_unstable_by(|&left, &right| {
+            strings[left].as_ref()[1..]
+                .cmp(&strings[right].as_ref()[1..])
+                .then_with(|| left.cmp(&right))
+        });
+    }
+
+    let process_bucket = |bucket: &FirstTransitionBucket| {
+        let signature_started_at = Instant::now();
+        let mut lease = scratch_pool.checkout(bucket.initial_outcomes.len(), dfa.num_groups);
+        let worker = lease.worker_mut();
+        let state_group_size = vocab_state_group_size(bucket.initial_outcomes.len(), dfa.num_groups);
+        let (active_sigs, trie_walk) = trie_walk_chunk_signatures_from_prefix(
+            dfa,
+            strings,
+            &bucket.token_indices,
+            &bucket.initial_outcomes,
+            state_group_size,
+            1,
+            &mut worker.scratch,
+            &mut worker.trie_state,
+            profiling,
+        );
+        let signature_ms = signature_started_at.elapsed().as_secs_f64() * 1000.0;
+
+        let grouping_started_at = Instant::now();
+        let mut by_signature = HashMap::<u64, Vec<usize>>::with_capacity(active_sigs.len());
+        for (token_idx, signature) in active_sigs {
+            by_signature.entry(signature).or_default().push(token_idx);
+        }
+        let mut classes = by_signature.into_values().collect::<Vec<_>>();
+        for class in &mut classes {
+            class.sort_unstable();
+        }
+        classes.sort_unstable_by_key(|class| class[0]);
+        let grouping_ms = grouping_started_at.elapsed().as_secs_f64() * 1000.0;
+
+        FirstTransitionBucketResult {
+            classes,
+            signature_ms,
+            grouping_ms,
+            trie_walk,
+        }
+    };
+
+    // This engine normally runs inside the partition-level Rayon scheduler.
+    // Spawning one nested task per semantic leading class can starve the outer
+    // partition DAG when several partitions enter this path concurrently. Keep
+    // the buckets sequential inside an existing Rayon worker; only use bucket
+    // parallelism when the engine is invoked outside a Rayon job.
+    let parallel_buckets = buckets.len() > 1
+        && rayon::current_num_threads() > 1
+        && (rayon::current_thread_index().is_none()
+            || first_transition_factor_force_parallel_buckets());
+    let bucket_results = if parallel_buckets {
+        buckets.par_iter().map(process_bucket).collect::<Vec<_>>()
+    } else {
+        buckets.iter().map(process_bucket).collect::<Vec<_>>()
+    };
+
+    let mut stats = FirstTransitionFactorStats {
+        semantic_buckets,
+        factored_buckets: buckets.len(),
+        min_bucket_tokens,
+        source_state_buckets_before,
+        source_state_buckets_after,
+        full_state_token_pairs,
+        preliminary_state_token_pairs,
+        parallel_buckets,
+        ..FirstTransitionFactorStats::default()
+    };
+    let mut preliminary_classes = singleton_tokens
+        .into_iter()
+        .map(|token_idx| vec![token_idx])
+        .collect::<Vec<_>>();
+    for result in bucket_results {
+        stats.preliminary_signature_ms += result.signature_ms;
+        stats.preliminary_grouping_ms += result.grouping_ms;
+        stats.trie_walk.add_assign(result.trie_walk);
+        preliminary_classes.extend(result.classes);
+    }
+    preliminary_classes.sort_unstable_by_key(|class| class[0]);
+    stats.preliminary_classes = preliminary_classes.len();
+
+    if preliminary_classes.len() >= strings.len() {
+        return None;
+    }
+
+    let mut preliminary_class_for_representative = vec![usize::MAX; strings.len()];
+    let representative_tokens = preliminary_classes
+        .iter()
+        .enumerate()
+        .map(|(class_idx, class)| {
+            let representative = class[0];
+            preliminary_class_for_representative[representative] = class_idx;
+            representative
+        })
+        .collect::<Vec<_>>();
+
+    Some(FirstTransitionFactorPlan {
+        preliminary_classes,
+        representative_tokens,
+        preliminary_class_for_representative,
+        stats,
+    })
 }
 
 /// Vocab equivalence with optional group filtering.
@@ -3402,6 +3839,30 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
     shared_cache: Option<&SharedVocabDfaCache>,
     shared_analysis_dfa_cache: Option<&SharedVocabAnalysisDfaCache>,
 ) -> (VocabEquivalenceResult, f64) {
+    find_vocab_equivalence_classes_with_group_filter_profiled_impl(
+        tokenizer,
+        strings,
+        initial_states,
+        disallowed_follows,
+        byte_to_class,
+        active_groups,
+        shared_cache,
+        shared_analysis_dfa_cache,
+        FirstTransitionFactorMode::Environment,
+    )
+}
+
+fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]> + Sync>(
+    tokenizer: &TokenizerView,
+    strings: &[S],
+    initial_states: &[usize],
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    byte_to_class: Option<&[u8; 256]>,
+    active_groups: Option<&[bool]>,
+    shared_cache: Option<&SharedVocabDfaCache>,
+    shared_analysis_dfa_cache: Option<&SharedVocabAnalysisDfaCache>,
+    first_transition_factor_mode: FirstTransitionFactorMode,
+) -> (VocabEquivalenceResult, f64) {
     let input_state_count = tokenizer.dfa().states.len();
     if let Some((position, &state)) = initial_states
         .iter()
@@ -3539,6 +4000,75 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
         return (BTreeSet::from_iter(vec![(0..num_tokens).collect()]), build_dfa_ms);
     }
 
+    let lexical_order_started_at = profiling.then(Instant::now);
+    let factor_enabled = match first_transition_factor_mode {
+        FirstTransitionFactorMode::Disabled => false,
+        FirstTransitionFactorMode::Environment => first_transition_factor_enabled(),
+        FirstTransitionFactorMode::Force => true,
+    };
+    let lexical_order_needed = (num_tokens >= TRIE_WALK_MIN_TOKENS && !*TRIE_WALK_DISABLED)
+        || factor_enabled;
+    let lexical_order = lexical_order_needed.then(|| token_indices_in_lexical_order(strings));
+    let mut sort_tokens_ms = elapsed_ms(lexical_order_started_at);
+    let scratch_pool = Arc::new(ScratchPool::default());
+
+    let preliminary_factor_started_at = profiling.then(Instant::now);
+    let factor_plan = factor_enabled.then(|| {
+        try_first_transition_factor_plan(
+            dfa_ref,
+            strings,
+            initial_states_ref,
+            lexical_order
+                .as_deref()
+                .expect("first-transition factorization requires lexical token order"),
+            &scratch_pool,
+            profiling,
+            first_transition_factor_mode != FirstTransitionFactorMode::Force,
+        )
+    });
+    let factor_plan = factor_plan.flatten();
+    let preliminary_factor_ms = elapsed_ms(preliminary_factor_started_at);
+    if profiling {
+        if factor_enabled {
+            eprintln!(
+                "[glrmask/profile][vocab_first_transition_factor_attempt] strings={} initial_states={} selected={} total_ms={:.3}",
+                num_tokens,
+                num_initial_states,
+                factor_plan.is_some(),
+                preliminary_factor_ms,
+            );
+        }
+        if let Some(plan) = factor_plan.as_ref() {
+            let stats = plan.stats;
+            let reduction_pct = 100.0
+                * (1.0
+                    - stats.preliminary_state_token_pairs as f64
+                        / stats.full_state_token_pairs.max(1) as f64);
+            eprintln!(
+                "[glrmask/profile][vocab_first_transition_factor] strings={} initial_states={} semantic_buckets={} factored_buckets={} parallel_buckets={} min_bucket_tokens={} source_state_buckets_before={} source_state_buckets_after={} full_state_token_pairs={} preliminary_state_token_pairs={} work_reduction_pct={:.2} preliminary_classes={} representative_tokens={} signature_cpu_ms={:.3} grouping_cpu_ms={:.3} wall_ms={:.3}",
+                num_tokens,
+                num_initial_states,
+                stats.semantic_buckets,
+                stats.factored_buckets,
+                stats.parallel_buckets,
+                stats.min_bucket_tokens,
+                stats.source_state_buckets_before,
+                stats.source_state_buckets_after,
+                stats.full_state_token_pairs,
+                stats.preliminary_state_token_pairs,
+                reduction_pct,
+                stats.preliminary_classes,
+                plan.representative_tokens.len(),
+                stats.preliminary_signature_ms,
+                stats.preliminary_grouping_ms,
+                preliminary_factor_ms,
+            );
+        }
+    }
+
+    let analysis_token_count = factor_plan
+        .as_ref()
+        .map_or(num_tokens, |plan| plan.representative_tokens.len());
     let state_order_started_at = profiling.then(Instant::now);
     let ordered_states = if diversity_state_order_enabled() {
         states_by_transition_diversity(dfa_ref, initial_states_ref)
@@ -3570,24 +4100,45 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
     // repeated trie traversal. Bound the default by the dominant
     // `match_positions` allocation so unusually wide terminal-group axes do
     // not inherit an unbounded memory increase. Keep the env override for A/B.
-    let batch_size = vocab_batch_size_override().unwrap_or_else(|| {
-        default_vocab_batch_size(num_initial_states, num_groups, num_tokens)
-    });
-    let mut active_indices: Vec<usize> = (0..num_tokens).collect();
-    let mut active_tokens = vec![true; num_tokens];
-    let lexical_order_started_at = profiling.then(Instant::now);
-    let lexical_order = (num_tokens >= TRIE_WALK_MIN_TOKENS && !*TRIE_WALK_DISABLED)
-        .then(|| token_indices_in_lexical_order(strings));
-    let mut sort_tokens_ms = elapsed_ms(lexical_order_started_at);
+    let default_batch_size =
+        default_vocab_batch_size(num_initial_states, num_groups, analysis_token_count);
+    let factor_final_single_batch = factor_plan.is_some()
+        && first_transition_factor_final_single_batch_enabled()
+        && analysis_token_count.saturating_mul(num_initial_states)
+            <= vocab_sequential_trie_work_max();
+    let factor_authority_batch_size = factor_plan
+        .as_ref()
+        .and_then(|_| first_transition_factor_authority_batch_size_override());
+    let batch_size = factor_authority_batch_size
+        .or_else(vocab_batch_size_override)
+        .unwrap_or_else(|| {
+            if factor_final_single_batch {
+                num_initial_states
+            } else {
+                default_batch_size
+            }
+        })
+        .min(num_initial_states);
+    let mut active_indices: Vec<usize> = factor_plan.as_ref().map_or_else(
+        || (0..num_tokens).collect(),
+        |plan| plan.representative_tokens.clone(),
+    );
+    let mut active_tokens = vec![false; num_tokens];
+    for &token_idx in &active_indices {
+        active_tokens[token_idx] = true;
+    }
     let mut partition = vec![0usize; num_tokens];
     let mut next_class_id = 1usize;
-    let mut signature_ms = 0.0;
+    let mut signature_ms = preliminary_factor_ms;
     let mut refinement_ms = 0.0;
     let mut batches = 0usize;
     let mut sequential_trie_batches = 0usize;
-    let mut used_trie_walk = false;
-    let mut trie_walk_stats = TrieWalkChunkStats::default();
-    let scratch_pool = Arc::new(ScratchPool::default());
+    let mut used_trie_walk = factor_plan
+        .as_ref()
+        .is_some_and(|plan| plan.stats.trie_walk.dfs_steps != 0);
+    let mut trie_walk_stats = factor_plan
+        .as_ref()
+        .map_or_else(TrieWalkChunkStats::default, |plan| plan.stats.trie_walk);
 
     // A single Rayon worker previously rebuilt the full scratch arena for every
     // state batch. The arena is deliberately reset by the signature routines,
@@ -3603,7 +4154,7 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
     // unresolved. A distinction found in the probe is permanent under further
     // refinement, so reaching `active_indices.is_empty()` is an exact identity
     // certificate, not a heuristic early exit.
-    let use_singleton_probe = num_tokens <= SINGLETON_PROBE_MAX_TOKENS
+    let use_singleton_probe = analysis_token_count <= SINGLETON_PROBE_MAX_TOKENS
         && num_initial_states > SINGLETON_PROBE_STATES
         && batch_size > SINGLETON_PROBE_STATES;
     let mut batch_start = 0usize;
@@ -3797,11 +4348,43 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
     }
 
     let final_groups_started_at = profiling.then(Instant::now);
-    let mut groups = vec![Vec::new(); next_class_id.max(1)];
-    for (token_idx, &class_id) in partition.iter().enumerate() {
-        groups[class_id].push(token_idx);
+    let analyzed_tokens = factor_plan.as_ref().map_or_else(
+        || (0..num_tokens).collect::<Vec<_>>(),
+        |plan| plan.representative_tokens.clone(),
+    );
+    let mut representative_groups = vec![Vec::new(); next_class_id.max(1)];
+    for token_idx in analyzed_tokens {
+        representative_groups[partition[token_idx]].push(token_idx);
     }
-    let groups: Vec<Vec<usize>> = groups.into_iter().filter(|group| !group.is_empty()).collect();
+    let representative_groups = representative_groups
+        .into_iter()
+        .filter(|group| !group.is_empty())
+        .collect::<Vec<_>>();
+    let groups = if let Some(plan) = factor_plan.as_ref() {
+        representative_groups
+            .into_iter()
+            .map(|representatives| {
+                let total_len = representatives
+                    .iter()
+                    .map(|&representative| {
+                        let class_idx =
+                            plan.preliminary_class_for_representative[representative];
+                        debug_assert_ne!(class_idx, usize::MAX);
+                        plan.preliminary_classes[class_idx].len()
+                    })
+                    .sum();
+                let mut expanded = Vec::with_capacity(total_len);
+                for representative in representatives {
+                    let class_idx = plan.preliminary_class_for_representative[representative];
+                    expanded.extend_from_slice(&plan.preliminary_classes[class_idx]);
+                }
+                expanded.sort_unstable();
+                expanded
+            })
+            .collect::<Vec<_>>()
+    } else {
+        representative_groups
+    };
     let final_groups_ms = elapsed_ms(final_groups_started_at);
 
     if let Some((left_token_idx, right_token_idx)) = vocab_verify_token_pair_override() {
@@ -3856,9 +4439,11 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
 
     if profiling {
         eprintln!(
-            "[glrmask/profile][vocab_equiv] strings={} initial_states={} batches={} sequential_trie_batches={} used_trie_walk={} active_final={} original_states={} effective_states={} compacted={} build_dfa_ms={:.3} compact_dfa_ms={:.3} state_order_ms={:.3} sort_tokens_ms={:.3} signature_ms={:.3} refinement_ms={:.3} final_groups_ms={:.3} dfs_step_ms={:.3} collect_targets_ms={:.3} single_target_suffix_ms={:.3} multi_target_suffix_ms={:.3} finish_signature_ms={:.3} dfs_steps={} dfs_steps_without_new_dirty={} dfs_states_visited={} dfs_dead_transitions={} dfs_dead_without_new_dirty={} dfs_new_dirty_groups={} dfs_new_dirty_states={} dfs_noop_self_loops={} clean_tokens={} dirty_tokens={} single_target_tokens={} multi_target_tokens={} total_targets={} scratch_pool_allocations={} scratch_pool_reuses={} total_ms={:.3}",
+            "[glrmask/profile][vocab_equiv] strings={} initial_states={} batch_size={} factor_final_single_batch={} batches={} sequential_trie_batches={} used_trie_walk={} active_final={} original_states={} effective_states={} compacted={} build_dfa_ms={:.3} compact_dfa_ms={:.3} state_order_ms={:.3} sort_tokens_ms={:.3} signature_ms={:.3} refinement_ms={:.3} final_groups_ms={:.3} dfs_step_ms={:.3} collect_targets_ms={:.3} single_target_suffix_ms={:.3} multi_target_suffix_ms={:.3} finish_signature_ms={:.3} dfs_steps={} dfs_steps_without_new_dirty={} dfs_states_visited={} dfs_dead_transitions={} dfs_dead_without_new_dirty={} dfs_new_dirty_groups={} dfs_new_dirty_states={} dfs_noop_self_loops={} clean_tokens={} dirty_tokens={} single_target_tokens={} multi_target_tokens={} total_targets={} scratch_pool_allocations={} scratch_pool_reuses={} total_ms={:.3}",
             num_tokens,
             num_initial_states,
+            batch_size,
+            factor_final_single_batch,
             batches,
             sequential_trie_batches,
             used_trie_walk,
@@ -3897,7 +4482,38 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
         );
     }
 
-    (groups.into_iter().collect(), build_dfa_ms)
+    let result = groups.into_iter().collect::<VocabEquivalenceResult>();
+    if first_transition_factor_mode != FirstTransitionFactorMode::Disabled
+        && factor_plan.is_some()
+        && first_transition_factor_strict_reference_enabled()
+    {
+        let strict_started_at = Instant::now();
+        let (reference, _) = find_vocab_equivalence_classes_with_group_filter_profiled_impl(
+            tokenizer,
+            strings,
+            initial_states,
+            disallowed_follows,
+            byte_to_class,
+            active_groups,
+            shared_cache,
+            shared_analysis_dfa_cache,
+            FirstTransitionFactorMode::Disabled,
+        );
+        assert_eq!(
+            result, reference,
+            "first-transition factored vocabulary partition differs from ordinary exact analysis",
+        );
+        if profiling {
+            eprintln!(
+                "[glrmask/profile][vocab_first_transition_factor_strict_reference] exact_classes={} reference_classes={} differs=false compare_ms={:.3}",
+                result.len(),
+                reference.len(),
+                strict_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+    }
+
+    (result, build_dfa_ms)
 }
 
 /// Result-only compatibility entry point. Callers that need precise phase
@@ -4019,6 +4635,555 @@ mod shared_base_tests {
             start_state: 0,
             transitions: Arc::from(transitions),
         }
+    }
+
+
+    fn first_transition_factor_dfa() -> FlatDfa {
+        let state_count = 8usize;
+        let mut transitions = vec![u32::MAX; state_count * 256];
+        let mut set = |state: usize, byte: u8, target: usize| {
+            transitions[state * 256 + byte as usize] = target as u32;
+        };
+
+        // 'a' and 'A' are one semantic byte class: their transition columns
+        // are exactly equal. States 0 and 1 also share their first successor.
+        for state in 0..state_count {
+            let target = match state {
+                0 | 1 | 2 | 3 => Some(2),
+                4 => Some(4),
+                5 => Some(5),
+                _ => None,
+            };
+            if let Some(target) = target {
+                set(state, b'a', target);
+                set(state, b'A', target);
+            }
+        }
+        for state in 0..=5 {
+            let target = match state {
+                0 | 1 | 2 | 3 => 3,
+                4 => 4,
+                5 => 5,
+                _ => unreachable!(),
+            };
+            set(state, b'b', target);
+        }
+
+        // 'p' and 'q' use different transition columns, but their destinations
+        // 4 and 5 have identical observations and continuation behavior. The
+        // final authority pass must therefore be able to merge across leading
+        // semantic classes.
+        for state in 0..=5 {
+            let p_target = if state == 5 { 5 } else { 4 };
+            let q_target = if state == 4 { 4 } else { 5 };
+            set(state, b'p', p_target);
+            set(state, b'q', q_target);
+        }
+        set(2, b'x', 6);
+        set(3, b'x', 6);
+        set(2, b'y', 4);
+        set(3, b'y', 5);
+        set(0, b'x', 7);
+        set(0, b'y', 7);
+
+        FlatDfa {
+            states: vec![
+                FlatDfaState {
+                    finalizers: vec![],
+                    possible_future_group_ids: vec![0, 1],
+                },
+                FlatDfaState {
+                    finalizers: vec![],
+                    possible_future_group_ids: vec![0, 1],
+                },
+                FlatDfaState {
+                    finalizers: vec![0],
+                    possible_future_group_ids: vec![0, 1],
+                },
+                FlatDfaState {
+                    finalizers: vec![1],
+                    possible_future_group_ids: vec![0, 1],
+                },
+                FlatDfaState {
+                    finalizers: vec![0],
+                    possible_future_group_ids: vec![0],
+                },
+                FlatDfaState {
+                    finalizers: vec![0],
+                    possible_future_group_ids: vec![0],
+                },
+                FlatDfaState {
+                    finalizers: vec![1],
+                    possible_future_group_ids: vec![],
+                },
+                FlatDfaState {
+                    finalizers: vec![],
+                    possible_future_group_ids: vec![],
+                },
+            ],
+            start_state: 0,
+            transitions: Arc::from(transitions),
+        }
+    }
+
+
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    struct ExactSuffixObservation {
+        completion: Vec<usize>,
+        edges: Vec<(usize, Option<Box<ExactSuffixObservation>>)>,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    struct ExactStateObservation {
+        completion: Vec<usize>,
+        edges: Vec<(usize, Option<Box<ExactSuffixObservation>>)>,
+    }
+
+    fn exact_completion(
+        dfa: &Dfa,
+        state: Option<usize>,
+        disallowed: Option<&BitSet>,
+    ) -> Vec<usize> {
+        let Some(state) = state else {
+            return Vec::new();
+        };
+        dfa.possible_future_groups[state]
+            .iter()
+            .copied()
+            .filter(|&gid| !disallowed.is_some_and(|blocked| blocked.contains(gid)))
+            .collect()
+    }
+
+    fn exact_run_from_state(
+        dfa: &Dfa,
+        token: &[u8],
+        initial_state: usize,
+        include_initial_finalizers: bool,
+    ) -> (Option<usize>, Vec<Option<usize>>) {
+        let mut latest = vec![None; dfa.num_groups];
+        let mut current = initial_state;
+        let mut done = dfa.is_dead_end[current];
+        if include_initial_finalizers {
+            for &gid in &dfa.finalizers[current] {
+                if gid < latest.len() {
+                    latest[gid] = Some(0);
+                }
+            }
+        }
+        for (offset, &byte) in token.iter().enumerate() {
+            if done {
+                break;
+            }
+            let next = dfa.transition(current, byte);
+            if next == NONE {
+                done = true;
+                break;
+            }
+            current = next as usize;
+            for &gid in &dfa.finalizers[current] {
+                if gid < latest.len() {
+                    latest[gid] = Some(offset + 1);
+                }
+            }
+            if dfa.is_dead_end[current] {
+                done = true;
+            }
+        }
+        ((!done).then_some(current), latest)
+    }
+
+    fn exact_intersect_disallowed(
+        slots: &mut BTreeMap<usize, BitSet>,
+        position: usize,
+        incoming: &BitSet,
+    ) {
+        slots
+            .entry(position)
+            .and_modify(|existing| *existing = existing.intersection(incoming))
+            .or_insert_with(|| incoming.clone());
+    }
+
+    fn exact_state_observation(
+        dfa: &Dfa,
+        token: &[u8],
+        initial_state: usize,
+    ) -> ExactStateObservation {
+        let (end_state, latest) = exact_run_from_state(dfa, token, initial_state, false);
+        let root_matches = latest
+            .into_iter()
+            .enumerate()
+            .filter_map(|(gid, position)| {
+                position
+                    .filter(|&position| position > 0)
+                    .map(|position| (gid, position))
+            })
+            .collect::<Vec<_>>();
+        let mut root_gids = BTreeMap::<usize, Vec<usize>>::new();
+        for &(gid, position) in &root_matches {
+            root_gids.entry(position).or_default().push(gid);
+        }
+
+        let mut suffix_runs = BTreeMap::<usize, (Option<usize>, Vec<(usize, usize)>)>::new();
+        let mut pending = root_gids
+            .keys()
+            .copied()
+            .filter(|&position| position < token.len())
+            .collect::<BTreeSet<_>>();
+        while let Some(position) = pending.pop_first() {
+            if suffix_runs.contains_key(&position) {
+                continue;
+            }
+            let (suffix_end, suffix_latest) = exact_run_from_state(
+                dfa,
+                &token[position..],
+                dfa.start_state,
+                true,
+            );
+            let mut edges = suffix_latest
+                .into_iter()
+                .enumerate()
+                .filter_map(|(gid, relative)| {
+                    relative
+                        .filter(|&relative| relative > 0)
+                        .map(|relative| (gid, position + relative))
+                })
+                .collect::<Vec<_>>();
+            edges.sort_unstable();
+            for &(_, target) in &edges {
+                if target < token.len() && !suffix_runs.contains_key(&target) {
+                    pending.insert(target);
+                }
+            }
+            suffix_runs.insert(position, (suffix_end, edges));
+        }
+
+        let mut disallowed_at = BTreeMap::<usize, BitSet>::new();
+        for (&position, gids) in &root_gids {
+            let mut rows = gids.iter().map(|&gid| dfa.disallowed_for(gid));
+            if let Some(first) = rows.next() {
+                let mut combined = first.clone();
+                for row in rows {
+                    combined = combined.intersection(row);
+                }
+                disallowed_at.insert(position, combined);
+            }
+        }
+        for (&position, (_, edges)) in &suffix_runs {
+            let blocked = disallowed_at.get(&position).cloned();
+            for &(gid, target) in edges {
+                if blocked.as_ref().is_some_and(|blocked| blocked.contains(gid)) {
+                    continue;
+                }
+                if target < token.len() {
+                    exact_intersect_disallowed(
+                        &mut disallowed_at,
+                        target,
+                        dfa.disallowed_for(gid),
+                    );
+                }
+            }
+        }
+
+        let mut built = BTreeMap::<usize, ExactSuffixObservation>::new();
+        for (&position, (suffix_end, edges)) in suffix_runs.iter().rev() {
+            let blocked = disallowed_at.get(&position);
+            let exact_edges = edges
+                .iter()
+                .filter(|(gid, _)| !blocked.is_some_and(|blocked| blocked.contains(*gid)))
+                .map(|&(gid, target)| {
+                    let child = (target < token.len())
+                        .then(|| Box::new(built[&target].clone()));
+                    (gid, child)
+                })
+                .collect();
+            built.insert(
+                position,
+                ExactSuffixObservation {
+                    completion: exact_completion(dfa, *suffix_end, blocked),
+                    edges: exact_edges,
+                },
+            );
+        }
+
+        let edges = root_matches
+            .into_iter()
+            .map(|(gid, position)| {
+                let child = (position < token.len())
+                    .then(|| Box::new(built[&position].clone()));
+                (gid, child)
+            })
+            .collect();
+        ExactStateObservation {
+            completion: exact_completion(dfa, end_state, None),
+            edges,
+        }
+    }
+
+    fn exact_vocab_partition(
+        dfa: &Dfa,
+        tokens: &[impl AsRef<[u8]>],
+        states: &[usize],
+    ) -> VocabEquivalenceResult {
+        let mut classes = BTreeMap::<Vec<ExactStateObservation>, Vec<usize>>::new();
+        for (token_idx, token) in tokens.iter().enumerate() {
+            let key = states
+                .iter()
+                .map(|&state| exact_state_observation(dfa, token.as_ref(), state))
+                .collect::<Vec<_>>();
+            classes.entry(key).or_default().push(token_idx);
+        }
+        classes.into_values().collect()
+    }
+
+    #[test]
+    fn first_transition_factor_matches_ordinary_exact_partition() {
+        let view = TokenizerView {
+            flat_dfa: first_transition_factor_dfa(),
+        };
+        let tokens: Vec<&[u8]> = vec![
+            b"a", b"A", b"aa", b"Aa", b"ax", b"Ax", b"ay", b"Ay", b"b", b"bx",
+            b"by", b"p", b"q", b"pp", b"qq", b"c", b"d", b"ax", b"x", b"x",
+        ];
+        let states = (0..view.dfa().states.len()).collect::<Vec<_>>();
+        let byte_classes = compute_byte_classes(view.dfa());
+        let mut blocked = BitSet::new(2);
+        blocked.set(1);
+        let disallowed = BTreeMap::from([(0u32, blocked)]);
+
+        let (ordinary, _) = find_vocab_equivalence_classes_with_group_filter_profiled_impl(
+            &view,
+            &tokens,
+            &states,
+            &disallowed,
+            Some(&byte_classes),
+            None,
+            None,
+            None,
+            FirstTransitionFactorMode::Disabled,
+        );
+        let (factored, _) = find_vocab_equivalence_classes_with_group_filter_profiled_impl(
+            &view,
+            &tokens,
+            &states,
+            &disallowed,
+            Some(&byte_classes),
+            None,
+            None,
+            None,
+            FirstTransitionFactorMode::Force,
+        );
+        let analysis_dfa =
+            build_dfa_with_group_filter(&view, &disallowed, Some(&byte_classes), None, None);
+        let direct = exact_vocab_partition(&analysis_dfa, &tokens, &states);
+
+        assert_eq!(ordinary, direct, "ordinary hash partition must match direct observations");
+        assert_eq!(factored, direct, "factored partition must match direct observations");
+        assert!(
+            factored
+                .iter()
+                .any(|class| class.contains(&4) && class.contains(&17)),
+            "duplicate byte strings must merge: {factored:?}",
+        );
+        assert!(
+            factored.iter().any(|class| class.contains(&11) && class.contains(&12)),
+            "the final authority pass must merge equivalent tokens from different leading classes",
+        );
+        assert!(
+            factored.iter().any(|class| class.contains(&18) && class.contains(&19)),
+            "a first transition into a finalizing dead-end state must be preserved",
+        );
+    }
+
+
+    #[test]
+    fn first_transition_factor_randomized_direct_differential() {
+        fn next(random: &mut u64) -> u64 {
+            *random = random
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *random
+        }
+
+        const ALPHABET: [u8; 7] = [b'a', b'A', b'b', b'p', b'q', b'x', b'y'];
+        for seed in 0..48u64 {
+            let mut random = seed.wrapping_add(0x9e3779b97f4a7c15);
+            let state_count = 3 + (next(&mut random) as usize % 6);
+            let group_count = 1 + (next(&mut random) as usize % 4);
+            let mut transitions = vec![u32::MAX; state_count * 256];
+            for state in 0..state_count {
+                for &byte in &[b'a', b'b', b'p', b'q', b'x', b'y'] {
+                    let draw = next(&mut random);
+                    if draw % 5 != 0 {
+                        transitions[state * 256 + byte as usize] =
+                            (draw as usize % state_count) as u32;
+                    }
+                }
+                // Guarantee one nontrivial semantic byte class in every case.
+                transitions[state * 256 + b'A' as usize] =
+                    transitions[state * 256 + b'a' as usize];
+            }
+            let states = (0..state_count)
+                .map(|_| {
+                    let mut finalizers = (0..group_count)
+                        .filter(|_| next(&mut random) % 4 == 0)
+                        .collect::<Vec<_>>();
+                    let mut future = (0..group_count)
+                        .filter(|_| next(&mut random) % 3 != 0)
+                        .collect::<Vec<_>>();
+                    finalizers.sort_unstable();
+                    future.sort_unstable();
+                    FlatDfaState {
+                        finalizers,
+                        possible_future_group_ids: future,
+                    }
+                })
+                .collect::<Vec<_>>();
+            let view = TokenizerView {
+                flat_dfa: FlatDfa {
+                    states,
+                    start_state: next(&mut random) as usize % state_count,
+                    transitions: Arc::from(transitions),
+                },
+            };
+            let mut tokens = vec![
+                b"a".to_vec(),
+                b"A".to_vec(),
+                b"aa".to_vec(),
+                b"Aa".to_vec(),
+                b"ax".to_vec(),
+                b"Ax".to_vec(),
+                b"p".to_vec(),
+                b"q".to_vec(),
+                b"ax".to_vec(),
+            ];
+            for _ in 0..24 {
+                let len = 1 + next(&mut random) as usize % 4;
+                let token = (0..len)
+                    .map(|_| ALPHABET[next(&mut random) as usize % ALPHABET.len()])
+                    .collect::<Vec<_>>();
+                tokens.push(token);
+            }
+            let initial_states = (0..state_count).collect::<Vec<_>>();
+            let mut disallowed = BTreeMap::<u32, BitSet>::new();
+            for gid in 0..group_count {
+                let mut row = BitSet::new(group_count);
+                for blocked in 0..group_count {
+                    if next(&mut random) % 4 == 0 {
+                        row.set(blocked);
+                    }
+                }
+                if !row.is_zero() {
+                    disallowed.insert(gid as u32, row);
+                }
+            }
+            let byte_classes = compute_byte_classes(view.dfa());
+            let (ordinary, _) = find_vocab_equivalence_classes_with_group_filter_profiled_impl(
+                &view,
+                &tokens,
+                &initial_states,
+                &disallowed,
+                Some(&byte_classes),
+                None,
+                None,
+                None,
+                FirstTransitionFactorMode::Disabled,
+            );
+            let (factored, _) = find_vocab_equivalence_classes_with_group_filter_profiled_impl(
+                &view,
+                &tokens,
+                &initial_states,
+                &disallowed,
+                Some(&byte_classes),
+                None,
+                None,
+                None,
+                FirstTransitionFactorMode::Force,
+            );
+            let analysis_dfa = build_dfa_with_group_filter(
+                &view,
+                &disallowed,
+                Some(&byte_classes),
+                None,
+                None,
+            );
+
+            assert_eq!(factored, ordinary, "factored/reference mismatch at seed {seed}");
+
+            // Directly certify the quotient invariant without relying on hash
+            // equality: within one semantic first-byte class, sources with the
+            // same effective first outcome must have identical structural
+            // observations for the complete token.
+            for token in &tokens {
+                let first_byte = token[0];
+                let mut observations = BTreeMap::<u32, ExactStateObservation>::new();
+                for &source in &initial_states {
+                    let effective_target = if analysis_dfa.is_dead_end[source] {
+                        NONE
+                    } else {
+                        analysis_dfa.transition(source, first_byte)
+                    };
+                    let observation =
+                        exact_state_observation(&analysis_dfa, token, source);
+                    if let Some(previous) = observations.insert(effective_target, observation.clone()) {
+                        assert_eq!(
+                            observation, previous,
+                            "first-successor invariant mismatch at seed {seed} token={token:?} source={source}",
+                        );
+                    }
+                }
+            }
+
+            // Bytes in one semantic class must be interchangeable at the first
+            // position when the suffix is held fixed.
+            assert_eq!(byte_classes[b'a' as usize], byte_classes[b'A' as usize]);
+            for suffix in [b"".as_slice(), b"x", b"ay", b"pq"] {
+                let mut lower = vec![b'a'];
+                lower.extend_from_slice(suffix);
+                let mut upper = vec![b'A'];
+                upper.extend_from_slice(suffix);
+                for &source in &initial_states {
+                    assert_eq!(
+                        exact_state_observation(&analysis_dfa, &lower, source),
+                        exact_state_observation(&analysis_dfa, &upper, source),
+                        "semantic leading-byte mismatch at seed {seed} source={source} suffix={suffix:?}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn first_transition_factor_falls_back_for_empty_tokens() {
+        let view = TokenizerView {
+            flat_dfa: first_transition_factor_dfa(),
+        };
+        let tokens: Vec<&[u8]> = vec![b"", b"a", b"A", b"ax", b"ax"];
+        let states = (0..view.dfa().states.len()).collect::<Vec<_>>();
+        let byte_classes = compute_byte_classes(view.dfa());
+        let disallowed = BTreeMap::new();
+        let (ordinary, _) = find_vocab_equivalence_classes_with_group_filter_profiled_impl(
+            &view,
+            &tokens,
+            &states,
+            &disallowed,
+            Some(&byte_classes),
+            None,
+            None,
+            None,
+            FirstTransitionFactorMode::Disabled,
+        );
+        let (forced, _) = find_vocab_equivalence_classes_with_group_filter_profiled_impl(
+            &view,
+            &tokens,
+            &states,
+            &disallowed,
+            Some(&byte_classes),
+            None,
+            None,
+            None,
+            FirstTransitionFactorMode::Force,
+        );
+        assert_eq!(forced, ordinary);
     }
 
     fn padded_sample_dfa() -> FlatDfa {
@@ -4451,6 +5616,7 @@ mod shared_base_tests {
     #[test]
     fn trie_target_aggregate_matches_dirty_mask_scan() {
         let mut scratch = Scratch::new(2, 3);
+        scratch.trie_target_bits_enabled = true;
         reset_trie_target_aggregate(&mut scratch, 4);
 
         let set_match = |scratch: &mut Scratch, state: usize, gid: usize, position: u32| {
