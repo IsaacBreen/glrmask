@@ -1433,19 +1433,49 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
         (result, idx)
     };
     let serial_profile_partition_schedule = compile_profile_uses_serial_partition_schedule();
+    let mut partition_schedule = (0..sub_vocabs.len()).collect::<Vec<_>>();
+    let partition_schedule_name =
+        std::env::var("GLRMASK_PARTITION_SCHEDULE_ORDER").unwrap_or_else(|_| "index".into());
+    match partition_schedule_name.as_str() {
+        "index" => {}
+        "largest_first" => partition_schedule.sort_unstable_by(|&left, &right| {
+            sub_vocabs[right]
+                .len()
+                .cmp(&sub_vocabs[left].len())
+                .then_with(|| left.cmp(&right))
+        }),
+        "smallest_first" => partition_schedule.sort_unstable_by(|&left, &right| {
+            sub_vocabs[left]
+                .len()
+                .cmp(&sub_vocabs[right].len())
+                .then_with(|| left.cmp(&right))
+        }),
+        other => panic!(
+            "Invalid GLRMASK_PARTITION_SCHEDULE_ORDER={other}; expected one of: index, largest_first, smallest_first"
+        ),
+    }
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][partition_schedule] order={} indices={:?} vocab_sizes={:?}",
+            partition_schedule_name,
+            partition_schedule,
+            partition_schedule
+                .iter()
+                .map(|&idx| sub_vocabs[idx].len())
+                .collect::<Vec<_>>(),
+        );
+    }
     let partition_build_started_at = Instant::now();
     let partition_results: Vec<(Option<(types::PartitionTerminalDwas, f64)>, usize)> =
         if serial_profile_partition_schedule {
-            sub_vocabs
+            partition_schedule
                 .iter()
-                .enumerate()
-                .map(|(idx, sub_vocab)| build_partition(idx, sub_vocab))
+                .map(|&idx| build_partition(idx, &sub_vocabs[idx]))
                 .collect()
         } else {
-            sub_vocabs
+            partition_schedule
                 .par_iter()
-                .enumerate()
-                .map(|(idx, sub_vocab)| build_partition(idx, sub_vocab))
+                .map(|&idx| build_partition(idx, &sub_vocabs[idx]))
                 .collect()
         };
     let partition_build_wall_ms =
