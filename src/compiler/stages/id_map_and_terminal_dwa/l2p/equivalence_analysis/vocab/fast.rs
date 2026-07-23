@@ -61,10 +61,6 @@ struct Dfa {
     /// Transposed transition table: `trans_by_class[class * num_states + state]`.
     /// For a given byte class, all state transitions are contiguous in memory.
     trans_by_class: Arc<[u32]>,
-    num_classes: usize,
-    /// Per-state classes that are output-free self loops. These masks let the
-    /// selective trie executor skip positions that provably cannot change.
-    noop_class_masks: Vec<[u64; 4]>,
     finalizers: Vec<SmallVec<[usize; 4]>>,
     is_dead_end: Vec<bool>,
     num_groups: usize,
@@ -842,26 +838,6 @@ fn hash_filtered_group_list(groups: &[usize], disallowed: &BitSet) -> u64 {
     h.finish()
 }
 
-fn build_noop_class_masks(
-    num_states: usize,
-    num_classes: usize,
-    transitions_by_class: &[u32],
-    finalizers: &[SmallVec<[usize; 4]>],
-) -> Vec<[u64; 4]> {
-    let mut masks = vec![[0u64; 4]; num_states];
-    for state in 0..num_states {
-        if !finalizers[state].is_empty() {
-            continue;
-        }
-        for class in 0..num_classes {
-            if transitions_by_class[class * num_states + state] == state as u32 {
-                masks[state][class / 64] |= 1u64 << (class % 64);
-            }
-        }
-    }
-    masks
-}
-
 fn build_dfa(
     tokenizer: &TokenizerView,
     disallowed_follows: &BTreeMap<u32, BitSet>,
@@ -983,29 +959,11 @@ fn build_dfa_with_group_filter(
             (btc, Arc::from(tbc), Arc::from(slb), nch)
         };
 
-    let num_classes = byte_to_class
-        .iter()
-        .copied()
-        .max()
-        .map_or(0usize, |class| class as usize + 1);
-    let noop_class_masks = if trie_selective_work_enabled() {
-        build_noop_class_masks(
-            num_dfa_states,
-            num_classes,
-            &trans_by_class,
-            &finalizers,
-        )
-    } else {
-        Vec::new()
-    };
-
     Dfa {
         start_state: dfa.start_state,
         num_states: num_dfa_states,
         byte_to_class,
         trans_by_class,
-        num_classes,
-        noop_class_masks,
         finalizers,
         is_dead_end,
         num_groups,
@@ -2124,101 +2082,6 @@ const TRIE_WALK_MIN_TOKENS: usize = 256;
 static TRIE_WALK_DISABLED: Lazy<bool> =
     Lazy::new(|| env_flag_enabled("GLRMASK_DISABLE_TRIE_WALK"));
 
-
-fn trie_selective_work_enabled() -> bool {
-    env_flag_enabled("GLRMASK_TRIE_SELECTIVE_WORK")
-}
-
-struct TrieSelectiveInitial {
-    words: usize,
-    live_bits: Box<[u64]>,
-    /// Class-major bitsets. A set bit means this initial-state position must be
-    /// processed for the class; clear live bits are output-free self loops.
-    class_work_bits: Box<[u64]>,
-}
-
-impl TrieSelectiveInitial {
-    fn new(dfa: &Dfa, batch: &[usize]) -> Self {
-        debug_assert_eq!(dfa.noop_class_masks.len(), dfa.num_states);
-        let words = batch.len().div_ceil(64);
-        let mut live_bits = vec![0u64; words];
-        for (index, &state) in batch.iter().enumerate() {
-            if !dfa.is_dead_end[state] {
-                live_bits[index / 64] |= 1u64 << (index % 64);
-            }
-        }
-
-        // This stores the complement of each current state's no-op classes.
-        // Liveness is maintained separately and intersected at each step. That
-        // lets a transition to dead retain its prior class membership: the
-        // live bit hides it until backtracking restores the old state.
-        let mut class_work_bits = vec![0u64; dfa.num_classes * words];
-        for index in 0..batch.len() {
-            for class in 0..dfa.num_classes {
-                class_work_bits[class * words + index / 64] |= 1u64 << (index % 64);
-            }
-        }
-        for (index, &state) in batch.iter().enumerate() {
-            let noop = dfa.noop_class_masks[state];
-            for (word_index, mut classes) in noop.into_iter().enumerate() {
-                while classes != 0 {
-                    let bit = classes.trailing_zeros() as usize;
-                    classes &= classes - 1;
-                    let class = word_index * 64 + bit;
-                    if class >= dfa.num_classes {
-                        break;
-                    }
-                    class_work_bits[class * words + index / 64] &=
-                        !(1u64 << (index % 64));
-                }
-            }
-        }
-
-        Self {
-            words,
-            live_bits: live_bits.into_boxed_slice(),
-            class_work_bits: class_work_bits.into_boxed_slice(),
-        }
-    }
-}
-
-#[inline]
-fn set_selective_live(live_bits: &mut [u64], index: usize) {
-    live_bits[index / 64] |= 1u64 << (index % 64);
-}
-
-#[inline]
-fn clear_selective_live(live_bits: &mut [u64], index: usize) {
-    live_bits[index / 64] &= !(1u64 << (index % 64));
-}
-
-/// Update one batch position's per-class work membership after a live state
-/// transition. Only classes whose no-op status changed need a bit operation.
-#[inline]
-fn update_selective_class_work(
-    dfa: &Dfa,
-    class_work_bits: &mut [u64],
-    words: usize,
-    index: usize,
-    old_state: usize,
-    new_state: usize,
-) {
-    let old = dfa.noop_class_masks[old_state];
-    let new = dfa.noop_class_masks[new_state];
-    for mask_word in 0..4 {
-        let mut changed = old[mask_word] ^ new[mask_word];
-        while changed != 0 {
-            let bit = changed.trailing_zeros() as usize;
-            changed &= changed - 1;
-            let class = mask_word * 64 + bit;
-            if class >= dfa.num_classes {
-                break;
-            }
-            class_work_bits[class * words + index / 64] ^= 1u64 << (index % 64);
-        }
-    }
-}
-
 struct DepthChangeLog {
     /// Batch indices whose DFA paths remain live after this depth.
     active_indices: Vec<usize>,
@@ -2255,9 +2118,6 @@ impl DepthChangeLog {
 struct TrieWalkState {
     root_active_indices: Vec<usize>,
     depth_logs: Vec<DepthChangeLog>,
-    selective_words: usize,
-    selective_live_bits: Vec<u64>,
-    selective_class_work_bits: Vec<u64>,
 }
 
 impl TrieWalkState {
@@ -2265,19 +2125,7 @@ impl TrieWalkState {
         Self {
             root_active_indices: Vec::new(),
             depth_logs: Vec::new(),
-            selective_words: 0,
-            selective_live_bits: Vec::new(),
-            selective_class_work_bits: Vec::new(),
         }
-    }
-
-    fn load_selective_initial(&mut self, initial: &TrieSelectiveInitial) {
-        self.selective_words = initial.words;
-        self.selective_live_bits.clear();
-        self.selective_live_bits.extend_from_slice(&initial.live_bits);
-        self.selective_class_work_bits.clear();
-        self.selective_class_work_bits
-            .extend_from_slice(&initial.class_work_bits);
     }
 
     fn ensure_depth(&mut self, depth: usize) {
@@ -2418,7 +2266,6 @@ fn dfs_step(
     let TrieWalkState {
         root_active_indices,
         depth_logs,
-        ..
     } = trie;
     let (source_indices, log) = if depth == 0 {
         (root_active_indices.as_slice(), &mut depth_logs[0])
@@ -2505,7 +2352,6 @@ fn dfs_step_profiled(
     let TrieWalkState {
         root_active_indices,
         depth_logs,
-        ..
     } = trie;
     let (source_indices, log) = if depth == 0 {
         (root_active_indices.as_slice(), &mut depth_logs[0])
@@ -2597,140 +2443,8 @@ fn dfs_step_profiled(
     step_stats
 }
 
-/// Selective trie step. Positions whose current state is an output-free
-/// self-loop for this byte class are absent from the work bitset and therefore
-/// remain unchanged without being visited.
-fn dfs_step_selective(
-    dfa: &Dfa,
-    scratch: &mut Scratch,
-    trie: &mut TrieWalkState,
-    byte: u8,
-    depth: usize,
-    batch_len: usize,
-    profile: bool,
-) -> DfsStepStats {
-    trie.ensure_depth(depth);
-    let TrieWalkState {
-        depth_logs,
-        selective_words,
-        selective_live_bits,
-        selective_class_work_bits,
-        ..
-    } = trie;
-    let log = &mut depth_logs[depth];
-    log.clear();
-
-    let mut step_stats = DfsStepStats::default();
-    let num_groups = dfa.num_groups;
-    let dirty_words = scratch.dirty_words;
-    let position = (depth + 1) as u32;
-    let class = dfa.byte_to_class[byte as usize] as usize;
-    let class_base = class * dfa.num_states;
-    let work_base = class * *selective_words;
-
-    for word_index in 0..*selective_words {
-        let live = selective_live_bits[word_index];
-        let mut work = live & selective_class_work_bits[work_base + word_index];
-        if profile {
-            step_stats.noop_self_loops +=
-                live.count_ones() as usize - work.count_ones() as usize;
-        }
-        while work != 0 {
-            let bit = work.trailing_zeros() as usize;
-            work &= work - 1;
-            let i = word_index * 64 + bit;
-            if i >= batch_len {
-                break;
-            }
-
-            let old_state = scratch.current_states[i];
-            debug_assert_ne!(old_state, STATE_NONE);
-            debug_assert!(
-                !dfa.finalizers[old_state].is_empty()
-                    || !dfa.self_loop_bytes[old_state].contains(byte),
-                "stale selective work bit: depth={depth} byte={byte:?} class={class} index={i} state={old_state} noop_mask={:?}",
-                dfa.noop_class_masks[old_state],
-            );
-            if profile {
-                step_stats.states_visited += 1;
-            }
-
-            let mut state_new_dirty_groups = 0usize;
-            let next_state_raw =
-                unsafe { *dfa.trans_by_class.get_unchecked(class_base + old_state) };
-            log.state_changes.push((i, old_state));
-            if next_state_raw == NONE {
-                scratch.current_states[i] = STATE_NONE;
-                clear_selective_live(selective_live_bits, i);
-                if profile {
-                    step_stats.dead_transitions += 1;
-                    step_stats.dead_without_new_dirty += 1;
-                }
-                continue;
-            }
-
-            let ns = next_state_raw as usize;
-            scratch.current_states[i] = ns;
-
-            let base = i * num_groups;
-            for &gid in &dfa.finalizers[ns] {
-                if gid < num_groups {
-                    let ix = base + gid;
-                    let old_mp = scratch.match_positions[ix];
-                    if old_mp == NONE {
-                        let dirty_word = gid / 64;
-                        let dirty_bit = gid % 64;
-                        let flat_idx = i * dirty_words + dirty_word;
-                        log.dirty_changes
-                            .push((flat_idx, scratch.dirty_group_masks[flat_idx]));
-                        if scratch.dirty_state_flags[i] == 0 {
-                            log.dirty_state_flag_changes
-                                .push((i, scratch.dirty_state_flags[i]));
-                            scratch.dirty_state_flags[i] = 1;
-                            set_dirty_state_bit(&mut scratch.dirty_state_bits, i);
-                            if profile {
-                                step_stats.new_dirty_states += 1;
-                            }
-                        }
-                        scratch.dirty_group_masks[flat_idx] |= 1u64 << dirty_bit;
-                        if profile {
-                            step_stats.new_dirty_groups += 1;
-                            state_new_dirty_groups += 1;
-                        }
-                    }
-                    log.match_changes.push((ix, old_mp));
-                    update_trie_target_aggregate(scratch, gid, old_mp, position);
-                    scratch.match_positions[ix] = position;
-                }
-            }
-
-            if dfa.is_dead_end[ns] {
-                scratch.current_states[i] = STATE_NONE;
-                clear_selective_live(selective_live_bits, i);
-                if profile {
-                    step_stats.dead_transitions += 1;
-                    if state_new_dirty_groups == 0 {
-                        step_stats.dead_without_new_dirty += 1;
-                    }
-                }
-            } else {
-                update_selective_class_work(
-                    dfa,
-                    selective_class_work_bits,
-                    *selective_words,
-                    i,
-                    old_state,
-                    ns,
-                );
-            }
-        }
-    }
-
-    step_stats
-}
-
 /// Undo all changes recorded at a single depth level.
-fn dfs_undo_nonstate_changes(scratch: &mut Scratch, log: &DepthChangeLog) {
+fn dfs_undo_depth(scratch: &mut Scratch, log: &DepthChangeLog) {
     for &(ix, old_mp) in log.match_changes.iter().rev() {
         let current_mp = scratch.match_positions[ix];
         let gid = ix % scratch.num_groups;
@@ -2748,38 +2462,8 @@ fn dfs_undo_nonstate_changes(scratch: &mut Scratch, log: &DepthChangeLog) {
             set_dirty_state_bit(&mut scratch.dirty_state_bits, state_idx);
         }
     }
-}
-
-fn dfs_undo_depth(scratch: &mut Scratch, log: &DepthChangeLog) {
-    dfs_undo_nonstate_changes(scratch, log);
     for &(i, old_state) in log.state_changes.iter().rev() {
         scratch.current_states[i] = old_state;
-    }
-}
-
-fn dfs_undo_depth_selective(
-    dfa: &Dfa,
-    scratch: &mut Scratch,
-    log: &DepthChangeLog,
-    words: usize,
-    live_bits: &mut [u64],
-    class_work_bits: &mut [u64],
-) {
-    dfs_undo_nonstate_changes(scratch, log);
-    for &(i, old_state) in log.state_changes.iter().rev() {
-        let current_state = scratch.current_states[i];
-        if current_state != STATE_NONE {
-            update_selective_class_work(
-                dfa,
-                class_work_bits,
-                words,
-                i,
-                current_state,
-                old_state,
-            );
-        }
-        scratch.current_states[i] = old_state;
-        set_selective_live(live_bits, i);
     }
 }
 
@@ -2792,32 +2476,6 @@ fn dfs_backtrack(
 ) {
     for depth in (target_depth..current_depth).rev() {
         dfs_undo_depth(scratch, &trie.depth_logs[depth]);
-    }
-}
-
-fn dfs_backtrack_selective(
-    dfa: &Dfa,
-    scratch: &mut Scratch,
-    trie: &mut TrieWalkState,
-    current_depth: usize,
-    target_depth: usize,
-) {
-    let TrieWalkState {
-        depth_logs,
-        selective_words,
-        selective_live_bits,
-        selective_class_work_bits,
-        ..
-    } = trie;
-    for depth in (target_depth..current_depth).rev() {
-        dfs_undo_depth_selective(
-            dfa,
-            scratch,
-            &depth_logs[depth],
-            *selective_words,
-            selective_live_bits,
-            selective_class_work_bits,
-        );
     }
 }
 
@@ -2885,35 +2543,6 @@ fn finish_token_signature_sparse_live_clean(
         signature = signature.wrapping_add(
             correction.wrapping_mul(scratch.completion_weights[index]),
         );
-    }
-    signature
-}
-
-fn finish_token_signature_sparse_live_clean_bits(
-    dfa: &Dfa,
-    live_bits: &[u64],
-    num_initial_states: usize,
-    scratch: &Scratch,
-    all_none_signature: u64,
-) -> u64 {
-    let mut signature = all_none_signature;
-    for (word_index, &word) in live_bits.iter().enumerate() {
-        let mut bits = word;
-        while bits != 0 {
-            let bit = bits.trailing_zeros() as usize;
-            bits &= bits - 1;
-            let index = word_index * 64 + bit;
-            if index >= num_initial_states {
-                break;
-            }
-            let state = scratch.current_states[index];
-            debug_assert_ne!(state, STATE_NONE);
-            let correction =
-                dfa.completion_hash[state].wrapping_sub(dfa.none_completion_hash);
-            signature = signature.wrapping_add(
-                correction.wrapping_mul(scratch.completion_weights[index]),
-            );
-        }
     }
     signature
 }
@@ -3068,7 +2697,6 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
     state_group_size: usize,
     scratch: &mut Scratch,
     trie: &mut TrieWalkState,
-    selective_initial: Option<&TrieSelectiveInitial>,
     profile: bool,
 ) -> (Vec<(usize, u64)>, TrieWalkChunkStats) {
     let batch_len = batch.len();
@@ -3096,9 +2724,6 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
     scratch.dirty_state_bits[..dirty_state_words].fill(0);
     ensure_completion_weights(scratch, batch_len);
     let all_none_signature = all_none_completion_signature(dfa, batch_len);
-    if let Some(initial) = selective_initial {
-        trie.load_selective_initial(initial);
-    }
     for i in 0..batch_len {
         if dfa.is_dead_end[scratch.current_states[i]] {
             scratch.current_states[i] = STATE_NONE;
@@ -3133,38 +2758,11 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
             for depth in (lcp..current_depth).rev() {
                 dirty_count -= trie.depth_logs[depth].dirty_state_flag_changes.len();
             }
-            if selective_initial.is_some() {
-                dfs_backtrack_selective(dfa, scratch, trie, current_depth, lcp);
-            } else {
-                dfs_backtrack(scratch, trie, current_depth, lcp);
-            }
+            dfs_backtrack(scratch, trie, current_depth, lcp);
         }
 
         for depth in lcp..token_len {
-            if selective_initial.is_some() {
-                let step_stats = dfs_step_selective(
-                    dfa,
-                    scratch,
-                    trie,
-                    token[depth],
-                    depth,
-                    batch_len,
-                    profile,
-                );
-                dirty_count += trie.depth_logs[depth].dirty_state_flag_changes.len();
-                if profile {
-                    stats.dfs_steps += 1;
-                    if step_stats.new_dirty_groups == 0 {
-                        stats.dfs_steps_without_new_dirty += 1;
-                    }
-                    stats.dfs_states_visited += step_stats.states_visited;
-                    stats.dfs_dead_transitions += step_stats.dead_transitions;
-                    stats.dfs_dead_without_new_dirty += step_stats.dead_without_new_dirty;
-                    stats.dfs_new_dirty_groups += step_stats.new_dirty_groups;
-                    stats.dfs_new_dirty_states += step_stats.new_dirty_states;
-                    stats.dfs_noop_self_loops += step_stats.noop_self_loops;
-                }
-            } else if profile {
+            if profile {
                 let step_stats =
                     dfs_step_profiled(
                         dfa,
@@ -3210,22 +2808,12 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
                 stats.clean_tokens += 1;
             }
             let finish_started_at = profile.then(Instant::now);
-            let signature = if selective_initial.is_some() {
-                finish_token_signature_sparse_live_clean_bits(
-                    dfa,
-                    &trie.selective_live_bits,
-                    batch_len,
-                    scratch,
-                    all_none_signature,
-                )
-            } else {
-                finish_token_signature_sparse_live_clean(
-                    dfa,
-                    live_indices,
-                    scratch,
-                    all_none_signature,
-                )
-            };
+            let signature = finish_token_signature_sparse_live_clean(
+                dfa,
+                live_indices,
+                scratch,
+                all_none_signature,
+            );
             stats.finish_signature_ms += elapsed_ms(finish_started_at);
             signature
         } else {
@@ -3282,11 +2870,7 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
 
     // Final backtrack to restore scratch to clean state
     if current_depth > 0 {
-        if selective_initial.is_some() {
-            dfs_backtrack_selective(dfa, scratch, trie, current_depth, 0);
-        } else {
-            dfs_backtrack(scratch, trie, current_depth, 0);
-        }
+        dfs_backtrack(scratch, trie, current_depth, 0);
     }
 
     (results, stats)
@@ -3775,14 +3359,6 @@ fn compact_dfa_for_tokens<S: AsRef<[u8]>>(
         compact_to_original.iter().map(|&s| dfa.completion_hash[s]).collect();
     let compact_self_loop: Vec<U8Set> =
         compact_to_original.iter().map(|&s| dfa.self_loop_bytes[s]).collect();
-    let compact_noop_class_masks: Vec<[u64; 4]> = if dfa.noop_class_masks.is_empty() {
-        Vec::new()
-    } else {
-        compact_to_original
-            .iter()
-            .map(|&s| dfa.noop_class_masks[s])
-            .collect()
-    };
     let compact_pfg: Vec<SmallVec<[usize; 4]>> =
         compact_to_original.iter().map(|&s| dfa.possible_future_groups[s].clone()).collect();
 
@@ -3801,8 +3377,6 @@ fn compact_dfa_for_tokens<S: AsRef<[u8]>>(
         num_states: compact_num,
         byte_to_class: dfa.byte_to_class,
         trans_by_class: Arc::from(compact_trans),
-        num_classes: dfa.num_classes,
-        noop_class_masks: compact_noop_class_masks,
         finalizers: compact_finalizers,
         is_dead_end: compact_is_dead_end,
         num_groups: dfa.num_groups,
@@ -4057,8 +3631,6 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
                 .len()
                 .saturating_mul(batch.len())
                 <= vocab_sequential_trie_work_max();
-        let selective_initial = (use_trie_walk && trie_selective_work_enabled())
-            .then(|| TrieSelectiveInitial::new(dfa_ref, batch));
         sequential_trie_batches += usize::from(use_sequential_trie);
         used_trie_walk |= use_trie_walk;
         let active_sigs: Vec<(usize, u64)> = if use_trie_walk {
@@ -4085,7 +3657,6 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
                     state_group_size,
                     scratch,
                     trie_state,
-                    selective_initial.as_ref(),
                     profiling,
                 );
                 flat_results.extend(chunk_result);
@@ -4103,7 +3674,6 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
                     state_group_size,
                     &mut worker.scratch,
                     &mut worker.trie_state,
-                    selective_initial.as_ref(),
                     profiling,
                 );
                 flat_results.extend(chunk_result);
@@ -4126,7 +3696,6 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
                                 state_group_size,
                                 &mut worker.scratch,
                                 &mut worker.trie_state,
-                                selective_initial.as_ref(),
                                 profiling,
                             )
                         },
@@ -4465,44 +4034,6 @@ mod shared_base_tests {
         dfa
     }
 
-    fn enable_selective_for_test(dfa: &mut Dfa) {
-        dfa.noop_class_masks = build_noop_class_masks(
-            dfa.num_states,
-            dfa.num_classes,
-            &dfa.trans_by_class,
-            &dfa.finalizers,
-        );
-    }
-
-    fn trie_signatures_for_test(
-        dfa: &Dfa,
-        tokens: &[Vec<u8>],
-        states: &[usize],
-        selective: bool,
-    ) -> Vec<u64> {
-        let sorted_indices = token_indices_in_lexical_order(tokens);
-        let state_group_size = vocab_state_group_size(states.len(), dfa.num_groups);
-        let mut scratch = Scratch::new(states.len(), dfa.num_groups);
-        let mut trie = TrieWalkState::new();
-        let selective_initial = selective.then(|| TrieSelectiveInitial::new(dfa, states));
-        let (pairs, _) = trie_walk_chunk_signatures(
-            dfa,
-            tokens,
-            &sorted_indices,
-            states,
-            state_group_size,
-            &mut scratch,
-            &mut trie,
-            selective_initial.as_ref(),
-            false,
-        );
-        let mut signatures = vec![0u64; tokens.len()];
-        for (token_idx, signature) in pairs {
-            signatures[token_idx] = signature;
-        }
-        signatures
-    }
-
     #[test]
     fn finite_token_probe_view_preserves_exact_witness_signatures() {
         let view = TokenizerView {
@@ -4544,8 +4075,7 @@ mod shared_base_tests {
     fn trie_live_frontier_signatures_match_independent_token_scans() {
         let view = TokenizerView { flat_dfa: sample_dfa() };
         let disallowed = BTreeMap::<u32, BitSet>::new();
-        let mut dfa = build_dfa_with_group_filter(&view, &disallowed, None, None, None);
-        enable_selective_for_test(&mut dfa);
+        let dfa = build_dfa_with_group_filter(&view, &disallowed, None, None, None);
         let states = vec![0usize, 1, 2];
         let tokens = vec![
             b"".to_vec(),
@@ -4561,8 +4091,27 @@ mod shared_base_tests {
             b"ca".to_vec(),
         ];
         let expected = token_signatures_for_states(&dfa, &tokens, &states);
-        assert_eq!(trie_signatures_for_test(&dfa, &tokens, &states, false), expected);
-        assert_eq!(trie_signatures_for_test(&dfa, &tokens, &states, true), expected);
+        let mut sorted_indices = (0..tokens.len()).collect::<Vec<_>>();
+        sorted_indices.sort_unstable_by(|&left, &right| tokens[left].cmp(&tokens[right]));
+        let state_group_size = vocab_state_group_size(states.len(), dfa.num_groups);
+        let mut scratch = Scratch::new(states.len(), dfa.num_groups);
+        let mut trie = TrieWalkState::new();
+        let (pairs, _) = trie_walk_chunk_signatures(
+            &dfa,
+            &tokens,
+            &sorted_indices,
+            &states,
+            state_group_size,
+            &mut scratch,
+            &mut trie,
+            false,
+        );
+        let mut actual = vec![0u64; tokens.len()];
+        for (token_idx, signature) in pairs {
+            actual[token_idx] = signature;
+        }
+
+        assert_eq!(actual, expected);
     }
 
     #[test]
@@ -4573,8 +4122,7 @@ mod shared_base_tests {
         flat_dfa.transitions = Arc::from(transitions);
         let view = TokenizerView { flat_dfa };
         let disallowed = BTreeMap::<u32, BitSet>::new();
-        let mut dfa = build_dfa_with_group_filter(&view, &disallowed, None, None, None);
-        enable_selective_for_test(&mut dfa);
+        let dfa = build_dfa_with_group_filter(&view, &disallowed, None, None, None);
         assert!(dfa.finalizers[0].is_empty());
         assert!(dfa.self_loop_bytes[0].contains(b'a'));
 
@@ -4588,8 +4136,25 @@ mod shared_base_tests {
             b"b".to_vec(),
         ];
         let expected = token_signatures_for_states(&dfa, &tokens, &states);
-        assert_eq!(trie_signatures_for_test(&dfa, &tokens, &states, false), expected);
-        assert_eq!(trie_signatures_for_test(&dfa, &tokens, &states, true), expected);
+        let sorted_indices = token_indices_in_lexical_order(&tokens);
+        let state_group_size = vocab_state_group_size(states.len(), dfa.num_groups);
+        let mut scratch = Scratch::new(states.len(), dfa.num_groups);
+        let mut trie = TrieWalkState::new();
+        let (pairs, _) = trie_walk_chunk_signatures(
+            &dfa,
+            &tokens,
+            &sorted_indices,
+            &states,
+            state_group_size,
+            &mut scratch,
+            &mut trie,
+            false,
+        );
+        let mut actual = vec![0u64; tokens.len()];
+        for (token_idx, signature) in pairs {
+            actual[token_idx] = signature;
+        }
+        assert_eq!(actual, expected);
     }
 
     #[test]
