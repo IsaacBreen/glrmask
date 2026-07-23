@@ -47,11 +47,6 @@ pub(crate) struct CompressedTransitionSegment {
     pub(crate) class_members: Arc<[Box<[u8]>]>,
     pub(crate) row_offsets: Arc<[u32]>,
     pub(crate) entries: Arc<[(u8, u32)]>,
-    /// Per-state byte-class masks whose target is the state itself. Keeping
-    /// these implicit avoids materializing the dominant edge kind in large
-    /// exact products while preserving exact deterministic lookup.
-    #[serde(default)]
-    pub(crate) self_loop_class_masks: Arc<[[u64; 4]]>,
     pub(crate) expanded_transition_count: usize,
 }
 
@@ -109,16 +104,6 @@ impl CompressedTransitionSegment {
     }
 
     #[inline]
-    fn has_implicit_self_loop(&self, local_state: u32, class: u8) -> bool {
-        self.self_loop_class_masks
-            .get(local_state as usize)
-            .is_some_and(|mask| {
-                let class = class as usize;
-                mask[class / 64] & (1u64 << (class % 64)) != 0
-            })
-    }
-
-    #[inline]
     fn local_transition(&self, local_state: u32, byte: u8) -> Option<u32> {
         let class = self.byte_to_class[byte as usize];
         let start = self.row_offsets[local_state as usize] as usize;
@@ -127,7 +112,6 @@ impl CompressedTransitionSegment {
             .binary_search_by_key(&class, |&(existing, _)| existing)
             .ok()
             .map(|index| self.entries[start + index].1)
-            .or_else(|| self.has_implicit_self_loop(local_state, class).then_some(local_state))
     }
 
     #[inline]
@@ -143,14 +127,6 @@ impl CompressedTransitionSegment {
         let row = &self.entries[start..end];
         let mut target_by_class = vec![u32::MAX; self.class_members.len()];
         let mut capacity = 0usize;
-        if let Some(mask) = self.self_loop_class_masks.get(local_state as usize) {
-            for class in 0..self.class_members.len() {
-                if mask[class / 64] & (1u64 << (class % 64)) != 0 {
-                    target_by_class[class] = local_state;
-                    capacity += self.class_members[class].len();
-                }
-            }
-        }
         for &(class, target) in row {
             target_by_class[class as usize] = target;
             capacity += self.class_members[class as usize].len();
@@ -169,15 +145,6 @@ impl CompressedTransitionSegment {
     fn fill_transition_row(&self, state: u32, row: &mut [u32; 256]) {
         row.fill(u32::MAX);
         let local_state = state - self.state_offset;
-        if let Some(mask) = self.self_loop_class_masks.get(local_state as usize) {
-            for class in 0..self.class_members.len() {
-                if mask[class / 64] & (1u64 << (class % 64)) != 0 {
-                    for &byte in self.class_members[class].iter() {
-                        row[byte as usize] = state;
-                    }
-                }
-            }
-        }
         let start = self.row_offsets[local_state as usize] as usize;
         let end = self.row_offsets[local_state as usize + 1] as usize;
         for &(class, target) in &self.entries[start..end] {
@@ -192,20 +159,10 @@ impl CompressedTransitionSegment {
         let local_state = state - self.state_offset;
         let start = self.row_offsets[local_state as usize] as usize;
         let end = self.row_offsets[local_state as usize + 1] as usize;
-        let explicit: usize = self.entries[start..end]
+        self.entries[start..end]
             .iter()
             .map(|(class, _)| self.class_members[*class as usize].len())
-            .sum();
-        let implicit = self
-            .self_loop_class_masks
-            .get(local_state as usize)
-            .map_or(0, |mask| {
-                (0..self.class_members.len())
-                    .filter(|&class| mask[class / 64] & (1u64 << (class % 64)) != 0)
-                    .map(|class| self.class_members[class].len())
-                    .sum()
-            });
-        explicit + implicit
+            .sum()
     }
 }
 
@@ -1050,15 +1007,6 @@ impl Tokenizer {
         if let Some(segment) = self.compressed_segment_for_state(state) {
             let mut bytes = U8Set::empty();
             let local_state = state - segment.state_offset;
-            if let Some(mask) = segment.self_loop_class_masks.get(local_state as usize) {
-                for class in 0..segment.class_members.len() {
-                    if mask[class / 64] & (1u64 << (class % 64)) != 0 {
-                        for &byte in segment.class_members[class].iter() {
-                            bytes.insert(byte);
-                        }
-                    }
-                }
-            }
             let start = segment.row_offsets[local_state as usize] as usize;
             let end = segment.row_offsets[local_state as usize + 1] as usize;
             for &(class, target) in &segment.entries[start..end] {

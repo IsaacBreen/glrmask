@@ -7624,7 +7624,6 @@ struct DeferredDenseBinaryIntersectionProduct {
     dfa: DFA,
     pending_class_transition_offsets: Vec<u32>,
     pending_class_transitions: Vec<(u8, u32)>,
-    pending_self_loop_class_masks: Vec<[u64; 4]>,
     class_members: Vec<Vec<u8>>,
     left_states: usize,
     right_states: usize,
@@ -7673,28 +7672,13 @@ impl DeferredDenseBinaryIntersectionProduct {
                 byte_to_class[byte as usize] = class as u8;
             }
         }
-        let expand = |state: u32,
-                      class_transitions: &[(u8, u32)],
-                      self_loop_mask: &[u64; 4],
-                      target_by_class: &mut [u32]| {
-            let implicit_byte_capacity: usize = (0..self.class_members.len())
-                .filter(|&class| {
-                    self_loop_mask[class / 64] & (1u64 << (class % 64)) != 0
-                })
-                .map(|class| self.class_members[class].len())
+        let expand = |class_transitions: &[(u8, u32)], target_by_class: &mut [u32]| {
+            let byte_capacity: usize = class_transitions
+                .iter()
+                .map(|(class, _)| self.class_members[*class as usize].len())
                 .sum();
-            let byte_capacity: usize = implicit_byte_capacity
-                + class_transitions
-                    .iter()
-                    .map(|(class, _)| self.class_members[*class as usize].len())
-                    .sum::<usize>();
             let entries = if byte_capacity >= dense_expansion_threshold {
                 target_by_class.fill(u32::MAX);
-                for class in 0..self.class_members.len() {
-                    if self_loop_mask[class / 64] & (1u64 << (class % 64)) != 0 {
-                        target_by_class[class] = state;
-                    }
-                }
                 for &(class, target) in class_transitions {
                     target_by_class[class as usize] = target;
                 }
@@ -7708,13 +7692,6 @@ impl DeferredDenseBinaryIntersectionProduct {
                 entries
             } else {
                 let mut entries = Vec::with_capacity(byte_capacity);
-                for class in 0..self.class_members.len() {
-                    if self_loop_mask[class / 64] & (1u64 << (class % 64)) != 0 {
-                        for &byte in &self.class_members[class] {
-                            entries.push((byte, state));
-                        }
-                    }
-                }
                 for &(class, target) in class_transitions {
                     for &byte in &self.class_members[class as usize] {
                         entries.push((byte, target));
@@ -7738,9 +7715,7 @@ impl DeferredDenseBinaryIntersectionProduct {
                             let row_end =
                                 self.pending_class_transition_offsets[state + 1] as usize;
                             expand(
-                                state as u32,
                                 &self.pending_class_transitions[row_start..row_end],
-                                &self.pending_self_loop_class_masks[state],
                                 target_by_class,
                             )
                         },
@@ -7753,9 +7728,7 @@ impl DeferredDenseBinaryIntersectionProduct {
                         let row_start = self.pending_class_transition_offsets[state] as usize;
                         let row_end = self.pending_class_transition_offsets[state + 1] as usize;
                         expand(
-                            state as u32,
                             &self.pending_class_transitions[row_start..row_end],
-                            &self.pending_self_loop_class_masks[state],
                             &mut target_by_class,
                         )
                     })
@@ -7807,22 +7780,11 @@ impl DeferredDenseBinaryIntersectionProduct {
                 bytes.into_boxed_slice()
             })
             .collect::<Vec<_>>();
-        let explicit_transition_count: usize = self
+        let expanded_transition_count = self
             .pending_class_transitions
             .iter()
             .map(|(class, _)| class_members[*class as usize].len())
             .sum();
-        let implicit_transition_count: usize = self
-            .pending_self_loop_class_masks
-            .iter()
-            .map(|mask| {
-                (0..class_members.len())
-                    .filter(|&class| mask[class / 64] & (1u64 << (class % 64)) != 0)
-                    .map(|class| class_members[class].len())
-                    .sum::<usize>()
-            })
-            .sum();
-        let expanded_transition_count = explicit_transition_count + implicit_transition_count;
         if let Some(started_at) = self.started_at {
             eprintln!(
                 "[glrmask/profile][tokenizer] dense_binary_intersection left_states={} right_states={} pair_cells={} reachable_states={} classes={} discovery_ms={:.3} future_ms={:.3} expansion_ms=0.000 compressed=true total_ms={:.3}",
@@ -7843,7 +7805,6 @@ impl DeferredDenseBinaryIntersectionProduct {
             class_members: Arc::from(class_members),
             row_offsets: Arc::from(self.pending_class_transition_offsets),
             entries: Arc::from(self.pending_class_transitions),
-            self_loop_class_masks: Arc::from(self.pending_self_loop_class_masks),
             expanded_transition_count,
         };
         (self.dfa, segment)
@@ -7895,7 +7856,6 @@ fn try_discover_dense_binary_intersection_product(
     let mut pending_class_transition_offsets = Vec::<u32>::new();
     pending_class_transition_offsets.push(0);
     let mut pending_class_transitions = Vec::<(u8, u32)>::new();
-    let mut pending_self_loop_class_masks = Vec::<[u64; 4]>::new();
     let mut dfa = DFA::new(1);
     dfa.ensure_group_capacity(1);
     let set_metadata = |dfa: &mut DFA, state: u32, left_state: u32, right_state: u32| {
@@ -7916,7 +7876,6 @@ fn try_discover_dense_binary_intersection_product(
         let right_row = &right_transitions[right_state as usize];
         let mut left_index = 0usize;
         let mut right_index = 0usize;
-        let mut self_loop_class_mask = [0u64; 4];
         while left_index < left_row.len() && right_index < right_row.len() {
             let (left_class, left_target) = left_row[left_index];
             let (right_class, right_target) = right_row[right_index];
@@ -7937,11 +7896,6 @@ fn try_discover_dense_binary_intersection_product(
             {
                 continue;
             }
-            if left_target == left_state && right_target == right_state {
-                let class = left_class as usize;
-                self_loop_class_mask[class / 64] |= 1u64 << (class % 64);
-                continue;
-            }
             let pair_index = (left_target as usize)
                 .checked_mul(right_states)?
                 .checked_add(right_target as usize)?;
@@ -7958,7 +7912,6 @@ fn try_discover_dense_binary_intersection_product(
             };
             pending_class_transitions.push((left_class, target));
         }
-        pending_self_loop_class_masks.push(self_loop_class_mask);
         pending_class_transition_offsets
             .push(u32::try_from(pending_class_transitions.len()).ok()?);
         cursor += 1;
@@ -7982,7 +7935,6 @@ fn try_discover_dense_binary_intersection_product(
             dfa,
             pending_class_transition_offsets,
             pending_class_transitions,
-            pending_self_loop_class_masks,
             class_members: class_members.to_vec(),
             left_states,
             right_states,
