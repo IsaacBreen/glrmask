@@ -14,7 +14,9 @@ use crate::compiler::stages::id_map_and_terminal_dwa::synthetic_state_map::{
 };
 
 use super::ast::Expr;
-use super::tokenizer::{CompressedTransitionSegment, Lexer, Tokenizer};
+use super::tokenizer::{
+    CompressedTransitionEntries, CompressedTransitionSegment, Lexer, Tokenizer,
+};
 use super::dfa::DFA;
 use super::nfa::NFA;
 
@@ -5084,7 +5086,7 @@ fn set_single_group_futures_from_class_graph(
 fn set_single_group_futures_from_class_graph_csr(
     dfa: &mut DFA,
     transition_offsets: &[u32],
-    class_transitions: &[(u8, u32)],
+    transition_targets: &[u32],
     cooperative_yield_interval: usize,
 ) {
     let states = dfa.num_states();
@@ -5102,7 +5104,7 @@ fn set_single_group_futures_from_class_graph_csr(
         let source_u32 = source as u32;
         let row_start = transition_offsets[source] as usize;
         let row_end = transition_offsets[source + 1] as usize;
-        for &(_, target) in &class_transitions[row_start..row_end] {
+        for &target in &transition_targets[row_start..row_end] {
             let target = target as usize;
             if seen_target_source[target] == source_u32 {
                 continue;
@@ -8059,7 +8061,8 @@ struct DeferredDenseBinaryIntersectionProduct {
     metadata: DFA,
     accepting: Vec<bool>,
     pending_class_transition_offsets: Vec<u32>,
-    pending_class_transitions: Vec<(u8, u32)>,
+    pending_class_transition_classes: Vec<u8>,
+    pending_class_transition_targets: Vec<u32>,
     deferred_transition_rows: Option<DeferredDenseBinaryTransitionRows>,
     class_members: Vec<Vec<u8>>,
     left_states: usize,
@@ -8168,7 +8171,8 @@ impl DeferredDenseBinaryIntersectionProduct {
             return None;
         }
         let total_entries = *self.pending_class_transition_offsets.last()? as usize;
-        self.pending_class_transitions = Vec::with_capacity(total_entries);
+        self.pending_class_transition_classes = Vec::with_capacity(total_entries);
+        self.pending_class_transition_targets = Vec::with_capacity(total_entries);
         for (state, &(left_state, right_state)) in rows.pairs.iter().enumerate() {
             if self.cooperative_yield_interval != 0
                 && state % self.cooperative_yield_interval == 0
@@ -8176,7 +8180,9 @@ impl DeferredDenseBinaryIntersectionProduct {
                 let _ = rayon::yield_now();
             }
             let expected_start = self.pending_class_transition_offsets[state] as usize;
-            if self.pending_class_transitions.len() != expected_start {
+            if self.pending_class_transition_classes.len() != expected_start
+                || self.pending_class_transition_targets.len() != expected_start
+            {
                 return None;
             }
             let left_row = &rows.left_transitions[left_state as usize];
@@ -8210,16 +8216,19 @@ impl DeferredDenseBinaryIntersectionProduct {
                 if target == u32::MAX {
                     return None;
                 }
-                self.pending_class_transitions
-                    .push((left_class, target));
+                self.pending_class_transition_classes.push(left_class);
+                self.pending_class_transition_targets.push(target);
             }
-            if self.pending_class_transitions.len()
+            if self.pending_class_transition_classes.len()
                 != self.pending_class_transition_offsets[state + 1] as usize
+                || self.pending_class_transition_targets.len()
+                    != self.pending_class_transition_offsets[state + 1] as usize
             {
                 return None;
             }
         }
-        debug_assert_eq!(self.pending_class_transitions.len(), total_entries);
+        debug_assert_eq!(self.pending_class_transition_classes.len(), total_entries);
+        debug_assert_eq!(self.pending_class_transition_targets.len(), total_entries);
         Some(())
     }
 
@@ -8238,7 +8247,7 @@ impl DeferredDenseBinaryIntersectionProduct {
         set_single_group_futures_from_class_graph_csr(
             &mut dfa,
             &self.pending_class_transition_offsets,
-            &self.pending_class_transitions,
+            &self.pending_class_transition_targets,
             self.cooperative_yield_interval,
         );
         let future_ms = future_started_at
@@ -8263,14 +8272,15 @@ impl DeferredDenseBinaryIntersectionProduct {
                 byte_to_class[byte as usize] = class as u8;
             }
         }
-        let expand = |class_transitions: &[(u8, u32)], target_by_class: &mut [u32]| {
-            let byte_capacity: usize = class_transitions
+        let expand = |classes: &[u8], targets: &[u32], target_by_class: &mut [u32]| {
+            debug_assert_eq!(classes.len(), targets.len());
+            let byte_capacity: usize = classes
                 .iter()
-                .map(|(class, _)| self.class_members[*class as usize].len())
+                .map(|class| self.class_members[*class as usize].len())
                 .sum();
             let entries = if byte_capacity >= dense_expansion_threshold {
                 target_by_class.fill(u32::MAX);
-                for &(class, target) in class_transitions {
+                for (&class, &target) in classes.iter().zip(targets) {
                     target_by_class[class as usize] = target;
                 }
                 let mut entries = Vec::with_capacity(byte_capacity);
@@ -8283,7 +8293,7 @@ impl DeferredDenseBinaryIntersectionProduct {
                 entries
             } else {
                 let mut entries = Vec::with_capacity(byte_capacity);
-                for &(class, target) in class_transitions {
+                for (&class, &target) in classes.iter().zip(targets) {
                     for &byte in &self.class_members[class as usize] {
                         entries.push((byte, target));
                     }
@@ -8306,7 +8316,8 @@ impl DeferredDenseBinaryIntersectionProduct {
                             let row_end =
                                 self.pending_class_transition_offsets[state + 1] as usize;
                             expand(
-                                &self.pending_class_transitions[row_start..row_end],
+                                &self.pending_class_transition_classes[row_start..row_end],
+                                &self.pending_class_transition_targets[row_start..row_end],
                                 target_by_class,
                             )
                         },
@@ -8319,7 +8330,8 @@ impl DeferredDenseBinaryIntersectionProduct {
                         let row_start = self.pending_class_transition_offsets[state] as usize;
                         let row_end = self.pending_class_transition_offsets[state + 1] as usize;
                         expand(
-                            &self.pending_class_transitions[row_start..row_end],
+                            &self.pending_class_transition_classes[row_start..row_end],
+                            &self.pending_class_transition_targets[row_start..row_end],
                             &mut target_by_class,
                         )
                     })
@@ -8338,7 +8350,7 @@ impl DeferredDenseBinaryIntersectionProduct {
                 self.right_states,
                 self.pair_cells,
                 dfa.num_states(),
-                self.pending_class_transitions.len(),
+                self.pending_class_transition_classes.len(),
                 self.num_classes,
                 self.discovery_ms,
                 transition_rows_ms,
@@ -8367,7 +8379,7 @@ impl DeferredDenseBinaryIntersectionProduct {
         set_single_group_futures_from_class_graph_csr(
             &mut dfa,
             &self.pending_class_transition_offsets,
-            &self.pending_class_transitions,
+            &self.pending_class_transition_targets,
             self.cooperative_yield_interval,
         );
         let future_ms = future_started_at
@@ -8385,9 +8397,9 @@ impl DeferredDenseBinaryIntersectionProduct {
             })
             .collect::<Vec<_>>();
         let expanded_transition_count = self
-            .pending_class_transitions
+            .pending_class_transition_classes
             .iter()
-            .map(|(class, _)| class_members[*class as usize].len())
+            .map(|class| class_members[*class as usize].len())
             .sum();
         if let Some(started_at) = self.started_at {
             eprintln!(
@@ -8396,7 +8408,7 @@ impl DeferredDenseBinaryIntersectionProduct {
                 self.right_states,
                 self.pair_cells,
                 dfa.num_states(),
-                self.pending_class_transitions.len(),
+                self.pending_class_transition_classes.len(),
                 self.num_classes,
                 self.discovery_ms,
                 transition_rows_ms,
@@ -8411,7 +8423,10 @@ impl DeferredDenseBinaryIntersectionProduct {
             byte_to_class: Arc::from(byte_to_class.to_vec().into_boxed_slice()),
             class_members: Arc::from(class_members),
             row_offsets: Arc::from(self.pending_class_transition_offsets),
-            entries: Arc::from(self.pending_class_transitions),
+            entries: CompressedTransitionEntries::from_parts(
+                self.pending_class_transition_classes,
+                self.pending_class_transition_targets,
+            ),
             expanded_transition_count,
         };
         (dfa, segment)
@@ -8448,7 +8463,7 @@ fn try_discover_dense_binary_intersection_product(
             std::env::var("GLRMASK_DEFERRED_DENSE_YIELD_INTERVAL")
                 .ok()
                 .and_then(|value| value.parse::<usize>().ok())
-                .unwrap_or(4096)
+                .unwrap_or(0)
         })
         .unwrap_or(0);
     let ProductComponentClassTransitions::Materialized(left_transitions) =
@@ -8471,7 +8486,8 @@ fn try_discover_dense_binary_intersection_product(
     let mut pairs = vec![(0u32, 0u32)];
     let mut pending_class_transition_offsets = Vec::<u32>::new();
     pending_class_transition_offsets.push(0);
-    let mut pending_class_transitions = Vec::<(u8, u32)>::new();
+    let mut pending_class_transition_classes = Vec::<u8>::new();
+    let mut pending_class_transition_targets = Vec::<u32>::new();
     let mut deferred_transition_count = 0usize;
     let mut metadata = DFA::new(1);
     metadata.ensure_group_capacity(1);
@@ -8542,13 +8558,14 @@ fn try_discover_dense_binary_intersection_product(
             if defer_transition_rows {
                 deferred_transition_count += 1;
             } else {
-                pending_class_transitions.push((left_class, target));
+                pending_class_transition_classes.push(left_class);
+                pending_class_transition_targets.push(target);
             }
         }
         pending_class_transition_offsets.push(u32::try_from(if defer_transition_rows {
             deferred_transition_count
         } else {
-            pending_class_transitions.len()
+            pending_class_transition_classes.len()
         }).ok()?);
         cursor += 1;
     }
@@ -8571,7 +8588,8 @@ fn try_discover_dense_binary_intersection_product(
             metadata,
             accepting,
             pending_class_transition_offsets,
-            pending_class_transitions,
+            pending_class_transition_classes,
+            pending_class_transition_targets,
             deferred_transition_rows: defer_transition_rows.then(|| {
                 DeferredDenseBinaryTransitionRows {
                     pairs: Vec::new(),

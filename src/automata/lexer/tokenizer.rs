@@ -46,8 +46,81 @@ pub(crate) struct CompressedTransitionSegment {
     pub(crate) byte_to_class: Arc<[u8]>,
     pub(crate) class_members: Arc<[Box<[u8]>]>,
     pub(crate) row_offsets: Arc<[u32]>,
-    pub(crate) entries: Arc<[(u8, u32)]>,
+    pub(crate) entries: CompressedTransitionEntries,
     pub(crate) expanded_transition_count: usize,
+}
+
+/// Structure-of-arrays storage for compressed transition entries. Rust pads a
+/// `(u8, u32)` tuple to eight bytes; keeping the fields separately uses five
+/// bytes per entry while retaining the historical serialized sequence of
+/// `(class, target)` pairs.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CompressedTransitionEntries {
+    classes: Arc<[u8]>,
+    targets: Arc<[u32]>,
+}
+
+impl CompressedTransitionEntries {
+    pub(crate) fn from_parts(classes: Vec<u8>, targets: Vec<u32>) -> Self {
+        assert_eq!(classes.len(), targets.len());
+        Self {
+            classes: Arc::from(classes.into_boxed_slice()),
+            targets: Arc::from(targets.into_boxed_slice()),
+        }
+    }
+
+    #[inline]
+    fn class_slice(&self, start: usize, end: usize) -> &[u8] {
+        &self.classes[start..end]
+    }
+
+    #[inline]
+    fn target(&self, index: usize) -> u32 {
+        self.targets[index]
+    }
+
+    #[inline]
+    fn iter_range(&self, start: usize, end: usize) -> impl Iterator<Item = (u8, u32)> + '_ {
+        self.classes[start..end]
+            .iter()
+            .copied()
+            .zip(self.targets[start..end].iter().copied())
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        self.classes.len()
+    }
+}
+
+impl Serialize for CompressedTransitionEntries {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.classes
+            .iter()
+            .copied()
+            .zip(self.targets.iter().copied())
+            .collect::<Vec<_>>()
+            .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for CompressedTransitionEntries {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let entries = Vec::<(u8, u32)>::deserialize(deserializer)?;
+        let mut classes = Vec::with_capacity(entries.len());
+        let mut targets = Vec::with_capacity(entries.len());
+        for (class, target) in entries {
+            classes.push(class);
+            targets.push(target);
+        }
+        Ok(Self::from_parts(classes, targets))
+    }
 }
 
 pub(crate) mod artifact_serde {
@@ -108,10 +181,11 @@ impl CompressedTransitionSegment {
         let class = self.byte_to_class[byte as usize];
         let start = self.row_offsets[local_state as usize] as usize;
         let end = self.row_offsets[local_state as usize + 1] as usize;
-        self.entries[start..end]
-            .binary_search_by_key(&class, |&(existing, _)| existing)
+        self.entries
+            .class_slice(start, end)
+            .binary_search(&class)
             .ok()
-            .map(|index| self.entries[start + index].1)
+            .map(|index| self.entries.target(start + index))
     }
 
     #[inline]
@@ -124,10 +198,9 @@ impl CompressedTransitionSegment {
         let local_state = state - self.state_offset;
         let start = self.row_offsets[local_state as usize] as usize;
         let end = self.row_offsets[local_state as usize + 1] as usize;
-        let row = &self.entries[start..end];
         let mut target_by_class = vec![u32::MAX; self.class_members.len()];
         let mut capacity = 0usize;
-        for &(class, target) in row {
+        for (class, target) in self.entries.iter_range(start, end) {
             target_by_class[class as usize] = target;
             capacity += self.class_members[class as usize].len();
         }
@@ -147,7 +220,7 @@ impl CompressedTransitionSegment {
         let local_state = state - self.state_offset;
         let start = self.row_offsets[local_state as usize] as usize;
         let end = self.row_offsets[local_state as usize + 1] as usize;
-        for &(class, target) in &self.entries[start..end] {
+        for (class, target) in self.entries.iter_range(start, end) {
             let target = self.state_offset + target;
             for &byte in self.class_members[class as usize].iter() {
                 row[byte as usize] = target;
@@ -159,9 +232,10 @@ impl CompressedTransitionSegment {
         let local_state = state - self.state_offset;
         let start = self.row_offsets[local_state as usize] as usize;
         let end = self.row_offsets[local_state as usize + 1] as usize;
-        self.entries[start..end]
+        self.entries
+            .class_slice(start, end)
             .iter()
-            .map(|(class, _)| self.class_members[*class as usize].len())
+            .map(|class| self.class_members[*class as usize].len())
             .sum()
     }
 }
@@ -1009,7 +1083,7 @@ impl Tokenizer {
             let local_state = state - segment.state_offset;
             let start = segment.row_offsets[local_state as usize] as usize;
             let end = segment.row_offsets[local_state as usize + 1] as usize;
-            for &(class, target) in &segment.entries[start..end] {
+            for (class, target) in segment.entries.iter_range(start, end) {
                 if target == local_state {
                     for &byte in segment.class_members[class as usize].iter() {
                         bytes.insert(byte);
@@ -1463,6 +1537,22 @@ pub(crate) fn arbitrary_epsilon_l1_test_tokenizer() -> Tokenizer {
 mod tests {
     use super::*;
     use crate::automata::lexer::dfa::DFA;
+
+    #[test]
+    fn compressed_transition_entries_preserve_pair_sequence_wire_format() {
+        let legacy = vec![(0u8, 7u32), (3, 11), (49, 782_231)];
+        let entries = CompressedTransitionEntries::from_parts(
+            legacy.iter().map(|&(class, _)| class).collect(),
+            legacy.iter().map(|&(_, target)| target).collect(),
+        );
+        assert_eq!(
+            bincode::serialize(&entries).unwrap(),
+            bincode::serialize(&legacy).unwrap(),
+        );
+        let decoded: CompressedTransitionEntries =
+            bincode::deserialize(&bincode::serialize(&legacy).unwrap()).unwrap();
+        assert_eq!(decoded.iter_range(0, decoded.len()).collect::<Vec<_>>(), legacy);
+    }
 
     fn dispatch_prefix_tokenizer(with_appended_residual: bool) -> Tokenizer {
         let mut dfa = DFA::new(if with_appended_residual { 5 } else { 4 });
