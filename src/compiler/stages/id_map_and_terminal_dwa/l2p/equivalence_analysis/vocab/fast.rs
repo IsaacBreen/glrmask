@@ -661,8 +661,9 @@ struct Scratch {
     /// For the active DFS path, how many initial states have their latest
     /// match for `(position, group)` at this slot.
     trie_target_group_counts: Vec<u32>,
-    /// Bitset of live groups at each token position. Optional experimental
-    /// materialization avoids rescanning all groups for every dirty token.
+    /// Bitset of live groups at each token position. This avoids rescanning all
+    /// groups for every dirty token while the exact reference counts remain
+    /// authoritative.
     trie_target_group_bits: Vec<u64>,
     trie_target_bits_enabled: bool,
     /// Number of live groups at each token position in the active DFS path.
@@ -692,7 +693,7 @@ static VOCAB_ROW_CERT_DIAG: Lazy<bool> =
 static VOCAB_SPARSE_DIRTY_FINISH_DISABLED: Lazy<bool> =
     Lazy::new(|| env_flag_enabled("GLRMASK_DISABLE_VOCAB_SPARSE_DIRTY_FINISH"));
 static VOCAB_TRIE_TARGET_BITS_ENABLED: Lazy<bool> =
-    Lazy::new(|| env_flag_enabled("GLRMASK_VOCAB_TRIE_TARGET_BITS"));
+    Lazy::new(|| !env_flag_enabled("GLRMASK_DISABLE_VOCAB_TRIE_TARGET_BITS"));
 
 #[inline]
 fn new_hasher() -> AHasher {
