@@ -686,6 +686,15 @@ fn l1_exact_profile_reuse_enabled() -> bool {
     })
 }
 
+fn l1_premerge_profile_keys_enabled() -> bool {
+    std::env::var("GLRMASK_L1_PREMERGE_PROFILE_KEYS")
+        .map(|value| {
+            let trimmed = value.trim();
+            !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false)
+}
+
 fn l1_remaining_horizon_quotients_enabled(state_count: usize, vocab_count: usize) -> bool {
     // Building every finite-depth quotient costs O(k * states * byte_classes).
     // The 82k-token O9961 p2 path repays that prepass with a ~3k-state scanner,
@@ -4620,7 +4629,6 @@ fn build_l1_terminal_dwa(
     // Each (terminal_signature, tsid) pair is unique across start groups since TSIDs
     // partition deterministically into start groups. We exploit this by using
     // Arc from the start and skipping merging entirely.
-    let start_states_list: Vec<(&u32, &Vec<u32>)> = states_to_initial_tsids.iter().collect();
     let empty_token_indices = token_buckets.empty_token_indices.as_slice();
     let token_indices_by_first_byte = &token_buckets.token_indices_by_first_byte;
     let suffix_lcps_by_first_byte = &token_buckets.suffix_lcps_by_first_byte;
@@ -4965,6 +4973,131 @@ fn build_l1_terminal_dwa(
         );
     }
 
+    if l1_premerge_profile_keys_enabled()
+        && let Some(walk_cache) = walk_cache.as_ref()
+        && id_map.num_tsids() > 1
+    {
+        let premerge_started_at = Instant::now();
+        let old_num_tsids = id_map.num_tsids() as usize;
+
+        // Intern the already-built exact suffix profiles. Unlike the ordinary
+        // exact-equivalence path, this performs no additional token walks.
+        let mut profile_ids = FxHashMap::<L1WalkProfile, u32>::default();
+        let mut profile_id_by_target = FxHashMap::<(u8, u32), u32>::default();
+        for (&target, profile) in walk_cache {
+            let next = profile_ids.len() as u32;
+            let profile_id = *profile_ids.entry(Arc::clone(profile)).or_insert(next);
+            profile_id_by_target.insert(target, profile_id);
+        }
+
+        let mut sorted_starts = states_to_initial_tsids
+            .iter()
+            .map(|(&start, tsids)| (start, tsids.clone()))
+            .collect::<Vec<_>>();
+        sorted_starts.sort_unstable_by_key(|(start, _)| *start);
+
+        // A deterministic-dispatch TSID can deliberately draw contributions
+        // from several scanner roots. Keep such TSIDs unique; single-root TSIDs
+        // may be grouped by their complete vector of disjoint first-byte
+        // profiles. Since first-byte token buckets are disjoint, equality of
+        // this vector is exactly equality of the final L1 token profile.
+        let mut start_count_by_tsid = vec![0usize; old_num_tsids];
+        for (_, tsids) in &sorted_starts {
+            for &tsid in tsids {
+                start_count_by_tsid[tsid as usize] += 1;
+            }
+        }
+        let nonempty_first_bytes = token_indices_by_first_byte
+            .iter()
+            .enumerate()
+            .filter_map(|(byte, tokens)| (!tokens.is_empty()).then_some(byte))
+            .collect::<Vec<_>>();
+        let mut group_by_key = FxHashMap::<Vec<u32>, u32>::default();
+        let mut tsid_perm = vec![u32::MAX; old_num_tsids];
+        let mut next_tsid = 0u32;
+
+        for (start_state, tsids) in &sorted_starts {
+            let mut key = Vec::with_capacity(nonempty_first_bytes.len() + 1);
+            if empty_token_indices.is_empty() {
+                key.push(0);
+            } else {
+                let signature = state_to_terminal_signature[*start_state as usize];
+                key.push(signature.wrapping_add(1));
+            }
+            for &byte in &nonempty_first_bytes {
+                let target = flat_trans[*start_state as usize * 256 + byte];
+                let profile_id = if target == dead {
+                    0
+                } else {
+                    profile_id_by_target
+                        .get(&(byte as u8, target))
+                        .map_or(0, |profile_id| profile_id.wrapping_add(1))
+                };
+                key.push(profile_id);
+            }
+
+            let mut shared_group = None;
+            for &old_tsid in tsids {
+                let old_tsid = old_tsid as usize;
+                if start_count_by_tsid[old_tsid] > 1 {
+                    if tsid_perm[old_tsid] == u32::MAX {
+                        tsid_perm[old_tsid] = next_tsid;
+                        next_tsid += 1;
+                    }
+                } else {
+                    let new_tsid = *shared_group.get_or_insert_with(|| {
+                        *group_by_key.entry(key.clone()).or_insert_with(|| {
+                            let id = next_tsid;
+                            next_tsid += 1;
+                            id
+                        })
+                    });
+                    tsid_perm[old_tsid] = new_tsid;
+                }
+            }
+        }
+        assert!(tsid_perm.iter().all(|&tsid| tsid != u32::MAX));
+
+        if (next_tsid as usize) < old_num_tsids {
+            apply_tsid_perm_to_id_map(
+                &mut id_map.tokenizer_states,
+                &tsid_perm,
+                next_tsid as usize,
+            );
+
+            let mut rebuilt = FxHashMap::<u32, Vec<u32>>::default();
+            let mut retained_single_start = vec![false; next_tsid as usize];
+            for (start_state, old_tsids) in sorted_starts {
+                for old_tsid in old_tsids {
+                    let new_tsid = tsid_perm[old_tsid as usize];
+                    if start_count_by_tsid[old_tsid as usize] > 1
+                        || !retained_single_start[new_tsid as usize]
+                    {
+                        retained_single_start[new_tsid as usize] = true;
+                        rebuilt.entry(start_state).or_default().push(new_tsid);
+                    }
+                }
+            }
+            for tsids in rebuilt.values_mut() {
+                tsids.sort_unstable();
+                tsids.dedup();
+            }
+            states_to_initial_tsids = rebuilt;
+        }
+
+        if compile_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][l1_premerge_profile_keys] tsids_before={} tsids_after={} start_states_after={} unique_walk_profiles={} key_groups={} total_ms={:.3}",
+                old_num_tsids,
+                id_map.num_tsids(),
+                states_to_initial_tsids.len(),
+                profile_ids.len(),
+                group_by_key.len(),
+                premerge_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+    }
+
     // Phase 2: For each start_state, collect walk_cache references per
 
     // Pre-build empty token ranges (shared across all start_states).
@@ -4983,6 +5116,8 @@ fn build_l1_terminal_dwa(
         }
         (empty_token_ranges.len() as u64).wrapping_add(h)
     };
+
+    let start_states_list: Vec<(&u32, &Vec<u32>)> = states_to_initial_tsids.iter().collect();
 
     let build_start_state_results = |&(&start_state, ref initial_tsids): &(&u32, &Vec<u32>)| {
             let collect_start = Instant::now();
