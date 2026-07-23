@@ -11,7 +11,6 @@ use crate::ds::{bitset::BitSet, u8set::U8Set};
 use crate::Vocab;
 use crate::compiler::stages::id_map_and_terminal_dwa::synthetic_state_map::{
     CertifiedVocabularyExactStateCandidates, certify_vocabulary_exact_state_candidates,
-    materialize_stable_active_tokenizer,
 };
 
 use super::ast::Expr;
@@ -7094,50 +7093,6 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
             "[glrmask/profile][tokenizer] structural_pair_minimize_skipped reason=augmented_residual_roots augmented_states={}",
             augmented_state_count,
         );
-    }
-
-    if std::env::var_os("GLRMASK_STRUCTURAL_PAIR_STABLE_QUOTIENT").is_some() {
-        let quotient_started_at = Instant::now();
-        let states_before = synthesized_dfa.num_states();
-        let tokenizer = Regex {
-            dfa: synthesized_dfa,
-        }
-        .into_tokenizer(
-            1,
-            Some(Arc::from(
-                vec![synthesized_expression.clone()].into_boxed_slice(),
-            )),
-        );
-        if let Some(materialized) =
-            materialize_stable_active_tokenizer(&tokenizer, vocab, &[true])
-        {
-            for state in &mut full_to_synthesized {
-                *state = *materialized
-                    .full_to_active
-                    .full_to_synthesized
-                    .get(*state as usize)?;
-            }
-            synthesized_dfa = materialized.tokenizer.dfa;
-            if profile {
-                eprintln!(
-                    "[glrmask/profile][tokenizer] structural_pair_stable_quotient states_before={} states_after={} quotient_build_ms={:.3} total_ms={:.3} selected=true",
-                    states_before,
-                    synthesized_dfa.num_states(),
-                    materialized.build_ms,
-                    quotient_started_at.elapsed().as_secs_f64() * 1000.0,
-                );
-            }
-        } else {
-            synthesized_dfa = tokenizer.dfa;
-            if profile {
-                eprintln!(
-                    "[glrmask/profile][tokenizer] structural_pair_stable_quotient states_before={} states_after={} total_ms={:.3} selected=false",
-                    states_before,
-                    synthesized_dfa.num_states(),
-                    quotient_started_at.elapsed().as_secs_f64() * 1000.0,
-                );
-            }
-        }
     }
 
     if let Some(total_started_at) = total_started_at {

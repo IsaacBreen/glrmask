@@ -66,24 +66,6 @@ pub(crate) struct MaterializedActiveTokenizer {
     pub(crate) build_ms: f64,
 }
 
-pub(crate) fn materialize_stable_active_tokenizer(
-    tokenizer: &Tokenizer,
-    vocab: &Vocab,
-    active_terminals: &[bool],
-) -> Option<MaterializedActiveTokenizer> {
-    let statistic = max_length::cached_statistic(vocab);
-    let state_map = max_length::compute_state_map(
-        tokenizer,
-        &statistic,
-        None,
-        Some(active_terminals),
-        MaxLengthMode::StableByteRestricted,
-        None,
-        None,
-    );
-    materialize_active_tokenizer(tokenizer, vocab, active_terminals, state_map)
-}
-
 /// Turn an exact active-language state quotient into the tokenizer actually
 /// consumed by an L1/L2P branch. Previously the quotient was only threaded as
 /// an initial ID map, leaving downstream token replay and profile construction
