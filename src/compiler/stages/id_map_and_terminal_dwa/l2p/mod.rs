@@ -401,10 +401,7 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
     // The pre-TI quotient and representative-core token-position partition are
     // two wrappers over the same C map. Build the positional analysis once.
     let (global_state_quotient, token_position_partition) =
-        if l2p_global_token_position_enabled()
-            && (matches!(partition_label, "p7" | "p8")
-                || l2p_env_enabled("GLRMASK_L2P_GLOBAL_TOKEN_POSITION_ALL_PARTITIONS"))
-        {
+        if l2p_global_token_position_enabled() && matches!(partition_label, "p7" | "p8") {
             match equivalence_analysis::state_equivalence::global_token_position::
                 compute_global_token_position_state_views(
                     tokenizer,
