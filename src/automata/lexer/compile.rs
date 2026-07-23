@@ -3004,22 +3004,41 @@ enum DeferredDfa {
 }
 
 impl DeferredDfa {
-    fn dfa(&self) -> &DFA {
-        match self {
-            Self::Ready(dfa) => dfa,
-            Self::DenseBinary(product) => product.dfa(),
-        }
-    }
-
-    fn dfa_mut(&mut self) -> &mut DFA {
-        match self {
-            Self::Ready(dfa) => dfa,
-            Self::DenseBinary(product) => product.dfa_mut(),
-        }
-    }
-
     fn num_states(&self) -> usize {
-        self.dfa().num_states()
+        match self {
+            Self::Ready(dfa) => dfa.num_states(),
+            Self::DenseBinary(product) => product.num_states(),
+        }
+    }
+
+    fn initial_is_nonnullable_without_epsilon(&self) -> bool {
+        match self {
+            Self::Ready(dfa) => {
+                dfa.finalizers(0).is_empty() && !dfa.has_epsilon_transitions()
+            }
+            Self::DenseBinary(product) => !product.initial_is_accepting(),
+        }
+    }
+
+    fn ensure_group_capacity(&mut self, num_groups: usize) {
+        match self {
+            Self::Ready(dfa) => dfa.ensure_group_capacity(num_groups),
+            Self::DenseBinary(product) => product.ensure_group_capacity(num_groups),
+        }
+    }
+
+    fn set_group_u8set(&mut self, group_id: u32, set: U8Set) {
+        match self {
+            Self::Ready(dfa) => dfa.set_group_u8set(group_id, set),
+            Self::DenseBinary(product) => product.set_group_u8set(group_id, set),
+        }
+    }
+
+    fn attach_dense_runtime_trace(&mut self, trace: ProductBuildTrace) -> Option<()> {
+        match self {
+            Self::Ready(_) => Some(()),
+            Self::DenseBinary(product) => product.attach_runtime_trace(trace),
+        }
     }
 
     fn finish(self) -> DFA {
@@ -4780,9 +4799,7 @@ pub(crate) fn prepare_partitioned_expression_pair_with_structural_map(
             let (synthesized, synthesized_nullable) =
                 isolate_component_nullable_start(pair.synthesized.dfa, terminal_ids.len());
             let mut full = pair.full;
-            let full_nullable = if full.dfa().finalizers(0).is_empty()
-                && !full.dfa().has_epsilon_transitions()
-            {
+            let full_nullable = if full.initial_is_nonnullable_without_epsilon() {
                 BTreeSet::new()
             } else {
                 let (dfa, nullable) =
@@ -6711,7 +6728,7 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
     }
 
     let product_build_started_at = profile.then(Instant::now);
-    let ((full, full_trace, full_build_ms), (mut synthesized_dfa, synthesized_trace, synthesized_build_ms)) = rayon::join(
+    let ((mut full, full_trace, full_build_ms), (mut synthesized_dfa, synthesized_trace, synthesized_build_ms)) = rayon::join(
         || {
             let started_at = profile.then(Instant::now);
             let (full, trace) = match try_compile_with_plan_deferred_dense(full_plan) {
@@ -6747,12 +6764,12 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
             product_build_ms,
         );
     }
-    let full_dfa = full.dfa();
+    let full_state_count = full.num_states();
     let Some(full_trace) = full_trace else {
         if profile {
             eprintln!(
                 "[glrmask/profile][tokenizer] structural_pair_rejected stage=missing_full_trace full_states={} synthesized_states={}",
-                full_dfa.num_states(),
+                full_state_count,
                 synthesized_dfa.num_states(),
             );
         }
@@ -6762,7 +6779,7 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
         if profile {
             eprintln!(
                 "[glrmask/profile][tokenizer] structural_pair_rejected stage=missing_synthesized_trace full_states={} synthesized_states={}",
-                full_dfa.num_states(),
+                full_state_count,
                 synthesized_dfa.num_states(),
             );
         }
@@ -7033,7 +7050,7 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
             eprintln!(
                 "[glrmask/profile][tokenizer] structural_component_identity_fallback components={:?} full_states={} synthesized_states={} total_components={}",
                 failed_components,
-                full_dfa.num_states(),
+                full_state_count,
                 synthesized_dfa.num_states(),
                 full_trace.components.len(),
             );
@@ -7062,7 +7079,7 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
         if profile {
             eprintln!(
                 "[glrmask/profile][tokenizer] structural_pair_rejected stage=component_map full_states={} synthesized_states={} components={}",
-                full_dfa.num_states(),
+                full_state_count,
                 synthesized_dfa.num_states(),
                 full_trace.components.len(),
             );
@@ -7307,7 +7324,7 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
     if let Some(total_started_at) = total_started_at {
         eprintln!(
             "[glrmask/profile][tokenizer] structural_pair full_states={} synthesized_states_before={} synthesized_states_after={} mapped_tuples={} missing_before={} product_build_ms={:.3} component_maps_ms={:.3} tuple_map_ms={:.3} augment_ms={:.3} lookup_ms={:.3} total_ms={:.3}",
-            full_dfa.num_states(),
+            full_state_count,
             states_before_augment,
             synthesized_dfa.num_states(),
             full_to_synthesized.len(),
@@ -7320,6 +7337,8 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
             total_started_at.elapsed().as_secs_f64() * 1000.0,
         );
     }
+
+    full.attach_dense_runtime_trace(full_trace)?;
 
     Some(PreparedTerminalExpressionPair {
         synthesized: Regex {
@@ -8023,9 +8042,11 @@ fn pure_binary_intersection(
 }
 
 struct DeferredDenseBinaryIntersectionProduct {
-    dfa: DFA,
+    metadata: DFA,
+    accepting: Vec<bool>,
     pending_class_transition_offsets: Vec<u32>,
     pending_class_transitions: Vec<(u8, u32)>,
+    deferred_transition_rows: Option<DeferredDenseBinaryTransitionRows>,
     class_members: Vec<Vec<u8>>,
     left_states: usize,
     right_states: usize,
@@ -8035,20 +8056,152 @@ struct DeferredDenseBinaryIntersectionProduct {
     started_at: Option<Instant>,
 }
 
+struct DeferredDenseBinaryTransitionRows {
+    pairs: Vec<(u32, u32)>,
+    state_by_pair: Vec<u32>,
+    left_transitions: Vec<Vec<(u8, u32)>>,
+    right_transitions: Vec<Vec<(u8, u32)>>,
+    left_dead: Option<u32>,
+    right_dead: Option<u32>,
+}
+
 impl DeferredDenseBinaryIntersectionProduct {
-    fn dfa(&self) -> &DFA {
-        &self.dfa
+    fn num_states(&self) -> usize {
+        self.accepting.len()
     }
 
-    fn dfa_mut(&mut self) -> &mut DFA {
-        &mut self.dfa
+    fn initial_is_accepting(&self) -> bool {
+        self.accepting.first().copied().unwrap_or(false)
+    }
+
+    fn ensure_group_capacity(&mut self, num_groups: usize) {
+        self.metadata.ensure_group_capacity(num_groups);
+    }
+
+    fn set_group_u8set(&mut self, group_id: u32, set: U8Set) {
+        self.metadata.set_group_u8set(group_id, set);
+    }
+
+    fn materialize_metadata(&mut self) -> DFA {
+        if self.metadata.num_states() == self.accepting.len() {
+            return std::mem::take(&mut self.metadata);
+        }
+        let num_groups = self.metadata.num_groups();
+        let mut dfa = DFA::new(self.accepting.len());
+        dfa.ensure_group_capacity(num_groups);
+        for group in 0..num_groups {
+            dfa.set_group_u8set(
+                group as u32,
+                *self.metadata.group_id_to_u8set(group as u32),
+            );
+        }
+        if num_groups != 0 {
+            for (state, &accepting) in self.accepting.iter().enumerate() {
+                if accepting {
+                    let mut finalizers = BitSet::new(num_groups);
+                    finalizers.set(0);
+                    dfa.overwrite_state_metadata(
+                        state as u32,
+                        finalizers,
+                        BitSet::new(num_groups),
+                    );
+                }
+            }
+        }
+        dfa
+    }
+
+    fn attach_runtime_trace(&mut self, trace: ProductBuildTrace) -> Option<()> {
+        let ProductStateTuples::DenseBinary(pairs) = trace.state_tuples else {
+            return None;
+        };
+        let ProductStateLookup::DenseBinary {
+            right_states,
+            state_by_pair,
+            overflow,
+        } = trace.state_lookup
+        else {
+            return None;
+        };
+        if right_states != self.right_states || !overflow.is_empty() || pairs.len() != self.num_states()
+        {
+            return None;
+        }
+        let Some(rows) = self.deferred_transition_rows.as_mut() else {
+            return Some(());
+        };
+        rows.pairs = pairs;
+        rows.state_by_pair = state_by_pair;
+        Some(())
+    }
+
+    fn materialize_pending_class_transitions(&mut self) -> Option<()> {
+        let Some(rows) = self.deferred_transition_rows.take() else {
+            return Some(());
+        };
+        if rows.pairs.len() != self.num_states()
+            || rows.state_by_pair.len() != self.pair_cells
+        {
+            return None;
+        }
+        self.pending_class_transition_offsets = Vec::with_capacity(rows.pairs.len() + 1);
+        self.pending_class_transition_offsets.push(0);
+        self.pending_class_transitions = Vec::new();
+        for &(left_state, right_state) in &rows.pairs {
+            let left_row = &rows.left_transitions[left_state as usize];
+            let right_row = &rows.right_transitions[right_state as usize];
+            let mut left_index = 0usize;
+            let mut right_index = 0usize;
+            while left_index < left_row.len() && right_index < right_row.len() {
+                let (left_class, left_target) = left_row[left_index];
+                let (right_class, right_target) = right_row[right_index];
+                if left_class < right_class {
+                    left_index += 1;
+                    continue;
+                }
+                if right_class < left_class {
+                    right_index += 1;
+                    continue;
+                }
+                left_index += 1;
+                right_index += 1;
+                if left_target == u32::MAX
+                    || right_target == u32::MAX
+                    || rows.left_dead == Some(left_target)
+                    || rows.right_dead == Some(right_target)
+                {
+                    continue;
+                }
+                let pair_index = (left_target as usize)
+                    .checked_mul(self.right_states)?
+                    .checked_add(right_target as usize)?;
+                let target = *rows.state_by_pair.get(pair_index)?;
+                if target == u32::MAX {
+                    return None;
+                }
+                self.pending_class_transitions
+                    .push((left_class, target));
+            }
+            self.pending_class_transition_offsets
+                .push(u32::try_from(self.pending_class_transitions.len()).ok()?);
+        }
+        Some(())
     }
 
     fn finish(mut self) -> DFA {
         let profile_timing = self.started_at.is_some();
+        let transition_rows_started_at = profile_timing.then(Instant::now);
+        self.materialize_pending_class_transitions()
+            .expect("deferred dense transition rows must materialize");
+        let transition_rows_ms = transition_rows_started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let metadata_started_at = profile_timing.then(Instant::now);
+        let mut dfa = self.materialize_metadata();
+        let metadata_ms = metadata_started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let future_started_at = profile_timing.then(Instant::now);
         set_single_group_futures_from_class_graph_csr(
-            &mut self.dfa,
+            &mut dfa,
             &self.pending_class_transition_offsets,
             &self.pending_class_transitions,
         );
@@ -8108,7 +8261,7 @@ impl DeferredDenseBinaryIntersectionProduct {
         };
         let expanded_transitions: Vec<crate::ds::char_transitions::CharTransitions<u32>> =
             if parallel_expansion {
-                (0..self.dfa.num_states())
+                (0..dfa.num_states())
                     .into_par_iter()
                     .map_init(
                         || vec![u32::MAX; self.num_classes],
@@ -8125,7 +8278,7 @@ impl DeferredDenseBinaryIntersectionProduct {
                     .collect()
             } else {
                 let mut target_by_class = vec![u32::MAX; self.num_classes];
-                (0..self.dfa.num_states())
+                (0..dfa.num_states())
                     .map(|state| {
                         let row_start = self.pending_class_transition_offsets[state] as usize;
                         let row_end = self.pending_class_transition_offsets[state + 1] as usize;
@@ -8136,7 +8289,7 @@ impl DeferredDenseBinaryIntersectionProduct {
                     })
                     .collect()
             };
-        for (state, transitions) in self.dfa.states_mut().iter_mut().zip(expanded_transitions) {
+        for (state, transitions) in dfa.states_mut().iter_mut().zip(expanded_transitions) {
             state.transitions = transitions;
         }
         let expansion_ms = expansion_started_at
@@ -8144,27 +8297,38 @@ impl DeferredDenseBinaryIntersectionProduct {
 
         if let Some(started_at) = self.started_at {
             eprintln!(
-                "[glrmask/profile][tokenizer] dense_binary_intersection left_states={} right_states={} pair_cells={} reachable_states={} classes={} discovery_ms={:.3} future_ms={:.3} expansion_ms={:.3} total_ms={:.3}",
+                "[glrmask/profile][tokenizer] dense_binary_intersection left_states={} right_states={} pair_cells={} reachable_states={} classes={} discovery_ms={:.3} transition_rows_ms={:.3} metadata_ms={:.3} future_ms={:.3} expansion_ms={:.3} total_ms={:.3}",
                 self.left_states,
                 self.right_states,
                 self.pair_cells,
-                self.dfa.num_states(),
+                dfa.num_states(),
                 self.num_classes,
                 self.discovery_ms,
+                transition_rows_ms,
+                metadata_ms,
                 future_ms,
                 expansion_ms,
                 started_at.elapsed().as_secs_f64() * 1000.0,
             );
         }
 
-        self.dfa
+        dfa
     }
 
     fn finish_compressed(mut self) -> (DFA, CompressedTransitionSegment) {
         let profile_timing = self.started_at.is_some();
+        let transition_rows_started_at = profile_timing.then(Instant::now);
+        self.materialize_pending_class_transitions()
+            .expect("deferred dense transition rows must materialize");
+        let transition_rows_ms = transition_rows_started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let metadata_started_at = profile_timing.then(Instant::now);
+        let mut dfa = self.materialize_metadata();
+        let metadata_ms = metadata_started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let future_started_at = profile_timing.then(Instant::now);
         set_single_group_futures_from_class_graph_csr(
-            &mut self.dfa,
+            &mut dfa,
             &self.pending_class_transition_offsets,
             &self.pending_class_transitions,
         );
@@ -8189,27 +8353,29 @@ impl DeferredDenseBinaryIntersectionProduct {
             .sum();
         if let Some(started_at) = self.started_at {
             eprintln!(
-                "[glrmask/profile][tokenizer] dense_binary_intersection left_states={} right_states={} pair_cells={} reachable_states={} classes={} discovery_ms={:.3} future_ms={:.3} expansion_ms=0.000 compressed=true total_ms={:.3}",
+                "[glrmask/profile][tokenizer] dense_binary_intersection left_states={} right_states={} pair_cells={} reachable_states={} classes={} discovery_ms={:.3} transition_rows_ms={:.3} metadata_ms={:.3} future_ms={:.3} expansion_ms=0.000 compressed=true total_ms={:.3}",
                 self.left_states,
                 self.right_states,
                 self.pair_cells,
-                self.dfa.num_states(),
+                dfa.num_states(),
                 self.num_classes,
                 self.discovery_ms,
+                transition_rows_ms,
+                metadata_ms,
                 future_ms,
                 started_at.elapsed().as_secs_f64() * 1000.0,
             );
         }
         let segment = CompressedTransitionSegment {
             state_offset: 0,
-            state_count: self.dfa.num_states() as u32,
+            state_count: dfa.num_states() as u32,
             byte_to_class: Arc::from(byte_to_class.to_vec().into_boxed_slice()),
             class_members: Arc::from(class_members),
             row_offsets: Arc::from(self.pending_class_transition_offsets),
             entries: Arc::from(self.pending_class_transitions),
             expanded_transition_count,
         };
-        (self.dfa, segment)
+        (dfa, segment)
     }
 }
 
@@ -8218,6 +8384,7 @@ fn try_discover_dense_binary_intersection_product(
     class_members: &[Vec<u8>],
     component_class_transitions: &[ProductComponentClassTransitions],
     capture_trace: bool,
+    defer_transition_rows: bool,
     profile_timing: bool,
 ) -> Option<(
     DeferredDenseBinaryIntersectionProduct,
@@ -8256,20 +8423,21 @@ fn try_discover_dense_binary_intersection_product(
     state_by_pair[0] = 0;
     let mut pairs = vec![(0u32, 0u32)];
     let mut pending_class_transition_offsets = Vec::<u32>::new();
-    pending_class_transition_offsets.push(0);
+    if !defer_transition_rows {
+        pending_class_transition_offsets.push(0);
+    }
     let mut pending_class_transitions = Vec::<(u8, u32)>::new();
-    let mut dfa = DFA::new(1);
-    dfa.ensure_group_capacity(1);
-    let set_metadata = |dfa: &mut DFA, state: u32, left_state: u32, right_state: u32| {
-        let mut finalizers = BitSet::new(1);
-        if left.finalizers(left_state).contains(0)
-            && right.finalizers(right_state).contains(0)
-        {
-            finalizers.set(0);
-        }
-        dfa.overwrite_state_metadata(state, finalizers, BitSet::new(1));
+    let mut metadata = DFA::new(1);
+    metadata.ensure_group_capacity(1);
+    let is_accepting = |left_state: u32, right_state: u32| {
+        left.finalizers(left_state).contains(0) && right.finalizers(right_state).contains(0)
     };
-    set_metadata(&mut dfa, 0, 0, 0);
+    let mut accepting = vec![is_accepting(0, 0)];
+    if accepting[0] && !defer_transition_rows {
+        let mut finalizers = BitSet::new(1);
+        finalizers.set(0);
+        metadata.overwrite_state_metadata(0, finalizers, BitSet::new(1));
+    }
 
     let mut cursor = 0usize;
     while cursor < pairs.len() {
@@ -8307,15 +8475,32 @@ fn try_discover_dense_binary_intersection_product(
                 let target = u32::try_from(pairs.len()).ok()?;
                 state_by_pair[pair_index] = target;
                 pairs.push((left_target, right_target));
-                let added = dfa.add_state();
-                debug_assert_eq!(added, target);
-                set_metadata(&mut dfa, target, left_target, right_target);
+                let target_accepting = is_accepting(left_target, right_target);
+                accepting.push(target_accepting);
+                if !defer_transition_rows {
+                    let added = metadata.add_state();
+                    debug_assert_eq!(added, target);
+                    if target_accepting {
+                        let mut finalizers = BitSet::new(1);
+                        finalizers.set(0);
+                        metadata.overwrite_state_metadata(
+                            target,
+                            finalizers,
+                            BitSet::new(1),
+                        );
+                    }
+                }
+                debug_assert_eq!(accepting.len() - 1, target as usize);
                 target
             };
-            pending_class_transitions.push((left_class, target));
+            if !defer_transition_rows {
+                pending_class_transitions.push((left_class, target));
+            }
         }
-        pending_class_transition_offsets
-            .push(u32::try_from(pending_class_transitions.len()).ok()?);
+        if !defer_transition_rows {
+            pending_class_transition_offsets
+                .push(u32::try_from(pending_class_transitions.len()).ok()?);
+        }
         cursor += 1;
     }
     let discovery_ms = discovery_started_at
@@ -8334,9 +8519,20 @@ fn try_discover_dense_binary_intersection_product(
 
     Some((
         DeferredDenseBinaryIntersectionProduct {
-            dfa,
+            metadata,
+            accepting,
             pending_class_transition_offsets,
             pending_class_transitions,
+            deferred_transition_rows: defer_transition_rows.then(|| {
+                DeferredDenseBinaryTransitionRows {
+                    pairs: Vec::new(),
+                    state_by_pair: Vec::new(),
+                    left_transitions: left_transitions.clone(),
+                    right_transitions: right_transitions.clone(),
+                    left_dead,
+                    right_dead,
+                }
+            }),
             class_members: class_members.to_vec(),
             left_states,
             right_states,
@@ -8369,6 +8565,7 @@ fn try_build_dense_binary_intersection_product(
         class_members,
         component_class_transitions,
         capture_trace,
+        false,
         profile_timing,
     )?;
     Some((deferred.finish(), true, trace))
@@ -8400,20 +8597,27 @@ fn try_compile_with_plan_deferred_dense(
     }
     let (class_map, class_members) = compute_product_equivalence_classes(&components);
     let component_class_transitions = build_product_class_transitions(&components, &class_map);
+    let defer_runtime_materialization = std::env::var(
+        "GLRMASK_DEFER_DENSE_RUNTIME_MATERIALIZATION",
+    )
+    .map(|value| {
+        let value = value.trim();
+        !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+    })
+    .unwrap_or(true);
     let Some((mut deferred, trace)) = try_discover_dense_binary_intersection_product(
         &components,
         &class_members,
         &component_class_transitions,
         true,
+        defer_runtime_materialization,
         profile_timing,
     ) else {
         return Err(plan);
     };
 
-    deferred.dfa_mut().ensure_group_capacity(1);
-    deferred
-        .dfa_mut()
-        .set_group_u8set(0, expr_u8set(&plan.compiled_exprs[0]));
+    deferred.ensure_group_capacity(1);
+    deferred.set_group_u8set(0, expr_u8set(&plan.compiled_exprs[0]));
     Ok((DeferredDfa::DenseBinary(deferred), trace))
 }
 
@@ -10514,13 +10718,16 @@ mod tests {
         let eager = super::compile_with_plan(super::build_exclusion_compile_plan(
             std::slice::from_ref(&expression),
         ));
-        let (deferred, trace) = match super::try_compile_with_plan_deferred_dense(
+        let (mut deferred, trace) = match super::try_compile_with_plan_deferred_dense(
             super::build_exclusion_compile_plan(std::slice::from_ref(&expression)),
         ) {
             Ok(prepared) => prepared,
             Err(_) => panic!("binary intersection should admit deferred dense construction"),
         };
-        assert!(trace.is_some(), "deferred construction must retain its state tuples");
+        let trace = trace.expect("deferred construction must retain its state tuples");
+        deferred
+            .attach_dense_runtime_trace(trace)
+            .expect("deferred construction must accept its runtime trace");
         let finished = deferred.finish();
 
         assert_eq!(finished, eager);
