@@ -662,9 +662,7 @@ fn append_l1_profile_entry_dense<'a>(
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::dwa::DWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
-use crate::compiler::stages::mapped_artifact::{
-    DeferredTokenCompactReport, MappedArtifact, compact_deferred_l1_token_sets,
-};
+use crate::compiler::stages::mapped_artifact::MappedArtifact;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::compiler::stages::id_map_and_terminal_dwa::types::LocalIdMapTerminalDwa;
 use crate::ds::weight::{shared_rangeset, Weight};
@@ -733,18 +731,6 @@ fn compact_l1_terminal_dwa_enabled() -> bool {
                 !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
             })
             .unwrap_or(true)
-    })
-}
-
-fn l1_early_token_compaction_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("GLRMASK_L1_EARLY_TOKEN_COMPACTION")
-            .map(|value| {
-                let trimmed = value.trim();
-                trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
-            })
-            .unwrap_or(false)
     })
 }
 
@@ -5267,23 +5253,6 @@ fn build_l1_terminal_dwa(
     }
 
     let token_set_intern_ms = token_set_intern_started_at.elapsed().as_secs_f64() * 1000.0;
-    let early_token_compact_started_at = Instant::now();
-    let early_token_compact_report = if l1_early_token_compaction_enabled() {
-        compact_deferred_l1_token_sets(&mut deferred_arced, id_map)
-    } else {
-        DeferredTokenCompactReport::default()
-    };
-    let early_token_compact_ms = early_token_compact_started_at.elapsed().as_secs_f64() * 1000.0;
-    if compile_profile_enabled() && l1_early_token_compaction_enabled() {
-        eprintln!(
-            "[glrmask/profile][l1_early_token_compaction] tokens_before={} tokens_after={} unique_token_sets={} source_ranges={} total_ms={:.3}",
-            early_token_compact_report.tokens_before,
-            early_token_compact_report.tokens_after,
-            early_token_compact_report.unique_token_sets,
-            early_token_compact_report.source_ranges,
-            early_token_compact_ms,
-        );
-    }
     let traversal_ms = traversal_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let tsid_profile_merge_started_at = Instant::now();

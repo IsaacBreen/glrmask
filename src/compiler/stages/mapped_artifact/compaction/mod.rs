@@ -86,14 +86,6 @@ pub struct CompactProfileStats {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct DeferredTokenCompactReport {
-    pub(crate) tokens_before: usize,
-    pub(crate) tokens_after: usize,
-    pub(crate) unique_token_sets: usize,
-    pub(crate) source_ranges: usize,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct UniqueStorageCounts {
     weight_ranges: usize,
     token_ranges: usize,
@@ -721,13 +713,6 @@ fn build_exact_token_merge_permutation(weights: &[&Weight], num_tokens: usize) -
         }
     }
 
-    build_exact_token_merge_permutation_from_token_sets(&token_sets, num_tokens)
-}
-
-fn build_exact_token_merge_permutation_from_token_sets(
-    token_sets: &[Arc<RangeSetBlaze<u32>>],
-    num_tokens: usize,
-) -> (Vec<u32>, usize) {
     if token_sets.is_empty() {
         return (vec![0; num_tokens], 1);
     }
@@ -741,117 +726,6 @@ fn build_exact_token_merge_permutation_from_token_sets(
     } else {
         build_exact_token_merge_permutation_multiword_dense(&token_sets, num_tokens, profile_words)
     }
-}
-
-/// Compact a temporary singleton token coordinate directly from the exact
-/// `(terminal-signature, TSID) -> token-set` relation produced by L1.
-///
-/// Those contexts encode the complete deterministic L1 end signature, so two
-/// tokens with identical membership profiles here are exactly interchangeable
-/// for every terminal weight assembled later.  Performing the merge before
-/// terminal-weight construction lets downstream range unions operate on the
-/// compact coordinate instead of materializing then remapping the full
-/// singleton vocabulary.
-pub(crate) fn compact_deferred_l1_token_sets(
-    entries_by_signature: &mut [Vec<(u32, SharedTokenSet)>],
-    id_map: &mut InternalIdMap,
-) -> DeferredTokenCompactReport {
-    let profile = env_flag("GLRMASK_PROFILE_COMPILE");
-    let total_started_at = profile.then(Instant::now);
-    let tokens_before = id_map.num_internal_tokens() as usize;
-    if tokens_before == 0 {
-        return DeferredTokenCompactReport::default();
-    }
-
-    let collect_started_at = profile.then(Instant::now);
-    let mut seen = HashSet::new();
-    let mut token_sets = Vec::<SharedTokenSet>::new();
-    let mut source_ranges = 0usize;
-    for entries in entries_by_signature.iter() {
-        for (_, token_set) in entries {
-            let ptr = Arc::as_ptr(token_set) as usize;
-            if seen.insert(ptr) {
-                source_ranges += token_set.ranges().count();
-                token_sets.push(Arc::clone(token_set));
-            }
-        }
-    }
-    let collect_ms = collect_started_at.map_or(0.0, elapsed_ms);
-
-    let merge_started_at = profile.then(Instant::now);
-    let (token_perm, tokens_after) =
-        build_exact_token_merge_permutation_from_token_sets(&token_sets, tokens_before);
-    let merge_ms = merge_started_at.map_or(0.0, elapsed_ms);
-    let report = DeferredTokenCompactReport {
-        tokens_before,
-        tokens_after,
-        unique_token_sets: token_sets.len(),
-        source_ranges,
-    };
-    if tokens_after == tokens_before
-        && token_perm
-            .iter()
-            .enumerate()
-            .all(|(old, &new)| old == new as usize)
-    {
-        return report;
-    }
-
-    let perm_context =
-        PermutationContext::new(&identity_perm(id_map.num_tsids() as usize), &token_perm);
-    let remap_started_at = profile.then(Instant::now);
-    let build_remap = |token_set: &SharedTokenSet| {
-        (
-            Arc::as_ptr(token_set) as usize,
-            shared_rangeset(permute_rangeset_with_runs(
-                token_set,
-                &perm_context.token_runs,
-            )),
-        )
-    };
-    let remapped: HashMap<usize, SharedTokenSet> = if rayon::current_num_threads() == 1 {
-        token_sets.iter().map(build_remap).collect()
-    } else {
-        token_sets.par_iter().map(build_remap).collect()
-    };
-    let remap_ms = remap_started_at.map_or(0.0, elapsed_ms);
-
-    let rewrite_started_at = profile.then(Instant::now);
-    for entries in entries_by_signature.iter_mut() {
-        for (_, token_set) in entries.iter_mut() {
-            let ptr = Arc::as_ptr(token_set) as usize;
-            let mapped = remapped
-                .get(&ptr)
-                .expect("early L1 token remap missing source token set");
-            *token_set = Arc::clone(mapped);
-        }
-    }
-    let rewrite_ms = rewrite_started_at.map_or(0.0, elapsed_ms);
-
-    let id_map_started_at = profile.then(Instant::now);
-    if id_map.deferred_vocab_singleton_original_ids.is_some() {
-        apply_perm_to_deferred_vocab_singletons(id_map, &token_perm, tokens_after);
-    } else {
-        apply_perm_to_id_map(&mut id_map.vocab_tokens, &token_perm, tokens_after);
-    }
-    let id_map_ms = id_map_started_at.map_or(0.0, elapsed_ms);
-    if let Some(total_started_at) = total_started_at {
-        eprintln!(
-            "[glrmask/profile][deferred_l1_token_compaction_detail] token_sets={} source_ranges={} perm_runs={} tokens_before={} tokens_after={} collect_ms={:.3} merge_ms={:.3} remap_ms={:.3} rewrite_ms={:.3} id_map_ms={:.3} total_ms={:.3}",
-            token_sets.len(),
-            source_ranges,
-            perm_context.token_runs.len(),
-            tokens_before,
-            tokens_after,
-            collect_ms,
-            merge_ms,
-            remap_ms,
-            rewrite_ms,
-            id_map_ms,
-            elapsed_ms(total_started_at),
-        );
-    }
-    report
 }
 
 fn exact_token_merge_sweep_enabled() -> bool {
