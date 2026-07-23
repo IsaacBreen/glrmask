@@ -3012,7 +3012,6 @@ pub(crate) struct PreparedPartitionedExpressionPair {
     pub(crate) synthesized: Regex,
     full: DeferredPartitionedRegex,
     pub(crate) full_to_synthesized: Vec<u32>,
-    pub(crate) synthesized_expressions: Vec<Expr>,
 }
 
 impl PreparedPartitionedExpressionPair {
@@ -3028,14 +3027,11 @@ impl PreparedPartitionedExpressionPair {
         }
     }
 
-    pub(crate) fn into_parts(
-        self,
-    ) -> (Regex, DeferredPartitionedRegex, Vec<u32>, Vec<Expr>) {
+    pub(crate) fn into_parts(self) -> (Regex, DeferredPartitionedRegex, Vec<u32>) {
         (
             self.synthesized,
             self.full,
             self.full_to_synthesized,
-            self.synthesized_expressions,
         )
     }
 }
@@ -4443,16 +4439,13 @@ pub(crate) fn prepare_partitioned_expression_pair_with_structural_map(
                     );
                 }
                 let state_count = dfa.num_states() as u32;
-                return Some((
-                    LexerComponentPair {
-                        terminal_ids,
-                        synthesized: dfa.clone(),
-                        full: DeferredDfa::Ready(dfa),
-                        full_to_synthesized: (0..state_count).collect(),
-                        protected_residual: false,
-                    },
-                    None,
-                ));
+                return Some(LexerComponentPair {
+                    terminal_ids,
+                    synthesized: dfa.clone(),
+                    full: DeferredDfa::Ready(dfa),
+                    full_to_synthesized: (0..state_count).collect(),
+                    protected_residual: false,
+                });
             }
 
             if changed_terminals.len() != 1 || terminal_ids.len() != 1 {
@@ -4478,34 +4471,13 @@ pub(crate) fn prepare_partitioned_expression_pair_with_structural_map(
             let Some(pair) = pair else {
                 if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some() {
                     eprintln!(
-                        "[glrmask/profile][tokenizer] structural_partition_pair_identity_fallback terminal={} reason=local_pair_failed full_expr={:?} synthesized_expr={:?}",
+                        "[glrmask/profile][tokenizer] structural_partition_pair_rejected reason=local_pair_failed terminal={} full_expr={:?} synthesized_expr={:?}",
                         terminal,
                         expr_profile_summary(&full_exprs[terminal]),
                         expr_profile_summary(&synthesized_exprs[terminal]),
                     );
                 }
-                let dfa = compile_terminal_ids(full_exprs, visible_labels, &terminal_ids);
-                let (dfa, nullable) = isolate_component_nullable_start(dfa, terminal_ids.len());
-                if !nullable.is_empty() {
-                    if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some() {
-                        eprintln!(
-                            "[glrmask/profile][tokenizer] structural_partition_pair_rejected reason=nullable_identity_fallback terminal={} nullable={:?}",
-                            terminal, nullable,
-                        );
-                    }
-                    return None;
-                }
-                let state_count = dfa.num_states() as u32;
-                return Some((
-                    LexerComponentPair {
-                        terminal_ids,
-                        synthesized: dfa.clone(),
-                        full: DeferredDfa::Ready(dfa),
-                        full_to_synthesized: (0..state_count).collect(),
-                        protected_residual: false,
-                    },
-                    Some(terminal),
-                ));
+                return None;
             };
             let (synthesized, synthesized_nullable) =
                 isolate_component_nullable_start(pair.synthesized.dfa, terminal_ids.len());
@@ -4529,26 +4501,19 @@ pub(crate) fn prepare_partitioned_expression_pair_with_structural_map(
                 }
                 return None;
             }
-            Some((
-                LexerComponentPair {
-                    terminal_ids,
-                    synthesized,
-                    full,
-                    full_to_synthesized: pair.full_to_synthesized,
-                    protected_residual: true,
-                },
-                None,
-            ))
+            Some(LexerComponentPair {
+                terminal_ids,
+                synthesized,
+                full,
+                full_to_synthesized: pair.full_to_synthesized,
+                protected_residual: true,
+            })
         })
         .collect::<Option<Vec<_>>>()?;
 
     let mut protected = Vec::new();
     let mut ordinary = Vec::new();
-    let mut effective_synthesized_expressions = synthesized_exprs.to_vec();
-    for (pair, identity_fallback_terminal) in compiled {
-        if let Some(terminal) = identity_fallback_terminal {
-            effective_synthesized_expressions[terminal] = full_exprs[terminal].clone();
-        }
+    for pair in compiled {
         if pair.protected_residual {
             protected.push(pair);
         } else {
@@ -4625,7 +4590,6 @@ pub(crate) fn prepare_partitioned_expression_pair_with_structural_map(
             total_groups: full_exprs.len(),
         },
         full_to_synthesized,
-        synthesized_expressions: effective_synthesized_expressions,
     })
 }
 
