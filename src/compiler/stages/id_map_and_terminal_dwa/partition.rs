@@ -212,9 +212,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
         partition_label,
         tokenizer,
         vocab,
-        initial_state_map
-            .map(ManyToOneIdMap::num_internal_ids)
-            .unwrap_or_else(|| tokenizer.num_states()) as usize,
+        initial_state_map,
         &l1_mask,
         &l2p_mask,
     );

@@ -10,7 +10,7 @@
 //! terminal labels. It measures scanner-topology sharing only.
 
 use std::cell::Cell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -19,8 +19,10 @@ use crate::automata::lexer::compile::compile_terminal_expr_dfa;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::lexer::{DFA, Lexer};
 use crate::automata::regex::Expr;
+use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 use crate::ds::u8set::U8Set;
 use crate::Vocab;
+use rustc_hash::FxHashSet;
 
 use super::l2p::equivalence_analysis::state_equivalence::restricted_observation::hopcroft_refine_sparse_edges;
 
@@ -326,6 +328,7 @@ struct SourceMachine {
 #[derive(Debug)]
 struct GenericPartitionAnalysis {
     members: Vec<Option<GenericMember>>,
+    source_dfas: Vec<Option<Arc<DFA>>>,
     failures: Vec<Option<&'static str>>,
     singleton_machine_time: Duration,
     quotient_time: Duration,
@@ -341,6 +344,7 @@ impl GenericPartitionAnalysis {
     fn build(tokenizer: &Tokenizer, alphabet: U8Set, active_mask: &[bool]) -> Self {
         let terminal_count = tokenizer.num_terminals() as usize;
         let mut members = (0..terminal_count).map(|_| None).collect::<Vec<_>>();
+        let mut source_dfas = (0..terminal_count).map(|_| None).collect::<Vec<_>>();
         let mut failures = vec![None; terminal_count];
         let mut machines = Vec::<SourceMachine>::new();
         let mut singleton_machine_time = Duration::ZERO;
@@ -386,9 +390,10 @@ impl GenericPartitionAnalysis {
             machines.push(SourceMachine {
                 terminal,
                 example,
-                dfa,
+                dfa: Arc::clone(&dfa),
                 offset: global_states,
             });
+            source_dfas[terminal] = Some(dfa);
             global_states += machines.last().expect("source machine").dfa.num_states();
         }
 
@@ -450,6 +455,7 @@ impl GenericPartitionAnalysis {
             }
             return Self {
                 members,
+                source_dfas,
                 failures,
                 singleton_machine_time,
                 quotient_time,
@@ -544,6 +550,7 @@ impl GenericPartitionAnalysis {
 
         Self {
             members,
+            source_dfas,
             failures,
             singleton_machine_time,
             quotient_time,
@@ -555,6 +562,400 @@ impl GenericPartitionAnalysis {
             refinement_memory_bytes_estimate,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct PhysicalDefinitionSeed {
+    residual_configuration: Vec<(u32, u32)>,
+    finalizers: Vec<u32>,
+    futures: Vec<u32>,
+    epsilon_target_seeds: Vec<u32>,
+}
+
+fn same_partition(left: &[u32], right: &[u32]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut left_to_right = HashMap::<u32, u32>::new();
+    let mut right_to_left = HashMap::<u32, u32>::new();
+    for (&left_class, &right_class) in left.iter().zip(right) {
+        if left_to_right
+            .insert(left_class, right_class)
+            .is_some_and(|existing| existing != right_class)
+            || right_to_left
+                .insert(right_class, left_class)
+                .is_some_and(|existing| existing != left_class)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn renumber_start_class_first(classes: &[u32], start_state: usize) -> (Vec<u32>, Vec<u32>) {
+    let start_class = classes[start_state];
+    let mut old_to_new = HashMap::<u32, u32>::new();
+    old_to_new.insert(start_class, 0);
+    let mut next = 1u32;
+    let mut mapped = Vec::with_capacity(classes.len());
+    for &class in classes {
+        let mapped_class = *old_to_new.entry(class).or_insert_with(|| {
+            let assigned = next;
+            next += 1;
+            assigned
+        });
+        mapped.push(mapped_class);
+    }
+    let mut representatives = vec![u32::MAX; next as usize];
+    for (state, &class) in mapped.iter().enumerate() {
+        if representatives[class as usize] == u32::MAX {
+            representatives[class as usize] = state as u32;
+        }
+    }
+    (mapped, representatives)
+}
+
+fn definition_physical_report_enabled(partition_label: &str, scope: &str) -> bool {
+    let enabled = std::env::var("GLRMASK_DEFINITION_PHYSICAL_REPORT")
+        .ok()
+        .is_some_and(|value| {
+            let value = value.trim();
+            value.is_empty() || value == "1" || value.eq_ignore_ascii_case("true")
+        });
+    if !enabled {
+        return false;
+    }
+    std::env::var("GLRMASK_DEFINITION_PHYSICAL_REPORT_FILTER")
+        .map(|filter| {
+            let branch = format!("{partition_label}.{scope}");
+            filter
+                .split(',')
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .any(|item| branch.contains(item))
+        })
+        .unwrap_or(true)
+}
+
+/// Reconstruct an exact, labelled definition-residual seed over the physical
+/// tokenizer, then close it under the actual branch transition/epsilon graph.
+///
+/// This is analysis-only. The reconstructed residual relation is permitted to
+/// over-distinguish states, but the final quotient is accepted only if the
+/// production tokenizer's complete congruence verifier certifies every raw
+/// member, relevant byte transition, output, future, and epsilon edge.
+fn report_physical_definition_coordinate(
+    partition_label: &str,
+    scope: &str,
+    tokenizer: &Tokenizer,
+    alphabet: U8Set,
+    active_mask: &[bool],
+    initial_state_map: Option<&ManyToOneIdMap>,
+    analysis: &GenericPartitionAnalysis,
+) {
+    if !definition_physical_report_enabled(partition_label, scope) {
+        return;
+    }
+    let total_started_at = Instant::now();
+    let raw_states = tokenizer.num_states() as usize;
+    if raw_states == 0 {
+        return;
+    }
+    let epsilon_closures = tokenizer.all_singleton_epsilon_closures();
+    let relation_started_at = Instant::now();
+    let mut raw_configurations = vec![Vec::<(u32, u32)>::new(); raw_states];
+    let mut relation_pairs = 0usize;
+    let mut terminal_failures = 0usize;
+
+    for terminal in 0..active_mask.len() {
+        if !active_mask[terminal] {
+            continue;
+        }
+        let Some(member) = analysis.members.get(terminal).and_then(Option::as_ref) else {
+            terminal_failures += 1;
+            continue;
+        };
+        let Some(singleton) = analysis
+            .source_dfas
+            .get(terminal)
+            .and_then(Option::as_ref)
+        else {
+            terminal_failures += 1;
+            continue;
+        };
+        if member.source_to_quotient.len() != singleton.num_states() {
+            terminal_failures += 1;
+            continue;
+        }
+
+        let terminal = terminal as u32;
+        let supports_terminal = |physical_state: u32| {
+            tokenizer
+                .matched_terminal_bitset(physical_state)
+                .contains(terminal as usize)
+                || tokenizer
+                    .possible_future_terminals(physical_state)
+                    .contains(terminal as usize)
+        };
+        let mut queue = VecDeque::<(u32, u32)>::new();
+        let mut seen = FxHashSet::<u64>::default();
+        queue.push_back((tokenizer.start_state(), 0));
+        while let Some((physical_state, singleton_state)) = queue.pop_front() {
+            let key = ((physical_state as u64) << 32) | singleton_state as u64;
+            if !seen.insert(key) {
+                continue;
+            }
+            relation_pairs += 1;
+            raw_configurations[physical_state as usize].push((
+                terminal,
+                member.source_to_quotient[singleton_state as usize],
+            ));
+
+            for &epsilon_target in epsilon_closures[physical_state as usize].iter() {
+                if epsilon_target != physical_state && supports_terminal(epsilon_target) {
+                    queue.push_back((epsilon_target, singleton_state));
+                }
+            }
+            for (byte, singleton_target) in singleton.transitions(singleton_state) {
+                if let Some(physical_target) = tokenizer.step(physical_state, byte)
+                    && supports_terminal(physical_target)
+                {
+                    queue.push_back((physical_target, singleton_target));
+                }
+            }
+        }
+    }
+    for configuration in &mut raw_configurations {
+        configuration.sort_unstable();
+        configuration.dedup();
+    }
+    let relation_ms = relation_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let source_count = initial_state_map
+        .map(ManyToOneIdMap::num_internal_ids)
+        .unwrap_or(tokenizer.num_states()) as usize;
+    let source_representatives = initial_state_map.map_or_else(
+        || (0..tokenizer.num_states()).collect::<Vec<_>>(),
+        |map| map.representative_original_ids.clone(),
+    );
+    if source_representatives.len() != source_count
+        || source_representatives
+            .iter()
+            .any(|&state| state == u32::MAX || state as usize >= raw_states)
+    {
+        eprintln!(
+            "[glrmask/profile][definition_physical_coordinate] partition={} scope={} selected=false reason=invalid_source_representatives raw_states={} source_states={} total_ms={:.3}",
+            partition_label,
+            scope,
+            raw_states,
+            source_count,
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+        return;
+    }
+    let raw_to_source = initial_state_map.map_or_else(
+        || (0..tokenizer.num_states()).collect::<Vec<_>>(),
+        |map| map.original_to_internal.clone(),
+    );
+
+    let seed_started_at = Instant::now();
+    let mut seed_values = Vec::<PhysicalDefinitionSeed>::with_capacity(source_count);
+    for &raw in &source_representatives {
+        let mut finalizers = tokenizer
+            .matched_terminal_bitset(raw)
+            .iter()
+            .filter(|&terminal| active_mask.get(terminal).copied().unwrap_or(false))
+            .map(|terminal| terminal as u32)
+            .collect::<Vec<_>>();
+        let mut futures = tokenizer
+            .possible_future_terminals(raw)
+            .iter()
+            .filter(|&terminal| active_mask.get(terminal).copied().unwrap_or(false))
+            .map(|terminal| terminal as u32)
+            .collect::<Vec<_>>();
+        finalizers.sort_unstable();
+        futures.sort_unstable();
+        seed_values.push(PhysicalDefinitionSeed {
+            residual_configuration: raw_configurations[raw as usize].clone(),
+            finalizers,
+            futures,
+            epsilon_target_seeds: Vec::new(),
+        });
+    }
+    let mut seed_classes = canonical_class_ids(&seed_values);
+    for (source, &raw) in source_representatives.iter().enumerate() {
+        let mut epsilon_target_seeds = epsilon_closures[raw as usize]
+            .iter()
+            .copied()
+            .filter(|&target| target != raw)
+            .filter_map(|target| raw_to_source.get(target as usize).copied())
+            .filter(|&target| target != u32::MAX && target as usize != source)
+            .map(|target| seed_classes[target as usize])
+            .collect::<Vec<_>>();
+        epsilon_target_seeds.sort_unstable();
+        epsilon_target_seeds.dedup();
+        seed_values[source].epsilon_target_seeds = epsilon_target_seeds;
+    }
+    seed_classes = canonical_class_ids(&seed_values);
+    let seed_class_count = seed_classes
+        .iter()
+        .copied()
+        .max()
+        .map_or(0usize, |class| class as usize + 1);
+    let seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let graph_started_at = Instant::now();
+    let mut offsets = Vec::<u32>::with_capacity(source_count + 1);
+    let mut bytes = Vec::<u8>::new();
+    let mut targets = Vec::<u32>::new();
+    offsets.push(0);
+    for &raw in &source_representatives {
+        for byte in alphabet.iter() {
+            if let Some(raw_target) = tokenizer.step(raw, byte)
+                && let Some(&source_target) = raw_to_source.get(raw_target as usize)
+                && source_target != u32::MAX
+            {
+                bytes.push(byte);
+                targets.push(source_target);
+            }
+        }
+        offsets.push(bytes.len() as u32);
+    }
+    let relevant_edges = bytes.len();
+    let graph_ms = graph_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let refine_started_at = Instant::now();
+    let mut input_classes = seed_classes;
+    let mut rounds = 0usize;
+    let final_classes = loop {
+        rounds += 1;
+        let Some(byte_classes) = hopcroft_refine_sparse_edges(
+            &input_classes,
+            offsets.clone(),
+            bytes.clone(),
+            targets.clone(),
+        ) else {
+            eprintln!(
+                "[glrmask/profile][definition_physical_coordinate] partition={} scope={} selected=false reason=invalid_source_graph raw_states={} source_states={} total_ms={:.3}",
+                partition_label,
+                scope,
+                raw_states,
+                source_count,
+                total_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+            return;
+        };
+        let epsilon_signatures = source_representatives
+            .iter()
+            .enumerate()
+            .map(|(source, &raw)| {
+                let mut epsilon_targets = epsilon_closures[raw as usize]
+                    .iter()
+                    .copied()
+                    .filter(|&target| target != raw)
+                    .filter_map(|target| raw_to_source.get(target as usize).copied())
+                    .filter(|&target| target != u32::MAX && target as usize != source)
+                    .map(|target| byte_classes[target as usize])
+                    .collect::<Vec<_>>();
+                epsilon_targets.sort_unstable();
+                epsilon_targets.dedup();
+                (byte_classes[source], epsilon_targets)
+            })
+            .collect::<Vec<_>>();
+        let epsilon_classes = canonical_class_ids(&epsilon_signatures);
+        if same_partition(&byte_classes, &epsilon_classes) {
+            break byte_classes;
+        }
+        input_classes = epsilon_classes;
+        if rounds > source_count {
+            eprintln!(
+                "[glrmask/profile][definition_physical_coordinate] partition={} scope={} selected=false reason=epsilon_refinement_did_not_stabilize raw_states={} source_states={} total_ms={:.3}",
+                partition_label,
+                scope,
+                raw_states,
+                source_count,
+                total_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+            return;
+        }
+    };
+    let refine_ms = refine_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let lift_started_at = Instant::now();
+    let raw_start_source = raw_to_source[tokenizer.start_state() as usize] as usize;
+    let (source_classes, _) = renumber_start_class_first(&final_classes, raw_start_source);
+    let mut raw_classes = vec![u32::MAX; raw_states];
+    for raw in 0..raw_states {
+        let source = raw_to_source[raw];
+        if source != u32::MAX {
+            raw_classes[raw] = source_classes[source as usize];
+        }
+    }
+    let class_count = source_classes
+        .iter()
+        .copied()
+        .max()
+        .map_or(0usize, |class| class as usize + 1);
+    let mut raw_representatives = vec![u32::MAX; class_count];
+    for (raw, &class) in raw_classes.iter().enumerate() {
+        if class != u32::MAX && raw_representatives[class as usize] == u32::MAX {
+            raw_representatives[class as usize] = raw as u32;
+        }
+    }
+    let mut relevant_bytes = [false; 256];
+    for byte in alphabet.iter() {
+        relevant_bytes[byte as usize] = true;
+    }
+    let certified = raw_representatives.iter().all(|&state| state != u32::MAX)
+        && tokenizer
+            .materialize_active_quotient(
+                &raw_classes,
+                &raw_representatives,
+                active_mask,
+                &relevant_bytes,
+            )
+            .is_some();
+    let lift_ms = lift_started_at.elapsed().as_secs_f64() * 1000.0;
+    let missing_active_states = (0..raw_states)
+        .filter(|&state| {
+            raw_configurations[state].is_empty()
+                && (tokenizer
+                    .matched_terminal_bitset(state as u32)
+                    .iter()
+                    .any(|terminal| active_mask.get(terminal).copied().unwrap_or(false))
+                    || tokenizer
+                        .possible_future_terminals(state as u32)
+                        .iter()
+                        .any(|terminal| active_mask.get(terminal).copied().unwrap_or(false)))
+        })
+        .count();
+    eprintln!(
+        "[glrmask/profile][definition_physical_coordinate] partition={} scope={} selected={} raw_states={} source_states={} active_terminals={} relation_pairs={} missing_active_states={} terminal_failures={} seed_classes={} quotient_states={} reduction_pct={:.2} relevant_edges={} rounds={} relation_ms={:.3} seed_ms={:.3} graph_ms={:.3} refine_ms={:.3} certificate_ms={:.3} total_ms={:.3}",
+        partition_label,
+        scope,
+        certified,
+        raw_states,
+        source_count,
+        active_mask.iter().filter(|&&active| active).count(),
+        relation_pairs,
+        missing_active_states,
+        terminal_failures,
+        seed_class_count,
+        class_count,
+        if source_count == 0 {
+            0.0
+        } else {
+            100.0 * source_count.saturating_sub(class_count) as f64 / source_count as f64
+        },
+        relevant_edges,
+        rounds,
+        relation_ms,
+        seed_ms,
+        graph_ms,
+        refine_ms,
+        lift_ms,
+        total_started_at.elapsed().as_secs_f64() * 1000.0,
+    );
 }
 
 fn fixed_literal_bytes(expr: &Expr, output: &mut Vec<u8>) -> bool {
@@ -923,7 +1324,7 @@ pub(crate) fn report_partition(
     partition_label: &str,
     tokenizer: &Tokenizer,
     vocab: &Vocab,
-    source_states: usize,
+    initial_state_map: Option<&ManyToOneIdMap>,
     l1_mask: &[bool],
     l2p_mask: &[bool],
 ) {
@@ -932,6 +1333,9 @@ pub(crate) fn report_partition(
     }
 
     let total_started_at = Instant::now();
+    let source_states = initial_state_map
+        .map(ManyToOneIdMap::num_internal_ids)
+        .unwrap_or_else(|| tokenizer.num_states()) as usize;
     let analysis = PartitionAnalysis::build(tokenizer, vocab);
     let literal_terminals = analysis.members.iter().filter(|member| member.is_some()).count();
     let map_entries = analysis
@@ -1032,6 +1436,24 @@ pub(crate) fn report_partition(
         "l2p",
         source_states,
         l2p_mask,
+        &generic,
+    );
+    report_physical_definition_coordinate(
+        partition_label,
+        "l1",
+        tokenizer,
+        analysis.alphabet,
+        l1_mask,
+        initial_state_map,
+        &generic,
+    );
+    report_physical_definition_coordinate(
+        partition_label,
+        "l2p",
+        tokenizer,
+        analysis.alphabet,
+        l2p_mask,
+        initial_state_map,
         &generic,
     );
     eprintln!(
