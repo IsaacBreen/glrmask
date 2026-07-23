@@ -29,7 +29,6 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
 use crate::automata::lexer::Lexer;
@@ -557,54 +556,59 @@ fn root_semantic_ids_for_token(
     token_semantic_ids
 }
 
-fn token_signature<F>(machine: &TraceMachine, bytes: &[u8], mut suffix_semantic: F) -> Vec<u32>
-where
-    F: FnMut(usize) -> u32,
-{
-    let mut signature = Vec::with_capacity(machine.tokenizer.num_states() as usize * 6);
-    let mut candidate_cuts = Vec::new();
-    for start_state in 0..machine.tokenizer.num_states() {
-        append_trace(
-            &mut signature,
-            &mut candidate_cuts,
+fn classify_tokens<S: AsRef<[u8]>>(
+    machine: &TraceMachine,
+    tokens: &[S],
+) -> Vec<Vec<usize>> {
+    let mut root_semantic_ids = FxHashMap::<Vec<u32>, u32>::default();
+    let mut root_semantic_by_suffix = FxHashMap::<Vec<u8>, u32>::default();
+    let mut classes = FxHashMap::<Vec<u32>, Vec<usize>>::default();
+    for (token_index, token) in tokens.iter().enumerate() {
+        let bytes = token.as_ref();
+        let suffix_semantics = root_semantic_ids_for_token(
             machine,
             bytes,
-            start_state,
-            0,
+            &mut root_semantic_ids,
+            &mut root_semantic_by_suffix,
         );
-    }
-    for (prefix_id, &prefix) in machine.prefix_bytes.iter().enumerate() {
-        signature.push(PREFIX);
-        signature.push(prefix_id as u32);
-        if bytes.first() == Some(&prefix) {
-            signature.push(PREFIX_MATCH);
+        let mut signature = Vec::with_capacity(machine.tokenizer.num_states() as usize * 6);
+        let mut candidate_cuts = Vec::new();
+        for start_state in 0..machine.tokenizer.num_states() {
             append_trace(
                 &mut signature,
                 &mut candidate_cuts,
                 machine,
-                &bytes[1..],
-                machine.boundary_state,
-                1,
+                bytes,
+                start_state,
+                0,
             );
-        } else {
-            signature.push(PREFIX_MISS);
         }
-    }
-    candidate_cuts.sort_unstable();
-    candidate_cuts.dedup();
-    signature.push(ROOT_CUTS);
-    signature.push(candidate_cuts.len() as u32);
-    for cut in candidate_cuts {
-        debug_assert!(cut > 0 && cut <= bytes.len());
-        signature.push(cut as u32);
-        signature.push(suffix_semantic(cut));
-    }
-    signature
-}
-
-fn group_token_signatures(signatures: Vec<Vec<u32>>) -> Vec<Vec<usize>> {
-    let mut classes = FxHashMap::<Vec<u32>, Vec<usize>>::default();
-    for (token_index, signature) in signatures.into_iter().enumerate() {
+        for (prefix_id, &prefix) in machine.prefix_bytes.iter().enumerate() {
+            signature.push(PREFIX);
+            signature.push(prefix_id as u32);
+            if bytes.first() == Some(&prefix) {
+                signature.push(PREFIX_MATCH);
+                append_trace(
+                    &mut signature,
+                    &mut candidate_cuts,
+                    machine,
+                    &bytes[1..],
+                    machine.boundary_state,
+                    1,
+                );
+            } else {
+                signature.push(PREFIX_MISS);
+            }
+        }
+        candidate_cuts.sort_unstable();
+        candidate_cuts.dedup();
+        signature.push(ROOT_CUTS);
+        signature.push(candidate_cuts.len() as u32);
+        for cut in candidate_cuts {
+            debug_assert!(cut > 0 && cut <= bytes.len());
+            signature.push(cut as u32);
+            signature.push(suffix_semantics[cut]);
+        }
         classes.entry(signature).or_default().push(token_index);
     }
     let mut classes = classes.into_values().collect::<Vec<_>>();
@@ -612,103 +616,7 @@ fn group_token_signatures(signatures: Vec<Vec<u32>>) -> Vec<Vec<usize>> {
     classes
 }
 
-fn classify_tokens_serial<S: AsRef<[u8]>>(
-    machine: &TraceMachine,
-    tokens: &[S],
-) -> Vec<Vec<usize>> {
-    let mut root_semantic_ids = FxHashMap::<Vec<u32>, u32>::default();
-    let mut root_semantic_by_suffix = FxHashMap::<Vec<u8>, u32>::default();
-    let signatures = tokens
-        .iter()
-        .map(|token| {
-            let bytes = token.as_ref();
-            let suffix_semantics = root_semantic_ids_for_token(
-                machine,
-                bytes,
-                &mut root_semantic_ids,
-                &mut root_semantic_by_suffix,
-            );
-            token_signature(machine, bytes, |cut| suffix_semantics[cut])
-        })
-        .collect();
-    group_token_signatures(signatures)
-}
-
-fn classify_tokens_parallel<S: AsRef<[u8]> + Sync>(
-    machine: &TraceMachine,
-    tokens: &[S],
-) -> Vec<Vec<usize>> {
-    let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-        || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
-        || std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
-    let total_started_at = Instant::now();
-    let suffix_started_at = Instant::now();
-    let mut root_semantic_ids = FxHashMap::<Vec<u32>, u32>::default();
-    let mut root_semantic_by_suffix = FxHashMap::<Vec<u8>, u32>::default();
-    for token in tokens {
-        let _ = root_semantic_ids_for_token(
-            machine,
-            token.as_ref(),
-            &mut root_semantic_ids,
-            &mut root_semantic_by_suffix,
-        );
-    }
-    let suffix_ms = suffix_started_at.elapsed().as_secs_f64() * 1000.0;
-
-    let signature_started_at = Instant::now();
-    let signatures = tokens
-        .par_iter()
-        .map(|token| {
-            let bytes = token.as_ref();
-            token_signature(machine, bytes, |cut| {
-                *root_semantic_by_suffix
-                    .get(&bytes[cut..])
-                    .expect("every candidate suffix was interned before parallel classification")
-            })
-        })
-        .collect::<Vec<_>>();
-    let signature_ms = signature_started_at.elapsed().as_secs_f64() * 1000.0;
-
-    let group_started_at = Instant::now();
-    let classes = group_token_signatures(signatures);
-    let group_ms = group_started_at.elapsed().as_secs_f64() * 1000.0;
-    if profile {
-        eprintln!(
-            "[glrmask/profile][common_atom_parallel_classify] tokens={} unique_suffixes={} semantic_ids={} classes={} suffix_ms={:.3} signature_ms={:.3} group_ms={:.3} total_ms={:.3}",
-            tokens.len(),
-            root_semantic_by_suffix.len(),
-            root_semantic_ids.len(),
-            classes.len(),
-            suffix_ms,
-            signature_ms,
-            group_ms,
-            total_started_at.elapsed().as_secs_f64() * 1000.0,
-        );
-    }
-    classes
-}
-
-fn parallel_classify_enabled() -> bool {
-    std::env::var("GLRMASK_L2P_COMMON_ATOM_PARALLEL_CLASSIFY")
-        .map(|value| {
-            let value = value.trim();
-            value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
-        })
-        .unwrap_or(false)
-}
-
-fn classify_tokens<S: AsRef<[u8]> + Sync>(
-    machine: &TraceMachine,
-    tokens: &[S],
-) -> Vec<Vec<usize>> {
-    if parallel_classify_enabled() {
-        classify_tokens_parallel(machine, tokens)
-    } else {
-        classify_tokens_serial(machine, tokens)
-    }
-}
-
-pub(crate) fn try_find_common_atom_preclasses<S: AsRef<[u8]> + Sync>(
+pub(crate) fn try_find_common_atom_preclasses<S: AsRef<[u8]>>(
     tokenizer: &Tokenizer,
     active_groups: Option<&[bool]>,
     tokens: &[S],
@@ -855,43 +763,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn parallel_common_atom_classification_matches_serial() {
-        let ordinary = crate::ds::u8set::U8Set::from_bytes(b"abcdefghijklmnopqrstuvwxyz");
-        let hex = crate::ds::u8set::U8Set::from_bytes(b"0123456789abcdef");
-        let atom = choice(vec![
-            crate::automata::regex::class(ordinary),
-            seq(vec![bytes(b"\\u00"), crate::automata::regex::class(hex)]),
-        ]);
-        let exprs = vec![
-            repeat(atom.clone(), 0, Some(64)),
-            repeat(atom.clone(), 3, Some(3)),
-            seq(vec![repeat(atom.clone(), 0, Some(63)), byte(b'"')]),
-            seq(vec![byte(b'"'), repeat(atom.clone(), 64, Some(64))]),
-        ];
-        let tokenizer = tokenizer_for(exprs.clone());
-        let active = vec![true; exprs.len()];
-        let active_exprs = active
-            .iter()
-            .enumerate()
-            .map(|(terminal, _)| (terminal as u32, exprs[terminal].clone()))
-            .collect::<Vec<_>>();
-        let (common_atom, shapes) =
-            find_common_atom_family(&active_exprs).expect("common atom family");
-        let machine = build_trace_machine(common_atom, shapes).expect("trace machine");
-        let mut tokens = enumerate(b"abc012\"x", 4);
-        while tokens.len() < MIN_TOKENS {
-            tokens.push(format!("word{}", tokens.len()).into_bytes());
-        }
-
-        assert_eq!(
-            classify_tokens_parallel(&machine, &tokens),
-            classify_tokens_serial(&machine, &tokens),
-        );
-        // Keep the public preclass construction covered on the same family.
-        assert!(try_find_common_atom_preclasses(&tokenizer, Some(&active), &tokens).is_some());
     }
 
     #[test]
