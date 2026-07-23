@@ -4502,6 +4502,119 @@ fn append_l1_signature_profile_range(
     }
 }
 
+fn l1_fallback_profile_builder() -> String {
+    std::env::var("GLRMASK_L1_FALLBACK_PROFILE_BUILDER")
+        .unwrap_or_else(|_| "direct".to_owned())
+}
+
+/// Build the direct L1 suffix-profile cache with the packed suffix-product
+/// engine already used by exact state equivalence. Direct terminal signatures
+/// use `u32::MAX` for empty and zero-based non-empty ids; the packed engine uses
+/// zero for empty, so shift them by one and freeze the resulting profiles back
+/// into the direct coordinate.
+fn build_l1_fallback_walk_cache_packed(
+    sorted_entries: &[(u32, Arc<[u8]>)],
+    token_buckets: &L1SortedTokenBuckets,
+    states_to_initial_tsids: &FxHashMap<u32, Vec<u32>>,
+    state_to_terminal_signature: &[u32],
+    flat_trans: &[u32],
+) -> FxHashMap<(u8, u32), L1WalkProfile> {
+    let num_states = state_to_terminal_signature.len();
+    debug_assert_eq!(flat_trans.len(), num_states * 256);
+    let dead = u32::MAX;
+
+    let shifted_signatures = state_to_terminal_signature
+        .iter()
+        .map(|&signature| {
+            if signature == u32::MAX {
+                0
+            } else {
+                signature + 1
+            }
+        })
+        .collect::<Vec<_>>();
+    let self_loop_bytes_by_state = (0..num_states)
+        .map(|state| {
+            let mut bytes = [0u64; 4];
+            let row = &flat_trans[state * 256..state * 256 + 256];
+            for (byte, &target) in row.iter().enumerate() {
+                if target == state as u32 {
+                    bytes[byte / 64] |= 1u64 << (byte % 64);
+                }
+            }
+            bytes
+        })
+        .collect::<Vec<_>>();
+
+    let mut targets_by_byte = vec![rustc_hash::FxHashSet::<u32>::default(); 256];
+    for &start_state in states_to_initial_tsids.keys() {
+        let row = &flat_trans[start_state as usize * 256..start_state as usize * 256 + 256];
+        for (byte, token_ids) in token_buckets.token_indices_by_first_byte.iter().enumerate() {
+            if token_ids.is_empty() {
+                continue;
+            }
+            let target = row[byte];
+            if target != dead {
+                targets_by_byte[byte].insert(target);
+            }
+        }
+    }
+    let byte_groups = targets_by_byte
+        .into_iter()
+        .enumerate()
+        .filter_map(|(byte, targets)| {
+            (!targets.is_empty()).then(|| {
+                let mut targets = targets.into_iter().collect::<Vec<_>>();
+                targets.sort_unstable();
+                (byte as u8, targets)
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let build_group = |(first_byte, targets): &(u8, Vec<u32>)| {
+        let byte = *first_byte as usize;
+        let token_ids = &token_buckets.token_indices_by_first_byte[byte];
+        let trie = token_buckets.packed_suffix_tries_by_first_byte[byte].get_or_init(|| {
+            Arc::new(L1PackedSuffixTrie::build(
+                sorted_entries,
+                token_ids,
+                &token_buckets.suffix_lcps_by_first_byte[byte],
+            ))
+        });
+        let suffix_horizon = trie.remaining_horizon_by_node[0];
+        l1_bucket_suffix_signature_profiles_packed(
+            *first_byte,
+            targets,
+            sorted_entries,
+            token_ids,
+            &token_buckets.suffix_lcps_by_first_byte[byte],
+            &token_buckets.suffix_subtree_bytes[byte],
+            &token_buckets.suffix_first_bytes_by_bucket[byte],
+            token_buckets.has_empty_suffix_by_bucket[byte],
+            &shifted_signatures,
+            &self_loop_bytes_by_state,
+            flat_trans,
+            None,
+            num_states,
+            None,
+            None,
+            suffix_horizon,
+            Some(trie.as_ref()),
+        )
+    };
+
+    let profiles = if rayon::current_num_threads() == 1 {
+        byte_groups.iter().map(build_group).collect::<Vec<_>>()
+    } else {
+        byte_groups.par_iter().map(build_group).collect::<Vec<_>>()
+    };
+    profiles
+        .into_iter()
+        .flatten()
+        .map(|(key, profile)| (key, freeze_l1_walk_profile(profile.as_ref())))
+        .collect()
+}
+
 fn build_l1_terminal_dwa(
     tokenizer: &Tokenizer,
     vocab_order: &L1IdentityVocabOrder,
@@ -4634,6 +4747,14 @@ fn build_l1_terminal_dwa(
     let walk_cache: Option<FxHashMap<(u8, u32), L1WalkProfile>> =
         if exact_profile_reuse.is_some() {
             None
+        } else if l1_fallback_profile_builder() == "packed" {
+            Some(build_l1_fallback_walk_cache_packed(
+                sorted_entries,
+                token_buckets,
+                &states_to_initial_tsids,
+                state_to_terminal_signature,
+                flat_trans,
+            ))
         } else {
             Some({
     // Phase 1: Identify unique concrete (first_byte, target_state) pairs.
@@ -4684,6 +4805,7 @@ fn build_l1_terminal_dwa(
         let byte_groups: Vec<(u8, Vec<u32>)> = walks_by_byte.into_iter().collect();
 
         let build_byte_batch = |(first_byte, all_targets): &(u8, Vec<u32>)| {
+                let batch_started_at = compile_profile_enabled().then(Instant::now);
                 let byte = *first_byte;
                 let bucket_idx = byte as usize;
                 let token_ids = &token_indices_by_first_byte[bucket_idx];
@@ -4707,6 +4829,18 @@ fn build_l1_terminal_dwa(
                 }
 
                 let mut results: Vec<((u8, u32), Vec<(u32, Vec<(u32, u32)>)>)> = Vec::new();
+                let finish = |results| {
+                    if let Some(started_at) = batch_started_at {
+                        eprintln!(
+                            "[glrmask/profile][l1_fallback_direct_bucket] first_byte={} tokens={} targets={} total_ms={:.3}",
+                            byte,
+                            token_ids.len(),
+                            all_targets.len(),
+                            started_at.elapsed().as_secs_f64() * 1000.0,
+                        );
+                    }
+                    results
+                };
 
                 // Handle self-loop targets.
                 if !selfloop_targets.is_empty() {
@@ -4721,7 +4855,7 @@ fn build_l1_terminal_dwa(
                 }
 
                 if walk_targets.is_empty() {
-                    return results;
+                    return finish(results);
                 }
 
                 // Fingerprint dedup: group walk targets by their
@@ -4791,7 +4925,7 @@ fn build_l1_terminal_dwa(
                 }
 
                 if walk_targets.is_empty() {
-                    return results;
+                    return finish(results);
                 }
 
                 let num_walk = walk_targets.len();
@@ -4910,7 +5044,7 @@ fn build_l1_terminal_dwa(
                     results.push(((byte, target), entries));
                 }
 
-                results
+                finish(results)
             };
         let all_batches: Vec<Vec<((u8, u32), Vec<(u32, Vec<(u32, u32)>)>)>> =
             if rayon::current_num_threads() == 1 {
