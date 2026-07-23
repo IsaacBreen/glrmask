@@ -665,11 +665,6 @@ struct Scratch {
     /// materialization avoids rescanning all groups for every dirty token.
     trie_target_group_bits: Vec<u64>,
     trie_target_bits_enabled: bool,
-    /// Sparse live-group lists at each token position. Counts remain the
-    /// authority; lists are updated only when a `(position, group)` count
-    /// crosses zero and avoid both dense scans and bit-word maintenance.
-    trie_target_group_lists: Vec<SmallVec<[usize; 8]>>,
-    trie_target_lists_enabled: bool,
     /// Number of live groups at each token position in the active DFS path.
     trie_target_position_counts: Vec<u32>,
     targets: Vec<usize>,
@@ -698,8 +693,6 @@ static VOCAB_SPARSE_DIRTY_FINISH_DISABLED: Lazy<bool> =
     Lazy::new(|| env_flag_enabled("GLRMASK_DISABLE_VOCAB_SPARSE_DIRTY_FINISH"));
 static VOCAB_TRIE_TARGET_BITS_ENABLED: Lazy<bool> =
     Lazy::new(|| env_flag_enabled("GLRMASK_VOCAB_TRIE_TARGET_BITS"));
-static VOCAB_TRIE_TARGET_LISTS_ENABLED: Lazy<bool> =
-    Lazy::new(|| env_flag_enabled("GLRMASK_VOCAB_TRIE_TARGET_LISTS"));
 
 #[inline]
 fn new_hasher() -> AHasher {
@@ -1064,10 +1057,7 @@ impl Scratch {
             num_groups,
             trie_target_group_counts: Vec::new(),
             trie_target_group_bits: Vec::new(),
-            trie_target_bits_enabled: *VOCAB_TRIE_TARGET_BITS_ENABLED
-                && !*VOCAB_TRIE_TARGET_LISTS_ENABLED,
-            trie_target_group_lists: Vec::new(),
-            trie_target_lists_enabled: *VOCAB_TRIE_TARGET_LISTS_ENABLED,
+            trie_target_bits_enabled: *VOCAB_TRIE_TARGET_BITS_ENABLED,
             trie_target_position_counts: Vec::new(),
             targets: Vec::new(),
             target_gids: HashMap::new(),
@@ -1137,14 +1127,6 @@ fn reset_trie_target_aggregate(scratch: &mut Scratch, max_token_len: usize) {
         scratch.trie_target_group_bits.resize(bit_slots, 0);
         scratch.trie_target_group_bits[..bit_slots].fill(0);
     }
-    if scratch.trie_target_lists_enabled {
-        scratch
-            .trie_target_group_lists
-            .resize_with(positions, SmallVec::new);
-        for groups in &mut scratch.trie_target_group_lists[..positions] {
-            groups.clear();
-        }
-    }
     scratch.trie_target_position_counts.resize(positions, 0);
     scratch.trie_target_position_counts[..positions].fill(0);
 }
@@ -1174,14 +1156,6 @@ fn update_trie_target_aggregate(
                 let bit_index = position * scratch.dirty_words + gid / 64;
                 scratch.trie_target_group_bits[bit_index] &= !(1u64 << (gid % 64));
             }
-            if scratch.trie_target_lists_enabled {
-                let groups = &mut scratch.trie_target_group_lists[position];
-                let list_index = groups
-                    .iter()
-                    .position(|&listed_gid| listed_gid == gid)
-                    .expect("live trie target group must be present in sparse list");
-                groups.swap_remove(list_index);
-            }
         }
     };
     let add = |scratch: &mut Scratch, position: usize, gid: usize| {
@@ -1194,9 +1168,6 @@ fn update_trie_target_aggregate(
             if scratch.trie_target_bits_enabled {
                 let bit_index = position * scratch.dirty_words + gid / 64;
                 scratch.trie_target_group_bits[bit_index] |= 1u64 << (gid % 64);
-            }
-            if scratch.trie_target_lists_enabled {
-                scratch.trie_target_group_lists[position].push(gid);
             }
         }
         scratch.trie_target_group_counts[index] += 1;
@@ -1225,10 +1196,7 @@ fn collect_trie_targets(scratch: &mut Scratch, token_len: usize) {
             continue;
         }
         let mut gids = SmallVec::<[usize; 16]>::new();
-        if scratch.trie_target_lists_enabled {
-            gids.extend_from_slice(&scratch.trie_target_group_lists[position]);
-            gids.sort_unstable();
-        } else if scratch.trie_target_bits_enabled {
+        if scratch.trie_target_bits_enabled {
             let bit_base = position * scratch.dirty_words;
             for word_index in 0..scratch.dirty_words {
                 let mut bits = scratch.trie_target_group_bits[bit_base + word_index];
@@ -5634,48 +5602,45 @@ mod shared_base_tests {
 
     #[test]
     fn trie_target_aggregate_matches_dirty_mask_scan() {
-        for (bits_enabled, lists_enabled) in [(true, false), (false, true)] {
-            let mut scratch = Scratch::new(2, 3);
-            scratch.trie_target_bits_enabled = bits_enabled;
-            scratch.trie_target_lists_enabled = lists_enabled;
-            reset_trie_target_aggregate(&mut scratch, 4);
+        let mut scratch = Scratch::new(2, 3);
+        scratch.trie_target_bits_enabled = true;
+        reset_trie_target_aggregate(&mut scratch, 4);
 
-            let set_match = |scratch: &mut Scratch, state: usize, gid: usize, position: u32| {
-                let index = state * scratch.num_groups + gid;
-                let previous = scratch.match_positions[index];
-                if previous == NONE {
-                    mark_dirty_group(scratch, state, gid);
-                }
-                update_trie_target_aggregate(scratch, gid, previous, position);
-                scratch.match_positions[index] = position;
-            };
-
-            set_match(&mut scratch, 0, 0, 1);
-            set_match(&mut scratch, 1, 0, 2);
-            set_match(&mut scratch, 0, 1, 3);
-            set_match(&mut scratch, 1, 2, 4);
-            // Replacing a state-local latest match must remove only its old pair.
-            set_match(&mut scratch, 0, 0, 4);
-
-            collect_targets(&mut scratch, 3, 4, 0, 2);
-            let mut expected_targets = scratch.targets.clone();
-            expected_targets.sort_unstable();
-            let expected_target_gids = scratch.target_gids.clone();
-            let expected_single_target_pos = scratch.single_target_pos;
-            let expected_single_target_gids = scratch.single_target_gids.clone();
-
-            collect_trie_targets(&mut scratch, 4);
-            assert_eq!(scratch.targets, expected_targets);
-            assert_eq!(scratch.target_gids, expected_target_gids);
-            if expected_targets.len() == 1 {
-                assert_eq!(scratch.single_target_pos, expected_single_target_pos);
-                assert_eq!(scratch.single_target_gids, expected_single_target_gids);
-            } else {
-                // The legacy scan leaves these stale after materializing the map;
-                // multi-target consumers use only `targets` and `target_gids`.
-                assert_eq!(scratch.single_target_pos, usize::MAX);
-                assert!(scratch.single_target_gids.is_empty());
+        let set_match = |scratch: &mut Scratch, state: usize, gid: usize, position: u32| {
+            let index = state * scratch.num_groups + gid;
+            let previous = scratch.match_positions[index];
+            if previous == NONE {
+                mark_dirty_group(scratch, state, gid);
             }
+            update_trie_target_aggregate(scratch, gid, previous, position);
+            scratch.match_positions[index] = position;
+        };
+
+        set_match(&mut scratch, 0, 0, 1);
+        set_match(&mut scratch, 1, 0, 2);
+        set_match(&mut scratch, 0, 1, 3);
+        set_match(&mut scratch, 1, 2, 4);
+        // Replacing a state-local latest match must remove only its old pair.
+        set_match(&mut scratch, 0, 0, 4);
+
+        collect_targets(&mut scratch, 3, 4, 0, 2);
+        let mut expected_targets = scratch.targets.clone();
+        expected_targets.sort_unstable();
+        let expected_target_gids = scratch.target_gids.clone();
+        let expected_single_target_pos = scratch.single_target_pos;
+        let expected_single_target_gids = scratch.single_target_gids.clone();
+
+        collect_trie_targets(&mut scratch, 4);
+        assert_eq!(scratch.targets, expected_targets);
+        assert_eq!(scratch.target_gids, expected_target_gids);
+        if expected_targets.len() == 1 {
+            assert_eq!(scratch.single_target_pos, expected_single_target_pos);
+            assert_eq!(scratch.single_target_gids, expected_single_target_gids);
+        } else {
+            // The legacy scan leaves these stale after materializing the map;
+            // multi-target consumers use only `targets` and `target_gids`.
+            assert_eq!(scratch.single_target_pos, usize::MAX);
+            assert!(scratch.single_target_gids.is_empty());
         }
     }
 
