@@ -3087,6 +3087,49 @@ struct FirstTransitionFactorPlan {
     stats: FirstTransitionFactorStats,
 }
 
+/// Exact token prepartition produced by the first-transition quotient before
+/// the final all-state vocabulary authority pass.
+///
+/// Every preliminary class is a subset of one final exact vocabulary class.
+/// Callers may therefore use one representative per preliminary class for an
+/// intervening exact state quotient, then classify those representatives on
+/// the resulting state representatives and expand the authority classes with
+/// [`Self::expand_authority_classes`].
+pub(crate) struct FirstTransitionPrepartition {
+    preliminary_classes: Vec<Vec<usize>>,
+    representative_tokens: Vec<usize>,
+}
+
+impl FirstTransitionPrepartition {
+    pub(crate) fn representative_token_indices(&self) -> &[usize] {
+        &self.representative_tokens
+    }
+
+    pub(crate) fn expand_authority_classes(
+        &self,
+        authority_classes: VocabEquivalenceResult,
+    ) -> VocabEquivalenceResult {
+        let mut expanded_classes = Vec::with_capacity(authority_classes.len());
+        for authority_class in authority_classes {
+            let total_len = authority_class
+                .iter()
+                .map(|&representative_position| {
+                    self.preliminary_classes[representative_position].len()
+                })
+                .sum();
+            let mut expanded = Vec::with_capacity(total_len);
+            for representative_position in authority_class {
+                expanded.extend_from_slice(
+                    &self.preliminary_classes[representative_position],
+                );
+            }
+            expanded.sort_unstable();
+            expanded_classes.push(expanded);
+        }
+        expanded_classes.into_iter().collect()
+    }
+}
+
 struct FirstTransitionBucket {
     token_indices: Vec<usize>,
     initial_outcomes: Vec<usize>,
@@ -3311,6 +3354,154 @@ fn try_first_transition_factor_plan<S: AsRef<[u8]> + Sync>(
         preliminary_class_for_representative,
         stats,
     })
+}
+
+/// Prepare only the exact first-transition token prepartition.
+///
+/// This is the split point used by the combined state/vocabulary pipeline: it
+/// shares the production DFA construction and structural selector, but stops
+/// before the ordinary all-state authority pass. The caller must subsequently
+/// run a factor-disabled exact vocabulary authority over the returned token
+/// representatives and expand it through the returned prepartition.
+pub(crate) fn try_first_transition_prepartition_with_group_filter_profiled<
+    S: AsRef<[u8]> + Sync,
+>(
+    tokenizer: &TokenizerView,
+    strings: &[S],
+    initial_states: &[usize],
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    byte_to_class: Option<&[u8; 256]>,
+    active_groups: Option<&[bool]>,
+    shared_cache: Option<&SharedVocabDfaCache>,
+    shared_analysis_dfa_cache: Option<&SharedVocabAnalysisDfaCache>,
+) -> Option<(FirstTransitionPrepartition, f64)> {
+    if !first_transition_factor_enabled() {
+        return None;
+    }
+
+    let input_state_count = tokenizer.dfa().states.len();
+    if let Some((position, &state)) = initial_states
+        .iter()
+        .enumerate()
+        .find(|(_, state)| **state >= input_state_count)
+    {
+        crate::error::fail_internal_invariant(format!(
+            "first-transition prepartition input state is outside the analysis-view domain: \
+             position={position} state={state} state_count={input_state_count} \
+             sentinel={} token_count={}",
+            state == u32::MAX as usize,
+            strings.len(),
+        ));
+    }
+    if initial_states.len() < 2 || strings.len() < 2 {
+        return None;
+    }
+
+    let profiling = compile_profile_enabled();
+    let total_started_at = profiling.then(Instant::now);
+    let build_dfa_started_at = Instant::now();
+    let input_compacted = if shared_analysis_dfa_cache.is_none()
+        && shared_cache.is_none()
+        && active_groups.is_none()
+        && strings.len() <= INPUT_VIEW_COMPACT_MAX_TOKENS
+    {
+        compact_tokenizer_view_for_tokens(tokenizer, initial_states, strings)
+    } else {
+        None
+    };
+    let (tokenizer_for_dfa, initial_states_for_dfa, input_compact_to_original): (
+        &TokenizerView,
+        &[usize],
+        Option<&Vec<usize>>,
+    ) = if let Some((ref compact_view, ref compact_initial, ref compact_to_original)) =
+        input_compacted
+    {
+        (compact_view, compact_initial, Some(compact_to_original))
+    } else {
+        (tokenizer, initial_states, None)
+    };
+    let dfa = if let Some(cache) = shared_analysis_dfa_cache {
+        let key = AnalysisDfaCacheKey::for_analysis_view(
+            tokenizer_for_dfa,
+            active_groups,
+            disallowed_follows,
+        );
+        cache.get_or_init(key, || {
+            build_dfa_with_group_filter(
+                tokenizer_for_dfa,
+                disallowed_follows,
+                byte_to_class,
+                active_groups,
+                shared_cache,
+            )
+        })
+    } else {
+        Arc::new(build_dfa_with_group_filter(
+            tokenizer_for_dfa,
+            disallowed_follows,
+            if input_compact_to_original.is_some() {
+                None
+            } else {
+                byte_to_class
+            },
+            active_groups,
+            shared_cache,
+        ))
+    };
+    let build_dfa_ms = build_dfa_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let compacted = compact_dfa_for_tokens(dfa.as_ref(), initial_states_for_dfa, strings);
+    let (dfa_ref, initial_states_ref): (&Dfa, &[usize]) = if let Some((
+        ref compact_dfa,
+        ref compact_initial_states,
+        _,
+    )) = compacted
+    {
+        (compact_dfa, compact_initial_states)
+    } else {
+        (&dfa, initial_states_for_dfa)
+    };
+    if initial_states_ref
+        .iter()
+        .all(|&state| dfa_ref.is_dead_end[state])
+    {
+        return None;
+    }
+
+    let lexical_order = token_indices_in_lexical_order(strings);
+    let scratch_pool = Arc::new(ScratchPool::default());
+    let plan = try_first_transition_factor_plan(
+        dfa_ref,
+        strings,
+        initial_states_ref,
+        &lexical_order,
+        &scratch_pool,
+        profiling,
+        true,
+    )?;
+
+    if profiling {
+        let stats = plan.stats;
+        eprintln!(
+            "[glrmask/profile][vocab_first_transition_prepartition] strings={} initial_states={} preliminary_classes={} representative_tokens={} full_state_token_pairs={} preliminary_state_token_pairs={} build_dfa_ms={:.3} total_ms={:.3}",
+            strings.len(),
+            initial_states.len(),
+            plan.preliminary_classes.len(),
+            plan.representative_tokens.len(),
+            stats.full_state_token_pairs,
+            stats.preliminary_state_token_pairs,
+            build_dfa_ms,
+            total_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
+        );
+    }
+
+    Some((
+        FirstTransitionPrepartition {
+            preliminary_classes: plan.preliminary_classes,
+            representative_tokens: plan.representative_tokens,
+        },
+        build_dfa_ms,
+    ))
 }
 
 /// Vocab equivalence with optional group filtering.
@@ -3849,6 +4040,31 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
         shared_cache,
         shared_analysis_dfa_cache,
         FirstTransitionFactorMode::Environment,
+    )
+}
+
+pub(crate) fn find_vocab_equivalence_classes_without_first_transition_factor_profiled<
+    S: AsRef<[u8]> + Sync,
+>(
+    tokenizer: &TokenizerView,
+    strings: &[S],
+    initial_states: &[usize],
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    byte_to_class: Option<&[u8; 256]>,
+    active_groups: Option<&[bool]>,
+    shared_cache: Option<&SharedVocabDfaCache>,
+    shared_analysis_dfa_cache: Option<&SharedVocabAnalysisDfaCache>,
+) -> (VocabEquivalenceResult, f64) {
+    find_vocab_equivalence_classes_with_group_filter_profiled_impl(
+        tokenizer,
+        strings,
+        initial_states,
+        disallowed_follows,
+        byte_to_class,
+        active_groups,
+        shared_cache,
+        shared_analysis_dfa_cache,
+        FirstTransitionFactorMode::Disabled,
     )
 }
 

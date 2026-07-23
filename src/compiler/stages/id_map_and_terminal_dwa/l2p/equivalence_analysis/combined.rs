@@ -63,6 +63,24 @@ fn first_byte_vocab_factor_strict_reference_enabled(partition_label: &str) -> bo
     )
 }
 
+fn first_transition_factor_strict_reference_enabled() -> bool {
+    std::env::var("GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_STRICT_REFERENCE")
+        .map(|value| {
+            let trimmed = value.trim();
+            !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false)
+}
+
+fn first_transition_factor_interleave_state_enabled() -> bool {
+    std::env::var("GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_INTERLEAVE_STATE")
+        .map(|value| {
+            let trimmed = value.trim();
+            !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false)
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct FirstByteVocabFactorProfile {
     buckets: usize,
@@ -2257,7 +2275,33 @@ fn analyze_equivalences_impl(
                 vocab_first,
             );
         }
-        let (precomputed_vocab, state_tokens, vocab_equiv_ms) = if vocab_first {
+        let interleaved_prepartition_started_at = Instant::now();
+        let interleaved_prepartition = (vocab_first
+            && first_transition_factor_interleave_state_enabled())
+        .then(|| {
+            vocab_equivalence_analysis::try_first_transition_prepartition_with_group_filter_profiled(
+                analysis_view,
+                &dedup.representative_token_bytes,
+                &query_view_states,
+                effective_disallowed,
+                Some(&byte_to_class),
+                None,
+                None,
+                None,
+            )
+        })
+        .flatten();
+        let interleaved_prepartition_ms =
+            interleaved_prepartition_started_at.elapsed().as_secs_f64() * 1000.0;
+        let (precomputed_vocab, state_tokens, vocab_equiv_ms) =
+            if let Some((prepartition, _)) = interleaved_prepartition.as_ref() {
+                let state_tokens = prepartition
+                    .representative_token_indices()
+                    .iter()
+                    .map(|&token_idx| dedup.representative_token_bytes[token_idx])
+                    .collect::<Vec<_>>();
+                (None, state_tokens, interleaved_prepartition_ms)
+            } else if vocab_first {
             let vocab_equiv_started_at = Instant::now();
             let first_byte_factored = first_byte_vocab_factor_enabled(partition_label)
                 .then(|| {
@@ -2464,6 +2508,68 @@ fn analyze_equivalences_impl(
         let (dedup_vocab_classes, vocab_analysis_dfa_build_ms, vocab_equiv_ms) =
             if let Some((classes, build_ms)) = precomputed_vocab {
                 (classes, build_ms, vocab_equiv_ms)
+            } else if let Some((prepartition, preliminary_dfa_build_ms)) =
+                interleaved_prepartition
+            {
+                let authority_started_at = Instant::now();
+                let (authority_classes, authority_dfa_build_ms) =
+                    vocab_equivalence_analysis::find_vocab_equivalence_classes_without_first_transition_factor_profiled(
+                        analysis_view,
+                        &state_tokens,
+                        &final_view_states,
+                        effective_disallowed,
+                        Some(&byte_to_class),
+                        None,
+                        None,
+                        None,
+                    );
+                let authority_ms = authority_started_at.elapsed().as_secs_f64() * 1000.0;
+                let classes = prepartition.expand_authority_classes(authority_classes);
+                if first_transition_factor_strict_reference_enabled() {
+                    let strict_started_at = Instant::now();
+                    let (reference, _) =
+                        vocab_equivalence_analysis::find_vocab_equivalence_classes_without_first_transition_factor_profiled(
+                            analysis_view,
+                            &dedup.representative_token_bytes,
+                            &query_view_states,
+                            effective_disallowed,
+                            Some(&byte_to_class),
+                            None,
+                            None,
+                            None,
+                        );
+                    assert_eq!(
+                        classes, reference,
+                        "epsilon-aware interleaved first-transition/state quotient differs from ordinary exact vocabulary analysis",
+                    );
+                    if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
+                        eprintln!(
+                            "[glrmask/profile][epsilon_interleaved_first_transition_strict_reference] partition={} exact_classes={} reference_classes={} differs=false compare_ms={:.3}",
+                            partition_label,
+                            classes.len(),
+                            reference.len(),
+                            strict_started_at.elapsed().as_secs_f64() * 1000.0,
+                        );
+                    }
+                }
+                if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
+                    eprintln!(
+                        "[glrmask/profile][epsilon_interleaved_first_transition] partition={} pre_states={} preliminary_tokens={} final_states={} final_vocab_classes={} preliminary_ms={:.3} state_equiv_ms={:.3} authority_ms={:.3}",
+                        partition_label,
+                        query_view_states.len(),
+                        state_tokens.len(),
+                        final_view_states.len(),
+                        classes.len(),
+                        vocab_equiv_ms,
+                        exact_state_equiv_ms,
+                        authority_ms,
+                    );
+                }
+                (
+                    classes,
+                    preliminary_dfa_build_ms + authority_dfa_build_ms,
+                    vocab_equiv_ms + authority_ms,
+                )
             } else {
                 let vocab_equiv_started_at = Instant::now();
                 let (classes, build_ms) =
@@ -2700,9 +2806,10 @@ fn analyze_equivalences_impl(
         vocab_equiv_ms,
         exact_rep_confirmation_used,
     ) = if vocab_first {
-        let vocab_equiv_started_at = Instant::now();
-        let (dedup_vocab_classes, vocab_analysis_dfa_build_ms) =
-            vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter_profiled(
+        let preliminary_started_at = Instant::now();
+        let first_transition_prepartition = first_transition_factor_interleave_state_enabled()
+            .then(|| {
+                vocab_equivalence_analysis::try_first_transition_prepartition_with_group_filter_profiled(
                 analysis_view,
                 &dedup.representative_token_bytes,
                 &pre_reduced_states,
@@ -2711,45 +2818,161 @@ fn analyze_equivalences_impl(
                 if uses_analysis_quotient { None } else { active_groups },
                 if uses_analysis_quotient { None } else { shared_vocab_dfa_cache },
                 if uses_analysis_quotient { None } else { shared_analysis_dfa_cache },
-            );
-        let vocab_equiv_ms = vocab_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
-        let representative_tokens = representative_tokens_for_vocab_classes(
-            &dedup_vocab_classes,
-            &dedup.representative_token_bytes,
-        );
-        let exact_rep_confirmation_used = pre_reduced_states.len()
-            >= EXACT_REP_CONFIRMATION_MIN_STATES
-            && representative_tokens.len() >= EXACT_REP_CONFIRMATION_MIN_TOKENS;
-        let exact_started_at = Instant::now();
-        let reduced_state_reps_for_pre_reduced = if exact_rep_confirmation_used {
-            state_equivalence_analysis::find_state_equivalence_classes_ex_with_rep_confirmation_and_disallowed_and_shared_base(
-                analysis_view,
-                &representative_tokens,
-                &pre_reduced_states,
-                &normalized_disallowed_follows,
-                None,
-                None,
-                Some(true),
-                (!uses_analysis_quotient).then_some(compatible_cache).flatten(),
+                )
+            })
+            .flatten();
+        let preliminary_ms = preliminary_started_at.elapsed().as_secs_f64() * 1000.0;
+        if let Some((prepartition, preliminary_dfa_build_ms)) = first_transition_prepartition {
+            let preliminary_representative_tokens = prepartition
+                .representative_token_indices()
+                .iter()
+                .map(|&token_idx| dedup.representative_token_bytes[token_idx])
+                .collect::<Vec<_>>();
+            let exact_rep_confirmation_used = pre_reduced_states.len()
+                >= EXACT_REP_CONFIRMATION_MIN_STATES
+                && preliminary_representative_tokens.len()
+                    >= EXACT_REP_CONFIRMATION_MIN_TOKENS;
+            let exact_started_at = Instant::now();
+            let reduced_state_reps_for_pre_reduced = if exact_rep_confirmation_used {
+                state_equivalence_analysis::find_state_equivalence_classes_ex_with_rep_confirmation_and_disallowed_and_shared_base(
+                    analysis_view,
+                    &preliminary_representative_tokens,
+                    &pre_reduced_states,
+                    &normalized_disallowed_follows,
+                    None,
+                    None,
+                    Some(true),
+                    (!uses_analysis_quotient).then_some(compatible_cache).flatten(),
+                )
+            } else {
+                state_equivalence_analysis::find_state_equivalence_classes_with_disallowed_and_shared_base(
+                    analysis_view,
+                    &preliminary_representative_tokens,
+                    &pre_reduced_states,
+                    &normalized_disallowed_follows,
+                    (!uses_analysis_quotient).then_some(compatible_cache).flatten(),
+                )
+            };
+            let exact_state_equiv_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
+            let mut final_state_representatives = reduced_state_reps_for_pre_reduced.clone();
+            final_state_representatives.sort_unstable();
+            final_state_representatives.dedup();
+
+            let authority_started_at = Instant::now();
+            let (authority_classes, authority_dfa_build_ms) =
+                vocab_equivalence_analysis::find_vocab_equivalence_classes_without_first_transition_factor_profiled(
+                    analysis_view,
+                    &preliminary_representative_tokens,
+                    &final_state_representatives,
+                    effective_disallowed,
+                    Some(&byte_to_class),
+                    if uses_analysis_quotient { None } else { active_groups },
+                    if uses_analysis_quotient { None } else { shared_vocab_dfa_cache },
+                    if uses_analysis_quotient { None } else { shared_analysis_dfa_cache },
+                );
+            let authority_ms = authority_started_at.elapsed().as_secs_f64() * 1000.0;
+            let dedup_vocab_classes = prepartition.expand_authority_classes(authority_classes);
+
+            if first_transition_factor_strict_reference_enabled() {
+                let strict_started_at = Instant::now();
+                let (reference, _) =
+                    vocab_equivalence_analysis::find_vocab_equivalence_classes_without_first_transition_factor_profiled(
+                        analysis_view,
+                        &dedup.representative_token_bytes,
+                        &pre_reduced_states,
+                        effective_disallowed,
+                        Some(&byte_to_class),
+                        if uses_analysis_quotient { None } else { active_groups },
+                        if uses_analysis_quotient { None } else { shared_vocab_dfa_cache },
+                        if uses_analysis_quotient { None } else { shared_analysis_dfa_cache },
+                    );
+                assert_eq!(
+                    dedup_vocab_classes, reference,
+                    "interleaved first-transition/state quotient differs from ordinary exact vocabulary analysis",
+                );
+                if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
+                    eprintln!(
+                        "[glrmask/profile][combined_interleaved_first_transition_strict_reference] partition={} exact_classes={} reference_classes={} differs=false compare_ms={:.3}",
+                        partition_label,
+                        dedup_vocab_classes.len(),
+                        reference.len(),
+                        strict_started_at.elapsed().as_secs_f64() * 1000.0,
+                    );
+                }
+            }
+            if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
+                eprintln!(
+                    "[glrmask/profile][combined_interleaved_first_transition] partition={} pre_states={} preliminary_tokens={} final_states={} final_vocab_classes={} preliminary_ms={:.3} state_equiv_ms={:.3} authority_ms={:.3}",
+                    partition_label,
+                    pre_reduced_states.len(),
+                    preliminary_representative_tokens.len(),
+                    final_state_representatives.len(),
+                    dedup_vocab_classes.len(),
+                    preliminary_ms,
+                    exact_state_equiv_ms,
+                    authority_ms,
+                );
+            }
+            (
+                reduced_state_reps_for_pre_reduced,
+                dedup_vocab_classes,
+                preliminary_dfa_build_ms + authority_dfa_build_ms,
+                exact_state_equiv_ms,
+                preliminary_ms + authority_ms,
+                exact_rep_confirmation_used,
             )
         } else {
-            state_equivalence_analysis::find_state_equivalence_classes_with_disallowed_and_shared_base(
-                analysis_view,
-                &representative_tokens,
-                &pre_reduced_states,
-                &normalized_disallowed_follows,
-                (!uses_analysis_quotient).then_some(compatible_cache).flatten(),
+            let vocab_equiv_started_at = Instant::now();
+            let (dedup_vocab_classes, vocab_analysis_dfa_build_ms) =
+                vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter_profiled(
+                    analysis_view,
+                    &dedup.representative_token_bytes,
+                    &pre_reduced_states,
+                    effective_disallowed,
+                    Some(&byte_to_class),
+                    if uses_analysis_quotient { None } else { active_groups },
+                    if uses_analysis_quotient { None } else { shared_vocab_dfa_cache },
+                    if uses_analysis_quotient { None } else { shared_analysis_dfa_cache },
+                );
+            let vocab_equiv_ms = vocab_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
+            let representative_tokens = representative_tokens_for_vocab_classes(
+                &dedup_vocab_classes,
+                &dedup.representative_token_bytes,
+            );
+            let exact_rep_confirmation_used = pre_reduced_states.len()
+                >= EXACT_REP_CONFIRMATION_MIN_STATES
+                && representative_tokens.len() >= EXACT_REP_CONFIRMATION_MIN_TOKENS;
+            let exact_started_at = Instant::now();
+            let reduced_state_reps_for_pre_reduced = if exact_rep_confirmation_used {
+                state_equivalence_analysis::find_state_equivalence_classes_ex_with_rep_confirmation_and_disallowed_and_shared_base(
+                    analysis_view,
+                    &representative_tokens,
+                    &pre_reduced_states,
+                    &normalized_disallowed_follows,
+                    None,
+                    None,
+                    Some(true),
+                    (!uses_analysis_quotient).then_some(compatible_cache).flatten(),
+                )
+            } else {
+                state_equivalence_analysis::find_state_equivalence_classes_with_disallowed_and_shared_base(
+                    analysis_view,
+                    &representative_tokens,
+                    &pre_reduced_states,
+                    &normalized_disallowed_follows,
+                    (!uses_analysis_quotient).then_some(compatible_cache).flatten(),
+                )
+            };
+            let exact_state_equiv_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
+            (
+                reduced_state_reps_for_pre_reduced,
+                dedup_vocab_classes,
+                vocab_analysis_dfa_build_ms,
+                exact_state_equiv_ms,
+                vocab_equiv_ms,
+                exact_rep_confirmation_used,
             )
-        };
-        let exact_state_equiv_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
-        (
-            reduced_state_reps_for_pre_reduced,
-            dedup_vocab_classes,
-            vocab_analysis_dfa_build_ms,
-            exact_state_equiv_ms,
-            vocab_equiv_ms,
-            exact_rep_confirmation_used,
-        )
+        }
     } else {
         let exact_rep_confirmation_used = pre_reduced_states.len()
             >= EXACT_REP_CONFIRMATION_MIN_STATES
