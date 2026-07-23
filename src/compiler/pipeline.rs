@@ -1285,7 +1285,8 @@ fn prepare_structural_tokenizer_pair(
     let relevant_bytes = vocab.relevant_bytes();
 
     let expression_count = full_expressions.len() as u32;
-    let (synthesized_regex, full, full_to_synthesized) = if full_expressions.len() == 1 {
+    let (synthesized_regex, full, full_to_synthesized, effective_synthesized_expressions) =
+        if full_expressions.len() == 1 {
             let pair = compile_terminal_expression_pair_with_structural_map(
                 &full_expressions[0],
                 &synthesized_expressions[0],
@@ -1306,6 +1307,7 @@ fn prepare_structural_tokenizer_pair(
                 pair.synthesized,
                 DeferredRuntimeTokenizer::Ready(full),
                 pair.full_to_synthesized,
+                None,
             )
         } else {
             let labels = grammar
@@ -1329,7 +1331,8 @@ fn prepare_structural_tokenizer_pair(
                 &relevant_bytes,
             )?;
             let full_num_states = pair.full_num_states();
-            let (synthesized, full, full_to_synthesized) = pair.into_parts();
+            let (synthesized, full, full_to_synthesized, effective_synthesized_expressions) =
+                pair.into_parts();
             (
                 synthesized,
                 DeferredRuntimeTokenizer::Partitioned {
@@ -1339,9 +1342,12 @@ fn prepare_structural_tokenizer_pair(
                     num_states: full_num_states,
                 },
                 full_to_synthesized,
+                Some(effective_synthesized_expressions),
             )
         };
 
+    let synthesized_expressions = effective_synthesized_expressions
+        .unwrap_or_else(|| synthesized_expressions.clone());
     let mut synthesized = synthesized_regex.into_tokenizer(
         expression_count,
         Some(Arc::from(synthesized_expressions.into_boxed_slice())),
