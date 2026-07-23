@@ -11,7 +11,10 @@ use crate::automata::weighted_u32::terminal_automaton::TerminalAutomaton;
 use crate::compiler::stages::equiv_types::InternalIdMap;
 use crate::ds::weight::Weight;
 
-pub(crate) use compaction::{CompactPlan, CompactReport, InternedRangeCounts};
+pub(crate) use compaction::{
+    CompactPlan, CompactReport, DeferredTokenCompactReport, InternedRangeCounts,
+    compact_deferred_l1_token_sets,
+};
 
 pub(crate) trait WeightRefs {
     fn weight_refs(&self) -> Vec<&Weight>;
