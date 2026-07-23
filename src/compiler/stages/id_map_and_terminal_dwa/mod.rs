@@ -135,6 +135,37 @@ fn branch_active_state_map_enabled() -> bool {
         .unwrap_or(true)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutomaticBranchActiveStateMapStrategy {
+    None,
+    VeryLargeProfile,
+    DenseRequiresFastProjection,
+}
+
+fn automatic_branch_active_state_map_strategy(
+    branch_label: &str,
+    vocab_tokens: usize,
+    active_terminals: usize,
+    source_reps: usize,
+) -> AutomaticBranchActiveStateMapStrategy {
+    if !branch_label.ends_with(".l1") {
+        return AutomaticBranchActiveStateMapStrategy::None;
+    }
+    let work = source_reps.saturating_mul(vocab_tokens);
+    if vocab_tokens >= 50_000 && work >= 300_000_000 {
+        return AutomaticBranchActiveStateMapStrategy::VeryLargeProfile;
+    }
+    let dense_protected_profile = active_terminals >= 180
+        && vocab_tokens >= 2_000
+        && work >= 50_000_000
+        && (source_reps >= 40_000 || vocab_tokens <= 8_000);
+    if dense_protected_profile {
+        AutomaticBranchActiveStateMapStrategy::DenseRequiresFastProjection
+    } else {
+        AutomaticBranchActiveStateMapStrategy::None
+    }
+}
+
 pub(crate) fn build_branch_active_state_map(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
@@ -181,19 +212,18 @@ pub(crate) fn build_branch_active_state_map(
         // medium-vocabulary regime: paired measurements show that adding a
         // quotient there shifts the critical path and worsens tail latency even
         // though its local CPU work falls.
-        let work = source_reps.saturating_mul(vocab.len());
-        let very_large_profile = vocab.len() >= 50_000 && work >= 300_000_000;
-        let dense_protected_profile = active.iter().filter(|&&value| value).count() >= 180
-            && vocab.len() >= 2_000
-            && work >= 50_000_000
-            && (source_reps >= 40_000 || vocab.len() <= 8_000);
-        if !branch_label.ends_with(".l1")
-            || (!very_large_profile && !dense_protected_profile)
-        {
-            return None;
+        match automatic_branch_active_state_map_strategy(
+            branch_label,
+            vocab.len(),
+            active.iter().filter(|&&value| value).count(),
+            source_reps,
+        ) {
+            AutomaticBranchActiveStateMapStrategy::None => return None,
+            AutomaticBranchActiveStateMapStrategy::VeryLargeProfile => {}
+            AutomaticBranchActiveStateMapStrategy::DenseRequiresFastProjection => {
+                automatic_dense_requires_fast_projection = true;
+            }
         }
-        automatic_dense_requires_fast_projection =
-            dense_protected_profile && !very_large_profile;
     }
     let started_at = Instant::now();
     let statistic =
@@ -1738,9 +1768,45 @@ pub(crate) fn build_id_map_and_terminal_dwa(
 #[cfg(test)]
 mod tests {
     use super::{
-        should_auto_use_global_max_length,
+        AutomaticBranchActiveStateMapStrategy,
         DEFAULT_GLOBAL_MAX_LENGTH_STABLE_SIGNATURE_CELL_LIMIT,
+        automatic_branch_active_state_map_strategy, should_auto_use_global_max_length,
     };
+
+    #[test]
+    fn branch_active_state_map_auto_gate_selects_only_amortized_l1_regimes() {
+        use AutomaticBranchActiveStateMapStrategy::{
+            DenseRequiresFastProjection, None, VeryLargeProfile,
+        };
+
+        assert_eq!(
+            automatic_branch_active_state_map_strategy("p4.l1", 21_308, 190, 45_180),
+            DenseRequiresFastProjection,
+        );
+        assert_eq!(
+            automatic_branch_active_state_map_strategy("p5.l1", 4_261, 233, 26_624),
+            DenseRequiresFastProjection,
+        );
+        assert_eq!(
+            automatic_branch_active_state_map_strategy("p2.l1", 82_266, 229, 48_002),
+            VeryLargeProfile,
+        );
+
+        // Medium-state/medium-vocabulary work shifts the critical path, while
+        // the small long-horizon lane remains above the fast-projected cutoff.
+        assert_eq!(
+            automatic_branch_active_state_map_strategy("p1.l1", 15_224, 201, 37_079),
+            None,
+        );
+        assert_eq!(
+            automatic_branch_active_state_map_strategy("p6.l1", 630, 192, 97_024),
+            None,
+        );
+        assert_eq!(
+            automatic_branch_active_state_map_strategy("p4.l2p", 17_646, 4, 45_180),
+            None,
+        );
+    }
 
     #[test]
     fn global_max_length_auto_gate_bounds_stable_signature_matrix() {
