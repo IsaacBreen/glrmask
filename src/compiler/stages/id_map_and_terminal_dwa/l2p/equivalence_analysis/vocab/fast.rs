@@ -40,6 +40,11 @@ const STATE_NONE: usize = usize::MAX;
 const VOCAB_MATCH_POSITIONS_GROUP_BYTES: usize = 256 * 1024;
 const VOCAB_DEFAULT_BATCH_MAX_STATES: usize = 4_000;
 const VOCAB_DEFAULT_BATCH_MATCH_POSITION_BYTES: usize = 4 * 1024 * 1024;
+const VOCAB_LARGE_WORK_BATCH_MATCH_POSITION_BYTES: usize = 768 * 1024;
+// A one-batch trie walk is already bounded to one state slab. For modest
+// token×state work, running it directly avoids nested Rayon scheduling while
+// retaining full lexical-prefix sharing. Larger analyses remain chunk-parallel.
+const VOCAB_SEQUENTIAL_TRIE_WORK_MAX_DEFAULT: usize = 10_000_000;
 const SELF_LOOP_ACTIVE_LEN_LIMIT: usize = 512;
 
 /// Flat DFA with byte-class-compressed transposed transition tables.
@@ -704,7 +709,18 @@ fn vocab_batch_size_override() -> Option<usize> {
         .filter(|&value| value > 0)
 }
 
-fn default_vocab_batch_size(num_states: usize, num_groups: usize) -> usize {
+fn vocab_sequential_trie_work_max() -> usize {
+    std::env::var("GLRMASK_VOCAB_SEQUENTIAL_TRIE_WORK_MAX")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(VOCAB_SEQUENTIAL_TRIE_WORK_MAX_DEFAULT)
+}
+
+fn default_vocab_batch_size(
+    num_states: usize,
+    num_groups: usize,
+    num_tokens: usize,
+) -> usize {
     if num_states == 0 {
         return 0;
     }
@@ -714,8 +730,23 @@ fn default_vocab_batch_size(num_states: usize, num_groups: usize) -> usize {
     let bytes_per_state = num_groups.saturating_mul(std::mem::size_of::<u32>());
     let memory_bounded_states =
         (VOCAB_DEFAULT_BATCH_MATCH_POSITION_BYTES / bytes_per_state.max(1)).max(1);
+    // On a large token × state product, refinement discovered in an early
+    // state slice permanently removes singleton token classes from every later
+    // slice.  Smaller slices therefore reduce total trie replay substantially.
+    // For smaller vocabularies or state domains, the extra refinement rounds
+    // are pure overhead, so retain the wider historical batch there.
+    let refinement_bounded_states = if num_tokens >= 8_000 && num_states >= 2_000 {
+        // Keep the dominant per-batch match-position slab within a typical
+        // private cache. This was formerly a fixed 750-state tuning point;
+        // deriving it from group width preserves the same locality benefit for
+        // narrower and wider analysis DFAs.
+        (VOCAB_LARGE_WORK_BATCH_MATCH_POSITION_BYTES / bytes_per_state.max(1)).max(1)
+    } else {
+        VOCAB_DEFAULT_BATCH_MAX_STATES
+    };
     num_states
         .min(VOCAB_DEFAULT_BATCH_MAX_STATES)
+        .min(refinement_bounded_states)
         .min(memory_bounded_states)
 }
 
@@ -3539,8 +3570,9 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
     // repeated trie traversal. Bound the default by the dominant
     // `match_positions` allocation so unusually wide terminal-group axes do
     // not inherit an unbounded memory increase. Keep the env override for A/B.
-    let batch_size = vocab_batch_size_override()
-        .unwrap_or_else(|| default_vocab_batch_size(num_initial_states, num_groups));
+    let batch_size = vocab_batch_size_override().unwrap_or_else(|| {
+        default_vocab_batch_size(num_initial_states, num_groups, num_tokens)
+    });
     let mut active_indices: Vec<usize> = (0..num_tokens).collect();
     let mut active_tokens = vec![true; num_tokens];
     let lexical_order_started_at = profiling.then(Instant::now);
@@ -3552,6 +3584,7 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
     let mut signature_ms = 0.0;
     let mut refinement_ms = 0.0;
     let mut batches = 0usize;
+    let mut sequential_trie_batches = 0usize;
     let mut used_trie_walk = false;
     let mut trie_walk_stats = TrieWalkChunkStats::default();
     let scratch_pool = Arc::new(ScratchPool::default());
@@ -3591,6 +3624,14 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
         let state_group_size = vocab_state_group_size(batch.len(), num_groups);
         let use_trie_walk = active_indices.len() >= TRIE_WALK_MIN_TOKENS
             && !*TRIE_WALK_DISABLED;
+        let use_sequential_trie = use_trie_walk
+            && num_initial_states <= batch_size
+            && vocab_sequential_trie_work_max() > 0
+            && active_indices
+                .len()
+                .saturating_mul(batch.len())
+                <= vocab_sequential_trie_work_max();
+        sequential_trie_batches += usize::from(use_sequential_trie);
         used_trie_walk |= use_trie_walk;
         let active_sigs: Vec<(usize, u64)> = if use_trie_walk {
             let sort_started_at = profiling.then(Instant::now);
@@ -3616,6 +3657,23 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
                     state_group_size,
                     scratch,
                     trie_state,
+                    profiling,
+                );
+                flat_results.extend(chunk_result);
+                if profiling {
+                    trie_walk_stats.add_assign(chunk_stats);
+                }
+            } else if use_sequential_trie {
+                let mut lease = scratch_pool.checkout(batch.len(), num_groups);
+                let worker = lease.worker_mut();
+                let (chunk_result, chunk_stats) = trie_walk_chunk_signatures(
+                    dfa_ref,
+                    strings,
+                    &sorted_indices,
+                    batch,
+                    state_group_size,
+                    &mut worker.scratch,
+                    &mut worker.trie_state,
                     profiling,
                 );
                 flat_results.extend(chunk_result);
@@ -3798,10 +3856,11 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
 
     if profiling {
         eprintln!(
-            "[glrmask/profile][vocab_equiv] strings={} initial_states={} batches={} used_trie_walk={} active_final={} original_states={} effective_states={} compacted={} build_dfa_ms={:.3} compact_dfa_ms={:.3} state_order_ms={:.3} sort_tokens_ms={:.3} signature_ms={:.3} refinement_ms={:.3} final_groups_ms={:.3} dfs_step_ms={:.3} collect_targets_ms={:.3} single_target_suffix_ms={:.3} multi_target_suffix_ms={:.3} finish_signature_ms={:.3} dfs_steps={} dfs_steps_without_new_dirty={} dfs_states_visited={} dfs_dead_transitions={} dfs_dead_without_new_dirty={} dfs_new_dirty_groups={} dfs_new_dirty_states={} dfs_noop_self_loops={} clean_tokens={} dirty_tokens={} single_target_tokens={} multi_target_tokens={} total_targets={} scratch_pool_allocations={} scratch_pool_reuses={} total_ms={:.3}",
+            "[glrmask/profile][vocab_equiv] strings={} initial_states={} batches={} sequential_trie_batches={} used_trie_walk={} active_final={} original_states={} effective_states={} compacted={} build_dfa_ms={:.3} compact_dfa_ms={:.3} state_order_ms={:.3} sort_tokens_ms={:.3} signature_ms={:.3} refinement_ms={:.3} final_groups_ms={:.3} dfs_step_ms={:.3} collect_targets_ms={:.3} single_target_suffix_ms={:.3} multi_target_suffix_ms={:.3} finish_signature_ms={:.3} dfs_steps={} dfs_steps_without_new_dirty={} dfs_states_visited={} dfs_dead_transitions={} dfs_dead_without_new_dirty={} dfs_new_dirty_groups={} dfs_new_dirty_states={} dfs_noop_self_loops={} clean_tokens={} dirty_tokens={} single_target_tokens={} multi_target_tokens={} total_targets={} scratch_pool_allocations={} scratch_pool_reuses={} total_ms={:.3}",
             num_tokens,
             num_initial_states,
             batches,
+            sequential_trie_batches,
             used_trie_walk,
             active_indices.len(),
             dfa.num_states,
@@ -4133,13 +4192,15 @@ mod shared_base_tests {
 
     #[test]
     fn default_vocab_batch_size_is_state_and_memory_bounded() {
-        assert_eq!(default_vocab_batch_size(0, 10), 0);
-        assert_eq!(default_vocab_batch_size(123, 0), 123);
-        assert_eq!(default_vocab_batch_size(10_000, 0), 4_000);
-        assert_eq!(default_vocab_batch_size(10_000, 1), 4_000);
-        assert_eq!(default_vocab_batch_size(10_000, 262), 4_000);
-        assert_eq!(default_vocab_batch_size(10_000, 263), 3_986);
-        assert_eq!(default_vocab_batch_size(10_000, usize::MAX), 1);
+        assert_eq!(default_vocab_batch_size(0, 10, 10_000), 0);
+        assert_eq!(default_vocab_batch_size(123, 0, 10_000), 123);
+        assert_eq!(default_vocab_batch_size(10_000, 0, 10_000), 4_000);
+        assert_eq!(default_vocab_batch_size(10_000, 1, 1_000), 4_000);
+        assert_eq!(default_vocab_batch_size(10_000, 262, 1_000), 4_000);
+        assert_eq!(default_vocab_batch_size(10_000, 263, 1_000), 3_986);
+        assert_eq!(default_vocab_batch_size(10_000, usize::MAX, 1_000), 1);
+        assert_eq!(default_vocab_batch_size(1_999, 100, 20_000), 1_999);
+        assert_eq!(default_vocab_batch_size(5_241, 259, 15_155), 759);
     }
 
     #[test]

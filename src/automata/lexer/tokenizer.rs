@@ -4,7 +4,8 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, OnceLock};
 
 use rustc_hash::FxHashMap;
-use serde::{Deserialize, Serialize};
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Serialize, Serializer};
 use smallvec::SmallVec;
 
 use super::dfa::DFA;
@@ -13,10 +14,15 @@ use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
 use crate::grammar::flat::TerminalID;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Tokenizer {
     pub(super) dfa: DFA,
     pub(super) num_terminals: u32,
+    /// Runtime-only exact byte-class transition segments. The historical
+    /// serialized tokenizer shape contains only `dfa` and `num_terminals`; the
+    /// custom serializer expands these segments into that same DFA wire form.
+    #[serde(default, skip)]
+    pub(super) compressed_transition_segments: Arc<[CompressedTransitionSegment]>,
     /// Per-terminal regex expressions used to (re)build this tokenizer.
     /// Skipped during (de)serialization because they are only needed during
     /// compile-time simplification for active-terminal rebuilds.
@@ -28,6 +34,219 @@ pub struct Tokenizer {
     /// raw state.
     #[serde(default, skip)]
     pub(super) singleton_epsilon_closures: OnceLock<Arc<[Box<[u32]>]>>,
+}
+
+/// Exact deterministic transition rows over a byte-equivalence-class alphabet.
+/// Targets and row coordinates are local to one DFA component; `state_offset`
+/// rebases both into the final partitioned runtime tokenizer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CompressedTransitionSegment {
+    pub(crate) state_offset: u32,
+    pub(crate) state_count: u32,
+    pub(crate) byte_to_class: Arc<[u8]>,
+    pub(crate) class_members: Arc<[Box<[u8]>]>,
+    pub(crate) row_offsets: Arc<[u32]>,
+    pub(crate) entries: Arc<[(u8, u32)]>,
+    pub(crate) expanded_transition_count: usize,
+}
+
+pub(crate) mod artifact_serde {
+    use super::*;
+    use serde::{Deserializer, Serializer};
+
+    #[derive(Serialize)]
+    struct TokenizerArtifactRef<'a> {
+        dfa: &'a DFA,
+        num_terminals: u32,
+        compressed_transition_segments: &'a [CompressedTransitionSegment],
+    }
+
+    #[derive(Deserialize)]
+    struct TokenizerArtifact {
+        dfa: DFA,
+        num_terminals: u32,
+        compressed_transition_segments: Vec<CompressedTransitionSegment>,
+    }
+
+    pub(crate) fn serialize<S>(tokenizer: &Tokenizer, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        TokenizerArtifactRef {
+            dfa: &tokenizer.dfa,
+            num_terminals: tokenizer.num_terminals,
+            compressed_transition_segments: &tokenizer.compressed_transition_segments,
+        }
+        .serialize(serializer)
+    }
+
+    pub(crate) fn deserialize<'de, D>(deserializer: D) -> Result<Tokenizer, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let artifact = TokenizerArtifact::deserialize(deserializer)?;
+        Ok(Tokenizer {
+            dfa: artifact.dfa,
+            num_terminals: artifact.num_terminals,
+            compressed_transition_segments: Arc::from(
+                artifact.compressed_transition_segments.into_boxed_slice(),
+            ),
+            exprs: None,
+            singleton_epsilon_closures: OnceLock::new(),
+        })
+    }
+}
+
+impl CompressedTransitionSegment {
+    #[inline]
+    fn contains_state(&self, state: u32) -> bool {
+        state >= self.state_offset && state - self.state_offset < self.state_count
+    }
+
+    #[inline]
+    fn local_transition(&self, local_state: u32, byte: u8) -> Option<u32> {
+        let class = self.byte_to_class[byte as usize];
+        let start = self.row_offsets[local_state as usize] as usize;
+        let end = self.row_offsets[local_state as usize + 1] as usize;
+        self.entries[start..end]
+            .binary_search_by_key(&class, |&(existing, _)| existing)
+            .ok()
+            .map(|index| self.entries[start + index].1)
+    }
+
+    #[inline]
+    fn transition(&self, state: u32, byte: u8) -> Option<u32> {
+        self.local_transition(state - self.state_offset, byte)
+            .map(|target| self.state_offset + target)
+    }
+
+    fn expanded_entries(&self, state: u32) -> Vec<(u8, u32)> {
+        let local_state = state - self.state_offset;
+        let start = self.row_offsets[local_state as usize] as usize;
+        let end = self.row_offsets[local_state as usize + 1] as usize;
+        let row = &self.entries[start..end];
+        let mut target_by_class = vec![u32::MAX; self.class_members.len()];
+        let mut capacity = 0usize;
+        for &(class, target) in row {
+            target_by_class[class as usize] = target;
+            capacity += self.class_members[class as usize].len();
+        }
+        let mut entries = Vec::with_capacity(capacity);
+        for byte in 0u16..=255 {
+            let class = self.byte_to_class[byte as usize] as usize;
+            let target = target_by_class[class];
+            if target != u32::MAX {
+                entries.push((byte as u8, self.state_offset + target));
+            }
+        }
+        entries
+    }
+
+    fn fill_transition_row(&self, state: u32, row: &mut [u32; 256]) {
+        row.fill(u32::MAX);
+        let local_state = state - self.state_offset;
+        let start = self.row_offsets[local_state as usize] as usize;
+        let end = self.row_offsets[local_state as usize + 1] as usize;
+        for &(class, target) in &self.entries[start..end] {
+            let target = self.state_offset + target;
+            for &byte in self.class_members[class as usize].iter() {
+                row[byte as usize] = target;
+            }
+        }
+    }
+
+    fn transition_count(&self, state: u32) -> usize {
+        let local_state = state - self.state_offset;
+        let start = self.row_offsets[local_state as usize] as usize;
+        let end = self.row_offsets[local_state as usize + 1] as usize;
+        self.entries[start..end]
+            .iter()
+            .map(|(class, _)| self.class_members[*class as usize].len())
+            .sum()
+    }
+}
+
+enum TokenizerTransitionsIterInner<'a> {
+    Dense(crate::ds::char_transitions::CharTransitionsIter<'a, u32>),
+    Compressed {
+        segment: &'a CompressedTransitionSegment,
+        state: u32,
+        next_byte: u16,
+    },
+    Empty,
+}
+
+pub(crate) struct TokenizerTransitionsIter<'a> {
+    inner: TokenizerTransitionsIterInner<'a>,
+}
+
+impl Iterator for TokenizerTransitionsIter<'_> {
+    type Item = (u8, u32);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match &mut self.inner {
+            TokenizerTransitionsIterInner::Dense(iter) => {
+                iter.next().map(|(byte, target)| (byte, *target))
+            }
+            TokenizerTransitionsIterInner::Compressed {
+                segment,
+                state,
+                next_byte,
+            } => {
+                while *next_byte <= 255 {
+                    let byte = *next_byte as u8;
+                    *next_byte += 1;
+                    if let Some(target) = segment.transition(*state, byte) {
+                        return Some((byte, target));
+                    }
+                }
+                None
+            }
+            TokenizerTransitionsIterInner::Empty => None,
+        }
+    }
+
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match &self.inner {
+            TokenizerTransitionsIterInner::Dense(iter) => iter.size_hint(),
+            TokenizerTransitionsIterInner::Compressed { segment, state, .. } => {
+                let count = segment.transition_count(*state);
+                (count, Some(count))
+            }
+            TokenizerTransitionsIterInner::Empty => (0, Some(0)),
+        }
+    }
+
+    fn count(self) -> usize {
+        match self.inner {
+            TokenizerTransitionsIterInner::Dense(iter) => iter.count(),
+            TokenizerTransitionsIterInner::Compressed { segment, state, .. } => {
+                segment.transition_count(state)
+            }
+            TokenizerTransitionsIterInner::Empty => 0,
+        }
+    }
+}
+
+impl Serialize for Tokenizer {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let materialized;
+        let dfa = if self.compressed_transition_segments.is_empty() {
+            &self.dfa
+        } else {
+            materialized = self.materialized_dfa();
+            &materialized
+        };
+        // Match the historical derived-serialization field order exactly.
+        let mut state = serializer.serialize_struct("Tokenizer", 2)?;
+        state.serialize_field("dfa", dfa)?;
+        state.serialize_field("num_terminals", &self.num_terminals)?;
+        state.end()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,6 +375,353 @@ fn group_matches_by_width(matches: Vec<TokenizerMatch>) -> Vec<(usize, BTreeSet<
 }
 
 impl Tokenizer {
+    /// Materialize a deterministic compile-time analysis view as a tokenizer.
+    /// The view may be a powerset of this tokenizers epsilon-NFA. State zero is
+    /// reserved for the supplied start state, and the returned old-to-new map
+    /// lets callers lift raw-start mappings into the materialized coordinate.
+    pub(crate) fn materialize_deterministic_view(
+        &self,
+        start_state: usize,
+        finalizers: &[Vec<usize>],
+        futures: &[Vec<usize>],
+        edge_offsets: &[u32],
+        edges: &[(u8, u32)],
+        active_terminals: &[bool],
+    ) -> Option<(Tokenizer, Vec<u32>)> {
+        let state_count = finalizers.len();
+        if state_count == 0
+            || futures.len() != state_count
+            || edge_offsets.len() != state_count + 1
+            || start_state >= state_count
+            || active_terminals.len() != self.num_terminals as usize
+        {
+            return None;
+        }
+        let mut new_to_old = Vec::with_capacity(state_count);
+        new_to_old.push(start_state);
+        new_to_old.extend((0..state_count).filter(|&state| state != start_state));
+        let mut old_to_new = vec![u32::MAX; state_count];
+        for (new, &old) in new_to_old.iter().enumerate() {
+            old_to_new[old] = new as u32;
+        }
+
+        let mut dfa = DFA::new(state_count);
+        dfa.ensure_group_capacity(self.num_terminals as usize);
+        for terminal in 0..self.num_terminals as usize {
+            if active_terminals[terminal] {
+                dfa.set_group_u8set(
+                    terminal as u32,
+                    *self.dfa.group_id_to_u8set(terminal as u32),
+                );
+            }
+        }
+        for (new_state, &old_state) in new_to_old.iter().enumerate() {
+            let start = *edge_offsets.get(old_state)? as usize;
+            let end = *edge_offsets.get(old_state + 1)? as usize;
+            let transitions = edges
+                .get(start..end)?
+                .iter()
+                .map(|&(byte, target)| {
+                    old_to_new
+                        .get(target as usize)
+                        .copied()
+                        .filter(|&target| target != u32::MAX)
+                        .map(|target| (byte, target))
+                })
+                .collect::<Option<Vec<_>>>()?;
+            dfa.set_transitions_from_sorted_entries(new_state as u32, transitions);
+            let to_bits = |groups: &[usize]| {
+                let mut bits = BitSet::new(self.num_terminals as usize);
+                for &group in groups {
+                    if group >= active_terminals.len() || !active_terminals[group] {
+                        return None;
+                    }
+                    bits.set(group);
+                }
+                Some(bits)
+            };
+            dfa.overwrite_state_metadata(
+                new_state as u32,
+                to_bits(&finalizers[old_state])?,
+                to_bits(&futures[old_state])?,
+            );
+        }
+        Some((
+            Tokenizer {
+                dfa,
+                num_terminals: self.num_terminals,
+                compressed_transition_segments: Arc::from([]),
+                exprs: None,
+                singleton_epsilon_closures: OnceLock::new(),
+            },
+            old_to_new,
+        ))
+    }
+
+    /// Materialize an exact deterministic quotient for one compile-time branch.
+    ///
+    /// `original_to_quotient` must be a congruence for every vocabulary-relevant
+    /// byte after filtering labels to `active_terminals`. The method verifies
+    /// that property over every class member before constructing the smaller
+    /// tokenizer, so callers can fail closed to the original tokenizer.
+    pub(crate) fn materialize_active_quotient(
+        &self,
+        original_to_quotient: &[u32],
+        representatives: &[u32],
+        active_terminals: &[bool],
+        relevant_bytes: &[bool; 256],
+    ) -> Option<Tokenizer> {
+        if original_to_quotient.len() != self.num_states() as usize
+            || active_terminals.len() != self.num_terminals as usize
+            || representatives.is_empty()
+            || original_to_quotient.get(self.start_state() as usize).copied() != Some(0)
+        {
+            return None;
+        }
+        let quotient_states = representatives.len();
+        if original_to_quotient
+            .iter()
+            .any(|&state| state == u32::MAX || state as usize >= quotient_states)
+        {
+            return None;
+        }
+
+        let filtered = |bits: &BitSet| {
+            let mut result = BitSet::new(self.num_terminals as usize);
+            for terminal in bits.iter() {
+                if active_terminals.get(terminal).copied().unwrap_or(false) {
+                    result.set(terminal);
+                }
+            }
+            result
+        };
+
+        // Verify output labels and every relevant transition for all members,
+        // rather than trusting the refinement implementation as an implicit
+        // construction contract.
+        let mut class_members = vec![Vec::<u32>::new(); quotient_states];
+        for (original, &quotient) in original_to_quotient.iter().enumerate() {
+            class_members[quotient as usize].push(original as u32);
+        }
+        for (class, members) in class_members.iter().enumerate() {
+            let representative = *representatives.get(class)?;
+            if !members.contains(&representative) {
+                return None;
+            }
+            let representative_finalizers = filtered(self.dfa.finalizers(representative));
+            let representative_futures =
+                filtered(self.dfa.possible_future_group_ids(representative));
+            for &member in members {
+                if filtered(self.dfa.finalizers(member)) != representative_finalizers
+                    || filtered(self.dfa.possible_future_group_ids(member))
+                        != representative_futures
+                {
+                    return None;
+                }
+                for byte in 0u16..=255 {
+                    if !relevant_bytes[byte as usize] {
+                        continue;
+                    }
+                    let mapped = self
+                        .step(member, byte as u8)
+                        .map(|target| original_to_quotient[target as usize]);
+                    let representative_mapped = self
+                        .step(representative, byte as u8)
+                        .map(|target| original_to_quotient[target as usize]);
+                    if mapped != representative_mapped {
+                        return None;
+                    }
+                }
+                let mapped_epsilon = |state: u32| {
+                    let mut targets = self.dfa.states()[state as usize]
+                        .epsilon_transitions
+                        .iter()
+                        .map(|&target| original_to_quotient[target as usize])
+                        .collect::<Vec<_>>();
+                    targets.sort_unstable();
+                    targets.dedup();
+                    targets
+                };
+                if mapped_epsilon(member) != mapped_epsilon(representative) {
+                    return None;
+                }
+            }
+        }
+
+        let mut dfa = DFA::new(quotient_states);
+        dfa.ensure_group_capacity(self.num_terminals as usize);
+        for terminal in 0..self.num_terminals as usize {
+            if active_terminals[terminal] {
+                dfa.set_group_u8set(
+                    terminal as u32,
+                    *self.dfa.group_id_to_u8set(terminal as u32),
+                );
+            }
+        }
+        for (class, &representative) in representatives.iter().enumerate() {
+            let transitions = (0u16..=255)
+                .filter(|&byte| relevant_bytes[byte as usize])
+                .filter_map(|byte| {
+                    self.step(representative, byte as u8).map(|target| {
+                        (byte as u8, original_to_quotient[target as usize])
+                    })
+                })
+                .collect::<Vec<_>>();
+            dfa.set_transitions_from_sorted_entries(class as u32, transitions);
+            let mut epsilon_targets = self.dfa.states()[representative as usize]
+                .epsilon_transitions
+                .iter()
+                .map(|&target| original_to_quotient[target as usize])
+                .collect::<Vec<_>>();
+            epsilon_targets.sort_unstable();
+            epsilon_targets.dedup();
+            for target in epsilon_targets {
+                dfa.add_epsilon_transition(class as u32, target);
+            }
+            dfa.overwrite_state_metadata(
+                class as u32,
+                filtered(self.dfa.finalizers(representative)),
+                filtered(self.dfa.possible_future_group_ids(representative)),
+            );
+        }
+        Some(Tokenizer {
+            dfa,
+            num_terminals: self.num_terminals,
+            compressed_transition_segments: Arc::from([]),
+            exprs: None,
+            singleton_epsilon_closures: OnceLock::new(),
+        })
+    }
+
+    /// Extend `self` with the source-only residual states that were appended to
+    /// `source` after `rebuilt` was constructed.  `rebuilt_to_self` must be a
+    /// structural state map from the rebuilt expression DFA into `self`.
+    ///
+    /// Protected residual synthesis appends externally-entered product states
+    /// to otherwise identical deterministic dispatch components.  The original
+    /// component states remain an exact prefix.  Verify that prefix relation
+    /// state-for-state, then clone only the appended states while redirecting
+    /// every edge through the completed source-to-self map.  The result is a
+    /// transition homomorphism over the actual source tokenizer, not a bounded
+    /// semantic approximation.
+    pub(crate) fn augment_from_verified_component_prefixes(
+        &mut self,
+        source: &Tokenizer,
+        rebuilt: &Tokenizer,
+        rebuilt_to_self: &[u32],
+    ) -> Option<Vec<u32>> {
+        if source.num_terminals != rebuilt.num_terminals
+            || source.num_terminals != self.num_terminals
+            || rebuilt_to_self.len() != rebuilt.num_states() as usize
+        {
+            return None;
+        }
+
+        let source_components = source.disjoint_dispatch_components()?;
+        let rebuilt_components = rebuilt.disjoint_dispatch_components()?;
+        if source_components.len() != rebuilt_components.len() {
+            return None;
+        }
+
+        let mut source_to_rebuilt = vec![u32::MAX; source.num_states() as usize];
+        source_to_rebuilt[source.start_state() as usize] = rebuilt.start_state();
+        for (source_states, rebuilt_states) in
+            source_components.iter().zip(&rebuilt_components)
+        {
+            if rebuilt_states.len() > source_states.len() {
+                return None;
+            }
+            for (&source_state, &rebuilt_state) in source_states.iter().zip(rebuilt_states) {
+                source_to_rebuilt[source_state as usize] = rebuilt_state;
+            }
+        }
+
+        // Verify that the mapped prefix is exactly the rebuilt DFA after state
+        // renumbering.  This guards the append-only invariant rather than
+        // relying on component construction order as an undocumented fact.
+        for (source_state, &rebuilt_state) in source_to_rebuilt.iter().enumerate() {
+            if rebuilt_state == u32::MAX {
+                continue;
+            }
+            let source_state = source_state as u32;
+            if source.dfa.finalizers(source_state) != rebuilt.dfa.finalizers(rebuilt_state)
+                || source.dfa.possible_future_group_ids(source_state)
+                    != rebuilt.dfa.possible_future_group_ids(rebuilt_state)
+                || source.state_has_epsilon_transitions(source_state)
+                    != rebuilt.state_has_epsilon_transitions(rebuilt_state)
+            {
+                return None;
+            }
+            let source_epsilon = &source.dfa.states()[source_state as usize].epsilon_transitions;
+            let rebuilt_epsilon = &rebuilt.dfa.states()[rebuilt_state as usize].epsilon_transitions;
+            let mapped_epsilon = source_epsilon
+                .iter()
+                .map(|&target| *source_to_rebuilt.get(target as usize).unwrap_or(&u32::MAX))
+                .collect::<Vec<_>>();
+            if mapped_epsilon != *rebuilt_epsilon {
+                return None;
+            }
+            let source_transitions = source
+                .transitions_from(source_state)
+                .map(|(byte, target)| {
+                    Some((byte, *source_to_rebuilt.get(target as usize)?))
+                })
+                .collect::<Option<Vec<_>>>()?;
+            if source_transitions.iter().any(|&(_, target)| target == u32::MAX)
+                || source_transitions
+                    != rebuilt.transitions_from(rebuilt_state).collect::<Vec<_>>()
+            {
+                return None;
+            }
+        }
+
+        let original_self_states = self.num_states() as usize;
+        let mut source_to_self = vec![u32::MAX; source.num_states() as usize];
+        for (source_state, &rebuilt_state) in source_to_rebuilt.iter().enumerate() {
+            if rebuilt_state != u32::MAX {
+                source_to_self[source_state] = *rebuilt_to_self.get(rebuilt_state as usize)?;
+            }
+        }
+        for source_state in 0..source.num_states() as usize {
+            if source_to_self[source_state] == u32::MAX {
+                source_to_self[source_state] = self.dfa.add_state();
+            }
+        }
+
+        for source_state in 0..source.num_states() as usize {
+            if source_to_rebuilt[source_state] != u32::MAX {
+                continue;
+            }
+            let target_state = source_to_self[source_state];
+            let source_state_u32 = source_state as u32;
+            if source.state_has_epsilon_transitions(source_state_u32) {
+                return None;
+            }
+            let transitions = source
+                .transitions_from(source_state_u32)
+                .map(|(byte, target)| (byte, source_to_self[target as usize]))
+                .collect::<Vec<_>>();
+            self.dfa
+                .set_transitions_from_sorted_entries(target_state, transitions);
+            self.dfa.overwrite_state_metadata(
+                target_state,
+                source.dfa.finalizers(source_state_u32).clone(),
+                source
+                    .dfa
+                    .possible_future_group_ids(source_state_u32)
+                    .clone(),
+            );
+        }
+        debug_assert_eq!(
+            self.num_states() as usize - original_self_states,
+            source_to_rebuilt
+                .iter()
+                .filter(|&&state| state == u32::MAX)
+                .count(),
+        );
+        Some(source_to_self)
+    }
+
     pub(super) fn from_parts(
         dfa: DFA,
         num_terminals: u32,
@@ -164,9 +730,56 @@ impl Tokenizer {
         Self {
             dfa,
             num_terminals,
+            compressed_transition_segments: Arc::from([]),
             exprs,
             singleton_epsilon_closures: OnceLock::new(),
         }
+    }
+
+    pub(crate) fn from_parts_with_compressed_transitions(
+        dfa: DFA,
+        num_terminals: u32,
+        exprs: Option<Arc<[Expr]>>,
+        compressed_transition_segments: Vec<CompressedTransitionSegment>,
+    ) -> Self {
+        debug_assert!(compressed_transition_segments
+            .windows(2)
+            .all(|pair| pair[0].state_offset + pair[0].state_count <= pair[1].state_offset));
+        Self {
+            dfa,
+            num_terminals,
+            compressed_transition_segments: Arc::from(compressed_transition_segments),
+            exprs,
+            singleton_epsilon_closures: OnceLock::new(),
+        }
+    }
+
+    fn compressed_segment_for_state(
+        &self,
+        state: u32,
+    ) -> Option<&CompressedTransitionSegment> {
+        let index = self
+            .compressed_transition_segments
+            .partition_point(|segment| segment.state_offset <= state);
+        index.checked_sub(1).and_then(|index| {
+            let segment = &self.compressed_transition_segments[index];
+            segment.contains_state(state).then_some(segment)
+        })
+    }
+
+    pub(crate) fn has_compressed_transition_state(&self, state: u32) -> bool {
+        self.compressed_segment_for_state(state).is_some()
+    }
+
+    fn materialized_dfa(&self) -> DFA {
+        let mut dfa = self.dfa.clone();
+        for segment in self.compressed_transition_segments.iter() {
+            for local_state in 0..segment.state_count {
+                let state = segment.state_offset + local_state;
+                dfa.set_transitions_from_sorted_entries(state, segment.expanded_entries(state));
+            }
+        }
+        dfa
     }
 
     /// Put two tokenizers with the same terminal-id domain under one fresh
@@ -352,15 +965,32 @@ impl Tokenizer {
             .unwrap_or_else(|| TokenizerStateSet::from_buf([self.initial_state_id()]))
     }
 
-    fn transitions_from(&self, state: u32) -> impl Iterator<Item = (u8, u32)> + '_ {
-        self.dfa
-            .states()
-            .get(state as usize)
-            .into_iter()
-            .flat_map(|state| state.transitions.iter().map(|(byte, &target)| (byte, target)))
+    fn transitions_from(&self, state: u32) -> TokenizerTransitionsIter<'_> {
+        if let Some(segment) = self.compressed_segment_for_state(state) {
+            return TokenizerTransitionsIter {
+                inner: TokenizerTransitionsIterInner::Compressed {
+                    segment,
+                    state,
+                    next_byte: 0,
+                },
+            };
+        }
+        TokenizerTransitionsIter {
+            inner: self
+                .dfa
+                .states()
+                .get(state as usize)
+                .map_or(TokenizerTransitionsIterInner::Empty, |state| {
+                    TokenizerTransitionsIterInner::Dense(state.transitions.iter())
+                }),
+        }
     }
 
     fn fill_transition_row(&self, state: u32, row: &mut [u32; 256]) {
+        if let Some(segment) = self.compressed_segment_for_state(state) {
+            segment.fill_transition_row(state, row);
+            return;
+        }
         row.fill(u32::MAX);
         for (byte, target) in self.transitions_from(state) {
             row[byte as usize] = target;
@@ -374,6 +1004,20 @@ impl Tokenizer {
     }
 
     fn self_loop_bytes(&self, state: u32) -> U8Set {
+        if let Some(segment) = self.compressed_segment_for_state(state) {
+            let mut bytes = U8Set::empty();
+            let local_state = state - segment.state_offset;
+            let start = segment.row_offsets[local_state as usize] as usize;
+            let end = segment.row_offsets[local_state as usize + 1] as usize;
+            for &(class, target) in &segment.entries[start..end] {
+                if target == local_state {
+                    for &byte in segment.class_members[class as usize].iter() {
+                        bytes.insert(byte);
+                    }
+                }
+            }
+            return bytes;
+        }
         let mut bytes = U8Set::empty();
         for (byte, target) in self.transitions_from(state) {
             if target == state {
@@ -384,9 +1028,22 @@ impl Tokenizer {
     }
 
     fn transition_count(&self) -> usize {
-        (0..self.num_states())
-            .map(|state| self.transitions_from(state).count())
-            .sum()
+        let compressed = self
+            .compressed_transition_segments
+            .iter()
+            .map(|segment| segment.expanded_transition_count)
+            .sum::<usize>();
+        let dense = self
+            .dfa
+            .states()
+            .iter()
+            .enumerate()
+            .filter(|(state, _)| {
+                self.compressed_segment_for_state(*state as u32).is_none()
+            })
+            .map(|(_, state)| state.transitions.len())
+            .sum::<usize>();
+        compressed + dense
     }
 
     /// Detect nullable terminals (those that match the empty string) by
@@ -475,15 +1132,40 @@ impl Tokenizer {
     }
 
     fn step(&self, state: u32, byte: u8) -> Option<u32> {
-        self.dfa.step(state, byte)
+        self.compressed_segment_for_state(state)
+            .map_or_else(|| self.dfa.step(state, byte), |segment| segment.transition(state, byte))
     }
 
     fn step_all(&self, states: &[u32], byte: u8) -> TokenizerStateSet {
-        self.dfa.step_all(states, byte)
+        if self.compressed_transition_segments.is_empty() {
+            return self.dfa.step_all(states, byte);
+        }
+        if states.len() == 1 {
+            let state = states[0];
+            if self.dfa.states()[state as usize].epsilon_transitions.is_empty()
+                && let Some(target) = self.step(state, byte)
+                && self.dfa.states()[target as usize].epsilon_transitions.is_empty()
+            {
+                return TokenizerStateSet::from_buf([target]);
+            }
+        }
+        let closure = self.dfa.epsilon_closure(states);
+        let mut targets = TokenizerStateSet::new();
+        for state in closure {
+            if let Some(target) = self.step(state, byte) {
+                targets.push(target);
+            }
+        }
+        if targets.is_empty() {
+            return targets;
+        }
+        targets.sort_unstable();
+        targets.dedup();
+        self.dfa.epsilon_closure(&targets)
     }
 
     fn get_transition(&self, state: u32, byte: u8) -> u32 {
-        self.dfa.get_transition(state, byte)
+        self.step(state, byte).unwrap_or(u32::MAX)
     }
 
     pub fn run(&self, input: &[u8]) -> TokenizerStateSet {
@@ -781,6 +1463,53 @@ pub(crate) fn arbitrary_epsilon_l1_test_tokenizer() -> Tokenizer {
 mod tests {
     use super::*;
     use crate::automata::lexer::dfa::DFA;
+
+    fn dispatch_prefix_tokenizer(with_appended_residual: bool) -> Tokenizer {
+        let mut dfa = DFA::new(if with_appended_residual { 5 } else { 4 });
+        dfa.ensure_group_capacity(1);
+        dfa.add_epsilon_transition(0, 1);
+        dfa.add_epsilon_transition(0, 3);
+        dfa.add_transition(1, b'a', 2);
+        dfa.add_transition(2, b'a', 2);
+        dfa.add_transition(3, b'x', 3);
+        let mut accepting = BitSet::new(1);
+        accepting.set(0);
+        dfa.overwrite_state_metadata(2, accepting.clone(), BitSet::new(1));
+        if with_appended_residual {
+            // This state is deliberately not reset-reachable. It models the
+            // externally-entered residuals appended by structural synthesis.
+            dfa.add_transition(4, b'a', 2);
+            dfa.add_transition(4, b'b', 4);
+            dfa.overwrite_state_metadata(4, accepting, BitSet::new(1));
+        }
+        dfa.recompute_possible_futures();
+        Tokenizer::from_parts(dfa, 1, None)
+    }
+
+    #[test]
+    fn structural_prefix_augmentation_clones_only_appended_residuals() {
+        let source = dispatch_prefix_tokenizer(true);
+        let rebuilt = dispatch_prefix_tokenizer(false);
+        let mut local = rebuilt.clone();
+        let rebuilt_to_local = (0..rebuilt.num_states()).collect::<Vec<_>>();
+
+        let source_to_local = local
+            .augment_from_verified_component_prefixes(
+                &source,
+                &rebuilt,
+                &rebuilt_to_local,
+            )
+            .expect("verified append-only component relation");
+
+        assert_eq!(local.num_states(), source.num_states());
+        assert_eq!(source_to_local, vec![0, 1, 2, 3, 4]);
+        for input in [b"".as_slice(), b"a", b"b", b"ba", b"bba"] {
+            let source_result = source.execute_from_state_all_widths(input, 4);
+            let local_result = local.execute_from_state_all_widths(input, source_to_local[4]);
+            assert_eq!(source_result.matches, local_result.matches, "input={input:?}");
+            assert_eq!(source_result.end_state, local_result.end_state, "input={input:?}");
+        }
+    }
 
     #[test]
     fn execution_handles_epsilon_edges_before_and_after_a_byte() {

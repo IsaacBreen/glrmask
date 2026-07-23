@@ -451,7 +451,7 @@ fn fast_projected_l1_id_map_enabled() -> bool {
     })
 }
 
-fn fast_projected_l1_id_map_max_tsids() -> usize {
+pub(crate) fn fast_projected_l1_id_map_max_tsids() -> usize {
     static MAX_TSID: OnceLock<usize> = OnceLock::new();
     *MAX_TSID.get_or_init(|| {
         std::env::var("GLRMASK_L1_FAST_PROJECTED_ID_MAP_MAX_TSIDS")
@@ -4197,8 +4197,9 @@ fn l1_bucket_suffix_signature_profiles_packed(
     });
     if let Some(total_started_at) = total_started_at {
         eprintln!(
-            "[glrmask/profile][l1_packed_product] first_byte={} tokens={} targets={} trie_nodes={} active_nodes={} states={} states_capacity={} transition_maps={} transition_maps_capacity={} behavior_ids={} behavior_ids_capacity={} records={} record_child_behaviors={} uniform_subtree_transitions={} trie_ms={:.3} propagate_ms={:.3} behavior_ms={:.3} materialize_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][l1_packed_product] first_byte={} suffix_horizon={} tokens={} targets={} trie_nodes={} active_nodes={} states={} states_capacity={} transition_maps={} transition_maps_capacity={} behavior_ids={} behavior_ids_capacity={} records={} record_child_behaviors={} uniform_subtree_transitions={} trie_ms={:.3} propagate_ms={:.3} behavior_ms={:.3} materialize_ms={:.3} total_ms={:.3}",
             first_byte,
+            suffix_horizon,
             token_ids.len(),
             walk_targets.len(),
             trie.nodes.len(),

@@ -9,6 +9,11 @@
   residual representative while keeping the full exact lexer for runtime
   state. Pathological bounded-repeat intersections no longer force the former
   multi-second terminal-DWA construction path.
+- Exact runtime tokenizer finalization now overlaps terminal/parser automaton
+  construction. Large protected residual products publish their synthesized
+  compile tokenizer before full future analysis and byte-transition
+  materialization, and runtime component assembly moves transition storage
+  instead of copying it a second time.
 - Bounded-terminal synthesis candidate discovery now runs before terminal
   materialization, uses cached vocabulary length/alphabet statistics, reuses
   language-canonical repeat-horizon proofs, and parallelizes only the small set
