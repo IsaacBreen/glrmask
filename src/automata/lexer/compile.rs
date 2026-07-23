@@ -11,7 +11,9 @@ use crate::ds::{bitset::BitSet, u8set::U8Set};
 use crate::Vocab;
 
 use super::ast::Expr;
-use super::tokenizer::{CompressedTransitionSegment, Tokenizer};
+use super::tokenizer::{
+    CompressedTransitionSegment, ProtectedDefinitionProvenance, Tokenizer,
+};
 use super::dfa::DFA;
 use super::nfa::NFA;
 
@@ -2488,6 +2490,7 @@ impl Regex {
             num_terminals,
             compressed_transition_segments: Arc::from([]),
             exprs,
+            definition_provenance: Arc::from([]),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
         }
     }
@@ -2948,7 +2951,13 @@ struct LexerComponentPair {
     synthesized: DFA,
     full: DeferredDfa,
     full_to_synthesized: Vec<u32>,
+    definition_provenance: Option<LocalProtectedDefinitionProvenance>,
     protected_residual: bool,
+}
+
+struct LocalProtectedDefinitionProvenance {
+    source_dfa: Arc<DFA>,
+    source_residuals_by_synthesized_state: Arc<[Box<[u32]>]>,
 }
 
 enum DeferredDfa {
@@ -3003,12 +3012,14 @@ pub(crate) struct CompiledPartitionedExpressionPair {
     pub(crate) synthesized: Regex,
     pub(crate) full: Regex,
     pub(crate) full_to_synthesized: Vec<u32>,
+    pub(crate) definition_provenance: Vec<ProtectedDefinitionProvenance>,
 }
 
 pub(crate) struct PreparedPartitionedExpressionPair {
     pub(crate) synthesized: Regex,
     full: DeferredPartitionedRegex,
     pub(crate) full_to_synthesized: Vec<u32>,
+    pub(crate) definition_provenance: Vec<ProtectedDefinitionProvenance>,
 }
 
 impl PreparedPartitionedExpressionPair {
@@ -3021,14 +3032,23 @@ impl PreparedPartitionedExpressionPair {
             synthesized: self.synthesized,
             full: self.full.finish(),
             full_to_synthesized: self.full_to_synthesized,
+            definition_provenance: self.definition_provenance,
         }
     }
 
-    pub(crate) fn into_parts(self) -> (Regex, DeferredPartitionedRegex, Vec<u32>) {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        Regex,
+        DeferredPartitionedRegex,
+        Vec<u32>,
+        Vec<ProtectedDefinitionProvenance>,
+    ) {
         (
             self.synthesized,
             self.full,
             self.full_to_synthesized,
+            self.definition_provenance,
         )
     }
 }
@@ -4441,6 +4461,7 @@ pub(crate) fn prepare_partitioned_expression_pair_with_structural_map(
                     synthesized: dfa.clone(),
                     full: DeferredDfa::Ready(dfa),
                     full_to_synthesized: (0..state_count).collect(),
+                    definition_provenance: None,
                     protected_residual: false,
                 });
             }
@@ -4498,11 +4519,16 @@ pub(crate) fn prepare_partitioned_expression_pair_with_structural_map(
                 }
                 return None;
             }
+            let definition_provenance = pair.definition_provenance.filter(|provenance| {
+                provenance.source_residuals_by_synthesized_state.len()
+                    == synthesized.num_states()
+            });
             Some(LexerComponentPair {
                 terminal_ids,
                 synthesized,
                 full,
                 full_to_synthesized: pair.full_to_synthesized,
+                definition_provenance,
                 protected_residual: true,
             })
         })
@@ -4544,6 +4570,7 @@ pub(crate) fn prepare_partitioned_expression_pair_with_structural_map(
                 synthesized: dfa.clone(),
                 full: DeferredDfa::Ready(dfa),
                 full_to_synthesized: (0..state_count).collect(),
+                definition_provenance: None,
                 protected_residual: false,
             }
         })
@@ -4555,6 +4582,22 @@ pub(crate) fn prepare_partitioned_expression_pair_with_structural_map(
 
     let (synthesized, synthesized_offsets) =
         combine_synthesized_component_pairs_under_epsilon_root(&pairs, full_exprs.len());
+    let definition_provenance = pairs
+        .iter()
+        .zip(&synthesized_offsets)
+        .filter_map(|(pair, &state_offset)| {
+            let local = pair.definition_provenance.as_ref()?;
+            let terminal_id = *pair.terminal_ids.first()? as u32;
+            Some(ProtectedDefinitionProvenance {
+                terminal_id,
+                state_offset,
+                source_dfa: Arc::clone(&local.source_dfa),
+                source_residuals_by_local_state: Arc::clone(
+                    &local.source_residuals_by_synthesized_state,
+                ),
+            })
+        })
+        .collect::<Vec<_>>();
     let mut full_offsets = Vec::with_capacity(pairs.len());
     let mut full_state_count = 1usize;
     for pair in &pairs {
@@ -4587,6 +4630,7 @@ pub(crate) fn prepare_partitioned_expression_pair_with_structural_map(
             total_groups: full_exprs.len(),
         },
         full_to_synthesized,
+        definition_provenance,
     })
 }
 
@@ -6251,12 +6295,165 @@ pub(crate) struct CompiledTerminalExpressionPair {
     pub(crate) synthesized: Regex,
     pub(crate) full: Regex,
     pub(crate) full_to_synthesized: Vec<u32>,
+    definition_provenance: Option<LocalProtectedDefinitionProvenance>,
 }
 
 struct PreparedTerminalExpressionPair {
     synthesized: Regex,
     full: DeferredDfa,
     full_to_synthesized: Vec<u32>,
+    definition_provenance: Option<LocalProtectedDefinitionProvenance>,
+}
+
+fn retain_definition_provenance_enabled() -> bool {
+    std::env::var_os("GLRMASK_RETAIN_DEFINITION_PROVENANCE").is_some()
+        || std::env::var_os("GLRMASK_DEFINITION_PHYSICAL_REPORT").is_some()
+}
+
+/// Relate every reachable state of the structural full-component DFA to the
+/// independently compiled full terminal DFA used by definition analysis.
+/// Both machines are deterministic partial DFAs for the same terminal
+/// language; disagreement in outputs or any byte transition fails closed.
+fn full_component_to_definition_residuals(
+    full: &DFA,
+    definition: &DFA,
+) -> Option<Vec<Box<[u32]>>> {
+    if full.num_states() == 0 || definition.num_states() == 0 {
+        return None;
+    }
+    if full == definition {
+        return Some(
+            (0..full.num_states() as u32)
+                .map(|state| vec![state].into_boxed_slice())
+                .collect(),
+        );
+    }
+    let mut residuals = vec![Vec::<u32>::new(); full.num_states()];
+    let mut queue = VecDeque::from([(0u32, 0u32)]);
+    let mut seen = FxHashSet::<u64>::default();
+    while let Some((full_state, definition_state)) = queue.pop_front() {
+        let key = ((full_state as u64) << 32) | definition_state as u64;
+        if !seen.insert(key) {
+            continue;
+        }
+        if full.finalizers(full_state).contains(0)
+            != definition.finalizers(definition_state).contains(0)
+        {
+            return None;
+        }
+        residuals[full_state as usize].push(definition_state);
+        for byte in 0u16..=255 {
+            match (
+                full.step(full_state, byte as u8),
+                definition.step(definition_state, byte as u8),
+            ) {
+                (None, None) => {}
+                (Some(full_target), Some(definition_target)) => {
+                    queue.push_back((full_target, definition_target));
+                }
+                _ => return None,
+            }
+        }
+    }
+    if residuals.iter().any(Vec::is_empty) {
+        return None;
+    }
+    Some(
+        residuals
+            .into_iter()
+            .map(|mut states| {
+                states.sort_unstable();
+                states.dedup();
+                states.into_boxed_slice()
+            })
+            .collect(),
+    )
+}
+
+fn build_local_definition_provenance(
+    full_expression: &Expr,
+    full: &DFA,
+    full_to_synthesized: &[u32],
+    synthesized_states: usize,
+) -> Option<LocalProtectedDefinitionProvenance> {
+    let profile = retain_definition_provenance_enabled();
+    if !retain_definition_provenance_enabled()
+        || full_to_synthesized.len() != full.num_states()
+        || synthesized_states == 0
+    {
+        if profile {
+            eprintln!(
+                "[glrmask/profile][definition_provenance_local] selected=false stage=input_shape full_states={} map_entries={} synthesized_states={}",
+                full.num_states(),
+                full_to_synthesized.len(),
+                synthesized_states,
+            );
+        }
+        return None;
+    }
+    let source_dfa = Arc::new(compile_terminal_expr_dfa(full_expression));
+    let Some(full_to_source) =
+        full_component_to_definition_residuals(full, source_dfa.as_ref())
+    else {
+        if profile {
+            eprintln!(
+                "[glrmask/profile][definition_provenance_local] selected=false stage=full_to_definition full_states={} definition_states={} synthesized_states={}",
+                full.num_states(),
+                source_dfa.num_states(),
+                synthesized_states,
+            );
+        }
+        return None;
+    };
+    let mut by_synthesized = vec![Vec::<u32>::new(); synthesized_states];
+    for (full_state, source_residuals) in full_to_source.iter().enumerate() {
+        let Some(&synthesized_state) = full_to_synthesized.get(full_state) else {
+            return None;
+        };
+        let Some(target) = by_synthesized.get_mut(synthesized_state as usize) else {
+            if profile {
+                eprintln!(
+                    "[glrmask/profile][definition_provenance_local] selected=false stage=invalid_synthesized_target full_state={} synthesized_state={} synthesized_states={}",
+                    full_state,
+                    synthesized_state,
+                    synthesized_states,
+                );
+            }
+            return None;
+        };
+        target.extend_from_slice(source_residuals);
+    }
+    let source_residuals_by_synthesized_state = by_synthesized
+        .into_iter()
+        .map(|mut states| {
+            states.sort_unstable();
+            states.dedup();
+            states.into_boxed_slice()
+        })
+        .collect::<Vec<_>>();
+    let empty_synthesized_states = source_residuals_by_synthesized_state
+        .iter()
+        .filter(|states| states.is_empty())
+        .count();
+    if profile {
+        eprintln!(
+            "[glrmask/profile][definition_provenance_local] selected=true full_states={} definition_states={} synthesized_states={} empty_synthesized_states={} residual_entries={}",
+            full.num_states(),
+            source_dfa.num_states(),
+            synthesized_states,
+            empty_synthesized_states,
+            source_residuals_by_synthesized_state
+                .iter()
+                .map(|states| states.len())
+                .sum::<usize>(),
+        );
+    }
+    Some(LocalProtectedDefinitionProvenance {
+        source_dfa,
+        source_residuals_by_synthesized_state: Arc::from(
+            source_residuals_by_synthesized_state.into_boxed_slice(),
+        ),
+    })
 }
 
 /// Return the number of structurally aligned product components available to
@@ -6385,12 +6582,19 @@ fn prepare_terminal_expression_pair_with_structural_map(
                 map_ms,
             );
         }
+        let definition_provenance = build_local_definition_provenance(
+            full_expression,
+            &full_dfa,
+            &full_to_synthesized,
+            synthesized_dfa.num_states(),
+        );
         return Some(PreparedTerminalExpressionPair {
             synthesized: Regex {
                 dfa: synthesized_dfa,
             },
             full: DeferredDfa::Ready(full_dfa),
             full_to_synthesized,
+            definition_provenance,
         });
     }
 
@@ -6928,12 +7132,19 @@ fn prepare_terminal_expression_pair_with_structural_map(
         );
     }
 
+    let definition_provenance = build_local_definition_provenance(
+        full_expression,
+        full_dfa,
+        &full_to_synthesized,
+        synthesized_dfa.num_states(),
+    );
     Some(PreparedTerminalExpressionPair {
         synthesized: Regex {
             dfa: synthesized_dfa,
         },
         full,
         full_to_synthesized,
+        definition_provenance,
     })
 }
 
@@ -6959,6 +7170,7 @@ pub(crate) fn compile_terminal_expression_pair_with_structural_map(
             dfa: prepared.full.finish(),
         },
         full_to_synthesized: prepared.full_to_synthesized,
+        definition_provenance: prepared.definition_provenance,
     })
 }
 
@@ -8113,6 +8325,7 @@ mod tests {
             num_terminals: 1,
             compressed_transition_segments: Arc::from([]),
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
+            definition_provenance: Arc::from([]),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
         };
         let exec = tokenizer.execute_from_state(input, tokenizer.initial_state());
@@ -8935,6 +9148,7 @@ mod tests {
             num_terminals: 1,
             compressed_transition_segments: Arc::from([]),
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
+            definition_provenance: Arc::from([]),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
         };
 
@@ -8972,6 +9186,7 @@ mod tests {
             num_terminals: 2,
             compressed_transition_segments: Arc::from([]),
             exprs: Some(Arc::from(vec![space, exact_repeat].into_boxed_slice())),
+            definition_provenance: Arc::from([]),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
         };
 
@@ -9009,6 +9224,7 @@ mod tests {
             num_terminals: 2,
             compressed_transition_segments: Arc::from([]),
             exprs: Some(Arc::from(vec![space, exact_repeat].into_boxed_slice())),
+            definition_provenance: Arc::from([]),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
         };
 
@@ -9068,6 +9284,7 @@ mod tests {
             num_terminals: exprs.len() as u32,
             compressed_transition_segments: Arc::from([]),
             exprs: Some(Arc::from(exprs.into_boxed_slice())),
+            definition_provenance: Arc::from([]),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
         };
 
@@ -9114,6 +9331,7 @@ mod tests {
             num_terminals: 1,
             compressed_transition_segments: Arc::from([]),
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
+            definition_provenance: Arc::from([]),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
         };
 
@@ -9170,6 +9388,7 @@ mod tests {
             num_terminals: 1,
             compressed_transition_segments: Arc::from([]),
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
+            definition_provenance: Arc::from([]),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
         };
 
@@ -9315,6 +9534,7 @@ mod tests {
             num_terminals: 1,
             compressed_transition_segments: Arc::from([]),
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
+            definition_provenance: Arc::from([]),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
         };
 

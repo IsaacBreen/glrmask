@@ -1285,7 +1285,8 @@ fn prepare_structural_tokenizer_pair(
     let relevant_bytes = vocab.relevant_bytes();
 
     let expression_count = full_expressions.len() as u32;
-    let (synthesized_regex, full, full_to_synthesized) = if full_expressions.len() == 1 {
+    let (synthesized_regex, full, full_to_synthesized, definition_provenance) =
+        if full_expressions.len() == 1 {
             let pair = compile_terminal_expression_pair_with_structural_map(
                 &full_expressions[0],
                 &synthesized_expressions[0],
@@ -1306,6 +1307,7 @@ fn prepare_structural_tokenizer_pair(
                 pair.synthesized,
                 DeferredRuntimeTokenizer::Ready(full),
                 pair.full_to_synthesized,
+                Vec::new(),
             )
         } else {
             let labels = grammar
@@ -1329,7 +1331,8 @@ fn prepare_structural_tokenizer_pair(
                 &relevant_bytes,
             )?;
             let full_num_states = pair.full_num_states();
-            let (synthesized, full, full_to_synthesized) = pair.into_parts();
+            let (synthesized, full, full_to_synthesized, definition_provenance) =
+                pair.into_parts();
             (
                 synthesized,
                 DeferredRuntimeTokenizer::Partitioned {
@@ -1339,6 +1342,7 @@ fn prepare_structural_tokenizer_pair(
                     num_states: full_num_states,
                 },
                 full_to_synthesized,
+                definition_provenance,
             )
         };
 
@@ -1350,6 +1354,7 @@ fn prepare_structural_tokenizer_pair(
     if !synthesized_nullable.is_empty() {
         return None;
     }
+    synthesized.set_definition_provenance(definition_provenance);
     Some((
         synthesized,
         full,
