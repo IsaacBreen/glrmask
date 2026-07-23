@@ -225,6 +225,66 @@ pub(crate) fn profile_dispatch_component_activity(
     }
 }
 
+/// Collapse every non-start state whose active-language observation is
+/// provably empty. `possible_future_terminals` is the scanner's transitive
+/// future label, so an empty filtered match/future pair proves that no byte
+/// continuation can produce an active terminal from that state. All such
+/// states therefore denote the same empty active language, including
+/// structural augmentation states outside the deterministic dispatcher.
+pub(crate) fn empty_active_language_state_map(
+    tokenizer: &Tokenizer,
+    active_terminals: &[bool],
+) -> ManyToOneIdMap {
+    let num_states = tokenizer.num_states() as usize;
+    let start = tokenizer.start_state() as usize;
+    let mut original_to_internal = vec![u32::MAX; num_states];
+    let mut representatives = Vec::new();
+    let mut empty_states = Vec::new();
+    let add_class = |original_to_internal: &mut [u32],
+                     representatives: &mut Vec<u32>,
+                     states: &[u32]| {
+        let internal = representatives.len() as u32;
+        representatives.push(states[0]);
+        for &state in states {
+            original_to_internal[state as usize] = internal;
+        }
+    };
+
+    add_class(
+        &mut original_to_internal,
+        &mut representatives,
+        &[start as u32],
+    );
+    for state in 0..num_states {
+        if state == start {
+            continue;
+        }
+        let (matched, future) =
+            filtered_state_label(tokenizer, state as u32, Some(active_terminals));
+        if matched.is_empty() && future.is_empty() {
+            empty_states.push(state as u32);
+        } else {
+            add_class(
+                &mut original_to_internal,
+                &mut representatives,
+                &[state as u32],
+            );
+        }
+    }
+    if !empty_states.is_empty() {
+        add_class(
+            &mut original_to_internal,
+            &mut representatives,
+            &empty_states,
+        );
+    }
+    ManyToOneIdMap::from_original_to_internal_with_representatives(
+        original_to_internal,
+        representatives.len() as u32,
+        representatives,
+    )
+}
+
 /// Collapse every closed dispatch component that can never observe an active
 /// terminal. Active components remain state-for-state identity classes.
 ///
