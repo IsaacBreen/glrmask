@@ -8,8 +8,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use rayon::prelude::*;
-
 use crate::automata::lexer::Lexer;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
@@ -18,8 +16,8 @@ use crate::compiler::stages::id_map_and_terminal_dwa::classify::{
     classify_terminal_path_lengths, split_vocab_for_active_l2p_terminals,
 };
 use crate::compiler::stages::id_map_and_terminal_dwa::types::{
-    LocalIdMapTerminalDwa, PartitionTerminalDwas, TerminalColoring, TerminalDwaPhaseProfile,
-    TerminalPathLength, compile_profile_enabled, compile_profile_join,
+    PartitionTerminalDwas, TerminalColoring, TerminalDwaPhaseProfile, TerminalPathLength,
+    compile_profile_enabled, compile_profile_join,
 };
 use crate::ds::bitset::BitSet;
 use crate::grammar::flat::TerminalID;
@@ -170,154 +168,6 @@ fn materialize_branch_active_tokenizer_selected(branch_label: &str) -> bool {
                 .any(|item| branch_label.contains(item))
         })
         .unwrap_or(true)
-}
-
-fn l1_dispatch_component_split_selected(branch_label: &str) -> bool {
-    let enabled = std::env::var("GLRMASK_L1_DISPATCH_COMPONENT_SPLIT")
-        .map(|value| {
-            let value = value.trim();
-            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
-        })
-        .unwrap_or(false);
-    if !enabled {
-        return false;
-    }
-    std::env::var("GLRMASK_L1_DISPATCH_COMPONENT_SPLIT_FILTER")
-        .map(|filter| {
-            filter
-                .split(',')
-                .map(str::trim)
-                .filter(|item| !item.is_empty())
-                .any(|item| branch_label.contains(item))
-        })
-        .unwrap_or(true)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn build_l1_by_dispatch_components(
-    partition_label: &str,
-    branch_label: &str,
-    tokenizer: &Tokenizer,
-    vocab: &Vocab,
-    terminal_coloring: &TerminalColoring,
-    use_terminal_coloring: bool,
-    ignore_terminal: Option<TerminalID>,
-    grammar: &AnalyzedGrammar,
-    active_terminals: &[bool],
-    flat_trans: &Arc<[u32]>,
-    transitions_by_byte: Option<&[u32]>,
-    shared_l1_token_trie: Option<
-        &super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTrie,
-    >,
-) -> Option<LocalIdMapTerminalDwa> {
-    let started_at = Instant::now();
-    let components = tokenizer.disjoint_dispatch_components()?;
-    if components.len() < 2 {
-        return None;
-    }
-
-    // A terminal language must belong to exactly one closed dispatch
-    // component. Otherwise splitting could duplicate or omit a terminal
-    // observation, so fail closed to the monolithic builder.
-    let mut owners = vec![usize::MAX; active_terminals.len()];
-    let mut masks = vec![vec![false; active_terminals.len()]; components.len()];
-    for (component, states) in components.iter().enumerate() {
-        for &state in states {
-            for terminal in tokenizer
-                .matched_terminals_iter(state)
-                .chain(tokenizer.possible_future_terminals_iter(state))
-            {
-                let terminal = terminal as usize;
-                if !active_terminals.get(terminal).copied().unwrap_or(false) {
-                    continue;
-                }
-                let owner = &mut owners[terminal];
-                if *owner != usize::MAX && *owner != component {
-                    return None;
-                }
-                *owner = component;
-                masks[component][terminal] = true;
-            }
-        }
-    }
-    if active_terminals
-        .iter()
-        .enumerate()
-        .any(|(terminal, &active)| active && owners[terminal] == usize::MAX)
-    {
-        return None;
-    }
-    let masks = masks
-        .into_iter()
-        .enumerate()
-        .filter(|(_, mask)| mask.iter().any(|&active| active))
-        .collect::<Vec<_>>();
-    if masks.len() < 2 {
-        return None;
-    }
-
-    let built = masks
-        .par_iter()
-        .map(|(component, mask)| {
-            let map_started_at = Instant::now();
-            let component_state_map =
-                super::synthetic_state_map::inactive_dispatch_component_state_map(
-                    tokenizer,
-                    mask,
-                )?;
-            let map_ms = map_started_at.elapsed().as_secs_f64() * 1000.0;
-            let component_started_at = Instant::now();
-            let mut artifact = super::l1::build_l1_id_map_and_terminal_dwa(
-                partition_label,
-                tokenizer,
-                vocab,
-                terminal_coloring,
-                use_terminal_coloring,
-                ignore_terminal,
-                grammar,
-                mask,
-                flat_trans,
-                transitions_by_byte,
-                Some(&component_state_map),
-                None,
-                shared_l1_token_trie,
-                None,
-            )?;
-            artifact.profile.id_map_ms += map_ms;
-            if compile_profile_enabled() {
-                eprintln!(
-                    "[glrmask/profile][l1_dispatch_component_split_piece] branch={} component={} active_terminals={} state_reps={} map_ms={:.3} total_ms={:.3}",
-                    branch_label,
-                    component,
-                    mask.iter().filter(|&&active| active).count(),
-                    component_state_map.num_internal_ids(),
-                    map_ms,
-                    component_started_at.elapsed().as_secs_f64() * 1000.0,
-                );
-            }
-            Some(artifact)
-        })
-        .collect::<Option<Vec<_>>>()?;
-    let piece_count = built.len();
-    let merge_started_at = Instant::now();
-    let mut merged = super::merge::merge_id_maps_and_terminal_dwas(
-        built,
-        tokenizer.num_states() as usize,
-        vocab.max_token_id(),
-    );
-    let merge_ms = merge_started_at.elapsed().as_secs_f64() * 1000.0;
-    if compile_profile_enabled() {
-        eprintln!(
-            "[glrmask/profile][l1_dispatch_component_split] branch={} pieces={} merged_tsids={} merge_ms={:.3} total_ms={:.3} selected=true",
-            branch_label,
-            piece_count,
-            merged.id_map.num_tsids(),
-            merge_ms,
-            started_at.elapsed().as_secs_f64() * 1000.0,
-        );
-    }
-    merged.profile.global_merge_ms += merge_ms;
-    Some(merged)
 }
 
 fn split_l2p_vocab_enabled() -> bool {
@@ -502,24 +352,6 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                 let started_at = Instant::now();
                 let branch_label = format!("{partition_label}.l1");
                 let active_terminal_count = l1_mask.iter().filter(|&&active| active).count();
-                if l1_dispatch_component_split_selected(&branch_label)
-                    && let Some(result) = build_l1_by_dispatch_components(
-                        partition_label,
-                        &branch_label,
-                        tokenizer,
-                        vocab,
-                        terminal_coloring,
-                        use_terminal_coloring,
-                        ignore_terminal,
-                        grammar,
-                        &l1_mask,
-                        flat_trans,
-                        l1_transitions_by_byte,
-                        shared_l1_token_trie.as_deref(),
-                    )
-                {
-                    return (Some(result), started_at.elapsed().as_secs_f64() * 1000.0);
-                }
                 let source_states = initial_state_map
                     .map(ManyToOneIdMap::num_internal_ids)
                     .unwrap_or_else(|| tokenizer.num_states()) as usize;
