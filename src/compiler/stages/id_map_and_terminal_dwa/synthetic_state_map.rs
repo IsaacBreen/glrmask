@@ -1471,46 +1471,6 @@ pub(crate) fn synthesize_terminal_expressions_for_horizon(
     }
 }
 
-/// Build a vocabulary-relative stencil for a selected terminal subset.
-///
-/// Partition-local analysis can use the actual sub-vocabulary rather than the
-/// full tokenizer vocabulary. Every resulting candidate is still certified by
-/// the structural full-to-local product before it is consumed downstream.
-pub(crate) fn synthesize_terminal_expressions_for_partition_vocab(
-    expressions: &[Expr],
-    selected_terminals: &[u32],
-    vocab: &Vocab,
-    horizons: &VocabularyRepeatHorizonCache,
-) -> SynthesizedTerminalExpressions {
-    let max_token_len = vocab.max_token_byte_len();
-    let mut selected = vec![false; expressions.len()];
-    for &terminal in selected_terminals {
-        if let Some(slot) = selected.get_mut(terminal as usize) {
-            *slot = true;
-        }
-    }
-    let mut changed_terminals = Vec::new();
-    let expressions = expressions
-        .iter()
-        .enumerate()
-        .map(|(terminal, expression)| {
-            if !selected[terminal] {
-                return expression.clone();
-            }
-            let (synthesized, changed, _used_vocab) =
-                synthesize_expression_for_vocab(expression, max_token_len, vocab, horizons);
-            if changed {
-                changed_terminals.push(terminal as u32);
-            }
-            synthesized.optimize()
-        })
-        .collect();
-    SynthesizedTerminalExpressions {
-        expressions,
-        changed_terminals,
-    }
-}
-
 pub(crate) fn synthesize_bounded_terminal_expressions(
     expressions: &[Expr],
     vocab: &Vocab,

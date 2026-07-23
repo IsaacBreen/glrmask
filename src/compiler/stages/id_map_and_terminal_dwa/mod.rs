@@ -115,15 +115,6 @@ fn fast_partition_local_synthesis_enabled() -> bool {
         .unwrap_or(true)
 }
 
-fn partition_local_vocab_horizon_enabled() -> bool {
-    std::env::var("GLRMASK_PARTITION_LOCAL_VOCAB_HORIZON")
-        .map(|value| {
-            let value = value.trim();
-            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
-        })
-        .unwrap_or(false)
-}
-
 fn partition_local_synthesis_selected(partition_label: &str) -> bool {
     let Ok(filter) = std::env::var("GLRMASK_PARTITION_LOCAL_SYNTHESIS_FILTER") else {
         return true;
@@ -265,10 +256,7 @@ fn build_partition_local_tokenizer(
         return None;
     }
     let max_token_len = vocab.entries.values().map(Vec::len).max().unwrap_or(0);
-    let use_vocab_horizon = partition_local_vocab_horizon_enabled();
-    if max_token_len == 0
-        || (max_token_len >= plan.global_max_token_len && !use_vocab_horizon)
-    {
+    if max_token_len == 0 || max_token_len >= plan.global_max_token_len {
         return None;
     }
     let allow_half_horizon = std::env::var("GLRMASK_PARTITION_LOCAL_SYNTHESIS_ALLOW_HALF_HORIZON")
@@ -292,12 +280,11 @@ fn build_partition_local_tokenizer(
         .unwrap_or(2_000);
     if vocab.len() < min_local_vocab
         || max_token_len < min_local_horizon
-        || (!use_vocab_horizon
-            && if allow_half_horizon {
-                max_token_len.saturating_mul(2) > plan.global_max_token_len
-            } else {
-                max_token_len.saturating_mul(2) >= plan.global_max_token_len
-            })
+        || if allow_half_horizon {
+            max_token_len.saturating_mul(2) > plan.global_max_token_len
+        } else {
+            max_token_len.saturating_mul(2) >= plan.global_max_token_len
+        }
     {
         return None;
     }
@@ -308,20 +295,10 @@ fn build_partition_local_tokenizer(
         .iter()
         .copied()
         .collect::<std::collections::BTreeSet<_>>();
-    let horizons = VocabularyRepeatHorizonCache::new();
-    let mut candidate = if use_vocab_horizon {
-        synthetic_state_map::synthesize_terminal_expressions_for_partition_vocab(
-            &plan.expressions,
-            &plan.protected_terminal_ids,
-            vocab,
-            &horizons,
-        )
-    } else {
-        synthetic_state_map::synthesize_terminal_expressions_for_horizon(
-            &plan.expressions,
-            max_token_len,
-        )
-    };
+    let mut candidate = synthetic_state_map::synthesize_terminal_expressions_for_horizon(
+        &plan.expressions,
+        max_token_len,
+    );
     let mut changed = false;
     for terminal in 0..candidate.expressions.len() {
         if protected.contains(&(terminal as u32)) {
@@ -360,7 +337,7 @@ fn build_partition_local_tokenizer(
                 &local_expressions,
                 &plan.protected_terminal_ids,
                 vocab,
-                &horizons,
+                &VocabularyRepeatHorizonCache::new(),
                 max_token_len,
                 &relevant_bytes,
                 None,
@@ -407,7 +384,7 @@ fn build_partition_local_tokenizer(
         &plan.residual_isolation_classes,
         plan.adaptive,
         vocab,
-        &horizons,
+        &VocabularyRepeatHorizonCache::new(),
         max_token_len,
         &relevant_bytes,
     ) else {
@@ -467,10 +444,7 @@ fn prepare_partition_local_tokenizer(
         return None;
     }
     let max_token_len = vocab.entries.values().map(Vec::len).max().unwrap_or(0);
-    let use_vocab_horizon = partition_local_vocab_horizon_enabled();
-    if max_token_len == 0
-        || (max_token_len >= plan.global_max_token_len && !use_vocab_horizon)
-    {
+    if max_token_len == 0 || max_token_len >= plan.global_max_token_len {
         return None;
     }
     let allow_half_horizon = std::env::var("GLRMASK_PARTITION_LOCAL_SYNTHESIS_ALLOW_HALF_HORIZON")
@@ -489,12 +463,11 @@ fn prepare_partition_local_tokenizer(
         .unwrap_or(2_000);
     if vocab.len() < min_local_vocab
         || max_token_len < min_local_horizon
-        || (!use_vocab_horizon
-            && if allow_half_horizon {
-                max_token_len.saturating_mul(2) > plan.global_max_token_len
-            } else {
-                max_token_len.saturating_mul(2) >= plan.global_max_token_len
-            })
+        || if allow_half_horizon {
+            max_token_len.saturating_mul(2) > plan.global_max_token_len
+        } else {
+            max_token_len.saturating_mul(2) >= plan.global_max_token_len
+        }
     {
         return None;
     }
@@ -504,20 +477,10 @@ fn prepare_partition_local_tokenizer(
         .iter()
         .copied()
         .collect::<std::collections::BTreeSet<_>>();
-    let horizons = VocabularyRepeatHorizonCache::new();
-    let mut candidate = if use_vocab_horizon {
-        synthetic_state_map::synthesize_terminal_expressions_for_partition_vocab(
-            &plan.expressions,
-            &plan.protected_terminal_ids,
-            vocab,
-            &horizons,
-        )
-    } else {
-        synthetic_state_map::synthesize_terminal_expressions_for_horizon(
-            &plan.expressions,
-            max_token_len,
-        )
-    };
+    let mut candidate = synthetic_state_map::synthesize_terminal_expressions_for_horizon(
+        &plan.expressions,
+        max_token_len,
+    );
     let mut changed = false;
     for terminal in 0..candidate.expressions.len() {
         if protected.contains(&(terminal as u32)) {
@@ -559,7 +522,7 @@ fn prepare_partition_local_tokenizer(
         &local_expressions,
         &plan.protected_terminal_ids,
         vocab,
-        &horizons,
+        &VocabularyRepeatHorizonCache::new(),
         max_token_len,
         &relevant_bytes,
     )?;
