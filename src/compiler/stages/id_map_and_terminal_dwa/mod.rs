@@ -231,10 +231,6 @@ pub(crate) fn build_branch_active_state_map(
     let requested_mode =
         std::env::var("GLRMASK_BRANCH_ACTIVE_STATE_MAP_MODE").unwrap_or_else(|_| "stable".into());
     let (state_map, mode_label) = match requested_mode.as_str() {
-        "empty" => (
-            synthetic_state_map::empty_active_language_state_map(tokenizer, active),
-            "empty",
-        ),
         "structural" => {
             if initial_state_map.is_some() {
                 return None;
@@ -269,7 +265,7 @@ pub(crate) fn build_branch_active_state_map(
             "kbounded",
         ),
         other => panic!(
-            "invalid GLRMASK_BRANCH_ACTIVE_STATE_MAP_MODE={other:?}; expected empty, structural, stable, or kbounded"
+            "invalid GLRMASK_BRANCH_ACTIVE_STATE_MAP_MODE={other:?}; expected structural, stable, or kbounded"
         ),
     };
     let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
