@@ -631,7 +631,7 @@ pub(crate) fn try_find_common_atom_preclasses<S: AsRef<[u8]>>(
     }
     let active_groups = active_groups?;
     let active_terminals = active_groups.iter().filter(|&&active| active).count();
-    if !(2..=MAX_ACTIVE_TERMINALS).contains(&active_terminals) {
+    if active_terminals < 2 {
         return None;
     }
     let active_exprs = active_groups
@@ -646,6 +646,37 @@ pub(crate) fn try_find_common_atom_preclasses<S: AsRef<[u8]>>(
             })
         })
         .collect::<Option<Vec<_>>>()?;
+    if std::env::var_os("GLRMASK_PROFILE_L2P_COMMON_ATOM_CANDIDATES").is_some() {
+        let mut counts = FxHashMap::<Expr, usize>::default();
+        let mut candidates = Vec::new();
+        for (_, expr) in &active_exprs {
+            collect_outer_repeat_atoms(expr, &mut counts, &mut candidates);
+        }
+        candidates.sort_by(|left, right| counts[right].cmp(&counts[left]));
+        candidates.dedup();
+        for (rank, atom) in candidates.into_iter().take(12).enumerate() {
+            let shapes = active_exprs
+                .iter()
+                .filter_map(|(terminal, expr)| terminal_shape(*terminal, expr, &atom))
+                .collect::<Vec<_>>();
+            let buildable = (shapes.len() >= 2)
+                .then(|| build_trace_machine(atom.clone(), shapes.clone()))
+                .flatten()
+                .is_some();
+            eprintln!(
+                "[glrmask/profile][l2p_common_atom_candidate] rank={} active_terminals={} repeated_uses={} covered_terminals={} buildable={} atom={:?}",
+                rank,
+                active_terminals,
+                counts[&atom],
+                shapes.len(),
+                buildable,
+                atom,
+            );
+        }
+    }
+    if active_terminals > MAX_ACTIVE_TERMINALS {
+        return None;
+    }
     let build_started_at = Instant::now();
     let (atom, shapes) = find_common_atom_family(&active_exprs)?;
     let machine = build_trace_machine(atom, shapes)?;
