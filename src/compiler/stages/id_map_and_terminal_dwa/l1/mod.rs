@@ -451,7 +451,7 @@ fn fast_projected_l1_id_map_enabled() -> bool {
     })
 }
 
-fn fast_projected_l1_id_map_max_tsids() -> usize {
+pub(crate) fn fast_projected_l1_id_map_max_tsids() -> usize {
     static MAX_TSID: OnceLock<usize> = OnceLock::new();
     *MAX_TSID.get_or_init(|| {
         std::env::var("GLRMASK_L1_FAST_PROJECTED_ID_MAP_MAX_TSIDS")

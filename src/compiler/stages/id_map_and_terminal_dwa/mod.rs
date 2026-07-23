@@ -152,6 +152,7 @@ pub(crate) fn build_branch_active_state_map(
     if source_reps <= 1 {
         return None;
     }
+    let mut automatic_dense_requires_fast_projection = false;
     if let Ok(filter) = std::env::var("GLRMASK_BRANCH_ACTIVE_STATE_MAP_FILTER") {
         if !filter
             .split(',')
@@ -191,6 +192,8 @@ pub(crate) fn build_branch_active_state_map(
         {
             return None;
         }
+        automatic_dense_requires_fast_projection =
+            dense_protected_profile && !very_large_profile;
     }
     let started_at = Instant::now();
     let statistic =
@@ -241,10 +244,14 @@ pub(crate) fn build_branch_active_state_map(
     };
     let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
     let reps = state_map.num_internal_ids() as usize;
-    let selected = reps < source_reps && source_reps.saturating_sub(reps) >= 512;
+    let enters_fast_projected_path =
+        reps <= l1::fast_projected_l1_id_map_max_tsids();
+    let selected = reps < source_reps
+        && source_reps.saturating_sub(reps) >= 512
+        && (!automatic_dense_requires_fast_projection || enters_fast_projected_path);
     if compile_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][branch_active_state_map] branch={} mode={} active_terminals={} vocab_tokens={} horizon={} source_reps={} reps={} reduction_pct={:.2} ms={:.3} selected={}",
+            "[glrmask/profile][branch_active_state_map] branch={} mode={} active_terminals={} vocab_tokens={} horizon={} source_reps={} reps={} reduction_pct={:.2} ms={:.3} requires_fast_projected={} enters_fast_projected={} fast_projected_max_tsids={} selected={}",
             branch_label,
             mode_label,
             active.iter().filter(|&&value| value).count(),
@@ -254,6 +261,9 @@ pub(crate) fn build_branch_active_state_map(
             reps,
             100.0 * source_reps.saturating_sub(reps) as f64 / source_reps as f64,
             elapsed_ms,
+            automatic_dense_requires_fast_projection,
+            enters_fast_projected_path,
+            l1::fast_projected_l1_id_map_max_tsids(),
             selected,
         );
     }
