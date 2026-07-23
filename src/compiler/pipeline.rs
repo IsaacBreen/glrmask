@@ -2268,72 +2268,8 @@ fn compile_prepared_with_profile_and_table_construction(
 
             scope.spawn(move |scope| {
                 let tok_started = Instant::now();
-                let early_structural_publish =
-                    env_flag_enabled("GLRMASK_EARLY_GLOBAL_SYNTHESIZED_TOKENIZER")
-                        && synthetic_tokenizer_plan_ref.is_some()
-                        && !prepared_grammar_ref.requires_global_terminal_observation;
                 let build_global_tokenizer = || {
-                    if early_structural_publish {
-                        let plan = synthetic_tokenizer_plan_ref
-                            .expect("early structural publication requires a synthesis plan");
-                        let mut synthesized = build_tokenizer_from_planned_expressions(
-                            prepared_grammar_ref,
-                            plan,
-                            &plan.synthesized_expressions,
-                            lexer_adaptive_override,
-                        );
-                        let nullable =
-                            synthesized.isolate_start_state_and_drain_nullable_terminals();
-                        assert!(
-                            nullable.is_empty(),
-                            "early published synthesized tokenizer must be non-nullable"
-                        );
-                        let published_layout = synthesized.clone();
-                        scope.spawn(move |_| {
-                            let runtime_started_at = Instant::now();
-                            let (rebuilt_synthesized, deferred_full, certified) =
-                                prepare_structural_tokenizer_pair(
-                                    prepared_grammar_ref,
-                                    plan,
-                                    vocab,
-                                    lexer_adaptive_override,
-                                )
-                                .expect(
-                                    "early published synthesized tokenizer requires deferred structural certification",
-                                );
-                            assert!(
-                                published_layout
-                                    .has_same_compile_layout(&rebuilt_synthesized),
-                                "deferred structural certification rebuilt a different synthesized tokenizer coordinate"
-                            );
-                            assert!(
-                                structural_state_reduction_is_profitable(
-                                    deferred_full.num_states(),
-                                    rebuilt_synthesized.num_states() as usize,
-                                ),
-                                "early published synthesized tokenizer was not structurally profitable"
-                            );
-                            let runtime_tokenizer = deferred_full.finish();
-                            let finish_ms = elapsed_ms(runtime_started_at);
-                            if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some() {
-                                eprintln!(
-                                    "[glrmask/profile][tokenizer] early_structural_runtime states={} transitions={} elapsed_ms={:.3}",
-                                    runtime_tokenizer.num_states(),
-                                    runtime_tokenizer.transition_count(),
-                                    finish_ms,
-                                );
-                            }
-                            *runtime_tokenizer_result_ref
-                                .lock()
-                                .expect("runtime tokenizer result slot poisoned") =
-                                Some(RuntimeTokenizerDagResult {
-                                    runtime_tokenizer: Some(runtime_tokenizer),
-                                    full_to_synthesized_state_map: Some(certified),
-                                    finish_ms,
-                                });
-                        });
-                        (synthesized, None, None, 0.0, true)
-                    } else if let Some(plan) = synthetic_tokenizer_plan_ref {
+                    if let Some(plan) = synthetic_tokenizer_plan_ref {
                                         if let Some((synthesized, full, certified)) =
                                             prepare_structural_tokenizer_pair(
                                                 prepared_grammar_ref,
@@ -2352,7 +2288,6 @@ fn compile_prepared_with_profile_and_table_construction(
                                                     Some(full),
                                                     Some(certified),
                                                     0.0,
-                                                    false,
                                                 )
                                             } else {
                                                 if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some() {
@@ -2374,7 +2309,6 @@ fn compile_prepared_with_profile_and_table_construction(
                                                     None,
                                                     None,
                                                     0.0,
-                                                    false,
                                                 )
                                             }
                                         } else {
@@ -2431,7 +2365,6 @@ fn compile_prepared_with_profile_and_table_construction(
                                                         Some(DeferredRuntimeTokenizer::Ready(full)),
                                                         Some(certified),
                                                         certification_ms,
-                                                        false,
                                                     )
                                                 }
                                                 None => {
@@ -2445,7 +2378,6 @@ fn compile_prepared_with_profile_and_table_construction(
                                                         None,
                                                         None,
                                                         certification_ms,
-                                                        false,
                                                     )
                                                 }
                                             }
@@ -2455,7 +2387,7 @@ fn compile_prepared_with_profile_and_table_construction(
                                             prepared_grammar_ref,
                                             lexer_adaptive_override,
                                         );
-                                        (tokenizer, None, None, 0.0, false)
+                                        (tokenizer, None, None, 0.0)
                                     }
                 };
                 let prebuild_partition_locals = partition_local_synthesis_plan_ref.is_some()
@@ -2481,11 +2413,10 @@ fn compile_prepared_with_profile_and_table_construction(
                     deferred_runtime_tokenizer,
                     full_to_synthesized_state_map,
                     synthetic_certification_ms,
-                    runtime_result_spawned_early,
                 ) = global_tokenizer_result;
                 let tokenizer_construct_ms = elapsed_ms(tok_started);
                 let isolate_started = Instant::now();
-                if deferred_runtime_tokenizer.is_none() && !runtime_result_spawned_early {
+                if deferred_runtime_tokenizer.is_none() {
                     tokenizer.isolate_start_state_and_drain_nullable_terminals();
                 }
                 if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some() {
@@ -2498,12 +2429,12 @@ fn compile_prepared_with_profile_and_table_construction(
                 }
                 let compile_tokenizer_states = tokenizer.num_states() as usize;
                 let compile_tokenizer_transitions = tokenizer.transition_count();
-                let has_synthetic_runtime =
-                    deferred_runtime_tokenizer.is_some() || runtime_result_spawned_early;
-                let partition_local_synthesis_plan = has_synthetic_runtime
+                let partition_local_synthesis_plan = deferred_runtime_tokenizer
+                    .is_some()
                     .then(|| partition_local_synthesis_plan_ref.cloned())
                     .flatten();
-                let prepared_partition_local_tokenizers = has_synthetic_runtime
+                let prepared_partition_local_tokenizers = deferred_runtime_tokenizer
+                    .is_some()
                     .then_some(prepared_partition_local_tokenizers)
                     .flatten();
 
@@ -2546,7 +2477,7 @@ fn compile_prepared_with_profile_and_table_construction(
                                 finish_ms,
                             });
                     });
-                } else if !runtime_result_spawned_early {
+                } else {
                     *runtime_tokenizer_result_ref
                         .lock()
                         .expect("runtime tokenizer result slot poisoned") =
