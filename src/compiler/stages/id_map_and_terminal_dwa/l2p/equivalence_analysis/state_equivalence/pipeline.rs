@@ -244,6 +244,12 @@ pub(crate) fn run_state_equivalence_pipeline(
             }
             StateEquivalencePassKind::MaxLength => {
                 let mode = match scope {
+                    StateEquivalenceScope::Global
+                        if std::env::var("GLRMASK_GLOBAL_MAX_LENGTH_MODE")
+                            .is_ok_and(|value| value.trim().eq_ignore_ascii_case("kbounded")) =>
+                    {
+                        MaxLengthMode::KBoundedByteRestricted
+                    }
                     StateEquivalenceScope::Global => MaxLengthMode::StableByteRestricted,
                     StateEquivalenceScope::L2p => MaxLengthMode::KBoundedByteRestricted,
                 };
