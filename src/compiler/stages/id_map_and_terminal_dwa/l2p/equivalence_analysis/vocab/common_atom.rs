@@ -634,94 +634,25 @@ fn classify_tokens_serial<S: AsRef<[u8]>>(
     group_token_signatures(signatures)
 }
 
-fn build_root_semantic_maps_by_suffix_length<S: AsRef<[u8]>>(
-    machine: &TraceMachine,
-    tokens: &[S],
-) -> (FxHashMap<Vec<u32>, u32>, FxHashMap<Vec<u8>, u32>) {
-    let mut suffixes = Vec::<Vec<u8>>::new();
-    for token in tokens {
-        let bytes = token.as_ref();
-        suffixes.extend((0..=bytes.len()).map(|offset| bytes[offset..].to_vec()));
-    }
-    suffixes.sort_unstable_by(|left, right| {
-        left.len()
-            .cmp(&right.len())
-            .then_with(|| left.cmp(right))
-    });
-    suffixes.dedup();
-
-    let mut semantic_ids = FxHashMap::<Vec<u32>, u32>::default();
-    let mut semantic_by_suffix = FxHashMap::<Vec<u8>, u32>::default();
-    let mut batch_start = 0usize;
-    while batch_start < suffixes.len() {
-        let suffix_len = suffixes[batch_start].len();
-        let mut batch_end = batch_start + 1;
-        while batch_end < suffixes.len() && suffixes[batch_end].len() == suffix_len {
-            batch_end += 1;
-        }
-        let batch = &suffixes[batch_start..batch_end];
-        let signatures = batch
-            .par_iter()
-            .map(|suffix| {
-                let (future_terminals, matches) = root_observation(machine, suffix);
-                let mut signature = Vec::new();
-                if future_terminals.is_empty() {
-                    signature.push(ROOT_DEAD);
-                } else {
-                    signature.push(ROOT_LIVE);
-                    signature.push(future_terminals.len() as u32);
-                    signature.extend(future_terminals);
-                }
-                signature.push(ROOT_MATCHES);
-                signature.push(matches.len() as u32);
-                for (terminal, width) in matches {
-                    debug_assert!(width > 0 && width <= suffix.len());
-                    signature.push(terminal);
-                    signature.push(width as u32);
-                    signature.push(
-                        *semantic_by_suffix
-                            .get(&suffix[width..])
-                            .expect("root semantics depend only on shorter suffixes"),
-                    );
-                }
-                signature
-            })
-            .collect::<Vec<_>>();
-        for (suffix, signature) in batch.iter().cloned().zip(signatures) {
-            let next_semantic_id = semantic_ids.len() as u32;
-            let semantic_id = *semantic_ids.entry(signature).or_insert(next_semantic_id);
-            semantic_by_suffix.insert(suffix, semantic_id);
-        }
-        batch_start = batch_end;
-    }
-    (semantic_ids, semantic_by_suffix)
-}
-
 fn classify_tokens_parallel<S: AsRef<[u8]> + Sync>(
     machine: &TraceMachine,
     tokens: &[S],
-    parallel_suffix_semantics: bool,
 ) -> Vec<Vec<usize>> {
     let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
         || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
         || std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
     let total_started_at = Instant::now();
     let suffix_started_at = Instant::now();
-    let (root_semantic_ids, root_semantic_by_suffix) = if parallel_suffix_semantics {
-        build_root_semantic_maps_by_suffix_length(machine, tokens)
-    } else {
-        let mut root_semantic_ids = FxHashMap::<Vec<u32>, u32>::default();
-        let mut root_semantic_by_suffix = FxHashMap::<Vec<u8>, u32>::default();
-        for token in tokens {
-            let _ = root_semantic_ids_for_token(
-                machine,
-                token.as_ref(),
-                &mut root_semantic_ids,
-                &mut root_semantic_by_suffix,
-            );
-        }
-        (root_semantic_ids, root_semantic_by_suffix)
-    };
+    let mut root_semantic_ids = FxHashMap::<Vec<u32>, u32>::default();
+    let mut root_semantic_by_suffix = FxHashMap::<Vec<u8>, u32>::default();
+    for token in tokens {
+        let _ = root_semantic_ids_for_token(
+            machine,
+            token.as_ref(),
+            &mut root_semantic_ids,
+            &mut root_semantic_by_suffix,
+        );
+    }
     let suffix_ms = suffix_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let signature_started_at = Instant::now();
@@ -743,9 +674,8 @@ fn classify_tokens_parallel<S: AsRef<[u8]> + Sync>(
     let group_ms = group_started_at.elapsed().as_secs_f64() * 1000.0;
     if profile {
         eprintln!(
-            "[glrmask/profile][common_atom_parallel_classify] tokens={} suffix_mode={} unique_suffixes={} semantic_ids={} classes={} suffix_ms={:.3} signature_ms={:.3} group_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][common_atom_parallel_classify] tokens={} unique_suffixes={} semantic_ids={} classes={} suffix_ms={:.3} signature_ms={:.3} group_ms={:.3} total_ms={:.3}",
             tokens.len(),
-            if parallel_suffix_semantics { "parallel_length_batches" } else { "serial_cache" },
             root_semantic_by_suffix.len(),
             root_semantic_ids.len(),
             classes.len(),
@@ -767,21 +697,12 @@ fn parallel_classify_enabled() -> bool {
         .unwrap_or(false)
 }
 
-fn parallel_suffix_semantics_enabled() -> bool {
-    std::env::var("GLRMASK_L2P_COMMON_ATOM_PARALLEL_SUFFIX_SEMANTICS")
-        .map(|value| {
-            let value = value.trim();
-            value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
-        })
-        .unwrap_or(false)
-}
-
 fn classify_tokens<S: AsRef<[u8]> + Sync>(
     machine: &TraceMachine,
     tokens: &[S],
 ) -> Vec<Vec<usize>> {
     if parallel_classify_enabled() {
-        classify_tokens_parallel(machine, tokens, parallel_suffix_semantics_enabled())
+        classify_tokens_parallel(machine, tokens)
     } else {
         classify_tokens_serial(machine, tokens)
     }
@@ -966,11 +887,7 @@ mod tests {
         }
 
         assert_eq!(
-            classify_tokens_parallel(&machine, &tokens, false),
-            classify_tokens_serial(&machine, &tokens),
-        );
-        assert_eq!(
-            classify_tokens_parallel(&machine, &tokens, true),
+            classify_tokens_parallel(&machine, &tokens),
             classify_tokens_serial(&machine, &tokens),
         );
         // Keep the public preclass construction covered on the same family.
