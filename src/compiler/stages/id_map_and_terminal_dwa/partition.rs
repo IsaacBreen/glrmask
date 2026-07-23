@@ -297,15 +297,40 @@ fn build_l1_by_dispatch_components(
         }
         Some(artifact)
     };
-    let serial = std::env::var("GLRMASK_L1_DISPATCH_COMPONENT_SCHEDULE")
-        .is_ok_and(|value| value.trim().eq_ignore_ascii_case("serial"));
-    let built = if serial {
-        masks.iter().map(build_piece).collect::<Option<Vec<_>>>()?
+    let schedule = std::env::var("GLRMASK_L1_DISPATCH_COMPONENT_SCHEDULE")
+        .unwrap_or_else(|_| "parallel".to_string());
+    let schedule = schedule.trim();
+    let max_parallel = if schedule.eq_ignore_ascii_case("serial") {
+        1
+    } else if schedule.eq_ignore_ascii_case("parallel") || schedule.is_empty() {
+        masks.len()
     } else {
+        schedule
+            .strip_prefix("chunk")
+            .or_else(|| schedule.strip_prefix("width"))
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|&value| value > 0)
+            .unwrap_or(masks.len())
+            .min(masks.len())
+    };
+    let built = if max_parallel == 1 {
+        masks.iter().map(build_piece).collect::<Option<Vec<_>>>()?
+    } else if max_parallel >= masks.len() {
         masks
             .par_iter()
             .map(build_piece)
             .collect::<Option<Vec<_>>>()?
+    } else {
+        let mut built = Vec::with_capacity(masks.len());
+        for chunk in masks.chunks(max_parallel) {
+            built.extend(
+                chunk
+                    .par_iter()
+                    .map(build_piece)
+                    .collect::<Option<Vec<_>>>()?,
+            );
+        }
+        built
     };
     let piece_count = built.len();
     let merge_started_at = Instant::now();
@@ -319,7 +344,7 @@ fn build_l1_by_dispatch_components(
         eprintln!(
             "[glrmask/profile][l1_dispatch_component_split] branch={} schedule={} pieces={} merged_tsids={} merge_ms={:.3} total_ms={:.3} selected=true",
             branch_label,
-            if serial { "serial" } else { "parallel" },
+            schedule,
             piece_count,
             merged.id_map.num_tsids(),
             merge_ms,
