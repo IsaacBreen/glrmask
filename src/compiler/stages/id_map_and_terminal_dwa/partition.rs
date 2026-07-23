@@ -208,6 +208,17 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
         }
     }
 
+    super::definition_skeleton::report_partition(
+        partition_label,
+        tokenizer,
+        vocab,
+        initial_state_map
+            .map(ManyToOneIdMap::num_internal_ids)
+            .unwrap_or_else(|| tokenizer.num_states()) as usize,
+        &l1_mask,
+        &l2p_mask,
+    );
+
     let use_prebuilt_l1_token_trie = std::env::var("GLRMASK_USE_PREBUILT_L1_TOKEN_TRIE")
         .map(|value| {
             let trimmed = value.trim();

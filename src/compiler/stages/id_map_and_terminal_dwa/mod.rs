@@ -12,6 +12,7 @@ use crate::automata::lexer::compile::{
     VocabularyRepeatHorizonCache,
 };
 pub(crate) mod classify;
+mod definition_skeleton;
 mod finalize_ignore;
 pub(crate) mod grammar_helpers;
 pub(crate) mod l1;
