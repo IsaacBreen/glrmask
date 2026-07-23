@@ -2284,6 +2284,7 @@ fn dfs_step(
     trie: &mut TrieWalkState,
     byte: u8,
     depth: usize,
+    position_offset: usize,
     batch_len: usize,
 ) {
     trie.ensure_depth(depth);
@@ -2304,7 +2305,7 @@ fn dfs_step(
 
     let num_groups = dfa.num_groups;
     let dirty_words = scratch.dirty_words;
-    let position = (depth + 1) as u32;
+    let position = (position_offset + depth + 1) as u32;
     let class = dfa.byte_to_class[byte as usize] as usize;
     let class_base = class * dfa.num_states;
 
@@ -2370,6 +2371,7 @@ fn dfs_step_profiled(
     trie: &mut TrieWalkState,
     byte: u8,
     depth: usize,
+    position_offset: usize,
     batch_len: usize,
 ) -> DfsStepStats {
     trie.ensure_depth(depth);
@@ -2392,7 +2394,7 @@ fn dfs_step_profiled(
 
     let num_groups = dfa.num_groups;
     let dirty_words = scratch.dirty_words;
-    let position = (depth + 1) as u32;
+    let position = (position_offset + depth + 1) as u32;
     let class = dfa.byte_to_class[byte as usize] as usize;
     let class_base = class * dfa.num_states;
 
@@ -2723,6 +2725,38 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
     trie: &mut TrieWalkState,
     profile: bool,
 ) -> (Vec<(usize, u64)>, TrieWalkChunkStats) {
+    trie_walk_chunk_signatures_from_prefix(
+        dfa,
+        strings,
+        chunk,
+        batch,
+        state_group_size,
+        0,
+        scratch,
+        trie,
+        profile,
+    )
+}
+
+/// Process tokens after a common already-consumed prefix.
+///
+/// `batch` is the DFA outcome coordinate after `position_offset` bytes. A
+/// `STATE_NONE` entry denotes an already-dead path. For the first-transition
+/// quotient `position_offset == 1`; finalizers of each live successor are
+/// seeded at match position 1 before the suffix trie walk begins. Tokens remain
+/// the original full byte strings so suffix-restart hashing observes the exact
+/// original positions.
+fn trie_walk_chunk_signatures_from_prefix<S: AsRef<[u8]> + Sync>(
+    dfa: &Dfa,
+    strings: &[S],
+    chunk: &[usize],
+    batch: &[usize],
+    _state_group_size: usize,
+    position_offset: usize,
+    scratch: &mut Scratch,
+    trie: &mut TrieWalkState,
+    profile: bool,
+) -> (Vec<(usize, u64)>, TrieWalkChunkStats) {
     let batch_len = batch.len();
     let num_groups = dfa.num_groups;
     let mut results = Vec::with_capacity(chunk.len());
@@ -2731,50 +2765,87 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
     };
     let mut stats = TrieWalkChunkStats::default();
 
-    // Initialize: copy initial states and mark dead-ends
     scratch.current_states[..batch_len].clone_from_slice(batch);
     trie.root_active_indices.clear();
     {
         let dirty_words = scratch.dirty_words;
         let mask_end = batch_len * dirty_words;
-        for v in scratch.dirty_group_masks[..mask_end].iter_mut() {
-            *v = 0;
-        }
+        scratch.dirty_group_masks[..mask_end].fill(0);
     }
-    for flag in scratch.dirty_state_flags[..batch_len].iter_mut() {
-        *flag = 0;
-    }
+    scratch.dirty_state_flags[..batch_len].fill(0);
     let dirty_state_words = batch_len.div_ceil(64);
     scratch.dirty_state_bits[..dirty_state_words].fill(0);
     ensure_completion_weights(scratch, batch_len);
     let all_none_signature = all_none_completion_signature(dfa, batch_len);
-    for i in 0..batch_len {
-        if dfa.is_dead_end[scratch.current_states[i]] {
-            scratch.current_states[i] = STATE_NONE;
-        } else {
-            trie.root_active_indices.push(i);
-        }
-    }
+
     let max_token_len = chunk
         .iter()
         .map(|&token_idx| strings[token_idx].as_ref().len())
         .max()
         .unwrap_or(0);
+    debug_assert!(chunk
+        .iter()
+        .all(|&token_idx| strings[token_idx].as_ref().len() >= position_offset));
     reset_trie_target_aggregate(scratch, max_token_len);
 
-    let mut current_depth: usize = 0;
-    let mut prev_token: &[u8] = &[];
-    // dirty_state_flag_changes records states that transition 0→1 at each depth.
-    let mut dirty_count: usize = 0;
+    let mut dirty_count = 0usize;
+    if position_offset == 0 {
+        for i in 0..batch_len {
+            let state = scratch.current_states[i];
+            debug_assert_ne!(state, STATE_NONE);
+            if dfa.is_dead_end[state] {
+                scratch.current_states[i] = STATE_NONE;
+            } else {
+                trie.root_active_indices.push(i);
+            }
+        }
+    } else {
+        let seeded_position = position_offset as u32;
+        for i in 0..batch_len {
+            let state = scratch.current_states[i];
+            if state == STATE_NONE {
+                continue;
+            }
+            debug_assert!(state < dfa.num_states);
+            let base = i * num_groups;
+            let mut state_became_dirty = false;
+            for &gid in &dfa.finalizers[state] {
+                if gid >= num_groups {
+                    continue;
+                }
+                let ix = base + gid;
+                debug_assert_eq!(scratch.match_positions[ix], NONE);
+                mark_dirty_group(scratch, i, gid);
+                update_trie_target_aggregate(scratch, gid, NONE, seeded_position);
+                scratch.match_positions[ix] = seeded_position;
+                state_became_dirty = true;
+            }
+            if state_became_dirty {
+                set_dirty_state_bit(&mut scratch.dirty_state_bits, i);
+                dirty_count += 1;
+            }
+            if dfa.is_dead_end[state] {
+                scratch.current_states[i] = STATE_NONE;
+            } else {
+                trie.root_active_indices.push(i);
+            }
+        }
+    }
+
+    let initial_dirty_count = dirty_count;
+    let mut current_depth = 0usize;
+    let mut prev_suffix: &[u8] = &[];
 
     for &token_idx in chunk {
         let token = strings[token_idx].as_ref();
+        let suffix = &token[position_offset..];
         let token_len = token.len();
+        let suffix_len = suffix.len();
         let dfs_started_at = profile.then(Instant::now);
 
-        let lcp = prev_token
+        let lcp = prev_suffix
             .iter()
-            .zip(token.iter())
+            .zip(suffix.iter())
             .take_while(|(left, right)| left == right)
             .count();
 
@@ -2785,17 +2856,17 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
             dfs_backtrack(scratch, trie, current_depth, lcp);
         }
 
-        for depth in lcp..token_len {
+        for depth in lcp..suffix_len {
             if profile {
-                let step_stats =
-                    dfs_step_profiled(
-                        dfa,
-                        scratch,
-                        trie,
-                        token[depth],
-                        depth,
-                        batch_len,
-                    );
+                let step_stats = dfs_step_profiled(
+                    dfa,
+                    scratch,
+                    trie,
+                    suffix[depth],
+                    depth,
+                    position_offset,
+                    batch_len,
+                );
                 dirty_count += trie.depth_logs[depth].dirty_state_flag_changes.len();
                 stats.dfs_steps += 1;
                 if step_stats.new_dirty_groups == 0 {
@@ -2812,19 +2883,20 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
                     dfa,
                     scratch,
                     trie,
-                    token[depth],
+                    suffix[depth],
                     depth,
+                    position_offset,
                     batch_len,
                 );
                 dirty_count += trie.depth_logs[depth].dirty_state_flag_changes.len();
             }
         }
         stats.dfs_step_ms += elapsed_ms(dfs_started_at);
-        current_depth = token_len;
-        let live_indices = if token_len == 0 {
+        current_depth = suffix_len;
+        let live_indices = if suffix_len == 0 {
             trie.root_active_indices.as_slice()
         } else {
-            trie.depth_logs[token_len - 1].active_indices.as_slice()
+            trie.depth_logs[suffix_len - 1].active_indices.as_slice()
         };
 
         let sig = if dirty_count == 0 {
@@ -2889,17 +2961,49 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
         };
 
         results.push((token_idx, sig));
-        prev_token = token;
+        prev_suffix = suffix;
     }
 
-    // Final backtrack to restore scratch to clean state
     if current_depth > 0 {
+        for depth in (0..current_depth).rev() {
+            dirty_count -= trie.depth_logs[depth].dirty_state_flag_changes.len();
+        }
         dfs_backtrack(scratch, trie, current_depth, 0);
+    }
+    debug_assert_eq!(dirty_count, initial_dirty_count);
+
+    // Prefix observations are the root baseline rather than trie-log changes,
+    // so remove them explicitly before returning the scratch worker to the pool.
+    if position_offset != 0 {
+        let seeded_position = position_offset as u32;
+        for (i, &state) in batch.iter().enumerate() {
+            if state == STATE_NONE {
+                continue;
+            }
+            let base = i * num_groups;
+            for &gid in &dfa.finalizers[state] {
+                if gid >= num_groups {
+                    continue;
+                }
+                let ix = base + gid;
+                debug_assert_eq!(scratch.match_positions[ix], seeded_position);
+                update_trie_target_aggregate(
+                    scratch,
+                    gid,
+                    scratch.match_positions[ix],
+                    NONE,
+                );
+                scratch.match_positions[ix] = NONE;
+            }
+        }
+        scratch.dirty_state_flags[..batch_len].fill(0);
+        scratch.dirty_state_bits[..dirty_state_words].fill(0);
+        let mask_end = batch_len * scratch.dirty_words;
+        scratch.dirty_group_masks[..mask_end].fill(0);
     }
 
     (results, stats)
 }
-
 
 #[derive(Clone, Copy, Default)]
 struct FirstTransitionFactorStats {
@@ -2933,7 +3037,7 @@ struct FirstTransitionFactorPlan {
 
 struct FirstTransitionBucket {
     token_indices: Vec<usize>,
-    source_representatives: Vec<usize>,
+    initial_outcomes: Vec<usize>,
 }
 
 struct FirstTransitionBucketResult {
@@ -2962,7 +3066,8 @@ fn try_first_transition_factor_plan<S: AsRef<[u8]> + Sync>(
     profiling: bool,
     enforce_work_ratio: bool,
 ) -> Option<FirstTransitionFactorPlan> {
-    if strings.len() < 2
+    if *TRIE_WALK_DISABLED
+        || strings.len() < 2
         || initial_states.len() < 2
         || strings.iter().any(|token| token.as_ref().is_empty())
     {
@@ -2992,39 +3097,54 @@ fn try_first_transition_factor_plan<S: AsRef<[u8]> + Sync>(
     let mut source_state_buckets_after = 0usize;
     let mut preliminary_state_token_pairs = 0usize;
 
-    for token_indices in tokens_by_class.into_iter().filter(|bucket| !bucket.is_empty()) {
+    for mut token_indices in tokens_by_class.into_iter().filter(|bucket| !bucket.is_empty()) {
         semantic_buckets += 1;
         if token_indices.len() < min_bucket_tokens {
             singleton_tokens.extend(token_indices);
             continue;
         }
 
+        // The leading byte has already been quotiented semantically. Sort by
+        // the remaining bytes so raw bytes in one DFA class share suffix trie
+        // paths instead of forming separate top-level lexical runs.
+        token_indices.sort_unstable_by(|&left, &right| {
+            strings[left].as_ref()[1..]
+                .cmp(&strings[right].as_ref()[1..])
+                .then_with(|| left.cmp(&right))
+        });
+
         let first_byte = strings[token_indices[0]].as_ref()[0];
-        let mut source_for_target = BTreeMap::<u32, usize>::new();
+        let mut initial_outcomes = Vec::with_capacity(initial_states.len());
         for &source in initial_states {
             // The ordinary engine suppresses a source marked dead before it
-            // consumes any token byte. Fold that precondition into the quotient
-            // coordinate: pre-dead sources and live sources with a dead first
-            // transition both have the same all-dead observation, while a live
-            // source must be keyed by its actual successor.
-            let effective_target = if dfa.is_dead_end[source] {
-                NONE
+            // consumes any token byte. A pre-dead source and a live source with
+            // no first transition therefore share STATE_NONE. A transition to
+            // a real dead-end state remains distinct because its first-byte
+            // finalizers are observable before the path dies.
+            let effective_outcome = if dfa.is_dead_end[source] {
+                STATE_NONE
             } else {
-                dfa.transition(source, first_byte)
+                let target = dfa.transition(source, first_byte);
+                if target == NONE {
+                    STATE_NONE
+                } else {
+                    target as usize
+                }
             };
-            source_for_target.entry(effective_target).or_insert(source);
+            initial_outcomes.push(effective_outcome);
         }
-        let source_representatives = source_for_target.into_values().collect::<Vec<_>>();
+        initial_outcomes.sort_unstable();
+        initial_outcomes.dedup();
         source_state_buckets_before = source_state_buckets_before
             .saturating_add(initial_states.len());
         source_state_buckets_after = source_state_buckets_after
-            .saturating_add(source_representatives.len());
+            .saturating_add(initial_outcomes.len());
         preliminary_state_token_pairs = preliminary_state_token_pairs.saturating_add(
-            token_indices.len().saturating_mul(source_representatives.len()),
+            token_indices.len().saturating_mul(initial_outcomes.len()),
         );
         buckets.push(FirstTransitionBucket {
             token_indices,
-            source_representatives,
+            initial_outcomes,
         });
     }
 
@@ -3041,48 +3161,20 @@ fn try_first_transition_factor_plan<S: AsRef<[u8]> + Sync>(
 
     let process_bucket = |bucket: &FirstTransitionBucket| {
         let signature_started_at = Instant::now();
-        let mut lease = scratch_pool.checkout(
-            bucket.source_representatives.len(),
-            dfa.num_groups,
-        );
+        let mut lease = scratch_pool.checkout(bucket.initial_outcomes.len(), dfa.num_groups);
         let worker = lease.worker_mut();
-        let state_group_size = vocab_state_group_size(
-            bucket.source_representatives.len(),
-            dfa.num_groups,
+        let state_group_size = vocab_state_group_size(bucket.initial_outcomes.len(), dfa.num_groups);
+        let (active_sigs, trie_walk) = trie_walk_chunk_signatures_from_prefix(
+            dfa,
+            strings,
+            &bucket.token_indices,
+            &bucket.initial_outcomes,
+            state_group_size,
+            1,
+            &mut worker.scratch,
+            &mut worker.trie_state,
+            profiling,
         );
-        let (active_sigs, trie_walk) = if bucket.token_indices.len() >= TRIE_WALK_MIN_TOKENS
-            && !*TRIE_WALK_DISABLED
-        {
-            trie_walk_chunk_signatures(
-                dfa,
-                strings,
-                &bucket.token_indices,
-                &bucket.source_representatives,
-                state_group_size,
-                &mut worker.scratch,
-                &mut worker.trie_state,
-                profiling,
-            )
-        } else {
-            let signatures = bucket
-                .token_indices
-                .iter()
-                .map(|&token_idx| {
-                    (
-                        token_idx,
-                        token_signature(
-                            dfa,
-                            strings[token_idx].as_ref(),
-                            &bucket.source_representatives,
-                            state_group_size,
-                            &mut worker.scratch,
-                            false,
-                        ),
-                    )
-                })
-                .collect::<Vec<_>>();
-            (signatures, TrieWalkChunkStats::default())
-        };
         let signature_ms = signature_started_at.elapsed().as_secs_f64() * 1000.0;
 
         let grouping_started_at = Instant::now();
