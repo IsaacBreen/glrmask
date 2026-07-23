@@ -748,6 +748,10 @@ fn first_transition_factor_final_single_batch_enabled() -> bool {
     env_flag_enabled("GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_FINAL_SINGLE_BATCH")
 }
 
+fn first_transition_factor_yield_between_buckets() -> bool {
+    env_flag_enabled("GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_YIELD_BUCKETS")
+}
+
 fn default_vocab_batch_size(
     num_states: usize,
     num_groups: usize,
@@ -3218,6 +3222,18 @@ fn try_first_transition_factor_plan<S: AsRef<[u8]> + Sync>(
             || first_transition_factor_force_parallel_buckets());
     let bucket_results = if parallel_buckets {
         buckets.par_iter().map(process_bucket).collect::<Vec<_>>()
+    } else if first_transition_factor_yield_between_buckets()
+        && rayon::current_thread_index().is_some()
+        && rayon::current_num_threads() > 1
+    {
+        let mut results = Vec::with_capacity(buckets.len());
+        for bucket in &buckets {
+            results.push(process_bucket(bucket));
+            // Give the outer partition scheduler a chance to run queued sibling
+            // branches without turning every semantic bucket into a nested task.
+            let _ = rayon::yield_now();
+        }
+        results
     } else {
         buckets.iter().map(process_bucket).collect::<Vec<_>>()
     };
