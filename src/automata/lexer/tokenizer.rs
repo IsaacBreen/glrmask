@@ -375,6 +375,14 @@ fn group_matches_by_width(matches: Vec<TokenizerMatch>) -> Vec<(usize, BTreeSet<
 }
 
 impl Tokenizer {
+    /// Exact raw-coordinate equality used when a synthesized tokenizer is
+    /// published before its deferred full-runtime certificate is constructed.
+    /// Expressions and derived caches are intentionally excluded: terminal and
+    /// parser compilation observe only the DFA coordinate and terminal count.
+    pub(crate) fn has_same_compile_layout(&self, other: &Self) -> bool {
+        self.num_terminals == other.num_terminals && self.dfa == other.dfa
+    }
+
     /// Materialize a deterministic compile-time analysis view as a tokenizer.
     /// The view may be a powerset of this tokenizers epsilon-NFA. State zero is
     /// reserved for the supplied start state, and the returned old-to-new map
