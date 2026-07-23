@@ -646,6 +646,8 @@ struct Scratch {
     // Batch execution across initial states
     current_states: Vec<usize>,
     active_indices: Vec<usize>,
+    /// Live initial-state positions for the optional trie bitset executor.
+    live_state_bits: Vec<u64>,
     match_positions: Vec<u32>,
     dirty_state_flags: Vec<u8>,
     /// Bitset mirroring `dirty_state_flags` for sparse dirty-token signature correction.
@@ -1010,6 +1012,7 @@ impl Scratch {
         Scratch {
             current_states: vec![0; num_states],
             active_indices: Vec::new(),
+            live_state_bits: vec![0; num_states.div_ceil(64)],
             match_positions: vec![NONE; num_states * num_groups],
             dirty_state_flags: vec![0; num_states],
             dirty_state_bits: vec![0; num_states.div_ceil(64)],
@@ -1047,6 +1050,7 @@ impl Scratch {
             return;
         }
         self.current_states.resize(num_states, 0);
+        self.live_state_bits.resize(num_states.div_ceil(64), 0);
         self.match_positions.resize(num_states * num_groups, NONE);
         self.dirty_state_flags.resize(num_states, 0);
         self.dirty_state_bits.resize(num_states.div_ceil(64), 0);
@@ -1062,6 +1066,16 @@ fn set_dirty_state_bit(bits: &mut [u64], state_idx: usize) {
 
 #[inline(always)]
 fn clear_dirty_state_bit(bits: &mut [u64], state_idx: usize) {
+    bits[state_idx / 64] &= !(1u64 << (state_idx % 64));
+}
+
+#[inline(always)]
+fn set_live_state_bit(bits: &mut [u64], state_idx: usize) {
+    bits[state_idx / 64] |= 1u64 << (state_idx % 64);
+}
+
+#[inline(always)]
+fn clear_live_state_bit(bits: &mut [u64], state_idx: usize) {
     bits[state_idx / 64] &= !(1u64 << (state_idx % 64));
 }
 
@@ -2082,9 +2096,17 @@ const TRIE_WALK_MIN_TOKENS: usize = 256;
 static TRIE_WALK_DISABLED: Lazy<bool> =
     Lazy::new(|| env_flag_enabled("GLRMASK_DISABLE_TRIE_WALK"));
 
+
+fn trie_live_bitset_enabled() -> bool {
+    env_flag_enabled("GLRMASK_TRIE_LIVE_BITSET")
+}
+
 struct DepthChangeLog {
     /// Batch indices whose DFA paths remain live after this depth.
     active_indices: Vec<usize>,
+    /// Batch indices whose paths became dead at this depth. Used by the
+    /// bitset executor to restore liveness during trie backtracking.
+    dead_indices: Vec<usize>,
     /// (state_idx, old_state_value)
     state_changes: Vec<(usize, usize)>,
     /// (match_positions_flat_idx, old_value)
@@ -2099,6 +2121,7 @@ impl DepthChangeLog {
     fn new() -> Self {
         Self {
             active_indices: Vec::new(),
+            dead_indices: Vec::new(),
             state_changes: Vec::new(),
             match_changes: Vec::new(),
             dirty_changes: Vec::new(),
@@ -2108,6 +2131,7 @@ impl DepthChangeLog {
 
     fn clear(&mut self) {
         self.active_indices.clear();
+        self.dead_indices.clear();
         self.state_changes.clear();
         self.match_changes.clear();
         self.dirty_changes.clear();
@@ -2443,6 +2467,193 @@ fn dfs_step_profiled(
     step_stats
 }
 
+/// Bitset variant of `dfs_step`. The live frontier is mutated in place;
+/// only deaths are logged because every surviving position remains live at the
+/// next depth. This avoids writing the full live-index vector at every trie
+/// edge, especially for output-free self loops.
+fn dfs_step_live_bitset(
+    dfa: &Dfa,
+    scratch: &mut Scratch,
+    trie: &mut TrieWalkState,
+    byte: u8,
+    depth: usize,
+    batch_len: usize,
+) {
+    trie.ensure_depth(depth);
+    let log = &mut trie.depth_logs[depth];
+    log.clear();
+
+    let num_groups = dfa.num_groups;
+    let dirty_words = scratch.dirty_words;
+    let position = (depth + 1) as u32;
+    let class = dfa.byte_to_class[byte as usize] as usize;
+    let class_base = class * dfa.num_states;
+    let live_words = batch_len.div_ceil(64);
+
+    for word_index in 0..live_words {
+        let mut bits = scratch.live_state_bits[word_index];
+        while bits != 0 {
+            let bit = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            let i = word_index * 64 + bit;
+            if i >= batch_len {
+                break;
+            }
+            let old_state = scratch.current_states[i];
+            debug_assert_ne!(old_state, STATE_NONE);
+            if dfa.finalizers[old_state].is_empty()
+                && dfa.self_loop_bytes[old_state].contains(byte)
+            {
+                continue;
+            }
+
+            let next_state_raw =
+                unsafe { *dfa.trans_by_class.get_unchecked(class_base + old_state) };
+            if next_state_raw == NONE {
+                log.state_changes.push((i, old_state));
+                log.dead_indices.push(i);
+                scratch.current_states[i] = STATE_NONE;
+                clear_live_state_bit(&mut scratch.live_state_bits, i);
+                continue;
+            }
+
+            let ns = next_state_raw as usize;
+            log.state_changes.push((i, old_state));
+            scratch.current_states[i] = ns;
+
+            let base = i * num_groups;
+            for &gid in &dfa.finalizers[ns] {
+                if gid < num_groups {
+                    let ix = base + gid;
+                    let old_mp = scratch.match_positions[ix];
+                    if old_mp == NONE {
+                        let word_idx = gid / 64;
+                        let bit = gid % 64;
+                        let flat_idx = i * dirty_words + word_idx;
+                        log.dirty_changes
+                            .push((flat_idx, scratch.dirty_group_masks[flat_idx]));
+                        if scratch.dirty_state_flags[i] == 0 {
+                            log.dirty_state_flag_changes
+                                .push((i, scratch.dirty_state_flags[i]));
+                            scratch.dirty_state_flags[i] = 1;
+                            set_dirty_state_bit(&mut scratch.dirty_state_bits, i);
+                        }
+                        scratch.dirty_group_masks[flat_idx] |= 1u64 << bit;
+                    }
+                    log.match_changes.push((ix, old_mp));
+                    update_trie_target_aggregate(scratch, gid, old_mp, position);
+                    scratch.match_positions[ix] = position;
+                }
+            }
+
+            if dfa.is_dead_end[ns] {
+                log.dead_indices.push(i);
+                scratch.current_states[i] = STATE_NONE;
+                clear_live_state_bit(&mut scratch.live_state_bits, i);
+            }
+        }
+    }
+}
+
+fn dfs_step_live_bitset_profiled(
+    dfa: &Dfa,
+    scratch: &mut Scratch,
+    trie: &mut TrieWalkState,
+    byte: u8,
+    depth: usize,
+    batch_len: usize,
+) -> DfsStepStats {
+    trie.ensure_depth(depth);
+    let log = &mut trie.depth_logs[depth];
+    log.clear();
+
+    let mut step_stats = DfsStepStats::default();
+    let num_groups = dfa.num_groups;
+    let dirty_words = scratch.dirty_words;
+    let position = (depth + 1) as u32;
+    let class = dfa.byte_to_class[byte as usize] as usize;
+    let class_base = class * dfa.num_states;
+    let live_words = batch_len.div_ceil(64);
+
+    for word_index in 0..live_words {
+        let mut bits = scratch.live_state_bits[word_index];
+        while bits != 0 {
+            let bit = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            let i = word_index * 64 + bit;
+            if i >= batch_len {
+                break;
+            }
+            let old_state = scratch.current_states[i];
+            debug_assert_ne!(old_state, STATE_NONE);
+            step_stats.states_visited += 1;
+            if dfa.finalizers[old_state].is_empty()
+                && dfa.self_loop_bytes[old_state].contains(byte)
+            {
+                step_stats.noop_self_loops += 1;
+                continue;
+            }
+
+            let mut state_new_dirty_groups = 0usize;
+            let next_state_raw =
+                unsafe { *dfa.trans_by_class.get_unchecked(class_base + old_state) };
+            if next_state_raw == NONE {
+                log.state_changes.push((i, old_state));
+                log.dead_indices.push(i);
+                scratch.current_states[i] = STATE_NONE;
+                clear_live_state_bit(&mut scratch.live_state_bits, i);
+                step_stats.dead_transitions += 1;
+                step_stats.dead_without_new_dirty += 1;
+                continue;
+            }
+
+            let ns = next_state_raw as usize;
+            log.state_changes.push((i, old_state));
+            scratch.current_states[i] = ns;
+
+            let base = i * num_groups;
+            for &gid in &dfa.finalizers[ns] {
+                if gid < num_groups {
+                    let ix = base + gid;
+                    let old_mp = scratch.match_positions[ix];
+                    if old_mp == NONE {
+                        let word_idx = gid / 64;
+                        let bit = gid % 64;
+                        let flat_idx = i * dirty_words + word_idx;
+                        log.dirty_changes
+                            .push((flat_idx, scratch.dirty_group_masks[flat_idx]));
+                        if scratch.dirty_state_flags[i] == 0 {
+                            log.dirty_state_flag_changes
+                                .push((i, scratch.dirty_state_flags[i]));
+                            scratch.dirty_state_flags[i] = 1;
+                            set_dirty_state_bit(&mut scratch.dirty_state_bits, i);
+                            step_stats.new_dirty_states += 1;
+                        }
+                        scratch.dirty_group_masks[flat_idx] |= 1u64 << bit;
+                        step_stats.new_dirty_groups += 1;
+                        state_new_dirty_groups += 1;
+                    }
+                    log.match_changes.push((ix, old_mp));
+                    update_trie_target_aggregate(scratch, gid, old_mp, position);
+                    scratch.match_positions[ix] = position;
+                }
+            }
+
+            if dfa.is_dead_end[ns] {
+                log.dead_indices.push(i);
+                scratch.current_states[i] = STATE_NONE;
+                clear_live_state_bit(&mut scratch.live_state_bits, i);
+                step_stats.dead_transitions += 1;
+                if state_new_dirty_groups == 0 {
+                    step_stats.dead_without_new_dirty += 1;
+                }
+            }
+        }
+    }
+
+    step_stats
+}
+
 /// Undo all changes recorded at a single depth level.
 fn dfs_undo_depth(scratch: &mut Scratch, log: &DepthChangeLog) {
     for &(ix, old_mp) in log.match_changes.iter().rev() {
@@ -2461,6 +2672,9 @@ fn dfs_undo_depth(scratch: &mut Scratch, log: &DepthChangeLog) {
         } else {
             set_dirty_state_bit(&mut scratch.dirty_state_bits, state_idx);
         }
+    }
+    for &i in log.dead_indices.iter().rev() {
+        set_live_state_bit(&mut scratch.live_state_bits, i);
     }
     for &(i, old_state) in log.state_changes.iter().rev() {
         scratch.current_states[i] = old_state;
@@ -2543,6 +2757,38 @@ fn finish_token_signature_sparse_live_clean(
         signature = signature.wrapping_add(
             correction.wrapping_mul(scratch.completion_weights[index]),
         );
+    }
+    signature
+}
+
+
+fn finish_token_signature_sparse_live_clean_bitset(
+    dfa: &Dfa,
+    live_state_bits: &[u64],
+    batch_len: usize,
+    scratch: &Scratch,
+    all_none_signature: u64,
+) -> u64 {
+    let mut signature = all_none_signature;
+    for (word_index, &word) in live_state_bits[..batch_len.div_ceil(64)]
+        .iter()
+        .enumerate()
+    {
+        let mut bits = word;
+        while bits != 0 {
+            let bit = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            let index = word_index * 64 + bit;
+            if index >= batch_len {
+                break;
+            }
+            let state = scratch.current_states[index];
+            debug_assert_ne!(state, STATE_NONE);
+            let correction = dfa.completion_hash[state].wrapping_sub(dfa.none_completion_hash);
+            signature = signature.wrapping_add(
+                correction.wrapping_mul(scratch.completion_weights[index]),
+            );
+        }
     }
     signature
 }
@@ -2698,6 +2944,7 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
     scratch: &mut Scratch,
     trie: &mut TrieWalkState,
     profile: bool,
+    use_live_bitset: bool,
 ) -> (Vec<(usize, u64)>, TrieWalkChunkStats) {
     let batch_len = batch.len();
     let num_groups = dfa.num_groups;
@@ -2710,6 +2957,9 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
     // Initialize: copy initial states and mark dead-ends
     scratch.current_states[..batch_len].clone_from_slice(batch);
     trie.root_active_indices.clear();
+    if use_live_bitset {
+        scratch.live_state_bits[..batch_len.div_ceil(64)].fill(0);
+    }
     {
         let dirty_words = scratch.dirty_words;
         let mask_end = batch_len * dirty_words;
@@ -2729,6 +2979,9 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
             scratch.current_states[i] = STATE_NONE;
         } else {
             trie.root_active_indices.push(i);
+            if use_live_bitset {
+                set_live_state_bit(&mut scratch.live_state_bits, i);
+            }
         }
     }
     let max_token_len = chunk
@@ -2763,7 +3016,16 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
 
         for depth in lcp..token_len {
             if profile {
-                let step_stats =
+                let step_stats = if use_live_bitset {
+                    dfs_step_live_bitset_profiled(
+                        dfa,
+                        scratch,
+                        trie,
+                        token[depth],
+                        depth,
+                        batch_len,
+                    )
+                } else {
                     dfs_step_profiled(
                         dfa,
                         scratch,
@@ -2771,7 +3033,8 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
                         token[depth],
                         depth,
                         batch_len,
-                    );
+                    )
+                };
                 dirty_count += trie.depth_logs[depth].dirty_state_flag_changes.len();
                 stats.dfs_steps += 1;
                 if step_stats.new_dirty_groups == 0 {
@@ -2784,36 +3047,59 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
                 stats.dfs_new_dirty_states += step_stats.new_dirty_states;
                 stats.dfs_noop_self_loops += step_stats.noop_self_loops;
             } else {
-                dfs_step(
-                    dfa,
-                    scratch,
-                    trie,
-                    token[depth],
-                    depth,
-                    batch_len,
-                );
+                if use_live_bitset {
+                    dfs_step_live_bitset(
+                        dfa,
+                        scratch,
+                        trie,
+                        token[depth],
+                        depth,
+                        batch_len,
+                    );
+                } else {
+                    dfs_step(
+                        dfa,
+                        scratch,
+                        trie,
+                        token[depth],
+                        depth,
+                        batch_len,
+                    );
+                }
                 dirty_count += trie.depth_logs[depth].dirty_state_flag_changes.len();
             }
         }
         stats.dfs_step_ms += elapsed_ms(dfs_started_at);
         current_depth = token_len;
-        let live_indices = if token_len == 0 {
-            trie.root_active_indices.as_slice()
-        } else {
-            trie.depth_logs[token_len - 1].active_indices.as_slice()
-        };
+        let live_indices = (!use_live_bitset).then(|| {
+            if token_len == 0 {
+                trie.root_active_indices.as_slice()
+            } else {
+                trie.depth_logs[token_len - 1].active_indices.as_slice()
+            }
+        });
 
         let sig = if dirty_count == 0 {
             if profile {
                 stats.clean_tokens += 1;
             }
             let finish_started_at = profile.then(Instant::now);
-            let signature = finish_token_signature_sparse_live_clean(
-                dfa,
-                live_indices,
-                scratch,
-                all_none_signature,
-            );
+            let signature = if use_live_bitset {
+                finish_token_signature_sparse_live_clean_bitset(
+                    dfa,
+                    &scratch.live_state_bits,
+                    batch_len,
+                    scratch,
+                    all_none_signature,
+                )
+            } else {
+                finish_token_signature_sparse_live_clean(
+                    dfa,
+                    live_indices.expect("vector trie path must retain live indices"),
+                    scratch,
+                    all_none_signature,
+                )
+            };
             stats.finish_signature_ms += elapsed_ms(finish_started_at);
             signature
         } else {
@@ -3658,6 +3944,7 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
                     scratch,
                     trie_state,
                     profiling,
+                    trie_live_bitset_enabled(),
                 );
                 flat_results.extend(chunk_result);
                 if profiling {
@@ -3675,6 +3962,7 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
                     &mut worker.scratch,
                     &mut worker.trie_state,
                     profiling,
+                    trie_live_bitset_enabled(),
                 );
                 flat_results.extend(chunk_result);
                 if profiling {
@@ -3697,6 +3985,7 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
                                 &mut worker.scratch,
                                 &mut worker.trie_state,
                                 profiling,
+                                trie_live_bitset_enabled(),
                             )
                         },
                     )
@@ -4105,6 +4394,7 @@ mod shared_base_tests {
             &mut scratch,
             &mut trie,
             false,
+            false,
         );
         let mut actual = vec![0u64; tokens.len()];
         for (token_idx, signature) in pairs {
@@ -4148,6 +4438,7 @@ mod shared_base_tests {
             state_group_size,
             &mut scratch,
             &mut trie,
+            false,
             false,
         );
         let mut actual = vec![0u64; tokens.len()];
