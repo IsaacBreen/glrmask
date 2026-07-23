@@ -2919,18 +2919,54 @@ fn exact_terminal_path_two_plus_candidate_dfa(
     let mut suffix_viable_masks = vec![0u64; total_splits * words_per_mask];
     let mut candidate_splits = 0usize;
     let mut any_viable_suffix = false;
-    let suffix_cache_enabled = std::env::var("GLRMASK_CLASSIFY_SUFFIX_CACHE")
-        .map(|value| {
-            let trimmed = value.trim();
-            !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
-        })
-        .unwrap_or(false);
+    let suffix_cache_mode = std::env::var("GLRMASK_CLASSIFY_SUFFIX_CACHE")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let suffix_slice_cache_enabled = matches!(
+        suffix_cache_mode.trim(),
+        "1" | "true" | "slice" | "bytes"
+    );
+    let suffix_id_cache_enabled = suffix_cache_mode.trim() == "id" && candidate_count < 64;
     let mut suffix_cache_hits = 0usize;
     let mut suffix_cache_misses = 0usize;
+    let mut suffix_cache_build_ms = 0.0;
+    let mut suffix_cache_entries = 0usize;
     if words_per_mask == 1 && adjacent_pair_index.is_some() {
         let index = adjacent_pair_index.as_ref().expect("checked above");
         let vocab_entries = vocab.entries.iter().collect::<Vec<_>>();
         let mut suffix_cache = FxHashMap::<&[u8], u64>::default();
+        let mut suffix_id_by_split = Vec::<u32>::new();
+        let mut suffix_representatives = Vec::<&[u8]>::new();
+        let mut suffix_viability_by_id = Vec::<Option<u64>>::new();
+        if suffix_id_cache_enabled {
+            let cache_started_at = std::time::Instant::now();
+            suffix_id_by_split.resize(total_splits, 0);
+            // ID zero is the empty suffix. Candidate splits always have a
+            // non-empty suffix, but reserving it makes the recursive key
+            // `(head_byte, tail_id)` canonical across every vocabulary token.
+            suffix_representatives.push(&[]);
+            let mut suffix_node_ids = FxHashMap::<(u8, u32), u32>::default();
+            for (entry_index, (_token_id, bytes)) in vocab_entries.iter().enumerate() {
+                let mut tail_id = 0u32;
+                for suffix_start in (1..bytes.len()).rev() {
+                    let key = (bytes[suffix_start], tail_id);
+                    let id = if let Some(&id) = suffix_node_ids.get(&key) {
+                        id
+                    } else {
+                        let id = suffix_representatives.len() as u32;
+                        suffix_node_ids.insert(key, id);
+                        suffix_representatives.push(&bytes[suffix_start..]);
+                        id
+                    };
+                    suffix_id_by_split[index.entry_split_offsets[entry_index] + suffix_start - 1] =
+                        id;
+                    tail_id = id;
+                }
+            }
+            suffix_viability_by_id.resize(suffix_representatives.len(), None);
+            suffix_cache_entries = suffix_representatives.len().saturating_sub(1);
+            suffix_cache_build_ms = cache_started_at.elapsed().as_secs_f64() * 1000.0;
+        }
         for left in 0u8..=u8::MAX {
             for right in feasible_follow_bytes_by_last_byte[left as usize].iter() {
                 for &packed in index.occurrences_for_pair(left, right) {
@@ -2938,12 +2974,23 @@ fn exact_terminal_path_two_plus_candidate_dfa(
                     let split_after = packed as u32 as usize;
                     let (&_token_id, bytes) = vocab_entries[entry_index];
                     candidate_splits += 1;
-                    let suffix = &bytes[split_after + 1..];
-                    if suffix_cache_enabled {
+                    let split_index = index.entry_split_offsets[entry_index] + split_after;
+                    let suffix_id = suffix_id_cache_enabled.then(|| suffix_id_by_split[split_index]);
+                    let suffix = suffix_id.map_or(&bytes[split_after + 1..], |id| {
+                        suffix_representatives[id as usize]
+                    });
+                    if let Some(id) = suffix_id {
+                        if let Some(matched) = suffix_viability_by_id[id as usize] {
+                            suffix_cache_hits += 1;
+                            any_viable_suffix |= matched != 0;
+                            suffix_viable_masks[split_index] = matched;
+                            continue;
+                        }
+                        suffix_cache_misses += 1;
+                    } else if suffix_slice_cache_enabled {
                         if let Some(&matched) = suffix_cache.get(suffix) {
                             suffix_cache_hits += 1;
                             any_viable_suffix |= matched != 0;
-                            let split_index = index.entry_split_offsets[entry_index] + split_after;
                             suffix_viable_masks[split_index] = matched;
                             continue;
                         }
@@ -2984,11 +3031,12 @@ fn exact_terminal_path_two_plus_candidate_dfa(
                             dense_future_masks[state as usize]
                         };
                     }
-                    if suffix_cache_enabled {
+                    if let Some(id) = suffix_id {
+                        suffix_viability_by_id[id as usize] = Some(matched);
+                    } else if suffix_slice_cache_enabled {
                         suffix_cache.insert(suffix, matched);
                     }
                     any_viable_suffix |= matched != 0;
-                    let split_index = index.entry_split_offsets[entry_index] + split_after;
                     suffix_viable_masks[split_index] = matched;
                 }
             }
@@ -3373,7 +3421,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
     }
     if super::types::compile_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][terminal_path_candidate_dfa] tokens={} candidates={} states={} transitions={} uses_original_tokenizer={} automatic_subset_tokenizer={} feasible_split_work={} prefix_entries={} suffix_splits={} candidate_splits={} suffix_cache_hits={} suffix_cache_misses={} prefix_configs={} split_checks={} allowed_pairs={} two_plus={} compile_ms={:.3} trie_ms={:.3} prefix_ms={:.3} suffix_ms={:.3} combine_ms={:.3} analyze_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][terminal_path_candidate_dfa] tokens={} candidates={} states={} transitions={} uses_original_tokenizer={} automatic_subset_tokenizer={} feasible_split_work={} prefix_entries={} suffix_splits={} candidate_splits={} suffix_cache_mode={} suffix_cache_entries={} suffix_cache_hits={} suffix_cache_misses={} suffix_cache_build_ms={:.3} prefix_configs={} split_checks={} allowed_pairs={} two_plus={} compile_ms={:.3} trie_ms={:.3} prefix_ms={:.3} suffix_ms={:.3} combine_ms={:.3} analyze_ms={:.3} total_ms={:.3}",
             vocab.entries.len(),
             candidate_ids.len(),
             candidate_tokenizer.num_states(),
@@ -3384,8 +3432,11 @@ fn exact_terminal_path_two_plus_candidate_dfa(
             total_splits,
             total_splits,
             candidate_splits,
+            suffix_cache_mode,
+            suffix_cache_entries,
             suffix_cache_hits,
             suffix_cache_misses,
+            suffix_cache_build_ms,
             prefix_scanner.configs.len(),
             split_checks,
             allowed_pairs,
