@@ -744,7 +744,7 @@ fn first_transition_factor_max_work_ratio() -> f64 {
         .ok()
         .and_then(|value| value.trim().parse::<f64>().ok())
         .filter(|value| value.is_finite() && *value > 0.0)
-        .unwrap_or(0.25)
+        .unwrap_or(FIRST_TRANSITION_FACTOR_MAX_WORK_RATIO_DEFAULT)
 }
 
 fn first_transition_factor_force_parallel_buckets() -> bool {
@@ -3322,6 +3322,7 @@ const SINGLETON_PROBE_MAX_TOKENS: usize = 64;
 const SINGLETON_PROBE_STATES: usize = 16;
 const PRE_DFA_SINGLETON_PROBE_MIN_INITIAL_STATES: usize = 64;
 const PRE_DFA_SINGLETON_PROBE_MIN_WORK: usize = 8_192;
+const FIRST_TRANSITION_FACTOR_MAX_WORK_RATIO_DEFAULT: f64 = 0.05;
 
 /// Restrict a tokenizer view to exactly the states reachable from the state
 /// representatives and lexer start along bytes that appear in `strings`.
