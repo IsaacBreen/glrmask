@@ -661,6 +661,10 @@ struct Scratch {
     /// For the active DFS path, how many initial states have their latest
     /// match for `(position, group)` at this slot.
     trie_target_group_counts: Vec<u32>,
+    /// Bitset of live groups at each token position. Optional experimental
+    /// materialization avoids rescanning all groups for every dirty token.
+    trie_target_group_bits: Vec<u64>,
+    trie_target_bits_enabled: bool,
     /// Number of live groups at each token position in the active DFS path.
     trie_target_position_counts: Vec<u32>,
     targets: Vec<usize>,
@@ -687,6 +691,8 @@ static VOCAB_ROW_CERT_DIAG: Lazy<bool> =
     Lazy::new(|| env_flag_enabled("GLRMASK_VOCAB_EQUIV_ROW_CERT_DIAG"));
 static VOCAB_SPARSE_DIRTY_FINISH_DISABLED: Lazy<bool> =
     Lazy::new(|| env_flag_enabled("GLRMASK_DISABLE_VOCAB_SPARSE_DIRTY_FINISH"));
+static VOCAB_TRIE_TARGET_BITS_ENABLED: Lazy<bool> =
+    Lazy::new(|| env_flag_enabled("GLRMASK_VOCAB_TRIE_TARGET_BITS"));
 
 #[inline]
 fn new_hasher() -> AHasher {
@@ -1050,6 +1056,8 @@ impl Scratch {
             dirty_words,
             num_groups,
             trie_target_group_counts: Vec::new(),
+            trie_target_group_bits: Vec::new(),
+            trie_target_bits_enabled: *VOCAB_TRIE_TARGET_BITS_ENABLED,
             trie_target_position_counts: Vec::new(),
             targets: Vec::new(),
             target_gids: HashMap::new(),
@@ -1110,11 +1118,17 @@ fn ensure_completion_weights(scratch: &mut Scratch, num_states: usize) {
 }
 
 fn reset_trie_target_aggregate(scratch: &mut Scratch, max_token_len: usize) {
-    let slots = (max_token_len + 1).saturating_mul(scratch.num_groups);
+    let positions = max_token_len + 1;
+    let slots = positions.saturating_mul(scratch.num_groups);
     scratch.trie_target_group_counts.resize(slots, 0);
     scratch.trie_target_group_counts[..slots].fill(0);
-    scratch.trie_target_position_counts.resize(max_token_len + 1, 0);
-    scratch.trie_target_position_counts[..=max_token_len].fill(0);
+    if scratch.trie_target_bits_enabled {
+        let bit_slots = positions.saturating_mul(scratch.dirty_words);
+        scratch.trie_target_group_bits.resize(bit_slots, 0);
+        scratch.trie_target_group_bits[..bit_slots].fill(0);
+    }
+    scratch.trie_target_position_counts.resize(positions, 0);
+    scratch.trie_target_position_counts[..positions].fill(0);
 }
 
 #[inline(always)]
@@ -1138,6 +1152,10 @@ fn update_trie_target_aggregate(
         if scratch.trie_target_group_counts[index] == 0 {
             debug_assert!(scratch.trie_target_position_counts[position] > 0);
             scratch.trie_target_position_counts[position] -= 1;
+            if scratch.trie_target_bits_enabled {
+                let bit_index = position * scratch.dirty_words + gid / 64;
+                scratch.trie_target_group_bits[bit_index] &= !(1u64 << (gid % 64));
+            }
         }
     };
     let add = |scratch: &mut Scratch, position: usize, gid: usize| {
@@ -1147,6 +1165,10 @@ fn update_trie_target_aggregate(
         let index = position * scratch.num_groups + gid;
         if scratch.trie_target_group_counts[index] == 0 {
             scratch.trie_target_position_counts[position] += 1;
+            if scratch.trie_target_bits_enabled {
+                let bit_index = position * scratch.dirty_words + gid / 64;
+                scratch.trie_target_group_bits[bit_index] |= 1u64 << (gid % 64);
+            }
         }
         scratch.trie_target_group_counts[index] += 1;
     };
@@ -1173,11 +1195,26 @@ fn collect_trie_targets(scratch: &mut Scratch, token_len: usize) {
         if scratch.trie_target_position_counts[position] == 0 {
             continue;
         }
-        let base = position * scratch.num_groups;
         let mut gids = SmallVec::<[usize; 16]>::new();
-        for gid in 0..scratch.num_groups {
-            if scratch.trie_target_group_counts[base + gid] != 0 {
-                gids.push(gid);
+        if scratch.trie_target_bits_enabled {
+            let bit_base = position * scratch.dirty_words;
+            for word_index in 0..scratch.dirty_words {
+                let mut bits = scratch.trie_target_group_bits[bit_base + word_index];
+                while bits != 0 {
+                    let bit = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    let gid = word_index * 64 + bit;
+                    if gid < scratch.num_groups {
+                        gids.push(gid);
+                    }
+                }
+            }
+        } else {
+            let base = position * scratch.num_groups;
+            for gid in 0..scratch.num_groups {
+                if scratch.trie_target_group_counts[base + gid] != 0 {
+                    gids.push(gid);
+                }
             }
         }
         debug_assert!(!gids.is_empty());
@@ -5566,6 +5603,7 @@ mod shared_base_tests {
     #[test]
     fn trie_target_aggregate_matches_dirty_mask_scan() {
         let mut scratch = Scratch::new(2, 3);
+        scratch.trie_target_bits_enabled = true;
         reset_trie_target_aggregate(&mut scratch, 4);
 
         let set_match = |scratch: &mut Scratch, state: usize, gid: usize, position: u32| {
