@@ -7001,6 +7001,17 @@ mod tests {
     }
 
     #[test]
+    fn vocabulary_repeat_horizon_counts_boundaries_before_token_exit() {
+        let body = Expr::U8Seq(b"a".to_vec());
+        let vocab = Vocab::new(vec![(0, b"aaaaX".to_vec())]);
+
+        assert_eq!(
+            super::vocabulary_repeat_boundary_horizon(&body, &vocab),
+            Some(4),
+        );
+    }
+
+    #[test]
     fn vocabulary_repeat_horizon_respects_dominance_not_path_count() {
         let body = parse_regex("a+", false);
         let vocab = Vocab::new(vec![(0, b"aaaaaaaa".to_vec())]);
