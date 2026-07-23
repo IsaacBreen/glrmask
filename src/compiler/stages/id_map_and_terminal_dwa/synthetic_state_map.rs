@@ -169,6 +169,62 @@ pub(crate) fn materialize_active_tokenizer(
     })
 }
 
+pub(crate) fn profile_dispatch_component_activity(
+    tokenizer: &Tokenizer,
+    active_terminals: &[bool],
+    branch_label: &str,
+) {
+    if std::env::var_os("GLRMASK_PROFILE_INACTIVE_COMPONENTS").is_none() {
+        return;
+    }
+    let Some(components) = tokenizer.disjoint_dispatch_components() else {
+        eprintln!(
+            "[glrmask/profile][dispatch_component_activity] branch={} available=false",
+            branch_label,
+        );
+        return;
+    };
+    let active_terminal_ids = active_terminals
+        .iter()
+        .enumerate()
+        .filter_map(|(terminal, &active)| active.then_some(terminal as u32))
+        .collect::<Vec<_>>();
+    eprintln!(
+        "[glrmask/profile][dispatch_component_activity] branch={} available=true components={} active_terminal_count={} active_terminal_ids={:?}",
+        branch_label,
+        components.len(),
+        active_terminal_ids.len(),
+        active_terminal_ids,
+    );
+    for (component, states) in components.iter().enumerate() {
+        let mut observed = std::collections::BTreeSet::<u32>::new();
+        for &state in states {
+            observed.extend(tokenizer.matched_terminals_iter(state));
+            observed.extend(tokenizer.possible_future_terminals_iter(state));
+        }
+        let observed = observed.into_iter().collect::<Vec<_>>();
+        let active_observed = observed
+            .iter()
+            .copied()
+            .filter(|&terminal| {
+                active_terminals
+                    .get(terminal as usize)
+                    .copied()
+                    .unwrap_or(false)
+            })
+            .collect::<Vec<_>>();
+        eprintln!(
+            "[glrmask/profile][dispatch_component_activity_component] branch={} component={} states={} observed_terminals={:?} active_observed_terminals={:?} active={}",
+            branch_label,
+            component,
+            states.len(),
+            observed,
+            active_observed,
+            !active_observed.is_empty(),
+        );
+    }
+}
+
 /// Collapse every closed dispatch component that can never observe an active
 /// terminal. Active components remain state-for-state identity classes.
 ///

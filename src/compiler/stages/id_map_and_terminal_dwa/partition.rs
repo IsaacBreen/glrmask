@@ -121,6 +121,11 @@ fn inactive_component_branch_state_map(
         return None;
     }
     let started_at = Instant::now();
+    super::synthetic_state_map::profile_dispatch_component_activity(
+        tokenizer,
+        active_terminals,
+        branch_label,
+    );
     let map = super::synthetic_state_map::inactive_dispatch_component_state_map(
         tokenizer,
         active_terminals,
