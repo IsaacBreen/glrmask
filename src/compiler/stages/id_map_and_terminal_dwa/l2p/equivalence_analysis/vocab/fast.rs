@@ -3062,6 +3062,7 @@ struct FirstTransitionFactorStats {
     preliminary_state_token_pairs: usize,
     preliminary_classes: usize,
     parallel_buckets: bool,
+    setup_ms: f64,
     preliminary_signature_ms: f64,
     preliminary_grouping_ms: f64,
     trie_walk: TrieWalkChunkStats,
@@ -3119,6 +3120,7 @@ fn try_first_transition_factor_plan<S: AsRef<[u8]> + Sync>(
     {
         return None;
     }
+    let setup_started_at = Instant::now();
 
     let num_classes = dfa
         .byte_to_class
@@ -3206,6 +3208,7 @@ fn try_first_transition_factor_plan<S: AsRef<[u8]> + Sync>(
                 .then_with(|| left.cmp(&right))
         });
     }
+    let setup_ms = setup_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let process_bucket = |bucket: &FirstTransitionBucket| {
         let signature_started_at = Instant::now();
@@ -3269,6 +3272,7 @@ fn try_first_transition_factor_plan<S: AsRef<[u8]> + Sync>(
         full_state_token_pairs,
         preliminary_state_token_pairs,
         parallel_buckets,
+        setup_ms,
         ..FirstTransitionFactorStats::default()
     };
     let mut preliminary_classes = singleton_tokens
@@ -4040,7 +4044,7 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
                     - stats.preliminary_state_token_pairs as f64
                         / stats.full_state_token_pairs.max(1) as f64);
             eprintln!(
-                "[glrmask/profile][vocab_first_transition_factor] strings={} initial_states={} semantic_buckets={} factored_buckets={} parallel_buckets={} min_bucket_tokens={} source_state_buckets_before={} source_state_buckets_after={} full_state_token_pairs={} preliminary_state_token_pairs={} work_reduction_pct={:.2} preliminary_classes={} representative_tokens={} signature_cpu_ms={:.3} grouping_cpu_ms={:.3} wall_ms={:.3}",
+                "[glrmask/profile][vocab_first_transition_factor] strings={} initial_states={} semantic_buckets={} factored_buckets={} parallel_buckets={} min_bucket_tokens={} source_state_buckets_before={} source_state_buckets_after={} full_state_token_pairs={} preliminary_state_token_pairs={} work_reduction_pct={:.2} preliminary_classes={} representative_tokens={} setup_ms={:.3} signature_cpu_ms={:.3} grouping_cpu_ms={:.3} wall_ms={:.3}",
                 num_tokens,
                 num_initial_states,
                 stats.semantic_buckets,
@@ -4054,6 +4058,7 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
                 reduction_pct,
                 stats.preliminary_classes,
                 plan.representative_tokens.len(),
+                stats.setup_ms,
                 stats.preliminary_signature_ms,
                 stats.preliminary_grouping_ms,
                 preliminary_factor_ms,
