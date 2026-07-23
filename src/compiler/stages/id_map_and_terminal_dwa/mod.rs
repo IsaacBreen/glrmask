@@ -724,7 +724,6 @@ struct CharTypeSubVocabs {
     p1_overflow_threshold: Option<usize>,
     p2_overflow_threshold: Option<usize>,
     p4_overflow_threshold: Option<usize>,
-    p6_overflow_threshold: Option<usize>,
     sub_vocabs: Arc<[Vocab]>,
 }
 
@@ -749,7 +748,6 @@ fn char_type_partition_index(
     p1_overflow_threshold: Option<usize>,
     p2_overflow_threshold: Option<usize>,
     p4_overflow_threshold: Option<usize>,
-    p6_overflow_threshold: Option<usize>,
 ) -> usize {
     let partition = classify_vocab_char_type(bytes) as usize;
     if partition == 0
@@ -768,10 +766,6 @@ fn char_type_partition_index(
         && p4_overflow_threshold.is_some_and(|threshold| bytes.len() > threshold)
     {
         11
-    } else if partition == 6
-        && p6_overflow_threshold.is_some_and(|threshold| bytes.len() > threshold)
-    {
-        13
     } else {
         partition
     }
@@ -811,24 +805,17 @@ fn build_char_type_sub_vocabs(
         "GLRMASK_P4_LONG_TOKEN_OVERFLOW_THRESHOLD",
         automatic_bounded_synthesis_overflow.then_some(32),
     );
-    let p6_overflow_threshold = long_token_overflow_threshold(
-        "GLRMASK_P6_LONG_TOKEN_OVERFLOW_THRESHOLD",
-        None,
-    );
     if let Some(cached) = vocab.vocab_derived_cache_get::<CharTypeSubVocabs>() {
         if cached.p0_overflow_threshold == p0_overflow_threshold
             && cached.p1_overflow_threshold == p1_overflow_threshold
             && cached.p2_overflow_threshold == p2_overflow_threshold
             && cached.p4_overflow_threshold == p4_overflow_threshold
-            && cached.p6_overflow_threshold == p6_overflow_threshold
         {
             return Arc::clone(&cached.sub_vocabs);
         }
     }
 
-    let partition_count = if p6_overflow_threshold.is_some() {
-        14
-    } else if p0_overflow_threshold.is_some() {
+    let partition_count = if p0_overflow_threshold.is_some() {
         13
     } else if p4_overflow_threshold.is_some() {
         12
@@ -851,7 +838,6 @@ fn build_char_type_sub_vocabs(
             p1_overflow_threshold,
             p2_overflow_threshold,
             p4_overflow_threshold,
-            p6_overflow_threshold,
         );
         for &byte in bytes {
             partition_bytes[idx].insert(byte);
@@ -880,7 +866,6 @@ fn build_char_type_sub_vocabs(
         p1_overflow_threshold,
         p2_overflow_threshold,
         p4_overflow_threshold,
-        p6_overflow_threshold,
         sub_vocabs: Arc::clone(&sub_vocabs),
     }));
     sub_vocabs
