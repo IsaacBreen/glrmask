@@ -69,11 +69,13 @@ thread_local! {
     static TERMINAL_INTERCHANGEABILITY_SUPPRESS_DEPTH: Cell<u32> = const { Cell::new(0) };
     static TERMINAL_INTERCHANGEABILITY_STRICT_REFERENCE_SUPPRESS_DEPTH: Cell<u32> = const { Cell::new(0) };
     static GLOBAL_TOKEN_POSITION_SUPPRESS_DEPTH: Cell<u32> = const { Cell::new(0) };
+    static FIRST_BYTE_VOCAB_FACTOR_SUPPRESS_DEPTH: Cell<u32> = const { Cell::new(0) };
 }
 
 struct SuppressTerminalInterchangeability;
 struct SuppressTerminalInterchangeabilityStrictReference;
 struct SuppressGlobalTokenPosition;
+struct SuppressFirstByteVocabFactor;
 
 impl SuppressTerminalInterchangeability {
     fn new() -> Self {
@@ -136,6 +138,26 @@ impl Drop for SuppressGlobalTokenPosition {
     }
 }
 
+impl SuppressFirstByteVocabFactor {
+    fn new() -> Self {
+        FIRST_BYTE_VOCAB_FACTOR_SUPPRESS_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        Self
+    }
+}
+
+impl Drop for SuppressFirstByteVocabFactor {
+    fn drop(&mut self) {
+        FIRST_BYTE_VOCAB_FACTOR_SUPPRESS_DEPTH.with(|depth| {
+            depth.set(
+                depth
+                    .get()
+                    .checked_sub(1)
+                    .expect("unbalanced first-byte vocabulary factor suppression"),
+            );
+        });
+    }
+}
+
 fn l2p_env_enabled(name: &str) -> bool {
     std::env::var(name)
         .map(|value| {
@@ -143,6 +165,44 @@ fn l2p_env_enabled(name: &str) -> bool {
             !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
         })
         .unwrap_or(false)
+}
+
+fn l2p_partition_selector_enabled(name: &str, partition_label: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() || trimmed == "1" || trimmed.eq_ignore_ascii_case("true") {
+                return true;
+            }
+            if trimmed == "0" || trimmed.eq_ignore_ascii_case("false") {
+                return false;
+            }
+            trimmed
+                .split(',')
+                .map(str::trim)
+                .any(|label| label == partition_label)
+        })
+        .unwrap_or(false)
+}
+
+pub(crate) fn l2p_first_byte_vocab_factor_enabled_for_partition(
+    partition_label: &str,
+) -> bool {
+    FIRST_BYTE_VOCAB_FACTOR_SUPPRESS_DEPTH.with(|depth| depth.get() == 0)
+        && l2p_partition_selector_enabled(
+            "GLRMASK_ENABLE_L2P_FIRST_BYTE_VOCAB_FACTOR",
+            partition_label,
+        )
+}
+
+pub(crate) fn l2p_first_byte_vocab_factor_strict_reference_enabled_for_partition(
+    partition_label: &str,
+) -> bool {
+    l2p_first_byte_vocab_factor_enabled_for_partition(partition_label)
+        && l2p_partition_selector_enabled(
+            "GLRMASK_L2P_FIRST_BYTE_VOCAB_FACTOR_STRICT_REFERENCE",
+            partition_label,
+        )
 }
 
 /// Production terminal interchangeability is enabled by default. Recursive
@@ -541,12 +601,14 @@ pub(crate) fn build_l2p_id_map_and_terminal_dwa(
         .is_some_and(|partition| partition_has_merges(partition));
     // A successful merge activates production TI. The recursive TI-off rebuild
     // and symbolic comparison are a separate, explicit validation mode.
-let strict_reference = reference_terminal_expansion
+    let strict_reference = reference_terminal_expansion
         && l2p_terminal_interchangeability_strict_reference_enabled()
         && l2p_strict_partition_matches(partition_label);
     let global_token_position_strict_reference = token_position_partition.is_some()
         && l2p_global_token_position_strict_reference_enabled()
         && l2p_strict_partition_matches(partition_label);
+    let first_byte_vocab_factor_strict_reference =
+        l2p_first_byte_vocab_factor_strict_reference_enabled_for_partition(partition_label);
     let analysis_active_terminals = terminal_partition
         .as_ref()
         .map(|partition| active_terminals_for_partition(partition, active_terminals.len()))
@@ -1312,6 +1374,7 @@ let strict_reference = reference_terminal_expansion
 
     if strict_reference
         || global_token_position_strict_reference
+        || first_byte_vocab_factor_strict_reference
     {
         // Rebuild the local artifact under the appropriate suppressed feature
         // set, then compare completed weighted terminal languages in original
@@ -1325,6 +1388,8 @@ let strict_reference = reference_terminal_expansion
             let _suppress_ti = strict_reference.then(SuppressTerminalInterchangeability::new);
             let _suppress_global = global_token_position_strict_reference
                 .then(SuppressGlobalTokenPosition::new);
+            let _suppress_first_byte_vocab_factor = first_byte_vocab_factor_strict_reference
+                .then(SuppressFirstByteVocabFactor::new);
             build_l2p_id_map_and_terminal_dwa(
                 partition_label,
                 tokenizer,
@@ -1361,10 +1426,11 @@ let strict_reference = reference_terminal_expansion
         let strict_compare_ms = strict_compare_started_at.elapsed().as_secs_f64() * 1000.0;
         if ti_profile_timing {
             eprintln!(
-                "[glrmask/profile][l2p_strict_reference] partition={} ti_reference={} global_token_position_reference={} baseline_build_ms={:.3} terminal_dwa_equivalence_ms={:.3} differs=false",
+                "[glrmask/profile][l2p_strict_reference] partition={} ti_reference={} global_token_position_reference={} first_byte_vocab_factor_reference={} baseline_build_ms={:.3} terminal_dwa_equivalence_ms={:.3} differs=false",
                 partition_label,
                 strict_reference,
                 global_token_position_strict_reference,
+                first_byte_vocab_factor_strict_reference,
                 strict_baseline_build_ms,
                 strict_compare_ms,
             );

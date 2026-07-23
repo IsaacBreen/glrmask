@@ -54,27 +54,13 @@ fn common_atom_preclass_enabled() -> bool {
 }
 
 fn first_byte_vocab_factor_enabled(partition_label: &str) -> bool {
-    std::env::var("GLRMASK_ENABLE_L2P_FIRST_BYTE_VOCAB_FACTOR")
-        .map(|value| {
-            let trimmed = value.trim();
-            if trimmed.is_empty() || trimmed == "1" || trimmed.eq_ignore_ascii_case("true") {
-                return true;
-            }
-            if trimmed == "0" || trimmed.eq_ignore_ascii_case("false") {
-                return false;
-            }
-            trimmed
-                .split(',')
-                .map(str::trim)
-                .any(|label| label == partition_label)
-        })
-        .unwrap_or(false)
+    super::super::l2p_first_byte_vocab_factor_enabled_for_partition(partition_label)
 }
 
 fn first_byte_vocab_factor_strict_reference_enabled(partition_label: &str) -> bool {
-    std::env::var("GLRMASK_L2P_FIRST_BYTE_VOCAB_FACTOR_STRICT_REFERENCE")
-        .ok()
-        .is_some_and(|value| value == "1" || value == partition_label)
+    super::super::l2p_first_byte_vocab_factor_strict_reference_enabled_for_partition(
+        partition_label,
+    )
 }
 
 #[derive(Debug, Clone, Copy, Default)]
