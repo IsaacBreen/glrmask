@@ -3144,6 +3144,8 @@ fn try_first_transition_factor_plan<S: AsRef<[u8]> + Sync>(
     let mut source_state_buckets_before = 0usize;
     let mut source_state_buckets_after = 0usize;
     let mut preliminary_state_token_pairs = 0usize;
+    let mut seen_outcomes = vec![0u32; dfa.num_states + 1];
+    let mut seen_outcome_epoch = 0u32;
 
     for token_indices in tokens_by_class.into_iter().filter(|bucket| !bucket.is_empty()) {
         semantic_buckets += 1;
@@ -3154,6 +3156,7 @@ fn try_first_transition_factor_plan<S: AsRef<[u8]> + Sync>(
 
         let first_byte = strings[token_indices[0]].as_ref()[0];
         let mut initial_outcomes = Vec::with_capacity(initial_states.len());
+        advance_seen_epoch(&mut seen_outcomes, &mut seen_outcome_epoch);
         for &source in initial_states {
             // The ordinary engine suppresses a source marked dead before it
             // consumes any token byte. A pre-dead source and a live source with
@@ -3170,10 +3173,16 @@ fn try_first_transition_factor_plan<S: AsRef<[u8]> + Sync>(
                     target as usize
                 }
             };
-            initial_outcomes.push(effective_outcome);
+            let seen_index = if effective_outcome == STATE_NONE {
+                dfa.num_states
+            } else {
+                effective_outcome
+            };
+            if seen_outcomes[seen_index] != seen_outcome_epoch {
+                seen_outcomes[seen_index] = seen_outcome_epoch;
+                initial_outcomes.push(effective_outcome);
+            }
         }
-        initial_outcomes.sort_unstable();
-        initial_outcomes.dedup();
         source_state_buckets_before = source_state_buckets_before
             .saturating_add(initial_states.len());
         source_state_buckets_after = source_state_buckets_after
