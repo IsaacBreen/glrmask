@@ -2082,17 +2082,9 @@ const TRIE_WALK_MIN_TOKENS: usize = 256;
 static TRIE_WALK_DISABLED: Lazy<bool> =
     Lazy::new(|| env_flag_enabled("GLRMASK_DISABLE_TRIE_WALK"));
 
-const ROOT_ACTIVE_OWNER: usize = usize::MAX;
-
 struct DepthChangeLog {
-    /// Batch indices whose DFA paths remain live after this depth when this
-    /// depth owns the set. An all-no-op transition inherits an earlier set
-    /// instead of copying every index.
+    /// Batch indices whose DFA paths remain live after this depth.
     active_indices: Vec<usize>,
-    /// ROOT_ACTIVE_OWNER or the depth whose `active_indices` owns this set.
-    active_owner: usize,
-    /// Bytes that are output-free self-loops for every live state.
-    noop_self_loop_bytes: U8Set,
     /// (state_idx, old_state_value)
     state_changes: Vec<(usize, usize)>,
     /// (match_positions_flat_idx, old_value)
@@ -2107,8 +2099,6 @@ impl DepthChangeLog {
     fn new() -> Self {
         Self {
             active_indices: Vec::new(),
-            active_owner: ROOT_ACTIVE_OWNER,
-            noop_self_loop_bytes: U8Set::empty(),
             state_changes: Vec::new(),
             match_changes: Vec::new(),
             dirty_changes: Vec::new(),
@@ -2118,8 +2108,6 @@ impl DepthChangeLog {
 
     fn clear(&mut self) {
         self.active_indices.clear();
-        self.active_owner = ROOT_ACTIVE_OWNER;
-        self.noop_self_loop_bytes = U8Set::empty();
         self.state_changes.clear();
         self.match_changes.clear();
         self.dirty_changes.clear();
@@ -2129,7 +2117,6 @@ impl DepthChangeLog {
 
 struct TrieWalkState {
     root_active_indices: Vec<usize>,
-    root_noop_self_loop_bytes: U8Set,
     depth_logs: Vec<DepthChangeLog>,
 }
 
@@ -2137,7 +2124,6 @@ impl TrieWalkState {
     fn new() -> Self {
         Self {
             root_active_indices: Vec::new(),
-            root_noop_self_loop_bytes: U8Set::empty(),
             depth_logs: Vec::new(),
         }
     }
@@ -2145,15 +2131,6 @@ impl TrieWalkState {
     fn ensure_depth(&mut self, depth: usize) {
         while self.depth_logs.len() <= depth {
             self.depth_logs.push(DepthChangeLog::new());
-        }
-    }
-
-    fn active_indices_after_depth(&self, depth: usize) -> &[usize] {
-        let owner = self.depth_logs[depth].active_owner;
-        if owner == ROOT_ACTIVE_OWNER {
-            &self.root_active_indices
-        } else {
-            &self.depth_logs[owner].active_indices
         }
     }
 }
@@ -2288,49 +2265,24 @@ fn dfs_step(
     trie.ensure_depth(depth);
     let TrieWalkState {
         root_active_indices,
-        root_noop_self_loop_bytes,
         depth_logs,
     } = trie;
-    let (source_indices, source_owner, source_noop_self_loop_bytes, log) = if depth == 0 {
-        (
-            root_active_indices.as_slice(),
-            ROOT_ACTIVE_OWNER,
-            *root_noop_self_loop_bytes,
-            &mut depth_logs[0],
-        )
+    let (source_indices, log) = if depth == 0 {
+        (root_active_indices.as_slice(), &mut depth_logs[0])
     } else {
         let (previous, current) = depth_logs.split_at_mut(depth);
-        let previous_log = &previous[depth - 1];
-        let source_owner = previous_log.active_owner;
-        let source_indices = if source_owner == ROOT_ACTIVE_OWNER {
-            root_active_indices.as_slice()
-        } else {
-            previous[source_owner].active_indices.as_slice()
-        };
         (
-            source_indices,
-            source_owner,
-            previous_log.noop_self_loop_bytes,
+            previous[depth - 1].active_indices.as_slice(),
             &mut current[0],
         )
     };
     log.clear();
-
-    // This byte cannot change state, produce a terminal match, or kill any
-    // live path. Reuse the prior live-set owner instead of copying every index
-    // into another depth log.
-    if source_noop_self_loop_bytes.contains(byte) {
-        log.active_owner = source_owner;
-        log.noop_self_loop_bytes = source_noop_self_loop_bytes;
-        return;
-    }
 
     let num_groups = dfa.num_groups;
     let dirty_words = scratch.dirty_words;
     let position = (depth + 1) as u32;
     let class = dfa.byte_to_class[byte as usize] as usize;
     let class_base = class * dfa.num_states;
-    let mut next_noop_self_loop_bytes = U8Set::all();
 
     debug_assert!(source_indices.iter().all(|&i| i < batch_len));
     for &i in source_indices {
@@ -2340,7 +2292,6 @@ fn dfs_step(
             && dfa.self_loop_bytes[old_state].contains(byte)
         {
             log.active_indices.push(i);
-            next_noop_self_loop_bytes &= dfa.self_loop_bytes[old_state];
             continue;
         }
 
@@ -2385,15 +2336,8 @@ fn dfs_step(
             scratch.current_states[i] = STATE_NONE;
         } else {
             log.active_indices.push(i);
-            if dfa.finalizers[ns].is_empty() {
-                next_noop_self_loop_bytes &= dfa.self_loop_bytes[ns];
-            } else {
-                next_noop_self_loop_bytes = U8Set::empty();
-            }
         }
     }
-    log.active_owner = depth;
-    log.noop_self_loop_bytes = next_noop_self_loop_bytes;
 }
 
 fn dfs_step_profiled(
@@ -2407,48 +2351,26 @@ fn dfs_step_profiled(
     trie.ensure_depth(depth);
     let TrieWalkState {
         root_active_indices,
-        root_noop_self_loop_bytes,
         depth_logs,
     } = trie;
-    let (source_indices, source_owner, source_noop_self_loop_bytes, log) = if depth == 0 {
-        (
-            root_active_indices.as_slice(),
-            ROOT_ACTIVE_OWNER,
-            *root_noop_self_loop_bytes,
-            &mut depth_logs[0],
-        )
+    let (source_indices, log) = if depth == 0 {
+        (root_active_indices.as_slice(), &mut depth_logs[0])
     } else {
         let (previous, current) = depth_logs.split_at_mut(depth);
-        let previous_log = &previous[depth - 1];
-        let source_owner = previous_log.active_owner;
-        let source_indices = if source_owner == ROOT_ACTIVE_OWNER {
-            root_active_indices.as_slice()
-        } else {
-            previous[source_owner].active_indices.as_slice()
-        };
         (
-            source_indices,
-            source_owner,
-            previous_log.noop_self_loop_bytes,
+            previous[depth - 1].active_indices.as_slice(),
             &mut current[0],
         )
     };
     log.clear();
 
     let mut step_stats = DfsStepStats::default();
-    if source_noop_self_loop_bytes.contains(byte) {
-        log.active_owner = source_owner;
-        log.noop_self_loop_bytes = source_noop_self_loop_bytes;
-        step_stats.noop_self_loops = source_indices.len();
-        return step_stats;
-    }
 
     let num_groups = dfa.num_groups;
     let dirty_words = scratch.dirty_words;
     let position = (depth + 1) as u32;
     let class = dfa.byte_to_class[byte as usize] as usize;
     let class_base = class * dfa.num_states;
-    let mut next_noop_self_loop_bytes = U8Set::all();
 
     debug_assert!(source_indices.iter().all(|&i| i < batch_len));
     for &i in source_indices {
@@ -2459,7 +2381,6 @@ fn dfs_step_profiled(
             && dfa.self_loop_bytes[old_state].contains(byte)
         {
             log.active_indices.push(i);
-            next_noop_self_loop_bytes &= dfa.self_loop_bytes[old_state];
             step_stats.noop_self_loops += 1;
             continue;
         }
@@ -2516,15 +2437,8 @@ fn dfs_step_profiled(
             }
         } else {
             log.active_indices.push(i);
-            if dfa.finalizers[ns].is_empty() {
-                next_noop_self_loop_bytes &= dfa.self_loop_bytes[ns];
-            } else {
-                next_noop_self_loop_bytes = U8Set::empty();
-            }
         }
     }
-    log.active_owner = depth;
-    log.noop_self_loop_bytes = next_noop_self_loop_bytes;
 
     step_stats
 }
@@ -2810,21 +2724,13 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
     scratch.dirty_state_bits[..dirty_state_words].fill(0);
     ensure_completion_weights(scratch, batch_len);
     let all_none_signature = all_none_completion_signature(dfa, batch_len);
-    let mut root_noop_self_loop_bytes = U8Set::all();
     for i in 0..batch_len {
         if dfa.is_dead_end[scratch.current_states[i]] {
             scratch.current_states[i] = STATE_NONE;
         } else {
-            let state = scratch.current_states[i];
             trie.root_active_indices.push(i);
-            if dfa.finalizers[state].is_empty() {
-                root_noop_self_loop_bytes &= dfa.self_loop_bytes[state];
-            } else {
-                root_noop_self_loop_bytes = U8Set::empty();
-            }
         }
     }
-    trie.root_noop_self_loop_bytes = root_noop_self_loop_bytes;
     let max_token_len = chunk
         .iter()
         .map(|&token_idx| strings[token_idx].as_ref().len())
@@ -2894,7 +2800,7 @@ fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
         let live_indices = if token_len == 0 {
             trie.root_active_indices.as_slice()
         } else {
-            trie.active_indices_after_depth(token_len - 1)
+            trie.depth_logs[token_len - 1].active_indices.as_slice()
         };
 
         let sig = if dirty_count == 0 {
@@ -3511,8 +3417,7 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
         ));
     }
 
-    let profiling = compile_profile_enabled()
-        || std::env::var_os("GLRMASK_PROFILE_VOCAB_EQUIV").is_some();
+    let profiling = compile_profile_enabled();
     let elapsed_ms = |started_at: Option<Instant>| {
         started_at.map_or(0.0, |instant| instant.elapsed().as_secs_f64() * 1000.0)
     };
@@ -4211,48 +4116,21 @@ mod shared_base_tests {
 
     #[test]
     fn trie_noop_self_loop_skip_matches_independent_token_scans() {
-        let mut transitions = vec![u32::MAX; 4 * 256];
-        for state in 0..2usize {
-            transitions[state * 256 + b'a' as usize] = state as u32;
-            transitions[state * 256 + b'b' as usize] = (state + 2) as u32;
-        }
-        let view = TokenizerView {
-            flat_dfa: FlatDfa {
-                start_state: 0,
-                transitions: Arc::from(transitions),
-                states: vec![
-                    FlatDfaState {
-                        finalizers: vec![],
-                        possible_future_group_ids: vec![0],
-                    },
-                    FlatDfaState {
-                        finalizers: vec![],
-                        possible_future_group_ids: vec![1],
-                    },
-                    FlatDfaState {
-                        finalizers: vec![0],
-                        possible_future_group_ids: vec![],
-                    },
-                    FlatDfaState {
-                        finalizers: vec![1],
-                        possible_future_group_ids: vec![],
-                    },
-                ],
-            },
-        };
+        let mut flat_dfa = sample_dfa();
+        let mut transitions = flat_dfa.transitions.to_vec();
+        transitions[b'a' as usize] = 0;
+        flat_dfa.transitions = Arc::from(transitions);
+        let view = TokenizerView { flat_dfa };
         let disallowed = BTreeMap::<u32, BitSet>::new();
         let dfa = build_dfa_with_group_filter(&view, &disallowed, None, None, None);
-        let states = vec![0usize, 1];
-        assert!(states.iter().all(|&state| dfa.finalizers[state].is_empty()));
-        assert!(states
-            .iter()
-            .all(|&state| dfa.self_loop_bytes[state].contains(b'a')));
+        assert!(dfa.finalizers[0].is_empty());
+        assert!(dfa.self_loop_bytes[0].contains(b'a'));
 
+        let states = vec![0usize, 1, 2];
         let tokens = vec![
             b"a".to_vec(),
             b"aa".to_vec(),
             b"aaa".to_vec(),
-            b"aaab".to_vec(),
             b"aab".to_vec(),
             b"ab".to_vec(),
             b"b".to_vec(),
@@ -4262,7 +4140,7 @@ mod shared_base_tests {
         let state_group_size = vocab_state_group_size(states.len(), dfa.num_groups);
         let mut scratch = Scratch::new(states.len(), dfa.num_groups);
         let mut trie = TrieWalkState::new();
-        let (pairs, stats) = trie_walk_chunk_signatures(
+        let (pairs, _) = trie_walk_chunk_signatures(
             &dfa,
             &tokens,
             &sorted_indices,
@@ -4270,17 +4148,13 @@ mod shared_base_tests {
             state_group_size,
             &mut scratch,
             &mut trie,
-            true,
+            false,
         );
         let mut actual = vec![0u64; tokens.len()];
         for (token_idx, signature) in pairs {
             actual[token_idx] = signature;
         }
         assert_eq!(actual, expected);
-        assert!(
-            stats.dfs_noop_self_loops > 0,
-            "the fixture must exercise active-set inheritance across no-op bytes",
-        );
     }
 
     #[test]
