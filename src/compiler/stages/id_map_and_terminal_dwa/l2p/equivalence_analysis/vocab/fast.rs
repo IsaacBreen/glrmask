@@ -661,8 +661,9 @@ struct Scratch {
     /// For the active DFS path, how many initial states have their latest
     /// match for `(position, group)` at this slot.
     trie_target_group_counts: Vec<u32>,
-    /// Bitset of live groups at each token position. Optional experimental
-    /// materialization avoids rescanning all groups for every dirty token.
+    /// Bitset of live groups at each token position. This avoids rescanning all
+    /// groups for every dirty token while the exact reference counts remain
+    /// authoritative.
     trie_target_group_bits: Vec<u64>,
     trie_target_bits_enabled: bool,
     /// Number of live groups at each token position in the active DFS path.
@@ -692,7 +693,7 @@ static VOCAB_ROW_CERT_DIAG: Lazy<bool> =
 static VOCAB_SPARSE_DIRTY_FINISH_DISABLED: Lazy<bool> =
     Lazy::new(|| env_flag_enabled("GLRMASK_DISABLE_VOCAB_SPARSE_DIRTY_FINISH"));
 static VOCAB_TRIE_TARGET_BITS_ENABLED: Lazy<bool> =
-    Lazy::new(|| env_flag_enabled("GLRMASK_VOCAB_TRIE_TARGET_BITS"));
+    Lazy::new(|| !env_flag_enabled("GLRMASK_DISABLE_VOCAB_TRIE_TARGET_BITS"));
 
 #[inline]
 fn new_hasher() -> AHasher {
@@ -743,7 +744,7 @@ fn first_transition_factor_max_work_ratio() -> f64 {
         .ok()
         .and_then(|value| value.trim().parse::<f64>().ok())
         .filter(|value| value.is_finite() && *value > 0.0)
-        .unwrap_or(0.25)
+        .unwrap_or(FIRST_TRANSITION_FACTOR_MAX_WORK_RATIO_DEFAULT)
 }
 
 fn first_transition_factor_force_parallel_buckets() -> bool {
@@ -752,13 +753,6 @@ fn first_transition_factor_force_parallel_buckets() -> bool {
 
 fn first_transition_factor_final_single_batch_enabled() -> bool {
     env_flag_enabled("GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_FINAL_SINGLE_BATCH")
-}
-
-fn first_transition_factor_authority_batch_size_override() -> Option<usize> {
-    std::env::var("GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_AUTHORITY_BATCH_SIZE")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|&value| value > 0)
 }
 
 fn default_vocab_batch_size(
@@ -3328,6 +3322,7 @@ const SINGLETON_PROBE_MAX_TOKENS: usize = 64;
 const SINGLETON_PROBE_STATES: usize = 16;
 const PRE_DFA_SINGLETON_PROBE_MIN_INITIAL_STATES: usize = 64;
 const PRE_DFA_SINGLETON_PROBE_MIN_WORK: usize = 8_192;
+const FIRST_TRANSITION_FACTOR_MAX_WORK_RATIO_DEFAULT: f64 = 0.05;
 
 /// Restrict a tokenizer view to exactly the states reachable from the state
 /// representatives and lexer start along bytes that appear in `strings`.
@@ -4106,19 +4101,13 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
         && first_transition_factor_final_single_batch_enabled()
         && analysis_token_count.saturating_mul(num_initial_states)
             <= vocab_sequential_trie_work_max();
-    let factor_authority_batch_size = factor_plan
-        .as_ref()
-        .and_then(|_| first_transition_factor_authority_batch_size_override());
-    let batch_size = factor_authority_batch_size
-        .or_else(vocab_batch_size_override)
-        .unwrap_or_else(|| {
-            if factor_final_single_batch {
-                num_initial_states
-            } else {
-                default_batch_size
-            }
-        })
-        .min(num_initial_states);
+    let batch_size = vocab_batch_size_override().unwrap_or_else(|| {
+        if factor_final_single_batch {
+            num_initial_states
+        } else {
+            default_batch_size
+        }
+    });
     let mut active_indices: Vec<usize> = factor_plan.as_ref().map_or_else(
         || (0..num_tokens).collect(),
         |plan| plan.representative_tokens.clone(),
