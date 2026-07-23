@@ -51,6 +51,165 @@ fn common_atom_preclass_enabled() -> bool {
         .unwrap_or(false)
 }
 
+fn first_byte_vocab_factor_enabled() -> bool {
+    std::env::var("GLRMASK_ENABLE_L2P_FIRST_BYTE_VOCAB_FACTOR")
+        .map(|value| {
+            let trimmed = value.trim();
+            trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or(false)
+}
+
+fn first_byte_vocab_factor_strict_reference_enabled(partition_label: &str) -> bool {
+    std::env::var("GLRMASK_L2P_FIRST_BYTE_VOCAB_FACTOR_STRICT_REFERENCE")
+        .ok()
+        .is_some_and(|value| value == "1" || value == partition_label)
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct FirstByteVocabFactorProfile {
+    buckets: usize,
+    source_states_before: usize,
+    source_states_after: usize,
+    preliminary_classes: usize,
+    bucket_ms: f64,
+    final_ms: f64,
+    total_ms: f64,
+    dfa_build_ms: f64,
+}
+
+/// Exact vocabulary partition through deterministic first-byte successors.
+///
+/// For one nonempty token `b + suffix`, every observable action from source
+/// state `q` after consuming the first byte depends only on `delta(q, b)`.
+/// Therefore one source representative per distinct `b` successor is enough
+/// to compute exact token classes *within* a first-byte bucket. Those bucket
+/// classes are only a prepartition: one final exact scan over all original
+/// source states and one representative per preliminary class merges classes
+/// that are equivalent across different first-byte buckets.
+fn first_byte_factored_vocab_classes(
+    tokenizer: &TokenizerView,
+    tokens: &[&[u8]],
+    initial_states: &[usize],
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    byte_to_class: &[u8; 256],
+) -> Option<(
+    vocab_equivalence_analysis::VocabEquivalenceResult,
+    FirstByteVocabFactorProfile,
+)> {
+    if tokens.len() < 2 || initial_states.len() < 2 || tokens.iter().any(|token| token.is_empty()) {
+        return None;
+    }
+
+    let total_started_at = Instant::now();
+    let mut token_buckets = (0..256).map(|_| Vec::<usize>::new()).collect::<Vec<_>>();
+    for (token, bytes) in tokens.iter().enumerate() {
+        token_buckets[bytes[0] as usize].push(token);
+    }
+
+    let analysis_dfa_cache = vocab_equivalence_analysis::SharedVocabAnalysisDfaCache::default();
+    let mut preliminary_classes = Vec::<Vec<usize>>::new();
+    let mut source_states_after = 0usize;
+    let mut dfa_build_ms = 0.0f64;
+    let mut buckets = 0usize;
+    let bucket_started_at = Instant::now();
+    for (first_byte, bucket) in token_buckets.iter().enumerate() {
+        if bucket.is_empty() {
+            continue;
+        }
+        buckets += 1;
+        if bucket.len() == 1 {
+            preliminary_classes.push(vec![bucket[0]]);
+            continue;
+        }
+
+        let mut source_for_target = BTreeMap::<u32, usize>::new();
+        for &source in initial_states {
+            let target = tokenizer.dfa().trans(source, first_byte);
+            source_for_target.entry(target).or_insert(source);
+        }
+        let reduced_sources = source_for_target.into_values().collect::<Vec<_>>();
+        source_states_after = source_states_after.saturating_add(reduced_sources.len());
+        let bucket_tokens = bucket.iter().map(|&token| tokens[token]).collect::<Vec<_>>();
+        let (bucket_classes, build_ms) =
+            vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter_profiled(
+                tokenizer,
+                &bucket_tokens,
+                &reduced_sources,
+                disallowed_follows,
+                Some(byte_to_class),
+                None,
+                None,
+                Some(&analysis_dfa_cache),
+            );
+        dfa_build_ms = dfa_build_ms.max(build_ms);
+        for local_class in bucket_classes {
+            let mut global_class = local_class
+                .into_iter()
+                .map(|local_token| bucket[local_token])
+                .collect::<Vec<_>>();
+            global_class.sort_unstable();
+            preliminary_classes.push(global_class);
+        }
+    }
+    let bucket_ms = bucket_started_at.elapsed().as_secs_f64() * 1000.0;
+    preliminary_classes.sort_unstable_by_key(|class| class[0]);
+
+    // No reduction means the final representative scan would only duplicate
+    // the ordinary exact pass.
+    if preliminary_classes.len() >= tokens.len() {
+        return None;
+    }
+
+    let representative_tokens = preliminary_classes
+        .iter()
+        .map(|class| tokens[class[0]])
+        .collect::<Vec<_>>();
+    let final_started_at = Instant::now();
+    let (representative_classes, final_build_ms) =
+        vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter_profiled(
+            tokenizer,
+            &representative_tokens,
+            initial_states,
+            disallowed_follows,
+            Some(byte_to_class),
+            None,
+            None,
+            Some(&analysis_dfa_cache),
+        );
+    dfa_build_ms = dfa_build_ms.max(final_build_ms);
+    let final_ms = final_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let mut classes = vocab_equivalence_analysis::VocabEquivalenceResult::new();
+    for representative_class in representative_classes {
+        let total_len = representative_class
+            .iter()
+            .map(|&preliminary| preliminary_classes[preliminary].len())
+            .sum();
+        let mut class = Vec::with_capacity(total_len);
+        for preliminary in representative_class {
+            class.extend_from_slice(&preliminary_classes[preliminary]);
+        }
+        class.sort_unstable();
+        classes.insert(class);
+    }
+
+    let total_ms = total_started_at.elapsed().as_secs_f64() * 1000.0;
+    Some((
+        classes,
+        FirstByteVocabFactorProfile {
+            buckets,
+            source_states_before: initial_states.len().saturating_mul(buckets),
+            source_states_after,
+            preliminary_classes: preliminary_classes.len(),
+            bucket_ms,
+            final_ms,
+            total_ms,
+            dfa_build_ms,
+        },
+    ))
+}
+
 fn deduplicate_tokens_by_byte_class<'a, S: AsRef<[u8]>>(
     tokens: &'a [S],
     byte_to_class: &[u8; 256],
@@ -2070,6 +2229,17 @@ fn analyze_equivalences_impl(
         }
         let (precomputed_vocab, state_tokens, vocab_equiv_ms) = if vocab_first {
             let vocab_equiv_started_at = Instant::now();
+            let first_byte_factored = first_byte_vocab_factor_enabled()
+                .then(|| {
+                    first_byte_factored_vocab_classes(
+                        analysis_view,
+                        &dedup.representative_token_bytes,
+                        &query_view_states,
+                        effective_disallowed,
+                        &byte_to_class,
+                    )
+                })
+                .flatten();
             let common_atom_preclasses = common_atom_preclass_enabled().then(|| {
                 common_atom_preclass::try_find_common_atom_preclasses(
                     tokenizer,
@@ -2077,7 +2247,52 @@ fn analyze_equivalences_impl(
                     &dedup.representative_token_bytes,
                 )
             });
-            let precomputed_vocab = if let Some(preclasses) = common_atom_preclasses.flatten() {
+            let precomputed_vocab = if let Some((classes, factor_profile)) = first_byte_factored {
+                if first_byte_vocab_factor_strict_reference_enabled(partition_label) {
+                    let strict_started_at = Instant::now();
+                    let (strict_classes, _) =
+                        vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter_profiled(
+                            analysis_view,
+                            &dedup.representative_token_bytes,
+                            &query_view_states,
+                            effective_disallowed,
+                            Some(&byte_to_class),
+                            None,
+                            None,
+                            None,
+                        );
+                    assert_eq!(
+                        classes, strict_classes,
+                        "first-byte vocabulary factorization changed exact classes in {partition_label}",
+                    );
+                    eprintln!(
+                        "[glrmask/profile][l2p_first_byte_vocab_factor_strict_reference] partition={} exact_classes={} compare_ms={:.3} differs=false",
+                        partition_label,
+                        strict_classes.len(),
+                        strict_started_at.elapsed().as_secs_f64() * 1000.0,
+                    );
+                }
+                if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some()
+                    || std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+                    || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+                {
+                    eprintln!(
+                        "[glrmask/profile][l2p_first_byte_vocab_factor_selected] partition={} tokens={} buckets={} source_state_buckets_before={} source_state_buckets_after={} preliminary_classes={} final_classes={} bucket_ms={:.3} final_ms={:.3} dfa_build_ms={:.3} total_ms={:.3}",
+                        partition_label,
+                        dedup.representative_token_bytes.len(),
+                        factor_profile.buckets,
+                        factor_profile.source_states_before,
+                        factor_profile.source_states_after,
+                        factor_profile.preliminary_classes,
+                        classes.len(),
+                        factor_profile.bucket_ms,
+                        factor_profile.final_ms,
+                        factor_profile.dfa_build_ms,
+                        factor_profile.total_ms,
+                    );
+                }
+                (classes, factor_profile.dfa_build_ms)
+            } else if let Some(preclasses) = common_atom_preclasses.flatten() {
                 let representative_tokens =
                     preclasses.representative_tokens(&dedup.representative_token_bytes);
                 let exact_started_at = Instant::now();
@@ -2819,6 +3034,42 @@ mod prepass_selection_tests {
             partition_from_representatives(&states, &reversed_state_reps),
         );
         assert_eq!(old_vocab, reversed_vocab);
+    }
+
+    #[test]
+    fn first_byte_vocab_factorization_matches_full_exact_partition() {
+        let view = synthetic_view();
+        let tokens: Vec<&[u8]> = vec![
+            b"a", b"b", b"ax", b"ay", b"bx", b"by", b"x", b"y",
+        ];
+        let states: Vec<usize> = (0..view.dfa().states.len()).collect();
+        let byte_to_class = super::super::compat::compute_byte_classes(view.dfa());
+        let mut disallowed = BTreeMap::<u32, BitSet>::new();
+        let mut blocked = BitSet::new(2);
+        blocked.set(1);
+        disallowed.insert(0, blocked);
+
+        let full = vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter(
+            &view,
+            &tokens,
+            &states,
+            &disallowed,
+            Some(&byte_to_class),
+            None,
+            None,
+            None,
+        );
+        let (factored, profile) = first_byte_factored_vocab_classes(
+            &view,
+            &tokens,
+            &states,
+            &disallowed,
+            &byte_to_class,
+        )
+        .expect("test vocabulary should admit a nontrivial first-byte prepartition");
+
+        assert!(profile.preliminary_classes < tokens.len());
+        assert_eq!(factored, full);
     }
 
     #[test]
