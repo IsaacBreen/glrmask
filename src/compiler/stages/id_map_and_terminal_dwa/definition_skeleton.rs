@@ -339,7 +339,6 @@ struct GenericPartitionAnalysis {
 
 impl GenericPartitionAnalysis {
     fn build(tokenizer: &Tokenizer, alphabet: U8Set, active_mask: &[bool]) -> Self {
-        let alphabet_bytes = alphabet.iter().collect::<Vec<_>>();
         let terminal_count = tokenizer.num_terminals() as usize;
         let mut members = (0..terminal_count).map(|_| None).collect::<Vec<_>>();
         let mut failures = vec![None; terminal_count];
@@ -473,14 +472,6 @@ impl GenericPartitionAnalysis {
         for (state, &class) in global_classes.iter().enumerate() {
             representatives[class as usize] = representatives[class as usize].min(state);
         }
-        let global_step_class = |state: usize, byte: u8| {
-            let machine = &machines[state_machine[state]];
-            let local_state = (state - machine.offset) as u32;
-            machine
-                .dfa
-                .step(local_state, byte)
-                .map(|target| global_classes[machine.offset + target as usize])
-        };
         let mut certification_failure = None;
         'certify: for (state, &class) in global_classes.iter().enumerate() {
             let representative = representatives[class as usize];
@@ -488,11 +479,40 @@ impl GenericPartitionAnalysis {
                 certification_failure = Some("global_observation_certificate_failed");
                 break;
             }
-            for &byte in &alphabet_bytes {
-                if global_step_class(state, byte) != global_step_class(representative, byte) {
-                    certification_failure = Some("global_transition_certificate_failed");
-                    break 'certify;
-                }
+
+            // A deterministic partial byte graph has one common implicit dead
+            // target for every absent edge. CharTransitions iterates in byte
+            // order, so equality of the complete sparse visible edge lists is
+            // exactly equality over every byte in the restricted alphabet,
+            // including all jointly absent transitions.
+            let current_machine = &machines[state_machine[state]];
+            let representative_machine = &machines[state_machine[representative]];
+            let state_local = (state - current_machine.offset) as u32;
+            let representative_local =
+                (representative - representative_machine.offset) as u32;
+            let state_edges = current_machine
+                .dfa
+                .transitions(state_local)
+                .filter(|(byte, _)| alphabet.contains(*byte))
+                .map(|(byte, target)| {
+                    (
+                        byte,
+                        global_classes[current_machine.offset + target as usize],
+                    )
+                });
+            let representative_edges = representative_machine
+                .dfa
+                .transitions(representative_local)
+                .filter(|(byte, _)| alphabet.contains(*byte))
+                .map(|(byte, target)| {
+                    (
+                        byte,
+                        global_classes[representative_machine.offset + target as usize],
+                    )
+                });
+            if !state_edges.eq(representative_edges) {
+                certification_failure = Some("global_transition_certificate_failed");
+                break 'certify;
             }
         }
         let certification_time = certification_started_at.elapsed();
@@ -1024,9 +1044,25 @@ pub(crate) fn report_partition(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::automata::lexer::compile::build_regex_partitioned;
 
     fn punctuation() -> U8Set {
         U8Set::from_bytes(b"\"': -")
+    }
+
+    fn tokenizer_for_exprs(exprs: Vec<Expr>) -> Tokenizer {
+        let expressions = Arc::<[Expr]>::from(exprs);
+        let terminal_count = expressions.len() as u32;
+        let partitions = vec![0u32; expressions.len()];
+        build_regex_partitioned(&expressions, &partitions)
+            .into_tokenizer(terminal_count, Some(Arc::clone(&expressions)))
+    }
+
+    fn same_partition(left: &[u32], right: &[u32]) -> bool {
+        left.len() == right.len()
+            && (0..left.len()).all(|i| {
+                (0..left.len()).all(|j| (left[i] == left[j]) == (right[i] == right[j]))
+            })
     }
 
     #[test]
@@ -1213,5 +1249,62 @@ mod tests {
         let dfa = compile_terminal_expr_dfa(&expr);
         let quotient = RestrictedQuotient::build(&dfa, alphabet_set).unwrap();
         quotient.certify(&dfa, &alphabet).unwrap();
+    }
+
+    #[test]
+    fn global_hopcroft_matches_individual_reference_quotients() {
+        let expressions = vec![
+            Expr::U8Seq(b"\"foo\": ".to_vec()),
+            Expr::U8Seq(b"\"bar\": ".to_vec()),
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"abc"))),
+                min: 1,
+                max: Some(4),
+            },
+        ];
+        let tokenizer = tokenizer_for_exprs(expressions.clone());
+        let active = vec![true; expressions.len()];
+        let global = GenericPartitionAnalysis::build(&tokenizer, punctuation(), &active);
+        assert!(global.failures.iter().all(Option::is_none));
+
+        for (terminal, expression) in expressions.iter().enumerate() {
+            let dfa = compile_terminal_expr_dfa(expression);
+            let reference = RestrictedQuotient::build(&dfa, punctuation()).unwrap();
+            let member = global.members[terminal].as_ref().unwrap();
+            assert!(same_partition(
+                &member.source_to_quotient,
+                &reference.source_to_quotient,
+            ));
+            assert_eq!(
+                member.topology.classes.len(),
+                reference.canonical.states.len(),
+            );
+        }
+        assert_eq!(
+            global.members[0].as_ref().unwrap().topology,
+            global.members[1].as_ref().unwrap().topology,
+        );
+        assert_ne!(
+            global.members[0].as_ref().unwrap().topology,
+            global.members[2].as_ref().unwrap().topology,
+        );
+    }
+
+    #[test]
+    fn global_hopcroft_shares_equivalent_nonliteral_topologies() {
+        let make_repeat = |bytes: &[u8]| Expr::Repeat {
+            expr: Box::new(Expr::U8Class(U8Set::from_bytes(bytes))),
+            min: 1,
+            max: Some(4),
+        };
+        let expressions = vec![make_repeat(b"abc"), make_repeat(b"xyz")];
+        let tokenizer = tokenizer_for_exprs(expressions.clone());
+        let active = vec![true; expressions.len()];
+        let global = GenericPartitionAnalysis::build(&tokenizer, punctuation(), &active);
+        assert!(global.failures.iter().all(Option::is_none));
+        assert_eq!(
+            global.members[0].as_ref().unwrap().topology,
+            global.members[1].as_ref().unwrap().topology,
+        );
     }
 }
