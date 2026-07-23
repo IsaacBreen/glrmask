@@ -188,6 +188,24 @@ fn count_complement_subgroups(missing: u64, valid_mask: u64) -> (u32, u32, u32) 
 }
 
 impl Constraint {
+    /// Return the direct-dynamic vocabulary, materializing it only when a
+    /// dynamic mask is actually requested. Static constraints with complete
+    /// possible-matches tables never pay this cost; deferred-PM constraints
+    /// pay it on their first exact fallback instead of during compile/load.
+    pub(crate) fn dynamic_mask_vocab_for_runtime(&self) -> &DynamicMaskVocab {
+        if self.dynamic_mask_vocab.is_initialized() {
+            return &self.dynamic_mask_vocab;
+        }
+        self.lazy_dynamic_mask_vocab.get_or_init(|| {
+            let mut vocab = self.dynamic_mask_vocab.clone();
+            let _ = vocab.materialize_pending_source();
+            if !vocab.is_initialized() {
+                vocab = self.build_dynamic_mask_vocab();
+            }
+            vocab
+        })
+    }
+
     fn build_dynamic_mask_vocab(&self) -> DynamicMaskVocab {
         let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
@@ -326,7 +344,7 @@ impl Constraint {
             })
             .unwrap_or(false);
         if prebuild_dynamic_continuations {
-            self.dynamic_mask_vocab
+            self.dynamic_mask_vocab_for_runtime()
                 .prebuild_continuation_partitions(&self.tokenizer, self.mask_len());
         }
         let continuation_ms = started_at
@@ -734,12 +752,13 @@ impl Constraint {
         // independent cache builders so the direct sparse weight-cache branch
         // observes the same default mapping as the historical serial path.
         self.final_mask_mapping = FinalMaskMapping::default();
-        let mut pending_dynamic_mask_vocab = std::mem::take(&mut self.dynamic_mask_vocab);
+        // Static cache finalization never constructs the direct-dynamic
+        // vocabulary. Deferred possible-match fallback materializes it lazily
+        // on the first state that actually requires a dynamic mask.
+        let dynamic_vocab_reused = false;
+        let dynamic_vocab_ms = 0.0;
         let primary_started_at = profile.then(std::time::Instant::now);
         let (
-            dynamic_mask_vocab,
-            dynamic_vocab_reused,
-            dynamic_vocab_ms,
             internal_token_buf_masks,
             internal_token_buf_masks_ms,
             tokenizer_fast_transitions,
@@ -751,14 +770,6 @@ impl Constraint {
             prebuilt_weight_caches,
             prebuilt_weight_sparse_ms,
         ) = if rayon::current_num_threads() == 1 {
-            let dynamic_vocab_started_at = profile.then(std::time::Instant::now);
-            let dynamic_vocab_reused = pending_dynamic_mask_vocab.materialize_pending_source();
-            if !pending_dynamic_mask_vocab.is_initialized() {
-                pending_dynamic_mask_vocab = self.build_dynamic_mask_vocab();
-            }
-            let dynamic_vocab_ms = dynamic_vocab_started_at
-                .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-
             let started = profile.then(std::time::Instant::now);
             let internal_token_buf_masks = self.compute_buf_masks();
             let internal_token_buf_masks_ms =
@@ -787,9 +798,6 @@ impl Constraint {
             let dwa_fast_transitions_ms =
                 started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
             (
-                pending_dynamic_mask_vocab,
-                dynamic_vocab_reused,
-                dynamic_vocab_ms,
                 internal_token_buf_masks,
                 internal_token_buf_masks_ms,
                 tokenizer_fast_transitions,
@@ -803,20 +811,10 @@ impl Constraint {
             )
         } else {
             let (
-                ((dynamic_mask_vocab, dynamic_vocab_reused, dynamic_vocab_ms), ((tokenizer_fast_transitions, tokenizer_fast_transitions_ms), (fast_transitions, dwa_fast_transitions_ms))),
+                ((tokenizer_fast_transitions, tokenizer_fast_transitions_ms), (fast_transitions, dwa_fast_transitions_ms)),
                 (((internal_token_buf_masks, internal_token_buf_masks_ms), ((dense_mask_words, dense_masks), dense_token_masks_ms)), (prebuilt_weight_caches, prebuilt_weight_sparse_ms)),
             ) = rayon::join(
                 || {
-                    let build_dynamic_vocab = || {
-                        let started = profile.then(std::time::Instant::now);
-                        let dynamic_vocab_reused = pending_dynamic_mask_vocab.materialize_pending_source();
-                        if !pending_dynamic_mask_vocab.is_initialized() {
-                            pending_dynamic_mask_vocab = self.build_dynamic_mask_vocab();
-                        }
-                        let dynamic_vocab_ms = started
-                            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-                        (pending_dynamic_mask_vocab, dynamic_vocab_reused, dynamic_vocab_ms)
-                    };
                     let build_tokenizer_fast_transitions = || {
                         let started = profile.then(std::time::Instant::now);
                         let result = self.compute_tokenizer_fast_transitions();
@@ -831,10 +829,7 @@ impl Constraint {
                             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
                         (result, ms)
                     };
-                    rayon::join(
-                        build_dynamic_vocab,
-                        || rayon::join(build_tokenizer_fast_transitions, build_dwa_fast_transitions),
-                    )
+                    rayon::join(build_tokenizer_fast_transitions, build_dwa_fast_transitions)
                 },
                 || {
                     let started = profile.then(std::time::Instant::now);
@@ -864,9 +859,6 @@ impl Constraint {
                 },
             );
             (
-                dynamic_mask_vocab,
-                dynamic_vocab_reused,
-                dynamic_vocab_ms,
                 internal_token_buf_masks,
                 internal_token_buf_masks_ms,
                 tokenizer_fast_transitions,
@@ -881,7 +873,6 @@ impl Constraint {
         };
         let primary_ms = primary_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-        self.dynamic_mask_vocab = dynamic_mask_vocab;
         let continuation_partitions_started_at = profile.then(std::time::Instant::now);
         let prebuild_dynamic_continuations = std::env::var("GLRMASK_PREBUILD_DYNAMIC_CONTINUATION_PARTITIONS")
             .map(|value| {
@@ -1067,7 +1058,7 @@ impl Constraint {
                 self.direct_sparse_weight_token_sets.len(),
             );
             eprintln!(
-                "[glrmask/profile][runtime_finalize] guarded_shift_ms={:.3} dynamic_mask_vocab_ms={:.3} dynamic_mask_vocab_reused={} continuation_partitions_ms={:.3} internal_token_buf_masks_ms={:.3} tokenizer_fast_transitions_ms={:.3} dense_token_masks_ms={:.3} dwa_fast_transitions_ms={:.3} primary_ms={:.3} word_block_masks_ms={:.3} quad_block_masks_ms={:.3} byte_block_masks_ms={:.3} block_masks_ms={:.3} derived_masks_ms={:.3} seed_dense_ms={:.3} total_ms={:.3}",
+                "[glrmask/profile][runtime_finalize] guarded_shift_ms={:.3} dynamic_mask_vocab_ms={:.3} dynamic_mask_vocab_reused={} continuation_partitions_ms={:.3} internal_token_buf_masks_ms={:.3} tokenizer_fast_transitions_ms={:.3} dense_token_masks_ms={:.3} dwa_fast_transitions_ms={:.3} primary_ms={:.3} word_block_masks_ms={:.3} quad_word_block_masks_ms={:.3} byte_block_masks_ms={:.3} block_masks_ms={:.3} derived_masks_ms={:.3} seed_dense_ms={:.3} total_ms={:.3}",
                 guarded_shift_ms,
                 dynamic_vocab_ms,
                 dynamic_vocab_reused,
@@ -1089,11 +1080,40 @@ impl Constraint {
     }
 
     fn compute_tokenizer_fast_transitions(&self) -> FastTokenizerTransitions {
-        let build = |state| self.tokenizer.transition_row(state);
-        if rayon::current_num_threads() == 1 {
-            (0..self.tokenizer.num_states()).map(build).collect()
+        let num_states = self.tokenizer.num_states();
+        let has_compressed =
+            (0..num_states).any(|state| self.tokenizer.has_compressed_transition_state(state));
+        if !has_compressed {
+            let build = |state| self.tokenizer.transition_row(state);
+            let rows = if rayon::current_num_threads() == 1 {
+                (0..num_states).map(build).collect()
+            } else {
+                (0..num_states).into_par_iter().map(build).collect()
+            };
+            return FastTokenizerTransitions::Dense(rows);
+        }
+
+        let dense_states = (0..num_states)
+            .filter(|&state| !self.tokenizer.has_compressed_transition_state(state))
+            .collect::<Vec<_>>();
+        let dense_rows = if rayon::current_num_threads() == 1 {
+            dense_states
+                .iter()
+                .map(|&state| self.tokenizer.transition_row(state))
+                .collect::<Vec<_>>()
         } else {
-            (0..self.tokenizer.num_states()).into_par_iter().map(build).collect()
+            dense_states
+                .par_iter()
+                .map(|&state| self.tokenizer.transition_row(state))
+                .collect::<Vec<_>>()
+        };
+        let mut state_to_dense_row = vec![u32::MAX; num_states as usize];
+        for (row, &state) in dense_states.iter().enumerate() {
+            state_to_dense_row[state as usize] = row as u32;
+        }
+        FastTokenizerTransitions::Hybrid {
+            state_to_dense_row,
+            dense_rows,
         }
     }
 

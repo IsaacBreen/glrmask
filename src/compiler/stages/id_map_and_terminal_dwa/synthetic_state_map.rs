@@ -32,9 +32,197 @@ pub(crate) struct CertifiedFullToSynthesizedStateMap {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct CertifiedVocabularyExactStateCandidates {
+    primary: Vec<u32>,
+    candidates_by_full_state: Vec<Arc<[u32]>>,
+}
+
+impl CertifiedVocabularyExactStateCandidates {
+    pub(crate) fn primary(&self) -> &[u32] {
+        &self.primary
+    }
+
+    pub(crate) fn visit_candidates(
+        &self,
+        full_state: u32,
+        mut visit: impl FnMut(u32) -> bool,
+    ) -> bool {
+        self.candidates_by_full_state[full_state as usize]
+            .iter()
+            .copied()
+            .any(&mut visit)
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct SynthesizedTerminalExpressions {
     pub(crate) expressions: Vec<Expr>,
     pub(crate) changed_terminals: Vec<u32>,
+}
+
+pub(crate) struct MaterializedActiveTokenizer {
+    pub(crate) tokenizer: Tokenizer,
+    pub(crate) full_to_active: CertifiedFullToSynthesizedStateMap,
+    pub(crate) build_ms: f64,
+}
+
+/// Turn an exact active-language state quotient into the tokenizer actually
+/// consumed by an L1/L2P branch. Previously the quotient was only threaded as
+/// an initial ID map, leaving downstream token replay and profile construction
+/// on the full raw tokenizer. Materialization removes that hidden raw-state
+/// cost while retaining an explicit lift back to the source coordinate.
+pub(crate) fn materialize_active_tokenizer(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    active_terminals: &[bool],
+    mut state_map: ManyToOneIdMap,
+) -> Option<MaterializedActiveTokenizer> {
+    if state_map.original_to_internal.len() != tokenizer.num_states() as usize
+        || state_map.num_internal_ids() >= tokenizer.num_states()
+    {
+        return None;
+    }
+    let quotient_states = state_map.num_internal_ids() as usize;
+    let started_at = std::time::Instant::now();
+    let statistic = max_length::cached_statistic(vocab);
+
+    let (compact, full_to_synthesized) = if tokenizer.has_epsilon_transitions() {
+        // NFA state equivalence is defined over epsilon-closed configurations,
+        // not raw physical edges. Materialize that exact powerset coordinate,
+        // seeded by the already-computed active-language quotient, instead of
+        // attempting an invalid raw-edge quotient.
+        let view = super::l2p::equivalence_analysis::state_equivalence::nfa::build_relevant_powerset_view(
+            tokenizer,
+            statistic.relevant_bytes(),
+            Some(active_terminals),
+            Some(&state_map),
+        );
+        let finalizers = view
+            .states
+            .iter()
+            .map(|state| state.finalizers.clone())
+            .collect::<Vec<_>>();
+        let futures = view
+            .states
+            .iter()
+            .map(|state| state.possible_future_group_ids.clone())
+            .collect::<Vec<_>>();
+        let (compact, old_to_new) = tokenizer.materialize_deterministic_view(
+            view.start_state,
+            &finalizers,
+            &futures,
+            &view.edge_offsets,
+            &view.edges,
+            active_terminals,
+        )?;
+        let full_to_synthesized = view
+            .raw_start_to_view
+            .iter()
+            .map(|&view_state| {
+                old_to_new
+                    .get(view_state as usize)
+                    .copied()
+                    .filter(|&state| state != u32::MAX)
+            })
+            .collect::<Option<Vec<_>>>()?;
+        (compact, full_to_synthesized)
+    } else {
+        let start = tokenizer.start_state();
+        state_map.isolate_original(start);
+        state_map.reorder_internal_by_representative_key(|representative| {
+            (representative != start, representative)
+        });
+        if state_map.original_to_internal[start as usize] != 0 {
+            return None;
+        }
+        let compact = tokenizer.materialize_active_quotient(
+            &state_map.original_to_internal,
+            &state_map.representative_original_ids,
+            active_terminals,
+            statistic.relevant_bytes(),
+        )?;
+        (compact, state_map.original_to_internal)
+    };
+    let source_states = tokenizer.num_states() as usize;
+    let compact_states = compact.num_states() as usize;
+    if compact_states >= source_states
+        || source_states.saturating_sub(compact_states) < 1_024
+        || compact_states.saturating_mul(10) > source_states.saturating_mul(9)
+        // Epsilon-view materialization may expand an exact quotient back into
+        // many powerset states. Downstream equivalence can consume the quotient
+        // directly, so a large expansion is negative work: it costs a build
+        // here and increases the later state-token product. Retain near-size
+        // materializations, which remove raw replay overhead, but fall back to
+        // the exact initial state map when the deterministic coordinate grows
+        // by more than 25 percent.
+        || compact_states.saturating_mul(4) > quotient_states.saturating_mul(5)
+    {
+        return None;
+    }
+    let build_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+    Some(MaterializedActiveTokenizer {
+        tokenizer: compact,
+        full_to_active: CertifiedFullToSynthesizedStateMap {
+            full_to_synthesized,
+        },
+        build_ms,
+    })
+}
+
+pub(crate) fn profile_dispatch_component_activity(
+    tokenizer: &Tokenizer,
+    active_terminals: &[bool],
+    branch_label: &str,
+) {
+    if std::env::var_os("GLRMASK_PROFILE_INACTIVE_COMPONENTS").is_none() {
+        return;
+    }
+    let Some(components) = tokenizer.disjoint_dispatch_components() else {
+        eprintln!(
+            "[glrmask/profile][dispatch_component_activity] branch={} available=false",
+            branch_label,
+        );
+        return;
+    };
+    let active_terminal_ids = active_terminals
+        .iter()
+        .enumerate()
+        .filter_map(|(terminal, &active)| active.then_some(terminal as u32))
+        .collect::<Vec<_>>();
+    eprintln!(
+        "[glrmask/profile][dispatch_component_activity] branch={} available=true components={} active_terminal_count={} active_terminal_ids={:?}",
+        branch_label,
+        components.len(),
+        active_terminal_ids.len(),
+        active_terminal_ids,
+    );
+    for (component, states) in components.iter().enumerate() {
+        let mut observed = std::collections::BTreeSet::<u32>::new();
+        for &state in states {
+            observed.extend(tokenizer.matched_terminals_iter(state));
+            observed.extend(tokenizer.possible_future_terminals_iter(state));
+        }
+        let observed = observed.into_iter().collect::<Vec<_>>();
+        let active_observed = observed
+            .iter()
+            .copied()
+            .filter(|&terminal| {
+                active_terminals
+                    .get(terminal as usize)
+                    .copied()
+                    .unwrap_or(false)
+            })
+            .collect::<Vec<_>>();
+        eprintln!(
+            "[glrmask/profile][dispatch_component_activity_component] branch={} component={} states={} observed_terminals={:?} active_observed_terminals={:?} active={}",
+            branch_label,
+            component,
+            states.len(),
+            observed,
+            active_observed,
+            !active_observed.is_empty(),
+        );
+    }
 }
 
 /// Collapse every closed dispatch component that can never observe an active
@@ -1475,12 +1663,12 @@ impl CertifiedFullToSynthesizedStateMap {
     }
 }
 
-fn certify_vocabulary_exact_state_map(
+pub(crate) fn certify_vocabulary_exact_state_candidates(
     full: &Tokenizer,
     synthesized: &Tokenizer,
     vocab: &Vocab,
     active_terminals: Option<&[bool]>,
-) -> Option<CertifiedFullToSynthesizedStateMap> {
+) -> Option<CertifiedVocabularyExactStateCandidates> {
     if full.has_epsilon_transitions() || synthesized.has_epsilon_transitions() {
         return None;
     }
@@ -1534,7 +1722,26 @@ fn certify_vocabulary_exact_state_map(
 
     let synthesized_start = union.right_offset as usize;
     let synthesized_end = synthesized_start + synthesized.num_states() as usize;
-    let mut full_to_synthesized = Vec::with_capacity(full.num_states() as usize);
+    let mut synthesized_candidates_by_representative =
+        FxHashMap::<usize, Vec<u32>>::default();
+    for (synthesized_state, &representative) in representatives[..full_position_start]
+        .iter()
+        .enumerate()
+    {
+        synthesized_candidates_by_representative
+            .entry(representative)
+            .or_default()
+            .push(synthesized_state as u32);
+    }
+    let synthesized_candidates_by_representative = synthesized_candidates_by_representative
+        .into_iter()
+        .map(|(representative, candidates)| {
+            (representative, Arc::<[u32]>::from(candidates.into_boxed_slice()))
+        })
+        .collect::<FxHashMap<_, _>>();
+
+    let mut primary = Vec::with_capacity(full.num_states() as usize);
+    let mut candidates_by_full_state = Vec::with_capacity(full.num_states() as usize);
     for &representative in &representatives[full_position_start..] {
         if representative < synthesized_start || representative >= synthesized_end {
             if profile {
@@ -1548,20 +1755,51 @@ fn certify_vocabulary_exact_state_map(
             }
             return None;
         }
-        full_to_synthesized.push((representative - synthesized_start) as u32);
+        let candidates = Arc::clone(synthesized_candidates_by_representative.get(&representative)?);
+        primary.push(*candidates.first()?);
+        candidates_by_full_state.push(candidates);
     }
 
     if profile {
+        let flexible_states = candidates_by_full_state
+            .iter()
+            .filter(|candidates| candidates.len() > 1)
+            .count();
+        let max_candidates = candidates_by_full_state
+            .iter()
+            .map(|candidates| candidates.len())
+            .max()
+            .unwrap_or(0);
         eprintln!(
-            "[glrmask/profile][tokenizer] vocabulary_certification_accepted full_states={} synthesized_states={} tokens={} elapsed_ms={:.3}",
+            "[glrmask/profile][tokenizer] vocabulary_certification_accepted full_states={} synthesized_states={} tokens={} flexible_states={} max_candidates={} elapsed_ms={:.3}",
             full.num_states(),
             synthesized.num_states(),
             tokens.len(),
+            flexible_states,
+            max_candidates,
             started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
         );
     }
+    Some(CertifiedVocabularyExactStateCandidates {
+        primary,
+        candidates_by_full_state,
+    })
+}
+
+pub(crate) fn certify_vocabulary_exact_state_map(
+    full: &Tokenizer,
+    synthesized: &Tokenizer,
+    vocab: &Vocab,
+    active_terminals: Option<&[bool]>,
+) -> Option<CertifiedFullToSynthesizedStateMap> {
+    let certified = certify_vocabulary_exact_state_candidates(
+        full,
+        synthesized,
+        vocab,
+        active_terminals,
+    )?;
     Some(CertifiedFullToSynthesizedStateMap {
-        full_to_synthesized,
+        full_to_synthesized: certified.primary,
     })
 }
 

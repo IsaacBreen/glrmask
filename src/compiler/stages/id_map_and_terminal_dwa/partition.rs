@@ -23,6 +23,153 @@ use crate::ds::bitset::BitSet;
 use crate::grammar::flat::TerminalID;
 use crate::Vocab;
 
+use super::build_branch_active_state_map;
+
+fn structural_branch_tokenizer_selected(
+    branch_label: &str,
+    vocab_tokens: usize,
+    active_terminals: usize,
+    source_states: usize,
+) -> bool {
+    if let Ok(value) = std::env::var("GLRMASK_STRUCTURAL_BRANCH_TOKENIZER") {
+        let value = value.trim();
+        if value.is_empty() || value == "0" || value.eq_ignore_ascii_case("false") {
+            return false;
+        }
+        return std::env::var("GLRMASK_STRUCTURAL_BRANCH_TOKENIZER_FILTER")
+            .map(|filter| {
+                filter
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|item| !item.is_empty())
+                    .any(|item| branch_label.contains(item))
+            })
+            .unwrap_or(true);
+    }
+
+    // Automatic strategy gate, based on branch structure rather than schema
+    // identity. The structural-token partition's tiny L1 family becomes almost
+    // free after projection. The mixed-token partition's L2P family benefits
+    // only in the medium active-terminal / medium tokenizer regime; very small
+    // active families retain stronger token canonicalization on the raw path,
+    // while very large tokenizers make active refinement itself dominant.
+    match branch_label {
+        "p0.l1" => {
+            active_terminals <= 4 && vocab_tokens >= 2_000 && source_states >= 5_000
+        }
+        // A medium mixed-token L1 family with a substantial active terminal
+        // set is dominated by repeated whole-token analysis on the raw lexer.
+        // Its exact active-language quotient is both much smaller and remains
+        // close in size after deterministic materialization, so downstream
+        // replay amortizes the refinement cost decisively. Keep the gate on
+        // structural work ranges rather than a corpus/schema identity.
+        _ if branch_label.ends_with(".l1")
+            && (128..=224).contains(&active_terminals)
+            && (8_000..=30_000).contains(&vocab_tokens)
+            && (10_000..=24_000).contains(&source_states) =>
+        {
+            true
+        }
+        _ => false,
+    }
+}
+
+fn branch_active_state_map_selected(
+    branch_label: &str,
+    vocab_tokens: usize,
+    active_terminals: usize,
+    source_states: usize,
+) -> bool {
+    // This medium L2P regime benefits strongly from the exact active-language
+    // quotient, but its epsilon powerset tokenizer expands well beyond that
+    // quotient and makes downstream token replay slower. Request the map only;
+    // tokenizer materialization remains governed independently above.
+    branch_label == "p1.l2p"
+        && (48..=128).contains(&active_terminals)
+        && (8_000..=30_000).contains(&vocab_tokens)
+        && (10_000..=24_000).contains(&source_states)
+}
+
+fn inactive_component_branch_state_map_selected(branch_label: &str) -> bool {
+    let enabled = std::env::var("GLRMASK_INACTIVE_COMPONENT_BRANCH_STATE_MAP")
+        .map(|value| {
+            let value = value.trim();
+            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false);
+    if !enabled {
+        return false;
+    }
+    std::env::var("GLRMASK_INACTIVE_COMPONENT_BRANCH_STATE_MAP_FILTER")
+        .map(|filter| {
+            filter
+                .split(',')
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .any(|item| branch_label.contains(item))
+        })
+        .unwrap_or(true)
+}
+
+fn inactive_component_branch_state_map(
+    tokenizer: &Tokenizer,
+    active_terminals: &[bool],
+    inherited: Option<&ManyToOneIdMap>,
+    branch_label: &str,
+) -> Option<(ManyToOneIdMap, f64)> {
+    if !inactive_component_branch_state_map_selected(branch_label) {
+        return None;
+    }
+    let started_at = Instant::now();
+    super::synthetic_state_map::profile_dispatch_component_activity(
+        tokenizer,
+        active_terminals,
+        branch_label,
+    );
+    let map = super::synthetic_state_map::inactive_dispatch_component_state_map(
+        tokenizer,
+        active_terminals,
+    )?;
+    if inherited.is_some_and(|inherited| {
+        map.num_internal_ids() >= inherited.num_internal_ids()
+    }) {
+        return None;
+    }
+    let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][inactive_component_branch_state_map] branch={} source_states={} inherited_reps={} structural_reps={} build_ms={:.3}",
+            branch_label,
+            tokenizer.num_states(),
+            inherited.map_or(tokenizer.num_states(), ManyToOneIdMap::num_internal_ids),
+            map.num_internal_ids(),
+            elapsed_ms,
+        );
+    }
+    Some((map, elapsed_ms))
+}
+
+fn materialize_branch_active_tokenizer_selected(branch_label: &str) -> bool {
+    let enabled = std::env::var("GLRMASK_MATERIALIZE_BRANCH_ACTIVE_TOKENIZER")
+        .map(|value| {
+            let value = value.trim();
+            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false);
+    if !enabled {
+        return false;
+    }
+    std::env::var("GLRMASK_MATERIALIZE_BRANCH_ACTIVE_TOKENIZER_FILTER")
+        .map(|filter| {
+            filter
+                .split(',')
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .any(|item| branch_label.contains(item))
+        })
+        .unwrap_or(true)
+}
+
 fn split_l2p_vocab_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -203,22 +350,117 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
         || {
             if has_l1 {
                 let started_at = Instant::now();
-                let result = super::l1::build_l1_id_map_and_terminal_dwa(
-                    partition_label,
+                let branch_label = format!("{partition_label}.l1");
+                let active_terminal_count = l1_mask.iter().filter(|&&active| active).count();
+                let source_states = initial_state_map
+                    .map(ManyToOneIdMap::num_internal_ids)
+                    .unwrap_or_else(|| tokenizer.num_states()) as usize;
+                let materialization_requested = structural_branch_tokenizer_selected(
+                    &branch_label,
+                    vocab.len(),
+                    active_terminal_count,
+                    source_states,
+                ) || materialize_branch_active_tokenizer_selected(&branch_label);
+                let state_map_requested = materialization_requested
+                    || branch_active_state_map_selected(
+                        &branch_label,
+                        vocab.len(),
+                        active_terminal_count,
+                        source_states,
+                    );
+                let branch_state_map = inactive_component_branch_state_map(
                     tokenizer,
-                    vocab,
-                    terminal_coloring,
-                    use_terminal_coloring,
-                    ignore_terminal,
-                    grammar,
                     &l1_mask,
-                    flat_trans,
-                    l1_transitions_by_byte,
                     initial_state_map,
-                    None,
-                    shared_l1_token_trie.as_deref(),
-                    None,
-                );
+                    &branch_label,
+                )
+                .or_else(|| {
+                    build_branch_active_state_map(
+                        tokenizer,
+                        vocab,
+                        &l1_mask,
+                        initial_state_map,
+                        &branch_label,
+                        state_map_requested,
+                    )
+                });
+                let materialized = materialization_requested
+                    .then(|| {
+                        branch_state_map.as_ref().and_then(|(map, _)| {
+                            super::synthetic_state_map::materialize_active_tokenizer(
+                                tokenizer,
+                                vocab,
+                                &l1_mask,
+                                map.clone(),
+                            )
+                        })
+                    })
+                    .flatten();
+                let mut result = if let Some(materialized) = materialized.as_ref() {
+                    let branch_flat_trans: Arc<[u32]> =
+                        Arc::from(super::l1::build_flat_transition_table(&materialized.tokenizer));
+                    let mut result = super::l1::build_l1_id_map_and_terminal_dwa(
+                        partition_label,
+                        &materialized.tokenizer,
+                        vocab,
+                        terminal_coloring,
+                        use_terminal_coloring,
+                        ignore_terminal,
+                        grammar,
+                        &l1_mask,
+                        &branch_flat_trans,
+                        None,
+                        None,
+                        None,
+                        shared_l1_token_trie.as_deref(),
+                        None,
+                    );
+                    if let Some(part) = result.as_mut() {
+                        part.id_map.tokenizer_states = materialized
+                            .full_to_active
+                            .lift_internal_tsid_map(&part.id_map.tokenizer_states)
+                            .expect("verified active-tokenizer lift must cover every source state");
+                        part.profile.id_map_ms += materialized.build_ms;
+                    }
+                    result
+                } else {
+                    let branch_initial_state_map = branch_state_map
+                        .as_ref()
+                        .map(|(map, _)| map)
+                        .or(initial_state_map);
+                    super::l1::build_l1_id_map_and_terminal_dwa(
+                        partition_label,
+                        tokenizer,
+                        vocab,
+                        terminal_coloring,
+                        use_terminal_coloring,
+                        ignore_terminal,
+                        grammar,
+                        &l1_mask,
+                        flat_trans,
+                        l1_transitions_by_byte,
+                        branch_initial_state_map,
+                        None,
+                        shared_l1_token_trie.as_deref(),
+                        None,
+                    )
+                };
+                if let (Some(part), Some((_, map_ms))) =
+                    (result.as_mut(), branch_state_map.as_ref())
+                {
+                    part.profile.id_map_ms += *map_ms;
+                }
+                if compile_profile_enabled() {
+                    eprintln!(
+                        "[glrmask/profile][branch_active_tokenizer] branch={}.l1 path={} selected={} source_states={} compact_states={} materialize_ms={:.3}",
+                        partition_label,
+                        if materialized.is_some() { "active_quotient" } else { "none" },
+                        materialized.is_some(),
+                        tokenizer.num_states(),
+                        materialized.as_ref().map_or(tokenizer.num_states(), |value| value.tokenizer.num_states()),
+                        materialized.as_ref().map_or(0.0, |value| value.build_ms),
+                    );
+                }
                 (result, started_at.elapsed().as_secs_f64() * 1000.0)
             } else {
                 (None, 0.0)
@@ -279,30 +521,136 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                                     );
                                 }
                             }
-                            let result = super::l2p::build_l2p_id_map_and_terminal_dwa(
-                                partition_label,
+                            let branch_label = format!("{partition_label}.l2p");
+                            let active_terminal_count =
+                                l2p_mask.iter().filter(|&&active| active).count();
+                            let source_states = initial_state_map
+                                .map(ManyToOneIdMap::num_internal_ids)
+                                .unwrap_or_else(|| tokenizer.num_states()) as usize;
+                            let materialization_requested = structural_branch_tokenizer_selected(
+                                &branch_label,
+                                boundary_vocab.len(),
+                                active_terminal_count,
+                                source_states,
+                            ) || materialize_branch_active_tokenizer_selected(&branch_label);
+                            let state_map_requested = materialization_requested
+                                || branch_active_state_map_selected(
+                                    &branch_label,
+                                    boundary_vocab.len(),
+                                    active_terminal_count,
+                                    source_states,
+                                );
+                            let branch_state_map = inactive_component_branch_state_map(
                                 tokenizer,
-                                &boundary_vocab,
-                                terminal_coloring,
-                                use_terminal_coloring,
-                                ignore_terminal,
-                                grammar,
-                                always_allowed_follows,
                                 &l2p_mask,
-                                disallowed_follows,
-                                Some(token_path_disallowed_follows.as_ref()),
-                                Some(normalized_token_path_disallowed_follows.as_ref()),
-                                shared_vocab_dfa_cache,
-                                shared_original_vocab_dfa_cache,
-                                shared_original_vocab_analysis_dfa_cache,
-                                shared_transition_cache,
-                                shared_ti_output_cache,
-                                        // All L2P work keeps raw lexer-state coordinates; equivalence
-                                        // analysis verifies flat-table compatibility before using it.
-                                Some(flat_trans),
-                                shared_l1_token_trie.as_deref(),
                                 initial_state_map,
-                            );
+                                &branch_label,
+                            )
+                            .or_else(|| {
+                                build_branch_active_state_map(
+                                    tokenizer,
+                                    &boundary_vocab,
+                                    &l2p_mask,
+                                    initial_state_map,
+                                    &branch_label,
+                                    state_map_requested,
+                                )
+                            });
+                            let materialized = materialization_requested
+                                .then(|| {
+                                    branch_state_map.as_ref().and_then(|(map, _)| {
+                                        super::synthetic_state_map::materialize_active_tokenizer(
+                                            tokenizer,
+                                            &boundary_vocab,
+                                            &l2p_mask,
+                                            map.clone(),
+                                        )
+                                    })
+                                })
+                                .flatten();
+                            let mut result = if let Some(materialized) = materialized.as_ref() {
+                                let branch_flat_trans: Arc<[u32]> = Arc::from(
+                                    super::l1::build_flat_transition_table(&materialized.tokenizer),
+                                );
+                                let local_vocab_dfa_cache = super::l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache::new();
+                                let local_original_vocab_dfa_cache = super::l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache::new();
+                                let local_original_vocab_analysis_dfa_cache = super::l2p::equivalence_analysis::vocab::fast::SharedVocabAnalysisDfaCache::default();
+                                let local_transition_cache = std::sync::OnceLock::new();
+                                let local_ti_output_cache = super::l2p::SharedTiTokenizerOutputCache::new();
+                                let mut result = super::l2p::build_l2p_id_map_and_terminal_dwa(
+                                    partition_label,
+                                    &materialized.tokenizer,
+                                    &boundary_vocab,
+                                    terminal_coloring,
+                                    use_terminal_coloring,
+                                    ignore_terminal,
+                                    grammar,
+                                    always_allowed_follows,
+                                    &l2p_mask,
+                                    disallowed_follows,
+                                    Some(token_path_disallowed_follows.as_ref()),
+                                    Some(normalized_token_path_disallowed_follows.as_ref()),
+                                    Some(&local_vocab_dfa_cache),
+                                    Some(&local_original_vocab_dfa_cache),
+                                    Some(&local_original_vocab_analysis_dfa_cache),
+                                    Some(&local_transition_cache),
+                                    Some(&local_ti_output_cache),
+                                    Some(&branch_flat_trans),
+                                    shared_l1_token_trie.as_deref(),
+                                    None,
+                                );
+                                if let Some(part) = result.as_mut() {
+                                    part.id_map.tokenizer_states = materialized
+                                        .full_to_active
+                                        .lift_internal_tsid_map(&part.id_map.tokenizer_states)
+                                        .expect("verified active-tokenizer lift must cover every source state");
+                                    part.profile.id_map_ms += materialized.build_ms;
+                                }
+                                result
+                            } else {
+                                let branch_initial_state_map = branch_state_map
+                                    .as_ref()
+                                    .map(|(map, _)| map)
+                                    .or(initial_state_map);
+                                super::l2p::build_l2p_id_map_and_terminal_dwa(
+                                    partition_label,
+                                    tokenizer,
+                                    &boundary_vocab,
+                                    terminal_coloring,
+                                    use_terminal_coloring,
+                                    ignore_terminal,
+                                    grammar,
+                                    always_allowed_follows,
+                                    &l2p_mask,
+                                    disallowed_follows,
+                                    Some(token_path_disallowed_follows.as_ref()),
+                                    Some(normalized_token_path_disallowed_follows.as_ref()),
+                                    shared_vocab_dfa_cache,
+                                    shared_original_vocab_dfa_cache,
+                                    shared_original_vocab_analysis_dfa_cache,
+                                    shared_transition_cache,
+                                    shared_ti_output_cache,
+                                    Some(flat_trans),
+                                    shared_l1_token_trie.as_deref(),
+                                    branch_initial_state_map,
+                                )
+                            };
+                            if let (Some(part), Some((_, map_ms))) =
+                                (result.as_mut(), branch_state_map.as_ref())
+                            {
+                                part.profile.id_map_ms += *map_ms;
+                            }
+                            if compile_profile_enabled() {
+                                eprintln!(
+                                    "[glrmask/profile][branch_active_tokenizer] branch={}.l2p path={} selected={} source_states={} compact_states={} materialize_ms={:.3}",
+                                    partition_label,
+                                    if materialized.is_some() { "active_quotient" } else { "none" },
+                                    materialized.is_some(),
+                                    tokenizer.num_states(),
+                                    materialized.as_ref().map_or(tokenizer.num_states(), |value| value.tokenizer.num_states()),
+                                    materialized.as_ref().map_or(0.0, |value| value.build_ms),
+                                );
+                            }
                             (result, started_at.elapsed().as_secs_f64() * 1000.0)
                         }
                     },

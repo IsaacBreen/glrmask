@@ -224,8 +224,11 @@ impl<'a> DynamicNfaScanCache<'a> {
         let closed_targets = {
             let mut targets = Vec::<u32>::new();
             for &state in self.configs[config_index].iter() {
-                let target = self.constraint.tokenizer_fast_transitions[state as usize]
-                    [byte as usize];
+                let target = self.constraint.tokenizer_fast_transitions.transition(
+                    &self.constraint.tokenizer,
+                    state,
+                    byte,
+                );
                 if target != u32::MAX {
                     self.check_growth(targets.len(), self.epsilon_closures[target as usize].len())?;
                     targets.extend_from_slice(&self.epsilon_closures[target as usize]);
@@ -734,7 +737,7 @@ fn mark_subtree_tokens(
 ) {
     for &canonical_token_id in trie.subtree_tokens(node) {
         let token_ids = constraint
-            .dynamic_mask_vocab
+            .dynamic_mask_vocab_for_runtime()
             .token_ids(canonical_token_id)
             .expect("dynamic vocabulary trie node lacks token ids");
         for &token_id in token_ids {
@@ -874,7 +877,7 @@ fn fill_mask_dynamic_impl(
             Ok(())
         }
     };
-    let vocab = &state.constraint.dynamic_mask_vocab;
+    let vocab = state.constraint.dynamic_mask_vocab_for_runtime();
     let profile = std::env::var_os("GLRMASK_PROFILE_DYNAMIC_MASK").is_some();
     let total_started_at = profile.then(std::time::Instant::now);
     let key_started_at = profile.then(std::time::Instant::now);
