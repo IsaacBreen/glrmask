@@ -4860,7 +4860,7 @@ mod shared_base_tests {
         };
         let tokens: Vec<&[u8]> = vec![
             b"a", b"A", b"aa", b"Aa", b"ax", b"Ax", b"ay", b"Ay", b"b", b"bx",
-            b"by", b"p", b"q", b"pp", b"qq", b"c", b"d", b"ax",
+            b"by", b"p", b"q", b"pp", b"qq", b"c", b"d", b"ax", b"x", b"x",
         ];
         let states = (0..view.dfa().states.len()).collect::<Vec<_>>();
         let byte_classes = compute_byte_classes(view.dfa());
@@ -4905,6 +4905,10 @@ mod shared_base_tests {
         assert!(
             factored.iter().any(|class| class.contains(&11) && class.contains(&12)),
             "the final authority pass must merge equivalent tokens from different leading classes",
+        );
+        assert!(
+            factored.iter().any(|class| class.contains(&18) && class.contains(&19)),
+            "a first transition into a finalizing dead-end state must be preserved",
         );
     }
 
