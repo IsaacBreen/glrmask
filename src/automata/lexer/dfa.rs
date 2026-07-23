@@ -423,7 +423,7 @@ impl DFA {
         offset
     }
 
-    pub(super) fn has_epsilon_transitions(&self) -> bool {
+    pub(crate) fn has_epsilon_transitions(&self) -> bool {
         self.states
             .iter()
             .any(|state| !state.epsilon_transitions.is_empty())
@@ -634,10 +634,17 @@ impl DFA {
         }
     }
 
-    pub(super) fn step(&self, state: u32, byte: u8) -> Option<u32> {
+    pub(crate) fn step(&self, state: u32, byte: u8) -> Option<u32> {
         self.states
             .get(state as usize)
             .and_then(|state| state.transitions.get(byte).copied())
+    }
+
+    pub(crate) fn transitions(&self, state: u32) -> impl Iterator<Item = (u8, u32)> + '_ {
+        self.states[state as usize]
+            .transitions
+            .iter()
+            .map(|(byte, &target)| (byte, target))
     }
 
     pub(super) fn get_u8set(&self, state: u32) -> U8Set {
@@ -658,11 +665,11 @@ impl DFA {
         &self.group_id_to_u8set[group_id as usize]
     }
 
-    pub(super) fn finalizers(&self, state: u32) -> &BitSet {
+    pub(crate) fn finalizers(&self, state: u32) -> &BitSet {
         &self.states[state as usize].finalizers
     }
 
-    pub(super) fn possible_future_group_ids(&self, state: u32) -> &BitSet {
+    pub(crate) fn possible_future_group_ids(&self, state: u32) -> &BitSet {
         &self.states[state as usize].possible_future_group_ids
     }
 

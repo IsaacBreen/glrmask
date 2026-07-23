@@ -721,6 +721,45 @@ fn hopcroft_refine_sparse(initial_classes: &[u32], edges: &RawRelevantEdges) -> 
     partition
 }
 
+/// Exact Hopcroft refinement for a caller-supplied partial deterministic graph.
+///
+/// `offsets`, `bytes`, and `targets` use the same CSR layout as
+/// `RawRelevantEdges`. Missing byte edges are one implicit dead target. This
+/// narrow crate-internal entry point lets definition-level singleton analyses
+/// reuse the production refinement implementation without constructing a
+/// physical combined lexer.
+pub(crate) fn hopcroft_refine_sparse_edges(
+    initial_classes: &[u32],
+    offsets: Vec<u32>,
+    bytes: Vec<u8>,
+    targets: Vec<u32>,
+) -> Option<Vec<u32>> {
+    if offsets.len() != initial_classes.len() + 1
+        || bytes.len() != targets.len()
+        || offsets.first().copied() != Some(0)
+        || offsets.last().copied().map(|value| value as usize) != Some(bytes.len())
+        || targets
+            .iter()
+            .any(|&target| target as usize >= initial_classes.len())
+    {
+        return None;
+    }
+    if offsets
+        .windows(2)
+        .any(|window| window[0] > window[1] || window[1] as usize > bytes.len())
+    {
+        return None;
+    }
+    Some(hopcroft_refine_sparse(
+        initial_classes,
+        &RawRelevantEdges {
+            offsets,
+            bytes,
+            targets,
+        },
+    ))
+}
+
 fn map_from_raw_classes(classes: &[u32]) -> ManyToOneIdMap {
     let class_count = classes.iter().copied().max().map_or(0usize, |id| id as usize + 1);
     let mut internal_to_originals = vec![Vec::new(); class_count];

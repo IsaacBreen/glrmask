@@ -9,14 +9,20 @@
 //! This module deliberately does not alter the production tokenizer or remove
 //! terminal labels. It measures scanner-topology sharing only.
 
-use std::collections::BTreeMap;
+use std::cell::Cell;
+use std::collections::{BTreeMap, HashMap};
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use crate::automata::lexer::compile::compile_terminal_expr_dfa;
 use crate::automata::lexer::tokenizer::Tokenizer;
-use crate::automata::lexer::Lexer;
+use crate::automata::lexer::{DFA, Lexer};
 use crate::automata::regex::Expr;
 use crate::ds::u8set::U8Set;
 use crate::Vocab;
+
+use super::l2p::equivalence_analysis::state_equivalence::restricted_observation::hopcroft_refine_sparse_edges;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum SkeletonAtom {
@@ -150,6 +156,387 @@ struct PartitionAnalysis {
     certification_failures: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct RestrictedStateSignature {
+    finalizes_terminal: bool,
+    terminal_remains_possible: bool,
+    transitions: Vec<(u8, u32)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct CanonicalRestrictedQuotient {
+    root_class: u32,
+    states: Vec<RestrictedStateSignature>,
+}
+
+#[derive(Debug, Clone)]
+struct RestrictedQuotient {
+    canonical: CanonicalRestrictedQuotient,
+    source_to_quotient: Vec<u32>,
+}
+
+impl RestrictedQuotient {
+    fn build(dfa: &DFA, alphabet: U8Set) -> Result<Self, &'static str> {
+        if dfa.has_epsilon_transitions() {
+            return Err("epsilon_singleton_dfa");
+        }
+        if dfa.num_states() == 0 {
+            return Err("empty_singleton_dfa");
+        }
+
+        let observations = (0..dfa.num_states() as u32)
+            .map(|state| {
+                (
+                    dfa.finalizers(state).contains(0),
+                    dfa.possible_future_group_ids(state).contains(0),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut classes = canonical_class_ids(&observations);
+
+        loop {
+            let signatures = (0..dfa.num_states() as u32)
+                .map(|state| RestrictedStateSignature {
+                    finalizes_terminal: observations[state as usize].0,
+                    terminal_remains_possible: observations[state as usize].1,
+                    transitions: dfa
+                        .transitions(state)
+                        .filter(|(byte, _)| alphabet.contains(*byte))
+                        .map(|(byte, target)| (byte, classes[target as usize]))
+                        .collect(),
+                })
+                .collect::<Vec<_>>();
+            let next_classes = canonical_class_ids(&signatures);
+            if next_classes == classes {
+                let mut states = signatures;
+                states.sort_unstable();
+                states.dedup();
+                return Ok(Self {
+                    canonical: CanonicalRestrictedQuotient {
+                        root_class: classes[0],
+                        states,
+                    },
+                    source_to_quotient: classes,
+                });
+            }
+            classes = next_classes;
+        }
+    }
+
+    fn certify(&self, dfa: &DFA, alphabet: &[u8]) -> Result<(), &'static str> {
+        if self.source_to_quotient.len() != dfa.num_states() {
+            return Err("generic_source_map_does_not_cover_every_residual");
+        }
+        if self.source_to_quotient.first().copied() != Some(self.canonical.root_class) {
+            return Err("generic_root_mapping_differs");
+        }
+
+        for state in 0..dfa.num_states() as u32 {
+            let quotient_state = self.source_to_quotient[state as usize] as usize;
+            let Some(signature) = self.canonical.states.get(quotient_state) else {
+                return Err("generic_source_map_target_out_of_range");
+            };
+            if signature.finalizes_terminal != dfa.finalizers(state).contains(0) {
+                return Err("generic_finalizer_observation_differs");
+            }
+            if signature.terminal_remains_possible
+                != dfa.possible_future_group_ids(state).contains(0)
+            {
+                return Err("generic_future_observation_differs");
+            }
+            for &byte in alphabet {
+                let mapped_source_target = dfa
+                    .step(state, byte)
+                    .map(|target| self.source_to_quotient[target as usize]);
+                let quotient_target = signature
+                    .transitions
+                    .binary_search_by_key(&byte, |&(transition_byte, _)| transition_byte)
+                    .ok()
+                    .map(|index| signature.transitions[index].1);
+                if quotient_target != mapped_source_target {
+                    return Err("generic_restricted_transition_homomorphism_differs");
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn canonical_class_ids<T: Ord + Clone>(values: &[T]) -> Vec<u32> {
+    let mut unique = values.to_vec();
+    unique.sort_unstable();
+    unique.dedup();
+    values
+        .iter()
+        .map(|value| unique.binary_search(value).expect("canonical value") as u32)
+        .collect()
+}
+
+type SingletonDfaCell = Arc<OnceLock<Arc<DFA>>>;
+
+fn singleton_dfa_cache() -> &'static Mutex<HashMap<Expr, SingletonDfaCell>> {
+    static CACHE: OnceLock<Mutex<HashMap<Expr, SingletonDfaCell>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cached_singleton_dfa(expr: &Expr) -> (Arc<DFA>, bool, Duration) {
+    let cell = {
+        let mut cache = singleton_dfa_cache()
+            .lock()
+            .expect("definition singleton-DFA cache poisoned");
+        Arc::clone(
+            cache
+                .entry(expr.clone())
+                .or_insert_with(|| Arc::new(OnceLock::new())),
+        )
+    };
+    let compiled_here = Cell::new(false);
+    let started_at = Instant::now();
+    let dfa = Arc::clone(cell.get_or_init(|| {
+        compiled_here.set(true);
+        Arc::new(compile_terminal_expr_dfa(expr))
+    }));
+    (dfa, compiled_here.get(), started_at.elapsed())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct GlobalTopologyKey {
+    root_class: u32,
+    classes: Vec<u32>,
+}
+
+#[derive(Debug)]
+struct GenericMember {
+    terminal: usize,
+    example: String,
+    source_states: usize,
+    topology: GlobalTopologyKey,
+    source_to_quotient: Vec<u32>,
+}
+
+#[derive(Debug)]
+struct SourceMachine {
+    terminal: usize,
+    example: String,
+    dfa: Arc<DFA>,
+    offset: usize,
+}
+
+#[derive(Debug)]
+struct GenericPartitionAnalysis {
+    members: Vec<Option<GenericMember>>,
+    failures: Vec<Option<&'static str>>,
+    singleton_machine_time: Duration,
+    quotient_time: Duration,
+    certification_time: Duration,
+    singleton_compiles: usize,
+    singleton_cache_reuses: usize,
+    global_states: usize,
+    relevant_edges: usize,
+    refinement_memory_bytes_estimate: usize,
+}
+
+impl GenericPartitionAnalysis {
+    fn build(tokenizer: &Tokenizer, alphabet: U8Set, active_mask: &[bool]) -> Self {
+        let alphabet_bytes = alphabet.iter().collect::<Vec<_>>();
+        let terminal_count = tokenizer.num_terminals() as usize;
+        let mut members = (0..terminal_count).map(|_| None).collect::<Vec<_>>();
+        let mut failures = vec![None; terminal_count];
+        let mut machines = Vec::<SourceMachine>::new();
+        let mut singleton_machine_time = Duration::ZERO;
+        let mut singleton_compiles = 0usize;
+        let mut singleton_cache_reuses = 0usize;
+        let mut global_states = 0usize;
+
+        for terminal in 0..terminal_count {
+            if !active_mask.get(terminal).copied().unwrap_or(false) {
+                continue;
+            }
+            let Some(expr) = tokenizer.terminal_expr(terminal as u32) else {
+                failures[terminal] = Some("missing_definition");
+                continue;
+            };
+
+            let singleton_result = catch_unwind(AssertUnwindSafe(|| cached_singleton_dfa(expr)));
+            let Ok((dfa, compiled_here, source_time)) = singleton_result else {
+                failures[terminal] = Some("singleton_compile_panic");
+                continue;
+            };
+            singleton_machine_time += source_time;
+            if compiled_here {
+                singleton_compiles += 1;
+            } else {
+                singleton_cache_reuses += 1;
+            }
+            if dfa.has_epsilon_transitions() {
+                failures[terminal] = Some("epsilon_singleton_dfa");
+                continue;
+            }
+            if dfa.num_states() == 0 {
+                failures[terminal] = Some("empty_singleton_dfa");
+                continue;
+            }
+
+            let mut literal = Vec::new();
+            let example = if fixed_literal_bytes(expr, &mut literal) {
+                escaped_bytes(&literal)
+            } else {
+                format!("<{}>", expr_shape(expr))
+            };
+            machines.push(SourceMachine {
+                terminal,
+                example,
+                dfa,
+                offset: global_states,
+            });
+            global_states += machines.last().expect("source machine").dfa.num_states();
+        }
+
+        let mut observations = Vec::<(bool, bool)>::with_capacity(global_states);
+        let mut state_machine = Vec::<usize>::with_capacity(global_states);
+        let mut offsets = Vec::<u32>::with_capacity(global_states + 1);
+        let mut edge_bytes = Vec::<u8>::new();
+        let mut edge_targets = Vec::<u32>::new();
+        offsets.push(0);
+        for (machine_index, machine) in machines.iter().enumerate() {
+            for local_state in 0..machine.dfa.num_states() as u32 {
+                observations.push((
+                    machine.dfa.finalizers(local_state).contains(0),
+                    machine
+                        .dfa
+                        .possible_future_group_ids(local_state)
+                        .contains(0),
+                ));
+                state_machine.push(machine_index);
+                for (byte, target) in machine.dfa.transitions(local_state) {
+                    if alphabet.contains(byte) {
+                        edge_bytes.push(byte);
+                        edge_targets.push((machine.offset + target as usize) as u32);
+                    }
+                }
+                offsets.push(edge_bytes.len() as u32);
+            }
+        }
+
+        let initial_classes = canonical_class_ids(&observations);
+        let relevant_edges = edge_bytes.len();
+        let refinement_memory_bytes_estimate = offsets
+            .len()
+            .saturating_mul(std::mem::size_of::<u32>())
+            .saturating_add(edge_bytes.len().saturating_mul(std::mem::size_of::<u8>()))
+            .saturating_add(edge_targets.len().saturating_mul(std::mem::size_of::<u32>()))
+            .saturating_add(
+                initial_classes
+                    .len()
+                    .saturating_mul(std::mem::size_of::<u32>()),
+            )
+            .saturating_add(
+                state_machine
+                    .len()
+                    .saturating_mul(std::mem::size_of::<usize>()),
+            );
+        let quotient_started_at = Instant::now();
+        let global_classes = hopcroft_refine_sparse_edges(
+            &initial_classes,
+            offsets,
+            edge_bytes,
+            edge_targets,
+        );
+        let quotient_time = quotient_started_at.elapsed();
+
+        let Some(global_classes) = global_classes else {
+            for machine in &machines {
+                failures[machine.terminal] = Some("invalid_global_restricted_graph");
+            }
+            return Self {
+                members,
+                failures,
+                singleton_machine_time,
+                quotient_time,
+                certification_time: Duration::ZERO,
+                singleton_compiles,
+                singleton_cache_reuses,
+                global_states,
+                relevant_edges,
+                refinement_memory_bytes_estimate,
+            };
+        };
+
+        let certification_started_at = Instant::now();
+        let class_count = global_classes
+            .iter()
+            .copied()
+            .max()
+            .map_or(0usize, |class| class as usize + 1);
+        let mut representatives = vec![usize::MAX; class_count];
+        for (state, &class) in global_classes.iter().enumerate() {
+            representatives[class as usize] = representatives[class as usize].min(state);
+        }
+        let global_step_class = |state: usize, byte: u8| {
+            let machine = &machines[state_machine[state]];
+            let local_state = (state - machine.offset) as u32;
+            machine
+                .dfa
+                .step(local_state, byte)
+                .map(|target| global_classes[machine.offset + target as usize])
+        };
+        let mut certification_failure = None;
+        'certify: for (state, &class) in global_classes.iter().enumerate() {
+            let representative = representatives[class as usize];
+            if representative == usize::MAX || observations[state] != observations[representative] {
+                certification_failure = Some("global_observation_certificate_failed");
+                break;
+            }
+            for &byte in &alphabet_bytes {
+                if global_step_class(state, byte) != global_step_class(representative, byte) {
+                    certification_failure = Some("global_transition_certificate_failed");
+                    break 'certify;
+                }
+            }
+        }
+        let certification_time = certification_started_at.elapsed();
+
+        if let Some(reason) = certification_failure {
+            for machine in &machines {
+                failures[machine.terminal] = Some(reason);
+            }
+        } else {
+            for machine in &machines {
+                let start = machine.offset;
+                let end = start + machine.dfa.num_states();
+                let source_to_quotient = global_classes[start..end].to_vec();
+                let mut classes = source_to_quotient.clone();
+                classes.sort_unstable();
+                classes.dedup();
+                members[machine.terminal] = Some(GenericMember {
+                    terminal: machine.terminal,
+                    example: machine.example.clone(),
+                    source_states: machine.dfa.num_states(),
+                    topology: GlobalTopologyKey {
+                        root_class: source_to_quotient[0],
+                        classes,
+                    },
+                    source_to_quotient,
+                });
+            }
+        }
+
+        Self {
+            members,
+            failures,
+            singleton_machine_time,
+            quotient_time,
+            certification_time,
+            singleton_compiles,
+            singleton_cache_reuses,
+            global_states,
+            relevant_edges,
+            refinement_memory_bytes_estimate,
+        }
+    }
+}
+
 fn fixed_literal_bytes(expr: &Expr, output: &mut Vec<u8>) -> bool {
     match expr {
         Expr::U8Seq(bytes) => {
@@ -257,7 +644,7 @@ fn report_enabled(partition_label: &str) -> bool {
                 .split(',')
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
-                .any(|value| partition_label == value || partition_label.contains(value))
+                .any(|value| partition_label == value)
         })
         .unwrap_or(true)
 }
@@ -392,6 +779,126 @@ fn report_scope(
     }
 }
 
+fn report_generic_scope(
+    partition_label: &str,
+    scope: &str,
+    source_states: usize,
+    active_mask: &[bool],
+    analysis: &GenericPartitionAnalysis,
+) {
+    let active_terminals = active_mask.iter().filter(|&&active| active).count();
+    let mut classes = BTreeMap::<GlobalTopologyKey, Vec<&GenericMember>>::new();
+    let mut failures = BTreeMap::<&'static str, usize>::new();
+    let mut source_singleton_states = 0usize;
+    let mut quotient_states_before_sharing = 0usize;
+    let mut map_entries = 0usize;
+
+    for (terminal, &active) in active_mask.iter().enumerate() {
+        if !active {
+            continue;
+        }
+        if let Some(member) = analysis.members.get(terminal).and_then(Option::as_ref) {
+            source_singleton_states += member.source_states;
+            quotient_states_before_sharing += member.topology.classes.len();
+            map_entries += member.source_to_quotient.len();
+            classes
+                .entry(member.topology.clone())
+                .or_default()
+                .push(member);
+        } else {
+            *failures
+                .entry(
+                    analysis
+                        .failures
+                        .get(terminal)
+                        .and_then(|failure| *failure)
+                        .unwrap_or("missing_generic_result"),
+                )
+                .or_default() += 1;
+        }
+    }
+
+    let handled_terminals = classes.values().map(Vec::len).sum::<usize>();
+    let quotient_states_after_sharing = classes
+        .keys()
+        .map(|quotient| quotient.classes.len())
+        .sum::<usize>();
+    let coordinate_with_dispatch = quotient_states_after_sharing.saturating_add(1);
+    let singleton_reduction_pct = if source_singleton_states == 0 {
+        0.0
+    } else {
+        100.0
+            * source_singleton_states
+                .saturating_sub(quotient_states_after_sharing)
+                as f64
+            / source_singleton_states as f64
+    };
+    let source_coordinate_reduction_pct = if source_states == 0 {
+        0.0
+    } else {
+        100.0 * source_states.saturating_sub(coordinate_with_dispatch) as f64
+            / source_states as f64
+    };
+    let failures_text = failures
+        .iter()
+        .map(|(reason, count)| format!("{reason}:{count}"))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    eprintln!(
+        "[glrmask/profile][definition_quotient_scope] partition={} scope={} source_states={} active_terminals={} handled_terminals={} failures={} quotient_classes={} source_singleton_states={} quotient_states_before_sharing={} quotient_states_after_sharing={} coordinate_with_dispatch={} singleton_reduction_pct={:.2} source_coordinate_reduction_pct={:.2} map_entries={} map_bytes_estimate={} failure_reasons={}",
+        partition_label,
+        scope,
+        source_states,
+        active_terminals,
+        handled_terminals,
+        active_terminals.saturating_sub(handled_terminals),
+        classes.len(),
+        source_singleton_states,
+        quotient_states_before_sharing,
+        quotient_states_after_sharing,
+        coordinate_with_dispatch,
+        singleton_reduction_pct,
+        source_coordinate_reduction_pct,
+        map_entries,
+        map_entries.saturating_mul(std::mem::size_of::<u32>()),
+        failures_text,
+    );
+
+    let mut largest = classes.into_iter().collect::<Vec<_>>();
+    largest.sort_by(|(left_quotient, left_members), (right_quotient, right_members)| {
+        right_members
+            .len()
+            .cmp(&left_members.len())
+            .then_with(|| left_quotient.cmp(right_quotient))
+    });
+    for (rank, (quotient, members)) in largest.into_iter().take(8).enumerate() {
+        let terminal_ids = members
+            .iter()
+            .take(12)
+            .map(|member| member.terminal.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let examples = members
+            .iter()
+            .take(3)
+            .map(|member| member.example.as_str())
+            .collect::<Vec<_>>()
+            .join("|");
+        eprintln!(
+            "[glrmask/profile][definition_quotient_class] partition={} scope={} rank={} members={} quotient_states={} root_class={} terminal_ids={} examples={}",
+            partition_label,
+            scope,
+            rank + 1,
+            members.len(),
+            quotient.classes.len(),
+            quotient.root_class,
+            terminal_ids,
+            examples,
+        );
+    }
+}
+
 pub(crate) fn report_partition(
     partition_label: &str,
     tokenizer: &Tokenizer,
@@ -457,6 +964,60 @@ pub(crate) fn report_partition(
         "[glrmask/profile][definition_skeleton_total] partition={} total_ms={:.3}",
         partition_label,
         total_started_at.elapsed().as_secs_f64() * 1000.0,
+    );
+
+    let generic_started_at = Instant::now();
+    let generic = GenericPartitionAnalysis::build(tokenizer, analysis.alphabet, &partition_mask);
+    let generic_active = partition_mask.iter().filter(|&&active| active).count();
+    let generic_handled = partition_mask
+        .iter()
+        .enumerate()
+        .filter(|&(terminal, active)| {
+            *active && generic.members.get(terminal).is_some_and(Option::is_some)
+        })
+        .count();
+    let generic_failures = generic_active.saturating_sub(generic_handled);
+    eprintln!(
+        "[glrmask/profile][definition_quotient_partition] partition={} terminal_count={} active_terminals={} handled_terminals={} failures={} singleton_compiles={} singleton_cache_reuses={} global_states={} relevant_edges={} refinement_memory_bytes_estimate={} singleton_machine_ms={:.3} quotient_ms={:.3} certification_ms={:.3}",
+        partition_label,
+        generic.members.len(),
+        generic_active,
+        generic_handled,
+        generic_failures,
+        generic.singleton_compiles,
+        generic.singleton_cache_reuses,
+        generic.global_states,
+        generic.relevant_edges,
+        generic.refinement_memory_bytes_estimate,
+        generic.singleton_machine_time.as_secs_f64() * 1000.0,
+        generic.quotient_time.as_secs_f64() * 1000.0,
+        generic.certification_time.as_secs_f64() * 1000.0,
+    );
+    report_generic_scope(
+        partition_label,
+        "partition",
+        source_states,
+        &partition_mask,
+        &generic,
+    );
+    report_generic_scope(
+        partition_label,
+        "l1",
+        source_states,
+        l1_mask,
+        &generic,
+    );
+    report_generic_scope(
+        partition_label,
+        "l2p",
+        source_states,
+        l2p_mask,
+        &generic,
+    );
+    eprintln!(
+        "[glrmask/profile][definition_quotient_total] partition={} total_ms={:.3}",
+        partition_label,
+        generic_started_at.elapsed().as_secs_f64() * 1000.0,
     );
 }
 
@@ -579,5 +1140,78 @@ mod tests {
             .iter()
             .all(|atom| matches!(atom, SkeletonAtom::Visible(_))));
         skeleton.certify(&source, alphabet).unwrap();
+    }
+
+    #[test]
+    fn generic_restricted_quotient_matches_equal_literal_skeletons() {
+        let alphabet = punctuation().iter().collect::<Vec<_>>();
+        let foo_dfa = compile_terminal_expr_dfa(&Expr::U8Seq(b"\"foo\": ".to_vec()));
+        let bar_dfa = compile_terminal_expr_dfa(&Expr::U8Seq(b"\"bar\": ".to_vec()));
+        let foo = RestrictedQuotient::build(&foo_dfa, punctuation()).unwrap();
+        let bar = RestrictedQuotient::build(&bar_dfa, punctuation()).unwrap();
+        foo.certify(&foo_dfa, &alphabet).unwrap();
+        bar.certify(&bar_dfa, &alphabet).unwrap();
+        assert_eq!(foo.canonical, bar.canonical);
+    }
+
+    #[test]
+    fn generic_restricted_quotient_certifies_nonliteral_repeat() {
+        let alphabet = punctuation().iter().collect::<Vec<_>>();
+        let expr = Expr::Repeat {
+            expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"abc"))),
+            min: 1,
+            max: Some(4),
+        };
+        let dfa = compile_terminal_expr_dfa(&expr);
+        let quotient = RestrictedQuotient::build(&dfa, punctuation()).unwrap();
+        quotient.certify(&dfa, &alphabet).unwrap();
+        assert_eq!(quotient.source_to_quotient.len(), dfa.num_states());
+        assert!(quotient.canonical.states.len() <= dfa.num_states());
+    }
+
+    #[test]
+    fn generic_full_alphabet_quotient_needs_no_synthetic_byte() {
+        let alphabet = U8Set::all().iter().collect::<Vec<_>>();
+        let expr = Expr::Choice(vec![
+            Expr::U8Seq(b"foo".to_vec()),
+            Expr::U8Seq(b"bar".to_vec()),
+        ]);
+        let dfa = compile_terminal_expr_dfa(&expr);
+        let quotient = RestrictedQuotient::build(&dfa, U8Set::all()).unwrap();
+        quotient.certify(&dfa, &alphabet).unwrap();
+    }
+
+    #[test]
+    fn generic_singleton_compiler_lowers_nested_exclude() {
+        let alphabet_set = punctuation();
+        let alphabet = alphabet_set.iter().collect::<Vec<_>>();
+        let expr = Expr::Seq(vec![
+            Expr::U8Seq(b"\"".to_vec()),
+            Expr::Exclude {
+                expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"abc"))),
+                exclude: Box::new(Expr::U8Seq(b"b".to_vec())),
+            },
+            Expr::U8Seq(b"\"".to_vec()),
+        ]);
+        let dfa = compile_terminal_expr_dfa(&expr);
+        let quotient = RestrictedQuotient::build(&dfa, alphabet_set).unwrap();
+        quotient.certify(&dfa, &alphabet).unwrap();
+    }
+
+    #[test]
+    fn generic_singleton_compiler_lowers_nested_intersect() {
+        let alphabet_set = punctuation();
+        let alphabet = alphabet_set.iter().collect::<Vec<_>>();
+        let expr = Expr::Seq(vec![
+            Expr::U8Seq(b"\"".to_vec()),
+            Expr::Intersect {
+                expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"abc"))),
+                intersect: Box::new(Expr::U8Class(U8Set::from_bytes(b"bc"))),
+            },
+            Expr::U8Seq(b"\"".to_vec()),
+        ]);
+        let dfa = compile_terminal_expr_dfa(&expr);
+        let quotient = RestrictedQuotient::build(&dfa, alphabet_set).unwrap();
+        quotient.certify(&dfa, &alphabet).unwrap();
     }
 }

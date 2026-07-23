@@ -4993,6 +4993,16 @@ fn compile_product_component_dfa(expr: &Expr) -> DFA {
     compile_with_plan(build_exclusion_compile_plan(std::slice::from_ref(expr)))
 }
 
+/// Compile one logical terminal definition through the full expression plan.
+///
+/// Unlike `compile_single_expr_dfa`, this lowers nested exclusions and
+/// intersections before NFA/DFA construction. Definition-level analyses must
+/// use this entry point because terminal expressions are not guaranteed to be
+/// primitive product leaves.
+pub(crate) fn compile_terminal_expr_dfa(expr: &Expr) -> DFA {
+    compile_product_component_dfa(expr)
+}
+
 fn compile_product_component_materialized_dfa_with_options(
     expr: &Expr,
     preserve_coordinates: bool,
