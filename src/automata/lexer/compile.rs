@@ -11,7 +11,7 @@ use crate::ds::{bitset::BitSet, u8set::U8Set};
 use crate::Vocab;
 
 use super::ast::Expr;
-use super::tokenizer::{CompressedTransitionSegment, Tokenizer};
+use super::tokenizer::{CompressedTransitionSegment, Lexer, Tokenizer};
 use super::dfa::DFA;
 use super::nfa::NFA;
 
@@ -3897,10 +3897,10 @@ fn combine_lexer_components_under_epsilon_root(
     combined
 }
 
-struct ExtractedDispatchComponent {
-    terminal_ids: Vec<usize>,
-    source_states: Vec<u32>,
-    dfa: DFA,
+pub(crate) struct ExtractedDispatchComponent {
+    pub(crate) terminal_ids: Vec<usize>,
+    pub(crate) source_states: Vec<u32>,
+    pub(crate) dfa: DFA,
 }
 
 pub(crate) struct PrecompiledFurtherSynthesisPairs {
@@ -3969,95 +3969,297 @@ pub(crate) fn precompile_further_synthesis_pairs(
     }))
 }
 
-fn extract_dispatch_components(tokenizer: &Tokenizer) -> Option<Vec<ExtractedDispatchComponent>> {
+fn extract_dispatch_component_from_states(
+    tokenizer: &Tokenizer,
+    root: u32,
+    mut source_states: Vec<u32>,
+) -> Option<ExtractedDispatchComponent> {
+    source_states.sort_unstable();
+    let root_position = source_states.iter().position(|&state| state == root)?;
+    source_states.swap(0, root_position);
+
+    let terminal_ids = tokenizer
+        .dfa
+        .possible_future_group_ids(root)
+        .iter()
+        .collect::<Vec<_>>();
+    if terminal_ids.is_empty() {
+        return None;
+    }
+    let mut local_group_by_terminal = vec![usize::MAX; tokenizer.num_terminals as usize];
+    for (local_group, &terminal) in terminal_ids.iter().enumerate() {
+        *local_group_by_terminal.get_mut(terminal)? = local_group;
+    }
+    let mut local_state_by_source = vec![u32::MAX; tokenizer.dfa.num_states()];
+    for (local_state, &source_state) in source_states.iter().enumerate() {
+        local_state_by_source[source_state as usize] = local_state as u32;
+    }
+
+    let mut dfa = DFA::new(source_states.len());
+    dfa.ensure_group_capacity(terminal_ids.len());
+    for (local_group, &terminal) in terminal_ids.iter().enumerate() {
+        dfa.set_group_u8set(
+            local_group as u32,
+            *tokenizer.dfa.group_id_to_u8set(terminal as u32),
+        );
+    }
+    for (local_state, &source_state) in source_states.iter().enumerate() {
+        let source_dfa_state = tokenizer.dfa.states().get(source_state as usize)?;
+        let transitions = source_dfa_state
+            .transitions
+            .iter()
+            .map(|(byte, &target)| {
+                let target = *local_state_by_source.get(target as usize)?;
+                (target != u32::MAX).then_some((byte, target))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        dfa.set_transitions_from_sorted_entries(local_state as u32, transitions);
+        for &target in &source_dfa_state.epsilon_transitions {
+            let target = *local_state_by_source.get(target as usize)?;
+            if target == u32::MAX {
+                return None;
+            }
+            dfa.add_epsilon_transition(local_state as u32, target);
+        }
+
+        let mut finalizers = BitSet::new(terminal_ids.len());
+        let mut futures = BitSet::new(terminal_ids.len());
+        for terminal in tokenizer.dfa.finalizers(source_state).iter() {
+            let local_group = *local_group_by_terminal.get(terminal)?;
+            if local_group == usize::MAX {
+                return None;
+            }
+            finalizers.set(local_group);
+        }
+        for terminal in tokenizer
+            .dfa
+            .possible_future_group_ids(source_state)
+            .iter()
+        {
+            let local_group = *local_group_by_terminal.get(terminal)?;
+            if local_group == usize::MAX {
+                return None;
+            }
+            futures.set(local_group);
+        }
+        dfa.overwrite_state_metadata(local_state as u32, finalizers, futures);
+    }
+    Some(ExtractedDispatchComponent {
+        terminal_ids,
+        source_states,
+        dfa,
+    })
+}
+
+pub(crate) fn extract_dispatch_components(
+    tokenizer: &Tokenizer,
+) -> Option<Vec<ExtractedDispatchComponent>> {
     let roots = tokenizer.deterministic_dispatch_roots()?;
     let components = tokenizer.disjoint_dispatch_components()?;
     if roots.len() != components.len() {
         return None;
     }
-
     roots
         .iter()
         .copied()
         .zip(components)
-        .map(|(root, mut source_states)| {
-            source_states.sort_unstable();
-            let root_position = source_states.iter().position(|&state| state == root)?;
-            source_states.swap(0, root_position);
+        .map(|(root, source_states)| {
+            extract_dispatch_component_from_states(tokenizer, root, source_states)
+        })
+        .collect()
+}
 
-            let terminal_ids = tokenizer
+/// Extract singleton dispatch components together with externally entered
+/// residual states that were cloned outside the live root-reachable component
+/// graph by protected residual synthesis.
+pub(crate) fn extract_augmented_singleton_dispatch_components(
+    tokenizer: &Tokenizer,
+) -> Option<Vec<ExtractedDispatchComponent>> {
+    let profile = std::env::var_os("GLRMASK_DEFINITION_PHYSICAL_REPORT").is_some();
+    let roots = tokenizer.deterministic_dispatch_roots()?.to_vec();
+    let components = tokenizer.disjoint_dispatch_components()?;
+    if roots.len() != components.len() {
+        return None;
+    }
+    let component_count = components.len();
+    let state_count = tokenizer.dfa.num_states();
+    let mut owner = vec![usize::MAX; state_count];
+    owner[tokenizer.initial_state_id() as usize] = roots.len();
+    let mut terminal_to_singleton_component = vec![usize::MAX; tokenizer.num_terminals as usize];
+    let mut singleton_terminal_by_component = vec![usize::MAX; roots.len()];
+    let mut singleton_components = 0usize;
+    for (component, (&root, states)) in roots.iter().zip(&components).enumerate() {
+        for &state in states {
+            owner[state as usize] = component;
+        }
+        let terminals = tokenizer
+            .dfa
+            .possible_future_group_ids(root)
+            .iter()
+            .collect::<Vec<_>>();
+        if terminals.len() == 1 {
+            terminal_to_singleton_component[terminals[0]] = component;
+            singleton_terminal_by_component[component] = terminals[0];
+            singleton_components += 1;
+        }
+    }
+
+    // Appended protected residuals retain exact final/future terminal metadata.
+    // Use that label as the initial owner, then admit only states whose complete
+    // outgoing graph remains inside the same singleton component.
+    let initially_unowned = owner.iter().filter(|&&owner| owner == usize::MAX).count();
+    let mut label_assigned = 0usize;
+    for state in 0..state_count {
+        if owner[state] != usize::MAX {
+            continue;
+        }
+        let mut terminals = tokenizer.dfa.finalizers(state as u32).iter().collect::<Vec<_>>();
+        terminals.extend(tokenizer.dfa.possible_future_group_ids(state as u32).iter());
+        terminals.sort_unstable();
+        terminals.dedup();
+        if terminals.len() == 1 {
+            let component = terminal_to_singleton_component[terminals[0]];
+            if component != usize::MAX {
+                owner[state] = component;
+                label_assigned += 1;
+            }
+        }
+    }
+    let mut forward_propagated = 0usize;
+    let mut queue = VecDeque::<u32>::new();
+    for state in 0..state_count {
+        if owner[state] < roots.len()
+            && singleton_terminal_by_component[owner[state]] != usize::MAX
+            && !components[owner[state]].contains(&(state as u32))
+        {
+            queue.push_back(state as u32);
+        }
+    }
+    while let Some(state) = queue.pop_front() {
+        let component = owner[state as usize];
+        let terminal = singleton_terminal_by_component[component];
+        for target in tokenizer.dfa.states()[state as usize]
+            .transitions
+            .iter()
+            .map(|(_, &target)| target)
+            .chain(
+                tokenizer.dfa.states()[state as usize]
+                    .epsilon_transitions
+                    .iter()
+                    .copied(),
+            )
+        {
+            let target_slot = &mut owner[target as usize];
+            if *target_slot == component {
+                continue;
+            }
+            if *target_slot != usize::MAX {
+                continue;
+            }
+            let mut target_terminals = tokenizer
+                .dfa
+                .finalizers(target)
+                .iter()
+                .collect::<Vec<_>>();
+            target_terminals.extend(tokenizer.dfa.possible_future_group_ids(target).iter());
+            target_terminals.sort_unstable();
+            target_terminals.dedup();
+            if target_terminals.is_empty()
+                || (target_terminals.len() == 1 && target_terminals[0] == terminal)
+            {
+                *target_slot = component;
+                forward_propagated += 1;
+                queue.push_back(target);
+            }
+        }
+    }
+    let mut propagated = 0usize;
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for state in 0..state_count {
+            if owner[state] != usize::MAX {
+                continue;
+            }
+            let dfa_state = &tokenizer.dfa.states()[state];
+            let mut candidate = usize::MAX;
+            let mut valid = true;
+            for target in dfa_state
+                .transitions
+                .iter()
+                .map(|(_, &target)| target)
+                .chain(dfa_state.epsilon_transitions.iter().copied())
+            {
+                let target_owner = owner[target as usize];
+                if target_owner == usize::MAX || target_owner == roots.len() {
+                    valid = false;
+                    break;
+                }
+                if candidate == usize::MAX {
+                    candidate = target_owner;
+                } else if candidate != target_owner {
+                    valid = false;
+                    break;
+                }
+            }
+            if valid
+                && candidate != usize::MAX
+                && terminal_to_singleton_component.contains(&candidate)
+            {
+                owner[state] = candidate;
+                changed = true;
+                propagated += 1;
+            }
+        }
+    }
+
+    let mut augmented = components;
+    for state in 0..state_count {
+        let component = owner[state];
+        if component < roots.len() && !augmented[component].contains(&(state as u32)) {
+            augmented[component].push(state as u32);
+        }
+    }
+    let remaining_unowned = owner.iter().filter(|&&owner| owner == usize::MAX).count();
+    let mut build_failures = 0usize;
+    let extracted = roots
+        .into_iter()
+        .zip(augmented)
+        .filter_map(|(root, states)| {
+            let terminals = tokenizer
                 .dfa
                 .possible_future_group_ids(root)
                 .iter()
                 .collect::<Vec<_>>();
-            if terminal_ids.is_empty() {
+            if terminals.len() != 1 {
                 return None;
             }
-            let mut local_group_by_terminal = vec![usize::MAX; tokenizer.num_terminals as usize];
-            for (local_group, &terminal) in terminal_ids.iter().enumerate() {
-                *local_group_by_terminal.get_mut(terminal)? = local_group;
-            }
-            let mut local_state_by_source = vec![u32::MAX; tokenizer.dfa.num_states()];
-            for (local_state, &source_state) in source_states.iter().enumerate() {
-                local_state_by_source[source_state as usize] = local_state as u32;
-            }
-
-            let mut dfa = DFA::new(source_states.len());
-            dfa.ensure_group_capacity(terminal_ids.len());
-            for (local_group, &terminal) in terminal_ids.iter().enumerate() {
-                dfa.set_group_u8set(
-                    local_group as u32,
-                    *tokenizer.dfa.group_id_to_u8set(terminal as u32),
-                );
-            }
-            for (local_state, &source_state) in source_states.iter().enumerate() {
-                let source_dfa_state = tokenizer.dfa.states().get(source_state as usize)?;
-                let transitions = source_dfa_state
-                    .transitions
-                    .iter()
-                    .map(|(byte, &target)| {
-                        let target = *local_state_by_source.get(target as usize)?;
-                        (target != u32::MAX).then_some((byte, target))
-                    })
-                    .collect::<Option<Vec<_>>>()?;
-                dfa.set_transitions_from_sorted_entries(local_state as u32, transitions);
-                for &target in &source_dfa_state.epsilon_transitions {
-                    let target = *local_state_by_source.get(target as usize)?;
-                    if target == u32::MAX {
-                        return None;
-                    }
-                    dfa.add_epsilon_transition(local_state as u32, target);
+            match extract_dispatch_component_from_states(tokenizer, root, states) {
+                Some(component) => Some(component),
+                None => {
+                    build_failures += 1;
+                    None
                 }
-
-                let mut finalizers = BitSet::new(terminal_ids.len());
-                let mut futures = BitSet::new(terminal_ids.len());
-                for terminal in tokenizer.dfa.finalizers(source_state).iter() {
-                    let local_group = *local_group_by_terminal.get(terminal)?;
-                    if local_group == usize::MAX {
-                        return None;
-                    }
-                    finalizers.set(local_group);
-                }
-                for terminal in tokenizer
-                    .dfa
-                    .possible_future_group_ids(source_state)
-                    .iter()
-                {
-                    let local_group = *local_group_by_terminal.get(terminal)?;
-                    if local_group == usize::MAX {
-                        return None;
-                    }
-                    futures.set(local_group);
-                }
-                dfa.overwrite_state_metadata(local_state as u32, finalizers, futures);
             }
-            Some(ExtractedDispatchComponent {
-                terminal_ids,
-                source_states,
-                dfa,
-            })
         })
-        .collect()
+        .collect::<Vec<_>>();
+    if profile {
+        eprintln!(
+            "[glrmask/profile][definition_dispatch_augmented] states={} roots={} singleton_components={} initially_unowned={} label_assigned={} forward_propagated={} propagated={} remaining_unowned={} extracted_singletons={} build_failures={} augmented_states={}",
+            state_count,
+            component_count,
+            singleton_components,
+            initially_unowned,
+            label_assigned,
+            forward_propagated,
+            propagated,
+            remaining_unowned,
+            extracted.len(),
+            build_failures,
+            extracted.iter().map(|component| component.source_states.len()).sum::<usize>(),
+        );
+    }
+    Some(extracted)
 }
 
 fn augment_component_from_verified_prefix(

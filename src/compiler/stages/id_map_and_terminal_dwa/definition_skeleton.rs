@@ -15,7 +15,9 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use crate::automata::lexer::compile::compile_terminal_expr_dfa;
+use crate::automata::lexer::compile::{
+    compile_terminal_expr_dfa, extract_augmented_singleton_dispatch_components,
+};
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::lexer::{DFA, Lexer};
 use crate::automata::regex::Expr;
@@ -329,6 +331,7 @@ struct SourceMachine {
 struct GenericPartitionAnalysis {
     members: Vec<Option<GenericMember>>,
     source_dfas: Vec<Option<Arc<DFA>>>,
+    component_source_states: Vec<Option<Arc<[u32]>>>,
     class_observations: Vec<(bool, bool)>,
     class_transitions: Vec<Vec<(u8, u32)>>,
     failures: Vec<Option<&'static str>>,
@@ -347,12 +350,21 @@ impl GenericPartitionAnalysis {
         let terminal_count = tokenizer.num_terminals() as usize;
         let mut members = (0..terminal_count).map(|_| None).collect::<Vec<_>>();
         let mut source_dfas = (0..terminal_count).map(|_| None).collect::<Vec<_>>();
+        let mut component_source_states = (0..terminal_count).map(|_| None).collect::<Vec<_>>();
         let mut failures = vec![None; terminal_count];
         let mut machines = Vec::<SourceMachine>::new();
         let mut singleton_machine_time = Duration::ZERO;
         let mut singleton_compiles = 0usize;
         let mut singleton_cache_reuses = 0usize;
         let mut global_states = 0usize;
+        let mut singleton_components = extract_augmented_singleton_dispatch_components(tokenizer)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|component| {
+                (component.terminal_ids.len() == 1)
+                    .then_some((component.terminal_ids[0], component))
+            })
+            .collect::<HashMap<_, _>>();
 
         for terminal in 0..terminal_count {
             if !active_mask.get(terminal).copied().unwrap_or(false) {
@@ -363,7 +375,17 @@ impl GenericPartitionAnalysis {
                 continue;
             };
 
-            let singleton_result = catch_unwind(AssertUnwindSafe(|| cached_singleton_dfa(expr)));
+            let extracted_component = singleton_components.remove(&terminal);
+            let singleton_result = catch_unwind(AssertUnwindSafe(|| {
+                if let Some(component) = extracted_component {
+                    component_source_states[terminal] = Some(Arc::from(
+                        component.source_states.into_boxed_slice(),
+                    ));
+                    (Arc::new(component.dfa), false, Duration::ZERO)
+                } else {
+                    cached_singleton_dfa(expr)
+                }
+            }));
             let Ok((dfa, compiled_here, source_time)) = singleton_result else {
                 failures[terminal] = Some("singleton_compile_panic");
                 continue;
@@ -458,6 +480,7 @@ impl GenericPartitionAnalysis {
             return Self {
                 members,
                 source_dfas,
+                component_source_states,
                 class_observations: Vec::new(),
                 class_transitions: Vec::new(),
                 failures,
@@ -574,6 +597,7 @@ impl GenericPartitionAnalysis {
         Self {
             members,
             source_dfas,
+            component_source_states,
             class_observations,
             class_transitions,
             failures,
@@ -953,6 +977,28 @@ fn report_physical_definition_coordinate(
         }
 
         let terminal = terminal as u32;
+        if let Some(source_states) = analysis
+            .component_source_states
+            .get(terminal as usize)
+            .and_then(Option::as_ref)
+        {
+            if source_states.len() != singleton.num_states()
+                || source_states
+                    .iter()
+                    .any(|&state| state as usize >= raw_states)
+            {
+                terminal_failures += 1;
+                continue;
+            }
+            for (local_state, &raw_state) in source_states.iter().enumerate() {
+                raw_configurations[raw_state as usize].push((
+                    terminal,
+                    member.source_to_quotient[local_state],
+                ));
+                relation_pairs += 1;
+            }
+            continue;
+        }
         let supports_terminal = |physical_state: u32| {
             epsilon_closures[physical_state as usize]
                 .iter()
@@ -1198,6 +1244,40 @@ fn report_physical_definition_coordinate(
                         .any(|terminal| active_mask.get(terminal).copied().unwrap_or(false)))
         })
         .count();
+    if missing_active_states != 0 {
+        for state in 0..raw_states {
+            if !raw_configurations[state].is_empty() {
+                continue;
+            }
+            let finalizers = tokenizer
+                .matched_terminal_bitset(state as u32)
+                .iter()
+                .filter(|&terminal| active_mask.get(terminal).copied().unwrap_or(false))
+                .collect::<Vec<_>>();
+            let futures = tokenizer
+                .possible_future_terminals(state as u32)
+                .iter()
+                .filter(|&terminal| active_mask.get(terminal).copied().unwrap_or(false))
+                .collect::<Vec<_>>();
+            if finalizers.is_empty() && futures.is_empty() {
+                continue;
+            }
+            let transitions = tokenizer
+                .transitions_from(state as u32)
+                .take(12)
+                .collect::<Vec<_>>();
+            eprintln!(
+                "[glrmask/profile][definition_missing_active_state] partition={} scope={} state={} finalizers={:?} futures={:?} epsilon={:?} transitions={:?}",
+                partition_label,
+                scope,
+                state,
+                finalizers,
+                futures,
+                tokenizer.singleton_epsilon_closure(state as u32),
+                transitions,
+            );
+        }
+    }
     report_virtual_definition_scanner(
         partition_label,
         scope,
