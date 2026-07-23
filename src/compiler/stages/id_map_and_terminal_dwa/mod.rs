@@ -169,9 +169,12 @@ pub(crate) fn build_branch_active_state_map(
         // workloads:
         //   * a very large vocabulary/state product (the existing broad gate);
         //   * a dense L1 terminal family with at least 50M raw state-token
-        //     pairs, provided either the state frontier is large or the
-        //     vocabulary is compact enough that quotient construction does not
-        //     contend with another medium/large token lane.
+        //     pairs and at least 2k tokens, provided either the state frontier
+        //     is large or the vocabulary is compact enough that quotient
+        //     construction does not contend with another medium/large token
+        //     lane. The lower vocabulary bound avoids long-horizon lanes whose
+        //     quotient remains above the fast-projected cutoff and would still
+        //     pay a second exact-equivalence pass.
         //
         // The second clause deliberately excludes the medium-state,
         // medium-vocabulary regime: paired measurements show that adding a
@@ -180,6 +183,7 @@ pub(crate) fn build_branch_active_state_map(
         let work = source_reps.saturating_mul(vocab.len());
         let very_large_profile = vocab.len() >= 50_000 && work >= 300_000_000;
         let dense_protected_profile = active.iter().filter(|&&value| value).count() >= 180
+            && vocab.len() >= 2_000
             && work >= 50_000_000
             && (source_reps >= 40_000 || vocab.len() <= 8_000);
         if !branch_label.ends_with(".l1")
