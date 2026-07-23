@@ -597,7 +597,7 @@ mod lexer_partition_plan_tests {
 
     use super::{
         lexer_partition_ids_with_options, prepare_structural_tokenizer_pair,
-        plan_synthetic_tokenizer_enabled,
+        plan_synthetic_tokenizer_enabled, structural_state_reduction_is_profitable,
     };
     use crate::automata::lexer::Lexer;
     use crate::automata::regex::Expr;
@@ -659,6 +659,13 @@ mod lexer_partition_plan_tests {
         assert_ne!(ids[0], ids[1]);
         assert_ne!(ids[0], ids[2]);
         assert_ne!(ids[1], ids[2]);
+    }
+
+    #[test]
+    fn exceptional_structural_reduction_accepts_bounded_large_compile_coordinate() {
+        assert!(structural_state_reduction_is_profitable(1_437_667, 173_832));
+        assert!(!structural_state_reduction_is_profitable(1_000_000, 250_001));
+        assert!(!structural_state_reduction_is_profitable(1_000_000, 200_000));
     }
 
     #[test]
@@ -926,6 +933,12 @@ fn structural_state_reduction_is_profitable(
     // quotients, so reject large stencils rather than turning an attempted
     // optimization into a multi-second regression.
     const MAX_SYNTHESIZED_COMPILE_STATES: usize = 100_000;
+    // A structurally certified composition can still be the safer compile
+    // coordinate above the ordinary stencil limit when it replaces an exact
+    // tokenizer that is larger by an order of magnitude. Keep this bounded so
+    // large marginal reductions continue to use the mature exact path.
+    const MAX_EXCEPTIONAL_SYNTHESIZED_COMPILE_STATES: usize = 250_000;
+    const EXCEPTIONAL_REDUCTION_FACTOR: usize = 8;
     let is_reduction = synthesized_states < full_states;
     let small_compile_domain =
         is_reduction && synthesized_states <= SMALL_SYNTHESIZED_COMPILE_STATES;
@@ -934,7 +947,10 @@ fn structural_state_reduction_is_profitable(
         && (synthesized_states <= MAX_SYNTHESIZED_COMPILE_STATES
             || std::env::var_os("GLRMASK_ALLOW_LARGE_SYNTHETIC").is_some())
         && synthesized_states.saturating_mul(2) <= full_states;
-    small_compile_domain || substantial_large_reduction
+    let exceptional_structural_reduction = synthesized_states
+        <= MAX_EXCEPTIONAL_SYNTHESIZED_COMPILE_STATES
+        && synthesized_states.saturating_mul(EXCEPTIONAL_REDUCTION_FACTOR) <= full_states;
+    small_compile_domain || substantial_large_reduction || exceptional_structural_reduction
 }
 
 fn plan_synthetic_tokenizer(
@@ -1285,7 +1301,8 @@ fn prepare_structural_tokenizer_pair(
     let relevant_bytes = vocab.relevant_bytes();
 
     let expression_count = full_expressions.len() as u32;
-    let (synthesized_regex, full, full_to_synthesized) = if full_expressions.len() == 1 {
+    let (synthesized_regex, full, full_to_synthesized, effective_synthesized_expressions) =
+        if full_expressions.len() == 1 {
             let pair = compile_terminal_expression_pair_with_structural_map(
                 &full_expressions[0],
                 &synthesized_expressions[0],
@@ -1306,6 +1323,7 @@ fn prepare_structural_tokenizer_pair(
                 pair.synthesized,
                 DeferredRuntimeTokenizer::Ready(full),
                 pair.full_to_synthesized,
+                vec![pair.synthesized_expression],
             )
         } else {
             let labels = grammar
@@ -1329,7 +1347,8 @@ fn prepare_structural_tokenizer_pair(
                 &relevant_bytes,
             )?;
             let full_num_states = pair.full_num_states();
-            let (synthesized, full, full_to_synthesized) = pair.into_parts();
+            let (synthesized, full, full_to_synthesized, effective_synthesized_expressions) =
+                pair.into_parts();
             (
                 synthesized,
                 DeferredRuntimeTokenizer::Partitioned {
@@ -1339,12 +1358,15 @@ fn prepare_structural_tokenizer_pair(
                     num_states: full_num_states,
                 },
                 full_to_synthesized,
+                effective_synthesized_expressions,
             )
         };
 
     let mut synthesized = synthesized_regex.into_tokenizer(
         expression_count,
-        Some(Arc::from(synthesized_expressions.into_boxed_slice())),
+        Some(Arc::from(
+            effective_synthesized_expressions.into_boxed_slice(),
+        )),
     );
     let synthesized_nullable = synthesized.isolate_start_state_and_drain_nullable_terminals();
     if !synthesized_nullable.is_empty() {

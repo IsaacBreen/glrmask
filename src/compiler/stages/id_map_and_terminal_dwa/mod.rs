@@ -136,6 +136,37 @@ fn branch_active_state_map_enabled() -> bool {
         .unwrap_or(true)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutomaticBranchActiveStateMapStrategy {
+    None,
+    VeryLargeProfile,
+    DenseRequiresFastProjection,
+}
+
+fn automatic_branch_active_state_map_strategy(
+    branch_label: &str,
+    vocab_tokens: usize,
+    active_terminals: usize,
+    source_reps: usize,
+) -> AutomaticBranchActiveStateMapStrategy {
+    if !branch_label.ends_with(".l1") {
+        return AutomaticBranchActiveStateMapStrategy::None;
+    }
+    let work = source_reps.saturating_mul(vocab_tokens);
+    if vocab_tokens >= 50_000 && work >= 300_000_000 {
+        return AutomaticBranchActiveStateMapStrategy::VeryLargeProfile;
+    }
+    let dense_protected_profile = active_terminals >= 180
+        && vocab_tokens >= 2_000
+        && work >= 50_000_000
+        && (source_reps >= 40_000 || vocab_tokens <= 8_000);
+    if dense_protected_profile {
+        AutomaticBranchActiveStateMapStrategy::DenseRequiresFastProjection
+    } else {
+        AutomaticBranchActiveStateMapStrategy::None
+    }
+}
+
 pub(crate) fn build_branch_active_state_map(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
@@ -153,6 +184,7 @@ pub(crate) fn build_branch_active_state_map(
     if source_reps <= 1 {
         return None;
     }
+    let mut automatic_dense_requires_fast_projection = false;
     if let Ok(filter) = std::env::var("GLRMASK_BRANCH_ACTIVE_STATE_MAP_FILTER") {
         if !filter
             .split(',')
@@ -163,14 +195,35 @@ pub(crate) fn build_branch_active_state_map(
             return None;
         }
     } else if !force {
-        // Stable active-language refinement has a real fixed cost. The corpus
-        // gate is the large L1 branch where exact whole-token profiles dominate:
-        // 50k+ tokens and at least 300M raw state-token pairs. Branch-tokenizer
-        // materialization can explicitly force this exact refinement for a
-        // separately gated branch.
-        let work = source_reps.saturating_mul(vocab.len());
-        if !branch_label.ends_with(".l1") || vocab.len() < 50_000 || work < 300_000_000 {
-            return None;
+        // Stable active-language refinement has a real fixed cost. Select it
+        // only when exact whole-token state profiling is predictably dominant.
+        //
+        // Two structural regimes amortize the quotient on protected-residual
+        // workloads:
+        //   * a very large vocabulary/state product (the existing broad gate);
+        //   * a dense L1 terminal family with at least 50M raw state-token
+        //     pairs and at least 2k tokens, provided either the state frontier
+        //     is large or the vocabulary is compact enough that quotient
+        //     construction does not contend with another medium/large token
+        //     lane. The lower vocabulary bound avoids long-horizon lanes whose
+        //     quotient remains above the fast-projected cutoff and would still
+        //     pay a second exact-equivalence pass.
+        //
+        // The second clause deliberately excludes the medium-state,
+        // medium-vocabulary regime: paired measurements show that adding a
+        // quotient there shifts the critical path and worsens tail latency even
+        // though its local CPU work falls.
+        match automatic_branch_active_state_map_strategy(
+            branch_label,
+            vocab.len(),
+            active.iter().filter(|&&value| value).count(),
+            source_reps,
+        ) {
+            AutomaticBranchActiveStateMapStrategy::None => return None,
+            AutomaticBranchActiveStateMapStrategy::VeryLargeProfile => {}
+            AutomaticBranchActiveStateMapStrategy::DenseRequiresFastProjection => {
+                automatic_dense_requires_fast_projection = true;
+            }
         }
     }
     let started_at = Instant::now();
@@ -218,10 +271,14 @@ pub(crate) fn build_branch_active_state_map(
     };
     let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
     let reps = state_map.num_internal_ids() as usize;
-    let selected = reps < source_reps && source_reps.saturating_sub(reps) >= 512;
+    let enters_fast_projected_path =
+        reps <= l1::fast_projected_l1_id_map_max_tsids();
+    let selected = reps < source_reps
+        && source_reps.saturating_sub(reps) >= 512
+        && (!automatic_dense_requires_fast_projection || enters_fast_projected_path);
     if compile_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][branch_active_state_map] branch={} mode={} active_terminals={} vocab_tokens={} horizon={} source_reps={} reps={} reduction_pct={:.2} ms={:.3} selected={}",
+            "[glrmask/profile][branch_active_state_map] branch={} mode={} active_terminals={} vocab_tokens={} horizon={} source_reps={} reps={} reduction_pct={:.2} ms={:.3} requires_fast_projected={} enters_fast_projected={} fast_projected_max_tsids={} selected={}",
             branch_label,
             mode_label,
             active.iter().filter(|&&value| value).count(),
@@ -231,6 +288,9 @@ pub(crate) fn build_branch_active_state_map(
             reps,
             100.0 * source_reps.saturating_sub(reps) as f64 / source_reps as f64,
             elapsed_ms,
+            automatic_dense_requires_fast_projection,
+            enters_fast_projected_path,
+            l1::fast_projected_l1_id_map_max_tsids(),
             selected,
         );
     }
@@ -274,8 +334,12 @@ fn build_partition_local_tokenizer(
     let min_local_horizon = std::env::var("GLRMASK_PARTITION_LOCAL_SYNTHESIS_MIN_HORIZON")
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(16);
-    if vocab.len() < 2_000
+        .unwrap_or(8);
+    let min_local_vocab = std::env::var("GLRMASK_PARTITION_LOCAL_SYNTHESIS_MIN_VOCAB")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(2_000);
+    if vocab.len() < min_local_vocab
         || max_token_len < min_local_horizon
         || if allow_half_horizon {
             max_token_len.saturating_mul(2) > plan.global_max_token_len
@@ -450,8 +514,16 @@ fn prepare_partition_local_tokenizer(
             !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
         })
         .unwrap_or(true);
-    if vocab.len() < 2_000
-        || max_token_len < 16
+    let min_local_horizon = std::env::var("GLRMASK_PARTITION_LOCAL_SYNTHESIS_MIN_HORIZON")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(16);
+    let min_local_vocab = std::env::var("GLRMASK_PARTITION_LOCAL_SYNTHESIS_MIN_VOCAB")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(2_000);
+    if vocab.len() < min_local_vocab
+        || max_token_len < min_local_horizon
         || if allow_half_horizon {
             max_token_len.saturating_mul(2) > plan.global_max_token_len
         } else {
@@ -1693,9 +1765,45 @@ pub(crate) fn build_id_map_and_terminal_dwa(
 #[cfg(test)]
 mod tests {
     use super::{
-        should_auto_use_global_max_length,
+        AutomaticBranchActiveStateMapStrategy,
         DEFAULT_GLOBAL_MAX_LENGTH_STABLE_SIGNATURE_CELL_LIMIT,
+        automatic_branch_active_state_map_strategy, should_auto_use_global_max_length,
     };
+
+    #[test]
+    fn branch_active_state_map_auto_gate_selects_only_amortized_l1_regimes() {
+        use AutomaticBranchActiveStateMapStrategy::{
+            DenseRequiresFastProjection, None, VeryLargeProfile,
+        };
+
+        assert_eq!(
+            automatic_branch_active_state_map_strategy("p4.l1", 21_308, 190, 45_180),
+            DenseRequiresFastProjection,
+        );
+        assert_eq!(
+            automatic_branch_active_state_map_strategy("p5.l1", 4_261, 233, 26_624),
+            DenseRequiresFastProjection,
+        );
+        assert_eq!(
+            automatic_branch_active_state_map_strategy("p2.l1", 82_266, 229, 48_002),
+            VeryLargeProfile,
+        );
+
+        // Medium-state/medium-vocabulary work shifts the critical path, while
+        // the small long-horizon lane remains above the fast-projected cutoff.
+        assert_eq!(
+            automatic_branch_active_state_map_strategy("p1.l1", 15_224, 201, 37_079),
+            None,
+        );
+        assert_eq!(
+            automatic_branch_active_state_map_strategy("p6.l1", 630, 192, 97_024),
+            None,
+        );
+        assert_eq!(
+            automatic_branch_active_state_map_strategy("p4.l2p", 17_646, 4, 45_180),
+            None,
+        );
+    }
 
     #[test]
     fn global_max_length_auto_gate_bounds_stable_signature_matrix() {

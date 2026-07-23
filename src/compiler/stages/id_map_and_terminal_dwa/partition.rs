@@ -90,6 +90,65 @@ fn branch_active_state_map_selected(
         && (10_000..=24_000).contains(&source_states)
 }
 
+fn inactive_component_branch_state_map_selected(branch_label: &str) -> bool {
+    let enabled = std::env::var("GLRMASK_INACTIVE_COMPONENT_BRANCH_STATE_MAP")
+        .map(|value| {
+            let value = value.trim();
+            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false);
+    if !enabled {
+        return false;
+    }
+    std::env::var("GLRMASK_INACTIVE_COMPONENT_BRANCH_STATE_MAP_FILTER")
+        .map(|filter| {
+            filter
+                .split(',')
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .any(|item| branch_label.contains(item))
+        })
+        .unwrap_or(true)
+}
+
+fn inactive_component_branch_state_map(
+    tokenizer: &Tokenizer,
+    active_terminals: &[bool],
+    inherited: Option<&ManyToOneIdMap>,
+    branch_label: &str,
+) -> Option<(ManyToOneIdMap, f64)> {
+    if !inactive_component_branch_state_map_selected(branch_label) {
+        return None;
+    }
+    let started_at = Instant::now();
+    super::synthetic_state_map::profile_dispatch_component_activity(
+        tokenizer,
+        active_terminals,
+        branch_label,
+    );
+    let map = super::synthetic_state_map::inactive_dispatch_component_state_map(
+        tokenizer,
+        active_terminals,
+    )?;
+    if inherited.is_some_and(|inherited| {
+        map.num_internal_ids() >= inherited.num_internal_ids()
+    }) {
+        return None;
+    }
+    let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][inactive_component_branch_state_map] branch={} source_states={} inherited_reps={} structural_reps={} build_ms={:.3}",
+            branch_label,
+            tokenizer.num_states(),
+            inherited.map_or(tokenizer.num_states(), ManyToOneIdMap::num_internal_ids),
+            map.num_internal_ids(),
+            elapsed_ms,
+        );
+    }
+    Some((map, elapsed_ms))
+}
+
 fn materialize_branch_active_tokenizer_selected(branch_label: &str) -> bool {
     let enabled = std::env::var("GLRMASK_MATERIALIZE_BRANCH_ACTIVE_TOKENIZER")
         .map(|value| {
@@ -318,14 +377,22 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                         active_terminal_count,
                         source_states,
                     );
-                let branch_state_map = build_branch_active_state_map(
+                let branch_state_map = inactive_component_branch_state_map(
                     tokenizer,
-                    vocab,
                     &l1_mask,
                     initial_state_map,
                     &branch_label,
-                    state_map_requested,
-                );
+                )
+                .or_else(|| {
+                    build_branch_active_state_map(
+                        tokenizer,
+                        vocab,
+                        &l1_mask,
+                        initial_state_map,
+                        &branch_label,
+                        state_map_requested,
+                    )
+                });
                 let materialized = materialization_requested
                     .then(|| {
                         branch_state_map.as_ref().and_then(|(map, _)| {
@@ -482,14 +549,22 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                                     active_terminal_count,
                                     source_states,
                                 );
-                            let branch_state_map = build_branch_active_state_map(
+                            let branch_state_map = inactive_component_branch_state_map(
                                 tokenizer,
-                                &boundary_vocab,
                                 &l2p_mask,
                                 initial_state_map,
                                 &branch_label,
-                                state_map_requested,
-                            );
+                            )
+                            .or_else(|| {
+                                build_branch_active_state_map(
+                                    tokenizer,
+                                    &boundary_vocab,
+                                    &l2p_mask,
+                                    initial_state_map,
+                                    &branch_label,
+                                    state_map_requested,
+                                )
+                            });
                             let materialized = materialization_requested
                                 .then(|| {
                                     branch_state_map.as_ref().and_then(|(map, _)| {
