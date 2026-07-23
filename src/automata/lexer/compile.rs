@@ -266,6 +266,7 @@ fn max_repeat_translation_over_vocab_suffixes(
             },
             |(current, next), token| {
                 current.fill(i32::MIN);
+                let mut best = 0i32;
                 for &byte in token.iter() {
                     next.fill(i32::MIN);
                     for (state, row) in automaton.transitions.iter().enumerate() {
@@ -278,17 +279,13 @@ fn max_repeat_translation_over_vocab_suffixes(
                             continue;
                         }
                         let candidate = score.saturating_add(i32::from(edge.completed));
+                        best = best.max(candidate);
                         let slot = &mut next[edge.target as usize];
                         *slot = (*slot).max(candidate);
                     }
                     std::mem::swap(current, next);
                 }
-                current
-                    .iter()
-                    .copied()
-                    .max()
-                    .unwrap_or(0)
-                    .max(0) as usize
+                best.max(0) as usize
             },
         )
         .max()
@@ -8162,6 +8159,17 @@ mod tests {
         assert_eq!(
             super::vocabulary_repeat_boundary_horizon(&body, &vocab),
             Some(3),
+        );
+    }
+
+    #[test]
+    fn vocabulary_repeat_horizon_counts_boundaries_before_token_exit() {
+        let body = Expr::U8Seq(b"a".to_vec());
+        let vocab = Vocab::new(vec![(0, b"aaaaX".to_vec())]);
+
+        assert_eq!(
+            super::vocabulary_repeat_boundary_horizon(&body, &vocab),
+            Some(4),
         );
     }
 
