@@ -950,7 +950,7 @@ fn use_global_max_length(
 pub(crate) fn build_global_max_length_state_map(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
-    flat_trans: &Arc<[u32]>,
+    _flat_trans: &Arc<[u32]>,
 ) -> ManyToOneIdMap {
     let started_at = Instant::now();
     let num_states_u32 = tokenizer.num_states();
@@ -961,51 +961,18 @@ pub(crate) fn build_global_max_length_state_map(
     let stable_signature_cells = global_max_length_stable_signature_cells(tokenizer, &global_statistic);
     let stable_signature_cell_limit = global_max_length_stable_signature_cell_limit();
 
-    let global_token_position = std::env::var("GLRMASK_GLOBAL_TOKEN_POSITION_INITIAL_MAP")
-        .map(|value| {
-            let value = value.trim();
-            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
-        })
-        .unwrap_or(false);
-    let (state_map, profile) = if global_token_position {
-        let position_started_at = Instant::now();
-        let result = l2p::equivalence_analysis::state_equivalence::global_token_position::
-            compute_global_token_position_state_views(
-                tokenizer,
-                vocab,
-                Some(flat_trans.as_ref()),
-            );
-        let state_map = result
-            .as_ref()
-            .map(|(quotient, _, _)| quotient.as_many_to_one().clone())
-            .unwrap_or_else(|| {
-                l2p::equivalence_analysis::state_equivalence::identity_state_map(num_states)
-            });
-        let elapsed_ms = position_started_at.elapsed().as_secs_f64() * 1000.0;
-        let representative_count = state_map.num_internal_ids() as usize;
-        (
-            state_map,
-            l2p::equivalence_analysis::state_equivalence::pipeline::StateEquivalencePipelineProfile {
-                max_length_skipped: false,
-                max_length_reps: representative_count,
-                max_length_state_equiv_ms: elapsed_ms,
-                ..Default::default()
-            },
-        )
-    } else {
-        let config = resolve_global_pipeline_config(use_global_max_length(tokenizer, &global_statistic));
-        run_state_equivalence_pipeline(
-            tokenizer,
-            vocab,
-            None,
-            None,
-            StateEquivalenceScope::Global,
-            &config,
-            None,
-            None,
-            None,
-        )
-    };
+    let config = resolve_global_pipeline_config(use_global_max_length(tokenizer, &global_statistic));
+    let (state_map, profile) = run_state_equivalence_pipeline(
+        tokenizer,
+        vocab,
+        None,
+        None,
+        StateEquivalenceScope::Global,
+        &config,
+        None,
+        None,
+        None,
+    );
 
     if compile_profile_enabled() {
         if profile.max_length_skipped {
@@ -1019,8 +986,7 @@ pub(crate) fn build_global_max_length_state_map(
             );
         } else {
             eprintln!(
-                "[glrmask/profile][global_max_length] mode={} skipped=false states={} reps={} tokens_included={} max_token_len={} stable_signature_cells={} stable_signature_cell_limit={} ms={:.3}",
-                if global_token_position { "token_position" } else { "stable" },
+                "[glrmask/profile][global_max_length] mode=stable skipped=false states={} reps={} tokens_included={} max_token_len={} stable_signature_cells={} stable_signature_cell_limit={} ms={:.3}",
                 num_states,
                 state_map.representative_original_ids.len(),
                 vocab.len(),
