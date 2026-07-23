@@ -754,6 +754,13 @@ fn first_transition_factor_final_single_batch_enabled() -> bool {
     env_flag_enabled("GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_FINAL_SINGLE_BATCH")
 }
 
+fn first_transition_factor_authority_batch_size_override() -> Option<usize> {
+    std::env::var("GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_AUTHORITY_BATCH_SIZE")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&value| value > 0)
+}
+
 fn default_vocab_batch_size(
     num_states: usize,
     num_groups: usize,
@@ -4099,13 +4106,19 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
         && first_transition_factor_final_single_batch_enabled()
         && analysis_token_count.saturating_mul(num_initial_states)
             <= vocab_sequential_trie_work_max();
-    let batch_size = vocab_batch_size_override().unwrap_or_else(|| {
-        if factor_final_single_batch {
-            num_initial_states
-        } else {
-            default_batch_size
-        }
-    });
+    let factor_authority_batch_size = factor_plan
+        .as_ref()
+        .and_then(|_| first_transition_factor_authority_batch_size_override());
+    let batch_size = factor_authority_batch_size
+        .or_else(vocab_batch_size_override)
+        .unwrap_or_else(|| {
+            if factor_final_single_batch {
+                num_initial_states
+            } else {
+                default_batch_size
+            }
+        })
+        .min(num_initial_states);
     let mut active_indices: Vec<usize> = factor_plan.as_ref().map_or_else(
         || (0..num_tokens).collect(),
         |plan| plan.representative_tokens.clone(),
