@@ -256,53 +256,57 @@ fn build_l1_by_dispatch_components(
         return None;
     }
 
-    let built = masks
-        .par_iter()
-        .map(|(component, mask)| {
-            let map_started_at = Instant::now();
-            let component_state_map = if std::env::var("GLRMASK_L1_DISPATCH_COMPONENT_STATE_MAP")
-                .is_ok_and(|value| value.trim().eq_ignore_ascii_case("empty"))
-            {
-                super::synthetic_state_map::empty_active_language_state_map(tokenizer, mask)
-            } else {
-                super::synthetic_state_map::inactive_dispatch_component_state_map(
-                    tokenizer,
-                    mask,
-                )?
-            };
-            let map_ms = map_started_at.elapsed().as_secs_f64() * 1000.0;
-            let component_started_at = Instant::now();
-            let mut artifact = super::l1::build_l1_id_map_and_terminal_dwa(
-                partition_label,
-                tokenizer,
-                vocab,
-                terminal_coloring,
-                use_terminal_coloring,
-                ignore_terminal,
-                grammar,
-                mask,
-                flat_trans,
-                transitions_by_byte,
-                Some(&component_state_map),
-                None,
-                shared_l1_token_trie,
-                None,
-            )?;
-            artifact.profile.id_map_ms += map_ms;
-            if compile_profile_enabled() {
-                eprintln!(
-                    "[glrmask/profile][l1_dispatch_component_split_piece] branch={} component={} active_terminals={} state_reps={} map_ms={:.3} total_ms={:.3}",
-                    branch_label,
-                    component,
-                    mask.iter().filter(|&&active| active).count(),
-                    component_state_map.num_internal_ids(),
-                    map_ms,
-                    component_started_at.elapsed().as_secs_f64() * 1000.0,
-                );
-            }
-            Some(artifact)
-        })
-        .collect::<Option<Vec<_>>>()?;
+    let build_piece = |(component, mask): &(usize, Vec<bool>)| {
+        let map_started_at = Instant::now();
+        let component_state_map = if std::env::var("GLRMASK_L1_DISPATCH_COMPONENT_STATE_MAP")
+            .is_ok_and(|value| value.trim().eq_ignore_ascii_case("empty"))
+        {
+            super::synthetic_state_map::empty_active_language_state_map(tokenizer, mask)
+        } else {
+            super::synthetic_state_map::inactive_dispatch_component_state_map(tokenizer, mask)?
+        };
+        let map_ms = map_started_at.elapsed().as_secs_f64() * 1000.0;
+        let component_started_at = Instant::now();
+        let mut artifact = super::l1::build_l1_id_map_and_terminal_dwa(
+            partition_label,
+            tokenizer,
+            vocab,
+            terminal_coloring,
+            use_terminal_coloring,
+            ignore_terminal,
+            grammar,
+            mask,
+            flat_trans,
+            transitions_by_byte,
+            Some(&component_state_map),
+            None,
+            shared_l1_token_trie,
+            None,
+        )?;
+        artifact.profile.id_map_ms += map_ms;
+        if compile_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][l1_dispatch_component_split_piece] branch={} component={} active_terminals={} state_reps={} map_ms={:.3} total_ms={:.3}",
+                branch_label,
+                component,
+                mask.iter().filter(|&&active| active).count(),
+                component_state_map.num_internal_ids(),
+                map_ms,
+                component_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        Some(artifact)
+    };
+    let serial = std::env::var("GLRMASK_L1_DISPATCH_COMPONENT_SCHEDULE")
+        .is_ok_and(|value| value.trim().eq_ignore_ascii_case("serial"));
+    let built = if serial {
+        masks.iter().map(build_piece).collect::<Option<Vec<_>>>()?
+    } else {
+        masks
+            .par_iter()
+            .map(build_piece)
+            .collect::<Option<Vec<_>>>()?
+    };
     let piece_count = built.len();
     let merge_started_at = Instant::now();
     let mut merged = super::merge::merge_id_maps_and_terminal_dwas(
@@ -313,8 +317,9 @@ fn build_l1_by_dispatch_components(
     let merge_ms = merge_started_at.elapsed().as_secs_f64() * 1000.0;
     if compile_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][l1_dispatch_component_split] branch={} pieces={} merged_tsids={} merge_ms={:.3} total_ms={:.3} selected=true",
+            "[glrmask/profile][l1_dispatch_component_split] branch={} schedule={} pieces={} merged_tsids={} merge_ms={:.3} total_ms={:.3} selected=true",
             branch_label,
+            if serial { "serial" } else { "parallel" },
             piece_count,
             merged.id_map.num_tsids(),
             merge_ms,
