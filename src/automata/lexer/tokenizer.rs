@@ -1,11 +1,13 @@
 //! Runtime-facing tokenizer API built on top of the lexer DFA.
 
 use std::collections::BTreeSet;
+use std::fmt;
 use std::sync::{Arc, OnceLock};
 
 use rustc_hash::FxHashMap;
-use serde::ser::SerializeStruct;
-use serde::{Deserialize, Serialize, Serializer};
+use serde::de::{SeqAccess, Visitor};
+use serde::ser::{SerializeSeq, SerializeStruct};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use smallvec::SmallVec;
 
 use super::dfa::DFA;
@@ -98,28 +100,44 @@ impl Serialize for CompressedTransitionEntries {
     where
         S: Serializer,
     {
-        self.classes
-            .iter()
-            .copied()
-            .zip(self.targets.iter().copied())
-            .collect::<Vec<_>>()
-            .serialize(serializer)
+        let mut sequence = serializer.serialize_seq(Some(self.len()))?;
+        for (&class, &target) in self.classes.iter().zip(self.targets.iter()) {
+            sequence.serialize_element(&(class, target))?;
+        }
+        sequence.end()
     }
 }
 
 impl<'de> Deserialize<'de> for CompressedTransitionEntries {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
-        D: serde::Deserializer<'de>,
+        D: Deserializer<'de>,
     {
-        let entries = Vec::<(u8, u32)>::deserialize(deserializer)?;
-        let mut classes = Vec::with_capacity(entries.len());
-        let mut targets = Vec::with_capacity(entries.len());
-        for (class, target) in entries {
-            classes.push(class);
-            targets.push(target);
+        struct EntriesVisitor;
+
+        impl<'de> Visitor<'de> for EntriesVisitor {
+            type Value = CompressedTransitionEntries;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a sequence of compressed transition (class, target) pairs")
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let capacity = sequence.size_hint().unwrap_or(0);
+                let mut classes = Vec::with_capacity(capacity);
+                let mut targets = Vec::with_capacity(capacity);
+                while let Some((class, target)) = sequence.next_element::<(u8, u32)>()? {
+                    classes.push(class);
+                    targets.push(target);
+                }
+                Ok(CompressedTransitionEntries::from_parts(classes, targets))
+            }
         }
-        Ok(Self::from_parts(classes, targets))
+
+        deserializer.deserialize_seq(EntriesVisitor)
     }
 }
 
