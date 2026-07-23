@@ -260,16 +260,11 @@ fn build_l1_by_dispatch_components(
         .par_iter()
         .map(|(component, mask)| {
             let map_started_at = Instant::now();
-            let component_state_map = if std::env::var("GLRMASK_L1_DISPATCH_COMPONENT_STATE_MAP")
-                .is_ok_and(|value| value.trim().eq_ignore_ascii_case("empty"))
-            {
-                super::synthetic_state_map::empty_active_language_state_map(tokenizer, mask)
-            } else {
+            let component_state_map =
                 super::synthetic_state_map::inactive_dispatch_component_state_map(
                     tokenizer,
                     mask,
-                )?
-            };
+                )?;
             let map_ms = map_started_at.elapsed().as_secs_f64() * 1000.0;
             let component_started_at = Instant::now();
             let mut artifact = super::l1::build_l1_id_map_and_terminal_dwa(
