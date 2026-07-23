@@ -950,7 +950,7 @@ fn use_global_max_length(
 pub(crate) fn build_global_max_length_state_map(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
-    _flat_trans: &Arc<[u32]>,
+    flat_trans: &Arc<[u32]>,
 ) -> ManyToOneIdMap {
     let started_at = Instant::now();
     let num_states_u32 = tokenizer.num_states();
@@ -961,18 +961,71 @@ pub(crate) fn build_global_max_length_state_map(
     let stable_signature_cells = global_max_length_stable_signature_cells(tokenizer, &global_statistic);
     let stable_signature_cell_limit = global_max_length_stable_signature_cell_limit();
 
-    let config = resolve_global_pipeline_config(use_global_max_length(tokenizer, &global_statistic));
-    let (state_map, profile) = run_state_equivalence_pipeline(
-        tokenizer,
-        vocab,
-        None,
-        None,
-        StateEquivalenceScope::Global,
-        &config,
-        None,
-        None,
-        None,
-    );
+    let component_kbounded = std::env::var("GLRMASK_GLOBAL_COMPONENT_KBOUNDED")
+        .map(|value| {
+            let value = value.trim();
+            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false);
+    let (state_map, profile) = if component_kbounded {
+        let component_started_at = Instant::now();
+        let min_component_states = std::env::var("GLRMASK_GLOBAL_COMPONENT_KBOUNDED_MIN_STATES")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(5_000);
+        let view = l2p::equivalence_analysis::compat::TokenizerView::new_from_flat_trans(
+            flat_trans,
+            tokenizer,
+        );
+        let representatives = tokenizer
+            .disjoint_dispatch_components()
+            .and_then(|components| {
+                l2p::equivalence_analysis::state::max_length::find_state_equivalence_classes_kbounded_by_disjoint_components(
+                    &view,
+                    &components,
+                    max_token_len,
+                    None,
+                    Some(global_statistic.relevant_bytes()),
+                    None,
+                    min_component_states,
+                )
+            });
+        let state_map = if let Some(representatives) = representatives {
+            let states = (0..num_states).collect::<Vec<_>>();
+            l2p::equivalence_analysis::state_equivalence::build_state_map_from_subset_representatives(
+                &states,
+                &representatives,
+                num_states,
+                None,
+            )
+        } else {
+            l2p::equivalence_analysis::state_equivalence::identity_state_map(num_states)
+        };
+        let representative_count = state_map.num_internal_ids() as usize;
+        let elapsed_ms = component_started_at.elapsed().as_secs_f64() * 1000.0;
+        (
+            state_map,
+            l2p::equivalence_analysis::state_equivalence::pipeline::StateEquivalencePipelineProfile {
+                max_length_skipped: false,
+                max_length_reps: representative_count,
+                max_length_state_equiv_ms: elapsed_ms,
+                ..Default::default()
+            },
+        )
+    } else {
+        let config = resolve_global_pipeline_config(use_global_max_length(tokenizer, &global_statistic));
+        run_state_equivalence_pipeline(
+            tokenizer,
+            vocab,
+            None,
+            None,
+            StateEquivalenceScope::Global,
+            &config,
+            None,
+            None,
+            None,
+        )
+    };
 
     if compile_profile_enabled() {
         if profile.max_length_skipped {
@@ -986,7 +1039,8 @@ pub(crate) fn build_global_max_length_state_map(
             );
         } else {
             eprintln!(
-                "[glrmask/profile][global_max_length] mode=stable skipped=false states={} reps={} tokens_included={} max_token_len={} stable_signature_cells={} stable_signature_cell_limit={} ms={:.3}",
+                "[glrmask/profile][global_max_length] mode={} skipped=false states={} reps={} tokens_included={} max_token_len={} stable_signature_cells={} stable_signature_cell_limit={} ms={:.3}",
+                if component_kbounded { "component_kbounded" } else { "stable" },
                 num_states,
                 state_map.representative_original_ids.len(),
                 vocab.len(),
