@@ -3539,8 +3539,16 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
         return (BTreeSet::from_iter(vec![(0..num_tokens).collect()]), build_dfa_ms);
     }
 
+    let num_groups = dfa_ref.num_groups;
+    // Diversity ordering exists to make early state batches distinguish more
+    // token classes and thereby remove them from later batches. When the whole
+    // state domain fits in one batch there is no later work to eliminate, and
+    // reordering only destroys the source coordinate's transition locality.
+    let batch_size = vocab_batch_size_override().unwrap_or_else(|| {
+        default_vocab_batch_size(num_initial_states, num_groups, num_tokens)
+    });
     let state_order_started_at = profiling.then(Instant::now);
-    let ordered_states = if diversity_state_order_enabled() {
+    let ordered_states = if diversity_state_order_enabled() && num_initial_states > batch_size {
         states_by_transition_diversity(dfa_ref, initial_states_ref)
     } else {
         initial_states_ref.to_vec()
@@ -3565,14 +3573,10 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
         ordered_states.clone()
     };
 
-    let num_groups = dfa_ref.num_groups;
     // Sparse live-state signatures make larger batches profitable by reducing
     // repeated trie traversal. Bound the default by the dominant
     // `match_positions` allocation so unusually wide terminal-group axes do
     // not inherit an unbounded memory increase. Keep the env override for A/B.
-    let batch_size = vocab_batch_size_override().unwrap_or_else(|| {
-        default_vocab_batch_size(num_initial_states, num_groups, num_tokens)
-    });
     let mut active_indices: Vec<usize> = (0..num_tokens).collect();
     let mut active_tokens = vec![true; num_tokens];
     let lexical_order_started_at = profiling.then(Instant::now);
