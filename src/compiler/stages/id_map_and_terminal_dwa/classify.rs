@@ -825,6 +825,63 @@ pub(crate) fn classify_terminal_path_lengths(
             heuristic_two_plus.set(t2);
         }
     }
+    let mut suffix_candidate_filter = None;
+    if std::env::var("GLRMASK_CLASSIFY_FINITE_SIDE_FILTER")
+        .ok()
+        .is_some_and(|value| {
+            let value = value.trim();
+            value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
+        })
+    {
+        let side_filter_started_at = std::time::Instant::now();
+        let candidates_before = heuristic_two_plus.count_ones();
+        let (left_possible, right_possible, left_trie_nodes, right_trie_nodes) =
+            finite_literal_terminal_path_side_potential(
+                tokenizer,
+                vocab,
+                &heuristic_two_plus,
+            );
+        suffix_candidate_filter = Some(right_possible.clone());
+        let mut directionally_possible = BitSet::new(nt);
+        for t1 in heuristic_two_plus.iter() {
+            if !left_possible.contains(t1) {
+                continue;
+            }
+            let mut observed_after_t1 = U8Set::empty();
+            for last_byte in bytesets.last_bytes[t1].iter() {
+                observed_after_t1 = observed_after_t1
+                    .union(&vocab_facts.observed_follow_bytes[last_byte as usize]);
+            }
+            if observed_after_t1.is_empty() {
+                continue;
+            }
+            let disallowed = disallowed_follows.get(&(t1 as u32));
+            for t2 in heuristic_two_plus.iter() {
+                if !right_possible.contains(t2)
+                    || bytesets.first_bytes[t2].is_disjoint(&observed_after_t1)
+                    || disallowed.is_some_and(|blocked| blocked.contains(t2))
+                {
+                    continue;
+                }
+                directionally_possible.set(t1);
+                directionally_possible.set(t2);
+            }
+        }
+        heuristic_two_plus = directionally_possible;
+        if super::types::compile_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][terminal_path_finite_side_filter] partition={} candidates_before={} candidates_after={} left_possible={} right_possible={} left_trie_nodes={} right_trie_nodes={} total_ms={:.3}",
+                partition_label,
+                candidates_before,
+                heuristic_two_plus.count_ones(),
+                left_possible.count_ones(),
+                right_possible.count_ones(),
+                left_trie_nodes,
+                right_trie_nodes,
+                side_filter_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+    }
     let exact = exact_terminal_path_two_plus_finite_literals(
         tokenizer,
         vocab,
@@ -842,6 +899,7 @@ pub(crate) fn classify_terminal_path_lengths(
             disallowed_follows,
             &heuristic_two_plus,
             bytesets,
+            suffix_candidate_filter.as_ref(),
         )
     });
     if std::env::var_os("GLRMASK_TERMINAL_PATH_STRICT_REFERENCE").is_some() {
@@ -2034,6 +2092,171 @@ fn collect_finite_literal_strings(expr: &Expr) -> Option<Vec<Vec<u8>>> {
     (!values.is_empty() && values.iter().all(|value| !value.is_empty())).then_some(values)
 }
 
+/// Exact directional feasibility for the finite-literal members of a terminal
+/// path candidate set.
+///
+/// The generic byte-pair prefilter only proves that a terminal's last/first
+/// bytes occur around some vocabulary split.  A fixed literal can still be
+/// impossible on that side of every split: completing a literal from an
+/// arbitrary live residual requires the whole token prefix to equal a suffix
+/// of the literal, while starting from lexer reset requires the token suffix
+/// and literal to be prefix-comparable.  Prove those two facts directly with
+/// small literal tries before invoking the much more expensive candidate-DFA
+/// scan.  Non-finite definitions remain conservatively feasible on both sides.
+fn finite_literal_terminal_path_side_potential(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    candidates: &BitSet,
+) -> (BitSet, BitSet, usize, usize) {
+    let candidate_ids = candidates.iter().collect::<Vec<_>>();
+    let mut left_possible = BitSet::new(candidates.len());
+    let mut right_possible = BitSet::new(candidates.len());
+    if candidate_ids.is_empty() || candidate_ids.len() > 64 {
+        for terminal in candidate_ids {
+            left_possible.set(terminal);
+            right_possible.set(terminal);
+        }
+        return (left_possible, right_possible, 0, 0);
+    }
+
+    const NONE: u16 = u16::MAX;
+    let mut left_trie = vec![Box::new([NONE; 256])];
+    let mut left_accepting = vec![0u64];
+    let mut right_trie = vec![Box::new([NONE; 256])];
+    let mut right_accepting = vec![0u64];
+    let mut finite_mask = 0u64;
+
+    let insert = |trie: &mut Vec<Box<[u16; 256]>>,
+                  accepting: &mut Vec<u64>,
+                  bytes: &[u8],
+                  bit: u64|
+     -> bool {
+        let mut node = 0usize;
+        for &byte in bytes {
+            let next = trie[node][byte as usize];
+            node = if next == NONE {
+                if trie.len() >= usize::from(NONE) {
+                    return false;
+                }
+                let child = trie.len();
+                trie.push(Box::new([NONE; 256]));
+                accepting.push(0);
+                trie[node][byte as usize] = child as u16;
+                child
+            } else {
+                next as usize
+            };
+        }
+        accepting[node] |= bit;
+        true
+    };
+
+    for (local, &terminal) in candidate_ids.iter().enumerate() {
+        let Some(expr) = tokenizer.terminal_expr(terminal as u32) else {
+            left_possible.set(terminal);
+            right_possible.set(terminal);
+            continue;
+        };
+        let Some(literals) = collect_finite_literal_strings(expr) else {
+            left_possible.set(terminal);
+            right_possible.set(terminal);
+            continue;
+        };
+        let bit = 1u64 << local;
+        let mut inserted = true;
+        for literal in literals {
+            inserted &= insert(&mut right_trie, &mut right_accepting, &literal, bit);
+            for start in 0..literal.len() {
+                inserted &= insert(
+                    &mut left_trie,
+                    &mut left_accepting,
+                    &literal[start..],
+                    bit,
+                );
+            }
+        }
+        if inserted {
+            finite_mask |= bit;
+        } else {
+            // Fail closed if the compact diagnostic trie reaches its u16 cap.
+            left_possible.set(terminal);
+            right_possible.set(terminal);
+        }
+    }
+
+    let mut right_subtree = right_accepting.clone();
+    for node in (0..right_trie.len()).rev() {
+        let mut subtree = right_subtree[node];
+        for &child in right_trie[node].iter() {
+            if child != NONE {
+                subtree |= right_subtree[child as usize];
+            }
+        }
+        right_subtree[node] = subtree;
+    }
+
+    let mut left_found = 0u64;
+    let mut right_found = 0u64;
+    for bytes in vocab.entries.values() {
+        if bytes.len() < 2 {
+            continue;
+        }
+
+        // A boundary on the left consumes a non-empty token prefix and leaves
+        // at least one byte for the following terminal.
+        let mut node = 0usize;
+        for &byte in &bytes[..bytes.len() - 1] {
+            let next = left_trie[node][byte as usize];
+            if next == NONE {
+                break;
+            }
+            node = next as usize;
+            left_found |= left_accepting[node];
+        }
+
+        // From reset, the following terminal is viable when it either accepts
+        // within the token suffix or remains completable at token end.
+        for split in 1..bytes.len() {
+            let mut node = 0usize;
+            let mut matched = 0u64;
+            let mut consumed = true;
+            for &byte in &bytes[split..] {
+                let next = right_trie[node][byte as usize];
+                if next == NONE {
+                    consumed = false;
+                    break;
+                }
+                node = next as usize;
+                matched |= right_accepting[node];
+            }
+            if consumed {
+                matched |= right_subtree[node];
+            }
+            right_found |= matched;
+        }
+
+        if left_found & finite_mask == finite_mask && right_found & finite_mask == finite_mask {
+            break;
+        }
+    }
+
+    for (local, &terminal) in candidate_ids.iter().enumerate() {
+        let bit = 1u64 << local;
+        if finite_mask & bit == 0 || left_found & bit != 0 {
+            left_possible.set(terminal);
+        }
+        if finite_mask & bit == 0 || right_found & bit != 0 {
+            right_possible.set(terminal);
+        }
+    }
+    (
+        left_possible,
+        right_possible,
+        left_trie.len(),
+        right_trie.len(),
+    )
+}
+
 /// Exact terminal-path classification for a small family of finite literal
 /// languages.  Starting the prefix scanner from every live residual of a
 /// literal means terminal `t` is final at a split exactly when the consumed
@@ -2711,6 +2934,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
     disallowed_follows: &BTreeMap<u32, BitSet>,
     candidates: &BitSet,
     bytesets: &SharedClassifyBytesets,
+    suffix_candidates: Option<&BitSet>,
 ) -> ExactTerminalPathTwoPlus {
     let total_started_at = std::time::Instant::now();
     let candidate_ids = candidates.iter().collect::<Vec<_>>();
@@ -2844,6 +3068,43 @@ fn exact_terminal_path_two_plus_candidate_dfa(
     let owned_candidate_tokenizer = (!uses_original_tokenizer)
         .then(|| compiled_subset_tokenizer.expect("selected subset tokenizer was compiled"));
     let candidate_tokenizer = owned_candidate_tokenizer.as_deref().unwrap_or(tokenizer);
+    let suffix_candidate_ids = suffix_candidates
+        .map(|suffix_candidates| {
+            candidate_ids
+                .iter()
+                .copied()
+                .filter(|&terminal| suffix_candidates.contains(terminal))
+                .collect::<Vec<_>>()
+        })
+        .filter(|ids| !ids.is_empty())
+        .unwrap_or_else(|| candidate_ids.clone());
+    let suffix_restricted = suffix_candidate_ids.len() < candidate_ids.len();
+    let mut candidate_local_by_terminal = vec![u32::MAX; candidates.len()];
+    for (local, &terminal) in candidate_ids.iter().enumerate() {
+        candidate_local_by_terminal[terminal] = local as u32;
+    }
+    let suffix_subset_to_candidate_local = suffix_candidate_ids
+        .iter()
+        .map(|&terminal| candidate_local_by_terminal[terminal])
+        .collect::<Vec<_>>();
+    let owned_suffix_tokenizer = suffix_restricted.then(|| {
+        let exprs = Arc::<[crate::automata::lexer::ast::Expr]>::from(
+            suffix_candidate_ids
+                .iter()
+                .map(|&terminal| {
+                    tokenizer
+                        .terminal_expr(terminal as u32)
+                        .unwrap_or_else(|| panic!("missing terminal expression for terminal {terminal}"))
+                        .clone()
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        Arc::new(
+            build_regex(exprs.as_ref())
+                .into_tokenizer(suffix_candidate_ids.len() as u32, Some(Arc::clone(&exprs))),
+        )
+    });
     let compile_ms = compile_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let analyze_started_at = std::time::Instant::now();
@@ -2896,25 +3157,51 @@ fn exact_terminal_path_two_plus_candidate_dfa(
     let mut dense_flat_trans = Vec::new();
     let mut dense_finalizer_masks = Vec::new();
     let mut dense_future_masks = Vec::new();
-    let continuation_reset_state = if uses_original_tokenizer {
+    let continuation_uses_prefix_scanner = uses_original_tokenizer && !suffix_restricted;
+    let suffix_tokenizer = owned_suffix_tokenizer
+        .as_deref()
+        .unwrap_or(candidate_tokenizer);
+    let continuation_reset_state = if continuation_uses_prefix_scanner {
         reset_state
     } else {
-        let state_count = candidate_tokenizer.num_states() as usize;
-        dense_flat_trans = super::l1::build_flat_transition_table(candidate_tokenizer);
+        let state_count = suffix_tokenizer.num_states() as usize;
+        dense_flat_trans = super::l1::build_flat_transition_table(suffix_tokenizer);
         dense_finalizer_masks = vec![0u64; state_count * words_per_mask];
         dense_future_masks = vec![0u64; state_count * words_per_mask];
-        for state in 0..state_count {
-            let base = state * words_per_mask;
-            dense_finalizer_masks[base..base + words_per_mask].copy_from_slice(
-                &candidate_tokenizer.matched_terminal_bitset(state as u32).words()
-                    [..words_per_mask],
-            );
-            dense_future_masks[base..base + words_per_mask].copy_from_slice(
-                &candidate_tokenizer.possible_future_terminals(state as u32).words()
-                    [..words_per_mask],
-            );
+        if suffix_restricted {
+            for state in 0..state_count {
+                let base = state * words_per_mask;
+                for suffix_local in suffix_tokenizer
+                    .matched_terminal_bitset(state as u32)
+                    .iter()
+                {
+                    let candidate_local = suffix_subset_to_candidate_local[suffix_local] as usize;
+                    dense_finalizer_masks[base + (candidate_local >> 6)] |=
+                        1u64 << (candidate_local & 63);
+                }
+                for suffix_local in suffix_tokenizer
+                    .possible_future_terminals(state as u32)
+                    .iter()
+                {
+                    let candidate_local = suffix_subset_to_candidate_local[suffix_local] as usize;
+                    dense_future_masks[base + (candidate_local >> 6)] |=
+                        1u64 << (candidate_local & 63);
+                }
+            }
+        } else {
+            for state in 0..state_count {
+                let base = state * words_per_mask;
+                dense_finalizer_masks[base..base + words_per_mask].copy_from_slice(
+                    &suffix_tokenizer.matched_terminal_bitset(state as u32).words()
+                        [..words_per_mask],
+                );
+                dense_future_masks[base..base + words_per_mask].copy_from_slice(
+                    &suffix_tokenizer.possible_future_terminals(state as u32).words()
+                        [..words_per_mask],
+                );
+            }
         }
-        candidate_tokenizer.initial_state_id()
+        suffix_tokenizer.initial_state_id()
     };
     let mut suffix_viable_masks = vec![0u64; total_splits * words_per_mask];
     let mut candidate_splits = 0usize;
@@ -2926,7 +3213,13 @@ fn exact_terminal_path_two_plus_candidate_dfa(
         suffix_cache_mode.trim(),
         "1" | "true" | "slice" | "bytes"
     );
-    let suffix_id_cache_enabled = suffix_cache_mode.trim() == "id" && candidate_count < 64;
+    let suffix_id_min_split_work = std::env::var("GLRMASK_CLASSIFY_SUFFIX_ID_MIN_SPLIT_WORK")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(100_000);
+    let suffix_id_cache_enabled = suffix_cache_mode.trim() == "id"
+        && candidate_count < 64
+        && feasible_split_work >= suffix_id_min_split_work;
     let mut suffix_cache_hits = 0usize;
     let mut suffix_cache_misses = 0usize;
     let mut suffix_cache_build_ms = 0.0;
@@ -3000,7 +3293,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
                     let mut matched = 0u64;
                     let mut consumed_suffix = true;
                     for &byte in suffix {
-                        if uses_original_tokenizer {
+                        if continuation_uses_prefix_scanner {
                             if prefix_scanner.future_mask(state)[0] == 0 {
                                 consumed_suffix = false;
                                 break;
@@ -3025,7 +3318,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
                         }
                     }
                     if consumed_suffix {
-                        matched |= if uses_original_tokenizer {
+                        matched |= if continuation_uses_prefix_scanner {
                             prefix_scanner.future_mask(state)[0]
                         } else {
                             dense_future_masks[state as usize]
@@ -3053,7 +3346,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
                 let mut matched = 0u64;
                 let mut consumed_suffix = true;
                 for &byte in &bytes[split_after + 1..] {
-                    if uses_original_tokenizer {
+                    if continuation_uses_prefix_scanner {
                         if prefix_scanner.future_mask(state)[0] == 0 {
                             consumed_suffix = false;
                             break;
@@ -3078,7 +3371,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
                     }
                 }
                 if consumed_suffix {
-                    matched |= if uses_original_tokenizer {
+                    matched |= if continuation_uses_prefix_scanner {
                         prefix_scanner.future_mask(state)[0]
                     } else {
                         dense_future_masks[state as usize]
@@ -3101,7 +3394,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
                 let mut state = continuation_reset_state;
                 let mut consumed_suffix = true;
                 for &byte in &bytes[split_after + 1..] {
-                    if uses_original_tokenizer {
+                    if continuation_uses_prefix_scanner {
                         if prefix_scanner
                             .future_mask(state)
                             .iter()
@@ -3139,7 +3432,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
                     }
                 }
                 if consumed_suffix {
-                    if uses_original_tokenizer {
+                    if continuation_uses_prefix_scanner {
                         for word_index in 0..words_per_mask {
                             matched[word_index] |= prefix_scanner.future_mask(state)[word_index];
                         }
@@ -3231,7 +3524,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
                 };
                 next_continuations.clear();
                 for &(state, active) in &continuations {
-                    let target = if uses_original_tokenizer {
+                    let target = if continuation_uses_prefix_scanner {
                         prefix_scanner.step(state, byte)
                     } else {
                         dense_flat_trans[state as usize * 256 + byte as usize]
@@ -3239,7 +3532,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
                     if target == PREFIX_DEAD_STATE || target == u32::MAX {
                         continue;
                     }
-                    let (target_matched, target_future) = if uses_original_tokenizer {
+                    let (target_matched, target_future) = if continuation_uses_prefix_scanner {
                         (
                             prefix_scanner.matched_mask(target)[0],
                             prefix_scanner.future_mask(target)[0],
@@ -3329,7 +3622,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
                 }
                 next_continuations.clear();
                 for (state, active) in &continuations {
-                    let target = if uses_original_tokenizer {
+                    let target = if continuation_uses_prefix_scanner {
                         prefix_scanner.step(*state, byte)
                     } else {
                         dense_flat_trans[*state as usize * 256 + byte as usize]
@@ -3338,12 +3631,12 @@ fn exact_terminal_path_two_plus_candidate_dfa(
                         continue;
                     }
                     for word_index in 0..words_per_mask {
-                        let target_matched = if uses_original_tokenizer {
+                        let target_matched = if continuation_uses_prefix_scanner {
                             prefix_scanner.matched_mask(target)[word_index]
                         } else {
                             dense_finalizer_masks[target as usize * words_per_mask + word_index]
                         };
-                        let target_future = if uses_original_tokenizer {
+                        let target_future = if continuation_uses_prefix_scanner {
                             prefix_scanner.future_mask(target)[word_index]
                         } else {
                             dense_future_masks[target as usize * words_per_mask + word_index]
@@ -4959,6 +5252,7 @@ mod tests {
             &disallowed,
             &active,
             &bytesets,
+            None,
         );
         let reference = exact_terminal_path_two_plus(
             &tokenizer,
@@ -5023,6 +5317,45 @@ mod tests {
     }
 
     #[test]
+    fn candidate_dfa_restricted_suffix_language_matches_reference() {
+        let expressions = vec![
+            Expr::U8Seq(b"ab".to_vec()),
+            Expr::U8Seq(b"x".to_vec()),
+            Expr::U8Seq(b"zc".to_vec()),
+        ];
+        let tokenizer = build_regex_partitioned_with_adaptive(&expressions, &[0, 1, 2], false)
+            .into_tokenizer(
+                expressions.len() as u32,
+                Some(Arc::from(expressions.into_boxed_slice())),
+            );
+        let vocab = Vocab::new(vec![(0, b"bx".to_vec()), (1, b"cx".to_vec())]);
+        let active = BitSet::all(3);
+        let mut suffix_candidates = BitSet::new(3);
+        suffix_candidates.set(1);
+        let disallowed = BTreeMap::new();
+        let bytesets = SharedClassifyBytesets::build(&tokenizer, tokenizer.num_terminals());
+
+        let restricted = exact_terminal_path_two_plus_candidate_dfa(
+            &tokenizer,
+            &vocab,
+            &disallowed,
+            &active,
+            &bytesets,
+            Some(&suffix_candidates),
+        );
+        let reference = exact_terminal_path_two_plus(
+            &tokenizer,
+            &vocab,
+            &disallowed,
+            &bytesets,
+            &active,
+        );
+
+        assert_eq!(restricted.two_plus, reference.two_plus);
+        assert_eq!(restricted.two_plus, active);
+    }
+
+    #[test]
     fn finite_literal_classification_propagates_later_token_boundaries() {
         let expressions = vec![Expr::U8Seq(b"+".to_vec()), Expr::U8Seq(b"a".to_vec())];
         let tokenizer = build_regex_partitioned_with_adaptive(&expressions, &[0, 1], false)
@@ -5048,6 +5381,7 @@ mod tests {
             &disallowed,
             &active,
             &bytesets,
+            None,
         );
 
         assert_eq!(specialized.two_plus, active);
@@ -5094,6 +5428,7 @@ mod tests {
             &disallowed,
             &active,
             &bytesets,
+            None,
         );
         let reference = exact_terminal_path_two_plus(
             &tokenizer,
