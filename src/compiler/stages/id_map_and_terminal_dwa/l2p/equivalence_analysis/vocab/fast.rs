@@ -755,10 +755,6 @@ fn first_transition_factor_final_single_batch_enabled() -> bool {
     env_flag_enabled("GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_FINAL_SINGLE_BATCH")
 }
 
-fn first_transition_factor_merge_outcome_shapes_enabled() -> bool {
-    env_flag_enabled("GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_MERGE_OUTCOME_SHAPES")
-}
-
 fn default_vocab_batch_size(
     num_states: usize,
     num_groups: usize,
@@ -3077,7 +3073,6 @@ enum FirstTransitionFactorMode {
     Disabled,
     Environment,
     Force,
-    ForceMergedOutcomeShapes,
 }
 
 struct FirstTransitionFactorPlan {
@@ -3117,7 +3112,6 @@ fn try_first_transition_factor_plan<S: AsRef<[u8]> + Sync>(
     scratch_pool: &Arc<ScratchPool>,
     profiling: bool,
     enforce_work_ratio: bool,
-    merge_outcome_shapes: bool,
 ) -> Option<FirstTransitionFactorPlan> {
     if *TRIE_WALK_DISABLED
         || strings.len() < 2
@@ -3210,8 +3204,7 @@ fn try_first_transition_factor_plan<S: AsRef<[u8]> + Sync>(
         return None;
     }
 
-    let unmerged_bucket_count = buckets.len();
-    if merge_outcome_shapes && buckets.len() > 1 {
+    if buckets.len() > 1 {
         let mut merged_buckets = Vec::<FirstTransitionBucket>::with_capacity(buckets.len());
         let mut shape_to_bucket = HashMap::<Vec<usize>, usize>::with_capacity(buckets.len());
         for bucket in buckets {
@@ -3226,41 +3219,6 @@ fn try_first_transition_factor_plan<S: AsRef<[u8]> + Sync>(
             }
         }
         buckets = merged_buckets;
-    }
-
-    if profiling {
-        let mut outcome_shapes = HashMap::<Vec<usize>, (usize, usize)>::new();
-        for bucket in &buckets {
-            let entry = outcome_shapes
-                .entry(bucket.initial_outcomes.clone())
-                .or_insert((0, 0));
-            entry.0 += 1;
-            entry.1 += bucket.token_indices.len();
-        }
-        let duplicate_shapes = outcome_shapes
-            .values()
-            .filter(|(bucket_count, _)| *bucket_count > 1)
-            .count();
-        let duplicate_buckets = outcome_shapes
-            .values()
-            .filter(|(bucket_count, _)| *bucket_count > 1)
-            .map(|(bucket_count, _)| *bucket_count)
-            .sum::<usize>();
-        let duplicate_tokens = outcome_shapes
-            .values()
-            .filter(|(bucket_count, _)| *bucket_count > 1)
-            .map(|(_, token_count)| *token_count)
-            .sum::<usize>();
-        eprintln!(
-            "[glrmask/profile][vocab_first_transition_factor_outcome_shapes] original_buckets={} buckets={} distinct_shapes={} duplicate_shapes={} duplicate_buckets={} duplicate_tokens={} merged={}",
-            unmerged_bucket_count,
-            buckets.len(),
-            outcome_shapes.len(),
-            duplicate_shapes,
-            duplicate_buckets,
-            duplicate_tokens,
-            buckets.len() < unmerged_bucket_count,
-        );
     }
 
     let full_state_token_pairs = strings.len().saturating_mul(initial_states.len());
@@ -4083,9 +4041,7 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
     let factor_enabled = match first_transition_factor_mode {
         FirstTransitionFactorMode::Disabled => false,
         FirstTransitionFactorMode::Environment => first_transition_factor_enabled(),
-        FirstTransitionFactorMode::Force | FirstTransitionFactorMode::ForceMergedOutcomeShapes => {
-            true
-        }
+        FirstTransitionFactorMode::Force => true,
     };
     let lexical_order_needed = (num_tokens >= TRIE_WALK_MIN_TOKENS && !*TRIE_WALK_DISABLED)
         || factor_enabled;
@@ -4105,8 +4061,6 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
             &scratch_pool,
             profiling,
             first_transition_factor_mode == FirstTransitionFactorMode::Environment,
-            first_transition_factor_mode == FirstTransitionFactorMode::ForceMergedOutcomeShapes
-                || first_transition_factor_merge_outcome_shapes_enabled(),
         )
     });
     let factor_plan = factor_plan.flatten();
@@ -5050,24 +5004,12 @@ mod shared_base_tests {
             None,
             FirstTransitionFactorMode::Force,
         );
-        let (merged, _) = find_vocab_equivalence_classes_with_group_filter_profiled_impl(
-            &view,
-            &tokens,
-            &states,
-            &disallowed,
-            Some(&byte_classes),
-            None,
-            None,
-            None,
-            FirstTransitionFactorMode::ForceMergedOutcomeShapes,
-        );
         let analysis_dfa =
             build_dfa_with_group_filter(&view, &disallowed, Some(&byte_classes), None, None);
         let direct = exact_vocab_partition(&analysis_dfa, &tokens, &states);
 
         assert_eq!(ordinary, direct, "ordinary hash partition must match direct observations");
         assert_eq!(factored, direct, "factored partition must match direct observations");
-        assert_eq!(merged, direct, "merged-outcome partition must match direct observations");
         assert!(
             factored
                 .iter()
@@ -5189,17 +5131,6 @@ mod shared_base_tests {
                 None,
                 FirstTransitionFactorMode::Force,
             );
-            let (merged, _) = find_vocab_equivalence_classes_with_group_filter_profiled_impl(
-                &view,
-                &tokens,
-                &initial_states,
-                &disallowed,
-                Some(&byte_classes),
-                None,
-                None,
-                None,
-                FirstTransitionFactorMode::ForceMergedOutcomeShapes,
-            );
             let analysis_dfa = build_dfa_with_group_filter(
                 &view,
                 &disallowed,
@@ -5209,7 +5140,6 @@ mod shared_base_tests {
             );
 
             assert_eq!(factored, ordinary, "factored/reference mismatch at seed {seed}");
-            assert_eq!(merged, ordinary, "merged/reference mismatch at seed {seed}");
 
             // Directly certify the quotient invariant without relying on hash
             // equality: within one semantic first-byte class, sources with the
