@@ -5,7 +5,7 @@
 //! equivalence classes.
 
 use rayon::prelude::*;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::sync::{Arc, OnceLock};
 
 use super::super::compat::{FlatDfa, TokenizerView};
@@ -390,7 +390,7 @@ fn refine_once_interned(
 
     let mut next_blocks = vec![0u32; n];
     let mut block_count = 0usize;
-    let mut buckets = HashMap::<u64, Vec<(usize, u32)>>::new();
+    let mut buckets = FxHashMap::<u64, Vec<(usize, u32)>>::default();
 
     for state in 0..n {
         let hash = row_hashes[state];
