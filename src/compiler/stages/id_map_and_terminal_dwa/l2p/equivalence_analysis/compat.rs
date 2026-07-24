@@ -1,7 +1,10 @@
 //! Flattened tokenizer-DFA views for the equivalence-analysis passes.
 
 use crate::automata::lexer::Lexer;
+use crate::automata::lexer::compile::compile_terminal_expr_dfa;
+use crate::automata::lexer::DFA;
 use crate::ds::u8set::U8Set;
+use rayon::prelude::*;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -193,7 +196,7 @@ pub(crate) fn compute_byte_classes(dfa: &FlatDfa) -> [u8; 256] {
 /// identical action from every residual of every active terminal language.
 /// Replacing one by the other preserves active-terminal match positions and
 /// residuals; grammar follow constraints only filter terminal labels later.
-pub(crate) fn compute_active_terminal_language_byte_classes(
+fn compute_active_terminal_language_byte_classes_combined(
     tokenizer: &Tokenizer,
     active_groups: &[bool],
 ) -> Option<[u8; 256]> {
@@ -219,6 +222,89 @@ pub(crate) fn compute_active_terminal_language_byte_classes(
     );
     let active_view = TokenizerView::new(&active_tokenizer);
     Some(compute_byte_classes(active_view.dfa()))
+}
+
+fn compute_byte_classes_for_independent_dfas(dfas: &[DFA]) -> [u8; 256] {
+    let num_states = dfas.iter().map(DFA::num_states).sum::<usize>();
+    let mut transitions = Vec::with_capacity(num_states.saturating_mul(256));
+    let mut column_hashes = [0u64; 256];
+    for dfa in dfas {
+        for state in 0..dfa.num_states() {
+            let row = build_transition_table(dfa.transitions(state as u32));
+            for (hash, &target) in column_hashes.iter_mut().zip(row.iter()) {
+                *hash = hash
+                    .wrapping_mul(BYTE_COLUMN_HASH_MULTIPLIER)
+                    .wrapping_add(target as u64);
+            }
+            transitions.extend_from_slice(&row);
+        }
+    }
+    byte_classes_from_column_hashes(&transitions, num_states, &column_hashes)
+}
+
+fn byte_class_relations_match(left: &[u8; 256], right: &[u8; 256]) -> bool {
+    (0..256).all(|first| {
+        (0..256).all(|second| {
+            (left[first] == left[second]) == (right[first] == right[second])
+        })
+    })
+}
+
+fn active_terminal_exprs(
+    tokenizer: &Tokenizer,
+    active_groups: &[bool],
+) -> Option<Vec<crate::automata::regex::Expr>> {
+    active_groups
+        .iter()
+        .enumerate()
+        .filter_map(|(terminal, &active)| active.then_some(terminal as u32))
+        .map(|terminal| tokenizer.terminal_expr(terminal).cloned())
+        .collect::<Option<Vec<_>>>()
+}
+
+fn compute_active_terminal_language_byte_classes_independent(
+    tokenizer: &Tokenizer,
+    active_groups: &[bool],
+) -> Option<[u8; 256]> {
+    let active_exprs = active_terminal_exprs(tokenizer, active_groups)?;
+    if active_exprs.is_empty() {
+        return Some([0u8; 256]);
+    }
+    let dfas = active_exprs
+        .par_iter()
+        .map(compile_terminal_expr_dfa)
+        .collect::<Vec<_>>();
+    Some(compute_byte_classes_for_independent_dfas(&dfas))
+}
+
+pub(crate) fn compute_active_terminal_language_byte_classes(
+    tokenizer: &Tokenizer,
+    active_groups: &[bool],
+) -> Option<[u8; 256]> {
+    let use_independent = std::env::var("GLRMASK_ACTIVE_LANGUAGE_BYTE_CLASSES_INDEPENDENT")
+        .map(|value| {
+            let value = value.trim();
+            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false);
+    if !use_independent {
+        return compute_active_terminal_language_byte_classes_combined(
+            tokenizer,
+            active_groups,
+        );
+    }
+
+    let independent =
+        compute_active_terminal_language_byte_classes_independent(tokenizer, active_groups)?;
+    if std::env::var_os("GLRMASK_ACTIVE_LANGUAGE_BYTE_CLASSES_STRICT_REFERENCE").is_some() {
+        let reference =
+            compute_active_terminal_language_byte_classes_combined(tokenizer, active_groups)?;
+        assert!(
+            byte_class_relations_match(&independent, &reference),
+            "independent active-terminal byte congruence differs from combined-tokenizer reference",
+        );
+    }
+    Some(independent)
 }
 
 
