@@ -974,7 +974,7 @@ impl PyConstraintState {
 fn allocation_stats_tuple(
     elapsed_ns: u64,
     stats: allocation_tracking::AllocationStats,
-) -> (u64, u64, u64, u64, u64, u64, u64, u64) {
+) -> (u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64) {
     (
         elapsed_ns,
         stats.alloc_calls,
@@ -984,6 +984,12 @@ fn allocation_stats_tuple(
         stats.allocated_bytes,
         stats.reallocated_bytes,
         stats.deallocated_bytes,
+        stats.alloc_ns,
+        stats.max_alloc_ns,
+        stats.realloc_ns,
+        stats.max_realloc_ns,
+        stats.dealloc_ns,
+        stats.max_dealloc_ns,
     )
 }
 
@@ -1002,7 +1008,7 @@ impl PyConstraintState {
     fn fill_mask_timed_allocation_stats(
         &self,
         mut bitmask: PyReadwriteArray1<i32>,
-    ) -> PyResult<(u64, u64, u64, u64, u64, u64, u64, u64)> {
+    ) -> PyResult<(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64)> {
         let slice = bitmask.as_slice_mut().map_err(|e| {
             PyValueError::new_err(format!("Array must be contiguous: {e:?}"))
         })?;
@@ -1045,7 +1051,7 @@ impl PyConstraintState {
     fn commit_token_timed_allocation_stats(
         &mut self,
         token_id: u32,
-    ) -> PyResult<(u64, u64, u64, u64, u64, u64, u64, u64)> {
+    ) -> PyResult<(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64)> {
         let (result, stats) = allocation_tracking::measure(|| {
             self.inner.with_dependent_mut(|_owner, state| {
                 state.commit_token_timed_ns(token_id)
@@ -1329,7 +1335,7 @@ fn fill_mask_timed_ns(
 fn fill_mask_timed_allocation_stats(
     state: PyRef<'_, PyConstraintState>,
     bitmask: PyReadwriteArray1<i32>,
-) -> PyResult<(u64, u64, u64, u64, u64, u64, u64, u64)> {
+) -> PyResult<(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64)> {
     state.fill_mask_timed_allocation_stats(bitmask)
 }
 
@@ -1355,7 +1361,7 @@ fn commit_token_timed_ns(
 fn commit_token_timed_allocation_stats(
     mut state: PyRefMut<'_, PyConstraintState>,
     token_id: u32,
-) -> PyResult<(u64, u64, u64, u64, u64, u64, u64, u64)> {
+) -> PyResult<(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64)> {
     state.commit_token_timed_allocation_stats(token_id)
 }
 
