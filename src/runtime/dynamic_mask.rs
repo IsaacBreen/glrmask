@@ -148,11 +148,10 @@ struct DynamicNfaScanCache<'a> {
     constraint: &'a Constraint,
     deadline: Option<Instant>,
     max_collection_items: Option<usize>,
-    epsilon_closures: Arc<[Box<[u32]>]>,
     config_ids: FxHashMap<Vec<u32>, u32>,
     configs: Vec<Box<[u32]>>,
     transitions: Vec<Option<Box<[u32; 256]>>>,
-    raw_start_config: Vec<u32>,
+    raw_start_config: FxHashMap<u32, u32>,
 }
 
 impl<'a> DynamicNfaScanCache<'a> {
@@ -161,14 +160,10 @@ impl<'a> DynamicNfaScanCache<'a> {
             constraint,
             deadline,
             max_collection_items: deadline.map(|_| 5_000_000),
-            epsilon_closures: constraint.tokenizer.all_singleton_epsilon_closures(),
             config_ids: FxHashMap::default(),
             configs: Vec::new(),
             transitions: Vec::new(),
-            raw_start_config: vec![
-                DYNAMIC_NFA_CONFIG_UNKNOWN;
-                constraint.tokenizer.num_states() as usize
-            ],
+            raw_start_config: FxHashMap::default(),
         }
     }
 
@@ -202,13 +197,16 @@ impl<'a> DynamicNfaScanCache<'a> {
     }
 
     fn config_for_raw_start(&mut self, state: u32) -> Result<u32, String> {
-        let slot = state as usize;
-        let cached = self.raw_start_config[slot];
-        if cached != DYNAMIC_NFA_CONFIG_UNKNOWN {
+        if let Some(&cached) = self.raw_start_config.get(&state) {
             return Ok(cached);
         }
-        let config = self.intern_config(self.epsilon_closures[slot].to_vec())?;
-        self.raw_start_config[slot] = config;
+        let closure = self
+            .constraint
+            .tokenizer
+            .singleton_epsilon_closure(state)
+            .into_vec();
+        let config = self.intern_config(closure)?;
+        self.raw_start_config.insert(state, config);
         Ok(config)
     }
 
@@ -223,15 +221,19 @@ impl<'a> DynamicNfaScanCache<'a> {
 
         let closed_targets = {
             let mut targets = Vec::<u32>::new();
-            for &state in self.configs[config_index].iter() {
+            let config_len = self.configs[config_index].len();
+            for state_index in 0..config_len {
+                let state = self.configs[config_index][state_index];
                 let target = self.constraint.tokenizer_fast_transitions.transition(
                     &self.constraint.tokenizer,
                     state,
                     byte,
                 );
                 if target != u32::MAX {
-                    self.check_growth(targets.len(), self.epsilon_closures[target as usize].len())?;
-                    targets.extend_from_slice(&self.epsilon_closures[target as usize]);
+                    let target_config = self.config_for_raw_start(target)?;
+                    let target_states = &self.configs[target_config as usize];
+                    self.check_growth(targets.len(), target_states.len())?;
+                    targets.extend_from_slice(target_states);
                 }
             }
             targets
@@ -1654,6 +1656,30 @@ mod tests {
             }
             frontier = next;
         }
+    }
+
+    #[test]
+    fn dynamic_nfa_cache_only_indexes_touched_raw_states() {
+        let vocab = Vocab::new(vec![
+            (0, b"a".to_vec()),
+            (1, b"b".to_vec()),
+            (2, b"ab".to_vec()),
+        ]);
+        let grammar = r#"
+start start;
+t A ::= 'a'+;
+t B ::= 'b';
+nt start ::= A B | A;
+"#;
+        let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
+        let mut cache = DynamicNfaScanCache::new(&constraint, None);
+        assert!(cache.raw_start_config.is_empty());
+
+        let initial = constraint.tokenizer.initial_state();
+        let config = cache.config_for_raw_start(initial).unwrap();
+        assert_eq!(cache.raw_start_config.len(), 1);
+        let _ = cache.step_config(config, b'a').unwrap();
+        assert!(cache.raw_start_config.len() < constraint.tokenizer.num_states() as usize);
     }
 
     #[test]

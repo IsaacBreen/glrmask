@@ -437,7 +437,7 @@ struct ContinuationNfaScanCache<'tok> {
     config_ids: FxHashMap<Vec<u32>, u32>,
     configs: Vec<Box<[u32]>>,
     transitions: Vec<Option<Box<[u32; 256]>>>,
-    raw_start_config: Vec<u32>,
+    raw_start_config: FxHashMap<u32, u32>,
 }
 
 impl<'tok> ContinuationNfaScanCache<'tok> {
@@ -447,10 +447,7 @@ impl<'tok> ContinuationNfaScanCache<'tok> {
             config_ids: FxHashMap::default(),
             configs: Vec::new(),
             transitions: Vec::new(),
-            raw_start_config: vec![
-                CONTINUATION_NFA_CONFIG_UNKNOWN;
-                tokenizer.num_states() as usize
-            ],
+            raw_start_config: FxHashMap::default(),
         }
     }
 
@@ -468,17 +465,12 @@ impl<'tok> ContinuationNfaScanCache<'tok> {
     }
 
     fn config_for_raw_start(&mut self, state: u32) -> u32 {
-        let slot = state as usize;
-        let cached = self.raw_start_config[slot];
-        if cached != CONTINUATION_NFA_CONFIG_UNKNOWN {
+        if let Some(&cached) = self.raw_start_config.get(&state) {
             return cached;
         }
-        let closure = self
-            .tokenizer
-            .execute_from_state_end_only(&[], state)
-            .into_vec();
+        let closure = self.tokenizer.singleton_epsilon_closure(state).into_vec();
         let config = self.intern_config(closure);
-        self.raw_start_config[slot] = config;
+        self.raw_start_config.insert(state, config);
         config
     }
 
@@ -2054,40 +2046,48 @@ impl DynamicMaskVocab {
             .iter()
             .map(|&(state, _)| state)
             .collect::<FxHashSet<_>>();
-        let epsilon_closures = tokenizer.has_epsilon_transitions().then(|| {
-            (0..tokenizer.num_states())
-                .map(|state| {
-                    tokenizer
-                        .execute_from_state_end_only(&[], state)
-                        .into_vec()
-                        .into_boxed_slice()
-                })
-                .collect::<Vec<_>>()
-        });
-        let target_closure_reaches_broad = epsilon_closures.as_ref().map(|closures| {
-            closures
-                .iter()
-                .map(|closure| closure.iter().any(|state| broad_targets.contains(state)))
-                .collect::<Vec<_>>()
-        });
+        let has_epsilon_transitions = tokenizer.has_epsilon_transitions();
+        let mut target_closure_reaches_broad = FxHashMap::<u32, bool>::default();
         let mut entry_sources = Vec::<(u32, usize)>::new();
-        let deterministic = !tokenizer.has_epsilon_transitions();
         for source_state in 0..tokenizer.num_states() {
             if broad_targets.contains(&source_state) {
                 continue;
             }
-            let covered_len = if deterministic {
+            let covered_len = if !has_epsilon_transitions {
                 tokenizer
                     .transitions_from(source_state)
                     .filter(|(_, target)| broad_targets.contains(target))
                     .count()
             } else {
+                let mut target_reaches_broad = |target: u32| {
+                    if broad_targets.contains(&target) {
+                        return true;
+                    }
+                    if !tokenizer.state_has_epsilon_transitions(target) {
+                        return false;
+                    }
+                    *target_closure_reaches_broad.entry(target).or_insert_with(|| {
+                        tokenizer
+                            .singleton_epsilon_closure(target)
+                            .iter()
+                            .any(|state| broad_targets.contains(state))
+                    })
+                };
                 let mut covered = U8Set::empty();
-                let closures = epsilon_closures.as_ref().unwrap();
-                let target_reaches_broad = target_closure_reaches_broad.as_ref().unwrap();
-                for &closure_state in closures[source_state as usize].iter() {
-                    for (byte, target) in tokenizer.transitions_from(closure_state) {
-                        if target_reaches_broad[target as usize] {
+                if tokenizer.state_has_epsilon_transitions(source_state) {
+                    for &closure_state in tokenizer
+                        .singleton_epsilon_closure(source_state)
+                        .iter()
+                    {
+                        for (byte, target) in tokenizer.transitions_from(closure_state) {
+                            if target_reaches_broad(target) {
+                                covered.insert(byte);
+                            }
+                        }
+                    }
+                } else {
+                    for (byte, target) in tokenizer.transitions_from(source_state) {
+                        if target_reaches_broad(target) {
                             covered.insert(byte);
                         }
                     }
@@ -2490,4 +2490,26 @@ pub struct Constraint {
     /// Self-contained final internal-token -> original-token bitset materializer.
     #[serde(skip)]
     pub(crate) final_mask_mapping: FinalMaskMapping,
+}
+
+
+#[cfg(test)]
+mod sparse_nfa_scan_cache_tests {
+    use super::*;
+    use crate::automata::lexer::tokenizer::arbitrary_epsilon_l1_test_tokenizer;
+
+    #[test]
+    fn continuation_nfa_cache_only_indexes_touched_raw_states() {
+        let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
+        let mut cache = ContinuationNfaScanCache::new(&tokenizer);
+        assert!(cache.raw_start_config.is_empty());
+
+        let initial = cache.config_for_raw_start(tokenizer.initial_state());
+        assert_eq!(cache.raw_start_config.len(), 1);
+        assert_eq!(cache.configs[initial as usize].as_ref(), &[0, 1, 2, 4]);
+
+        let after_a = cache.step_config(initial, b'a').unwrap();
+        assert_eq!(cache.configs[after_a as usize].as_ref(), &[3, 5]);
+        assert!(cache.raw_start_config.len() < tokenizer.num_states() as usize);
+    }
 }
