@@ -3151,11 +3151,15 @@ fn try_first_transition_factor_plan<S: AsRef<[u8]> + Sync>(
     let mut source_state_buckets_before = 0usize;
     let mut source_state_buckets_after = 0usize;
     let mut preliminary_state_token_pairs = 0usize;
+    let mut preliminary_domain_by_token = vec![usize::MAX; strings.len()];
     let mut seen_outcomes = vec![0u32; dfa.num_states + 1];
     let mut seen_outcome_epoch = 0u32;
 
     for token_indices in tokens_by_class.into_iter().filter(|bucket| !bucket.is_empty()) {
         semantic_buckets += 1;
+        for &token_idx in &token_indices {
+            preliminary_domain_by_token[token_idx] = semantic_buckets;
+        }
         if token_indices.len() < min_bucket_tokens {
             singleton_tokens.extend(token_indices);
             continue;
@@ -3207,6 +3211,23 @@ fn try_first_transition_factor_plan<S: AsRef<[u8]> + Sync>(
         return None;
     }
 
+    if buckets.len() > 1 {
+        let mut merged_buckets = Vec::<FirstTransitionBucket>::with_capacity(buckets.len());
+        let mut shape_to_bucket = HashMap::<Vec<usize>, usize>::with_capacity(buckets.len());
+        for bucket in buckets {
+            if let Some(&merged_idx) = shape_to_bucket.get(&bucket.initial_outcomes) {
+                merged_buckets[merged_idx]
+                    .token_indices
+                    .extend(bucket.token_indices);
+            } else {
+                let merged_idx = merged_buckets.len();
+                shape_to_bucket.insert(bucket.initial_outcomes.clone(), merged_idx);
+                merged_buckets.push(bucket);
+            }
+        }
+        buckets = merged_buckets;
+    }
+
     let full_state_token_pairs = strings.len().saturating_mul(initial_states.len());
     let preliminary_ratio = preliminary_state_token_pairs as f64
         / full_state_token_pairs.max(1) as f64;
@@ -3245,9 +3266,17 @@ fn try_first_transition_factor_plan<S: AsRef<[u8]> + Sync>(
         let signature_ms = signature_started_at.elapsed().as_secs_f64() * 1000.0;
 
         let grouping_started_at = Instant::now();
-        let mut by_signature = HashMap::<u64, Vec<usize>>::with_capacity(active_sigs.len());
+        // Equal outcome vectors may share one suffix trie walk, but retain the
+        // original semantic leading-byte domain in the preliminary partition.
+        // This captures traversal reuse without making the authority pass
+        // resolve a deliberately coarser cross-domain class.
+        let mut by_signature =
+            HashMap::<(usize, u64), Vec<usize>>::with_capacity(active_sigs.len());
         for (token_idx, signature) in active_sigs {
-            by_signature.entry(signature).or_default().push(token_idx);
+            by_signature
+                .entry((preliminary_domain_by_token[token_idx], signature))
+                .or_default()
+                .push(token_idx);
         }
         let mut classes = by_signature.into_values().collect::<Vec<_>>();
         for class in &mut classes {
@@ -4052,7 +4081,7 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
                 .expect("first-transition factorization requires lexical token order"),
             &scratch_pool,
             profiling,
-            first_transition_factor_mode != FirstTransitionFactorMode::Force,
+            first_transition_factor_mode == FirstTransitionFactorMode::Environment,
         )
     });
     let factor_plan = factor_plan.flatten();
