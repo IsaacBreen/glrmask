@@ -974,8 +974,8 @@ impl PyConstraintState {
 fn allocation_stats_tuple(
     elapsed_ns: u64,
     stats: allocation_tracking::AllocationStats,
-) -> (u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64) {
-    (
+) -> Vec<u64> {
+    vec![
         elapsed_ns,
         stats.alloc_calls,
         stats.alloc_zeroed_calls,
@@ -990,7 +990,7 @@ fn allocation_stats_tuple(
         stats.max_realloc_ns,
         stats.dealloc_ns,
         stats.max_dealloc_ns,
-    )
+    ]
 }
 
 impl PyConstraintState {
