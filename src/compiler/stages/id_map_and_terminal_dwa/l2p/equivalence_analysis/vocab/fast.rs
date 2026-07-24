@@ -709,6 +709,13 @@ fn env_flag_enabled(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn env_flag_override(name: &str) -> Option<bool> {
+    std::env::var(name).ok().map(|value| {
+        let normalized = value.trim().to_ascii_lowercase();
+        !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
+    })
+}
+
 fn vocab_batch_size_override() -> Option<usize> {
     std::env::var("GLRMASK_VOCAB_EQUIV_BATCH_SIZE")
         .ok()
@@ -724,7 +731,7 @@ fn vocab_sequential_trie_work_max() -> usize {
 }
 
 fn first_transition_factor_enabled() -> bool {
-    env_flag_enabled("GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR")
+    env_flag_override("GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR").unwrap_or(true)
 }
 
 fn first_transition_factor_strict_reference_enabled() -> bool {
@@ -747,8 +754,8 @@ fn first_transition_factor_max_work_ratio() -> f64 {
         .unwrap_or(FIRST_TRANSITION_FACTOR_MAX_WORK_RATIO_DEFAULT)
 }
 
-fn first_transition_factor_force_parallel_buckets() -> bool {
-    env_flag_enabled("GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_PARALLEL_BUCKETS")
+fn first_transition_factor_parallel_buckets_override() -> Option<bool> {
+    env_flag_override("GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_PARALLEL_BUCKETS")
 }
 
 fn first_transition_factor_final_single_batch_enabled() -> bool {
@@ -3257,15 +3264,19 @@ fn try_first_transition_factor_plan<S: AsRef<[u8]> + Sync>(
         }
     };
 
-    // This engine normally runs inside the partition-level Rayon scheduler.
-    // Spawning one nested task per semantic leading class can starve the outer
-    // partition DAG when several partitions enter this path concurrently. Keep
-    // the buckets sequential inside an existing Rayon worker; only use bucket
-    // parallelism when the engine is invoked outside a Rayon job.
+    // The factor pass normally runs inside the partition-level Rayon DAG.
+    // Small and moderate pools benefit from nested bucket parallelism because
+    // one sequential factor task otherwise monopolizes an outer worker. On
+    // larger pools, very large source-state domains instead benefit from one
+    // sequential factor task, leaving the remaining workers to the outer DAG.
+    // Keep an explicit override for diagnostics and future scheduler studies.
     let parallel_buckets = buckets.len() > 1
-        && rayon::current_num_threads() > 1
-        && (rayon::current_thread_index().is_none()
-            || first_transition_factor_force_parallel_buckets());
+        && first_transition_factor_parallel_buckets_override().unwrap_or_else(|| {
+            first_transition_factor_parallel_buckets_default(
+                rayon::current_num_threads(),
+                initial_states.len(),
+            )
+        });
     let bucket_results = if parallel_buckets {
         buckets.par_iter().map(process_bucket).collect::<Vec<_>>()
     } else {
@@ -3336,6 +3347,16 @@ const SINGLETON_PROBE_STATES: usize = 16;
 const PRE_DFA_SINGLETON_PROBE_MIN_INITIAL_STATES: usize = 64;
 const PRE_DFA_SINGLETON_PROBE_MIN_WORK: usize = 8_192;
 const FIRST_TRANSITION_FACTOR_MAX_WORK_RATIO_DEFAULT: f64 = 0.05;
+const FIRST_TRANSITION_FACTOR_HIGH_THREAD_SEQUENTIAL_MIN_STATES: usize = 10_000;
+
+fn first_transition_factor_parallel_buckets_default(
+    num_threads: usize,
+    num_initial_states: usize,
+) -> bool {
+    num_threads > 1
+        && (num_threads <= 8
+            || num_initial_states < FIRST_TRANSITION_FACTOR_HIGH_THREAD_SEQUENTIAL_MIN_STATES)
+}
 
 /// Restrict a tokenizer view to exactly the states reachable from the state
 /// representatives and lexer start along bytes that appear in `strings`.
@@ -4551,6 +4572,15 @@ mod shared_base_tests {
         FlatDfa, FlatDfaState, TokenizerView,
     };
     use std::sync::Arc;
+
+    #[test]
+    fn first_transition_factor_bucket_policy_tracks_pool_and_state_domain() {
+        assert!(!first_transition_factor_parallel_buckets_default(1, 1));
+        assert!(first_transition_factor_parallel_buckets_default(4, 50_000));
+        assert!(first_transition_factor_parallel_buckets_default(8, 50_000));
+        assert!(first_transition_factor_parallel_buckets_default(12, 4_989));
+        assert!(!first_transition_factor_parallel_buckets_default(12, 12_000));
+    }
 
     #[test]
     fn byte_classes_from_unpruned_view_are_not_valid_for_bounded_view() {
