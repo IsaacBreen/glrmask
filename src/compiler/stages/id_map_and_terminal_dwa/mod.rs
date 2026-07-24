@@ -23,7 +23,6 @@ pub(crate) mod partition;
 pub(crate) mod types;
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
@@ -1434,11 +1433,6 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
         (result, idx)
     };
     let serial_profile_partition_schedule = compile_profile_uses_serial_partition_schedule();
-    let bounded_outer_workers = std::env::var("GLRMASK_PARTITION_OUTER_WORKERS")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|&workers| workers > 0)
-        .map(|workers| workers.min(sub_vocabs.len()));
     let partition_build_started_at = Instant::now();
     let partition_results: Vec<(Option<(types::PartitionTerminalDwas, f64)>, usize)> =
         if serial_profile_partition_schedule {
@@ -1446,39 +1440,6 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
                 .iter()
                 .enumerate()
                 .map(|(idx, sub_vocab)| build_partition(idx, sub_vocab))
-                .collect()
-        } else if let Some(worker_count) = bounded_outer_workers {
-            let sub_vocabs_ref = sub_vocabs.as_ref();
-            let partition_count = sub_vocabs_ref.len();
-            let next_partition = AtomicUsize::new(0);
-            let result_slots = Mutex::new(
-                (0..partition_count)
-                    .map(|_| None)
-                    .collect::<Vec<Option<(Option<(types::PartitionTerminalDwas, f64)>, usize)>>>(),
-            );
-            rayon::scope(|scope| {
-                for _ in 0..worker_count {
-                    let next_partition = &next_partition;
-                    let result_slots = &result_slots;
-                    let build_partition = &build_partition;
-                    let sub_vocabs = sub_vocabs_ref;
-                    scope.spawn(move |_| loop {
-                        let idx = next_partition.fetch_add(1, Ordering::Relaxed);
-                        if idx >= partition_count {
-                            break;
-                        }
-                        let result = build_partition(idx, &sub_vocabs[idx]);
-                        result_slots
-                            .lock()
-                            .expect("bounded partition result slots poisoned")[idx] = Some(result);
-                    });
-                }
-            });
-            result_slots
-                .into_inner()
-                .expect("bounded partition result slots poisoned")
-                .into_iter()
-                .map(|result| result.expect("bounded partition worker omitted a partition"))
                 .collect()
         } else {
             sub_vocabs
@@ -1672,15 +1633,8 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
             split_terminal_dwa_total_ms,
         );
         eprintln!(
-            "[glrmask/profile][split_terminal_dwa_wall] scheduler={} outer_workers={} stage_setup_ms={:.3} partition_vocab_ms={:.3} shared_cache_setup_ms={:.3} partition_build_wall_ms={:.3} partition_result_finalize_ms={:.3} family_merge_wall_ms={:.3} global_merge_ms={:.3} post_ti_ignore_ms={:.3} post_merge_bookkeeping_ms={:.3} accounted_wall_ms={:.3} timing_residual_ms={:.3} total_ms={:.3}",
-            if serial_profile_partition_schedule {
-                "serial_profile_1t"
-            } else if bounded_outer_workers.is_some() {
-                "bounded_rayon"
-            } else {
-                "rayon"
-            },
-            bounded_outer_workers.unwrap_or(sub_vocabs.len()),
+            "[glrmask/profile][split_terminal_dwa_wall] scheduler={} stage_setup_ms={:.3} partition_vocab_ms={:.3} shared_cache_setup_ms={:.3} partition_build_wall_ms={:.3} partition_result_finalize_ms={:.3} family_merge_wall_ms={:.3} global_merge_ms={:.3} post_ti_ignore_ms={:.3} post_merge_bookkeeping_ms={:.3} accounted_wall_ms={:.3} timing_residual_ms={:.3} total_ms={:.3}",
+            if serial_profile_partition_schedule { "serial_profile_1t" } else { "rayon" },
             stage_setup_ms,
             partition_vocab_ms,
             shared_cache_setup_ms,
