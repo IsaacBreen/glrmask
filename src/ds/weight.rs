@@ -1,8 +1,8 @@
+use once_cell::sync::Lazy;
 use range_set_blaze::{CheckSortedDisjoint, RangeMapBlaze, RangeSetBlaze, SortedDisjointMap};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
-use once_cell::sync::Lazy;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use dashmap::DashMap;
 
 use std::cell::RefCell;
@@ -1482,6 +1482,79 @@ fn append_weight_entries(builder: &mut CompactRangeBuilder, weight: &Weight) {
     }
 }
 
+fn coalesce_repeated_token_body_ranges(
+    all_entries: Vec<WeightRangeEntry>,
+) -> Vec<WeightRangeEntry> {
+    const MIN_ENTRIES: usize = 2_048;
+    const MIN_OUTPUT_COMPRESSION: usize = 32;
+
+    let input_entries = all_entries.len();
+    if input_entries < MIN_ENTRIES {
+        return all_entries;
+    }
+
+    let mut token_body_ids = FxHashSet::default();
+    for entry in &all_entries {
+        token_body_ids.insert(Arc::as_ptr(&entry.tokens) as usize);
+    }
+    if token_body_ids
+        .len()
+        .saturating_mul(MIN_OUTPUT_COMPRESSION)
+        > input_entries
+    {
+        return all_entries;
+    }
+
+    struct TokenBodyGroup {
+        tokens: SharedTokenSet,
+        ranges: Vec<(u32, u32)>,
+    }
+
+    let mut group_by_token_body = FxHashMap::<usize, usize>::default();
+    let mut groups = Vec::<TokenBodyGroup>::with_capacity(token_body_ids.len());
+    for range_entry in &all_entries {
+        let token_body = Arc::as_ptr(&range_entry.tokens) as usize;
+        let group_id = match group_by_token_body.entry(token_body) {
+            std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let group_id = groups.len();
+                entry.insert(group_id);
+                groups.push(TokenBodyGroup {
+                    tokens: Arc::clone(&range_entry.tokens),
+                    ranges: Vec::new(),
+                });
+                group_id
+            }
+        };
+        groups[group_id].ranges.push((range_entry.start, range_entry.end));
+    }
+
+    let mut coalesced = Vec::new();
+    for mut group in groups {
+        group.ranges.sort_unstable_by_key(|&(start, end)| (start, end));
+        let mut merged = Vec::<(u32, u32)>::with_capacity(group.ranges.len());
+        for (start, end) in group.ranges {
+            if let Some((_, previous_end)) = merged.last_mut()
+                && start <= previous_end.saturating_add(1)
+            {
+                *previous_end = (*previous_end).max(end);
+            } else {
+                merged.push((start, end));
+            }
+        }
+        coalesced.extend(merged.into_iter().map(|(start, end)| WeightRangeEntry {
+            start,
+            end,
+            tokens: Arc::clone(&group.tokens),
+        }));
+    }
+    let selected = coalesced
+        .len()
+        .saturating_mul(MIN_OUTPUT_COMPRESSION)
+        <= input_entries;
+    if selected { coalesced } else { all_entries }
+}
+
 fn union_disjoint_tsid_ranges(left: &Weight, right: &Weight) -> Option<Weight> {
     let (left_start, left_end) = weight_tsid_span(left)?;
     let (right_start, right_end) = weight_tsid_span(right)?;
@@ -1506,7 +1579,7 @@ fn union_disjoint_tsid_ranges(left: &Weight, right: &Weight) -> Option<Weight> {
 /// The previous implementation re-scanned every started entry at every
 /// boundary, which is quadratic for long overlapping ranges.  The event sweep
 /// maintains the active distinct token sets incrementally instead.
-fn union_all_multiway(weights: &[&Weight]) -> Weight {
+fn union_all_multiway_impl(weights: &[&Weight], coalesce_repeated_token_ranges: bool) -> Weight {
     let total_entry_hint: usize = weights.iter().map(|w| w.0.ranges().count()).sum();
     let mut all_entries: Vec<WeightRangeEntry> = Vec::with_capacity(total_entry_hint);
     for weight in weights {
@@ -1521,6 +1594,10 @@ fn union_all_multiway(weights: &[&Weight]) -> Weight {
 
     if all_entries.is_empty() {
         return Weight::empty();
+    }
+
+    if coalesce_repeated_token_ranges {
+        all_entries = coalesce_repeated_token_body_ranges(all_entries);
     }
 
     // Terminal-transport unions frequently contain coordinate-disjoint
@@ -1546,6 +1623,10 @@ fn union_all_multiway(weights: &[&Weight]) -> Weight {
         return union_all_multiway_rescan(all_entries);
     }
     union_all_multiway_incremental(all_entries)
+}
+
+fn union_all_multiway(weights: &[&Weight]) -> Weight {
+    union_all_multiway_impl(weights, false)
 }
 
 fn union_all_multiway_rescan(mut all_entries: Vec<WeightRangeEntry>) -> Weight {
@@ -2596,6 +2677,60 @@ impl Weight {
         }
     }
 
+    /// Exact multi-way union specialized for weighted-DWA reconstruction.
+    ///
+    /// Reconstruction can accumulate thousands of overlapping TSID intervals
+    /// that repeatedly carry the same interned token-set body. Coalesce only
+    /// those same-valued coordinate intervals before the ordinary event sweep;
+    /// unrelated bulk-union callers retain the normal path and pay no scan.
+    pub(crate) fn union_all_reconstruction<'a>(
+        weights: impl IntoIterator<Item = &'a Self>,
+    ) -> Self {
+        let mut meaningful = SmallVec::<[&Weight; 8]>::new();
+        for weight in weights {
+            if weight.is_full() {
+                return Self::all();
+            }
+            if !weight.is_empty() {
+                meaningful.push(weight);
+            }
+        }
+        match meaningful.len() {
+            0 => Self::empty(),
+            1 => meaningful[0].clone(),
+            _ if meaningful.len() > 4 => {
+                meaningful.sort_unstable_by_key(|weight| weight.ptr_key());
+                meaningful.dedup_by_key(|weight| weight.ptr_key());
+                if meaningful.len() == 1 {
+                    meaningful[0].clone()
+                } else if let Some(result) = union_all_single_tsid_entries(&meaningful) {
+                    result
+                } else if meaningful.len() > 4 {
+                    union_all_multiway_impl(&meaningful, true)
+                } else {
+                    let mut iter = meaningful.into_iter();
+                    let mut acc = iter.next().unwrap().clone();
+                    for weight in iter {
+                        acc = acc.union(weight);
+                    }
+                    acc
+                }
+            }
+            _ => {
+                if let Some(result) = union_all_single_tsid_entries(&meaningful) {
+                    result
+                } else {
+                    let mut iter = meaningful.into_iter();
+                    let mut acc = iter.next().unwrap().clone();
+                    for weight in iter {
+                        acc = acc.union(weight);
+                    }
+                    acc
+                }
+            }
+        }
+    }
+
     pub fn intersection(&self, other: &Self) -> Self {
         if self.is_empty() || other.is_empty() {
             return Self::empty();
@@ -3149,6 +3284,59 @@ mod tests {
 
         assert_eq!(bulk, sequential);
         assert_eq!(direct, sequential);
+    }
+
+    #[test]
+    fn repeated_token_body_range_coalescing_preserves_union() {
+        let alpha = shared_rangeset(RangeSetBlaze::from_iter([1..=5]));
+        let beta = shared_rangeset(RangeSetBlaze::from_iter([7..=11]));
+        let mut entries = Vec::new();
+        for index in 0..2_400u32 {
+            let start = index % 100;
+            entries.push(WeightRangeEntry {
+                start,
+                end: start + 3,
+                tokens: if index % 2 == 0 {
+                    Arc::clone(&alpha)
+                } else {
+                    Arc::clone(&beta)
+                },
+            });
+        }
+
+        let sequential_union = entries.iter().fold(Weight::empty(), |acc, entry| {
+            acc.union(&Weight::from_uniform(
+                entry.start..=entry.end,
+                entry.tokens.as_ref().clone(),
+            ))
+        });
+        let coalesced = coalesce_repeated_token_body_ranges(entries);
+        assert!(coalesced.len() < 10);
+        let coalesced_union = coalesced.iter().fold(Weight::empty(), |acc, entry| {
+            acc.union(&Weight::from_uniform(
+                entry.start..=entry.end,
+                entry.tokens.as_ref().clone(),
+            ))
+        });
+
+        assert_eq!(coalesced_union, sequential_union);
+    }
+
+    #[test]
+    fn repeated_token_body_range_coalescing_skips_impossible_compression() {
+        let token_bodies: Vec<_> = (0..100u32)
+            .map(|token| shared_rangeset(RangeSetBlaze::from_iter([token..=token])))
+            .collect();
+        let entries: Vec<_> = (0..2_400u32)
+            .map(|index| WeightRangeEntry {
+                start: index % 200,
+                end: index % 200,
+                tokens: Arc::clone(&token_bodies[index as usize % token_bodies.len()]),
+            })
+            .collect();
+
+        let unchanged = coalesce_repeated_token_body_ranges(entries);
+        assert_eq!(unchanged.len(), 2_400);
     }
 
     #[test]

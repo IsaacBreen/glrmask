@@ -5,7 +5,7 @@
 //! compatibility constraints, and reconstructs the minimized automaton from the
 //! merged buckets.
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use range_set_blaze::RangeSetBlaze;
@@ -33,6 +33,18 @@ const UNMAPPED: u32 = u32::MAX;
 fn weighted_dwa_minimize_profile_enabled() -> bool {
     std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
         || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+}
+
+fn reconstruction_token_range_coalescing_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("GLRMASK_WEIGHT_UNION_COALESCE_TOKEN_RANGES")
+            .map(|value| {
+                let value = value.trim();
+                !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+            })
+            .unwrap_or(false)
+    })
 }
 
 fn mapped_target(old_to_new: &[u32], target: u32) -> Option<u32> {
@@ -1176,23 +1188,139 @@ struct PointwiseRegionBuildCache {
     misses: usize,
 }
 
-#[derive(Default)]
+struct DirectOverlayCache {
+    region_values: Vec<Arc<Vec<TokenBehaviorRange>>>,
+    region_ids_by_ptr: FxHashMap<usize, u32>,
+    slots: Vec<Option<(u64, u32)>>,
+    hits: usize,
+    misses: usize,
+    replacements: usize,
+}
+
 struct PointwiseRegionInterner {
     // Keep the immutable region itself as the hash key. `Arc<Vec<_>>` hashes
     // and compares by its contents, so lookup can still borrow a fresh Vec,
     // but newly interned regions no longer need a second full Vec clone solely
     // for map ownership.
     regions: FxHashMap<Arc<Vec<TokenBehaviorRange>>, ()>,
+    direct_overlay: Option<DirectOverlayCache>,
+}
+
+impl Default for PointwiseRegionInterner {
+    fn default() -> Self {
+        let requested_slots = std::env::var("GLRMASK_WEIGHTED_MINIMIZE_DIRECT_OVERLAY_SLOTS")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        let slot_count = if requested_slots == 0 {
+            0
+        } else {
+            requested_slots.next_power_of_two()
+        };
+        Self::with_direct_overlay_slots(slot_count)
+    }
 }
 
 impl PointwiseRegionInterner {
+    fn with_direct_overlay_slots(slot_count: usize) -> Self {
+        debug_assert!(slot_count == 0 || slot_count.is_power_of_two());
+        Self {
+            regions: FxHashMap::default(),
+            direct_overlay: (slot_count != 0).then(|| DirectOverlayCache {
+                region_values: Vec::new(),
+                region_ids_by_ptr: FxHashMap::default(),
+                slots: vec![None; slot_count],
+                hits: 0,
+                misses: 0,
+                replacements: 0,
+            }),
+        }
+    }
+
     fn intern(&mut self, ranges: Vec<TokenBehaviorRange>) -> Arc<Vec<TokenBehaviorRange>> {
         if let Some((existing, _)) = self.regions.get_key_value(&ranges) {
             return Arc::clone(existing);
         }
         let ranges = Arc::new(ranges);
         self.regions.insert(Arc::clone(&ranges), ());
+        if let Some(cache) = self.direct_overlay.as_mut() {
+            let id = cache.region_values.len() as u32;
+            cache
+                .region_ids_by_ptr
+                .insert(Arc::as_ptr(&ranges) as usize, id);
+            cache.region_values.push(Arc::clone(&ranges));
+        }
         ranges
+    }
+
+    fn overlay_compatible(
+        &mut self,
+        left: &Arc<Vec<TokenBehaviorRange>>,
+        right: &Arc<Vec<TokenBehaviorRange>>,
+    ) -> Arc<Vec<TokenBehaviorRange>> {
+        if Arc::ptr_eq(left, right) {
+            return Arc::clone(left);
+        }
+        let Some(cache) = self.direct_overlay.as_mut() else {
+            return self.intern(overlay_compatible_token_behavior_ranges(
+                left.as_ref(),
+                right.as_ref(),
+            ));
+        };
+
+        let left_id = *cache
+            .region_ids_by_ptr
+            .get(&(Arc::as_ptr(left) as usize))
+            .expect("interned pointwise region must have a compact ID");
+        let right_id = *cache
+            .region_ids_by_ptr
+            .get(&(Arc::as_ptr(right) as usize))
+            .expect("interned pointwise region must have a compact ID");
+        let (low, high) = if left_id <= right_id {
+            (left_id, right_id)
+        } else {
+            (right_id, left_id)
+        };
+        let key = (u64::from(low) << 32) | u64::from(high);
+        let mixed = key
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            .rotate_left(23)
+            ^ key.rotate_right(17);
+        let slot_index = mixed as usize & (cache.slots.len() - 1);
+        if let Some((cached_key, result_id)) = cache.slots[slot_index] {
+            if cached_key == key {
+                cache.hits += 1;
+                return Arc::clone(&cache.region_values[result_id as usize]);
+            }
+            cache.replacements += 1;
+        }
+
+        cache.misses += 1;
+        let result = self.intern(overlay_compatible_token_behavior_ranges(
+            left.as_ref(),
+            right.as_ref(),
+        ));
+        let cache = self
+            .direct_overlay
+            .as_mut()
+            .expect("direct overlay cache must remain enabled");
+        let result_id = *cache
+            .region_ids_by_ptr
+            .get(&(Arc::as_ptr(&result) as usize))
+            .expect("newly interned pointwise region must have a compact ID");
+        cache.slots[slot_index] = Some((key, result_id));
+        result
+    }
+
+    fn direct_overlay_stats(&self) -> (usize, usize, usize, usize) {
+        self.direct_overlay.as_ref().map_or((0, 0, 0, 0), |cache| {
+            (
+                cache.slots.len(),
+                cache.hits,
+                cache.misses,
+                cache.replacements,
+            )
+        })
     }
 }
 
@@ -1319,10 +1447,7 @@ impl PointwiseBehaviorMap {
                 Self::Sparse(entries) => match entries.get_mut(tsid) {
                     Some(existing) if Arc::ptr_eq(existing, ranges) => {}
                     Some(existing) => {
-                        *existing = regions.intern(overlay_compatible_token_behavior_ranges(
-                            existing.as_ref(),
-                            ranges.as_ref(),
-                        ));
+                        *existing = regions.overlay_compatible(existing, ranges);
                     }
                     None => {
                         entries.insert(*tsid, Arc::clone(ranges));
@@ -1335,10 +1460,7 @@ impl PointwiseBehaviorMap {
                     match entry {
                         Some(existing) if Arc::ptr_eq(existing, ranges) => {}
                         Some(existing) => {
-                            *existing = regions.intern(overlay_compatible_token_behavior_ranges(
-                                existing.as_ref(),
-                                ranges.as_ref(),
-                            ));
+                            *existing = regions.overlay_compatible(existing, ranges);
                         }
                         None => {
                             *entry = Some(Arc::clone(ranges));
@@ -1461,10 +1583,7 @@ impl PointwiseRangeBehaviorMap {
                     let region = if Arc::ptr_eq(&left.region, &right.region) {
                         left.region.clone()
                     } else {
-                        regions.intern(overlay_compatible_token_behavior_ranges(
-                            left.region.as_ref(),
-                            right.region.as_ref(),
-                        ))
+                        regions.overlay_compatible(&left.region, &right.region)
                     };
                     push_pointwise_tsid_range(&mut merged, left.start, end, region);
 
@@ -2105,6 +2224,8 @@ fn try_build_and_color_pointwise(
         .collect();
 
     if profile_enabled {
+        let (direct_overlay_slots, direct_overlay_hits, direct_overlay_misses, direct_overlay_replacements) =
+            regions.direct_overlay_stats();
         let region_entries = groups
             .iter()
             .map(|group| {
@@ -2112,7 +2233,7 @@ fn try_build_and_color_pointwise(
             })
             .sum::<usize>();
         eprintln!(
-            "[glrmask/profile][weighted_dwa_minimize_pointwise] candidates={} classes={} groups={} behaviors={} interned_regions={} regions={} region_build_cache_entries={} region_build_cache_hits={} region_build_cache_misses={} profile_build_ms={:.3} merge_ms={:.3} total_ms={:.3} group_attempts={} target_rejects={} behavior_rejects={}",
+            "[glrmask/profile][weighted_dwa_minimize_pointwise] candidates={} classes={} groups={} behaviors={} interned_regions={} regions={} region_build_cache_entries={} region_build_cache_hits={} region_build_cache_misses={} direct_overlay_slots={} direct_overlay_hits={} direct_overlay_misses={} direct_overlay_replacements={} profile_build_ms={:.3} merge_ms={:.3} total_ms={:.3} group_attempts={} target_rejects={} behavior_rejects={}",
             candidates.len(),
             class_profiles.len(),
             groups.len(),
@@ -2122,6 +2243,10 @@ fn try_build_and_color_pointwise(
             region_build_cache.entries.len(),
             region_build_cache.hits,
             region_build_cache.misses,
+            direct_overlay_slots,
+            direct_overlay_hits,
+            direct_overlay_misses,
+            direct_overlay_replacements,
             profile_build_ms,
             merge_ms,
             started_at.elapsed().as_secs_f64() * 1000.0,
@@ -2273,6 +2398,8 @@ fn try_build_and_color_pointwise_ranges(
         .collect();
 
     if profile_enabled {
+        let (direct_overlay_slots, direct_overlay_hits, direct_overlay_misses, direct_overlay_replacements) =
+            regions.direct_overlay_stats();
         let group_tsid_ranges = groups
             .iter()
             .map(|group| group.behavior_by_tsid.ranges.len())
@@ -2282,7 +2409,7 @@ fn try_build_and_color_pointwise_ranges(
             .map(|group| group.behavior_by_tsid.region_entry_count())
             .sum::<usize>();
         eprintln!(
-            "[glrmask/profile][weighted_dwa_minimize_pointwise_ranges] candidates={} classes={} groups={} behaviors={} interned_regions={} profile_ranges={} profile_tsid_cells={} group_tsid_ranges={} regions={} region_build_cache_entries={} region_build_cache_hits={} region_build_cache_misses={} profile_build_ms={:.3} merge_ms={:.3} total_ms={:.3} group_attempts={} target_rejects={} behavior_rejects={}",
+            "[glrmask/profile][weighted_dwa_minimize_pointwise_ranges] candidates={} classes={} groups={} behaviors={} interned_regions={} profile_ranges={} profile_tsid_cells={} group_tsid_ranges={} regions={} region_build_cache_entries={} region_build_cache_hits={} region_build_cache_misses={} direct_overlay_slots={} direct_overlay_hits={} direct_overlay_misses={} direct_overlay_replacements={} profile_build_ms={:.3} merge_ms={:.3} total_ms={:.3} group_attempts={} target_rejects={} behavior_rejects={}",
             candidates.len(),
             class_profiles.len(),
             groups.len(),
@@ -2295,6 +2422,10 @@ fn try_build_and_color_pointwise_ranges(
             region_build_cache.entries.len(),
             region_build_cache.hits,
             region_build_cache.misses,
+            direct_overlay_slots,
+            direct_overlay_hits,
+            direct_overlay_misses,
+            direct_overlay_replacements,
             profile_build_ms,
             merge_ms,
             started_at.elapsed().as_secs_f64() * 1000.0,
@@ -3609,7 +3740,11 @@ impl MergedStateBuilder {
 /// wide unions. Feeding it a tree of bounded intermediate unions adds repeated
 /// sorting, allocation, and range coalescing without reducing the final work.
 fn batch_build_weight(pending: Vec<Weight>) -> Weight {
-    Weight::union_all(pending.iter())
+    if reconstruction_token_range_coalescing_enabled() {
+        Weight::union_all_reconstruction(pending.iter())
+    } else {
+        Weight::union_all(pending.iter())
+    }
 }
 
 fn merge_state_into_builder(
@@ -4157,6 +4292,7 @@ mod tests {
     use super::{
         batch_build_weight, build_exact_group_summary, final_weights_compatible_on_domain,
         memberwise_group_compatible, minimize_acyclic, push_weights,
+        overlay_compatible_token_behavior_ranges,
         sorted_weights_compatible_on_domain,
         sorted_weights_compatible_on_domain_intersection,
         weight_is_disjoint_from_domain_intersection, weights_equal_on_domain,
@@ -4265,6 +4401,43 @@ mod tests {
         assert_eq!(cache.entries.len(), 2);
         assert_eq!(cache.hits, 1);
         assert_eq!(cache.misses, 2);
+    }
+
+    #[test]
+    fn direct_mapped_region_overlay_cache_matches_exact_overlay() {
+        let mut regions = PointwiseRegionInterner::with_direct_overlay_slots(8);
+        let left = regions.intern(vec![
+            TokenBehaviorRange {
+                start: 0,
+                end: 3,
+                behavior: 1,
+            },
+            TokenBehaviorRange {
+                start: 8,
+                end: 9,
+                behavior: 2,
+            },
+        ]);
+        let right = regions.intern(vec![
+            TokenBehaviorRange {
+                start: 2,
+                end: 5,
+                behavior: 1,
+            },
+            TokenBehaviorRange {
+                start: 10,
+                end: 12,
+                behavior: 3,
+            },
+        ]);
+        let expected = overlay_compatible_token_behavior_ranges(left.as_ref(), right.as_ref());
+
+        let first = regions.overlay_compatible(&left, &right);
+        let second = regions.overlay_compatible(&right, &left);
+
+        assert_eq!(first.as_ref(), &expected);
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(regions.direct_overlay_stats(), (8, 1, 1, 0));
     }
 
     #[test]
