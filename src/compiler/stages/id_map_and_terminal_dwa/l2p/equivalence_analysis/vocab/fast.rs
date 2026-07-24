@@ -755,14 +755,6 @@ fn first_transition_factor_final_single_batch_enabled() -> bool {
     env_flag_enabled("GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_FINAL_SINGLE_BATCH")
 }
 
-fn first_transition_factor_witness_states() -> usize {
-    std::env::var("GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_WITNESS_STATES")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|&value| value > 0)
-        .unwrap_or(0)
-}
-
 fn default_vocab_batch_size(
     num_states: usize,
     num_groups: usize,
@@ -4165,9 +4157,6 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
     // unresolved. A distinction found in the probe is permanent under further
     // refinement, so reaching `active_indices.is_empty()` is an exact identity
     // certificate, not a heuristic early exit.
-    let factor_witness_states = factor_plan
-        .as_ref()
-        .map_or(0, |_| first_transition_factor_witness_states());
     let use_singleton_probe = analysis_token_count <= SINGLETON_PROBE_MAX_TOKENS
         && num_initial_states > SINGLETON_PROBE_STATES
         && batch_size > SINGLETON_PROBE_STATES;
@@ -4179,11 +4168,7 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
         }
         batches += 1;
 
-        let active_before = active_indices.len();
-        let batch_wall_started_at = profiling.then(Instant::now);
-        let current_batch_size = if batch_index == 0 && factor_witness_states > 0 {
-            factor_witness_states.min(batch_size)
-        } else if batch_index == 0 && use_singleton_probe {
+        let current_batch_size = if batch_index == 0 && use_singleton_probe {
             SINGLETON_PROBE_STATES
         } else {
             batch_size
@@ -4361,18 +4346,6 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
         }
         active_indices = new_active;
         refinement_ms += elapsed_ms(refinement_started_at);
-        if profiling {
-            eprintln!(
-                "[glrmask/profile][vocab_equiv_batch] batch_index={} state_start={} state_end={} states={} active_before={} active_after={} wall_ms={:.3}",
-                batch_index,
-                batch_start,
-                batch_end,
-                batch.len(),
-                active_before,
-                active_indices.len(),
-                elapsed_ms(batch_wall_started_at),
-            );
-        }
         batch_start = batch_end;
         batch_index += 1;
     }
