@@ -7,6 +7,11 @@ edition = "2021"
 name = "_glrmask"
 crate-type = ["cdylib"]
 
+
+[features]
+default = []
+allocation-tracking = []
+
 [dependencies]
 pyo3 = { version = "0.24.2", features = ["extension-module"] }
 numpy = "0.24.0"

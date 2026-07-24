@@ -15,6 +15,15 @@
 //! dependent relationship. The only handwritten `unsafe` in this file is the
 //! NumPy `i32` to `u32` bitmask view cast used by `fill_mask`.
 
+#[cfg(feature = "allocation-tracking")]
+mod allocation_tracking;
+
+#[cfg(feature = "allocation-tracking")]
+#[global_allocator]
+static GLOBAL: allocation_tracking::TrackingAllocator =
+    allocation_tracking::TrackingAllocator(mimalloc::MiMalloc);
+
+#[cfg(not(feature = "allocation-tracking"))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -961,6 +970,23 @@ impl PyConstraintState {
     }
 }
 
+#[cfg(feature = "allocation-tracking")]
+fn allocation_stats_tuple(
+    elapsed_ns: u64,
+    stats: allocation_tracking::AllocationStats,
+) -> (u64, u64, u64, u64, u64, u64, u64, u64) {
+    (
+        elapsed_ns,
+        stats.alloc_calls,
+        stats.alloc_zeroed_calls,
+        stats.realloc_calls,
+        stats.dealloc_calls,
+        stats.allocated_bytes,
+        stats.reallocated_bytes,
+        stats.deallocated_bytes,
+    )
+}
+
 impl PyConstraintState {
     fn fill_mask_timed_ns(&self, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<u64> {
         let slice = bitmask.as_slice_mut().map_err(|e| {
@@ -970,6 +996,24 @@ impl PyConstraintState {
             std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u32, slice.len())
         };
         Ok(self.inner.with_dependent(|_owner, state| state.fill_mask_timed_ns(buf)))
+    }
+
+    #[cfg(feature = "allocation-tracking")]
+    fn fill_mask_timed_allocation_stats(
+        &self,
+        mut bitmask: PyReadwriteArray1<i32>,
+    ) -> PyResult<(u64, u64, u64, u64, u64, u64, u64, u64)> {
+        let slice = bitmask.as_slice_mut().map_err(|e| {
+            PyValueError::new_err(format!("Array must be contiguous: {e:?}"))
+        })?;
+        let buf: &mut [u32] = unsafe {
+            std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u32, slice.len())
+        };
+        let (elapsed_ns, stats) = allocation_tracking::measure(|| {
+            self.inner
+                .with_dependent(|_owner, state| state.fill_mask_timed_ns(buf))
+        });
+        Ok(allocation_stats_tuple(elapsed_ns, stats))
     }
 
     fn fill_mask_profiled<'py>(
@@ -995,6 +1039,20 @@ impl PyConstraintState {
                 .commit_token_timed_ns(token_id)
                 .map_err(PyValueError::new_err)
         })
+    }
+
+    #[cfg(feature = "allocation-tracking")]
+    fn commit_token_timed_allocation_stats(
+        &mut self,
+        token_id: u32,
+    ) -> PyResult<(u64, u64, u64, u64, u64, u64, u64, u64)> {
+        let (result, stats) = allocation_tracking::measure(|| {
+            self.inner.with_dependent_mut(|_owner, state| {
+                state.commit_token_timed_ns(token_id)
+            })
+        });
+        let elapsed_ns = result.map_err(PyValueError::new_err)?;
+        Ok(allocation_stats_tuple(elapsed_ns, stats))
     }
 
     /// Like commit_token but returns profiling stats as a dict.
@@ -1266,6 +1324,15 @@ fn fill_mask_timed_ns(
     state.fill_mask_timed_ns(bitmask)
 }
 
+#[cfg(feature = "allocation-tracking")]
+#[pyfunction]
+fn fill_mask_timed_allocation_stats(
+    state: PyRef<'_, PyConstraintState>,
+    bitmask: PyReadwriteArray1<i32>,
+) -> PyResult<(u64, u64, u64, u64, u64, u64, u64, u64)> {
+    state.fill_mask_timed_allocation_stats(bitmask)
+}
+
 #[pyfunction]
 fn fill_mask_profiled<'py>(
     py: Python<'py>,
@@ -1281,6 +1348,15 @@ fn commit_token_timed_ns(
     token_id: u32,
 ) -> PyResult<u64> {
     state.commit_token_timed_ns(token_id)
+}
+
+#[cfg(feature = "allocation-tracking")]
+#[pyfunction]
+fn commit_token_timed_allocation_stats(
+    mut state: PyRefMut<'_, PyConstraintState>,
+    token_id: u32,
+) -> PyResult<(u64, u64, u64, u64, u64, u64, u64, u64)> {
+    state.commit_token_timed_allocation_stats(token_id)
 }
 
 #[pyfunction]
@@ -1335,8 +1411,12 @@ fn add_internal_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     internal.add_function(wrap_pyfunction!(terminal_display_names, &internal)?)?;
     internal.add_function(wrap_pyfunction!(terminal_display_name, &internal)?)?;
     internal.add_function(wrap_pyfunction!(fill_mask_timed_ns, &internal)?)?;
+    #[cfg(feature = "allocation-tracking")]
+    internal.add_function(wrap_pyfunction!(fill_mask_timed_allocation_stats, &internal)?)?;
     internal.add_function(wrap_pyfunction!(fill_mask_profiled, &internal)?)?;
     internal.add_function(wrap_pyfunction!(commit_token_timed_ns, &internal)?)?;
+    #[cfg(feature = "allocation-tracking")]
+    internal.add_function(wrap_pyfunction!(commit_token_timed_allocation_stats, &internal)?)?;
     internal.add_function(wrap_pyfunction!(commit_token_profiled, &internal)?)?;
     internal.add_function(wrap_pyfunction!(parser_root_count, &internal)?)?;
     internal.add_function(wrap_pyfunction!(parser_path_count, &internal)?)?;
