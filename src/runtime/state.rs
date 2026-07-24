@@ -21,6 +21,26 @@ pub(crate) struct MaskScratch {
     pub merged_dense: Vec<u64>,
     pub chain_merged_dense: Vec<u64>,
     pub output_buf: Vec<u32>,
+    /// Reused by the single-path direct mask kernel when constructing the
+    /// terminal-disallowed seed and non-precomputed intersections.
+    pub single_path_aux_dense: Vec<u64>,
+    /// Mutable single-TSID accumulator for the allocation-free direct kernel.
+    pub single_path_acc_dense: Vec<u64>,
+}
+
+impl MaskScratch {
+    pub(crate) fn for_constraint(constraint: &Constraint) -> Self {
+        let dense_words = constraint.internal_token_dense_words;
+        Self {
+            merged_dense: Vec::with_capacity(dense_words),
+            chain_merged_dense: Vec::with_capacity(dense_words),
+            output_buf: Vec::with_capacity(constraint.mask_len()),
+            // Allocate and touch these before any timed runtime operation. The
+            // direct kernel clears/reuses them without changing capacity.
+            single_path_aux_dense: vec![0; dense_words],
+            single_path_acc_dense: vec![0; dense_words],
+        }
+    }
 }
 
 /// Reusable scratch buffers for `commit_bytes_impl`, retained between calls
@@ -94,7 +114,7 @@ impl<'a> Clone for ConstraintState<'a> {
             buffers: self.buffers.clone(),
             generation: self.generation,
             mask_cache: Mutex::new(None),
-            mask_scratch: Mutex::new(MaskScratch::default()),
+            mask_scratch: Mutex::new(MaskScratch::for_constraint(self.constraint)),
             max_rollback_tokens: self.max_rollback_tokens,
             history: self.history.clone(),
         }
@@ -130,7 +150,7 @@ impl<'a> ConstraintState<'a> {
             buffers: self.buffers.clone(),
             generation: self.generation,
             mask_cache: Mutex::new(None),
-            mask_scratch: Mutex::new(MaskScratch::default()),
+            mask_scratch: Mutex::new(MaskScratch::for_constraint(self.constraint)),
             max_rollback_tokens: 0,
             history: VecDeque::new(),
         }
@@ -167,7 +187,7 @@ impl<'a> ConstraintState<'a> {
         self.generation = snapshot.generation;
         self.buffers.clear_all();
         *self.mask_cache.lock().unwrap() = None;
-        *self.mask_scratch.lock().unwrap() = MaskScratch::default();
+        *self.mask_scratch.lock().unwrap() = MaskScratch::for_constraint(self.constraint);
         Ok(())
     }
 

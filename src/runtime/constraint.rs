@@ -2113,7 +2113,7 @@ impl Constraint {
             buffers: Default::default(),
             generation: 0,
             mask_cache: Mutex::new(None),
-            mask_scratch: Mutex::new(Default::default()),
+            mask_scratch: Mutex::new(crate::runtime::state::MaskScratch::for_constraint(self)),
             max_rollback_tokens,
             history: Default::default(),
         };
@@ -2128,7 +2128,7 @@ impl Constraint {
             buffers: Default::default(),
             generation: 0,
             mask_cache: Mutex::new(None),
-            mask_scratch: Mutex::new(Default::default()),
+            mask_scratch: Mutex::new(crate::runtime::state::MaskScratch::for_constraint(self)),
             max_rollback_tokens: 0,
             history: Default::default(),
         }

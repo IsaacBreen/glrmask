@@ -1029,11 +1029,13 @@ impl<'a> ConstraintState<'a> {
 
         let precomputed = &self.constraint.weight_token_dense_masks;
         let dense_words = self.constraint.internal_token_dense_words;
-        let (mut merged, mut output_scratch) = {
+        let (mut merged, mut output_scratch, mut single_path_aux, mut single_path_acc) = {
             let mut scratch = self.mask_scratch.lock().unwrap();
             (
                 std::mem::take(&mut scratch.merged_dense),
                 std::mem::take(&mut scratch.output_buf),
+                std::mem::take(&mut scratch.single_path_aux_dense),
+                std::mem::take(&mut scratch.single_path_acc_dense),
             )
         };
         merged.clear();
@@ -1041,26 +1043,38 @@ impl<'a> ConstraintState<'a> {
         let mut used_direct_final = false;
         let mut direct_buf_dirty = false;
 
-        let restore_scratch = |merged: Vec<u64>, output_scratch: Vec<u32>| {
+        let restore_scratch = |
+            merged: Vec<u64>,
+            output_scratch: Vec<u32>,
+            single_path_aux: Vec<u64>,
+            single_path_acc: Vec<u64>,
+        | {
             let mut scratch = self.mask_scratch.lock().unwrap();
             scratch.merged_dense = merged;
             scratch.chain_merged_dense.clear();
             scratch.output_buf = output_scratch;
+            scratch.single_path_aux_dense = single_path_aux;
+            scratch.single_path_acc_dense = single_path_acc;
         };
 
         for (original_tokenizer_state, terminals_disallowed, stack) in paths {
             let internal_tsid = self
                 .constraint
                 .internal_tsid_for_state(original_tokenizer_state);
-            let actionable_states = stack.first().copied().into_iter().collect::<SmallVec<[u32; 1]>>();
-            let Some(mut acc) = self.terminals_disallowed_to_dense_acc(
+            let actionable_states = stack
+                .first()
+                .copied()
+                .into_iter()
+                .collect::<SmallVec<[u32; 1]>>();
+            if !self.fill_single_path_seed_dense(
                 &terminals_disallowed,
                 original_tokenizer_state,
-                internal_tsid,
                 &actionable_states,
-            ) else {
+                &mut single_path_aux,
+                &mut single_path_acc,
+            ) {
                 continue;
-            };
+            }
 
             let mut dwa_state_id = parser_dwa.start_state();
             let mut stack_idx = 0usize;
@@ -1069,9 +1083,10 @@ impl<'a> ConstraintState<'a> {
                 let dwa_state = &parser_dwa.states()[dwa_state_id as usize];
                 if let Some(final_weight) = &dwa_state.final_weight {
                     used_direct_final = true;
-                    self.merge_final_weight_to_internal(
+                    self.merge_single_path_final_weight_to_internal(
                         final_weight,
-                        &acc,
+                        internal_tsid,
+                        &single_path_acc,
                         precomputed,
                         &mut merged,
                         Some(&mut *buf),
@@ -1093,9 +1108,10 @@ impl<'a> ConstraintState<'a> {
                         .or_else(|| self.constraint.parser_top_accept.get(&DEFAULT_LABEL))
                     {
                         used_direct_final = true;
-                        self.merge_final_weight_to_internal(
+                        self.merge_single_path_final_weight_to_internal(
                             accept_weight,
-                            &acc,
+                            internal_tsid,
+                            &single_path_acc,
                             precomputed,
                             &mut merged,
                             Some(&mut *buf),
@@ -1111,7 +1127,13 @@ impl<'a> ConstraintState<'a> {
                     break;
                 };
 
-                if !acc.intersect_with_weight_in_place(weight, precomputed) {
+                if !Self::intersect_single_path_dense_with_weight_in_place(
+                    &mut single_path_acc,
+                    &mut single_path_aux,
+                    internal_tsid,
+                    weight,
+                    precomputed,
+                ) {
                     break;
                 }
                 dwa_state_id = *target;
@@ -1119,7 +1141,7 @@ impl<'a> ConstraintState<'a> {
         }
 
         if !used_direct_final && !self.is_complete() {
-            restore_scratch(merged, output_scratch);
+            restore_scratch(merged, output_scratch, single_path_aux, single_path_acc);
             return false;
         }
 
@@ -1139,7 +1161,7 @@ impl<'a> ConstraintState<'a> {
             self.store_mask_cache(buf, &merged);
         }
 
-        restore_scratch(merged, output_scratch);
+        restore_scratch(merged, output_scratch, single_path_aux, single_path_acc);
         true
     }
 
@@ -1179,6 +1201,165 @@ impl<'a> ConstraintState<'a> {
                 });
             }
         }
+    }
+
+    fn fill_single_path_seed_dense(
+        &self,
+        terminals_disallowed: &TerminalsDisallowed,
+        original_tokenizer_state: u32,
+        actionable_states: &[u32],
+        aux: &mut Vec<u64>,
+        dense: &mut Vec<u64>,
+    ) -> bool {
+        let base = &self.constraint.seed_universe_dense;
+        if base.is_empty() {
+            dense.clear();
+            return false;
+        }
+
+        dense.clear();
+        dense.extend_from_slice(base);
+
+        let Some(disallowed_in_state) = terminals_disallowed.get(&original_tokenizer_state) else {
+            return true;
+        };
+        if disallowed_in_state.is_empty() {
+            return true;
+        }
+
+        let terminal_is_actionable = |terminal_id| {
+            actionable_states.iter().any(|&parser_state| {
+                self.constraint
+                    .table
+                    .advance_row_allows(parser_state, terminal_id)
+            })
+        };
+
+        aux.clear();
+        aux.resize(base.len(), 0);
+        let terminal_masks = &self.constraint.seed_terminal_dense;
+        for &terminal_id in disallowed_in_state {
+            if Some(terminal_id) == self.constraint.ignore_terminal
+                || !terminal_is_actionable(terminal_id)
+            {
+                continue;
+            }
+            if let Some(mask) = terminal_masks.get(&(original_tokenizer_state, terminal_id)) {
+                for (blocked_word, mask_word) in aux.iter_mut().zip(mask.iter()) {
+                    *blocked_word |= mask_word;
+                }
+            }
+        }
+
+        if aux.iter().all(|&word| word == 0) {
+            return true;
+        }
+
+        for &terminal_id in self.constraint.possible_matches.keys() {
+            if Some(terminal_id) == self.constraint.ignore_terminal
+                || disallowed_in_state.contains(&terminal_id)
+                || !terminal_is_actionable(terminal_id)
+            {
+                continue;
+            }
+            if let Some(mask) = terminal_masks.get(&(original_tokenizer_state, terminal_id)) {
+                for (blocked_word, mask_word) in aux.iter_mut().zip(mask.iter()) {
+                    *blocked_word &= !mask_word;
+                }
+                if aux.iter().all(|&word| word == 0) {
+                    return true;
+                }
+            }
+        }
+
+        let mut any = false;
+        for (allowed_word, blocked_word) in dense.iter_mut().zip(aux.iter().copied()) {
+            *allowed_word &= !blocked_word;
+            any |= *allowed_word != 0;
+        }
+        any
+    }
+
+    fn intersect_single_path_dense_with_weight_in_place(
+        dense: &mut Vec<u64>,
+        aux: &mut Vec<u64>,
+        internal_tsid: u32,
+        weight: &Weight,
+        precomputed: &DenseTokenMaskCache,
+    ) -> bool {
+        if weight.is_full() {
+            return dense.iter().any(|&word| word != 0);
+        }
+
+        let Some(token_set) = weight.0.get(internal_tsid) else {
+            dense.fill(0);
+            return false;
+        };
+        let token_set_key = Arc::as_ptr(token_set) as usize;
+        if let Some(mask) = precomputed.get(&token_set_key) {
+            let mut any = false;
+            for (idx, dense_word) in dense.iter_mut().enumerate() {
+                *dense_word &= mask.get(idx).copied().unwrap_or(0);
+                any |= *dense_word != 0;
+            }
+            return any;
+        }
+
+        aux.clear();
+        aux.resize(dense.len(), 0);
+        DenseMaskAcc::for_each_token_range_word(token_set, dense.len(), |word_idx, token_mask| {
+            aux[word_idx] |= dense[word_idx] & token_mask;
+        });
+        std::mem::swap(dense, aux);
+        dense.iter().any(|&word| word != 0)
+    }
+
+    fn merge_single_path_final_weight_to_internal(
+        &self,
+        final_weight: &Weight,
+        internal_tsid: u32,
+        dense: &[u64],
+        precomputed: &DenseTokenMaskCache,
+        merged: &mut [u64],
+        mut direct_buf: Option<&mut [u32]>,
+        direct_buf_dirty: &mut bool,
+    ) -> bool {
+        if final_weight.is_full() {
+            let n = dense.len().min(merged.len());
+            for idx in 0..n {
+                merged[idx] |= dense[idx];
+            }
+            return false;
+        }
+
+        let Some(token_set) = final_weight.0.get(internal_tsid) else {
+            return true;
+        };
+        if let Some(buf) = direct_buf.as_deref_mut() {
+            let token_set_key = Arc::as_ptr(token_set) as usize;
+            if self
+                .constraint
+                .direct_sparse_weight_token_sets
+                .contains(&token_set_key)
+                && self
+                    .constraint
+                    .or_dense_token_set_to_buf_sparse(dense, token_set, 2048, buf)
+                    .is_some()
+            {
+                *direct_buf_dirty = true;
+                return true;
+            }
+            if self
+                .constraint
+                .or_weight_token_set_to_buf_if_contained(dense, token_set, buf)
+            {
+                *direct_buf_dirty = true;
+                return true;
+            }
+        }
+
+        DenseMaskAcc::or_dense_and_token_set_into(dense, token_set, precomputed, merged);
+        false
     }
 
     fn terminals_disallowed_to_dense_acc(
