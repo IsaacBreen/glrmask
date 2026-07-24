@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use super::super::disallowed_follows::normalize_disallowed_follows;
+use super::super::state::fast as state_equivalence_analysis;
 use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
@@ -753,6 +754,10 @@ fn first_transition_factor_force_parallel_buckets() -> bool {
 
 fn first_transition_factor_final_single_batch_enabled() -> bool {
     env_flag_enabled("GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_FINAL_SINGLE_BATCH")
+}
+
+fn first_transition_factor_state_quotient_enabled() -> bool {
+    env_flag_enabled("GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_STATE_QUOTIENT")
 }
 
 fn default_vocab_batch_size(
@@ -4078,11 +4083,68 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
     let analysis_token_count = factor_plan
         .as_ref()
         .map_or(num_tokens, |plan| plan.representative_tokens.len());
+
+    // Exact token and state quotients commute. If two source states have the
+    // same complete observation for every preliminary token representative,
+    // retaining one of them is sufficient for the final token-authority pass.
+    //
+    // The state engine below observes the full tokenizer terminal alphabet,
+    // while `dfa_ref` may have filtered inactive groups. This can only
+    // over-refine the state quotient, never merge states that the vocabulary
+    // analysis distinguishes. Keep this prototype gated and restricted to raw
+    // state coordinates so no compact-DFA remapping enters the proof.
+    let factor_state_quotient_started_at = profiling.then(Instant::now);
+    let factor_state_quotient = if first_transition_factor_state_quotient_enabled()
+        && factor_plan.is_some()
+        && compact_to_original.is_none()
+        && input_compact_to_original.is_none()
+    {
+        let plan = factor_plan.as_ref().expect("factor plan checked above");
+        let representative_tokens = plan
+            .representative_tokens
+            .iter()
+            .map(|&token_idx| strings[token_idx].as_ref())
+            .collect::<Vec<_>>();
+        let normalized_disallowed = normalize_disallowed_follows(
+            dfa_num_groups(tokenizer.dfa()),
+            disallowed_follows,
+        );
+        let state_mapping = state_equivalence_analysis::
+            find_state_equivalence_classes_with_disallowed_and_shared_base(
+                tokenizer,
+                &representative_tokens,
+                initial_states_ref,
+                &normalized_disallowed,
+                shared_cache.and_then(OnceLock::get),
+            );
+        let mut representatives = state_mapping;
+        representatives.sort_unstable();
+        representatives.dedup();
+        (representatives.len() < initial_states_ref.len()).then_some(representatives)
+    } else {
+        None
+    };
+    let factor_state_quotient_ms = elapsed_ms(factor_state_quotient_started_at);
+    let authority_states = factor_state_quotient
+        .as_deref()
+        .unwrap_or(initial_states_ref);
+    let num_authority_states = authority_states.len();
+    if profiling && first_transition_factor_state_quotient_enabled() && factor_plan.is_some() {
+        eprintln!(
+            "[glrmask/profile][vocab_first_transition_factor_state_quotient] selected={} input_states={} representative_states={} representative_tokens={} total_ms={:.3}",
+            factor_state_quotient.is_some(),
+            num_initial_states,
+            num_authority_states,
+            analysis_token_count,
+            factor_state_quotient_ms,
+        );
+    }
+
     let state_order_started_at = profiling.then(Instant::now);
     let ordered_states = if diversity_state_order_enabled() {
-        states_by_transition_diversity(dfa_ref, initial_states_ref)
+        states_by_transition_diversity(dfa_ref, authority_states)
     } else {
-        initial_states_ref.to_vec()
+        authority_states.to_vec()
     };
     let state_order_ms = elapsed_ms(state_order_started_at);
     let ordered_original_states = if let Some(compact_to_original) = compact_to_original {
@@ -4110,14 +4172,14 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
     // `match_positions` allocation so unusually wide terminal-group axes do
     // not inherit an unbounded memory increase. Keep the env override for A/B.
     let default_batch_size =
-        default_vocab_batch_size(num_initial_states, num_groups, analysis_token_count);
+        default_vocab_batch_size(num_authority_states, num_groups, analysis_token_count);
     let factor_final_single_batch = factor_plan.is_some()
         && first_transition_factor_final_single_batch_enabled()
-        && analysis_token_count.saturating_mul(num_initial_states)
+        && analysis_token_count.saturating_mul(num_authority_states)
             <= vocab_sequential_trie_work_max();
     let batch_size = vocab_batch_size_override().unwrap_or_else(|| {
         if factor_final_single_batch {
-            num_initial_states
+            num_authority_states
         } else {
             default_batch_size
         }
@@ -4158,11 +4220,11 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
     // refinement, so reaching `active_indices.is_empty()` is an exact identity
     // certificate, not a heuristic early exit.
     let use_singleton_probe = analysis_token_count <= SINGLETON_PROBE_MAX_TOKENS
-        && num_initial_states > SINGLETON_PROBE_STATES
+        && num_authority_states > SINGLETON_PROBE_STATES
         && batch_size > SINGLETON_PROBE_STATES;
     let mut batch_start = 0usize;
     let mut batch_index = 0usize;
-    while batch_start < num_initial_states {
+    while batch_start < num_authority_states {
         if active_indices.is_empty() {
             break;
         }
@@ -4173,13 +4235,13 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
         } else {
             batch_size
         };
-        let batch_end = (batch_start + current_batch_size).min(num_initial_states);
+        let batch_end = (batch_start + current_batch_size).min(num_authority_states);
         let batch = &ordered_states[batch_start..batch_end];
         let state_group_size = vocab_state_group_size(batch.len(), num_groups);
         let use_trie_walk = active_indices.len() >= TRIE_WALK_MIN_TOKENS
             && !*TRIE_WALK_DISABLED;
         let use_sequential_trie = use_trie_walk
-            && num_initial_states <= batch_size
+            && num_authority_states <= batch_size
             && vocab_sequential_trie_work_max() > 0
             && active_indices
                 .len()
