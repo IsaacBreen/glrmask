@@ -751,13 +751,6 @@ fn first_transition_factor_force_parallel_buckets() -> bool {
     env_flag_enabled("GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_PARALLEL_BUCKETS")
 }
 
-fn first_transition_factor_bucket_shards() -> Option<usize> {
-    std::env::var("GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_BUCKET_SHARDS")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|&value| value > 0)
-}
-
 fn first_transition_factor_final_single_batch_enabled() -> bool {
     env_flag_enabled("GLRMASK_VOCAB_FIRST_TRANSITION_FACTOR_FINAL_SINGLE_BATCH")
 }
@@ -3274,53 +3267,7 @@ fn try_first_transition_factor_plan<S: AsRef<[u8]> + Sync>(
         && (rayon::current_thread_index().is_none()
             || first_transition_factor_force_parallel_buckets());
     let bucket_results = if parallel_buckets {
-        if let Some(shard_count) = first_transition_factor_bucket_shards()
-            .map(|shards| shards.min(buckets.len()))
-            .filter(|&shards| shards > 1 && shards < buckets.len())
-        {
-            // A task per semantic leading-byte class can flood the nested
-            // Rayon scheduler, while one sequential task can monopolize an
-            // outer partition worker. Balance estimated state-token work into
-            // a small number of shards, then process each shard sequentially.
-            let mut bucket_indices = (0..buckets.len()).collect::<Vec<_>>();
-            bucket_indices.sort_unstable_by_key(|&index| {
-                std::cmp::Reverse(
-                    buckets[index]
-                        .token_indices
-                        .len()
-                        .saturating_mul(buckets[index].initial_outcomes.len()),
-                )
-            });
-            let mut shards = (0..shard_count)
-                .map(|_| (0usize, Vec::<usize>::new()))
-                .collect::<Vec<_>>();
-            for index in bucket_indices {
-                let (load, shard) = shards
-                    .iter_mut()
-                    .min_by_key(|(load, _)| *load)
-                    .expect("factor bucket shard set is nonempty");
-                let work = buckets[index]
-                    .token_indices
-                    .len()
-                    .saturating_mul(buckets[index].initial_outcomes.len());
-                *load = load.saturating_add(work);
-                shard.push(index);
-            }
-            shards
-                .par_iter()
-                .map(|(_, shard)| {
-                    shard
-                        .iter()
-                        .map(|&index| process_bucket(&buckets[index]))
-                        .collect::<Vec<_>>()
-                })
-                .collect::<Vec<_>>()
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>()
-        } else {
-            buckets.par_iter().map(process_bucket).collect::<Vec<_>>()
-        }
+        buckets.par_iter().map(process_bucket).collect::<Vec<_>>()
     } else {
         buckets.iter().map(process_bucket).collect::<Vec<_>>()
     };
