@@ -479,19 +479,23 @@ impl DFA {
             return closure;
         }
         let mut closure = SmallVec::<[u32; 1]>::new();
-        let mut seen = vec![false; self.states.len()];
+        // Runtime tokenizers produced by exact bounded synthesis can have
+        // hundreds of thousands of raw states while an epsilon closure usually
+        // contains only a handful. A dense `seen` vector makes every such scan
+        // O(total states) in allocation and zeroing. Track only states actually
+        // reached so closure cost is proportional to the live epsilon graph.
+        let mut seen = FxHashSet::<u32>::default();
+        seen.reserve(roots.len().max(4));
         let mut stack = Vec::with_capacity(roots.len());
         for &root in roots {
-            if (root as usize) < self.states.len() && !seen[root as usize] {
-                seen[root as usize] = true;
+            if (root as usize) < self.states.len() && seen.insert(root) {
                 stack.push(root);
             }
         }
         while let Some(state) = stack.pop() {
             closure.push(state);
             for &target in &self.states[state as usize].epsilon_transitions {
-                if !seen[target as usize] {
-                    seen[target as usize] = true;
+                if seen.insert(target) {
                     stack.push(target);
                 }
             }

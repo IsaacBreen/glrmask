@@ -1454,7 +1454,20 @@ impl Tokenizer {
         mut matches: &mut R,
         mut record_matches: impl FnMut(&Self, &mut R, u32, usize),
     ) -> TokenizerStateSet {
-        let mut states = self.dfa.epsilon_closure(&[start]);
+        // The partitioned runtime tokenizer has a zero-byte dispatcher whose
+        // outgoing roots are already deterministic and epsilon-free. Once at
+        // least one byte will be consumed, the dispatcher itself cannot remain
+        // live, so enter those roots directly instead of materializing its
+        // epsilon closure. On very large synthesized tokenizers that closure's
+        // generic dense `seen` scratch is otherwise proportional to every raw
+        // tokenizer state even though only a handful of roots are live.
+        let mut states = if !input.is_empty() && start == self.initial_state_id() {
+            self.deterministic_dispatch_roots()
+                .map(TokenizerStateSet::from_slice)
+                .unwrap_or_else(|| self.dfa.epsilon_closure(&[start]))
+        } else {
+            self.dfa.epsilon_closure(&[start])
+        };
         for (index, &byte) in input.iter().enumerate() {
             states = self.step_all(&states, byte);
             if states.is_empty() {
@@ -1574,6 +1587,22 @@ mod tests {
         }
         dfa.recompute_possible_futures();
         Tokenizer::from_parts(dfa, 1, None)
+    }
+
+    #[test]
+    fn deterministic_dispatch_execution_enters_roots_without_retaining_dispatcher() {
+        let tokenizer = dispatch_prefix_tokenizer(false);
+        assert_eq!(tokenizer.deterministic_dispatch_roots(), Some(&[1, 3][..]));
+
+        let empty = tokenizer.execute_from_state_end_only(b"", tokenizer.initial_state_id());
+        assert_eq!(empty.as_slice(), &[0, 1, 3]);
+
+        let a = tokenizer.execute_from_state(b"a", tokenizer.initial_state_id());
+        assert!(a.matches.iter().any(|matched| matched.id == 0 && matched.width == 1));
+        assert_eq!(a.end_state.as_slice(), &[2]);
+
+        let x = tokenizer.execute_from_state_end_only(b"x", tokenizer.initial_state_id());
+        assert_eq!(x.as_slice(), &[3]);
     }
 
     #[test]
