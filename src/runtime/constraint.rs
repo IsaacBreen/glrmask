@@ -2106,6 +2106,7 @@ impl Constraint {
 
     /// Create a state retaining up to `max_rollback_tokens` token snapshots.
     pub fn start_with_rollback(&self, max_rollback_tokens: usize) -> ConstraintState<'_> {
+        crate::runtime::initialize_hot_path_config();
         let state = self.initial_state_map();
         let state = ConstraintState {
             constraint: self,
@@ -2122,6 +2123,7 @@ impl Constraint {
     }
 
     pub(crate) fn start_dynamic(&self) -> ConstraintState<'_> {
+        crate::runtime::initialize_hot_path_config();
         ConstraintState {
             constraint: self,
             state: self.initial_state_map(),

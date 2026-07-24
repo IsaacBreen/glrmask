@@ -237,6 +237,12 @@ fn profile_allow_fast_paths() -> bool {
         .unwrap_or(false)
 }
 
+pub(crate) fn initialize_runtime_config() {
+    let _ = template_advance_enabled();
+    let _ = validate_template_advance_enabled();
+    let _ = commit_assertion_flags();
+}
+
 fn token_in_mask(mask: &[u32], token_id: u32) -> bool {
     let word_idx = token_id as usize / 32;
     let bit_idx = token_id as usize % 32;

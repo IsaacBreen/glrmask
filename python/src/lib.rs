@@ -27,7 +27,7 @@ static GLOBAL: allocation_tracking::TrackingAllocator =
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use numpy::{PyArray1, PyReadwriteArray1};
+use numpy::{PyArray1, PyArrayMethods, PyReadwriteArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict};
@@ -1434,6 +1434,13 @@ fn add_internal_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
 #[pymodule]
 fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // rust-numpy lazily publishes and caches its mutable-borrow checking API on
+    // the first PyReadwriteArray extraction. Paying that process-global setup
+    // inside the first fill_mask call creates an artificial runtime-latency
+    // spike. Initialize it while the extension module itself is loading; this
+    // touches only a zero-length NumPy array and does not build or execute a
+    // constraint.
+    drop(PyArray1::<i32>::zeros(m.py(), 0, false).readwrite());
     glrmask::Constraint::warm_ti_pool();
     m.add_class::<PyVocab>()?;
     m.add_class::<PyConstraint>()?;

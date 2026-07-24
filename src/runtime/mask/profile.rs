@@ -49,6 +49,16 @@ pub(super) fn mask_single_path_to_stacks_fallback_disabled() -> bool {
 	*DISABLED.get_or_init(|| bool_env("GLRMASK_DISABLE_MASK_SINGLE_PATH_TO_STACKS_FALLBACK"))
 }
 
+pub(super) fn initialize_runtime_config() {
+	let _ = mask_queue_debug_enabled();
+	let _ = mask_inner_profile_enabled();
+	let _ = mask_delta_profile_enabled();
+	let _ = mask_queue_merge_profile_enabled();
+	let _ = mask_acc_merge_profile_enabled();
+	let _ = mask_fast_conversion_profile_enabled();
+	let _ = mask_single_path_to_stacks_fallback_disabled();
+}
+
 fn emit_line_with_optional_file(line: &str, file_env_var: &str) {
 	println!("{line}");
 

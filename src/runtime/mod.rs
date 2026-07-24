@@ -20,3 +20,8 @@ pub use constraint::Constraint;
 #[allow(unused_imports)]
 pub use mask::profile::MaskProfile;
 pub use state::ConstraintState;
+
+pub(crate) fn initialize_hot_path_config() {
+    mask::initialize_runtime_config();
+    commit::initialize_runtime_config();
+}

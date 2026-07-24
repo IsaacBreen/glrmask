@@ -18,6 +18,7 @@ use self::profile::{
     emit_mask_fast_conversion_profile_line,
     emit_mask_inner_profile_line,
     emit_mask_queue_debug_line,
+    initialize_runtime_config as initialize_mask_profile_config,
     mask_delta_profile_enabled,
     mask_fast_conversion_profile_enabled,
     mask_inner_profile_enabled,
@@ -61,6 +62,12 @@ fn dynamic_mask_equivalence_assert_enabled() -> bool {
             })
             .unwrap_or(false)
     })
+}
+
+pub(crate) fn initialize_runtime_config() {
+    let _ = dynamic_mask_equivalence_assert_enabled();
+    initialize_mask_profile_config();
+    let _ = mask_queue_mode();
 }
 
 fn assert_dynamic_mask_equivalence(state: &ConstraintState<'_>, static_mask: &[u32]) {
