@@ -25,6 +25,7 @@ internal-api = []
 
 [dependencies]
 rustc-hash = "1"
+weighted-gss = { git = "https://github.com/IsaacBreen/weighted-gss.git", rev = "ba71e7b4cd9a8b2c24be43edd05cd4e79abbc78d" }
 ahash = "0.8"
 smallvec = { version = "1", features = ["serde"] }
 im = "15"
