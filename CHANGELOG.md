@@ -4,6 +4,7 @@
 
 ### Improved
 
+- The Python extension now disables mimalloc's automatic delayed page purging by default, preventing rare allocator maintenance from appearing inside arbitrary mask or commit operations. Explicit `MIMALLOC_PURGE_DELAY` settings remain authoritative, and an unstable explicit collection hook is available for caller-chosen quiescent boundaries.
 - Large bounded JSON Schema string patterns now retain exact `maxLength`
   semantics by compiling terminal/parser automata against a certified smaller
   residual representative while keeping the full exact lexer for runtime

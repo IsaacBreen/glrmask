@@ -27,6 +27,20 @@ static GLOBAL: allocation_tracking::TrackingAllocator =
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+// `libmimalloc-sys` intentionally does not expose constants for experimental
+// options. This is `mi_option_purge_delay` in the pinned mimalloc v3 API.
+const MIMALLOC_PURGE_DELAY_OPTION: libmimalloc_sys::mi_option_t = 15;
+
+fn configure_mimalloc_latency_default() {
+    // Preserve any explicit environment/programmatic setting. With the stock
+    // 1000 ms default, periodic purge work can be charged to an arbitrary
+    // mask/commit call. The latency-safe default keeps maintenance out of the
+    // decoding loop; callers can collect explicitly at a safe boundary.
+    unsafe {
+        libmimalloc_sys::mi_option_set_default(MIMALLOC_PURGE_DELAY_OPTION, -1);
+    }
+}
+
 use numpy::{PyArray1, PyArrayMethods, PyReadwriteArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -1428,12 +1442,15 @@ fn add_internal_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     internal.add_function(wrap_pyfunction!(parser_path_count, &internal)?)?;
     internal.add_function(wrap_pyfunction!(debug_parser_stacks, &internal)?)?;
     internal.add_function(wrap_pyfunction!(commit_token_per_advance, &internal)?)?;
+    internal.add_function(wrap_pyfunction!(mimalloc_purge_delay, &internal)?)?;
+    internal.add_function(wrap_pyfunction!(collect_allocator, &internal)?)?;
     m.add_submodule(&internal)?;
     Ok(())
 }
 
 #[pymodule]
 fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    configure_mimalloc_latency_default();
     // rust-numpy lazily publishes and caches its mutable-borrow checking API on
     // the first PyReadwriteArray extraction. Paying that process-global setup
     // inside the first fill_mask call creates an artificial runtime-latency
@@ -1461,6 +1478,31 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     Ok(())
 }
+
+#[pyfunction]
+fn mimalloc_purge_delay() -> i64 {
+    unsafe { libmimalloc_sys::mi_option_get(MIMALLOC_PURGE_DELAY_OPTION) as i64 }
+}
+
+#[pyfunction]
+#[pyo3(signature = (force=true))]
+fn collect_allocator(force: bool) {
+    unsafe {
+        let purge_delay = libmimalloc_sys::mi_option_get(MIMALLOC_PURGE_DELAY_OPTION);
+        if purge_delay < 0 {
+            // Automatic purging is disabled for latency stability. Explicit
+            // collection is a caller-chosen quiescent boundary, so permit an
+            // immediate purge only for this collection and restore the policy
+            // before returning.
+            libmimalloc_sys::mi_option_set(MIMALLOC_PURGE_DELAY_OPTION, 0);
+        }
+        libmimalloc_sys::mi_collect(force);
+        if purge_delay < 0 {
+            libmimalloc_sys::mi_option_set(MIMALLOC_PURGE_DELAY_OPTION, purge_delay);
+        }
+    }
+}
+
 
 #[pyfunction]
 fn clear_stale_weights() {
