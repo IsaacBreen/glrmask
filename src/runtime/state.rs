@@ -9,7 +9,7 @@ use smallvec::SmallVec;
 use super::constraint::Constraint;
 
 pub(crate) const LINEAR_STACK_RESERVE: usize = 64;
-pub(crate) const INLINE_PARSER_STATE_CAPACITY: usize = 8;
+pub(crate) const INLINE_PARSER_STATE_CAPACITY: usize = 16;
 
 /// Parser paths grouped by tokenizer state, stored inline for the common small
 /// frontier. Entries remain sorted by tokenizer-state ID. The bounded flat

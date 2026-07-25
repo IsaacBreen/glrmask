@@ -71,7 +71,7 @@ impl SmallCommitQueueScratch {
 const FLAT_FRONTIER_MAX_BRANCHES: usize = 16;
 const FLAT_ACTION_MAX_BRANCHES: usize = 16;
 const FLAT_ACTION_MAX_STEPS: usize = 256;
-const FLAT_FRONTIER_PREALLOCATED_GSS: usize = 8;
+const FLAT_FRONTIER_PREALLOCATED_GSS: usize = 16;
 
 type FlatInlineStack = SmallVec<[u32; LINEAR_STACK_RESERVE]>;
 
@@ -109,7 +109,7 @@ impl FlatActionScratch {
         true
     }
 }
-const FLAT_FRONTIER_GSS_POOL_CAPACITY: usize = 12;
+const FLAT_FRONTIER_GSS_POOL_CAPACITY: usize = 24;
 const FLAT_FRONTIER_RETIRED_GSS_CAPACITY: usize = 32;
 
 #[derive(Debug)]
@@ -177,6 +177,12 @@ impl FlatFrontierScratch {
     pub(crate) fn clear(&mut self) {
         self.len = 0;
         self.action.clear();
+    }
+
+    fn remove_branch(&mut self, index: usize) {
+        debug_assert!(index < self.len);
+        self.len -= 1;
+        self.branches.swap(index, self.len);
     }
 
     fn enqueue(
@@ -3829,6 +3835,362 @@ fn apply_flat_future_disallow(
     Some(updated)
 }
 
+/// Advance a small set of lexer states that all carry the same concrete parser
+/// stack and no terminal exclusions. This factors the common parser state out
+/// of the lexer frontier: each lexer input is scanned exactly once, while
+/// identical parser actions and output branches are deduplicated directly.
+/// The general correlated queue remains authoritative for partial-width,
+/// ignored, or otherwise non-uniform terminal boundaries.
+fn try_commit_uniform_parser_frontier(
+    constraint: &Constraint,
+    state: &mut ParserStateMap,
+    bytes: &[u8],
+    original: &mut Vec<u32>,
+    work: &mut Vec<u32>,
+    tokenizer_scratch: &mut tokenizer_scan::ReusableTokenizerExecScratch,
+    frontier: &mut FlatFrontierScratch,
+) -> Option<Result<(), String>> {
+    if state.len() < 2 || state.len() > INLINE_PARSER_STATE_CAPACITY || bytes.is_empty() {
+        return None;
+    }
+
+    original.clear();
+    let (_, first_gss) = state.iter().next()?;
+    let acc = first_gss.single_path_acc()?;
+    if !acc.is_empty() || !first_gss.copy_single_path_stack_into(original) {
+        return None;
+    }
+    let top = *original.last()?;
+
+    for (_, gss) in state.iter().skip(1) {
+        let other_acc = gss.single_path_acc()?;
+        if !other_acc.is_empty()
+            || !gss.copy_single_path_stack_into(work)
+            || work != original
+        {
+            return None;
+        }
+    }
+
+    frontier.clear();
+    let actionable = ActionableTerminals::SingleState(top);
+    let initial_tokenizer_state = constraint.tokenizer.initial_state();
+    let input_keys = SmallVec::<[u32; INLINE_PARSER_STATE_CAPACITY]>::from_iter(
+        state.keys().copied(),
+    );
+
+    for tokenizer_state in input_keys {
+        if !execute_tokenizer_reusable(
+            constraint,
+            bytes,
+            tokenizer_state,
+            tokenizer_scratch,
+        ) || tokenizer_scratch.matches.len() > SMALL_NORMALIZED_MATCH_LINEAR_SCAN_MAX
+        {
+            return None;
+        }
+
+        let normalized_matches = collect_unique_actionable_matches(
+            constraint,
+            Some(&actionable),
+            constraint.ignore_terminal,
+            &tokenizer_scratch.matches,
+            None,
+        );
+        if normalized_matches.len() > 1 {
+            return None;
+        }
+
+        if let Some(matched) = normalized_matches.first() {
+            if matched.ignored || matched.width != bytes.len() {
+                return None;
+            }
+            match apply_terminal_to_flat_stacks(
+                constraint,
+                matched.terminal_id,
+                original,
+                &mut frontier.action,
+            ) {
+                Some(true) => {}
+                Some(false) => {}
+                None => return None,
+            }
+            let advanced_acc = apply_flat_future_disallow(
+                constraint,
+                &acc,
+                &tokenizer_scratch.states,
+                matched.terminal_id,
+            )?;
+            for action_index in 0..frontier.action.complete.len() {
+                work.clear();
+                work.extend_from_slice(&frontier.action.complete[action_index]);
+                if !frontier.enqueue(
+                    bytes.len(),
+                    initial_tokenizer_state,
+                    work,
+                    advanced_acc.clone(),
+                ) {
+                    return None;
+                }
+            }
+        }
+
+        for &end_state in &tokenizer_scratch.states {
+            let viable = if end_state == initial_tokenizer_state {
+                true
+            } else {
+                flat_stack_may_advance_on_any(
+                    constraint,
+                    original,
+                    constraint.tokenizer.possible_future_terminals(end_state),
+                    &mut frontier.action,
+                )?
+            };
+            if viable
+                && !frontier.enqueue(bytes.len(), end_state, original, acc.clone())
+            {
+                return None;
+            }
+        }
+    }
+
+    finish_uniform_parser_frontier_commit(state, frontier, bytes.len(), original, &acc)
+}
+
+fn finish_uniform_parser_frontier_commit(
+    state: &mut ParserStateMap,
+    frontier: &mut FlatFrontierScratch,
+    final_offset: usize,
+    original_stack: &[u32],
+    original_acc: &TerminalsDisallowed,
+) -> Option<Result<(), String>> {
+    let mut outputs = SmallVec::<[usize; INLINE_PARSER_STATE_CAPACITY]>::new();
+    for index in 0..frontier.len {
+        if frontier.branches[index].offset == final_offset {
+            if outputs.len() == outputs.capacity() {
+                return None;
+            }
+            outputs.push(index);
+        }
+    }
+    if outputs.is_empty() {
+        return Some(Err(
+            "commit rejected: no valid parser states remain".to_string(),
+        ));
+    }
+    outputs.sort_unstable_by(|&left, &right| {
+        frontier.branches[left]
+            .tokenizer_state
+            .cmp(&frontier.branches[right].tokenizer_state)
+            .then_with(|| frontier.branches[left].stack.cmp(&frontier.branches[right].stack))
+    });
+
+    let mut group_representatives = SmallVec::<[usize; INLINE_PARSER_STATE_CAPACITY]>::new();
+    let mut output_groups = SmallVec::<[usize; INLINE_PARSER_STATE_CAPACITY]>::new();
+    for &output in &outputs {
+        let branch = &frontier.branches[output];
+        let group = group_representatives.iter().position(|&representative| {
+            let existing = &frontier.branches[representative];
+            existing.stack == branch.stack && existing.acc == branch.acc
+        });
+        let group = match group {
+            Some(group) => group,
+            None => {
+                if group_representatives.len() == group_representatives.capacity() {
+                    return None;
+                }
+                group_representatives.push(output);
+                group_representatives.len() - 1
+            }
+        };
+        output_groups.push(group);
+    }
+    let unchanged_group = group_representatives.iter().position(|&representative| {
+        let branch = &frontier.branches[representative];
+        branch.stack.as_slice() == original_stack && &branch.acc == original_acc
+    });
+
+    // Plan one existing active or spare GSS for each distinct parser-state
+    // group. Active unique objects are preferred; the unchanged group can also
+    // retain a shared object without mutation.
+    let mut active_used = [false; INLINE_PARSER_STATE_CAPACITY];
+    let mut pool_used = [false; FLAT_FRONTIER_GSS_POOL_CAPACITY];
+    let mut assignments = SmallVec::<[(bool, usize); INLINE_PARSER_STATE_CAPACITY]>::new();
+    for (group, &representative) in group_representatives.iter().enumerate() {
+        let stack = &frontier.branches[representative].stack;
+        let active = state.entries.iter().enumerate().find_map(|(index, (_, gss))| {
+            if active_used[index] {
+                return None;
+            }
+            (Some(group) == unchanged_group || gss.can_replace_single_path_state_in_place(stack))
+                .then_some(index)
+        });
+        if let Some(index) = active {
+            active_used[index] = true;
+            assignments.push((true, index));
+            continue;
+        }
+        let pool = frontier.gss_pool.iter().enumerate().find_map(|(index, gss)| {
+            (!pool_used[index] && gss.can_replace_single_path_state_in_place(stack))
+                .then_some(index)
+        })?;
+        pool_used[pool] = true;
+        assignments.push((false, pool));
+    }
+
+    // Validate storage for active objects that will not become output groups.
+    // Pointer-duplicates of selected active objects can be dropped safely;
+    // their allocation remains held by the selected output group.
+    let mut recyclable = 0usize;
+    let mut retired = 0usize;
+    for (index, (_, gss)) in state.entries.iter().enumerate() {
+        if active_used[index] {
+            continue;
+        }
+        let held_by_output = assignments.iter().any(|&(active, selected)| {
+            active && gss.ptr_eq(&state.entries[selected].1)
+        });
+        if held_by_output {
+            continue;
+        }
+        if gss.can_replace_single_path_state_in_place(&[0]) {
+            recyclable += 1;
+        } else {
+            retired += 1;
+        }
+    }
+    let selected_pool = pool_used.iter().filter(|&&used| used).count();
+    if frontier.gss_pool.len() - selected_pool + recyclable
+        > FLAT_FRONTIER_GSS_POOL_CAPACITY
+        || frontier.retired_gss.len() + retired > FLAT_FRONTIER_RETIRED_GSS_CAPACITY
+    {
+        return None;
+    }
+
+    let old_entries = std::mem::take(&mut state.entries);
+    let mut active_slots = SmallVec::<
+        [Option<(u32, ParserGSS)>; INLINE_PARSER_STATE_CAPACITY],
+    >::from_iter(old_entries.into_iter().map(Some));
+    let old_pool = std::mem::take(&mut frontier.gss_pool);
+    let mut pool_slots = SmallVec::<
+        [Option<ParserGSS>; FLAT_FRONTIER_GSS_POOL_CAPACITY],
+    >::from_iter(old_pool.into_iter().map(Some));
+
+    let mut group_gss = SmallVec::<[ParserGSS; INLINE_PARSER_STATE_CAPACITY]>::new();
+    for (group, (&representative, &(active, index))) in group_representatives
+        .iter()
+        .zip(&assignments)
+        .enumerate()
+    {
+        let mut gss = if active {
+            active_slots[index].take().expect("active assignment validated").1
+        } else {
+            pool_slots[index].take().expect("pool assignment validated")
+        };
+        if Some(group) != unchanged_group {
+            let branch = &frontier.branches[representative];
+            let replaced = gss.try_replace_single_path_state_in_place(
+                &branch.stack,
+                branch.acc.clone(),
+            );
+            debug_assert!(replaced, "uniform parser group eligibility changed");
+            if !replaced {
+                unreachable!("uniform parser group was validated before mutation");
+            }
+        }
+        group_gss.push(gss);
+    }
+
+    for slot in active_slots.into_iter().flatten() {
+        let (_, gss) = slot;
+        if group_gss.iter().any(|selected| gss.ptr_eq(selected)) {
+            continue;
+        }
+        if gss.can_replace_single_path_state_in_place(&[0]) {
+            frontier.gss_pool.push(gss);
+        } else {
+            frontier.retired_gss.push(gss);
+        }
+    }
+    frontier.gss_pool.extend(pool_slots.into_iter().flatten());
+
+    let mut new_entries = SmallVec::<[(u32, ParserGSS); INLINE_PARSER_STATE_CAPACITY]>::new();
+    for (&output, &group) in outputs.iter().zip(&output_groups) {
+        new_entries.push((
+            frontier.branches[output].tokenizer_state,
+            group_gss[group].clone(),
+        ));
+    }
+    state.entries = new_entries;
+    Some(Ok(()))
+}
+
+fn finish_flat_frontier_commit(
+    state: &mut ParserStateMap,
+    frontier: &mut FlatFrontierScratch,
+    final_offset: usize,
+) -> Option<Result<(), String>> {
+    let mut outputs = SmallVec::<[usize; INLINE_PARSER_STATE_CAPACITY]>::new();
+    for index in 0..frontier.len {
+        if frontier.branches[index].offset == final_offset {
+            if outputs.len() == outputs.capacity() {
+                return None;
+            }
+            outputs.push(index);
+        }
+    }
+    if outputs.is_empty() {
+        return Some(Err(
+            "commit rejected: no valid parser states remain".to_string(),
+        ));
+    }
+    outputs.sort_unstable_by(|&left, &right| {
+        frontier.branches[left]
+            .tokenizer_state
+            .cmp(&frontier.branches[right].tokenizer_state)
+            .then_with(|| frontier.branches[left].stack.cmp(&frontier.branches[right].stack))
+    });
+
+    if frontier.gss_pool.len() < outputs.len()
+        || !frontier.can_recycle_old_state(state, outputs.len())
+    {
+        return None;
+    }
+    let mut selected = SmallVec::<[ParserGSS; INLINE_PARSER_STATE_CAPACITY]>::new();
+    for &output in &outputs {
+        let stack = &frontier.branches[output].stack;
+        let Some(pool_index) = frontier
+            .gss_pool
+            .iter()
+            .rposition(|gss| gss.can_replace_single_path_state_in_place(stack))
+        else {
+            for gss in selected.drain(..) {
+                frontier.gss_pool.push(gss);
+            }
+            return None;
+        };
+        selected.push(frontier.gss_pool.swap_remove(pool_index));
+    }
+
+    let mut new_entries = SmallVec::<[(u32, ParserGSS); INLINE_PARSER_STATE_CAPACITY]>::new();
+    for (mut gss, &output) in selected.into_iter().zip(&outputs) {
+        let branch = &frontier.branches[output];
+        let replaced = gss.try_replace_single_path_state_in_place(
+            &branch.stack,
+            branch.acc.clone(),
+        );
+        debug_assert!(replaced, "flat-frontier spare eligibility changed");
+        if !replaced {
+            unreachable!("flat-frontier spare was validated before mutation");
+        }
+        new_entries.push((branch.tokenizer_state, gss));
+    }
+
+    let old_entries = std::mem::replace(&mut state.entries, new_entries);
+    frontier.recycle_old_entries(old_entries);
+    Some(Ok(()))
+}
+
 fn try_commit_flat_frontier_in_place(
     constraint: &Constraint,
     state: &mut ParserStateMap,
@@ -3849,14 +4211,41 @@ fn try_commit_flat_frontier_in_place(
     }
     frontier.clear();
     for (&tokenizer_state, gss) in state.iter() {
-        if !gss.copy_single_path_stack_into(original) {
-            flat_decline!("input-not-single-path");
+        if gss.copy_single_path_stack_into(original) {
+            let Some(acc) = gss.single_path_acc() else {
+                flat_decline!("missing-single-acc");
+            };
+            if !frontier.enqueue(0, tokenizer_state, original, acc) {
+                flat_decline!("initial-enqueue");
+            }
+            continue;
         }
-        let Some(acc) = gss.single_path_acc() else {
-            flat_decline!("missing-single-acc");
-        };
-        if !frontier.enqueue(0, tokenizer_state, original, acc) {
-            flat_decline!("initial-enqueue");
+
+        // Small ambiguous GSSes are still concrete bounded frontiers. Flatten
+        // them directly into the existing preallocated branch bank rather than
+        // falling back to allocating GSS advances. The traversal itself keeps
+        // its path buffer inline through depth 64.
+        let remaining = FLAT_FRONTIER_MAX_BRANCHES.saturating_sub(frontier.len);
+        if remaining == 0 {
+            flat_decline!("initial-multipath-capacity");
+        }
+        let mut admitted = true;
+        let complete = gss.for_each_stack_top_first_bounded(
+            remaining,
+            |top_first, acc| {
+                if !admitted || top_first.is_empty() || top_first.len() > original.capacity() {
+                    admitted = false;
+                    return;
+                }
+                original.clear();
+                original.extend(top_first.iter().rev().copied());
+                if !frontier.enqueue(0, tokenizer_state, original, acc.clone()) {
+                    admitted = false;
+                }
+            },
+        );
+        if !complete || !admitted {
+            flat_decline!("initial-multipath-traversal");
         }
     }
 
@@ -3864,9 +4253,7 @@ fn try_commit_flat_frontier_in_place(
     for offset in 0..bytes.len() {
         let mut index = 0usize;
         while index < frontier.len {
-            if frontier.branches[index].processed
-                || frontier.branches[index].offset != offset
-            {
+            if frontier.branches[index].offset != offset {
                 index += 1;
                 continue;
             }
@@ -3878,7 +4265,10 @@ fn try_commit_flat_frontier_in_place(
             original.clear();
             original.extend_from_slice(&frontier.branches[index].stack);
             let mut acc = frontier.branches[index].acc.clone();
-            frontier.branches[index].processed = true;
+            // The branch is fully copied into scratch. Reclaim its fixed slot
+            // before enqueuing successors, so capacity tracks the live frontier
+            // rather than cumulative branches processed across byte offsets.
+            frontier.remove_branch(index);
 
             if !execute_tokenizer_reusable(
                 constraint,
@@ -3906,10 +4296,7 @@ fn try_commit_flat_frontier_in_place(
                     None => flat_decline!("prune-acc-promotion"),
                     Some(result) => match result {
                         Some(pruned) => acc = pruned,
-                        None => {
-                            index += 1;
-                            continue;
-                        }
+                        None => continue,
                     },
                 }
             }
@@ -3991,72 +4378,10 @@ fn try_commit_flat_frontier_in_place(
                     flat_decline!("continuation-enqueue");
                 }
             }
-            index += 1;
         }
     }
 
-    let mut outputs = SmallVec::<[usize; INLINE_PARSER_STATE_CAPACITY]>::new();
-    for index in 0..frontier.len {
-        if frontier.branches[index].offset == bytes.len() {
-            if outputs.len() == outputs.capacity() {
-                flat_decline!("output-capacity");
-            }
-            outputs.push(index);
-        }
-    }
-    if outputs.is_empty() {
-        return Some(Err(
-            "commit rejected: no valid parser states remain".to_string(),
-        ));
-    }
-    outputs.sort_unstable_by(|&left, &right| {
-        frontier.branches[left]
-            .tokenizer_state
-            .cmp(&frontier.branches[right].tokenizer_state)
-            .then_with(|| frontier.branches[left].stack.cmp(&frontier.branches[right].stack))
-    });
-
-    // Use a preallocated spare GSS for every output. This is deliberately a
-    // double buffer: active GSS objects may be shared by rollback snapshots or
-    // by a prior lexer split, while spare objects remain uniquely mutable.
-    if frontier.gss_pool.len() < outputs.len()
-        || !frontier.can_recycle_old_state(state, outputs.len())
-    {
-        flat_decline!("gss-pool-capacity");
-    }
-    let mut selected = SmallVec::<[ParserGSS; INLINE_PARSER_STATE_CAPACITY]>::new();
-    for &output in &outputs {
-        let stack = &frontier.branches[output].stack;
-        let Some(pool_index) = frontier
-            .gss_pool
-            .iter()
-            .rposition(|gss| gss.can_replace_single_path_state_in_place(stack))
-        else {
-            for gss in selected.drain(..) {
-                frontier.gss_pool.push(gss);
-            }
-            flat_decline!("gss-pool-shared-or-shape");
-        };
-        selected.push(frontier.gss_pool.swap_remove(pool_index));
-    }
-
-    let mut new_entries = SmallVec::<[(u32, ParserGSS); INLINE_PARSER_STATE_CAPACITY]>::new();
-    for (mut gss, &output) in selected.into_iter().zip(&outputs) {
-        let branch = &frontier.branches[output];
-        let replaced = gss.try_replace_single_path_state_in_place(
-            &branch.stack,
-            branch.acc.clone(),
-        );
-        debug_assert!(replaced, "flat-frontier spare eligibility changed");
-        if !replaced {
-            unreachable!("flat-frontier spare was validated before mutation");
-        }
-        new_entries.push((branch.tokenizer_state, gss));
-    }
-
-    let old_entries = std::mem::replace(&mut state.entries, new_entries);
-    frontier.recycle_old_entries(old_entries);
-    Some(Ok(()))
+    finish_flat_frontier_commit(state, frontier, bytes.len())
 }
 
 fn try_commit_direct_linear_in_place(
@@ -4197,6 +4522,19 @@ fn commit_bytes_impl(
 
     if state.len() == 1
         && let Some(result) = try_commit_direct_linear_in_place(
+            constraint,
+            state,
+            bytes,
+            &mut bufs.linear_stack_original,
+            &mut bufs.linear_stack_work,
+            &mut bufs.reusable_tokenizer_exec,
+            &mut bufs.flat_frontier,
+        )
+    {
+        return result;
+    }
+    if state.len() <= INLINE_PARSER_STATE_CAPACITY
+        && let Some(result) = try_commit_uniform_parser_frontier(
             constraint,
             state,
             bytes,
