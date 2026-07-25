@@ -208,7 +208,7 @@ fn initial_commit_prime_token_ids(mask: &[u32]) -> Option<Vec<u32>> {
 impl Constraint {
     #[cold]
     fn prime_initial_commit_hot_path(&self) {
-        let state = ConstraintState {
+        let mut state = ConstraintState {
             constraint: self,
             state: self.initial_state_map(),
             buffers: Default::default(),
@@ -219,6 +219,7 @@ impl Constraint {
             history: Default::default(),
         };
         state.prefill_mask_cache();
+        state.reserve_linear_stack_hot_path();
 
         let token_ids = {
             let cache = state.mask_cache.lock().unwrap();
@@ -1084,6 +1085,14 @@ impl Constraint {
         let seed_started_at = profile.then(std::time::Instant::now);
         self.build_seed_dense_masks();
         let seed_ms = seed_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        // The bounded tokenizer scanner used by every allocation-free commit
+        // reads this constraint-level cache. Materialize it during compile/load
+        // finalization rather than charging its one-time allocations to the
+        // first decoding commit.
+        let tokenizer_closures_started_at = profile.then(std::time::Instant::now);
+        let _ = self.tokenizer.all_singleton_epsilon_closures();
+        let tokenizer_closures_ms = tokenizer_closures_started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let initial_commit_prime_started_at = profile.then(std::time::Instant::now);
         self.prime_initial_commit_hot_path();
         let initial_commit_prime_ms = initial_commit_prime_started_at
@@ -1108,7 +1117,7 @@ impl Constraint {
                 self.direct_sparse_weight_token_sets.len(),
             );
             eprintln!(
-                "[glrmask/profile][runtime_finalize] guarded_shift_ms={:.3} dynamic_mask_vocab_ms={:.3} dynamic_mask_vocab_reused={} continuation_partitions_ms={:.3} internal_token_buf_masks_ms={:.3} tokenizer_fast_transitions_ms={:.3} dense_token_masks_ms={:.3} dwa_fast_transitions_ms={:.3} primary_ms={:.3} word_block_masks_ms={:.3} quad_word_block_masks_ms={:.3} byte_block_masks_ms={:.3} block_masks_ms={:.3} derived_masks_ms={:.3} seed_dense_ms={:.3} initial_commit_prime_ms={:.3} total_ms={:.3}",
+                "[glrmask/profile][runtime_finalize] guarded_shift_ms={:.3} dynamic_mask_vocab_ms={:.3} dynamic_mask_vocab_reused={} continuation_partitions_ms={:.3} internal_token_buf_masks_ms={:.3} tokenizer_fast_transitions_ms={:.3} dense_token_masks_ms={:.3} dwa_fast_transitions_ms={:.3} primary_ms={:.3} word_block_masks_ms={:.3} quad_word_block_masks_ms={:.3} byte_block_masks_ms={:.3} block_masks_ms={:.3} derived_masks_ms={:.3} seed_dense_ms={:.3} tokenizer_closures_ms={:.3} initial_commit_prime_ms={:.3} total_ms={:.3}",
                 guarded_shift_ms,
                 dynamic_vocab_ms,
                 dynamic_vocab_reused,
@@ -1124,6 +1133,7 @@ impl Constraint {
                 block_ms,
                 derived_ms,
                 seed_ms,
+                tokenizer_closures_ms,
                 initial_commit_prime_ms,
                 total_started_at.elapsed().as_secs_f64() * 1000.0,
             );
@@ -2158,8 +2168,11 @@ impl Constraint {
     /// Create a state retaining up to `max_rollback_tokens` token snapshots.
     pub fn start_with_rollback(&self, max_rollback_tokens: usize) -> ConstraintState<'_> {
         crate::runtime::initialize_hot_path_config();
+        if self.tokenizer.has_epsilon_transitions() {
+            drop(self.tokenizer.all_singleton_epsilon_closures());
+        }
         let state = self.initial_state_map();
-        let state = ConstraintState {
+        let mut state = ConstraintState {
             constraint: self,
             state,
             buffers: Default::default(),
@@ -2170,12 +2183,16 @@ impl Constraint {
             history: Default::default(),
         };
         state.prefill_mask_cache();
+        state.reserve_linear_stack_hot_path();
         state
     }
 
     pub(crate) fn start_dynamic(&self) -> ConstraintState<'_> {
         crate::runtime::initialize_hot_path_config();
-        ConstraintState {
+        if self.tokenizer.has_epsilon_transitions() {
+            drop(self.tokenizer.all_singleton_epsilon_closures());
+        }
+        let mut state = ConstraintState {
             constraint: self,
             state: self.initial_state_map(),
             buffers: Default::default(),
@@ -2184,7 +2201,9 @@ impl Constraint {
             mask_scratch: Mutex::new(crate::runtime::state::MaskScratch::for_constraint(self)),
             max_rollback_tokens: 0,
             history: Default::default(),
-        }
+        };
+        state.reserve_linear_stack_hot_path();
+        state
     }
 
     /// Return the number of `u32` words required for a packed token mask.

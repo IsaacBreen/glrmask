@@ -27,17 +27,23 @@ static GLOBAL: allocation_tracking::TrackingAllocator =
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-// `libmimalloc-sys` intentionally does not expose constants for experimental
-// options. This is `mi_option_purge_delay` in the pinned mimalloc v3 API.
+// `libmimalloc-sys` intentionally does not expose constants for these advanced
+// options. The values are pinned by the mimalloc v3 `mi_option_e` ordering.
+const MIMALLOC_PURGE_DECOMMITS_OPTION: libmimalloc_sys::mi_option_t = 5;
 const MIMALLOC_PURGE_DELAY_OPTION: libmimalloc_sys::mi_option_t = 15;
 
-fn configure_mimalloc_latency_default() {
-    // Preserve any explicit environment/programmatic setting. With the stock
-    // 1000 ms default, periodic purge work can be charged to an arbitrary
-    // mask/commit call. The latency-safe default keeps maintenance out of the
-    // decoding loop; callers can collect explicitly at a safe boundary.
-    unsafe {
-        libmimalloc_sys::mi_option_set_default(MIMALLOC_PURGE_DELAY_OPTION, -1);
+fn configure_mimalloc_runtime_default() {
+    // Keep delayed automatic purging, but reset unused pages with
+    // MADV_FREE/MEM_RESET rather than synchronously decommitting them. Reset
+    // pages remain reclaimable by the OS without charging decommit work to an
+    // arbitrary runtime allocation. An explicit mimalloc environment setting
+    // remains authoritative.
+    if std::env::var_os("MIMALLOC_PURGE_DECOMMITS").is_none()
+        && std::env::var_os("MIMALLOC_RESET_DECOMMITS").is_none()
+    {
+        unsafe {
+            libmimalloc_sys::mi_option_set_enabled(MIMALLOC_PURGE_DECOMMITS_OPTION, false);
+        }
     }
 }
 
@@ -982,6 +988,21 @@ impl PyConstraintState {
     fn is_finished(&self) -> bool {
         self.inner.with_dependent(|_owner, state| state.is_finished())
     }
+
+    #[cfg(feature = "allocation-tracking")]
+    #[pyo3(name = "fill_mask_timed_allocation_stats")]
+    fn py_fill_mask_timed_allocation_stats(
+        &self,
+        bitmask: PyReadwriteArray1<i32>,
+    ) -> PyResult<Vec<u64>> {
+        self.fill_mask_timed_allocation_stats(bitmask)
+    }
+
+    #[cfg(feature = "allocation-tracking")]
+    #[pyo3(name = "commit_token_timed_allocation_stats")]
+    fn py_commit_token_timed_allocation_stats(&mut self, token_id: u32) -> PyResult<Vec<u64>> {
+        self.commit_token_timed_allocation_stats(token_id)
+    }
 }
 
 #[cfg(feature = "allocation-tracking")]
@@ -1443,6 +1464,7 @@ fn add_internal_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     internal.add_function(wrap_pyfunction!(debug_parser_stacks, &internal)?)?;
     internal.add_function(wrap_pyfunction!(commit_token_per_advance, &internal)?)?;
     internal.add_function(wrap_pyfunction!(mimalloc_purge_delay, &internal)?)?;
+    internal.add_function(wrap_pyfunction!(mimalloc_purge_decommits, &internal)?)?;
     internal.add_function(wrap_pyfunction!(collect_allocator, &internal)?)?;
     m.add_submodule(&internal)?;
     Ok(())
@@ -1450,7 +1472,7 @@ fn add_internal_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
 #[pymodule]
 fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    configure_mimalloc_latency_default();
+    configure_mimalloc_runtime_default();
     // rust-numpy lazily publishes and caches its mutable-borrow checking API on
     // the first PyReadwriteArray extraction. Paying that process-global setup
     // inside the first fill_mask call creates an artificial runtime-latency
@@ -1485,15 +1507,19 @@ fn mimalloc_purge_delay() -> i64 {
 }
 
 #[pyfunction]
+fn mimalloc_purge_decommits() -> bool {
+    unsafe { libmimalloc_sys::mi_option_is_enabled(MIMALLOC_PURGE_DECOMMITS_OPTION) }
+}
+
+#[pyfunction]
 #[pyo3(signature = (force=true))]
 fn collect_allocator(force: bool) {
     unsafe {
         let purge_delay = libmimalloc_sys::mi_option_get(MIMALLOC_PURGE_DELAY_OPTION);
         if purge_delay < 0 {
-            // Automatic purging is disabled for latency stability. Explicit
-            // collection is a caller-chosen quiescent boundary, so permit an
-            // immediate purge only for this collection and restore the policy
-            // before returning.
+            // An explicit no-purge policy should not make explicit collection
+            // a no-op. Temporarily permit this caller-selected collection and
+            // restore the configured policy before returning.
             libmimalloc_sys::mi_option_set(MIMALLOC_PURGE_DELAY_OPTION, 0);
         }
         libmimalloc_sys::mi_collect(force);

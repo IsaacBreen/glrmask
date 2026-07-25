@@ -1,11 +1,217 @@
 use crate::automata::lexer::Lexer;
 use std::sync::Mutex;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 
 use crate::compiler::glr::parser::{ParserGSS, stacks_finished};
 use rustc_hash::{FxHashMap, FxHashSet};
+use smallvec::SmallVec;
 
 use super::constraint::Constraint;
+
+pub(crate) const LINEAR_STACK_RESERVE: usize = 64;
+pub(crate) const INLINE_PARSER_STATE_CAPACITY: usize = 8;
+
+/// Parser paths grouped by tokenizer state, stored inline for the common small
+/// frontier. Entries remain sorted by tokenizer-state ID. The bounded flat
+/// runtime may temporarily retain multiple single-stack entries with the same
+/// key instead of materializing them into one allocating GSS; general paths
+/// normalize equal-key entries when they need map semantics.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub(crate) struct ParserStateMap {
+    pub(crate) entries: SmallVec<[(u32, ParserGSS); INLINE_PARSER_STATE_CAPACITY]>,
+}
+
+impl std::fmt::Debug for ParserStateMap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_map().entries(self.entries.iter().map(|(k, v)| (k, v))).finish()
+    }
+}
+
+impl ParserStateMap {
+    pub(crate) fn singleton(key: u32, value: ParserGSS) -> Self {
+        let mut entries = SmallVec::new();
+        entries.push((key, value));
+        Self { entries }
+    }
+
+    #[inline]
+    pub(crate) fn len(&self) -> usize { self.entries.len() }
+
+    #[inline]
+    pub(crate) fn is_empty(&self) -> bool { self.entries.is_empty() }
+
+    #[inline]
+    pub(crate) fn clear(&mut self) { self.entries.clear(); }
+
+    #[inline]
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&u32, &ParserGSS)> {
+        self.entries.iter().map(|(key, value)| (key, value))
+    }
+
+    #[inline]
+    pub(crate) fn values(&self) -> impl Iterator<Item = &ParserGSS> {
+        self.entries.iter().map(|(_, value)| value)
+    }
+
+    #[inline]
+    pub(crate) fn values_mut(&mut self) -> impl Iterator<Item = &mut ParserGSS> {
+        self.entries.iter_mut().map(|(_, value)| value)
+    }
+
+    #[inline]
+    pub(crate) fn keys(&self) -> impl Iterator<Item = &u32> {
+        self.entries.iter().map(|(key, _)| key)
+    }
+
+    fn equal_range(&self, key: u32) -> std::ops::Range<usize> {
+        let start = self.entries.partition_point(|(entry_key, _)| *entry_key < key);
+        let end = self.entries.partition_point(|(entry_key, _)| *entry_key <= key);
+        start..end
+    }
+
+    /// Return the sole entry for `key`. A duplicate-key flat frontier is not a
+    /// map value and deliberately returns `None` so map-only optimizations fall
+    /// back rather than observing just one parser alternative.
+    pub(crate) fn get(&self, key: &u32) -> Option<&ParserGSS> {
+        let range = self.equal_range(*key);
+        (range.len() == 1).then(|| &self.entries[range.start].1)
+    }
+
+    pub(crate) fn get_mut(&mut self, key: &u32) -> Option<&mut ParserGSS> {
+        let range = self.equal_range(*key);
+        if range.len() != 1 {
+            return None;
+        }
+        Some(&mut self.entries[range.start].1)
+    }
+
+    pub(crate) fn values_for_key(&self, key: u32) -> impl Iterator<Item = &ParserGSS> {
+        let range = self.equal_range(key);
+        self.entries[range].iter().map(|(_, value)| value)
+    }
+
+    pub(crate) fn has_duplicate_keys(&self) -> bool {
+        self.entries.windows(2).any(|pair| pair[0].0 == pair[1].0)
+    }
+
+    /// Materialize duplicate-key flat alternatives into one GSS per tokenizer
+    /// state. This is the explicit boundary between the bounded allocation-free
+    /// representation and general map/GSS algorithms.
+    pub(crate) fn normalize_duplicate_keys(&mut self) {
+        if !self.has_duplicate_keys() {
+            return;
+        }
+        let old = std::mem::take(&mut self.entries);
+        for (key, value) in old {
+            self.merge_insert(key, value);
+        }
+    }
+
+    /// Map-style insertion. Any bounded flat alternatives already stored under
+    /// this key are merged into the returned old value before replacement.
+    pub(crate) fn insert(&mut self, key: u32, value: ParserGSS) -> Option<ParserGSS> {
+        let range = self.equal_range(key);
+        if range.is_empty() {
+            self.entries.insert(range.start, (key, value));
+            return None;
+        }
+
+        let mut old = std::mem::replace(&mut self.entries[range.start].1, value);
+        for _ in range.start + 1..range.end {
+            let (_, duplicate) = self.entries.remove(range.start + 1);
+            old = old.merge(&duplicate);
+        }
+        Some(old)
+    }
+
+    pub(crate) fn pop_first(&mut self) -> Option<(u32, ParserGSS)> {
+        (!self.entries.is_empty()).then(|| self.entries.remove(0))
+    }
+
+    pub(crate) fn merge_insert(&mut self, key: u32, mut value: ParserGSS) {
+        let range = self.equal_range(key);
+        if range.is_empty() {
+            self.entries.insert(range.start, (key, value));
+            return;
+        }
+        for _ in range.clone() {
+            let (_, existing) = self.entries.remove(range.start);
+            value = value.merge(&existing);
+        }
+        self.entries.insert(range.start, (key, value));
+    }
+
+    pub(crate) fn retain(&mut self, mut keep: impl FnMut(&u32, &mut ParserGSS) -> bool) {
+        let mut index = 0;
+        while index < self.entries.len() {
+            let should_keep = {
+                let (key, value) = &mut self.entries[index];
+                keep(key, value)
+            };
+            if should_keep {
+                index += 1;
+            } else {
+                self.entries.remove(index);
+            }
+        }
+    }
+
+    /// Replace the sole tokenizer-state key without moving or reallocating its GSS.
+    pub(crate) fn replace_single_key(&mut self, key: u32) -> bool {
+        self.replace_single_keys(std::slice::from_ref(&key))
+    }
+
+    /// Associate the sole existing GSS with a small sorted set of tokenizer
+    /// states. Arc clones are allocation-free and eight entries fit inline.
+    pub(crate) fn replace_single_keys(&mut self, keys: &[u32]) -> bool {
+        if self.entries.len() != 1 || keys.is_empty() || keys.len() > INLINE_PARSER_STATE_CAPACITY {
+            return false;
+        }
+        if keys.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return false;
+        }
+        let (_, gss) = self.entries.pop().unwrap();
+        for &key in &keys[..keys.len() - 1] {
+            self.entries.push((key, gss.clone()));
+        }
+        self.entries.push((*keys.last().unwrap(), gss));
+        true
+    }
+}
+
+impl FromIterator<(u32, ParserGSS)> for ParserStateMap {
+    fn from_iter<T: IntoIterator<Item = (u32, ParserGSS)>>(iter: T) -> Self {
+        let mut result = Self::default();
+        for (key, value) in iter {
+            if let Some(existing) = result.insert(key, value) {
+                let current = result.get_mut(&key).unwrap();
+                *current = existing.merge(current);
+            }
+        }
+        result
+    }
+}
+
+impl IntoIterator for ParserStateMap {
+    type Item = (u32, ParserGSS);
+    type IntoIter = smallvec::IntoIter<[(u32, ParserGSS); INLINE_PARSER_STATE_CAPACITY]>;
+
+    fn into_iter(self) -> Self::IntoIter { self.entries.into_iter() }
+}
+
+impl<'a> IntoIterator for &'a ParserStateMap {
+    type Item = (&'a u32, &'a ParserGSS);
+    type IntoIter = std::iter::Map<
+        std::slice::Iter<'a, (u32, ParserGSS)>,
+        fn(&(u32, ParserGSS)) -> (&u32, &ParserGSS),
+    >;
+
+    fn into_iter(self) -> Self::IntoIter {
+        fn pair_refs(pair: &(u32, ParserGSS)) -> (&u32, &ParserGSS) { (&pair.0, &pair.1) }
+        self.entries.iter().map(pair_refs)
+    }
+}
+
 
 /// Cached fill_mask result, keyed on generation counter.
 pub(crate) struct MaskCacheData {
@@ -45,7 +251,7 @@ impl MaskScratch {
 
 /// Reusable scratch buffers for `commit_bytes_impl`, retained between calls
 /// to avoid repeated heap allocation.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct CommitBuffers {
     pub advance_result_cache: FxHashMap<(usize, u32), (ParserGSS, ParserGSS)>,
     pub pending_state: FxHashMap<u32, ParserGSS>,
@@ -53,7 +259,36 @@ pub(crate) struct CommitBuffers {
     pub terminal_result_cache: FxHashMap<u32, ParserGSS>,
     pub exec_results: FxHashMap<u32, crate::automata::lexer::tokenizer::TokenizerExecResult>,
     pub small_exec_result: crate::automata::lexer::tokenizer::TokenizerExecResult,
+    pub reusable_tokenizer_exec:
+        crate::runtime::commit::tokenizer_scan::ReusableTokenizerExecScratch,
+    pub small_queue: crate::runtime::commit::SmallCommitQueueScratch,
+    pub flat_frontier: crate::runtime::commit::FlatFrontierScratch,
+    pub linear_stack_original: Vec<u32>,
+    pub linear_stack_work: Vec<u32>,
     pub processing_queue: Vec<FxHashMap<u32, ParserGSS>>,
+}
+
+impl Default for CommitBuffers {
+    fn default() -> Self {
+        Self {
+            advance_result_cache: FxHashMap::default(),
+            pending_state: FxHashMap::default(),
+            seen_matches: FxHashSet::default(),
+            terminal_result_cache: FxHashMap::default(),
+            exec_results: FxHashMap::default(),
+            small_exec_result: crate::automata::lexer::tokenizer::TokenizerExecResult {
+                end_state: crate::automata::lexer::tokenizer::TokenizerStateSet::new(),
+                matches: Vec::with_capacity(8),
+            },
+            reusable_tokenizer_exec:
+                crate::runtime::commit::tokenizer_scan::ReusableTokenizerExecScratch::default(),
+            small_queue: crate::runtime::commit::SmallCommitQueueScratch::default(),
+            flat_frontier: crate::runtime::commit::FlatFrontierScratch::default(),
+            linear_stack_original: Vec::with_capacity(LINEAR_STACK_RESERVE),
+            linear_stack_work: Vec::with_capacity(LINEAR_STACK_RESERVE),
+            processing_queue: Vec::new(),
+        }
+    }
 }
 
 impl Clone for CommitBuffers {
@@ -72,6 +307,12 @@ impl CommitBuffers {
         self.exec_results.clear();
         self.small_exec_result.end_state.clear();
         self.small_exec_result.matches.clear();
+        self.reusable_tokenizer_exec.states.clear();
+        self.reusable_tokenizer_exec.matches.clear();
+        self.small_queue.clear();
+        self.flat_frontier.clear();
+        self.linear_stack_original.clear();
+        self.linear_stack_work.clear();
         for bucket in &mut self.processing_queue {
             bucket.clear();
         }
@@ -80,7 +321,7 @@ impl CommitBuffers {
 
 #[derive(Clone)]
 pub(crate) struct StateSnapshot {
-    pub state: BTreeMap<u32, ParserGSS>,
+    pub state: ParserStateMap,
     pub generation: u64,
 }
 
@@ -90,7 +331,7 @@ pub(crate) struct StateSnapshot {
 /// Create separate states for concurrently generated sequences.
 pub struct ConstraintState<'a> {
     pub(crate) constraint: &'a Constraint,
-    pub(crate) state: BTreeMap<u32, ParserGSS>,
+    pub(crate) state: ParserStateMap,
     pub(crate) buffers: CommitBuffers,
     /// Monotonically increasing counter, bumped on every commit.
     /// Used for cheap cache invalidation in fill_mask.
@@ -143,6 +384,16 @@ enum GreedyTokenizationStep {
 }
 
 impl<'a> ConstraintState<'a> {
+    pub(crate) fn reserve_linear_stack_hot_path(&mut self) {
+        // Runtime frontiers are commonly a small set of correlated tokenizer
+        // continuations, each carrying one concrete parser stack. Detach and
+        // reserve every such GSS before timed decoding so later branch updates
+        // can reuse their storage in place. Non-linear entries simply decline.
+        for gss in self.state.values_mut() {
+            let _ = gss.reserve_single_segment_capacity(LINEAR_STACK_RESERVE);
+        }
+    }
+
     pub(crate) fn clone_without_history(&self) -> Self {
         Self {
             constraint: self.constraint,
@@ -212,10 +463,9 @@ impl<'a> ConstraintState<'a> {
     /// Return whether the committed prefix completes the grammar.
     pub fn is_complete(&self) -> bool {
         let initial_tsid = self.constraint.tokenizer.initial_state();
-        let Some(stack) = self.state.get(&initial_tsid) else {
-            return false;
-        };
-        !stack.is_empty() && stacks_finished(&self.constraint.table, stack)
+        self.state.values_for_key(initial_tsid).any(|stack| {
+            !stack.is_empty() && stacks_finished(&self.constraint.table, stack)
+        })
     }
 
     /// Return whether generation has finished.
@@ -240,16 +490,28 @@ impl<'a> ConstraintState<'a> {
     /// Return all flattened parser stacks for debugging.
     /// Each entry is (tokenizer_state, Vec<(stack_of_parser_states, disallowed_terminals)>).
     pub(crate) fn debug_parser_stacks(&self) -> Vec<(u32, Vec<(Vec<u32>, Vec<(u32, Vec<u32>)>)>)> {
-        self.state.iter().map(|(&ts, gss)| {
-            let stacks = gss.to_stacks(4_096).expect("stack enumeration exceeded explicit limit");
-            let formatted: Vec<(Vec<u32>, Vec<(u32, Vec<u32>)>)> = stacks.into_iter().map(|(stack, acc)| {
-                let disallowed: Vec<(u32, Vec<u32>)> = acc.0.iter().map(|(&k, v)| {
-                    (k, v.iter().copied().collect())
-                }).collect();
+        let mut grouped = std::collections::BTreeMap::<
+            u32,
+            Vec<(Vec<u32>, Vec<(u32, Vec<u32>)>)>,
+        >::new();
+        for (&ts, gss) in self.state.iter() {
+            let stacks = gss
+                .to_stacks(4_096)
+                .expect("stack enumeration exceeded explicit limit");
+            let out = grouped.entry(ts).or_default();
+            out.extend(stacks.into_iter().map(|(stack, acc)| {
+                let disallowed = acc
+                    .iter()
+                    .map(|(key, values)| (*key, values.iter().copied().collect()))
+                    .collect();
                 (stack, disallowed)
-            }).collect();
-            (ts, formatted)
-        }).collect()
+            }));
+        }
+        for stacks in grouped.values_mut() {
+            stacks.sort();
+            stacks.dedup();
+        }
+        grouped.into_iter().collect()
     }
 
     /// Return a forced token sequence when one can be determined.

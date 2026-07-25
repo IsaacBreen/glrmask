@@ -35,6 +35,7 @@ type DenseMaskGSS = LeveledGSS<u32, DenseMaskAcc>;
 const DELTA_SEED_MIN_SAVINGS: u64 = 2048;
 const MASK_SINGLE_PATH_DIRECT_MAX_DEPTH: u32 = 64;
 const MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_PATHS: usize = 16;
+const MASK_SINGLE_PATH_DIRECT_INLINE_STACK_DEPTH: usize = 64;
 const MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_STACK_VALUES: usize = 128;
 const MASK_SINGLE_PATH_DIRECT_TWO_PASS_MIN_STATE_COUNT: usize =
     MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_PATHS / 2;
@@ -661,10 +662,10 @@ mod tests {
         let tokenizer_state = constraint.tokenizer.initial_state();
         let disallowed = TerminalsDisallowed::new().with_insert(tokenizer_state, terminal_a);
         let mut state = constraint.start_dynamic();
-        state.state = std::collections::BTreeMap::from([(
+        state.state = crate::runtime::state::ParserStateMap::singleton(
             tokenizer_state,
             ParserGSS::from_stacks(&[(vec![0u32], disallowed)]),
-        )]);
+        );
 
         assert!(state.requires_dynamic_possible_matches_fallback());
         let mut expected = vec![0u32; constraint.mask_len()];
@@ -679,10 +680,10 @@ mod tests {
         let loaded_tokenizer_state = loaded.tokenizer.initial_state();
         let loaded_disallowed =
             TerminalsDisallowed::new().with_insert(loaded_tokenizer_state, terminal_a);
-        loaded_state.state = std::collections::BTreeMap::from([(
+        loaded_state.state = crate::runtime::state::ParserStateMap::singleton(
             loaded_tokenizer_state,
             ParserGSS::from_stacks(&[(vec![0u32], loaded_disallowed)]),
-        )]);
+        );
         let mut loaded_expected = vec![0u32; loaded.mask_len()];
         loaded_state.fill_mask_dynamic(&mut loaded_expected);
         let mut loaded_actual = vec![0u32; loaded.mask_len()];
@@ -917,7 +918,7 @@ impl<'a> ConstraintState<'a> {
             return false;
         }
 
-        let mut paths = SmallVec::<[(u32, TerminalsDisallowed, SmallVec<[u32; 16]>); MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_PATHS]>::new();
+        let mut paths = SmallVec::<[(u32, TerminalsDisallowed, SmallVec<[u32; MASK_SINGLE_PATH_DIRECT_INLINE_STACK_DEPTH]>); MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_PATHS]>::new();
         if self.state.len() < MASK_SINGLE_PATH_DIRECT_TWO_PASS_MIN_STATE_COUNT {
             // Below half the path budget, accepted multipath states are common
             // and a separate counting traversal costs more than it saves. Keep
@@ -927,7 +928,7 @@ impl<'a> ConstraintState<'a> {
                     return false;
                 }
 
-                let mut stack = SmallVec::<[u32; 16]>::new();
+                let mut stack = SmallVec::<[u32; MASK_SINGLE_PATH_DIRECT_INLINE_STACK_DEPTH]>::new();
                 if let Some(terminals_disallowed) = gss.single_path_top_first_and_acc(&mut stack) {
                     paths.push((original_tokenizer_state, terminals_disallowed, stack));
                     continue;
@@ -940,7 +941,7 @@ impl<'a> ConstraintState<'a> {
                 let complete = gss.for_each_stack_top_first_bounded(
                     remaining,
                     |stack_top_first, terminals_disallowed| {
-                        let mut path_stack = SmallVec::<[u32; 16]>::new();
+                        let mut path_stack = SmallVec::<[u32; MASK_SINGLE_PATH_DIRECT_INLINE_STACK_DEPTH]>::new();
                         path_stack.extend(stack_top_first.iter().copied());
                         paths.push((
                             original_tokenizer_state,
@@ -964,7 +965,7 @@ impl<'a> ConstraintState<'a> {
                     return false;
                 }
 
-                let mut stack = SmallVec::<[u32; 16]>::new();
+                let mut stack = SmallVec::<[u32; MASK_SINGLE_PATH_DIRECT_INLINE_STACK_DEPTH]>::new();
                 let Some(terminals_disallowed) = gss.single_path_top_first_and_acc(&mut stack) else {
                     all_single_path = false;
                     break;
@@ -1003,7 +1004,7 @@ impl<'a> ConstraintState<'a> {
                     let complete = gss.for_each_stack_top_first_bounded(
                         remaining,
                         |stack_top_first, terminals_disallowed| {
-                            let mut path_stack = SmallVec::<[u32; 16]>::new();
+                            let mut path_stack = SmallVec::<[u32; MASK_SINGLE_PATH_DIRECT_INLINE_STACK_DEPTH]>::new();
                             path_stack.extend(stack_top_first.iter().copied());
                             paths.push((
                                 original_tokenizer_state,

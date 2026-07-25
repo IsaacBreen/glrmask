@@ -108,6 +108,21 @@ macro_rules! define_dyn_stack_vec {
                 match self { $( Self::$variant(v) => v.capacity(), )+ }
             }
 
+            pub fn reserve_total(&mut self, min_capacity: usize) -> bool {
+                match self {
+                    Self::Vec(v) => { v.reserve_total(min_capacity); true }
+                    Self::ArcArray(v) => v.reserve_total(min_capacity),
+                }
+            }
+
+            #[inline]
+            pub fn can_push_without_alloc(&self, new_len: usize) -> bool {
+                match self {
+                    Self::Vec(v) => v.can_push_without_alloc(new_len),
+                    Self::ArcArray(v) => v.can_push_without_alloc(new_len),
+                }
+            }
+
             pub fn to_vec(&self) -> Vec<T> {
                 match self { $( Self::$variant(v) => v.to_vec(), )+ }
             }

@@ -6,21 +6,25 @@ The `glrmask` package compiles a grammar together with a model vocabulary and ex
 
 ## Allocator policy
 
-The Python extension uses mimalloc and disables automatic page purging by
-default. Mimalloc's ordinary delayed purge can otherwise perform OS memory
-maintenance inside an arbitrary `mask` or `commit_token` call, producing rare
-latency spikes unrelated to the grammar state being processed.
+The Python extension uses mimalloc with delayed automatic purging enabled. It
+does not override `MIMALLOC_PURGE_DELAY`, whose mimalloc v3 default is 1000 ms.
 
-Set `MIMALLOC_PURGE_DELAY` before importing `glrmask` to override this policy.
-For example, `MIMALLOC_PURGE_DELAY=1000` restores mimalloc's standard delayed
-purging.
+GLRMask defaults each purge to a memory **reset** (`MADV_FREE` on supported Unix
+systems and `MEM_RESET` on Windows) rather than a synchronous decommit. Reset
+pages remain reclaimable by the operating system and reusable by mimalloc, but
+process RSS may not decrease immediately. This avoids charging immediate page
+decommit work to an otherwise unrelated runtime allocation.
 
-Disabling automatic purging can retain more resident memory in a long-lived
-process. The unstable `glrmask._internal.collect_allocator(force=True)` helper
-can release unused allocator pages at a caller-chosen **quiescent boundary**,
-such as between batches or after retiring constraints. Do not call it while
-other threads are allocating through GLRMask or executing latency-critical
-mask/commit operations.
+Most runtime work also uses bounded preallocated parser, tokenizer, accumulator,
+and mask storage. Ordinary applications therefore need no allocator lifecycle
+calls or manual trimming. Set `MIMALLOC_PURGE_DECOMMITS=1` before importing
+GLRMask when immediate RSS reduction is more important than allocator tail
+latency.
+
+The unstable `glrmask._internal.mimalloc_purge_delay()`,
+`glrmask._internal.mimalloc_purge_decommits()`, and
+`glrmask._internal.collect_allocator(force=True)` helpers remain available for
+diagnostics and controlled experiments.
 
 ## Installation
 

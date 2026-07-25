@@ -155,6 +155,127 @@ fn advance_with_template(template: &CommitTemplateDfas, stack: ParserGSS) -> Par
     output
 }
 
+
+/// Apply a deterministic single-stack commit template to preallocated flat
+/// stack scratch. `Some(true)` is an accepting result, `Some(false)` is an
+/// empty result, and `None` means the template branches or scratch would grow.
+pub(super) fn advance_flat_stack_single_path(
+    constraint: &Constraint,
+    terminal: TerminalID,
+    stack: &mut Vec<u32>,
+) -> Option<bool> {
+    let template = constraint
+        .template_dfas_by_terminal
+        .get(terminal as usize)?
+        .as_ref()?;
+    let mut phase = Phase::Pop;
+    let mut state_id = template.pop.start_state;
+    let total_states = template
+        .pop
+        .states
+        .len()
+        .saturating_add(template.read.states.len())
+        .saturating_add(template.push.states.len());
+    let max_steps = total_states.saturating_mul(2).saturating_add(8);
+    let mut steps = 0usize;
+
+    loop {
+        let mut choice = None;
+        let mut choices = 0usize;
+        let accepting;
+        match phase {
+            Phase::Pop => {
+                let dfa_state = template.pop.states.get(state_id as usize)?;
+                accepting = dfa_state.is_accepting;
+                if let Some(&top) = stack.last() {
+                    let label = top as i32;
+                    if let Some(&target) = dfa_state.transitions.get(&label) {
+                        choice = Some(SingleChoice::Pop(target));
+                        choices += 1;
+                    } else if let Some(&target) = dfa_state.transitions.get(&DEFAULT_LABEL) {
+                        choice = Some(SingleChoice::Pop(target));
+                        choices += 1;
+                    }
+                    if let Some(Some(read_state)) = template.pop_to_read.get(state_id as usize)
+                        && template
+                            .read
+                            .states
+                            .get(*read_state as usize)
+                            .is_some_and(|state| state.transitions.contains_key(&label))
+                    {
+                        choice = Some(SingleChoice::Read(*read_state));
+                        choices += 1;
+                    }
+                }
+                if let Some(Some(push_state)) = template.pop_to_push.get(state_id as usize) {
+                    choice = Some(SingleChoice::Push(*push_state, None));
+                    choices += 1;
+                }
+            }
+            Phase::Read => {
+                let dfa_state = template.read.states.get(state_id as usize)?;
+                accepting = dfa_state.is_accepting;
+                if let Some(&top) = stack.last() {
+                    if let Some(&target) = dfa_state.transitions.get(&(top as i32)) {
+                        choice = Some(SingleChoice::Read(target));
+                        choices += 1;
+                    }
+                }
+                if let Some(Some(push_state)) = template.read_to_push.get(state_id as usize) {
+                    choice = Some(SingleChoice::Push(*push_state, None));
+                    choices += 1;
+                }
+            }
+            Phase::Push => {
+                let dfa_state = template.push.states.get(state_id as usize)?;
+                accepting = dfa_state.is_accepting;
+                for (&label, &target) in &dfa_state.transitions {
+                    if !is_negative_label(label) {
+                        return None;
+                    }
+                    choice = Some(SingleChoice::Push(
+                        target,
+                        Some(negative_to_positive_label(label) as u32),
+                    ));
+                    choices += 1;
+                }
+            }
+        }
+
+        if choices == 0 {
+            return Some(accepting);
+        }
+        if accepting || choices > 1 {
+            return None;
+        }
+        match choice? {
+            SingleChoice::Pop(target) => {
+                stack.pop()?;
+                phase = Phase::Pop;
+                state_id = target;
+            }
+            SingleChoice::Read(target) => {
+                phase = Phase::Read;
+                state_id = target;
+            }
+            SingleChoice::Push(target, pushed) => {
+                if let Some(pushed) = pushed {
+                    if stack.len() == stack.capacity() {
+                        return None;
+                    }
+                    stack.push(pushed);
+                }
+                phase = Phase::Push;
+                state_id = target;
+            }
+        }
+        steps += 1;
+        if steps > max_steps {
+            return None;
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum SingleChoice {
     Pop(u32),

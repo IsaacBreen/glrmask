@@ -3701,6 +3701,218 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         Some(VirtualStack { values, next, acc: interface.acc.clone(), pending_top: None })
     }
 
+    /// Copy the complete sole stack into preallocated scratch. Unary General
+    /// nodes are traversed exactly; branching or an optional early end declines.
+    pub(crate) fn single_path_acc(&self) -> Option<A> {
+        let Upper::Interface(interface) = &*self.inner else {
+            return None;
+        };
+        self.single_path_terminal_floor()?;
+        Some(interface.acc.clone())
+    }
+
+    pub(crate) fn copy_single_path_stack_into(&self, out: &mut Vec<T>) -> bool {
+        let Upper::Interface(interface) = &*self.inner else {
+            return false;
+        };
+        out.clear();
+        let mut node = &interface.inner;
+        loop {
+            match &**node {
+                Lower::Segment(segment) => {
+                    if out.len() + segment.values.len() > out.capacity() {
+                        out.clear();
+                        return false;
+                    }
+                    out.extend(segment.values.iter().rev().cloned());
+                    node = &segment.next;
+                }
+                Lower::General {
+                    children, empty, ..
+                } => {
+                    if *empty {
+                        if !children.is_empty() {
+                            out.clear();
+                            return false;
+                        }
+                        out.reverse();
+                        return !out.is_empty();
+                    }
+                    if children.len() != 1 {
+                        out.clear();
+                        return false;
+                    }
+                    let (value, kids) = children.iter().next().unwrap();
+                    if kids.len() != 1 || out.len() == out.capacity() {
+                        out.clear();
+                        return false;
+                    }
+                    out.push(value.clone());
+                    node = kids.values().next().unwrap();
+                }
+            }
+        }
+    }
+
+    fn single_path_terminal_floor(&self) -> Option<Arc<Lower<T>>> {
+        let Upper::Interface(interface) = &*self.inner else {
+            return None;
+        };
+        let mut node = &interface.inner;
+        loop {
+            match &**node {
+                Lower::Segment(segment) => node = &segment.next,
+                Lower::General {
+                    children, empty, ..
+                } => {
+                    if *empty {
+                        return children.is_empty().then(|| node.clone());
+                    }
+                    if children.len() != 1 {
+                        return None;
+                    }
+                    let kids = children.values().next().unwrap();
+                    if kids.len() != 1 {
+                        return None;
+                    }
+                    node = kids.values().next().unwrap();
+                }
+            }
+        }
+    }
+
+    pub(crate) fn can_replace_single_path_state_in_place(&self, values: &[T]) -> bool {
+        if values.is_empty() || self.single_path_terminal_floor().is_none() {
+            return false;
+        }
+        if Arc::strong_count(&self.inner) != 1 {
+            return false;
+        }
+        let Upper::Interface(interface) = &*self.inner else {
+            return false;
+        };
+        if Arc::strong_count(interface) != 1 || Arc::strong_count(&interface.inner) != 1 {
+            return false;
+        }
+        let Lower::Segment(segment) = &*interface.inner else {
+            return false;
+        };
+        Arc::strong_count(segment) == 1
+            && segment.rest.get().is_none()
+            && segment.values.can_push_without_alloc(values.len())
+    }
+
+    /// Replace a uniquely-owned sole stack and accumulator, reusing the reserved
+    /// top Segment and existing terminal floor.
+    pub(crate) fn try_replace_single_path_state_in_place(
+        &mut self,
+        values: &[T],
+        acc: A,
+    ) -> bool {
+        if !self.can_replace_single_path_state_in_place(values) {
+            return false;
+        }
+        let floor = self
+            .single_path_terminal_floor()
+            .expect("replacement eligibility checked terminal floor");
+        let upper = Arc::get_mut(&mut self.inner).expect("replacement eligibility checked upper");
+        let Upper::Interface(interface) = upper else {
+            unreachable!();
+        };
+        let interface = Arc::get_mut(interface).expect("replacement eligibility checked interface");
+        let lower = Arc::get_mut(&mut interface.inner).expect("replacement eligibility checked lower");
+        let Lower::Segment(segment) = lower else {
+            unreachable!();
+        };
+        let segment = Arc::get_mut(segment).expect("replacement eligibility checked segment");
+
+        segment.values.truncate(0);
+        for value in values {
+            if !segment.values.try_push(value.clone()) {
+                unreachable!("replacement capacity checked before mutation");
+            }
+        }
+        segment.next = floor;
+        segment.max_depth = segment.next.max_depth() + values.len() as u32;
+        segment.segments_len = segment.next.segments_len() + values.len();
+        interface.acc = acc;
+        true
+    }
+
+    pub(crate) fn try_replace_single_path_stack_in_place(&mut self, values: &[T]) -> bool {
+        let Upper::Interface(interface) = &*self.inner else {
+            return false;
+        };
+        let acc = interface.acc.clone();
+        self.try_replace_single_path_state_in_place(values, acc)
+    }
+
+    /// Reserve the uniquely-owned linear Segment used by the deterministic
+    /// runtime fast path. This is called before timed decoding operations.
+    pub(crate) fn reserve_single_segment_capacity(&mut self, min_capacity: usize) -> bool {
+        // Startup is outside the timed hot path: deliberately detach the small
+        // linear representation from any compile-time/shared Arcs so subsequent
+        // deterministic commits can mutate it without allocating.
+        let upper = Arc::make_mut(&mut self.inner);
+        let Upper::Interface(interface) = upper else {
+            return false;
+        };
+        let interface = Arc::make_mut(interface);
+        let lower = Arc::make_mut(&mut interface.inner);
+        let Lower::Segment(segment) = lower else {
+            return false;
+        };
+        let segment = Arc::make_mut(segment);
+        // Cloning a Segment deliberately clears this derived suffix cache.
+        segment.rest = OnceLock::new();
+        segment.values.reserve_total(min_capacity)
+    }
+
+    /// Apply one deterministic stack effect directly to a uniquely-owned
+    /// single Segment. Returns false without mutation when the operation would
+    /// cross the Segment floor, grow capacity, or invalidate a cached suffix.
+    pub(crate) fn try_apply_single_segment_stack_effect_in_place(
+        &mut self,
+        pop: usize,
+        pushes: &[T],
+    ) -> bool {
+        let Some(upper) = Arc::get_mut(&mut self.inner) else {
+            return false;
+        };
+        let Upper::Interface(interface) = upper else {
+            return false;
+        };
+        let Some(interface) = Arc::get_mut(interface) else {
+            return false;
+        };
+        let Some(lower) = Arc::get_mut(&mut interface.inner) else {
+            return false;
+        };
+        let Lower::Segment(segment) = lower else {
+            return false;
+        };
+        let Some(segment) = Arc::get_mut(segment) else {
+            return false;
+        };
+        if segment.rest.get().is_some() || pop > segment.values.len() {
+            return false;
+        }
+        let new_len = segment.values.len() - pop + pushes.len();
+        if new_len == 0 || !segment.values.can_push_without_alloc(new_len) {
+            return false;
+        }
+
+        segment.values.truncate(segment.values.len() - pop);
+        for value in pushes {
+            if !segment.values.try_push(value.clone()) {
+                return false;
+            }
+        }
+        segment.max_depth = segment.next.max_depth() + new_len as u32;
+        segment.segments_len = segment.next.segments_len() + new_len;
+        true
+    }
+
     pub fn is_empty(&self) -> bool {
         match &*self.inner {
             Upper::Branch(b) => b.children.is_empty() && b.empty.is_none(),
@@ -4765,10 +4977,14 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         Some((stack, acc))
     }
 
-    pub fn single_path_top_first_and_acc(&self, out: &mut SmallVec<[T; 16]>) -> Option<A> {
-        fn push_lower_path<T>(node: &Arc<Lower<T>>, out: &mut SmallVec<[T; 16]>) -> bool
+    pub fn single_path_top_first_and_acc<S>(&self, out: &mut SmallVec<S>) -> Option<A>
+    where
+        S: smallvec::Array<Item = T>,
+    {
+        fn push_lower_path<T, S>(node: &Arc<Lower<T>>, out: &mut SmallVec<S>) -> bool
         where
             T: Clone + Eq + Hash,
+            S: smallvec::Array<Item = T>,
         {
             match &**node {
                 Lower::Segment(seg) => {
@@ -4794,13 +5010,14 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             }
         }
 
-        fn push_upper_path<T, A>(
+        fn push_upper_path<T, A, S>(
             node: &Arc<Upper<T, A>>,
-            out: &mut SmallVec<[T; 16]>,
+            out: &mut SmallVec<S>,
         ) -> Option<A>
         where
             T: Clone + Eq + Hash,
             A: Merge + Clone + Eq + Hash,
+            S: smallvec::Array<Item = T>,
         {
             match &**node {
                 Upper::Interface(interface) => {

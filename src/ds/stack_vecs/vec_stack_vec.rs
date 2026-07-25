@@ -19,6 +19,22 @@ impl<T: Clone + Eq + Hash> VecStackVec<T> {
     pub fn as_slice(&self) -> &[T] {
         self.0.as_slice()
     }
+
+    #[inline]
+    pub fn capacity(&self) -> usize {
+        self.0.capacity()
+    }
+
+    pub fn reserve_total(&mut self, min_capacity: usize) {
+        if self.0.capacity() < min_capacity {
+            self.0.reserve(min_capacity.saturating_sub(self.0.len()));
+        }
+    }
+
+    #[inline]
+    pub fn can_push_without_alloc(&self, new_len: usize) -> bool {
+        self.0.capacity() >= new_len
+    }
 }
 
 impl<T: PartialEq> PartialEq for VecStackVec<T> {

@@ -46,6 +46,11 @@ impl<T> ArcArrayVec<T> {
         self.nw
     }
 
+    #[inline]
+    pub fn capacity(&self) -> usize {
+        self.data.capacity()
+    }
+
     /// Whether the view is empty.
     #[inline]
     pub fn is_empty(&self) -> bool {
@@ -79,6 +84,21 @@ impl<T> ArcArrayVec<T> {
 }
 
 impl<T: Clone> ArcArrayVec<T> {
+    pub fn reserve_total(&mut self, min_capacity: usize) -> bool {
+        let Some(data) = Arc::get_mut(&mut self.data) else {
+            return false;
+        };
+        if data.capacity() < min_capacity {
+            data.reserve(min_capacity.saturating_sub(data.len()));
+        }
+        true
+    }
+
+    #[inline]
+    pub fn can_push_without_alloc(&self, new_len: usize) -> bool {
+        Arc::strong_count(&self.data) == 1 && self.data.capacity() >= new_len
+    }
+
     /// Create from a single value.
     #[inline]
     pub fn unit(val: T) -> Self {

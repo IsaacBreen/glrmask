@@ -411,7 +411,7 @@ impl InitialPruneGuard {
         }
 
         Self::Pending {
-            blocked: Arc::new(blocked.clone()),
+            blocked: Arc::new(blocked.to_btree_set()),
             lexer_states: smallvec::smallvec![tokenizer_state],
             actionable_states: actionable_states.into(),
             has_actionable_match: false,
@@ -822,10 +822,9 @@ fn dynamic_mask_state_key(state: &ConstraintState<'_>) -> Option<DynamicMaskStat
             .into_iter()
             .map(|(stack, exclusions)| {
                 let exclusion_entries = exclusions
-                    .0
                     .iter()
-                    .map(|(&excluded_state, terminals)| {
-                        (excluded_state, terminals.iter().copied().collect::<Vec<_>>())
+                    .map(|(excluded_state, terminals)| {
+                        (*excluded_state, terminals.iter().copied().collect::<Vec<_>>())
                     })
                     .collect::<Vec<_>>();
                 (stack, exclusion_entries)
@@ -966,9 +965,8 @@ fn fill_mask_dynamic_impl(
                     tokenizer_state == initial_tsid,
                     stacks.path_count_at_most(1_000_000),
                     terminals_disallowed
-                        .0
-                        .values()
-                        .map(BTreeSet::len)
+                        .iter()
+                        .map(|(_, terminals)| terminals.len())
                         .sum::<usize>(),
                     state.constraint.tokenizer.transitions_from(tokenizer_state).count(),
                     state
@@ -1062,6 +1060,9 @@ fn fill_mask_dynamic_impl(
                 {
                     let mut matches = true;
                     for &other_state in combined.source_states.iter().skip(1) {
+                        // Combined-source reuse requires one exact parser
+                        // language per tokenizer state. Duplicate-key flat
+                        // alternatives conservatively disable this optimization.
                         let Some(other_gss) = state.state.get(&other_state) else {
                             matches = false;
                             break;

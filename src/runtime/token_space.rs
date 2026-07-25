@@ -82,10 +82,10 @@ impl Constraint {
 		Self::range_set_from_sorted_ids(&all_ids)
 	}
 
-	pub(crate) fn initial_state_map(&self) -> BTreeMap<u32, ParserGSS> {
+	pub(crate) fn initial_state_map(&self) -> crate::runtime::state::ParserStateMap {
 		let initial_tok_state = self.tokenizer.initial_state();
 		let parser_gss = ParserGSS::from_stacks(&[(vec![0u32], TerminalsDisallowed::new())]);
-		BTreeMap::from([(initial_tok_state, parser_gss)])
+		crate::runtime::state::ParserStateMap::singleton(initial_tok_state, parser_gss)
 	}
 
 	fn collect_original_token_ids(&self, internal_tokens: &RangeSetBlaze<u32>) -> Vec<u32> {
