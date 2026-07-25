@@ -5,6 +5,7 @@
 ### Improved
 
 - The Python extension now disables mimalloc's automatic delayed page purging by default, preventing rare allocator maintenance from appearing inside arbitrary mask or commit operations. Explicit `MIMALLOC_PURGE_DELAY` settings remain authoritative, and an unstable explicit collection hook is available for caller-chosen quiescent boundaries.
+- Constraints with at most 16 initially admissible tokens now exercise those initial commit transitions during runtime-cache finalization. This moves a bounded amount of cold parser/tokenizer execution into compile or load, reducing first-token TBM without adding work to `Constraint::start()` or displacing it to the second token; larger initial masks skip the step entirely.
 - Large bounded JSON Schema string patterns now retain exact `maxLength`
   semantics by compiling terminal/parser automata against a certified smaller
   residual representative while keeping the full exact lexer for runtime

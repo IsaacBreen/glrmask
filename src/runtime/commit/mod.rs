@@ -496,6 +496,19 @@ fn commit_token_impl(
 }
 
 #[cold]
+pub(crate) fn prime_initial_commits(
+    constraint: &Constraint,
+    initial_state: &BTreeMap<u32, ParserGSS>,
+    token_ids: &[u32],
+) {
+    let mut buffers = CommitBuffers::default();
+    for &token_id in token_ids {
+        let mut state = initial_state.clone();
+        let _ = commit_token_impl(constraint, &mut state, &mut buffers, token_id);
+    }
+}
+
+#[cold]
 fn commit_token_no_fast_path_reference(
     constraint: &Constraint,
     state: &mut BTreeMap<u32, ParserGSS>,
@@ -3864,6 +3877,48 @@ mod tests {
         state: &BTreeMap<u32, ParserGSS>,
     ) -> CanonicalCommitState {
         canonical_commit_state_for_equivalence_assert(state)
+    }
+
+    #[test]
+    fn compile_time_initial_commit_priming_preserves_runtime_semantics() {
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                t A ::= "a";
+                t B ::= "b";
+                nt start ::= A B;
+            "#,
+            &Vocab::new(vec![
+                (0, b"a".to_vec()),
+                (1, b"ab".to_vec()),
+                (2, b"b".to_vec()),
+                (3, b"x".to_vec()),
+            ]),
+        )
+        .unwrap();
+
+        let mut state = constraint.start();
+        assert_eq!(
+            state
+                .mask()
+                .iter()
+                .enumerate()
+                .flat_map(|(word, &bits)| {
+                    (0..32).filter_map(move |bit| {
+                        ((bits >> bit) & 1 == 1).then_some((word * 32 + bit) as u32)
+                    })
+                })
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([0, 1]),
+        );
+        state.commit_token(0).unwrap();
+        state.commit_token(2).unwrap();
+        assert!(state.is_complete());
+
+        let loaded = Constraint::load(&constraint.save()).unwrap();
+        let mut loaded_state = loaded.start();
+        loaded_state.commit_token(1).unwrap();
+        assert!(loaded_state.is_complete());
     }
 
     #[test]

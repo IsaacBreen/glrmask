@@ -187,7 +187,53 @@ fn count_complement_subgroups(missing: u64, valid_mask: u64) -> (u32, u32, u32) 
     (byte_groups, nibble_groups, remaining_bits)
 }
 
+const INITIAL_COMMIT_PRIME_MAX_TOKENS: usize = 16;
+
+fn initial_commit_prime_token_ids(mask: &[u32]) -> Option<Vec<u32>> {
+    let mut token_ids = Vec::new();
+    for (word_index, &word) in mask.iter().enumerate() {
+        let mut remaining = word;
+        while remaining != 0 {
+            if token_ids.len() == INITIAL_COMMIT_PRIME_MAX_TOKENS {
+                return None;
+            }
+            let bit = remaining.trailing_zeros() as usize;
+            token_ids.push((word_index * 32 + bit) as u32);
+            remaining &= remaining - 1;
+        }
+    }
+    Some(token_ids)
+}
+
 impl Constraint {
+    #[cold]
+    fn prime_initial_commit_hot_path(&self) {
+        let state = ConstraintState {
+            constraint: self,
+            state: self.initial_state_map(),
+            buffers: Default::default(),
+            generation: 0,
+            mask_cache: Mutex::new(None),
+            mask_scratch: Mutex::new(crate::runtime::state::MaskScratch::for_constraint(self)),
+            max_rollback_tokens: 0,
+            history: Default::default(),
+        };
+        state.prefill_mask_cache();
+
+        let token_ids = {
+            let cache = state.mask_cache.lock().unwrap();
+            let Some(mask) = cache.as_ref().map(|cache| cache.mask.as_slice()) else {
+                return;
+            };
+            let Some(token_ids) = initial_commit_prime_token_ids(mask) else {
+                return;
+            };
+            token_ids
+        };
+
+        super::commit::prime_initial_commits(self, &state.state, &token_ids);
+    }
+
     /// Return the direct-dynamic vocabulary, materializing it only when a
     /// dynamic mask is actually requested. Static constraints with complete
     /// possible-matches tables never pay this cost; deferred-PM constraints
@@ -1038,6 +1084,10 @@ impl Constraint {
         let seed_started_at = profile.then(std::time::Instant::now);
         self.build_seed_dense_masks();
         let seed_ms = seed_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let initial_commit_prime_started_at = profile.then(std::time::Instant::now);
+        self.prime_initial_commit_hot_path();
+        let initial_commit_prime_ms = initial_commit_prime_started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         if let Some(total_started_at) = total_started_at {
             eprintln!(
                 "[glrmask/profile][runtime_finalize_derived] pair_ms={:.3} quad_ms={:.3} super_ms={:.3} mega_ms={:.3} giga_ms={:.3} all_tokens_ms={:.3} heavy_ms={:.3} flat_ms={:.3} costs_ms={:.3} prebuilt_weight_sparse_ms={:.3} weight_buf_ms={:.3} weight_sparse_ms={:.3} final_weight_sets={} final_weight_sparse_sets={} direct_sparse_weight_sets={}",
@@ -1058,7 +1108,7 @@ impl Constraint {
                 self.direct_sparse_weight_token_sets.len(),
             );
             eprintln!(
-                "[glrmask/profile][runtime_finalize] guarded_shift_ms={:.3} dynamic_mask_vocab_ms={:.3} dynamic_mask_vocab_reused={} continuation_partitions_ms={:.3} internal_token_buf_masks_ms={:.3} tokenizer_fast_transitions_ms={:.3} dense_token_masks_ms={:.3} dwa_fast_transitions_ms={:.3} primary_ms={:.3} word_block_masks_ms={:.3} quad_word_block_masks_ms={:.3} byte_block_masks_ms={:.3} block_masks_ms={:.3} derived_masks_ms={:.3} seed_dense_ms={:.3} total_ms={:.3}",
+                "[glrmask/profile][runtime_finalize] guarded_shift_ms={:.3} dynamic_mask_vocab_ms={:.3} dynamic_mask_vocab_reused={} continuation_partitions_ms={:.3} internal_token_buf_masks_ms={:.3} tokenizer_fast_transitions_ms={:.3} dense_token_masks_ms={:.3} dwa_fast_transitions_ms={:.3} primary_ms={:.3} word_block_masks_ms={:.3} quad_word_block_masks_ms={:.3} byte_block_masks_ms={:.3} block_masks_ms={:.3} derived_masks_ms={:.3} seed_dense_ms={:.3} initial_commit_prime_ms={:.3} total_ms={:.3}",
                 guarded_shift_ms,
                 dynamic_vocab_ms,
                 dynamic_vocab_reused,
@@ -1074,6 +1124,7 @@ impl Constraint {
                 block_ms,
                 derived_ms,
                 seed_ms,
+                initial_commit_prime_ms,
                 total_started_at.elapsed().as_secs_f64() * 1000.0,
             );
         }
@@ -3276,6 +3327,21 @@ impl<'a> ConstraintState<'a> {
 mod dense_internal_token_mask_tests {
     use super::*;
     use crate::Vocab;
+
+    #[test]
+    fn initial_commit_prime_token_ids_accepts_exact_limit() {
+        let mask = [u32::MAX >> (32 - INITIAL_COMMIT_PRIME_MAX_TOKENS)];
+        assert_eq!(
+            initial_commit_prime_token_ids(&mask),
+            Some((0..INITIAL_COMMIT_PRIME_MAX_TOKENS as u32).collect()),
+        );
+    }
+
+    #[test]
+    fn initial_commit_prime_token_ids_rejects_above_limit() {
+        let mask = [u32::MAX >> (32 - (INITIAL_COMMIT_PRIME_MAX_TOKENS + 1))];
+        assert_eq!(initial_commit_prime_token_ids(&mask), None);
+    }
 
     #[test]
     fn dense_internal_token_masks_match_reference_expansion() {
