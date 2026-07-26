@@ -48,6 +48,7 @@ type SmallParserStates =
 pub(crate) struct SmallCommitQueueScratch {
     processing: [SmallParserStates; 9],
     pending: SmallParserStates,
+    advance_cache: SmallVec<[(usize, u32, ParserGSS); 8]>,
 }
 
 impl Default for SmallCommitQueueScratch {
@@ -55,6 +56,7 @@ impl Default for SmallCommitQueueScratch {
         Self {
             processing: std::array::from_fn(|_| SmallVec::new()),
             pending: SmallVec::new(),
+            advance_cache: SmallVec::new(),
         }
     }
 }
@@ -65,6 +67,7 @@ impl SmallCommitQueueScratch {
             bucket.clear();
         }
         self.pending.clear();
+        self.advance_cache.clear();
     }
 }
 
@@ -1752,7 +1755,9 @@ fn merge_small_parser_state(
 ) {
     for (existing_state, existing_gss) in states.iter_mut() {
         if *existing_state == tokenizer_state {
-            *existing_gss = existing_gss.merge(&gss);
+            if !existing_gss.ptr_eq(&gss) {
+                *existing_gss = existing_gss.merge(&gss);
+            }
             return;
         }
     }
@@ -1865,7 +1870,31 @@ fn commit_bytes_small_queue_fast_path(
                     ) {
                         continue;
                     }
-                    advance_parser_stacks(constraint, &gss_at_offset, matched.terminal_id)
+                    let key = (gss_at_offset.ptr_key(), matched.terminal_id);
+                    if let Some((_, _, cached)) = queue_scratch
+                        .advance_cache
+                        .iter()
+                        .find(|(ptr, terminal, _)| (*ptr, *terminal) == key)
+                    {
+                        cached.clone()
+                    } else {
+                        if queue_scratch.advance_cache.len()
+                            == queue_scratch.advance_cache.capacity()
+                        {
+                            return None;
+                        }
+                        let advanced = advance_parser_stacks(
+                            constraint,
+                            &gss_at_offset,
+                            matched.terminal_id,
+                        );
+                        queue_scratch.advance_cache.push((
+                            key.0,
+                            key.1,
+                            advanced.clone(),
+                        ));
+                        advanced
+                    }
                 };
                 let advanced = apply_future_terminal_disallow_for_states(
                     constraint,
@@ -4285,7 +4314,7 @@ fn try_process_flat_continuation_group(
         .len
         .saturating_sub(indices.len())
         .saturating_add(indices.len().saturating_mul(viable_end_states.len()));
-    if projected > FLAT_FRONTIER_MAX_BRANCHES {
+    if projected > 8 {
         return FlatContinuationGroupOutcome::Decline;
     }
 
