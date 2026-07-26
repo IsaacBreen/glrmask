@@ -10,7 +10,9 @@ use super::table::{
     StackShiftGuard,
 };
 use crate::ds::bitset::BitSet;
-use crate::ds::leveled_gss::{GssSemanticKeyInterner, LeveledGSS, Merge, VirtualStack};
+use crate::ds::leveled_gss::{
+    GssSemanticKey, GssSemanticKeyInterner, LeveledGSS, Merge, VirtualStack,
+};
 use crate::grammar::flat::TerminalID;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
@@ -2669,7 +2671,7 @@ pub(crate) fn stack_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: T
     admitted
 }
 
-type ExactAdmissionSemanticKey = u32;
+type ExactAdmissionSemanticKey = GssSemanticKey;
 
 type ExactAdmissionKeyInterner = GssSemanticKeyInterner<u32, TerminalsDisallowed>;
 
