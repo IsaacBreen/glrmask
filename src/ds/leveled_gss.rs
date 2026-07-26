@@ -7,6 +7,7 @@ use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::hash::Hash;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use weighted_gss as wg;
 
 /// Historical GLRMask name for the path-weight join operation.
@@ -29,16 +30,12 @@ impl Merge for () {
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct CompatWeight<A>(A);
 
-impl<A: Merge + PartialEq> wg::Weight for CompatWeight<A> {
+impl<A: Merge> wg::Weight for CompatWeight<A> {
     #[inline]
     fn join(&self, other: &Self) -> Self {
         Self(self.0.merge(&other.0))
     }
 
-    #[inline]
-    fn equivalent(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
 }
 
 /// Structural statistics retained for existing GLRMask profiling code.
@@ -87,12 +84,21 @@ where
     }
 }
 
+static NEXT_COMPAT_GSS_ID: AtomicUsize = AtomicUsize::new(1);
+
+fn next_compat_gss_id() -> usize {
+    NEXT_COMPAT_GSS_ID
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| next.checked_add(1))
+        .expect("GLRMask compatibility GSS ID space exhausted")
+}
+
 /// GLRMask compatibility wrapper over the standalone weighted GSS.
 pub struct LeveledGSS<
     T: Clone + Eq + Hash,
     A: Merge + Clone + Eq + Hash,
 > {
     inner: wg::WeightedGss<T, CompatWeight<A>>,
+    identity: usize,
 }
 
 impl<T, A> Clone for LeveledGSS<T, A>
@@ -103,6 +109,7 @@ where
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
+            identity: self.identity,
         }
     }
 }
@@ -150,10 +157,15 @@ where
     T: Clone + Eq + Hash,
     A: Merge + Clone + Eq + Hash,
 {
-    pub fn empty() -> Self {
+    fn from_inner(inner: wg::WeightedGss<T, CompatWeight<A>>) -> Self {
         Self {
-            inner: wg::WeightedGss::new(),
+            inner,
+            identity: next_compat_gss_id(),
         }
+    }
+
+    pub fn empty() -> Self {
+        Self::from_inner(wg::WeightedGss::new())
     }
 
     pub fn from_stacks(stacks: &[(Vec<T>, A)]) -> Self {
@@ -170,17 +182,15 @@ where
             by_weight.entry(weight).or_default().push(stack);
         }
 
-        Self {
-            inner: wg::WeightedGss::merge_all(by_weight.into_iter().map(|(weight, stacks)| {
+        Self::from_inner(wg::WeightedGss::merge_all(
+            by_weight.into_iter().map(|(weight, stacks)| {
                 wg::WeightedGss::from_stacks_with_weight(stacks, CompatWeight(weight))
-            })),
-        }
+            }),
+        ))
     }
 
     pub fn from_single_stack(values: Vec<T>, weight: A) -> Self {
-        Self {
-            inner: wg::WeightedGss::from_stack(values, CompatWeight(weight)),
-        }
+        Self::from_inner(wg::WeightedGss::from_stack(values, CompatWeight(weight)))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -192,11 +202,11 @@ where
     }
 
     pub fn ptr_eq(&self, other: &Self) -> bool {
-        self.inner.representation_id() == other.inner.representation_id()
+        self.identity == other.identity
     }
 
     pub fn ptr_key(&self) -> usize {
-        self.inner.representation_id().as_usize()
+        self.identity
     }
 
     pub(crate) fn single_interface_lower_id(&self) -> Option<usize> {
@@ -204,53 +214,39 @@ where
     }
 
     pub fn push(&self, value: T) -> Self {
-        Self {
-            inner: self.inner.push(value),
-        }
+        Self::from_inner(self.inner.push(value))
     }
 
     pub fn pop(&self) -> Self {
-        Self {
-            inner: self.inner.pop(),
-        }
+        Self::from_inner(self.inner.pop())
     }
 
     pub fn popn(&self, count: isize) -> Self {
         if count <= 0 {
             return self.clone();
         }
-        Self {
-            inner: self.inner.pop_n(count as usize),
-        }
+        Self::from_inner(self.inner.popn(count as usize))
     }
 
     pub fn isolate(&self, value: Option<T>) -> Self {
         match value {
-            Some(value) => Self {
-                inner: self.inner.retain_top(&value),
-            },
-            None => Self {
-                inner: self.inner.retain_empty(),
-            },
+            Some(value) => Self::from_inner(self.inner.retain_top(&value)),
+            None => Self::from_inner(self.inner.retain_empty()),
         }
     }
 
     pub fn pop_top_value(&self, value: &T) -> Self {
-        Self {
-            inner: self.inner.pop_top(value),
-        }
+        Self::from_inner(self.inner.pop_top(value))
     }
 
     pub fn merge(&self, other: &Self) -> Self {
-        Self {
-            inner: self.inner.merge(&other.inner),
-        }
+        Self::from_inner(self.inner.merge(&other.inner))
     }
 
     pub fn merge_many(values: impl IntoIterator<Item = Self>) -> Self {
-        Self {
-            inner: wg::WeightedGss::merge_all(values.into_iter().map(|value| value.inner)),
-        }
+        Self::from_inner(wg::WeightedGss::merge_all(
+            values.into_iter().map(|value| value.inner),
+        ))
     }
 
     pub fn fuse(&self, _levels: Option<isize>) -> Self {
@@ -282,7 +278,7 @@ where
     }
 
     pub fn path_count_at_most(&self, limit: usize) -> usize {
-        self.inner.paths().count_at_most(limit)
+        self.inner.paths().path_count_at_most(limit)
     }
 
     pub fn to_stacks(&self, max_stacks: usize) -> Option<Vec<(Vec<T>, A)>> {
@@ -314,7 +310,7 @@ where
     ) -> bool {
         self.inner
             .paths()
-            .for_each_top_first(limit, |stack, weight| visit(stack, &weight.0))
+            .for_each_path_top_first(limit, |stack, weight| visit(stack, &weight.0))
             .is_ok()
     }
 
@@ -345,7 +341,7 @@ where
     ) -> Option<A> {
         let mut values = Vec::new();
         let paths = self.inner.paths();
-        let weight = paths.single_top_first(&mut values)?;
+        let weight = paths.write_single_path_top_first(&mut values)?;
         output.clear();
         output.extend(values);
         Some(weight.0.clone())
@@ -356,12 +352,10 @@ where
         B: Merge + Clone + Eq + Hash,
         F: FnMut(&A) -> B,
     {
-        LeveledGSS {
-            inner: self
+        LeveledGSS::from_inner(self
                 .inner
                 .paths()
-                .map_weights(|weight| CompatWeight(map(&weight.0))),
-        }
+                .map_weights(|weight| CompatWeight(map(&weight.0))))
     }
 
     pub fn apply_and_prune<B, F>(&self, mut map: F) -> LeveledGSS<T, B>
@@ -369,12 +363,10 @@ where
         B: Merge + Clone + Eq + Hash,
         F: FnMut(&A) -> Option<B>,
     {
-        LeveledGSS {
-            inner: self
+        LeveledGSS::from_inner(self
                 .inner
                 .paths()
-                .filter_map_weights(|weight| map(&weight.0).map(CompatWeight)),
-        }
+                .filter_map_weights(|weight| map(&weight.0).map(CompatWeight)))
     }
 
     pub fn apply_and_prune_no_promote<B, F>(&self, map: F) -> LeveledGSS<T, B>
@@ -394,7 +386,7 @@ where
                 let inner = stacks
                     .paths()
                     .map_weights(|_| CompatWeight(()));
-                (LeveledGSS { inner }, weight.0)
+                (LeveledGSS::from_inner(inner), weight.0)
             })
             .collect()
     }
@@ -408,22 +400,20 @@ where
     }
 
     pub fn for_each_acc(&self, mut visit: impl FnMut(&A)) {
-        self.inner.paths().for_each_weight(|weight| visit(&weight.0));
+        for weight in self.inner.paths().weights() {
+            visit(&weight.0);
+        }
     }
 
     pub fn all_accs_satisfy(&self, predicate: impl Fn(&A) -> bool) -> bool {
-        self.inner
-            .paths()
-            .all_weights_satisfy(|weight| predicate(&weight.0))
+        self.inner.paths().weights().all(|weight| predicate(&weight.0))
     }
 
     pub fn for_each_decomposed(&self, mut visit: impl FnMut(T, Self)) {
         for branch in self.inner.pop_branches() {
             visit(
                 branch.top,
-                Self {
-                    inner: branch.remainder,
-                },
+                Self::from_inner(branch.remainder),
             );
         }
     }
@@ -476,13 +466,11 @@ where
         I: IntoIterator<Item = (usize, &'a [T])>,
         T: 'a,
     {
-        Some(Self {
-            inner: self.inner.apply_effects(
+        Some(Self::from_inner(self.inner.apply_ops(
                 effects
                     .into_iter()
-                    .map(|(pop, push)| wg::StackEffect::new(pop, push)),
-            ),
-        })
+                    .map(|(pop, push)| wg::StackOp::new(pop, push)),
+            )))
     }
 
     pub fn apply_guarded_stack_effects_to_single_concrete_path<'a, I, G>(
@@ -498,17 +486,13 @@ where
         let branches = effects.into_iter().map(|(guards, pop, push)| {
             let mut branch = self.clone();
             for (depth, states) in guards {
-                branch = Self {
-                    inner: branch
+                branch = Self::from_inner(branch
                         .inner
-                        .retain_at_depth(depth, |state| states.contains(state)),
-                };
+                        .retain_where_at_depth(depth, |state| states.contains(state)));
             }
-            Self {
-                inner: branch
+            Self::from_inner(branch
                     .inner
-                    .apply_effect(wg::StackEffect::new(pop, push)),
-            }
+                    .apply_op(wg::StackOp::new(pop, push)))
         });
         Some(Self::merge_many(branches))
     }
@@ -555,17 +539,13 @@ where
         }
         let first = branches.next()?.remainder;
         for branch in branches {
-            let candidate = Self {
-                inner: branch.remainder,
-            };
-            let expected = Self {
-                inner: first.clone(),
-            };
+            let candidate = Self::from_inner(branch.remainder);
+            let expected = Self::from_inner(first.clone());
             if !candidate.semantically_eq(&expected, 4_096)? {
                 return None;
             }
         }
-        Some(Self { inner: first })
+        Some(Self::from_inner(first))
     }
 
     pub fn absorb_push_same_acc(self, value: T, base: &Self) -> Self {
@@ -596,15 +576,10 @@ where
     }
 
     pub fn summary(&self) -> LeveledGSSSummary {
-        let stats = self.inner.structural_stats();
-        let mut accumulator_instances = 0;
-        self.for_each_acc(|_| accumulator_instances += 1);
         LeveledGSSSummary {
             top_values_count: self.peek_values().len(),
-            total_unique_nodes: stats.nodes,
-            total_edges: stats.edges,
-            accumulator_instances,
-            max_depth: stats.max_depth.min(u32::MAX as usize) as u32,
+            accumulator_instances: self.inner.paths().weights().count(),
+            max_depth: self.max_depth(),
             ..LeveledGSSSummary::default()
         }
     }
@@ -684,9 +659,7 @@ where
     }
 
     pub fn into_gss(self) -> LeveledGSS<T, A> {
-        LeveledGSS {
-            inner: self.inner.into_gss(),
-        }
+        LeveledGSS::from_inner(self.inner.into_gss())
     }
 
     pub fn into_gss_after_popping(mut self, count: usize) -> LeveledGSS<T, A> {
@@ -706,13 +679,11 @@ where
         if pop > self.len() {
             return None;
         }
-        Some(LeveledGSS {
-            inner: self.inner.apply_effects(
-                pushes
-                    .into_iter()
-                    .map(|push| wg::StackEffect::new(pop, push)),
-            ),
-        })
+        Some(LeveledGSS::from_inner(self.inner.apply_ops(
+            pushes
+                .into_iter()
+                .map(|push| wg::StackOp::new(pop, push)),
+        )))
     }
 
     pub fn into_gss_after_popping_and_pushing_single_branches<'a, I>(
@@ -729,9 +700,7 @@ where
         }
         let effects = targets
             .into_iter()
-            .map(|target| wg::StackEffect::new(pop, std::slice::from_ref(target)));
-        Some(LeveledGSS {
-            inner: self.inner.apply_effects(effects),
-        })
+            .map(|target| wg::StackOp::new(pop, std::slice::from_ref(target)));
+        Some(LeveledGSS::from_inner(self.inner.apply_ops(effects)))
     }
 }
