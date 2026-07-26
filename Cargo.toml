@@ -25,7 +25,7 @@ internal-api = []
 
 [dependencies]
 rustc-hash = "1"
-weighted-gss = { path = "/private/tmp/weighted-gss-rewrite-20260725" }
+weighted-gss = { git = "https://github.com/IsaacBreen/weighted-gss.git", rev = "7d5d07a8b216265e7a6245319795c6978213dec7" }
 ahash = "0.8"
 smallvec = { version = "1", features = ["serde"] }
 im = "15"
