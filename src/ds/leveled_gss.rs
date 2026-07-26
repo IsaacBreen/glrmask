@@ -312,10 +312,45 @@ where
         limit: usize,
         mut visit: impl FnMut(&[T], &A),
     ) -> bool {
-        self.inner
-            .paths()
-            .for_each_top_first(limit, |stack, weight| visit(stack, &weight.0))
-            .is_ok()
+        const MAX_RAW_PATHS: usize = 256;
+
+        let paths = self.inner.paths();
+        if paths.count_at_most(limit.saturating_add(1)) <= limit {
+            return paths
+                .for_each_top_first(limit, |stack, weight| visit(stack, &weight.0))
+                .is_ok();
+        }
+
+        // Only the overflow case needs extensional coalescing. Duplicate raw
+        // structural spellings may still denote at most `limit` stacks.
+        let mut stacks = SmallVec::<[(SmallVec<[T; 64]>, A); 16]>::new();
+        let mut semantic_overflow = false;
+        let complete = paths
+            .for_each_top_first(MAX_RAW_PATHS, |stack, weight| {
+                if semantic_overflow {
+                    return;
+                }
+                if let Some((_, existing)) = stacks
+                    .iter_mut()
+                    .find(|(existing, _)| existing.as_slice() == stack)
+                {
+                    *existing = existing.merge(&weight.0);
+                    return;
+                }
+                if stacks.len() == limit {
+                    semantic_overflow = true;
+                    return;
+                }
+                stacks.push((stack.iter().cloned().collect(), weight.0.clone()));
+            })
+            .is_ok();
+        if !complete || semantic_overflow {
+            return false;
+        }
+        for (stack, weight) in &stacks {
+            visit(stack, weight);
+        }
+        true
     }
 
     pub(crate) fn for_each_stack_len_bounded(
@@ -343,11 +378,7 @@ where
         &self,
         output: &mut SmallVec<[T; 16]>,
     ) -> Option<A> {
-        let mut values = Vec::new();
-        let paths = self.inner.paths();
-        let weight = paths.single_top_first(&mut values)?;
-        output.clear();
-        output.extend(values);
+        let weight = self.inner.paths().single_top_first_small(output)?;
         Some(weight.0.clone())
     }
 
