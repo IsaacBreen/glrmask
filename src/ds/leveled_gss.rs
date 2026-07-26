@@ -7,6 +7,7 @@ use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::hash::Hash;
+use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use weighted_gss as wg;
 
@@ -30,7 +31,7 @@ impl Merge for () {
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct CompatWeight<A>(A);
 
-impl<A: Merge> wg::Weight for CompatWeight<A> {
+impl<A: Merge + PartialEq> wg::Weight for CompatWeight<A> {
     #[inline]
     fn join(&self, other: &Self) -> Self {
         Self(self.0.merge(&other.0))
@@ -87,9 +88,9 @@ where
 static NEXT_COMPAT_GSS_ID: AtomicUsize = AtomicUsize::new(1);
 
 fn next_compat_gss_id() -> usize {
-    NEXT_COMPAT_GSS_ID
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| next.checked_add(1))
-        .expect("GLRMask compatibility GSS ID space exhausted")
+    let id = NEXT_COMPAT_GSS_ID.fetch_add(1, Ordering::Relaxed);
+    assert_ne!(id, 0, "GLRMask compatibility GSS ID space exhausted");
+    id
 }
 
 /// GLRMask compatibility wrapper over the standalone weighted GSS.
@@ -98,7 +99,7 @@ pub struct LeveledGSS<
     A: Merge + Clone + Eq + Hash,
 > {
     inner: wg::WeightedGss<T, CompatWeight<A>>,
-    identity: usize,
+    identity: Arc<OnceLock<usize>>,
 }
 
 impl<T, A> Clone for LeveledGSS<T, A>
@@ -109,7 +110,7 @@ where
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
-            identity: self.identity,
+            identity: self.identity.clone(),
         }
     }
 }
@@ -160,7 +161,7 @@ where
     fn from_inner(inner: wg::WeightedGss<T, CompatWeight<A>>) -> Self {
         Self {
             inner,
-            identity: next_compat_gss_id(),
+            identity: Arc::new(OnceLock::new()),
         }
     }
 
@@ -202,11 +203,11 @@ where
     }
 
     pub fn ptr_eq(&self, other: &Self) -> bool {
-        self.identity == other.identity
+        self.ptr_key() == other.ptr_key()
     }
 
     pub fn ptr_key(&self) -> usize {
-        self.identity
+        *self.identity.get_or_init(next_compat_gss_id)
     }
 
     pub(crate) fn single_interface_lower_id(&self) -> Option<usize> {
@@ -308,10 +309,45 @@ where
         limit: usize,
         mut visit: impl FnMut(&[T], &A),
     ) -> bool {
-        self.inner
-            .paths()
-            .for_each_path_top_first(limit, |stack, weight| visit(stack, &weight.0))
-            .is_ok()
+        const MAX_RAW_PATHS: usize = 256;
+
+        let paths = self.inner.paths();
+        if paths.path_count_at_most(limit.saturating_add(1)) <= limit {
+            return paths
+                .for_each_path_top_first(limit, |stack, weight| visit(stack, &weight.0))
+                .is_ok();
+        }
+
+        // Only the raw-path overflow case needs extensional coalescing. Several
+        // structural paths may still denote at most `limit` concrete stacks.
+        let mut stacks = SmallVec::<[(SmallVec<[T; 64]>, A); 16]>::new();
+        let mut semantic_overflow = false;
+        let complete = paths
+            .for_each_path_top_first(MAX_RAW_PATHS, |stack, weight| {
+                if semantic_overflow {
+                    return;
+                }
+                if let Some((_, existing)) = stacks
+                    .iter_mut()
+                    .find(|(existing, _)| existing.as_slice() == stack)
+                {
+                    *existing = existing.merge(&weight.0);
+                    return;
+                }
+                if stacks.len() == limit {
+                    semantic_overflow = true;
+                    return;
+                }
+                stacks.push((stack.iter().cloned().collect(), weight.0.clone()));
+            })
+            .is_ok();
+        if !complete || semantic_overflow {
+            return false;
+        }
+        for (stack, weight) in &stacks {
+            visit(stack, weight);
+        }
+        true
     }
 
     pub(crate) fn for_each_stack_len_bounded(
@@ -339,12 +375,11 @@ where
         &self,
         output: &mut SmallVec<[T; 16]>,
     ) -> Option<A> {
-        let mut values = Vec::new();
-        let paths = self.inner.paths();
-        let weight = paths.write_single_path_top_first(&mut values)?;
-        output.clear();
-        output.extend(values);
-        Some(weight.0.clone())
+        self.inner.paths().with_single_path_top_first(|stack, weight| {
+            output.clear();
+            output.extend(stack.iter().cloned());
+            weight.0.clone()
+        })
     }
 
     pub fn apply<B, F>(&self, mut map: F) -> LeveledGSS<T, B>
@@ -400,9 +435,10 @@ where
     }
 
     pub fn for_each_acc(&self, mut visit: impl FnMut(&A)) {
-        for weight in self.inner.paths().weights() {
-            visit(&weight.0);
-        }
+        self.inner
+            .paths()
+            .weights()
+            .for_each(|weight| visit(&weight.0));
     }
 
     pub fn all_accs_satisfy(&self, predicate: impl Fn(&A) -> bool) -> bool {
