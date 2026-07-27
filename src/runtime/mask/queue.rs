@@ -17,13 +17,26 @@ use super::DenseMaskGSS;
 pub(super) enum MaskQueueMode {
 	Target,
 	Depth,
+	DepthMerge,
+	DepthBatch4,
 }
+
+// A depth-first queue preserves the parser-DWA traversal order and avoids the
+// potentially large cross-depth GSS unions performed by `Target`.  Keeping
+// every same-target item separate, however, can replay exponentially many
+// equivalent work items when a compact GSS represents a highly ambiguous
+// parser state.  Batch four is deliberately conservative: ordinary one-, two-,
+// and three-item buckets pay no merge cost, while a multiplying bucket is
+// periodically collapsed back into one compact GSS.
+const DEPTH_BATCH_MERGE_THRESHOLD: usize = 4;
 
 pub(super) fn mask_queue_mode() -> MaskQueueMode {
 	static MODE: std::sync::OnceLock<MaskQueueMode> = std::sync::OnceLock::new();
 	*MODE.get_or_init(|| match std::env::var("GLRMASK_MASK_QUEUE_MODE") {
 		Ok(value) if value.trim().eq_ignore_ascii_case("target") => MaskQueueMode::Target,
-		_ => MaskQueueMode::Depth,
+		Ok(value) if value.trim().eq_ignore_ascii_case("depth") => MaskQueueMode::Depth,
+		Ok(value) if value.trim().eq_ignore_ascii_case("depth-merge") => MaskQueueMode::DepthMerge,
+		_ => MaskQueueMode::DepthBatch4,
 	})
 }
 
@@ -38,30 +51,38 @@ pub(super) enum MaskQueueInner {
 }
 
 pub(super) struct MaskQueue {
+	mode: MaskQueueMode,
 	inner: MaskQueueInner,
 	debug: MaskQueueDebugStats,
 }
 
 impl Default for MaskQueue {
 	fn default() -> Self {
-		let inner = match mask_queue_mode() {
+		Self::new_with_mode(mask_queue_mode())
+	}
+}
+
+impl MaskQueue {
+	fn new_with_mode(mode: MaskQueueMode) -> Self {
+		let inner = match mode {
 			MaskQueueMode::Target => MaskQueueInner::Target {
 				by_target: FxHashMap::default(),
 				ready_by_depth: BTreeMap::new(),
 			},
-			MaskQueueMode::Depth => MaskQueueInner::Depth {
+			MaskQueueMode::Depth
+			| MaskQueueMode::DepthMerge
+			| MaskQueueMode::DepthBatch4 => MaskQueueInner::Depth {
 				by_depth: BTreeMap::new(),
 			},
 		};
 
 		Self {
+			mode,
 			inner,
 			debug: MaskQueueDebugStats::default(),
 		}
 	}
-}
 
-impl MaskQueue {
 	pub(super) fn new() -> Self {
 		Self::default()
 	}
@@ -152,7 +173,27 @@ impl MaskQueue {
 			MaskQueueInner::Depth { by_depth } => {
 				let depth = gss.max_depth();
 				let lookup_start = if inner_profile_enabled { Some(Instant::now()) } else { None };
-				let existing: Option<DenseMaskGSS> = None;
+				let target_items = by_depth
+					.entry(depth)
+					.or_default()
+					.entry(target)
+					.or_default();
+				let existing = match self.mode {
+					MaskQueueMode::DepthMerge => target_items.pop(),
+					MaskQueueMode::DepthBatch4
+						if target_items.len() + 1 >= DEPTH_BATCH_MERGE_THRESHOLD =>
+					{
+						let mut existing = target_items.pop().unwrap();
+						while let Some(other) = target_items.pop() {
+							existing = existing.merge(&other);
+							self.debug.merge_hit_count += 1;
+						}
+						Some(existing)
+					}
+					MaskQueueMode::Target
+					| MaskQueueMode::Depth
+					| MaskQueueMode::DepthBatch4 => None,
+				};
 				if let Some(start) = lookup_start {
 					self.debug.lookup_total_ns += elapsed_ns(start);
 				}
@@ -202,7 +243,7 @@ impl MaskQueue {
 				};
 
 				let insert_start = if inner_profile_enabled { Some(Instant::now()) } else { None };
-				by_depth.entry(depth).or_default().entry(target).or_default().push(merged);
+				target_items.push(merged);
 				if let Some(start) = insert_start {
 					self.debug.insert_total_ns += elapsed_ns(start);
 				}
@@ -297,5 +338,81 @@ impl MaskQueue {
 
 	pub(super) fn record_parser_dwa_transition_enqueue(&mut self) {
 		self.debug.parser_dwa_transitions_enqueued += 1;
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::ds::leveled_gss::LeveledGSS;
+
+	fn gss(stack: &[u32], bit: u64) -> DenseMaskGSS {
+		let acc = super::super::DenseMaskAcc::from_dense(0, vec![bit]).unwrap();
+		LeveledGSS::from_stacks(&[(stack.to_vec(), acc)])
+	}
+
+	#[test]
+	fn depth_merge_coalesces_same_target_at_same_depth() {
+		let left = gss(&[0, 1], 1);
+		let right = gss(&[0, 2], 2);
+		let expected = left.merge(&right);
+		let mut queue = MaskQueue::new_with_mode(MaskQueueMode::DepthMerge);
+
+		queue.enqueue(7, left);
+		queue.enqueue(7, right);
+
+		assert_eq!(queue.debug.merge_hit_count, 1);
+		let (target, actual) = queue.pop_next().unwrap();
+		assert_eq!(target, 7);
+		assert_eq!(actual.semantically_eq(&expected, 16), Some(true));
+		assert!(queue.pop_next().is_none());
+	}
+
+	#[test]
+	fn depth_merge_keeps_different_depths_separate() {
+		let mut queue = MaskQueue::new_with_mode(MaskQueueMode::DepthMerge);
+		queue.enqueue(7, gss(&[0, 1], 1));
+		queue.enqueue(7, gss(&[0, 1, 2], 2));
+
+		assert_eq!(queue.debug.merge_hit_count, 0);
+		assert!(queue.pop_next().is_some());
+		assert!(queue.pop_next().is_some());
+		assert!(queue.pop_next().is_none());
+	}
+
+	#[test]
+	fn legacy_depth_mode_keeps_same_bucket_items_separate() {
+		let mut queue = MaskQueue::new_with_mode(MaskQueueMode::Depth);
+		queue.enqueue(7, gss(&[0, 1], 1));
+		queue.enqueue(7, gss(&[0, 2], 2));
+
+		assert_eq!(queue.debug.merge_hit_count, 0);
+		assert!(queue.pop_next().is_some());
+		assert!(queue.pop_next().is_some());
+		assert!(queue.pop_next().is_none());
+	}
+
+	#[test]
+	fn depth_batch_four_merges_only_after_fourth_same_bucket_item() {
+		let stacks = [
+			gss(&[0, 1], 1),
+			gss(&[0, 2], 2),
+			gss(&[0, 3], 4),
+			gss(&[0, 4], 8),
+		];
+		let expected = stacks.iter().skip(1).fold(stacks[0].clone(), |acc, gss| acc.merge(gss));
+		let mut queue = MaskQueue::new_with_mode(MaskQueueMode::DepthBatch4);
+
+		for gss in stacks.iter().take(3) {
+			queue.enqueue(7, gss.clone());
+		}
+		assert_eq!(queue.debug.merge_hit_count, 0);
+
+		queue.enqueue(7, stacks[3].clone());
+		assert_eq!(queue.debug.merge_hit_count, 3);
+		let (target, actual) = queue.pop_next().unwrap();
+		assert_eq!(target, 7);
+		assert_eq!(actual.semantically_eq(&expected, 16), Some(true));
+		assert!(queue.pop_next().is_none());
 	}
 }
