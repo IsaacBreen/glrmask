@@ -1018,9 +1018,7 @@ fn try_advance_bounded_concrete_paths(
             Some(Action::Reduce(..)) | Some(Action::GuardedStackShifts(..)) => {
                 saw_complex_action = true;
             }
-            Some(Action::StackShifts(shifts)) if shifts.len() == 1 => {
-                saw_complex_action = true;
-            }
+            Some(Action::StackShifts(shifts)) if shifts.len() == 1 => {}
             _ => return None,
         }
     }
