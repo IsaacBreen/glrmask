@@ -4692,6 +4692,29 @@ fn finish_grouped_flat_frontier_commit(
             true
         };
 
+    let distinct_output_keys = outputs
+        .iter()
+        .enumerate()
+        .filter(|(index, output)| {
+            *index == 0
+                || frontier.branches[outputs[*index - 1]].tokenizer_state
+                    != frontier.branches[**output].tokenizer_state
+        })
+        .count();
+    if unchanged.is_none()
+        && outputs.len() >= 8
+        && distinct_output_keys <= 2
+        && distinct_output_keys < group_representatives.len()
+    {
+        return rebuild_by_key_languages(
+            state,
+            frontier,
+            active_representatives,
+            old_layout,
+        )
+        .then_some(Ok(()));
+    }
+
     // Plan one unique active representative or spare GSS per distinct output
     // parser state. The unchanged uniform group must retain an active object;
     // every other group is validated for in-place replacement before mutation.
@@ -6463,6 +6486,65 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert_eq!(distinct_parser_states.len(), 4);
         assert_eq!(state.len(), outputs.len());
+    }
+
+    #[test]
+    fn grouped_flat_finalizer_eagerly_rebuilds_two_wide_key_languages() {
+        let acc = TerminalsDisallowed::new();
+        let mut state = ParserStateMap::default();
+        state.entries.push((
+            0,
+            ParserGSS::from_single_stack(vec![0, 1, 7, 14, 105], acc.clone()),
+        ));
+        state.entries.push((
+            29,
+            ParserGSS::from_single_stack(vec![0, 1, 7, 14, 127], acc.clone()),
+        ));
+
+        let key_zero = [
+            vec![0, 1, 7, 14, 114, 105],
+            vec![0, 1, 7, 14, 122, 105],
+            vec![0, 1, 7, 14, 124, 105],
+            vec![0, 1, 7, 14, 156],
+        ];
+        let key_twenty_nine = [
+            vec![0, 1, 7, 14, 114],
+            vec![0, 1, 7, 14, 122],
+            vec![0, 1, 7, 14, 124],
+            vec![0, 1, 7, 14, 127],
+        ];
+        let mut frontier = FlatFrontierScratch::default();
+        for stack in &key_zero {
+            assert!(frontier.enqueue(1, 0, stack, acc.clone()));
+        }
+        for stack in &key_twenty_nine {
+            assert!(frontier.enqueue(1, 29, stack, acc.clone()));
+        }
+
+        finish_grouped_flat_frontier_commit(&mut state, &mut frontier, 1, None)
+            .expect("wide two-key finalization should be applicable")
+            .expect("wide two-key output should be non-empty");
+
+        assert_eq!(state.len(), 2);
+        let expected = vec![
+            (
+                0,
+                key_zero
+                    .iter()
+                    .cloned()
+                    .map(|stack| (stack, vec![]))
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                29,
+                key_twenty_nine
+                    .iter()
+                    .cloned()
+                    .map(|stack| (stack, vec![]))
+                    .collect::<Vec<_>>(),
+            ),
+        ];
+        assert_eq!(canonical_commit_state(&state), expected);
     }
 
     #[test]
