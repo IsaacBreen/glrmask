@@ -1259,7 +1259,7 @@ dependencies = [
 [[package]]
 name = "weighted-gss"
 version = "0.2.0"
-source = "git+https://github.com/IsaacBreen/weighted-gss.git?rev=b541121c35a2e1b234fc2f7d8e9782368cfd0b6c#b541121c35a2e1b234fc2f7d8e9782368cfd0b6c"
+source = "git+https://github.com/IsaacBreen/weighted-gss.git?rev=174cbedc1dd16a2d58fb384308cc4dcf35a38961#174cbedc1dd16a2d58fb384308cc4dcf35a38961"
 dependencies = [
  "rustc-hash 2.1.2",
  "smallvec",

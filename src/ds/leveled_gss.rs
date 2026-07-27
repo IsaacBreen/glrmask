@@ -380,10 +380,10 @@ where
         B: Merge + Clone + Eq + Hash,
         F: FnMut(&A) -> B,
     {
-        LeveledGSS::from_inner(wg::engine::filter_map_path_weights(
-            &self.inner,
-            |weight| Some(CompatWeight(map(&weight.0))),
-        ))
+        LeveledGSS::from_inner(
+            self.inner
+                .map_weights(|weight| CompatWeight(map(&weight.0))),
+        )
     }
 
     pub fn apply_and_prune<B, F>(&self, mut map: F) -> LeveledGSS<T, B>
@@ -391,10 +391,10 @@ where
         B: Merge + Clone + Eq + Hash,
         F: FnMut(&A) -> Option<B>,
     {
-        LeveledGSS::from_inner(wg::engine::filter_map_path_weights(
-            &self.inner,
-            |weight| map(&weight.0).map(CompatWeight),
-        ))
+        LeveledGSS::from_inner(
+            self.inner
+                .filter_map_weights(|weight| map(&weight.0).map(CompatWeight)),
+        )
     }
 
     pub fn apply_and_prune_no_promote<B, F>(&self, map: F) -> LeveledGSS<T, B>
@@ -407,7 +407,7 @@ where
 
     pub fn partition_by_accumulator(&self) -> Vec<(LeveledGSS<T, ()>, A)> {
         let mut weights = Vec::<A>::new();
-        for weight in wg::engine::path_weights(&self.inner) {
+        for weight in self.inner.weights() {
             if !weights.contains(&weight.0) {
                 weights.push(weight.0.clone());
             }
@@ -415,7 +415,7 @@ where
         weights
             .into_iter()
             .map(|weight| {
-                let inner = wg::engine::filter_map_path_weights(&self.inner, |candidate| {
+                let inner = self.inner.filter_map_weights(|candidate| {
                     (candidate.0 == weight).then_some(CompatWeight(()))
                 });
                 (LeveledGSS::from_inner(inner), weight)
@@ -432,11 +432,11 @@ where
     }
 
     pub fn for_each_acc(&self, mut visit: impl FnMut(&A)) {
-        wg::engine::path_weights(&self.inner).for_each(|weight| visit(&weight.0));
+        self.inner.weights().for_each(|weight| visit(&weight.0));
     }
 
     pub fn all_accs_satisfy(&self, predicate: impl Fn(&A) -> bool) -> bool {
-        wg::engine::path_weights(&self.inner).all(|weight| predicate(&weight.0))
+        self.inner.weights().all(|weight| predicate(&weight.0))
     }
 
     pub fn for_each_decomposed(&self, mut visit: impl FnMut(T, Self)) {
@@ -611,7 +611,7 @@ where
     pub fn summary(&self) -> LeveledGSSSummary {
         LeveledGSSSummary {
             top_values_count: self.peek_values().len(),
-            accumulator_instances: wg::engine::path_weights(&self.inner).count(),
+            accumulator_instances: self.inner.weights().count(),
             max_depth: self.max_depth(),
             ..LeveledGSSSummary::default()
         }
