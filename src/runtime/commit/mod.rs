@@ -4919,8 +4919,11 @@ fn try_process_flat_same_key_group(
     }
 
     let initial_tokenizer_state = constraint.tokenizer.initial_state();
-    for (stack, original_acc) in &stacks {
-        let mut acc = original_acc.clone();
+    let mut surviving = SmallVec::<
+        [(FlatInlineStack, TerminalsDisallowed); FLAT_FRONTIER_MAX_BRANCHES],
+    >::new();
+    for (stack, original_acc) in stacks {
+        let mut acc = original_acc;
         if offset == 0 {
             match prune_flat_branch_acc(
                 &acc,
@@ -4933,7 +4936,10 @@ fn try_process_flat_same_key_group(
                 Some(None) => continue,
             }
         }
+        surviving.push((stack, acc));
+    }
 
+    for (stack, acc) in &surviving {
         let Some(&top_state) = stack.last() else {
             return FlatContinuationGroupOutcome::Decline;
         };
@@ -4975,7 +4981,7 @@ fn try_process_flat_same_key_group(
             }
             let Some(advanced_acc) = apply_flat_future_disallow(
                 constraint,
-                &acc,
+                acc,
                 &tokenizer_scratch.states,
                 matched.terminal_id,
             ) else {
@@ -4993,29 +4999,33 @@ fn try_process_flat_same_key_group(
                 }
             }
         }
+    }
 
-        for &end_state in &tokenizer_scratch.states {
-            let viable = if end_state == initial_tokenizer_state {
-                true
-            } else {
-                let Some(viable) = flat_stack_may_advance_on_any(
+    for &end_state in &tokenizer_scratch.states {
+        let viable = if end_state == initial_tokenizer_state {
+            true
+        } else {
+            let future = constraint.tokenizer.possible_future_terminals(end_state);
+            let mut any_path = false;
+            for (stack, _) in &surviving {
+                match flat_stack_may_advance_on_any(
                     constraint,
                     stack,
-                    constraint.tokenizer.possible_future_terminals(end_state),
+                    future,
                     &mut frontier.action,
-                ) else {
-                    return FlatContinuationGroupOutcome::Decline;
-                };
-                viable
-            };
-            if viable
-                && !frontier.enqueue(
-                    bytes.len(),
-                    end_state,
-                    stack,
-                    acc.clone(),
-                )
-            {
+                ) {
+                    Some(true) => any_path = true,
+                    Some(false) => {}
+                    None => return FlatContinuationGroupOutcome::Decline,
+                }
+            }
+            any_path
+        };
+        if !viable {
+            continue;
+        }
+        for (stack, acc) in &surviving {
+            if !frontier.enqueue(bytes.len(), end_state, stack, acc.clone()) {
                 return FlatContinuationGroupOutcome::Decline;
             }
         }
