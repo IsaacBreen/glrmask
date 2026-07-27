@@ -401,6 +401,63 @@ fn advance_parser_stacks_profiled(
     advance_stacks_profiled(&constraint.table, stack, terminal)
 }
 
+/// Advance once when admission requires exact simulation. Row-presence tables
+/// retain their cheap precheck; exact-simulation tables must not execute the
+/// same reduction closure once for admission and again for the actual advance.
+fn advance_parser_stacks_if_possible(
+    constraint: &Constraint,
+    stack: &ParserGSS,
+    terminal: u32,
+) -> Option<ParserGSS> {
+    if constraint.table.admission_policy == AdmissionPolicy::RowPresenceExact
+        && !stack_may_advance_on(&constraint.table, stack, terminal)
+    {
+        return None;
+    }
+    let advanced = advance_parser_stacks(constraint, stack, terminal);
+    (!advanced.is_empty()).then_some(advanced)
+}
+
+struct ProfiledAdvanceAttempt {
+    advanced: ParserGSS,
+    profile: AdvanceProfile,
+    may_ns: u64,
+    core_ns: u64,
+}
+
+fn advance_parser_stacks_profiled_if_possible(
+    constraint: &Constraint,
+    stack: &ParserGSS,
+    terminal: u32,
+) -> ProfiledAdvanceAttempt {
+    use std::time::Instant;
+
+    let mut may_ns = 0;
+    if constraint.table.admission_policy == AdmissionPolicy::RowPresenceExact {
+        let may_started_at = Instant::now();
+        let admitted = stack_may_advance_on(&constraint.table, stack, terminal);
+        may_ns = may_started_at.elapsed().as_nanos() as u64;
+        if !admitted {
+            return ProfiledAdvanceAttempt {
+                advanced: ParserGSS::empty(),
+                profile: AdvanceProfile::default(),
+                may_ns,
+                core_ns: 0,
+            };
+        }
+    }
+
+    let core_started_at = Instant::now();
+    let (advanced, profile) = advance_parser_stacks_profiled(constraint, stack, terminal);
+    let core_ns = core_started_at.elapsed().as_nanos() as u64;
+    ProfiledAdvanceAttempt {
+        advanced,
+        profile,
+        may_ns,
+        core_ns,
+    }
+}
+
 /// Cache for `advance_stacks` results, keyed by (GSS pointer, terminal).
 /// Stores the key GSS alongside the result to keep its Arc alive and prevent
 /// address reuse (ABA problem) within a single `commit_bytes_impl` call.
@@ -585,15 +642,14 @@ pub(super) fn advance_special_token_paths(
                 special.terminal_id,
                 None,
             );
-            if pruned.is_empty()
-                || !stack_may_advance_on(&constraint.table, &pruned, special.terminal_id)
-            {
+            if pruned.is_empty() {
                 continue;
             }
-            let advanced = advance_parser_stacks(constraint, &pruned, special.terminal_id);
-            if advanced.is_empty() {
+            let Some(advanced) =
+                advance_parser_stacks_if_possible(constraint, &pruned, special.terminal_id)
+            else {
                 continue;
-            }
+            };
             merged = Some(match merged.take() {
                 Some(existing) => existing.merge(&advanced),
                 None => advanced,
@@ -643,21 +699,15 @@ fn advance_special_token_paths_profiled(
                 continue;
             }
 
-            let may_started_at = Instant::now();
-            let may_advance =
-                stack_may_advance_on(&constraint.table, &pruned, special.terminal_id);
-            result.may_check_ns += may_started_at.elapsed().as_nanos() as u64;
-            if !may_advance {
+            let attempt =
+                advance_parser_stacks_profiled_if_possible(constraint, &pruned, special.terminal_id);
+            result.may_check_ns += attempt.may_ns;
+            result.advance_ns += attempt.core_ns;
+            if attempt.advanced.is_empty() {
                 continue;
             }
-
-            let advance_started_at = Instant::now();
-            let (advanced, advance_profile) =
-                advance_parser_stacks_profiled(constraint, &pruned, special.terminal_id);
-            result.advance_ns += advance_started_at.elapsed().as_nanos() as u64;
-            if advanced.is_empty() {
-                continue;
-            }
+            let advanced = attempt.advanced;
+            let advance_profile = attempt.profile;
 
             if let Some(entries) = per_advance.as_deref_mut() {
                 result.summary_ns += record_per_advance_entry(
@@ -1699,10 +1749,7 @@ fn commit_bytes_full_width_fast_path(
             {
                 advanced
             } else {
-                if !stack_may_advance_on(&constraint.table, &pruned_gss, terminal) {
-                    return None;
-                }
-                advance_parser_stacks(constraint, &pruned_gss, terminal)
+                advance_parser_stacks_if_possible(constraint, &pruned_gss, terminal)?
             };
             if advanced.is_empty() {
                 continue;
@@ -1852,14 +1899,14 @@ fn commit_bytes_small_queue_fast_path(
                 {
                     advanced
                 } else {
-                    if !stack_may_advance_on(
-                        &constraint.table,
+                    let Some(advanced) = advance_parser_stacks_if_possible(
+                        constraint,
                         &gss_at_offset,
                         matched.terminal_id,
-                    ) {
+                    ) else {
                         continue;
-                    }
-                    advance_parser_stacks(constraint, &gss_at_offset, matched.terminal_id)
+                    };
+                    advanced
                 };
                 let advanced = apply_future_terminal_disallow_for_states(
                     constraint,
@@ -2839,25 +2886,20 @@ fn commit_bytes_impl_profiled(
                                         continue;
                                     }
 
-                                    let may_start = Instant::now();
-                                    let may_advance =
-                                        stack_may_advance_on(&constraint.table, &gss_at_offset, matched.terminal_id);
-                                    let may_elapsed = may_start.elapsed().as_nanos() as u64;
+                                    let attempt = advance_parser_stacks_profiled_if_possible(
+                                        constraint,
+                                        &gss_at_offset,
+                                        matched.terminal_id,
+                                    );
+                                    let may_elapsed = attempt.may_ns;
+                                    let advance_core_elapsed = attempt.core_ns;
                                     profile.advance_may_check_ns += may_elapsed;
-                                    if !may_advance {
+                                    profile.advance_core_ns += advance_core_elapsed;
+                                    if attempt.advanced.is_empty() {
                                         continue;
                                     }
-
-                                    let advance_core_start = Instant::now();
-                                    let (advanced_before_disallow, advance_profile) =
-                                        advance_parser_stacks_profiled(
-                                            constraint,
-                                            &gss_at_offset,
-                                            matched.terminal_id,
-                                        );
-                                    let advance_core_elapsed =
-                                        advance_core_start.elapsed().as_nanos() as u64;
-                                    profile.advance_core_ns += advance_core_elapsed;
+                                    let advanced_before_disallow = attempt.advanced;
+                                    let advance_profile = attempt.profile;
                                     apply_advance_profile(&mut profile, &advance_profile);
 
                                     if let Some(advances) = advances.as_deref_mut() {
@@ -3041,24 +3083,20 @@ fn commit_bytes_impl_profiled(
                     continue;
                 }
 
-                let may_start = Instant::now();
-                let may_advance =
-                    stack_may_advance_on(&constraint.table, &gss_at_offset, matched.terminal_id);
-                let may_elapsed = may_start.elapsed().as_nanos() as u64;
+                let attempt = advance_parser_stacks_profiled_if_possible(
+                    constraint,
+                    &gss_at_offset,
+                    matched.terminal_id,
+                );
+                let may_elapsed = attempt.may_ns;
+                let advance_core_elapsed = attempt.core_ns;
                 profile.advance_may_check_ns += may_elapsed;
-                if !may_advance {
+                profile.advance_core_ns += advance_core_elapsed;
+                if attempt.advanced.is_empty() {
                     continue;
                 }
-
-                let advance_core_start = Instant::now();
-                let (advanced_before_disallow, advance_profile) =
-                    advance_parser_stacks_profiled(
-                        constraint,
-                        &gss_at_offset,
-                        matched.terminal_id,
-                    );
-                let advance_core_elapsed = advance_core_start.elapsed().as_nanos() as u64;
-                profile.advance_core_ns += advance_core_elapsed;
+                let advanced_before_disallow = attempt.advanced;
+                let advance_profile = attempt.profile;
                 apply_advance_profile(&mut profile, &advance_profile);
 
                 if let Some(advances) = advances.as_deref_mut() {
@@ -5102,6 +5140,67 @@ mod tests {
             .pop()
             .unwrap()
             .1
+    }
+
+    #[test]
+    fn fused_exact_admission_matches_legacy_two_pass_reference() {
+        let vocab = Vocab::new(vec![
+            (0, b"a".to_vec()),
+            (1, b"b".to_vec()),
+            (2, b"ab".to_vec()),
+        ]);
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                t A ::= "a";
+                t AB ::= "ab";
+                t B ::= "b";
+                nt item ::= A | AB | A B;
+                nt start ::= item item?;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        assert_eq!(
+            constraint.table.admission_policy,
+            AdmissionPolicy::ExactSimulation,
+        );
+
+        let mut states = vec![constraint.start()];
+        let mut after_a = constraint.start();
+        after_a.commit_token(0).unwrap();
+        states.push(after_a);
+
+        for state in states {
+            for gss in state.state.values() {
+                for terminal in 0..constraint.table.num_terminals {
+                    let legacy = if stack_may_advance_on(&constraint.table, gss, terminal) {
+                        let advanced = advance_parser_stacks(&constraint, gss, terminal);
+                        (!advanced.is_empty()).then_some(advanced)
+                    } else {
+                        None
+                    };
+                    let fused = advance_parser_stacks_if_possible(&constraint, gss, terminal);
+                    assert_eq!(
+                        fused.as_ref().map(canonical_gss),
+                        legacy.as_ref().map(canonical_gss),
+                        "terminal={terminal} source={:#?}",
+                        canonical_gss(gss),
+                    );
+
+                    let profiled =
+                        advance_parser_stacks_profiled_if_possible(&constraint, gss, terminal);
+                    assert_eq!(
+                        (!profiled.advanced.is_empty())
+                            .then(|| canonical_gss(&profiled.advanced)),
+                        legacy.as_ref().map(canonical_gss),
+                        "profiled terminal={terminal} source={:#?}",
+                        canonical_gss(gss),
+                    );
+                    assert_eq!(profiled.may_ns, 0);
+                }
+            }
+        }
     }
 
     fn top_local_prune_reference(

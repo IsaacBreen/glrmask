@@ -83,6 +83,11 @@ fn advance_trace_enabled() -> bool {
     *ENABLED.get_or_init(|| env_flag_enabled("GLRMASK_PROFILE_ADVANCE_TRACE"))
 }
 
+fn nondet_wave_specializations_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag_enabled("GLRMASK_ENABLE_NONDET_WAVE_SPECIALIZATIONS"))
+}
+
 fn trace_action_kind(action: Option<&Action>) -> &'static str {
     match action {
         Some(Action::Shift(..)) => "shift",
@@ -2123,8 +2128,8 @@ fn advance_nondeterministically_profiled(
             });
         }
 
-        if let Some(shifted_wave) =
-            try_advance_single_active_pop1_reduce_wave(table, &closure, token)
+        if nondet_wave_specializations_enabled()
+            && let Some(shifted_wave) = try_advance_single_active_pop1_reduce_wave(table, &closure, token)
         {
             if let Some(trace) = profile.trace.as_mut()
                 && let Some(wave) = trace.nondet_waves.last_mut()
@@ -2146,8 +2151,8 @@ fn advance_nondeterministically_profiled(
             return shifted;
         }
 
-        if let Some(shifted_wave) =
-            try_advance_pop1_common_base_reduce_wave(table, &closure, token)
+        if nondet_wave_specializations_enabled()
+            && let Some(shifted_wave) = try_advance_pop1_common_base_reduce_wave(table, &closure, token)
         {
             if let Some(trace) = profile.trace.as_mut()
                 && let Some(wave) = trace.nondet_waves.last_mut()
@@ -2169,8 +2174,8 @@ fn advance_nondeterministically_profiled(
             return shifted;
         }
 
-        if let Some(shifted_wave) =
-            try_advance_mixed_top_pop1_shift_reduce_wave(table, &closure, token)
+        if nondet_wave_specializations_enabled()
+            && let Some(shifted_wave) = try_advance_mixed_top_pop1_shift_reduce_wave(table, &closure, token)
         {
             if let Some(trace) = profile.trace.as_mut()
                 && let Some(wave) = trace.nondet_waves.last_mut()
@@ -2195,8 +2200,8 @@ fn advance_nondeterministically_profiled(
             return shifted;
         }
 
-        if let Some(shifted_wave) =
-            try_advance_pop1_stackshift_shift_wave(table, &closure, token)
+        if nondet_wave_specializations_enabled()
+            && let Some(shifted_wave) = try_advance_pop1_stackshift_shift_wave(table, &closure, token)
         {
             if let Some(trace) = profile.trace.as_mut()
                 && let Some(wave) = trace.nondet_waves.last_mut()
@@ -2217,8 +2222,8 @@ fn advance_nondeterministically_profiled(
             return shifted;
         }
 
-        if let Some(shifted_wave) =
-            try_advance_pop1_reduce_plus_stackshift_wave(table, &closure, token)
+        if nondet_wave_specializations_enabled()
+            && let Some(shifted_wave) = try_advance_pop1_reduce_plus_stackshift_wave(table, &closure, token)
         {
             if let Some(trace) = profile.trace.as_mut()
                 && let Some(wave) = trace.nondet_waves.last_mut()
@@ -2240,8 +2245,8 @@ fn advance_nondeterministically_profiled(
             return shifted;
         }
 
-        if let Some(shifted_wave) =
-            try_advance_single_alt_pop1_common_suffix_stackshift_wave(table, &closure, token)
+        if nondet_wave_specializations_enabled()
+            && let Some(shifted_wave) = try_advance_single_alt_pop1_common_suffix_stackshift_wave(table, &closure, token)
         {
             if let Some(trace) = profile.trace.as_mut()
                 && let Some(wave) = trace.nondet_waves.last_mut()
@@ -2383,43 +2388,43 @@ fn advance_nondeterministically(
     let mut shifted = ParserGSS::empty();
 
     loop {
-        if let Some(shifted_wave) =
-            try_advance_single_active_pop1_reduce_wave(table, &closure, token)
+        if nondet_wave_specializations_enabled()
+            && let Some(shifted_wave) = try_advance_single_active_pop1_reduce_wave(table, &closure, token)
         {
             merge_into(&mut shifted, shifted_wave);
             return shifted;
         }
 
-        if let Some(shifted_wave) =
-            try_advance_pop1_common_base_reduce_wave(table, &closure, token)
+        if nondet_wave_specializations_enabled()
+            && let Some(shifted_wave) = try_advance_pop1_common_base_reduce_wave(table, &closure, token)
         {
             merge_into(&mut shifted, shifted_wave);
             return shifted;
         }
 
-        if let Some(shifted_wave) =
-            try_advance_mixed_top_pop1_shift_reduce_wave(table, &closure, token)
+        if nondet_wave_specializations_enabled()
+            && let Some(shifted_wave) = try_advance_mixed_top_pop1_shift_reduce_wave(table, &closure, token)
         {
             merge_into(&mut shifted, shifted_wave);
             return shifted;
         }
 
-        if let Some(shifted_wave) =
-            try_advance_pop1_stackshift_shift_wave(table, &closure, token)
+        if nondet_wave_specializations_enabled()
+            && let Some(shifted_wave) = try_advance_pop1_stackshift_shift_wave(table, &closure, token)
         {
             merge_into(&mut shifted, shifted_wave);
             return shifted;
         }
 
-        if let Some(shifted_wave) =
-            try_advance_pop1_reduce_plus_stackshift_wave(table, &closure, token)
+        if nondet_wave_specializations_enabled()
+            && let Some(shifted_wave) = try_advance_pop1_reduce_plus_stackshift_wave(table, &closure, token)
         {
             merge_into(&mut shifted, shifted_wave);
             return shifted;
         }
 
-        if let Some(shifted_wave) =
-            try_advance_single_alt_pop1_common_suffix_stackshift_wave(table, &closure, token)
+        if nondet_wave_specializations_enabled()
+            && let Some(shifted_wave) = try_advance_single_alt_pop1_common_suffix_stackshift_wave(table, &closure, token)
         {
             merge_into(&mut shifted, shifted_wave);
             return shifted;

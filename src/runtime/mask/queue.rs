@@ -36,7 +36,10 @@ pub(super) fn mask_queue_mode() -> MaskQueueMode {
 		Ok(value) if value.trim().eq_ignore_ascii_case("target") => MaskQueueMode::Target,
 		Ok(value) if value.trim().eq_ignore_ascii_case("depth") => MaskQueueMode::Depth,
 		Ok(value) if value.trim().eq_ignore_ascii_case("depth-merge") => MaskQueueMode::DepthMerge,
-		_ => MaskQueueMode::DepthBatch4,
+		Ok(value) if value.trim().eq_ignore_ascii_case("depth-batch4") => {
+			MaskQueueMode::DepthBatch4
+		}
+		_ => MaskQueueMode::DepthMerge,
 	})
 }
 
