@@ -2,7 +2,9 @@ use crate::automata::lexer::Lexer;
 use std::sync::Mutex;
 use std::collections::VecDeque;
 
+use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::compiler::glr::parser::{ParserGSS, stacks_finished};
+use crate::ds::leveled_gss::GssSemanticKeyInterner;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
@@ -177,6 +179,36 @@ impl ParserStateMap {
         self.entries.push((*keys.last().unwrap(), gss));
         true
     }
+
+
+    /// Replace a small set of structurally identical parser states with one
+    /// shared GSS under a new sorted set of tokenizer-state keys.
+    pub(crate) fn replace_uniform_gss_keys(&mut self, keys: &[u32]) -> bool {
+        if self.entries.is_empty()
+            || keys.is_empty()
+            || keys.len() > INLINE_PARSER_STATE_CAPACITY
+            || keys.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return false;
+        }
+        let representative = &self.entries[0].1;
+        if self
+            .entries
+            .iter()
+            .skip(1)
+            .any(|(_, gss)| !representative.ptr_eq(gss) && representative != gss)
+        {
+            return false;
+        }
+
+        let old = std::mem::take(&mut self.entries);
+        let (_, gss) = old.into_iter().next().expect("nonempty state checked");
+        for &key in &keys[..keys.len() - 1] {
+            self.entries.push((key, gss.clone()));
+        }
+        self.entries.push((*keys.last().unwrap(), gss));
+        true
+    }
 }
 
 impl FromIterator<(u32, ParserGSS)> for ParserStateMap {
@@ -254,6 +286,7 @@ impl MaskScratch {
 #[derive(Debug)]
 pub(crate) struct CommitBuffers {
     pub advance_result_cache: FxHashMap<(usize, u32), (ParserGSS, ParserGSS)>,
+    pub semantic_frontier_keys: GssSemanticKeyInterner<u32, TerminalsDisallowed>,
     pub pending_state: FxHashMap<u32, ParserGSS>,
     pub seen_matches: FxHashSet<(usize, u32)>,
     pub terminal_result_cache: FxHashMap<u32, ParserGSS>,
@@ -272,6 +305,7 @@ impl Default for CommitBuffers {
     fn default() -> Self {
         Self {
             advance_result_cache: FxHashMap::default(),
+            semantic_frontier_keys: GssSemanticKeyInterner::with_capacity(256),
             pending_state: FxHashMap::default(),
             seen_matches: FxHashSet::default(),
             terminal_result_cache: FxHashMap::default(),
@@ -301,6 +335,7 @@ impl Clone for CommitBuffers {
 impl CommitBuffers {
     pub fn clear_all(&mut self) {
         self.advance_result_cache.clear();
+        self.semantic_frontier_keys.clear();
         self.pending_state.clear();
         self.seen_matches.clear();
         self.terminal_result_cache.clear();

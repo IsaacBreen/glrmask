@@ -573,6 +573,24 @@ fn advance_stacks_profiled_core(
                         Some(&Action::Reduce(*nt, *len)),
                     ));
                 }
+                if gss.single_predecessor_below_top(&state).is_none()
+                    && let Some(shifted) =
+                        try_advance_bounded_deterministic_reduce_paths(table, &gss, token)
+                {
+                    profile.fast_path_ns = fast_path_start.elapsed().as_nanos() as u64;
+                    profile.stack_shift_apply_ns = profile.fast_path_ns;
+                    profile.total_ns = total_start.elapsed().as_nanos() as u64;
+                    return (shifted, profile);
+                }
+                if *len == 1
+                    && let Some(shifted) =
+                        try_advance_single_top_pop1_reduce_frontier(table, &gss, token)
+                {
+                    profile.fast_path_ns = fast_path_start.elapsed().as_nanos() as u64;
+                    profile.stack_shift_apply_ns = profile.fast_path_ns;
+                    profile.total_ns = total_start.elapsed().as_nanos() as u64;
+                    return (shifted, profile);
+                }
                 if let Some(shifted) = try_collapse_small_reduce_fanout(table, &gss, token) {
                     profile.fast_path_ns = fast_path_start.elapsed().as_nanos() as u64;
                     profile.stack_shift_apply_ns = profile.fast_path_ns;
@@ -589,6 +607,42 @@ fn advance_stacks_profiled_core(
     if let Some(shifted) = advance_pure_frontier_shifts(table, &gss, token) {
         profile.pure_shift = true;
         profile.stack_shift_apply_ns = frontier_start.elapsed().as_nanos() as u64;
+        profile.total_ns = total_start.elapsed().as_nanos() as u64;
+        return (shifted, profile);
+    }
+
+    let mixed_top_replace_start = Instant::now();
+    if let Some(shifted) = try_advance_mixed_top_replace_wave(table, &gss, token) {
+        profile.stack_shift_apply_ns += mixed_top_replace_start.elapsed().as_nanos() as u64;
+        profile.total_ns = total_start.elapsed().as_nanos() as u64;
+        return (shifted, profile);
+    }
+
+    let mixed_reduce_guarded_start = Instant::now();
+    if let Some(shifted) =
+        try_advance_pop1_reduce_guarded_stackshift_wave(table, &gss, token)
+    {
+        profile.stack_shift_apply_ns +=
+            mixed_reduce_guarded_start.elapsed().as_nanos() as u64;
+        profile.total_ns = total_start.elapsed().as_nanos() as u64;
+        return (shifted, profile);
+    }
+
+    let bounded_reduce_start = Instant::now();
+    if let Some(shifted) =
+        try_advance_bounded_deterministic_reduce_paths(table, &gss, token)
+    {
+        profile.stack_shift_apply_ns += bounded_reduce_start.elapsed().as_nanos() as u64;
+        profile.total_ns = total_start.elapsed().as_nanos() as u64;
+        return (shifted, profile);
+    }
+
+    let single_active_start = Instant::now();
+    if let Some(shifted) =
+        try_advance_single_active_pop1_stackshift_wave(table, &gss, token)
+    {
+        profile.pure_shift = true;
+        profile.stack_shift_apply_ns += single_active_start.elapsed().as_nanos() as u64;
         profile.total_ns = total_start.elapsed().as_nanos() as u64;
         return (shifted, profile);
     }
@@ -642,6 +696,19 @@ fn advance_stacks_core(table: &GLRTable, mut gss: ParserGSS, token: TerminalID) 
             return apply_guarded_stack_shifts(gss, shifts, table.guarded_shift_index(state, token));
         }
         if matches!(table.action(state, token), Some(Action::Reduce(..)))
+            && gss.single_predecessor_below_top(&state).is_none()
+            && let Some(shifted) =
+                try_advance_bounded_deterministic_reduce_paths(table, &gss, token)
+        {
+            return shifted;
+        }
+        if matches!(table.action(state, token), Some(Action::Reduce(..)))
+            && let Some(shifted) =
+                try_advance_single_top_pop1_reduce_frontier(table, &gss, token)
+        {
+            return shifted;
+        }
+        if matches!(table.action(state, token), Some(Action::Reduce(..)))
             && let Some(shifted) = try_collapse_small_reduce_fanout(table, &gss, token)
         {
             return shifted;
@@ -649,6 +716,28 @@ fn advance_stacks_core(table: &GLRTable, mut gss: ParserGSS, token: TerminalID) 
     }
 
     if let Some(shifted) = advance_pure_frontier_shifts(table, &gss, token) {
+        return shifted;
+    }
+
+    if let Some(shifted) = try_advance_mixed_top_replace_wave(table, &gss, token) {
+        return shifted;
+    }
+
+    if let Some(shifted) =
+        try_advance_pop1_reduce_guarded_stackshift_wave(table, &gss, token)
+    {
+        return shifted;
+    }
+
+    if let Some(shifted) =
+        try_advance_bounded_deterministic_reduce_paths(table, &gss, token)
+    {
+        return shifted;
+    }
+
+    if let Some(shifted) =
+        try_advance_single_active_pop1_stackshift_wave(table, &gss, token)
+    {
         return shifted;
     }
 
@@ -767,6 +856,587 @@ fn advance_pure_frontier_shifts(
         return Some(shifted);
     }
     Some(gss.apply_top_pure_shifts(shifts))
+}
+
+/// Collapse a mixed frontier of pure shifts and pop-one reductions when every
+/// reduction is immediately followed by a replace shift. In that shape the
+/// whole wave is just a top-layer remap: the lower GSS children can be retained
+/// directly instead of materialising reduction branches and merging them back.
+fn try_advance_mixed_top_replace_wave(
+    table: &GLRTable,
+    closure: &ParserGSS,
+    token: TerminalID,
+) -> Option<ParserGSS> {
+    let states = closure.peek_values();
+    if states.len() < 2 {
+        return None;
+    }
+
+    let mut remaps = SmallVec::<[(u32, u32, bool); 16]>::new();
+    let mut saw_reduce = false;
+    for state in states {
+        let Some(action) = table.action(state, token) else {
+            continue;
+        };
+        if let Some((target, replace_top)) =
+            effective_pure_frontier_shift(table, state, token, action)
+        {
+            if remaps.len() == remaps.capacity() {
+                return None;
+            }
+            remaps.push((state, target, replace_top));
+            continue;
+        }
+
+        let nt = match action {
+            Action::Reduce(nt, 1) => *nt,
+            _ => return None,
+        };
+        saw_reduce = true;
+        let Some(predecessor) = closure.single_predecessor_below_top(&state) else {
+            return None;
+        };
+        let Some((goto_target, false)) = table.goto_target(predecessor, nt) else {
+            // A missing goto kills this reduction branch. A replacing goto is
+            // not a top-only remap and must use the general path.
+            if table.goto_target(predecessor, nt).is_none() {
+                continue;
+            }
+            return None;
+        };
+        let Some(next_action) = table.action(goto_target, token) else {
+            continue;
+        };
+        let Some((target, true)) =
+            effective_pure_frontier_shift(table, goto_target, token, next_action)
+        else {
+            return None;
+        };
+        if remaps.len() == remaps.capacity() {
+            return None;
+        }
+        remaps.push((state, target, true));
+    }
+
+    if !saw_reduce {
+        return None;
+    }
+    if remaps.is_empty() {
+        return Some(ParserGSS::empty());
+    }
+    Some(closure.apply_top_pure_shifts(remaps))
+}
+
+/// Advance a small frontier whose live actions are deterministic reduction
+/// chains (with dead alternatives allowed). Concrete paths are traversed into
+/// inline buffers, advanced exactly, and rebuilt once with shared prefixes.
+/// Larger, branching, or accumulator-heterogeneous frontiers decline to the
+/// ordinary GSS interpreter.
+fn try_advance_bounded_deterministic_reduce_paths(
+    table: &GLRTable,
+    closure: &ParserGSS,
+    token: TerminalID,
+) -> Option<ParserGSS> {
+    const MAX_PATHS: usize = 32;
+    const MAX_DEPTH: usize = 64;
+    const MAX_STEPS: usize = 16;
+
+    let states = closure.peek_values();
+    if states.is_empty()
+        || states.len() > 4
+        || closure.max_depth() as usize > MAX_DEPTH
+        || !states
+            .iter()
+            .any(|&state| matches!(table.action(state, token), Some(Action::Reduce(..))))
+        || states.iter().any(|&state| {
+            !matches!(table.action(state, token), Some(Action::Reduce(..)) | None)
+        })
+    {
+        return None;
+    }
+
+    let mut outputs =
+        SmallVec::<[(SmallVec<[u32; MAX_DEPTH]>, TerminalsDisallowed); MAX_PATHS]>::new();
+    let mut unsupported = false;
+    let complete = closure.for_each_stack_top_first_bounded(MAX_PATHS, |top_first, acc| {
+        if unsupported || top_first.len() > MAX_DEPTH {
+            unsupported = true;
+            return;
+        }
+
+        let mut stack = SmallVec::<[u32; MAX_DEPTH]>::new();
+        stack.extend(top_first.iter().rev().copied());
+        let mut finished = false;
+        let mut dead = false;
+
+        for _ in 0..MAX_STEPS {
+            let Some(&state) = stack.last() else {
+                dead = true;
+                finished = true;
+                break;
+            };
+            match table.action(state, token) {
+                Some(Action::Reduce(nt, len)) => {
+                    let len = *len as usize;
+                    if len >= stack.len() {
+                        unsupported = true;
+                        return;
+                    }
+                    stack.truncate(stack.len() - len);
+                    let goto_from = *stack.last().unwrap();
+                    let Some((target, replace_top)) = table.goto_target(goto_from, *nt) else {
+                        dead = true;
+                        finished = true;
+                        break;
+                    };
+                    if replace_top {
+                        *stack.last_mut().unwrap() = target;
+                    } else {
+                        if stack.len() == MAX_DEPTH {
+                            unsupported = true;
+                            return;
+                        }
+                        stack.push(target);
+                    }
+                }
+                Some(Action::Shift(target, replace_top)) => {
+                    if *replace_top {
+                        *stack.last_mut().unwrap() = *target;
+                    } else {
+                        if stack.len() == MAX_DEPTH {
+                            unsupported = true;
+                            return;
+                        }
+                        stack.push(*target);
+                    }
+                    finished = true;
+                    break;
+                }
+                Some(Action::StackShifts(shifts)) if shifts.len() == 1 => {
+                    let shift = &shifts[0];
+                    let pop = shift.pop as usize;
+                    if pop > stack.len()
+                        || stack.len() - pop + shift.pushes.len() > MAX_DEPTH
+                    {
+                        unsupported = true;
+                        return;
+                    }
+                    stack.truncate(stack.len() - pop);
+                    stack.extend(shift.pushes.iter().copied());
+                    finished = true;
+                    break;
+                }
+                Some(Action::GuardedStackShifts(shifts)) => {
+                    let mut matched: Option<&GuardedStackShift> = None;
+                    for shift in shifts {
+                        let guards_match = shift.guards.iter().all(|guard| {
+                            let pop = guard.pop as usize;
+                            pop < stack.len()
+                                && guard
+                                    .states
+                                    .binary_search(&stack[stack.len() - 1 - pop])
+                                    .is_ok()
+                        });
+                        if !guards_match {
+                            continue;
+                        }
+                        if matched.is_some() {
+                            unsupported = true;
+                            return;
+                        }
+                        matched = Some(shift);
+                    }
+
+                    let Some(shift) = matched else {
+                        dead = true;
+                        finished = true;
+                        break;
+                    };
+                    let pop = shift.pop as usize;
+                    if pop > stack.len()
+                        || stack.len() - pop + shift.pushes.len() > MAX_DEPTH
+                    {
+                        unsupported = true;
+                        return;
+                    }
+                    stack.truncate(stack.len() - pop);
+                    stack.extend(shift.pushes.iter().copied());
+                    finished = true;
+                    break;
+                }
+                None | Some(Action::Accept) => {
+                    dead = true;
+                    finished = true;
+                    break;
+                }
+                _ => {
+                    unsupported = true;
+                    return;
+                }
+            }
+        }
+
+        if !finished {
+            unsupported = true;
+            return;
+        }
+        if dead {
+            return;
+        }
+
+        if let Some((_, existing_acc)) = outputs
+            .iter_mut()
+            .find(|(existing_stack, _)| existing_stack == &stack)
+        {
+            *existing_acc = existing_acc.merge(acc);
+            return;
+        }
+        if outputs.len() == outputs.capacity() {
+            unsupported = true;
+            return;
+        }
+        outputs.push((stack, acc.clone()));
+    });
+
+    if !complete || unsupported {
+        return None;
+    }
+    if outputs.is_empty() {
+        return Some(ParserGSS::empty());
+    }
+    let mut groups = SmallVec::<
+        [(TerminalsDisallowed, SmallVec<[&[u32]; MAX_PATHS]>); 4],
+    >::new();
+    for (stack, acc) in &outputs {
+        if let Some((_, slices)) = groups
+            .iter_mut()
+            .find(|(existing_acc, _)| existing_acc == acc)
+        {
+            slices.push(stack.as_slice());
+        } else {
+            let mut slices = SmallVec::<[&[u32]; MAX_PATHS]>::new();
+            slices.push(stack.as_slice());
+            groups.push((acc.clone(), slices));
+        }
+    }
+
+    let mut out = ParserGSS::empty();
+    for (acc, slices) in groups {
+        let group = ParserGSS::from_small_stack_slices_shared_prefix(&slices, acc)?;
+        merge_into(&mut out, group);
+    }
+    Some(out)
+}
+
+/// Apply one pop-one reduction across all of its live predecessor states, then
+/// finish the same terminal with a pure shift frontier. This preserves the
+/// shared lower GSS instead of isolating one predecessor branch at a time.
+fn advance_pop1_reduce_predecessor_frontier(
+    table: &GLRTable,
+    closure: &ParserGSS,
+    state: u32,
+    nt: u32,
+    token: TerminalID,
+) -> Option<ParserGSS> {
+    if let Ok(remapped) = closure.try_replace_predecessors_below_top(&state, |predecessor| {
+        let Some((goto_target, goto_replace)) = table.goto_target(*predecessor, nt) else {
+            return Ok(None);
+        };
+        if !goto_replace {
+            return Err(());
+        }
+        let Some(action) = table.action(goto_target, token) else {
+            return Ok(None);
+        };
+        let Some((target, replace_top)) =
+            effective_pure_frontier_shift(table, goto_target, token, action)
+        else {
+            return Err(());
+        };
+        if !replace_top {
+            return Err(());
+        }
+        Ok(Some(target))
+    }) {
+        return Some(remapped);
+    }
+
+    let popped = closure.pop_top_value(&state);
+    if popped.is_empty() {
+        return Some(ParserGSS::empty());
+    }
+
+    let mut gotos = SmallVec::<[(u32, u32, bool); 16]>::new();
+    for goto_from in popped.peek_values() {
+        let Some((target, is_replace)) = table.goto_target(goto_from, nt) else {
+            continue;
+        };
+        if gotos.len() == gotos.capacity() {
+            return None;
+        }
+        gotos.push((goto_from, target, is_replace));
+    }
+    if gotos.is_empty() {
+        return Some(ParserGSS::empty());
+    }
+
+    let reduced = popped
+        .try_apply_selective_top_pure_shifts(gotos.iter().copied())
+        .unwrap_or_else(|| popped.apply_top_pure_shifts(gotos));
+    if reduced.is_empty() {
+        return Some(ParserGSS::empty());
+    }
+
+    let mut shifts = SmallVec::<[(u32, u32, bool); 16]>::new();
+    for next_state in reduced.peek_values() {
+        let Some(action) = table.action(next_state, token) else {
+            continue;
+        };
+        let (target, replace_top) =
+            effective_pure_frontier_shift(table, next_state, token, action)?;
+        if shifts.len() == shifts.capacity() {
+            return None;
+        }
+        shifts.push((next_state, target, replace_top));
+    }
+    if shifts.is_empty() {
+        return Some(ParserGSS::empty());
+    }
+
+    Some(
+        reduced
+            .try_apply_selective_top_pure_shifts(shifts.iter().copied())
+            .unwrap_or_else(|| reduced.apply_top_pure_shifts(shifts)),
+    )
+}
+
+fn try_advance_single_top_pop1_reduce_frontier(
+    table: &GLRTable,
+    closure: &ParserGSS,
+    token: TerminalID,
+) -> Option<ParserGSS> {
+    let state = closure.single_exclusive_top_value()?;
+    let nt = match table.action(state, token)? {
+        Action::Reduce(nt, 1) => *nt,
+        Action::Split {
+            shift: None,
+            reduces,
+            accept: false,
+        } if reduces.len() == 1 && reduces[0].1 == 1 => reduces[0].0,
+        _ => return None,
+    };
+    advance_pop1_reduce_predecessor_frontier(table, closure, state, nt, token)
+}
+
+/// Handle a one-wave frontier containing pop-one reductions and guarded stack
+/// shifts. Each active top is transformed structurally from its popped lower
+/// interface; unsupported action shapes decline to the authoritative GLR path.
+fn try_advance_pop1_reduce_guarded_stackshift_wave(
+    table: &GLRTable,
+    closure: &ParserGSS,
+    token: TerminalID,
+) -> Option<ParserGSS> {
+    let states = closure.peek_values();
+    if states.len() < 2 {
+        return None;
+    }
+
+    let mut combined_saw_reduce = false;
+    let mut combined_saw_guarded = false;
+    let mut max_guard_pop = 0usize;
+    let mut combined_shape_supported = true;
+    for state in &states {
+        match table.action(*state, token) {
+            None => {}
+            Some(Action::Reduce(_, 1)) => combined_saw_reduce = true,
+            Some(Action::Split {
+                shift: None,
+                reduces,
+                accept: false,
+            }) if reduces.len() == 1 && reduces[0].1 == 1 => {
+                combined_saw_reduce = true;
+            }
+            Some(Action::GuardedStackShifts(shifts)) => {
+                combined_saw_guarded = true;
+                for shift in shifts {
+                    for guard in &shift.guards {
+                        max_guard_pop = max_guard_pop.max(guard.pop as usize);
+                    }
+                }
+            }
+            _ => combined_shape_supported = false,
+        }
+    }
+
+    if combined_shape_supported
+        && combined_saw_reduce
+        && combined_saw_guarded
+        && max_guard_pop <= 9
+    {
+        let lower_prefix_len = max_guard_pop.saturating_sub(1);
+        if let Ok(combined) = closure.try_replace_top_predecessors_with_sequences(
+            lower_prefix_len,
+            |top, predecessor, lower_prefix| {
+                let action = table.action(*top, token).ok_or(())?;
+                let reduction_nt = match action {
+                    Action::Reduce(nt, 1) => Some(*nt),
+                    Action::Split {
+                        shift: None,
+                        reduces,
+                        accept: false,
+                    } if reduces.len() == 1 && reduces[0].1 == 1 => Some(reduces[0].0),
+                    _ => None,
+                };
+                if let Some(nt) = reduction_nt {
+                    let Some((goto_target, true)) = table.goto_target(*predecessor, nt) else {
+                        return Ok(None);
+                    };
+                    let Some(next_action) = table.action(goto_target, token) else {
+                        return Ok(None);
+                    };
+                    let Some((target, true)) =
+                        effective_pure_frontier_shift(table, goto_target, token, next_action)
+                    else {
+                        return Err(());
+                    };
+                    let mut pushes = SmallVec::<[u32; 4]>::new();
+                    pushes.push(target);
+                    return Ok(Some(pushes));
+                }
+
+                let Action::GuardedStackShifts(shifts) = action else {
+                    return Ok(None);
+                };
+                let mut selected = SmallVec::<[u32; 4]>::new();
+                let mut matched = false;
+                for shift in shifts {
+                    let guards_match = shift.guards.iter().try_fold(true, |matches, guard| {
+                        if !matches {
+                            return Ok(false);
+                        }
+                        let value = match guard.pop {
+                            0 => top,
+                            1 => predecessor,
+                            pop => lower_prefix.get(pop as usize - 2).ok_or(())?,
+                        };
+                        Ok::<bool, ()>(guard.states.binary_search(value).is_ok())
+                    })?;
+                    if !guards_match {
+                        continue;
+                    }
+                    if shift.pop != 2 || shift.pushes.is_empty() {
+                        return Err(());
+                    }
+                    if matched && selected.as_slice() != shift.pushes.as_slice() {
+                        return Err(());
+                    }
+                    if !matched {
+                        selected.extend(shift.pushes.iter().copied());
+                        matched = true;
+                    }
+                }
+                Ok(matched.then_some(selected))
+            },
+        ) {
+            return Some(combined);
+        }
+    }
+
+    let mut out = ParserGSS::empty();
+    let mut saw_reduce = false;
+    let mut saw_guarded_shift = false;
+    for state in states {
+        match table.action(state, token) {
+            None => {}
+            Some(Action::Reduce(nt, 1)) => {
+                saw_reduce = true;
+                merge_into(
+                    &mut out,
+                    advance_pop1_reduce_predecessor_frontier(
+                        table, closure, state, *nt, token,
+                    )?,
+                );
+            }
+            Some(Action::Split {
+                shift: None,
+                reduces,
+                accept: false,
+            }) if reduces.len() == 1 && reduces[0].1 == 1 => {
+                saw_reduce = true;
+                merge_into(
+                    &mut out,
+                    advance_pop1_reduce_predecessor_frontier(
+                        table,
+                        closure,
+                        state,
+                        reduces[0].0,
+                        token,
+                    )?,
+                );
+            }
+            Some(Action::GuardedStackShifts(shifts)) => {
+                saw_guarded_shift = true;
+                let popped = closure.pop_top_value(&state);
+                if popped.is_empty() {
+                    continue;
+                }
+                let branch = popped.push(state);
+                merge_into(
+                    &mut out,
+                    apply_guarded_stack_shifts_fast(
+                        &branch,
+                        shifts,
+                        table.guarded_shift_index(state, token),
+                    )?,
+                );
+            }
+            _ => return None,
+        }
+    }
+
+    (saw_reduce && saw_guarded_shift && !out.is_empty()).then_some(out)
+}
+
+/// Advance a frontier where exactly one top state is live and its action is
+/// a set of pop-one stack shifts. Dead top alternatives are discarded by
+/// taking the active state's already-popped lower frontier directly, avoiding
+/// isolate/pop/merge reconstruction of the complete GSS.
+fn try_advance_single_active_pop1_stackshift_wave(
+    table: &GLRTable,
+    closure: &ParserGSS,
+    token: TerminalID,
+) -> Option<ParserGSS> {
+    let states = closure.peek_values();
+    if states.len() < 2 {
+        return None;
+    }
+
+    let mut active: Option<(u32, &[StackShift])> = None;
+    for state in states {
+        match table.action(state, token) {
+            None => {}
+            Some(Action::StackShifts(shifts))
+                if shifts.iter().all(|shift| shift.pop == 1) =>
+            {
+                if active.is_some() {
+                    return None;
+                }
+                active = Some((state, shifts));
+            }
+            _ => return None,
+        }
+    }
+
+    let (state, shifts) = active?;
+    let base = closure.pop_top_value(&state);
+    if base.is_empty() {
+        return Some(ParserGSS::empty());
+    }
+    let pushes = shifts
+        .iter()
+        .map(|shift| shift.pushes.as_slice())
+        .collect::<SmallVec<[&[u32]; 4]>>();
+    Some(apply_push_sequences(base, &pushes))
 }
 
 fn try_advance_single_alt_pop1_common_suffix_stackshift_wave(
@@ -1170,14 +1840,63 @@ fn try_advance_pop1_stackshift_shift_wave(
     closure: &ParserGSS,
     token: TerminalID,
 ) -> Option<ParserGSS> {
-    if let Some(shifted) = try_advance_single_alt_pop1_common_suffix_stackshift_wave(table, closure, token) {
-        return Some(shifted);
-    }
-
     let states = closure.peek_values();
     if states.len() < 2 {
         return None;
     }
+
+    let mut effects = SmallVec::<[(u32, usize, &[u32]); 16]>::new();
+    let mut saw_stack_shift = false;
+    let mut saw_action = false;
+    let mut top_local = true;
+    for &state in &states {
+        let Some(action) = table.action(state, token) else {
+            continue;
+        };
+        saw_action = true;
+        match action {
+            Action::StackShifts(shifts) => {
+                saw_stack_shift = true;
+                for shift in shifts {
+                    if shift.pop > 1
+                        || shift.pushes.is_empty()
+                        || effects.len() == effects.capacity()
+                    {
+                        top_local = false;
+                        break;
+                    }
+                    effects.push((state, shift.pop as usize, shift.pushes.as_slice()));
+                }
+            }
+            Action::Shift(target, is_replace) => {
+                let pop = usize::from(
+                    *is_replace && !table.forwarded_shifts.contains(&(state, token)),
+                );
+                if effects.len() == effects.capacity() {
+                    top_local = false;
+                    break;
+                }
+                effects.push((state, pop, std::slice::from_ref(target)));
+            }
+            _ => {
+                top_local = false;
+                break;
+            }
+        }
+        if !top_local {
+            break;
+        }
+    }
+    if top_local && saw_action && saw_stack_shift
+        && let Some(shifted) = closure.try_apply_top_stack_effects(effects)
+    {
+        return Some(shifted);
+    }
+
+    if let Some(shifted) = try_advance_single_alt_pop1_common_suffix_stackshift_wave(table, closure, token) {
+        return Some(shifted);
+    }
+
     let base = closure.pop1_common_interface_base()?;
 
     let mut out = ParserGSS::empty();
@@ -1456,6 +2175,102 @@ fn apply_guarded_stack_shifts_from_vstack(
     }
 }
 
+fn apply_guarded_stack_shifts_as_predecessor_remap(
+    gss: &ParserGSS,
+    shifts: &[GuardedStackShift],
+) -> Option<ParserGSS> {
+    let virtual_stack = gss.try_virtual_stack()?;
+    if !virtual_stack.has_hidden_floor_values() {
+        return None;
+    }
+    let predecessor_pop = u32::try_from(virtual_stack.len()).ok()?;
+    if predecessor_pop == 0 {
+        return None;
+    }
+    let predecessor_frontier = gss.popn(predecessor_pop as isize);
+    if predecessor_frontier.is_empty() {
+        return Some(ParserGSS::empty());
+    }
+    let predecessor_values = predecessor_frontier.peek_values();
+    let mut remaps = SmallVec::<[(u32, u32, bool); 16]>::new();
+
+    for shift in shifts {
+        let predecessor_guards = shift
+            .guards
+            .iter()
+            .filter(|guard| guard.pop == predecessor_pop)
+            .collect::<SmallVec<[_; 2]>>();
+        if predecessor_guards.is_empty() {
+            // Without a guard at the first hidden floor we cannot prove this
+            // shift irrelevant without branch-specific traversal.
+            return None;
+        }
+        let matching_predecessors = predecessor_values
+            .iter()
+            .copied()
+            .filter(|predecessor| {
+                predecessor_guards
+                    .iter()
+                    .all(|guard| guard.states.binary_search(predecessor).is_ok())
+            })
+            .collect::<SmallVec<[u32; 8]>>();
+        if matching_predecessors.is_empty() {
+            // This shift is dead for the represented GSS, even if its stack
+            // effect has a shape the structural remap does not support.
+            continue;
+        }
+
+        if shift.pop != predecessor_pop + 1
+            || shift.pushes.len() != 1
+            || shift
+                .guards
+                .iter()
+                .any(|guard| guard.pop != predecessor_pop && guard.pop != shift.pop)
+        {
+            return None;
+        }
+        let base_guards = shift
+            .guards
+            .iter()
+            .filter(|guard| guard.pop == shift.pop)
+            .collect::<SmallVec<[_; 2]>>();
+
+        for predecessor in matching_predecessors {
+            let below = predecessor_frontier.pop_top_value(&predecessor);
+            if below.is_empty() {
+                continue;
+            }
+            let below_values = below.peek_values();
+            let matching = below_values
+                .iter()
+                .filter(|state| {
+                    base_guards
+                        .iter()
+                        .all(|guard| guard.states.binary_search(state).is_ok())
+                })
+                .count();
+            if matching == 0 {
+                continue;
+            }
+            if matching != below_values.len() {
+                // The predecessor branch contains both matching and
+                // non-matching deeper contexts. A top-only remap would lose
+                // that path correlation, so leave it to the general path.
+                return None;
+            }
+            if remaps.len() == remaps.capacity() {
+                return None;
+            }
+            remaps.push((predecessor, shift.pushes[0], true));
+        }
+    }
+
+    if remaps.is_empty() {
+        return Some(ParserGSS::empty());
+    }
+    Some(predecessor_frontier.apply_top_pure_shifts(remaps))
+}
+
 pub(crate) fn apply_guarded_stack_shifts_fast(
     gss: &ParserGSS,
     shifts: &[GuardedStackShift],
@@ -1465,6 +2280,27 @@ pub(crate) fn apply_guarded_stack_shifts_fast(
         && guarded_stack_shifts_are_decidable_from_vstack(&stack, shifts)
     {
         return Some(apply_guarded_stack_shifts_to_vstack(&stack, shifts, index));
+    }
+
+    if let Some(shifted) = apply_guarded_stack_shifts_as_predecessor_remap(gss, shifts) {
+        return Some(shifted);
+    }
+
+    if let Some(shifted) = gss.apply_guarded_stack_effects_to_bounded_paths(
+        shifts.iter().map(|shift| {
+            (
+                shift
+                    .guards
+                    .iter()
+                    .map(|guard| (guard.pop as usize, guard.states.as_slice())),
+                shift.pop as usize,
+                shift.pushes.as_slice(),
+            )
+        }),
+        16,
+        64,
+    ) {
+        return Some(shifted);
     }
 
     if !guarded_stack_to_stacks_fallback_disabled()
@@ -2124,6 +2960,28 @@ fn advance_nondeterministically_profiled(
         }
 
         if let Some(shifted_wave) =
+            try_advance_single_active_pop1_stackshift_wave(table, &closure, token)
+        {
+            if let Some(trace) = profile.trace.as_mut()
+                && let Some(wave) = trace.nondet_waves.last_mut()
+            {
+                for &state in &frontier_states {
+                    let branch_gss = closure.isolate(Some(state));
+                    wave.branches.push(trace_action_summary(
+                        table,
+                        state,
+                        &branch_gss,
+                        table.action(state, token),
+                    ));
+                }
+            }
+            profile.n_nondet_branches += frontier_states.len() as u32;
+            profile.n_nondet_merges += 1;
+            merge_into(&mut shifted, shifted_wave);
+            return shifted;
+        }
+
+        if let Some(shifted_wave) =
             try_advance_single_active_pop1_reduce_wave(table, &closure, token)
         {
             if let Some(trace) = profile.trace.as_mut()
@@ -2383,6 +3241,13 @@ fn advance_nondeterministically(
     let mut shifted = ParserGSS::empty();
 
     loop {
+        if let Some(shifted_wave) =
+            try_advance_single_active_pop1_stackshift_wave(table, &closure, token)
+        {
+            merge_into(&mut shifted, shifted_wave);
+            return shifted;
+        }
+
         if let Some(shifted_wave) =
             try_advance_single_active_pop1_reduce_wave(table, &closure, token)
         {
@@ -3153,11 +4018,19 @@ mod tests {
         ParserGSS,
         advance_concrete_stacks_reference,
         advance_stacks,
+        apply_guarded_stack_shifts,
+        apply_guarded_stack_shifts_as_predecessor_remap,
+        apply_guarded_stack_shifts_fast,
         apply_guarded_stack_shifts_to_vstack,
         stack_admissible_terminals,
         stack_may_advance_on,
         stack_may_advance_on_any,
+        try_advance_bounded_deterministic_reduce_paths,
+        try_advance_mixed_top_replace_wave,
+        try_advance_pop1_reduce_guarded_stackshift_wave,
         try_advance_pop1_reduce_plus_stackshift_wave,
+        try_advance_pop1_stackshift_shift_wave,
+        try_advance_single_active_pop1_stackshift_wave,
     };
     use crate::compiler::glr::accumulator::TerminalsDisallowed;
     use crate::compiler::glr::analysis::EOF;
@@ -3298,6 +4171,115 @@ mod tests {
         );
 
         assert_eq!(advance_stacks(&table, &before, token), expected);
+    }
+
+    #[test]
+    fn single_active_pop1_stackshift_wave_discards_dead_top_without_cross_product() {
+        let token = 0;
+        let mut action_rows = vec![Vec::new(); 500];
+        action_rows[452] = vec![(
+            token,
+            Action::StackShifts(vec![StackShift {
+                pop: 1,
+                pushes: vec![384, 411],
+            }]),
+        )];
+        let action_refs: Vec<&[(u32, Action)]> =
+            action_rows.iter().map(|row| row.as_slice()).collect();
+        let goto_rows = vec![Vec::new(); 500];
+        let goto_refs: Vec<&[(u32, (u32, bool))]> =
+            goto_rows.iter().map(|row| row.as_slice()).collect();
+        let table = build_test_table(500, 1, &action_refs, &goto_refs);
+
+        let acc = TerminalsDisallowed::new();
+        let before = ParserGSS::from_stacks(&[
+            (vec![0, 1, 186, 40, 85, 123, 452], acc.clone()),
+            (vec![0, 1, 202, 40, 85, 123, 452], acc.clone()),
+            (vec![0, 1, 322, 92, 150, 426], acc),
+        ]);
+        let expected = ParserGSS::from_stacks(&[
+            (
+                vec![0, 1, 186, 40, 85, 123, 384, 411],
+                TerminalsDisallowed::new(),
+            ),
+            (
+                vec![0, 1, 202, 40, 85, 123, 384, 411],
+                TerminalsDisallowed::new(),
+            ),
+        ]);
+
+        let fast = try_advance_single_active_pop1_stackshift_wave(&table, &before, token)
+            .expect("single live stack-shift branch should be structural");
+        let mut fast_stacks = fast
+            .to_stacks(16)
+            .expect("bounded structural result should enumerate");
+        let mut expected_stacks = expected
+            .to_stacks(16)
+            .expect("bounded expected result should enumerate");
+        fast_stacks.sort_by(|left, right| left.0.cmp(&right.0));
+        expected_stacks.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(fast_stacks, expected_stacks);
+
+        let mut actual_stacks = advance_stacks(&table, &before, token)
+            .to_stacks(16)
+            .expect("bounded advanced result should enumerate");
+        actual_stacks.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(actual_stacks, expected_stacks);
+    }
+
+    #[test]
+    fn pop1_reduce_and_guarded_shift_wave_remaps_predecessors_structurally() {
+        let token = 0;
+        let nt = 0;
+        let mut action_rows = vec![Vec::new(); 400];
+        action_rows[133] = vec![(
+            token,
+            Action::GuardedStackShifts(vec![GuardedStackShift {
+                guards: vec![
+                    StackShiftGuard {
+                        pop: 1,
+                        states: vec![322],
+                    },
+                    StackShiftGuard {
+                        pop: 2,
+                        states: vec![10],
+                    },
+                ],
+                pop: 2,
+                pushes: vec![327],
+            }]),
+        )];
+        action_rows[137] = vec![(token, Action::Reduce(nt, 1))];
+        action_rows[266] = vec![(token, Action::Shift(351, true))];
+        action_rows[284] = vec![(token, Action::Shift(360, true))];
+        let action_refs: Vec<&[(u32, Action)]> =
+            action_rows.iter().map(|row| row.as_slice()).collect();
+
+        let mut goto_rows = vec![Vec::new(); 400];
+        goto_rows[168] = vec![(nt, (266, true))];
+        goto_rows[181] = vec![(nt, (284, true))];
+        let goto_refs: Vec<&[(u32, (u32, bool))]> =
+            goto_rows.iter().map(|row| row.as_slice()).collect();
+        let table = build_test_table(400, 1, &action_refs, &goto_refs);
+
+        let acc = TerminalsDisallowed::new();
+        let before = ParserGSS::from_stacks(&[
+            (vec![0, 10, 168, 137], acc.clone()),
+            (vec![0, 10, 181, 137], acc.clone()),
+            (vec![0, 10, 322, 133], acc),
+        ]);
+        let expected = ParserGSS::from_stacks(&[
+            (vec![0, 10, 351], TerminalsDisallowed::new()),
+            (vec![0, 10, 360], TerminalsDisallowed::new()),
+            (vec![0, 10, 327], TerminalsDisallowed::new()),
+        ]);
+
+        let fast = try_advance_pop1_reduce_guarded_stackshift_wave(&table, &before, token)
+            .expect("mixed wave should be handled structurally");
+        assert!(fast.semantically_eq(&expected, 16).unwrap());
+        assert!(advance_stacks(&table, &before, token)
+            .semantically_eq(&expected, 16)
+            .unwrap());
     }
 
     #[test]
@@ -3476,6 +4458,206 @@ mod tests {
         let mut terminals = BitSet::new(1);
         terminals.set(token as usize);
         assert!(stack_may_advance_on_any(&table, &stack, &terminals));
+    }
+
+    #[test]
+    fn guarded_predecessor_remap_preserves_branched_floor_correlation() {
+        let acc = TerminalsDisallowed::new();
+        let before = ParserGSS::from_stacks(&[
+            (vec![0_u32, 353, 669, 800], acc.clone()),
+            (vec![0_u32, 353, 711, 800], acc.clone()),
+            (vec![0_u32, 353, 753, 800], acc),
+        ]);
+        let shifts = vec![
+            GuardedStackShift {
+                guards: vec![
+                    StackShiftGuard {
+                        pop: 1,
+                        states: vec![669],
+                    },
+                    StackShiftGuard {
+                        pop: 2,
+                        states: vec![353, 1503],
+                    },
+                ],
+                pop: 2,
+                pushes: vec![1115],
+            },
+            GuardedStackShift {
+                guards: vec![
+                    StackShiftGuard {
+                        pop: 1,
+                        states: vec![711],
+                    },
+                    StackShiftGuard {
+                        pop: 2,
+                        states: vec![353, 1504],
+                    },
+                ],
+                pop: 2,
+                pushes: vec![1168],
+            },
+            GuardedStackShift {
+                guards: vec![
+                    StackShiftGuard {
+                        pop: 1,
+                        states: vec![753],
+                    },
+                    StackShiftGuard {
+                        pop: 2,
+                        states: vec![353, 1505],
+                    },
+                ],
+                pop: 2,
+                pushes: vec![1221],
+            },
+            GuardedStackShift {
+                guards: vec![StackShiftGuard {
+                    pop: 1,
+                    states: vec![1348],
+                }],
+                pop: 2,
+                pushes: vec![1457, 1497],
+            },
+            GuardedStackShift {
+                guards: vec![
+                    StackShiftGuard {
+                        pop: 1,
+                        states: vec![1547],
+                    },
+                    StackShiftGuard {
+                        pop: 3,
+                        states: vec![1457],
+                    },
+                ],
+                pop: 3,
+                pushes: vec![1498, 1497],
+            },
+        ];
+
+        let fast = apply_guarded_stack_shifts_as_predecessor_remap(&before, &shifts)
+            .expect("predecessor remap shape should be recognized");
+        let general = apply_guarded_stack_shifts(before, &shifts, None);
+        assert!(fast.semantically_eq(&general, 16).unwrap());
+
+        let mut stacks = fast
+            .to_stacks(16)
+            .expect("three-path result should remain bounded");
+        stacks.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(
+            stacks
+                .into_iter()
+                .map(|(stack, _)| stack)
+                .collect::<Vec<_>>(),
+            vec![
+                vec![0, 353, 1115],
+                vec![0, 353, 1168],
+                vec![0, 353, 1221],
+            ],
+        );
+    }
+
+    #[test]
+    fn bounded_guarded_effects_handle_machine_schema_branched_floor() {
+        let acc = TerminalsDisallowed::new();
+        let before = ParserGSS::from_stacks(&[
+            (
+                vec![0, 1, 10, 40, 87, 124, 85, 123, 186, 40, 85, 123, 322, 133],
+                acc.clone(),
+            ),
+            (
+                vec![0, 1, 10, 40, 87, 124, 85, 123, 202, 40, 85, 123, 322, 133],
+                acc.clone(),
+            ),
+            (
+                vec![
+                    0, 1, 10, 40, 87, 124, 85, 123, 322, 92, 150, 92, 250, 343, 426, 133,
+                ],
+                acc,
+            ),
+        ]);
+        let shifts = vec![
+            GuardedStackShift {
+                guards: vec![
+                    StackShiftGuard {
+                        pop: 1,
+                        states: vec![50],
+                    },
+                    StackShiftGuard {
+                        pop: 2,
+                        states: vec![1],
+                    },
+                ],
+                pop: 2,
+                pushes: vec![74],
+            },
+            GuardedStackShift {
+                guards: vec![
+                    StackShiftGuard {
+                        pop: 1,
+                        states: vec![322],
+                    },
+                    StackShiftGuard {
+                        pop: 2,
+                        states: vec![123],
+                    },
+                ],
+                pop: 2,
+                pushes: vec![327],
+            },
+            GuardedStackShift {
+                guards: vec![
+                    StackShiftGuard {
+                        pop: 1,
+                        states: vec![426],
+                    },
+                    StackShiftGuard {
+                        pop: 2,
+                        states: vec![250],
+                    },
+                ],
+                pop: 2,
+                pushes: vec![343, 342],
+            },
+            GuardedStackShift {
+                guards: vec![
+                    StackShiftGuard {
+                        pop: 1,
+                        states: vec![426],
+                    },
+                    StackShiftGuard {
+                        pop: 2,
+                        states: vec![343],
+                    },
+                    StackShiftGuard {
+                        pop: 3,
+                        states: vec![250],
+                    },
+                ],
+                pop: 3,
+                pushes: vec![343, 342],
+            },
+        ];
+        let expected = ParserGSS::from_stacks(&[
+            (
+                vec![0, 1, 10, 40, 87, 124, 85, 123, 186, 40, 85, 123, 327],
+                TerminalsDisallowed::new(),
+            ),
+            (
+                vec![0, 1, 10, 40, 87, 124, 85, 123, 202, 40, 85, 123, 327],
+                TerminalsDisallowed::new(),
+            ),
+            (
+                vec![
+                    0, 1, 10, 40, 87, 124, 85, 123, 322, 92, 150, 92, 250, 343, 342,
+                ],
+                TerminalsDisallowed::new(),
+            ),
+        ]);
+
+        let fast = apply_guarded_stack_shifts_fast(&before, &shifts, None)
+            .expect("small branched floor should use bounded guarded effects");
+        assert!(fast.semantically_eq(&expected, 16).unwrap());
     }
 
     #[test]
@@ -3709,6 +4891,272 @@ mod tests {
                 assert_advance_matches_concrete_reference_case(&table, &before, token, &case);
             }
         }
+    }
+
+    #[test]
+    fn mixed_top_replace_wave_handles_machine_schema_step333_shape() {
+        let token = 0;
+        let nt0 = 0;
+        let nt1 = 1;
+        let mut action_rows = vec![Vec::new(); 400];
+        action_rows[355].push((token, Action::Shift(264, true)));
+        action_rows[363].push((token, Action::Reduce(nt0, 1)));
+        action_rows[373].push((token, Action::Reduce(nt1, 1)));
+        action_rows[193].push((token, Action::Shift(280, true)));
+        action_rows[208].push((token, Action::Shift(299, true)));
+        let action_refs: Vec<&[(u32, Action)]> =
+            action_rows.iter().map(Vec::as_slice).collect();
+
+        let mut goto_rows = vec![Vec::new(); 400];
+        goto_rows[10].push((nt0, (193, false)));
+        goto_rows[10].push((nt1, (208, false)));
+        let goto_refs: Vec<&[(u32, (u32, bool))]> =
+            goto_rows.iter().map(Vec::as_slice).collect();
+        let table = build_test_table(400, 1, &action_refs, &goto_refs);
+
+        let acc = TerminalsDisallowed::new();
+        let before = ParserGSS::from_stacks(&[
+            (vec![0, 1, 10, 327], acc.clone()),
+            (vec![0, 2, 10, 327], acc.clone()),
+            (vec![0, 1, 10, 342], acc.clone()),
+            (vec![0, 1, 10, 355], acc.clone()),
+            (vec![0, 2, 10, 355], acc.clone()),
+            (vec![0, 1, 10, 363], acc.clone()),
+            (vec![0, 2, 10, 363], acc.clone()),
+            (vec![0, 1, 10, 373], acc.clone()),
+            (vec![0, 2, 10, 373], acc),
+        ]);
+        let expected = ParserGSS::from_stacks(&[
+            (vec![0, 1, 10, 264], TerminalsDisallowed::new()),
+            (vec![0, 2, 10, 264], TerminalsDisallowed::new()),
+            (vec![0, 1, 10, 280], TerminalsDisallowed::new()),
+            (vec![0, 2, 10, 280], TerminalsDisallowed::new()),
+            (vec![0, 1, 10, 299], TerminalsDisallowed::new()),
+            (vec![0, 2, 10, 299], TerminalsDisallowed::new()),
+        ]);
+
+        let remapped = try_advance_mixed_top_replace_wave(&table, &before, token)
+            .expect("machine schema step333 shape should be a direct top remap");
+        assert!(remapped.semantically_eq(&expected, 16).unwrap());
+        assert!(advance_stacks(&table, &before, token)
+            .semantically_eq(&expected, 16)
+            .unwrap());
+    }
+
+    #[test]
+    fn mixed_top_replace_wave_handles_reduce_plus_dead_frontier() {
+        let token = 0;
+        let nt = 0;
+        let mut action_rows = vec![Vec::new(); 200];
+        action_rows[99].push((token, Action::Reduce(nt, 1)));
+        action_rows[112].push((token, Action::Shift(170, true)));
+        let action_refs: Vec<&[(u32, Action)]> =
+            action_rows.iter().map(Vec::as_slice).collect();
+        let mut goto_rows = vec![Vec::new(); 200];
+        goto_rows[56].push((nt, (112, false)));
+        let goto_refs: Vec<&[(u32, (u32, bool))]> =
+            goto_rows.iter().map(Vec::as_slice).collect();
+        let table = build_test_table(200, 1, &action_refs, &goto_refs);
+
+        let acc = TerminalsDisallowed::new();
+        let before = ParserGSS::from_stacks(&[
+            (vec![0, 1, 40, 56, 99], acc.clone()),
+            (vec![0, 1, 40, 56, 83], acc),
+        ]);
+        let expected = ParserGSS::from_single_stack(
+            vec![0, 1, 40, 56, 170],
+            TerminalsDisallowed::new(),
+        );
+
+        let fast = try_advance_mixed_top_replace_wave(&table, &before, token)
+            .expect("reduce plus dead frontier should be a direct top remap");
+        assert!(fast.semantically_eq(&expected, 8).unwrap());
+        assert!(advance_stacks(&table, &before, token)
+            .semantically_eq(&expected, 8)
+            .unwrap());
+    }
+
+    #[test]
+    fn bounded_deterministic_reduce_paths_handle_predecessor_dependent_chains() {
+        let token = 0;
+        let nt_value = 0;
+        let nt_regular = 1;
+        let nt_deep = 2;
+        let mut action_rows = vec![Vec::new(); 500];
+        action_rows[90].push((token, Action::Reduce(nt_value, 1)));
+        action_rows[335].push((token, Action::Reduce(nt_regular, 1)));
+        action_rows[336].push((token, Action::Shift(337, true)));
+        action_rows[446].push((token, Action::Reduce(nt_deep, 1)));
+        action_rows[343].push((
+            token,
+            Action::GuardedStackShifts(vec![
+                GuardedStackShift {
+                    guards: vec![StackShiftGuard {
+                        pop: 2,
+                        states: vec![59],
+                    }],
+                    pop: 3,
+                    pushes: vec![107],
+                },
+                GuardedStackShift {
+                    guards: vec![StackShiftGuard {
+                        pop: 2,
+                        states: vec![80],
+                    }],
+                    pop: 3,
+                    pushes: vec![119],
+                },
+                GuardedStackShift {
+                    guards: vec![StackShiftGuard {
+                        pop: 2,
+                        states: vec![92],
+                    }],
+                    pop: 3,
+                    pushes: vec![135],
+                },
+            ]),
+        ));
+        let action_refs: Vec<&[(u32, Action)]> =
+            action_rows.iter().map(Vec::as_slice).collect();
+
+        let mut goto_rows = vec![Vec::new(); 500];
+        goto_rows[389].push((nt_value, (335, true)));
+        goto_rows[426].push((nt_value, (446, true)));
+        goto_rows[138].push((nt_regular, (336, false)));
+        goto_rows[250].push((nt_deep, (343, false)));
+        let goto_refs: Vec<&[(u32, (u32, bool))]> =
+            goto_rows.iter().map(Vec::as_slice).collect();
+        let table = build_test_table(500, 1, &action_refs, &goto_refs);
+
+        let acc_a = TerminalsDisallowed::new().with_insert(60, 0);
+        let acc_b = TerminalsDisallowed::new().with_insert(61, 0);
+        let before = ParserGSS::from_stacks(&[
+            (vec![0, 1, 168, 138, 389, 90], acc_a.clone()),
+            (vec![0, 1, 181, 138, 389, 90], acc_a.clone()),
+            (vec![0, 1, 198, 138, 389, 90], acc_a.clone()),
+            (vec![0, 1, 322, 91, 59, 250, 426, 90], acc_b.clone()),
+            (vec![0, 1, 322, 91, 80, 250, 426, 90], acc_b.clone()),
+            (vec![0, 1, 322, 91, 92, 250, 426, 90], acc_b.clone()),
+        ]);
+        let expected = ParserGSS::from_stacks(&[
+            (vec![0, 1, 168, 138, 337], acc_a.clone()),
+            (vec![0, 1, 181, 138, 337], acc_a.clone()),
+            (vec![0, 1, 198, 138, 337], acc_a),
+            (vec![0, 1, 322, 91, 107], acc_b.clone()),
+            (vec![0, 1, 322, 91, 119], acc_b.clone()),
+            (vec![0, 1, 322, 91, 135], acc_b),
+        ]);
+
+        let fast = try_advance_bounded_deterministic_reduce_paths(&table, &before, token)
+            .expect("small predecessor-dependent reduce chains should remain bounded");
+        assert!(fast.semantically_eq(&expected, 16).unwrap());
+        assert!(advance_stacks(&table, &before, token)
+            .semantically_eq(&expected, 16)
+            .unwrap());
+    }
+
+    #[test]
+    fn top_local_stack_effects_preserve_upper_branch_accumulators() {
+        let token = 0;
+        let mut action_rows = vec![Vec::new(); 64];
+        action_rows[10].push((
+            token,
+            Action::StackShifts(vec![StackShift {
+                pop: 1,
+                pushes: vec![20, 30],
+            }]),
+        ));
+        action_rows[11].push((token, Action::Shift(40, false)));
+        let action_refs: Vec<&[(u32, Action)]> =
+            action_rows.iter().map(Vec::as_slice).collect();
+        let goto_rows = vec![Vec::new(); 64];
+        let goto_refs: Vec<&[(u32, (u32, bool))]> =
+            goto_rows.iter().map(Vec::as_slice).collect();
+        let table = build_test_table(64, 1, &action_refs, &goto_refs);
+
+        let acc_a = TerminalsDisallowed::new().with_insert(60, 0);
+        let acc_b = TerminalsDisallowed::new().with_insert(61, 0);
+        let before = ParserGSS::from_stacks(&[
+            (vec![0, 1, 10], acc_a.clone()),
+            (vec![0, 2, 11], acc_b.clone()),
+        ]);
+        let expected = ParserGSS::from_stacks(&[
+            (vec![0, 1, 20, 30], acc_a),
+            (vec![0, 2, 11, 40], acc_b),
+        ]);
+
+        let fast = try_advance_pop1_stackshift_shift_wave(&table, &before, token)
+            .expect("top-local effects should traverse upper accumulator branches");
+        assert!(fast.semantically_eq(&expected, 8).unwrap());
+        assert!(advance_stacks(&table, &before, token)
+            .semantically_eq(&expected, 8)
+            .unwrap());
+    }
+
+    #[test]
+    fn top_local_stack_effect_wave_handles_machine_schema_step333_followup() {
+        let token = 0;
+        let mut action_rows = vec![Vec::new(); 500];
+        action_rows[264].push((
+            token,
+            Action::StackShifts(vec![StackShift {
+                pop: 1,
+                pushes: vec![171, 88],
+            }]),
+        ));
+        action_rows[280].push((
+            token,
+            Action::StackShifts(vec![StackShift {
+                pop: 1,
+                pushes: vec![185, 288],
+            }]),
+        ));
+        action_rows[299].push((
+            token,
+            Action::StackShifts(vec![StackShift {
+                pop: 1,
+                pushes: vec![201, 288],
+            }]),
+        ));
+        action_rows[426].push((token, Action::Shift(92, false)));
+        action_rows[322].push((token, Action::Shift(92, false)));
+        let action_refs: Vec<&[(u32, Action)]> =
+            action_rows.iter().map(Vec::as_slice).collect();
+        let goto_rows = vec![Vec::new(); 500];
+        let goto_refs: Vec<&[(u32, (u32, bool))]> =
+            goto_rows.iter().map(Vec::as_slice).collect();
+        let table = build_test_table(500, 1, &action_refs, &goto_refs);
+
+        let acc = TerminalsDisallowed::new();
+        let before = ParserGSS::from_stacks(&[
+            (vec![0, 1, 10, 186, 40, 85, 123, 264], acc.clone()),
+            (vec![0, 1, 10, 202, 40, 85, 123, 264], acc.clone()),
+            (vec![0, 1, 10, 186, 40, 85, 123, 280], acc.clone()),
+            (vec![0, 1, 10, 202, 40, 85, 123, 280], acc.clone()),
+            (vec![0, 1, 10, 186, 40, 85, 123, 299], acc.clone()),
+            (vec![0, 1, 10, 202, 40, 85, 123, 299], acc.clone()),
+            (vec![0, 1, 10, 322, 92, 150, 250, 343, 426], acc.clone()),
+            (vec![0, 1, 10, 186, 40, 85, 123, 322], acc.clone()),
+            (vec![0, 1, 10, 202, 40, 85, 123, 322], acc),
+        ]);
+        let expected = ParserGSS::from_stacks(&[
+            (vec![0, 1, 10, 322, 92, 150, 250, 343, 426, 92], TerminalsDisallowed::new()),
+            (vec![0, 1, 10, 186, 40, 85, 123, 322, 92], TerminalsDisallowed::new()),
+            (vec![0, 1, 10, 202, 40, 85, 123, 322, 92], TerminalsDisallowed::new()),
+            (vec![0, 1, 10, 186, 40, 85, 123, 171, 88], TerminalsDisallowed::new()),
+            (vec![0, 1, 10, 202, 40, 85, 123, 171, 88], TerminalsDisallowed::new()),
+            (vec![0, 1, 10, 186, 40, 85, 123, 185, 288], TerminalsDisallowed::new()),
+            (vec![0, 1, 10, 202, 40, 85, 123, 185, 288], TerminalsDisallowed::new()),
+            (vec![0, 1, 10, 186, 40, 85, 123, 201, 288], TerminalsDisallowed::new()),
+            (vec![0, 1, 10, 202, 40, 85, 123, 201, 288], TerminalsDisallowed::new()),
+        ]);
+
+        let fast = try_advance_pop1_stackshift_shift_wave(&table, &before, token)
+            .expect("machine schema follow-up should be top-local");
+        assert!(fast.semantically_eq(&expected, 32).unwrap());
+        assert!(advance_stacks(&table, &before, token)
+            .semantically_eq(&expected, 32)
+            .unwrap());
     }
 
     #[test]
