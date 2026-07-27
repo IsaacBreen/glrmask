@@ -1713,10 +1713,16 @@ fn commit_bytes_full_width_fast_path(
     if state.len() > INLINE_PARSER_STATE_CAPACITY {
         return None;
     }
+    let normalized_state = state.has_duplicate_keys().then(|| {
+        let mut normalized = state.clone();
+        normalized.normalize_duplicate_keys();
+        normalized
+    });
+    let input_state = normalized_state.as_ref().unwrap_or(&*state);
     let at_most_two_parser_states = {
         let mut representatives = SmallVec::<[&ParserGSS; 2]>::new();
         let mut within_bound = true;
-        for gss in state.values() {
+        for gss in input_state.values() {
             if representatives
                 .iter()
                 .any(|existing| existing.ptr_eq(gss) || *existing == gss)
@@ -1734,14 +1740,17 @@ fn commit_bytes_full_width_fast_path(
     if !at_most_two_parser_states {
         return None;
     }
-    if state.len() > 1 && bytes.len() > 4 && state_has_nonempty_accumulators(state) {
+    if input_state.len() > 1
+        && bytes.len() > 4
+        && state_has_nonempty_accumulators(input_state)
+    {
         return None;
     }
 
     let mut output =
         SmallVec::<[(u32, ParserGSS); INLINE_PARSER_STATE_CAPACITY]>::new();
     let mut advance_cache = SmallVec::<[(u32, ParserGSS, ParserGSS); 4]>::new();
-    for (&tokenizer_state, gss) in state.iter() {
+    for (&tokenizer_state, gss) in input_state.iter() {
         if require_multiple_terminals && gss.peek_values().len() <= 1 {
             return None;
         }
@@ -1787,7 +1796,7 @@ fn commit_bytes_full_width_fast_path(
         if require_multiple_terminals && terminals.len() < 2 {
             return None;
         }
-        if terminals.len() > 1 && (state.len() != 1 || !accs_empty) {
+        if terminals.len() > 1 && (input_state.len() != 1 || !accs_empty) {
             return None;
         }
         let pruned_gss = if accs_empty {
@@ -7823,6 +7832,85 @@ nt start ::= item item? item?;
             }
             frontier = next;
         }
+    }
+
+    #[test]
+    fn full_width_continuation_preserves_duplicate_key_parser_language() {
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                t LEFT ::= "x";
+                t RIGHT ::= "y";
+                t A ::= "threea";
+                t B ::= "threeb";
+                nt start ::= LEFT A | RIGHT B;
+            "#,
+            &Vocab::new(vec![
+                (0, b"x".to_vec()),
+                (1, b"y".to_vec()),
+                (2, b"three".to_vec()),
+                (3, b"a".to_vec()),
+                (4, b"b".to_vec()),
+            ]),
+        )
+        .unwrap();
+
+        let mut left = constraint.start();
+        left.commit_token(0).unwrap();
+        let mut right = constraint.start();
+        right.commit_token(1).unwrap();
+
+        let lexer_key = constraint.tokenizer.initial_state();
+        let mut split = ParserStateMap::default();
+        for source in [&left.state, &right.state] {
+            for gss in source.values() {
+                for (stack, acc) in gss.to_stacks(8).expect("bounded post-prefix parser state") {
+                    split
+                        .entries
+                        .push((lexer_key, ParserGSS::from_single_stack(stack, acc)));
+                }
+            }
+        }
+        assert!(split.has_duplicate_keys());
+        assert_eq!(
+            split
+                .entries
+                .iter()
+                .flat_map(|(_, gss)| gss.to_stacks(8).unwrap())
+                .count(),
+            2,
+        );
+
+        let mut fast = split.clone();
+        let mut reference = split;
+        let mut tokenizer_scratch = tokenizer_scan::ReusableTokenizerExecScratch::default();
+        commit_bytes_full_width_fast_path(
+            &constraint,
+            &mut fast,
+            b"three",
+            &mut tokenizer_scratch,
+            None,
+            false,
+        )
+        .expect("duplicate-key full-width continuation should be applicable")
+        .expect("duplicate-key full-width continuation should remain viable");
+        commit_bytes_impl_profiled(
+            &constraint,
+            &mut reference,
+            b"three",
+            &mut CommitBuffers::default(),
+            None,
+            false,
+        )
+        .expect("authoritative continuation should remain viable");
+
+        assert_eq!(
+            canonical_commit_state(&fast),
+            canonical_commit_state(&reference),
+        );
+        assert!(canonical_commit_state(&fast)
+            .iter()
+            .all(|(_, stacks)| stacks.len() == 2));
     }
 
     #[test]
