@@ -4458,7 +4458,7 @@ fn finish_grouped_flat_frontier_commit(
         output_groups.push(group);
     }
 
-    let compressed_cartesian = if outputs.len() > INLINE_PARSER_STATE_CAPACITY {
+    let compressed_cartesian = {
         let mut keys = SmallVec::<[u32; INLINE_PARSER_STATE_CAPACITY]>::new();
         let mut expected_groups = SmallVec::<[usize; INLINE_PARSER_STATE_CAPACITY]>::new();
         let mut cursor = 0usize;
@@ -4490,8 +4490,6 @@ fn finish_grouped_flat_frontier_commit(
         }
         (valid && keys.len() >= 2 && expected_groups.len() >= 2)
             .then_some((keys, expected_groups))
-    } else {
-        None
     };
     if outputs.len() > INLINE_PARSER_STATE_CAPACITY && compressed_cartesian.is_none() {
         return None;
@@ -6505,6 +6503,44 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert_eq!(distinct_parser_states.len(), 4);
         assert_eq!(state.len(), outputs.len());
+    }
+
+    #[test]
+    fn grouped_flat_finalizer_compresses_small_cartesian_outputs() {
+        let acc = TerminalsDisallowed::new();
+        let mut state = ParserStateMap::default();
+        state.entries.push((
+            3,
+            ParserGSS::from_single_stack(vec![0, 3, 21, 38], acc.clone()),
+        ));
+        state.entries.push((
+            15,
+            ParserGSS::from_single_stack(vec![0, 3, 30, 32, 11], acc.clone()),
+        ));
+
+        let stacks = [vec![0, 3, 21, 38], vec![0, 3, 30, 32, 11]];
+        let mut frontier = FlatFrontierScratch::default();
+        for &key in &[50, 138] {
+            for stack in &stacks {
+                assert!(frontier.enqueue(5, key, stack, acc.clone()));
+            }
+        }
+
+        finish_grouped_flat_frontier_commit(&mut state, &mut frontier, 5, None)
+            .expect("small Cartesian finalization should be applicable")
+            .expect("small Cartesian output should be non-empty");
+
+        let expected_stacks = stacks
+            .iter()
+            .cloned()
+            .map(|stack| (stack, vec![]))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            canonical_commit_state(&state),
+            vec![(50, expected_stacks.clone()), (138, expected_stacks)],
+        );
+        assert_eq!(state.len(), 2);
+        assert!(state.entries[0].1.ptr_eq(&state.entries[1].1));
     }
 
     #[test]
