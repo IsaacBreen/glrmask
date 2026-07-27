@@ -4353,6 +4353,50 @@ fn try_commit_uniform_parser_frontier(
     )
 }
 
+#[inline]
+fn flat_frontier_gss_is_cheap_to_drop(gss: &ParserGSS) -> bool {
+    gss.max_depth() <= LINEAR_STACK_RESERVE as u32 && gss.single_path_acc().is_some()
+}
+
+fn displaced_flat_gss_storage_counts<'a>(
+    gsses: impl IntoIterator<Item = &'a ParserGSS>,
+) -> (usize, usize) {
+    let mut recyclable = 0usize;
+    let mut must_retire = 0usize;
+    for gss in gsses {
+        if gss.can_replace_single_path_state_in_place(&[0]) {
+            recyclable += 1;
+        } else if !flat_frontier_gss_is_cheap_to_drop(gss) {
+            must_retire += 1;
+        }
+    }
+    (recyclable, must_retire)
+}
+
+fn store_displaced_flat_gsses(
+    frontier: &mut FlatFrontierScratch,
+    gsses: impl IntoIterator<Item = ParserGSS>,
+) {
+    let mut cheap_to_drop =
+        SmallVec::<[ParserGSS; INLINE_PARSER_STATE_CAPACITY]>::new();
+    for gss in gsses {
+        if gss.can_replace_single_path_state_in_place(&[0]) {
+            frontier.gss_pool.push(gss);
+        } else if flat_frontier_gss_is_cheap_to_drop(&gss) {
+            cheap_to_drop.push(gss);
+        } else {
+            frontier.retired_gss.push(gss);
+        }
+    }
+    for gss in cheap_to_drop {
+        if frontier.retired_gss.len() < FLAT_FRONTIER_RETIRED_GSS_CAPACITY {
+            frontier.retired_gss.push(gss);
+        } else {
+            drop(gss);
+        }
+    }
+}
+
 fn finish_grouped_flat_frontier_commit(
     state: &mut ParserStateMap,
     frontier: &mut FlatFrontierScratch,
@@ -4440,38 +4484,34 @@ fn finish_grouped_flat_frontier_commit(
         return None;
     }
     if let Some((keys, groups)) = compressed_cartesian.as_ref() {
-        let first = &frontier.branches[group_representatives[*groups.first()?]];
-        let acc = first.acc.clone();
-        let mut stack_slices = SmallVec::<[&[u32]; INLINE_PARSER_STATE_CAPACITY]>::new();
-        for &group in groups {
-            let branch = &frontier.branches[group_representatives[group]];
-            if branch.acc != acc {
-                return None;
+        let compressed = {
+            let first = &frontier.branches[group_representatives[*groups.first()?]];
+            let acc = first.acc.clone();
+            let mut stack_slices =
+                SmallVec::<[&[u32]; INLINE_PARSER_STATE_CAPACITY]>::new();
+            for &group in groups {
+                let branch = &frontier.branches[group_representatives[group]];
+                if branch.acc != acc {
+                    return None;
+                }
+                stack_slices.push(branch.stack.as_slice());
             }
-            stack_slices.push(branch.stack.as_slice());
-        }
-        let compressed = ParserGSS::from_small_stack_slices_shared_prefix(&stack_slices, acc)?;
+            ParserGSS::from_small_stack_slices_shared_prefix(&stack_slices, acc)?
+        };
 
-        let (recyclable, retired) = {
-            let mut unique_ptrs = SmallVec::<[usize; INLINE_PARSER_STATE_CAPACITY]>::new();
-            let mut recyclable = 0usize;
-            let mut retired = 0usize;
+        let (recyclable, must_retire) = {
+            let mut unique =
+                SmallVec::<[&ParserGSS; INLINE_PARSER_STATE_CAPACITY]>::new();
             for (_, gss) in &state.entries {
-                let ptr = gss.ptr_key();
-                if unique_ptrs.contains(&ptr) {
-                    continue;
-                }
-                unique_ptrs.push(ptr);
-                if gss.can_replace_single_path_state_in_place(&[0]) {
-                    recyclable += 1;
-                } else {
-                    retired += 1;
+                if !unique.iter().any(|existing| existing.ptr_eq(gss)) {
+                    unique.push(gss);
                 }
             }
-            (recyclable, retired)
+            displaced_flat_gss_storage_counts(unique.iter().copied())
         };
         if frontier.gss_pool.len() + recyclable > FLAT_FRONTIER_GSS_POOL_CAPACITY
-            || frontier.retired_gss.len() + retired > FLAT_FRONTIER_RETIRED_GSS_CAPACITY
+            || frontier.retired_gss.len() + must_retire
+                > FLAT_FRONTIER_RETIRED_GSS_CAPACITY
         {
             return None;
         }
@@ -4483,13 +4523,7 @@ fn finish_grouped_flat_frontier_commit(
                 old_representatives.push(gss);
             }
         }
-        for gss in old_representatives {
-            if gss.can_replace_single_path_state_in_place(&[0]) {
-                frontier.gss_pool.push(gss);
-            } else {
-                frontier.retired_gss.push(gss);
-            }
-        }
+        store_displaced_flat_gsses(frontier, old_representatives);
 
         let mut new_entries =
             SmallVec::<[(u32, ParserGSS); INLINE_PARSER_STATE_CAPACITY]>::new();
@@ -4547,17 +4581,10 @@ fn finish_grouped_flat_frontier_commit(
         >,
          old_layout: SmallVec<[(u32, usize); INLINE_PARSER_STATE_CAPACITY]>|
          -> bool {
-            let mut recyclable = 0usize;
-            let mut retired = 0usize;
-            for gss in &active_representatives {
-                if gss.can_replace_single_path_state_in_place(&[0]) {
-                    recyclable += 1;
-                } else {
-                    retired += 1;
-                }
-            }
+            let (recyclable, must_retire) =
+                displaced_flat_gss_storage_counts(active_representatives.iter());
             if frontier.gss_pool.len() + recyclable > FLAT_FRONTIER_GSS_POOL_CAPACITY
-                || frontier.retired_gss.len() + retired
+                || frontier.retired_gss.len() + must_retire
                     > FLAT_FRONTIER_RETIRED_GSS_CAPACITY
             {
                 restore_old_state(state, &active_representatives, &old_layout);
@@ -4656,13 +4683,7 @@ fn finish_grouped_flat_frontier_commit(
                 new_entries.push((key, language));
             }
 
-            for gss in active_representatives {
-                if gss.can_replace_single_path_state_in_place(&[0]) {
-                    frontier.gss_pool.push(gss);
-                } else {
-                    frontier.retired_gss.push(gss);
-                }
-            }
+            store_displaced_flat_gsses(frontier, active_representatives);
             state.entries = new_entries;
             true
         };
@@ -4720,22 +4741,16 @@ fn finish_grouped_flat_frontier_commit(
     // Validate storage for distinct active parser objects not selected as an
     // output group. Pointer duplicates were already discarded above, so every
     // remaining representative is independently recyclable or retired.
-    let mut recyclable = 0usize;
-    let mut retired = 0usize;
-    for (index, gss) in active_representatives.iter().enumerate() {
-        if active_used[index] {
-            continue;
-        }
-        if gss.can_replace_single_path_state_in_place(&[0]) {
-            recyclable += 1;
-        } else {
-            retired += 1;
-        }
-    }
+    let unused_active = active_representatives
+        .iter()
+        .enumerate()
+        .filter_map(|(index, gss)| (!active_used[index]).then_some(gss));
+    let (recyclable, must_retire) = displaced_flat_gss_storage_counts(unused_active);
     let selected_pool = pool_used.iter().filter(|&&used| used).count();
     if frontier.gss_pool.len() - selected_pool + recyclable
         > FLAT_FRONTIER_GSS_POOL_CAPACITY
-        || frontier.retired_gss.len() + retired > FLAT_FRONTIER_RETIRED_GSS_CAPACITY
+        || frontier.retired_gss.len() + must_retire
+            > FLAT_FRONTIER_RETIRED_GSS_CAPACITY
     {
         restore_old_state(state, &active_representatives, &old_layout);
         return None;
@@ -4779,14 +4794,8 @@ fn finish_grouped_flat_frontier_commit(
         group_gss.push(gss);
     }
 
-    for gss in active_slots.into_iter().flatten() {
-        if gss.can_replace_single_path_state_in_place(&[0]) {
-            frontier.gss_pool.push(gss);
-        } else {
-            frontier.retired_gss.push(gss);
-        }
-    }
     frontier.gss_pool.extend(pool_slots.into_iter().flatten());
+    store_displaced_flat_gsses(frontier, active_slots.into_iter().flatten());
 
     let mut new_entries =
         SmallVec::<[(u32, ParserGSS); INLINE_PARSER_STATE_CAPACITY]>::new();
@@ -6653,6 +6662,51 @@ mod tests {
         assert_eq!(
             canonical_commit_state(&state.state),
             canonical_commit_state(&normalized.state),
+        );
+    }
+
+    #[test]
+    fn flat_finalizer_drops_small_displaced_gss_when_retired_bank_is_full() {
+        let mut frontier = FlatFrontierScratch::default();
+        while frontier.retired_gss.len() < FLAT_FRONTIER_RETIRED_GSS_CAPACITY {
+            let value = 100 + frontier.retired_gss.len() as u32;
+            frontier.retired_gss.push(ParserGSS::from_single_stack(
+                vec![0, value],
+                TerminalsDisallowed::new(),
+            ));
+        }
+
+        let left = ParserGSS::from_single_stack(
+            vec![0, 10, 20],
+            TerminalsDisallowed::new(),
+        );
+        let right = ParserGSS::from_single_stack(
+            vec![0, 11, 21],
+            TerminalsDisallowed::new(),
+        );
+        let _left_hold = left.clone();
+        let _right_hold = right.clone();
+        let mut state = ParserStateMap::default();
+        state.entries.push((4, left));
+        state.entries.push((30, right));
+
+        assert!(frontier.enqueue(
+            3,
+            0,
+            &[0, 99],
+            TerminalsDisallowed::new(),
+        ));
+        assert_eq!(
+            finish_flat_frontier_commit(&mut state, &mut frontier, 3),
+            Some(Ok(())),
+        );
+        assert_eq!(
+            canonical_commit_state(&state),
+            vec![(0, vec![(vec![0, 99], Vec::new())])],
+        );
+        assert_eq!(
+            frontier.retired_gss.len(),
+            FLAT_FRONTIER_RETIRED_GSS_CAPACITY,
         );
     }
 
