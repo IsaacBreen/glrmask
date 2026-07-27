@@ -583,7 +583,7 @@ fn advance_stacks_profiled_core(
                 }
                 if gss.single_predecessor_below_top(&state).is_none()
                     && let Some(shifted) =
-                        try_advance_bounded_deterministic_reduce_paths(table, &gss, token)
+                        try_advance_bounded_concrete_paths(table, &gss, token)
                 {
                     profile.fast_path_ns = fast_path_start.elapsed().as_nanos() as u64;
                     profile.stack_shift_apply_ns = profile.fast_path_ns;
@@ -638,7 +638,7 @@ fn advance_stacks_profiled_core(
 
     let bounded_reduce_start = Instant::now();
     if let Some(shifted) =
-        try_advance_bounded_deterministic_reduce_paths(table, &gss, token)
+        try_advance_bounded_concrete_paths(table, &gss, token)
     {
         profile.stack_shift_apply_ns += bounded_reduce_start.elapsed().as_nanos() as u64;
         profile.total_ns = total_start.elapsed().as_nanos() as u64;
@@ -712,7 +712,7 @@ fn advance_stacks_core(table: &GLRTable, mut gss: ParserGSS, token: TerminalID) 
         if matches!(table.action(state, token), Some(Action::Reduce(..)))
             && gss.single_predecessor_below_top(&state).is_none()
             && let Some(shifted) =
-                try_advance_bounded_deterministic_reduce_paths(table, &gss, token)
+                try_advance_bounded_concrete_paths(table, &gss, token)
         {
             return shifted;
         }
@@ -744,7 +744,7 @@ fn advance_stacks_core(table: &GLRTable, mut gss: ParserGSS, token: TerminalID) 
     }
 
     if let Some(shifted) =
-        try_advance_bounded_deterministic_reduce_paths(table, &gss, token)
+        try_advance_bounded_concrete_paths(table, &gss, token)
     {
         return shifted;
     }
@@ -998,7 +998,7 @@ fn try_advance_uniform_deterministic_frontier(
     None
 }
 
-fn try_advance_bounded_deterministic_reduce_paths(
+fn try_advance_bounded_concrete_paths(
     table: &GLRTable,
     closure: &ParserGSS,
     token: TerminalID,
@@ -1008,16 +1008,23 @@ fn try_advance_bounded_deterministic_reduce_paths(
     const MAX_STEPS: usize = 16;
 
     let states = closure.peek_values();
-    if states.is_empty()
-        || states.len() > 4
-        || closure.max_depth() as usize > MAX_DEPTH
-        || !states
-            .iter()
-            .any(|&state| matches!(table.action(state, token), Some(Action::Reduce(..))))
-        || states.iter().any(|&state| {
-            !matches!(table.action(state, token), Some(Action::Reduce(..)) | None)
-        })
-    {
+    if states.is_empty() || states.len() > 4 || closure.max_depth() as usize > MAX_DEPTH {
+        return None;
+    }
+    let mut saw_complex_action = false;
+    for &state in &states {
+        match table.action(state, token) {
+            None | Some(Action::Shift(..)) => {}
+            Some(Action::Reduce(..)) | Some(Action::GuardedStackShifts(..)) => {
+                saw_complex_action = true;
+            }
+            Some(Action::StackShifts(shifts)) if shifts.len() == 1 => {
+                saw_complex_action = true;
+            }
+            _ => return None,
+        }
+    }
+    if !saw_complex_action {
         return None;
     }
 
@@ -4092,7 +4099,7 @@ mod tests {
         stack_admissible_terminals,
         stack_may_advance_on,
         stack_may_advance_on_any,
-        try_advance_bounded_deterministic_reduce_paths,
+        try_advance_bounded_concrete_paths,
         try_advance_mixed_top_replace_wave,
         try_advance_uniform_deterministic_frontier,
         try_advance_pop1_reduce_guarded_stackshift_wave,
@@ -4385,6 +4392,10 @@ mod tests {
             (vec![0, 10, 360], TerminalsDisallowed::new()),
             (vec![0, 10, 327], TerminalsDisallowed::new()),
         ]);
+
+        let bounded = try_advance_bounded_concrete_paths(&table, &before, token)
+            .expect("small mixed paths should be interpreted concretely");
+        assert!(bounded.semantically_eq(&expected, 16).unwrap());
 
         let fast = try_advance_pop1_reduce_guarded_stackshift_wave(&table, &before, token)
             .expect("mixed wave should be handled structurally");
@@ -5159,11 +5170,49 @@ mod tests {
             (vec![0, 1, 322, 91, 135], acc_b),
         ]);
 
-        let fast = try_advance_bounded_deterministic_reduce_paths(&table, &before, token)
+        let fast = try_advance_bounded_concrete_paths(&table, &before, token)
             .expect("small predecessor-dependent reduce chains should remain bounded");
         assert!(fast.semantically_eq(&expected, 16).unwrap());
         assert!(advance_stacks(&table, &before, token)
             .semantically_eq(&expected, 16)
+            .unwrap());
+    }
+
+    #[test]
+    fn bounded_concrete_paths_handle_guarded_shift_and_pure_shift() {
+        let token = 0;
+        let mut action_rows = vec![Vec::new(); 64];
+        action_rows[10].push((
+            token,
+            Action::GuardedStackShifts(vec![GuardedStackShift {
+                guards: vec![StackShiftGuard {
+                    pop: 1,
+                    states: vec![1],
+                }],
+                pop: 2,
+                pushes: vec![20],
+            }]),
+        ));
+        action_rows[11].push((token, Action::Shift(30, true)));
+        let action_refs = action_rows.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let goto_rows = vec![Vec::new(); 64];
+        let goto_refs = goto_rows.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let table = build_test_table(64, 1, &action_refs, &goto_refs);
+
+        let before = ParserGSS::from_stacks(&[
+            (vec![0, 1, 10], TerminalsDisallowed::new()),
+            (vec![0, 2, 11], TerminalsDisallowed::new()),
+        ]);
+        let expected = ParserGSS::from_stacks(&[
+            (vec![0, 20], TerminalsDisallowed::new()),
+            (vec![0, 2, 30], TerminalsDisallowed::new()),
+        ]);
+
+        let fast = try_advance_bounded_concrete_paths(&table, &before, token)
+            .expect("small guarded/shift frontier should stay bounded");
+        assert!(fast.semantically_eq(&expected, 8).unwrap());
+        assert!(advance_stacks(&table, &before, token)
+            .semantically_eq(&expected, 8)
             .unwrap());
     }
 
