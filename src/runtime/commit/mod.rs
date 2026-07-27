@@ -4100,6 +4100,7 @@ fn flat_group_accepted_terminals(
     constraint: &Constraint,
     frontier: &FlatFrontierScratch,
     tokenizer_state: u32,
+    current_top: u32,
     matches: &[TokenizerMatch],
 ) -> SmallVec<[u32; SMALL_NORMALIZED_MATCH_LINEAR_SCAN_MAX]> {
     let mut accepted = SmallVec::new();
@@ -4109,13 +4110,16 @@ fn flat_group_accepted_terminals(
         {
             continue;
         }
-        let actionable = frontier.branches[..frontier.len].iter().any(|branch| {
-            branch.offset == 0
-                && branch.tokenizer_state == tokenizer_state
-                && branch.stack.last().is_some_and(|top| {
-                    constraint.table.advance_row_allows(*top, matched.id)
-                })
-        });
+        let actionable = constraint
+            .table
+            .advance_row_allows(current_top, matched.id)
+            || frontier.branches[..frontier.len].iter().any(|branch| {
+                branch.offset == 0
+                    && branch.tokenizer_state == tokenizer_state
+                    && branch.stack.last().is_some_and(|top| {
+                        constraint.table.advance_row_allows(*top, matched.id)
+                    })
+            });
         if actionable {
             accepted.push(matched.id);
         }
@@ -4825,10 +4829,10 @@ enum FlatContinuationGroupOutcome {
 }
 
 /// Process several flat parser branches sharing one tokenizer state with a
-/// single lexer scan. Empty accumulators make the branches independent: no
-/// initial-state exclusion pruning needs the complete correlated group, so the
-/// common tokenizer result can be applied to each concrete stack exactly.
-fn try_process_flat_empty_acc_group(
+/// single lexer scan. Initial-state exclusions are pruned against the terminals
+/// accepted by the complete correlated group, matching the authoritative GSS
+/// path while avoiding one tokenizer execution per concrete stack.
+fn try_process_flat_same_key_group(
     constraint: &Constraint,
     bytes: &[u8],
     offset: usize,
@@ -4840,7 +4844,7 @@ fn try_process_flat_empty_acc_group(
     for index in 0..frontier.len {
         let branch = &frontier.branches[index];
         if branch.offset == offset && branch.tokenizer_state == tokenizer_state {
-            if !branch.acc.is_empty() {
+            if !branch.acc.is_inline() {
                 return FlatContinuationGroupOutcome::NotApplicable;
             }
             indices.push(index);
@@ -4860,7 +4864,24 @@ fn try_process_flat_empty_acc_group(
         return FlatContinuationGroupOutcome::Decline;
     }
 
-    let mut stacks = SmallVec::<[FlatInlineStack; FLAT_FRONTIER_MAX_BRANCHES]>::new();
+    let Some(&first_top) = frontier.branches[indices[0]].stack.last() else {
+        return FlatContinuationGroupOutcome::Decline;
+    };
+    let accepted_terminals = if offset == 0 {
+        flat_group_accepted_terminals(
+            constraint,
+            frontier,
+            tokenizer_state,
+            first_top,
+            &tokenizer_scratch.matches,
+        )
+    } else {
+        SmallVec::new()
+    };
+
+    let mut stacks = SmallVec::<
+        [(FlatInlineStack, TerminalsDisallowed); FLAT_FRONTIER_MAX_BRANCHES],
+    >::new();
     for &index in &indices {
         let branch = &frontier.branches[index];
         if branch.stack.len() > LINEAR_STACK_RESERVE {
@@ -4868,14 +4889,28 @@ fn try_process_flat_empty_acc_group(
         }
         let mut stack = FlatInlineStack::new();
         stack.extend_from_slice(&branch.stack);
-        stacks.push(stack);
+        stacks.push((stack, branch.acc.clone()));
     }
     for &index in indices.iter().rev() {
         frontier.remove_branch(index);
     }
 
     let initial_tokenizer_state = constraint.tokenizer.initial_state();
-    for stack in &stacks {
+    for (stack, original_acc) in &stacks {
+        let mut acc = original_acc.clone();
+        if offset == 0 {
+            match prune_flat_branch_acc(
+                &acc,
+                tokenizer_state,
+                &tokenizer_scratch.states,
+                &accepted_terminals,
+            ) {
+                None => return FlatContinuationGroupOutcome::Decline,
+                Some(Some(pruned)) => acc = pruned,
+                Some(None) => continue,
+            }
+        }
+
         let Some(&top_state) = stack.last() else {
             return FlatContinuationGroupOutcome::Decline;
         };
@@ -4898,7 +4933,7 @@ fn try_process_flat_empty_acc_group(
                     new_offset,
                     initial_tokenizer_state,
                     stack,
-                    TerminalsDisallowed::new(),
+                    acc.clone(),
                 ) {
                     return FlatContinuationGroupOutcome::Decline;
                 }
@@ -4917,7 +4952,7 @@ fn try_process_flat_empty_acc_group(
             }
             let Some(advanced_acc) = apply_flat_future_disallow(
                 constraint,
-                &TerminalsDisallowed::new(),
+                &acc,
                 &tokenizer_scratch.states,
                 matched.terminal_id,
             ) else {
@@ -4955,7 +4990,7 @@ fn try_process_flat_empty_acc_group(
                     bytes.len(),
                     end_state,
                     stack,
-                    TerminalsDisallowed::new(),
+                    acc.clone(),
                 )
             {
                 return FlatContinuationGroupOutcome::Decline;
@@ -5162,7 +5197,7 @@ fn try_commit_flat_frontier_in_place(
             }
 
             let tokenizer_state = frontier.branches[index].tokenizer_state;
-            match try_process_flat_empty_acc_group(
+            match try_process_flat_same_key_group(
                 constraint,
                 bytes,
                 offset,
@@ -5172,7 +5207,7 @@ fn try_commit_flat_frontier_in_place(
             ) {
                 FlatContinuationGroupOutcome::Handled => continue,
                 FlatContinuationGroupOutcome::Decline => {
-                    flat_decline!("empty-acc-group");
+                    flat_decline!("same-key-group");
                 }
                 FlatContinuationGroupOutcome::NotApplicable => {}
             }
@@ -5216,6 +5251,7 @@ fn try_commit_flat_frontier_in_place(
                     constraint,
                     frontier,
                     tokenizer_state,
+                    top_state,
                     &tokenizer_scratch.matches,
                 );
                 match prune_flat_branch_acc(
@@ -6832,7 +6868,7 @@ mod tests {
         }
         let mut tokenizer_scratch = tokenizer_scan::ReusableTokenizerExecScratch::default();
         assert_eq!(
-            try_process_flat_empty_acc_group(
+            try_process_flat_same_key_group(
                 &constraint,
                 b"b",
                 0,
@@ -6847,6 +6883,78 @@ mod tests {
         let mut actual_buffers = CommitBuffers::default();
         commit_token_impl(&constraint, &mut actual_state, &mut actual_buffers, 1)
             .expect("grouped flat commit should accept b");
+        let mut reference_state = flat_state;
+        commit_token_no_fast_path_reference(&constraint, &mut reference_state, 1)
+            .expect("authoritative commit should accept b");
+
+        assert_eq!(
+            canonical_commit_state(&actual_state),
+            canonical_commit_state(&reference_state),
+        );
+    }
+
+    #[test]
+    fn inline_acc_duplicate_key_group_matches_authoritative_commit() {
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                t A ::= "a";
+                t B ::= "a" | "ab";
+                nt item ::= A | B;
+                nt start ::= item;
+            "#,
+            &Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]),
+        )
+        .unwrap();
+
+        let mut source = constraint.start();
+        source.commit_token(0).unwrap();
+        assert!(source.state.has_duplicate_keys());
+
+        let mut flat_state = ParserStateMap::default();
+        for (&key, gss) in source.state.iter() {
+            for (stack, acc) in gss.to_stacks(8).expect("bounded duplicate-key state") {
+                flat_state
+                    .entries
+                    .push((key, ParserGSS::from_single_stack(stack, acc)));
+            }
+        }
+        assert!(flat_state.has_duplicate_keys());
+        assert!(flat_state.entries.iter().any(|(_, gss)| {
+            gss.single_path_acc()
+                .is_some_and(|acc: TerminalsDisallowed| !acc.is_empty())
+        }));
+
+        let duplicate_key = flat_state
+            .entries
+            .windows(2)
+            .find_map(|pair| (pair[0].0 == pair[1].0).then_some(pair[0].0))
+            .expect("duplicate key checked");
+        let mut frontier = FlatFrontierScratch::default();
+        let mut stack = Vec::with_capacity(LINEAR_STACK_RESERVE);
+        for gss in flat_state.values_for_key(duplicate_key) {
+            stack.clear();
+            assert!(gss.copy_single_path_stack_into(&mut stack));
+            let acc = gss.single_path_acc().expect("single-path accumulator");
+            assert!(frontier.enqueue(0, duplicate_key, &stack, acc));
+        }
+        let mut tokenizer_scratch = tokenizer_scan::ReusableTokenizerExecScratch::default();
+        assert_eq!(
+            try_process_flat_same_key_group(
+                &constraint,
+                b"b",
+                0,
+                duplicate_key,
+                &mut tokenizer_scratch,
+                &mut frontier,
+            ),
+            FlatContinuationGroupOutcome::Handled,
+        );
+
+        let mut actual_state = flat_state.clone();
+        let mut actual_buffers = CommitBuffers::default();
+        commit_token_impl(&constraint, &mut actual_state, &mut actual_buffers, 1)
+            .expect("grouped inline-acc commit should accept b");
         let mut reference_state = flat_state;
         commit_token_no_fast_path_reference(&constraint, &mut reference_state, 1)
             .expect("authoritative commit should accept b");
