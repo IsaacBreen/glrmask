@@ -573,6 +573,14 @@ fn advance_stacks_profiled_core(
                         Some(&Action::Reduce(*nt, *len)),
                     ));
                 }
+                if let Some(shifted) =
+                    try_advance_uniform_deterministic_frontier(table, &gss, token)
+                {
+                    profile.fast_path_ns = fast_path_start.elapsed().as_nanos() as u64;
+                    profile.stack_shift_apply_ns = profile.fast_path_ns;
+                    profile.total_ns = total_start.elapsed().as_nanos() as u64;
+                    return (shifted, profile);
+                }
                 if gss.single_predecessor_below_top(&state).is_none()
                     && let Some(shifted) =
                         try_advance_bounded_deterministic_reduce_paths(table, &gss, token)
@@ -694,6 +702,12 @@ fn advance_stacks_core(table: &GLRTable, mut gss: ParserGSS, token: TerminalID) 
         }
         if let Some(Action::GuardedStackShifts(shifts)) = table.action(state, token) {
             return apply_guarded_stack_shifts(gss, shifts, table.guarded_shift_index(state, token));
+        }
+        if matches!(table.action(state, token), Some(Action::Reduce(..)))
+            && let Some(shifted) =
+                try_advance_uniform_deterministic_frontier(table, &gss, token)
+        {
+            return shifted;
         }
         if matches!(table.action(state, token), Some(Action::Reduce(..)))
             && gss.single_predecessor_below_top(&state).is_none()
@@ -932,6 +946,58 @@ fn try_advance_mixed_top_replace_wave(
 /// inline buffers, advanced exactly, and rebuilt once with shared prefixes.
 /// Larger, branching, or accumulator-heterogeneous frontiers decline to the
 /// ordinary GSS interpreter.
+/// Advance a deterministic reduction chain directly on the whole GSS while
+/// every live path exposes the same top state. This preserves divergent lower
+/// prefixes and avoids materializing each concrete stack separately.
+fn try_advance_uniform_deterministic_frontier(
+    table: &GLRTable,
+    closure: &ParserGSS,
+    token: TerminalID,
+) -> Option<ParserGSS> {
+    const MAX_STEPS: usize = 16;
+
+    let initial_state = closure.single_exclusive_top_value()?;
+    if !matches!(table.action(initial_state, token), Some(Action::Reduce(..))) {
+        return None;
+    }
+
+    let mut frontier = closure.clone();
+    for _ in 0..MAX_STEPS {
+        let state = frontier.single_exclusive_top_value()?;
+        match table.action(state, token) {
+            Some(Action::Reduce(nonterminal, len)) => {
+                let base = frontier.popn(*len as isize);
+                if base.is_empty() {
+                    return Some(ParserGSS::empty());
+                }
+                let goto_from = base.single_exclusive_top_value()?;
+                let Some((target, replace_top)) = table.goto_target(goto_from, *nonterminal)
+                else {
+                    return Some(ParserGSS::empty());
+                };
+                frontier = if replace_top {
+                    base.popn(1).push(target)
+                } else {
+                    base.push(target)
+                };
+            }
+            Some(Action::Shift(target, replace_top)) => {
+                return Some(if *replace_top {
+                    frontier.popn(1).push(*target)
+                } else {
+                    frontier.push(*target)
+                });
+            }
+            Some(Action::StackShifts(shifts)) if shifts.len() == 1 => {
+                return Some(apply_stack_shifts(frontier, shifts));
+            }
+            None => return Some(ParserGSS::empty()),
+            _ => return None,
+        }
+    }
+    None
+}
+
 fn try_advance_bounded_deterministic_reduce_paths(
     table: &GLRTable,
     closure: &ParserGSS,
@@ -4017,6 +4083,7 @@ mod tests {
     use super::{
         ParserGSS,
         advance_concrete_stacks_reference,
+        normalized_concrete_stacks,
         advance_stacks,
         apply_guarded_stack_shifts,
         apply_guarded_stack_shifts_as_predecessor_remap,
@@ -4027,6 +4094,7 @@ mod tests {
         stack_may_advance_on_any,
         try_advance_bounded_deterministic_reduce_paths,
         try_advance_mixed_top_replace_wave,
+        try_advance_uniform_deterministic_frontier,
         try_advance_pop1_reduce_guarded_stackshift_wave,
         try_advance_pop1_reduce_plus_stackshift_wave,
         try_advance_pop1_stackshift_shift_wave,
@@ -4040,6 +4108,50 @@ mod tests {
     };
     use crate::ds::bitset::BitSet;
     use crate::ds::leveled_gss::Merge;
+
+    #[test]
+    fn uniform_deterministic_frontier_preserves_divergent_lower_prefixes() {
+        let token = 0;
+        let nt0 = 0;
+        let nt1 = 1;
+        let mut action_rows = vec![Vec::<(u32, Action)>::new(); 10];
+        action_rows[9].push((token, Action::Reduce(nt0, 1)));
+        action_rows[6].push((token, Action::Reduce(nt1, 1)));
+        action_rows[7].push((token, Action::Shift(8, false)));
+        let action_refs = action_rows
+            .iter()
+            .map(Vec::as_slice)
+            .collect::<Vec<_>>();
+
+        let mut goto_rows = vec![Vec::<(u32, (u32, bool))>::new(); 10];
+        goto_rows[4].push((nt0, (6, true)));
+        goto_rows[1].push((nt1, (7, true)));
+        let goto_refs = goto_rows.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let table = build_test_table(10, 1, &action_refs, &goto_refs);
+
+        let acc = TerminalsDisallowed::new();
+        let before = ParserGSS::from_stacks(&[
+            (vec![0, 2, 1, 4, 9], acc.clone()),
+            (vec![0, 3, 1, 4, 9], acc.clone()),
+            (vec![0, 5, 1, 4, 9], acc),
+        ]);
+        let fast = try_advance_uniform_deterministic_frontier(&table, &before, token)
+            .expect("uniform reduction chain should be structural");
+        let expected = advance_concrete_stacks_reference(&table, &before, token);
+
+        assert_eq!(
+            normalized_concrete_stacks(&fast),
+            normalized_concrete_stacks(&expected),
+        );
+        assert_eq!(
+            normalized_concrete_stacks(&fast),
+            vec![
+                (vec![0, 2, 7, 8], TerminalsDisallowed::new()),
+                (vec![0, 3, 7, 8], TerminalsDisallowed::new()),
+                (vec![0, 5, 7, 8], TerminalsDisallowed::new()),
+            ],
+        );
+    }
 
     #[test]
     fn concrete_advance_reference_applies_whole_stack_effect_atomically() {
