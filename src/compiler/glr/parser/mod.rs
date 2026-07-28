@@ -214,6 +214,17 @@ pub(crate) fn advance_stacks_owned(table: &GLRTable, stack: ParserGSS, token: Te
     }
 }
 
+/// Try the bounded mixed reduction/guarded-shift interpreter before a
+/// commit-template DFA. Large guarded cells use the parser table's dense index;
+/// unsupported shapes leave template and general GLR dispatch unchanged.
+pub(crate) fn try_advance_mixed_guarded_before_template(
+    table: &GLRTable,
+    stack: &ParserGSS,
+    token: TerminalID,
+) -> Option<ParserGSS> {
+    try_advance_pop1_reduce_guarded_stackshift_wave(table, stack, token)
+}
+
 fn normalized_concrete_stacks(
     gss: &ParserGSS,
 ) -> Vec<(Vec<u32>, TerminalsDisallowed)> {
@@ -1315,6 +1326,7 @@ fn try_advance_pop1_reduce_guarded_stackshift_wave(
     let mut combined_saw_reduce = false;
     let mut combined_saw_guarded = false;
     let mut max_guard_pop = 0usize;
+    let mut combined_guarded_alternatives = 0usize;
     let mut combined_shape_supported = true;
     for state in &states {
         match table.action(*state, token) {
@@ -1329,6 +1341,7 @@ fn try_advance_pop1_reduce_guarded_stackshift_wave(
             }
             Some(Action::GuardedStackShifts(shifts)) => {
                 combined_saw_guarded = true;
+                combined_guarded_alternatives += shifts.len();
                 for shift in shifts {
                     for guard in &shift.guards {
                         max_guard_pop = max_guard_pop.max(guard.pop as usize);
@@ -1342,6 +1355,7 @@ fn try_advance_pop1_reduce_guarded_stackshift_wave(
     if combined_shape_supported
         && combined_saw_reduce
         && combined_saw_guarded
+        && combined_guarded_alternatives <= 8
         && max_guard_pop <= 9
     {
         let lower_prefix_len = max_guard_pop.saturating_sub(1);
@@ -2455,7 +2469,8 @@ fn indexed_guarded_shift_candidates(
     stack: &VirtualStack<u32, TerminalsDisallowed>,
     index: &GuardedShiftCellIndex,
 ) -> SmallVec<[u32; 8]> {
-    let mut counts: FxHashMap<u32, u16> = FxHashMap::default();
+    let mut counts = SmallVec::<[u16; 32]>::new();
+    counts.resize(index.guard_counts.len(), 0);
 
     for &pop in &index.guard_pops {
         let Some(state) = stack.top_after_popping(pop as usize).copied() else {
@@ -2463,19 +2478,19 @@ fn indexed_guarded_shift_candidates(
         };
         if let Some(shift_indices) = index.by_guard_key.get(&(pop, state)) {
             for &shift_index in shift_indices.iter() {
-                *counts.entry(shift_index).or_insert(0) += 1;
+                if let Some(count) = counts.get_mut(shift_index as usize) {
+                    *count += 1;
+                }
             }
         }
     }
 
     let mut candidates = SmallVec::<[u32; 8]>::new();
-    for (shift_index, count) in counts {
-        if index
-            .guard_counts
-            .get(shift_index as usize)
-            .is_some_and(|required| *required == count)
-        {
-            candidates.push(shift_index);
+    for (shift_index, (&count, &required)) in
+        counts.iter().zip(index.guard_counts.iter()).enumerate()
+    {
+        if count == required && count != 0 {
+            candidates.push(shift_index as u32);
         }
     }
     candidates.extend(index.unguarded_indices.iter().copied());
@@ -4098,6 +4113,7 @@ mod tests {
         stack_may_advance_on,
         stack_may_advance_on_any,
         try_advance_bounded_concrete_paths,
+        try_advance_mixed_guarded_before_template,
         try_advance_mixed_top_replace_wave,
         try_advance_uniform_deterministic_frontier,
         try_advance_pop1_reduce_guarded_stackshift_wave,
@@ -4398,6 +4414,9 @@ mod tests {
         let fast = try_advance_pop1_reduce_guarded_stackshift_wave(&table, &before, token)
             .expect("mixed wave should be handled structurally");
         assert!(fast.semantically_eq(&expected, 16).unwrap());
+        let early = try_advance_mixed_guarded_before_template(&table, &before, token)
+            .expect("mixed guarded/reduction frontier should bypass templates");
+        assert!(early.semantically_eq(&expected, 16).unwrap());
         assert!(advance_stacks(&table, &before, token)
             .semantically_eq(&expected, 16)
             .unwrap());
