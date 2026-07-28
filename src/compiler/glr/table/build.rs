@@ -1847,12 +1847,17 @@ fn grouped_item_lookahead_counts(grammar: &AnalyzedGrammar) -> Vec<Vec<(u32, u32
 #[cfg(test)]
 mod tests {
     use super::{
-        build_lalr_table, build_table, build_table_with_default_construction,
-        grouped_item_lookahead_counts,
+        build_experimental_core_merged_table, build_lalr_table, build_lr1_item_sets, build_table,
+        build_table_with_default_construction, grouped_item_lookahead_counts,
     };
+    use crate::compiler::glr::accumulator::TerminalsDisallowed;
     use crate::compiler::glr::analysis::AnalyzedGrammar;
-    use crate::compiler::glr::table::{Action, AdmissionPolicy, GlrTableConstruction};
+    use crate::compiler::glr::parser::{
+        advance_stacks, stack_may_advance_on, stacks_finished, ParserGSS,
+    };
+    use crate::compiler::glr::table::{Action, AdmissionPolicy, GLRTable, GlrTableConstruction};
     use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
+    use std::collections::VecDeque;
 
     fn multi_lookahead_grammar() -> AnalyzedGrammar {
         let grammar = GrammarDef {
@@ -1941,6 +1946,313 @@ mod tests {
             ..GrammarDef::default()
         };
         AnalyzedGrammar::from_grammar_def(&grammar)
+    }
+
+    fn terminal(id: u32, byte: u8) -> Terminal {
+        Terminal::Literal {
+            id,
+            bytes: vec![byte],
+        }
+    }
+
+    fn analyzed(rules: Vec<Rule>, start: u32, num_terminals: u32) -> AnalyzedGrammar {
+        let grammar = GrammarDef {
+            rules,
+            start,
+            terminals: (0..num_terminals)
+                .map(|id| terminal(id, b'a' + id as u8))
+                .collect(),
+            ..GrammarDef::default()
+        };
+        AnalyzedGrammar::from_grammar_def(&grammar)
+    }
+
+    fn unit_chain_grammar() -> AnalyzedGrammar {
+        analyzed(
+            vec![
+                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(1), Symbol::Terminal(2)] },
+                Rule { lhs: 1, rhs: vec![Symbol::Nonterminal(2)] },
+                Rule { lhs: 2, rhs: vec![Symbol::Nonterminal(3)] },
+                Rule { lhs: 3, rhs: vec![Symbol::Terminal(0)] },
+                Rule { lhs: 3, rhs: vec![Symbol::Terminal(1)] },
+            ],
+            0,
+            3,
+        )
+    }
+
+    fn ambiguous_unit_chain_grammar() -> AnalyzedGrammar {
+        analyzed(
+            vec![
+                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(1), Symbol::Terminal(1)] },
+                Rule { lhs: 1, rhs: vec![Symbol::Nonterminal(2)] },
+                Rule { lhs: 1, rhs: vec![Symbol::Nonterminal(3)] },
+                Rule { lhs: 2, rhs: vec![Symbol::Nonterminal(4)] },
+                Rule { lhs: 3, rhs: vec![Symbol::Nonterminal(4)] },
+                Rule { lhs: 4, rhs: vec![Symbol::Terminal(0)] },
+            ],
+            0,
+            2,
+        )
+    }
+
+    fn nullable_unit_chain_grammar() -> AnalyzedGrammar {
+        analyzed(
+            vec![
+                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(1), Symbol::Terminal(2)] },
+                Rule { lhs: 1, rhs: Vec::new() },
+                Rule { lhs: 1, rhs: vec![Symbol::Nonterminal(2)] },
+                Rule { lhs: 2, rhs: vec![Symbol::Nonterminal(3)] },
+                Rule { lhs: 3, rhs: vec![Symbol::Terminal(0)] },
+                Rule { lhs: 3, rhs: vec![Symbol::Terminal(1)] },
+            ],
+            0,
+            3,
+        )
+    }
+
+    fn recursive_ambiguous_grammar() -> AnalyzedGrammar {
+        analyzed(
+            vec![
+                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(1)] },
+                Rule { lhs: 1, rhs: vec![Symbol::Nonterminal(2)] },
+                Rule { lhs: 1, rhs: vec![Symbol::Nonterminal(3)] },
+                Rule { lhs: 2, rhs: vec![Symbol::Terminal(0)] },
+                Rule {
+                    lhs: 2,
+                    rhs: vec![
+                        Symbol::Terminal(1),
+                        Symbol::Nonterminal(1),
+                        Symbol::Terminal(2),
+                    ],
+                },
+                Rule { lhs: 3, rhs: vec![Symbol::Terminal(0)] },
+                Rule {
+                    lhs: 3,
+                    rhs: vec![
+                        Symbol::Terminal(1),
+                        Symbol::Nonterminal(1),
+                        Symbol::Terminal(2),
+                    ],
+                },
+            ],
+            0,
+            3,
+        )
+    }
+
+    fn template_like_grammar() -> AnalyzedGrammar {
+        analyzed(
+            vec![
+                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(1)] },
+                Rule {
+                    lhs: 1,
+                    rhs: vec![
+                        Symbol::Terminal(0),
+                        Symbol::Terminal(1),
+                        Symbol::Nonterminal(2),
+                        Symbol::Terminal(2),
+                    ],
+                },
+                Rule { lhs: 2, rhs: vec![Symbol::Nonterminal(3)] },
+                Rule {
+                    lhs: 2,
+                    rhs: vec![
+                        Symbol::Nonterminal(2),
+                        Symbol::Terminal(3),
+                        Symbol::Nonterminal(3),
+                    ],
+                },
+                Rule { lhs: 3, rhs: vec![Symbol::Nonterminal(4)] },
+                Rule { lhs: 3, rhs: vec![Symbol::Nonterminal(5)] },
+                Rule { lhs: 4, rhs: vec![Symbol::Terminal(0)] },
+                Rule {
+                    lhs: 4,
+                    rhs: vec![
+                        Symbol::Terminal(0),
+                        Symbol::Terminal(1),
+                        Symbol::Nonterminal(2),
+                        Symbol::Terminal(2),
+                    ],
+                },
+                Rule { lhs: 5, rhs: vec![Symbol::Terminal(0)] },
+                Rule {
+                    lhs: 5,
+                    rhs: vec![
+                        Symbol::Terminal(0),
+                        Symbol::Terminal(1),
+                        Symbol::Nonterminal(2),
+                        Symbol::Terminal(2),
+                    ],
+                },
+            ],
+            0,
+            4,
+        )
+    }
+
+    fn core_merged_tables_before_and_after_unit_lowering(
+        grammar: &AnalyzedGrammar,
+    ) -> (GLRTable, GLRTable, usize) {
+        let (item_sets, transitions) = build_lr1_item_sets(grammar);
+        let raw = build_experimental_core_merged_table(grammar, &item_sets, &transitions)
+            .expect("test grammar must support core merging");
+
+        let mut reference = raw.clone();
+        reference.prune_unreachable_states();
+        reference.rebuild_guarded_shift_index();
+
+        let mut lowered = raw;
+        let report = lowered.collapse_sr_unit_reductions_with_compatible_gotos();
+        assert!(!report.aborted, "unit lowering aborted: {report:?}");
+        lowered.extend_advance_rows_from_actions();
+        lowered.prune_unreachable_states();
+        lowered.rebuild_guarded_shift_index();
+        let changed_states = report.changed_original_states.len();
+        (reference, lowered, changed_states)
+    }
+
+    fn assert_bounded_parser_bisimulation(
+        name: &str,
+        grammar: &AnalyzedGrammar,
+        max_depth: usize,
+    ) -> usize {
+        let (reference, lowered, changed_states) =
+            core_merged_tables_before_and_after_unit_lowering(grammar);
+        assert_eq!(reference.num_terminals, lowered.num_terminals);
+        let start = ParserGSS::from_single_stack(vec![0], TerminalsDisallowed::new());
+        let mut queue = VecDeque::from([(Vec::<u32>::new(), start.clone(), start)]);
+        let mut visited_prefixes = 0usize;
+
+        while let Some((prefix, left, right)) = queue.pop_front() {
+            visited_prefixes += 1;
+            assert_eq!(
+                stacks_finished(&reference, &left),
+                stacks_finished(&lowered, &right),
+                "completion mismatch for {name} at prefix {prefix:?}",
+            );
+            if prefix.len() == max_depth {
+                continue;
+            }
+
+            for terminal in 0..reference.num_terminals {
+                assert_eq!(
+                    stack_may_advance_on(&reference, &left, terminal),
+                    stack_may_advance_on(&lowered, &right, terminal),
+                    "admission mismatch for {name} at prefix {prefix:?}, terminal {terminal}",
+                );
+                let left_next = advance_stacks(&reference, &left, terminal);
+                let right_next = advance_stacks(&lowered, &right, terminal);
+                assert_eq!(
+                    left_next.is_empty(),
+                    right_next.is_empty(),
+                    "recognition mismatch for {name} at prefix {prefix:?}, terminal {terminal}",
+                );
+                if !left_next.is_empty() {
+                    let mut next_prefix = prefix.clone();
+                    next_prefix.push(terminal);
+                    queue.push_back((next_prefix, left_next, right_next));
+                }
+            }
+        }
+        assert!(visited_prefixes > 1, "{name} test did not explore any successors");
+        changed_states
+    }
+
+    fn generated_unit_dag_grammar(
+        chain_len: usize,
+        branches: usize,
+        nullable: bool,
+        recursive_tail: bool,
+    ) -> AnalyzedGrammar {
+        assert!(chain_len > 0);
+        assert!(branches > 0);
+        let mut rules = vec![Rule {
+            lhs: 0,
+            rhs: vec![Symbol::Nonterminal(1), Symbol::Terminal(2)],
+        }];
+        if nullable {
+            rules.push(Rule { lhs: 1, rhs: Vec::new() });
+        }
+        let first_chain_nt = 2u32;
+        for branch in 0..branches {
+            let branch_start = first_chain_nt + (branch * chain_len) as u32;
+            rules.push(Rule {
+                lhs: 1,
+                rhs: vec![Symbol::Nonterminal(branch_start)],
+            });
+            for level in 0..chain_len {
+                let current = branch_start + level as u32;
+                if level + 1 < chain_len {
+                    rules.push(Rule {
+                        lhs: current,
+                        rhs: vec![Symbol::Nonterminal(current + 1)],
+                    });
+                } else {
+                    rules.push(Rule {
+                        lhs: current,
+                        rhs: vec![Symbol::Terminal((branch % 2) as u32)],
+                    });
+                    if recursive_tail {
+                        rules.push(Rule {
+                            lhs: current,
+                            rhs: vec![
+                                Symbol::Terminal((branch % 2) as u32),
+                                Symbol::Nonterminal(1),
+                            ],
+                        });
+                    }
+                }
+            }
+        }
+        analyzed(rules, 0, 3)
+    }
+
+    #[test]
+    fn core_merged_unit_lowering_is_bisimilar_on_generated_unit_dags() {
+        let mut cases = 0usize;
+        let mut changed_cases = 0usize;
+        for chain_len in 1..=5 {
+            for branches in 1..=3 {
+                for nullable in [false, true] {
+                    for recursive_tail in [false, true] {
+                        let name = format!(
+                            "generated-chain-{chain_len}-branches-{branches}-nullable-{nullable}-recursive-{recursive_tail}"
+                        );
+                        let grammar = generated_unit_dag_grammar(
+                            chain_len,
+                            branches,
+                            nullable,
+                            recursive_tail,
+                        );
+                        let changed = assert_bounded_parser_bisimulation(&name, &grammar, 7);
+                        cases += 1;
+                        changed_cases += usize::from(changed > 0);
+                    }
+                }
+            }
+        }
+        assert_eq!(cases, 60);
+        assert!(
+            changed_cases >= 20,
+            "generated gate was too vacuous: only {changed_cases}/{cases} grammars changed"
+        );
+    }
+
+    #[test]
+    fn core_merged_unit_lowering_is_bisimilar_on_small_grammar_families() {
+        let cases = [
+            ("multi-lookahead", multi_lookahead_grammar(), 5usize),
+            ("mysterious-conflict", mysterious_conflict_grammar(), 5),
+            ("unit-chain", unit_chain_grammar(), 6),
+            ("ambiguous-unit-chain", ambiguous_unit_chain_grammar(), 6),
+            ("nullable-unit-chain", nullable_unit_chain_grammar(), 6),
+            ("recursive-ambiguous", recursive_ambiguous_grammar(), 7),
+            ("template-like", template_like_grammar(), 8),
+        ];
+        for (name, grammar, depth) in cases {
+            let _ = assert_bounded_parser_bisimulation(name, &grammar, depth);
+        }
     }
 
     #[test]
