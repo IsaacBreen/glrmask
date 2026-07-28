@@ -515,14 +515,10 @@ fn build_cancellation_query_groups(
     worklist: &mut VecDeque<CancellationTask>,
     query_weights: &QueryWeights,
 ) -> Vec<CancellationQueryGroup> {
-    let mut seen_tasks = FxHashSet::<CancellationTask>::default();
     let mut group_index = FxHashMap::<(u32, i32, usize), usize>::default();
     let mut groups = Vec::<CancellationQueryGroup>::new();
 
     while let Some((current_state, source_state, positive_label)) = worklist.pop_front() {
-        if !seen_tasks.insert((current_state, source_state, positive_label)) {
-            continue;
-        }
         let Some(weight) = query_weights[current_state as usize]
             .get(&(source_state, positive_label))
             .cloned()
