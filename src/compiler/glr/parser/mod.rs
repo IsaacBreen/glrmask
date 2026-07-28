@@ -214,6 +214,23 @@ pub(crate) fn advance_stacks_owned(table: &GLRTable, stack: ParserGSS, token: Te
     }
 }
 
+/// Try only bounded structural table interpreters that are already part of
+/// `advance_stacks_core`. Runtime callers use this before a commit-template DFA:
+/// a successful result is authoritative, while `None` leaves template and
+/// general GLR dispatch unchanged.
+pub(crate) fn try_advance_stacks_structural_before_template(
+    table: &GLRTable,
+    stack: &ParserGSS,
+    token: TerminalID,
+) -> Option<ParserGSS> {
+    if let Some(shifted) =
+        try_advance_pop1_reduce_guarded_stackshift_wave(table, stack, token)
+    {
+        return Some(shifted);
+    }
+    try_advance_bounded_concrete_paths(table, stack, token)
+}
+
 fn normalized_concrete_stacks(
     gss: &ParserGSS,
 ) -> Vec<(Vec<u32>, TerminalsDisallowed)> {
@@ -4104,6 +4121,7 @@ mod tests {
         try_advance_pop1_reduce_plus_stackshift_wave,
         try_advance_pop1_stackshift_shift_wave,
         try_advance_single_active_pop1_stackshift_wave,
+        try_advance_stacks_structural_before_template,
     };
     use crate::compiler::glr::accumulator::TerminalsDisallowed;
     use crate::compiler::glr::analysis::EOF;
@@ -4223,6 +4241,9 @@ mod tests {
             advance_concrete_stacks_reference(&table, &before, token),
             expected,
         );
+        let early = try_advance_stacks_structural_before_template(&table, &before, token)
+            .expect("bounded multi-reduction frontier should bypass templates");
+        assert_eq!(normalized_concrete_stacks(&early), normalized_concrete_stacks(&expected));
     }
 
     #[test]
@@ -4398,6 +4419,9 @@ mod tests {
         let fast = try_advance_pop1_reduce_guarded_stackshift_wave(&table, &before, token)
             .expect("mixed wave should be handled structurally");
         assert!(fast.semantically_eq(&expected, 16).unwrap());
+        let early = try_advance_stacks_structural_before_template(&table, &before, token)
+            .expect("mixed guarded/reduction frontier should bypass templates");
+        assert!(early.semantically_eq(&expected, 16).unwrap());
         assert!(advance_stacks(&table, &before, token)
             .semantically_eq(&expected, 16)
             .unwrap());
