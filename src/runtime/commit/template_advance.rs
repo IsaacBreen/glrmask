@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use smallvec::SmallVec;
 
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::compiler::glr::labels::{
@@ -51,16 +51,19 @@ fn advance_with_template(template: &CommitTemplateDfas, stack: ParserGSS) -> Par
     }
 
     let mut output = ParserGSS::empty();
-    let mut worklist = vec![(Phase::Pop, template.pop.start_state, stack)];
-    let mut visited = HashSet::new();
+    let mut worklist = SmallVec::<[(Phase, u32, ParserGSS); 64]>::new();
+    worklist.push((Phase::Pop, template.pop.start_state, stack));
+    let mut visited = SmallVec::<[(Phase, u32, usize); 64]>::new();
 
     while let Some((phase, state_id, gss)) = worklist.pop() {
         if gss.is_empty() {
             continue;
         }
-        if !visited.insert((phase, state_id, gss.ptr_key())) {
+        let visit_key = (phase, state_id, gss.ptr_key());
+        if visited.contains(&visit_key) {
             continue;
         }
+        visited.push(visit_key);
 
         match phase {
             Phase::Pop => {
