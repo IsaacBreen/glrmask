@@ -19,6 +19,7 @@ use crate::compiler::glr::parser::{
     stack_may_advance_on_any,
 };
 use crate::compiler::glr::table::{Action, AdmissionPolicy, GLRTable};
+use crate::ds::leveled_gss::GssSemanticKeyInterner;
 use crate::runtime::constraint::Constraint;
 use crate::runtime::state::{
     CommitBuffers, ConstraintState, INLINE_PARSER_STATE_CAPACITY, LINEAR_STACK_RESERVE,
@@ -36,7 +37,8 @@ use self::template_advance::{
     advance_stacks_template_dfa, advance_stacks_template_dfa_owned,
 };
 use self::tokenizer_scan::{
-    execute_tokenizer_from_state_small, execute_tokenizer_reusable, InitialCommitScan,
+    execute_tokenizer_from_state_small, execute_tokenizer_from_state_small_into,
+    execute_tokenizer_reusable, InitialCommitScan,
 };
 
 type ParserStatesByTokenizer = FxHashMap<u32, ParserGSS>;
@@ -48,6 +50,7 @@ type SmallParserStates =
 pub(crate) struct SmallCommitQueueScratch {
     processing: [SmallParserStates; 9],
     pending: SmallParserStates,
+    advance_cache: SmallVec<[(u32, ParserGSS, ParserGSS); 8]>,
 }
 
 impl Default for SmallCommitQueueScratch {
@@ -55,6 +58,7 @@ impl Default for SmallCommitQueueScratch {
         Self {
             processing: std::array::from_fn(|_| SmallVec::new()),
             pending: SmallVec::new(),
+            advance_cache: SmallVec::new(),
         }
     }
 }
@@ -65,14 +69,15 @@ impl SmallCommitQueueScratch {
             bucket.clear();
         }
         self.pending.clear();
+        self.advance_cache.clear();
     }
 }
 
-const FLAT_FRONTIER_MAX_BRANCHES: usize = 16;
+const FLAT_FRONTIER_MAX_BRANCHES: usize = 32;
 const FLAT_CONTINUATION_CACHE_CAPACITY: usize = 32;
 const FLAT_ACTION_MAX_BRANCHES: usize = 16;
 const FLAT_ACTION_MAX_STEPS: usize = 256;
-const FLAT_FRONTIER_PREALLOCATED_GSS: usize = 8;
+const FLAT_FRONTIER_PREALLOCATED_GSS: usize = 24;
 
 type FlatInlineStack = SmallVec<[u32; LINEAR_STACK_RESERVE]>;
 
@@ -110,7 +115,7 @@ impl FlatActionScratch {
         true
     }
 }
-const FLAT_FRONTIER_GSS_POOL_CAPACITY: usize = 12;
+const FLAT_FRONTIER_GSS_POOL_CAPACITY: usize = 32;
 const FLAT_FRONTIER_RETIRED_GSS_CAPACITY: usize = 32;
 
 #[derive(Debug)]
@@ -227,6 +232,12 @@ impl FlatFrontierScratch {
             viable,
         };
         self.continuation_cache_len += 1;
+    }
+
+    fn remove_branch(&mut self, index: usize) {
+        debug_assert!(index < self.len);
+        self.len -= 1;
+        self.branches.swap(index, self.len);
     }
 
     fn enqueue(
@@ -937,7 +948,7 @@ fn end_state_may_advance(constraint: &Constraint, gss: &ParserGSS, end_state: u3
 
 enum ActionableTerminals {
     SingleState(u32),
-    ManyStates(SmallVec<[u32; 8]>),
+    ManyStates(SmallVec<[u32; INLINE_PARSER_STATE_CAPACITY]>),
 }
 
 impl ActionableTerminals {
@@ -946,8 +957,16 @@ impl ActionableTerminals {
             return Some(Self::SingleState(state_id));
         }
 
-        let states = gss.peek_values();
-        if states.is_empty() {
+        let mut states = SmallVec::<[u32; INLINE_PARSER_STATE_CAPACITY]>::new();
+        let mut overflow = false;
+        gss.for_each_top_value(|state| {
+            if states.len() == states.capacity() {
+                overflow = true;
+            } else {
+                states.push(state);
+            }
+        });
+        if overflow || states.is_empty() {
             None
         } else {
             Some(Self::ManyStates(states))
@@ -960,6 +979,18 @@ impl ActionableTerminals {
             Self::ManyStates(states) => states
                 .iter()
                 .any(|state_id| constraint.table.advance_row_allows(*state_id, terminal)),
+        }
+    }
+
+
+    fn intersects(&self, constraint: &Constraint, terminals: &crate::ds::bitset::BitSet) -> bool {
+        match self {
+            Self::SingleState(state_id) => {
+                constraint.table.advance_row_intersects(*state_id, terminals)
+            }
+            Self::ManyStates(states) => states
+                .iter()
+                .any(|state_id| constraint.table.advance_row_intersects(*state_id, terminals)),
         }
     }
 }
@@ -1551,7 +1582,18 @@ fn advance_terminal_match(
     }
 
     let advance_cache_key = (gss_at_offset.ptr_key(), terminal);
-    let advanced = if let Some((_, cached)) = advance_result_cache.get(&advance_cache_key) {
+    let advanced = if let Some((_, cached)) = advance_result_cache
+        .get(&advance_cache_key)
+        .or_else(|| {
+            advance_result_cache
+                .iter()
+                .find_map(|((_, cached_terminal), entry)| {
+                    (*cached_terminal == terminal
+                        && (entry.0.ptr_eq(gss_at_offset) || &entry.0 == gss_at_offset))
+                        .then_some(entry)
+                })
+        })
+    {
         cached.clone()
     } else {
         let advanced = advance_parser_stacks(constraint, gss_at_offset, terminal);
@@ -1731,52 +1773,141 @@ fn commit_bytes_fast_path(
     Some(Ok(()))
 }
 
+fn try_merge_inline_parser_state(
+    states: &mut SmallVec<[(u32, ParserGSS); INLINE_PARSER_STATE_CAPACITY]>,
+    tokenizer_state: u32,
+    gss: ParserGSS,
+) -> bool {
+    for (existing_state, existing_gss) in states.iter_mut() {
+        if *existing_state != tokenizer_state {
+            continue;
+        }
+        if !existing_gss.ptr_eq(&gss) && existing_gss != &gss {
+            *existing_gss = existing_gss.merge(&gss);
+        }
+        return true;
+    }
+    if states.len() == states.capacity() {
+        return false;
+    }
+    states.push((tokenizer_state, gss));
+    true
+}
+
 fn commit_bytes_full_width_fast_path(
     constraint: &Constraint,
     state: &mut ParserStateMap,
     bytes: &[u8],
+    tokenizer_scratch: &mut tokenizer_scan::ReusableTokenizerExecScratch,
+    mut fallback_exec: Option<&mut TokenizerExecResult>,
+    require_multiple_terminals: bool,
 ) -> Option<Result<(), String>> {
+    if require_multiple_terminals && (state.len() != 1 || bytes.len() > 3) {
+        return None;
+    }
     if constraint.tokenizer.has_epsilon_transitions()
         && state_has_nonempty_accumulators(state)
     {
         return None;
     }
-    if state.len() > 2 {
+    if state.len() > INLINE_PARSER_STATE_CAPACITY {
         return None;
     }
-    if state.len() > 1 && bytes.len() > 4 && state_has_nonempty_accumulators(state) {
+    let normalized_state = state.has_duplicate_keys().then(|| {
+        let mut normalized = state.clone();
+        normalized.normalize_duplicate_keys();
+        normalized
+    });
+    let input_state = normalized_state.as_ref().unwrap_or(&*state);
+    let at_most_two_parser_states = {
+        let mut representatives = SmallVec::<[&ParserGSS; 2]>::new();
+        let mut within_bound = true;
+        for gss in input_state.values() {
+            if representatives
+                .iter()
+                .any(|existing| existing.ptr_eq(gss) || *existing == gss)
+            {
+                continue;
+            }
+            if representatives.len() == representatives.capacity() {
+                within_bound = false;
+                break;
+            }
+            representatives.push(gss);
+        }
+        within_bound
+    };
+    if !at_most_two_parser_states {
+        return None;
+    }
+    if input_state.len() > 1
+        && bytes.len() > 4
+        && state_has_nonempty_accumulators(input_state)
+    {
         return None;
     }
 
-    let mut output = ParserStatesByTokenizer::default();
-    for (&tokenizer_state, gss) in state.iter() {
-        let exec_result = execute_tokenizer_from_state_small(constraint, bytes, tokenizer_state);
+    let mut output =
+        SmallVec::<[(u32, ParserGSS); INLINE_PARSER_STATE_CAPACITY]>::new();
+    let mut advance_cache = SmallVec::<[(u32, ParserGSS, ParserGSS); 4]>::new();
+    for (&tokenizer_state, gss) in input_state.iter() {
+        if require_multiple_terminals && gss.peek_values().len() <= 1 {
+            return None;
+        }
+        let reusable = execute_tokenizer_reusable(
+            constraint,
+            bytes,
+            tokenizer_state,
+            tokenizer_scratch,
+        );
+        let (exec_states, exec_matches): (&[u32], &[TokenizerMatch]) = if reusable {
+            (&tokenizer_scratch.states, &tokenizer_scratch.matches)
+        } else {
+            let fallback = fallback_exec.as_deref_mut()?;
+            execute_tokenizer_from_state_small_into(
+                constraint,
+                bytes,
+                tokenizer_state,
+                fallback,
+            );
+            (&fallback.end_state, &fallback.matches)
+        };
         let actionable_terminals = ActionableTerminals::from_gss(constraint, gss);
-        let mut terminal = None;
+        let mut terminals = SmallVec::<[u32; 4]>::new();
 
-        for matched in &exec_result.matches {
+        for matched in exec_matches {
             if matched.width != bytes.len()
                 || is_ignored_terminal(constraint.ignore_terminal, matched.id)
             {
                 return None;
             }
-            if !is_actionable_terminal(actionable_terminals.as_ref(), constraint, matched.id) {
+            if !is_actionable_terminal(actionable_terminals.as_ref(), constraint, matched.id)
+                || terminals.contains(&matched.id)
+            {
                 continue;
             }
-            if terminal.is_some_and(|existing| existing != matched.id) {
+            if terminals.len() == terminals.capacity() {
                 return None;
             }
-            terminal = Some(matched.id);
+            terminals.push(matched.id);
         }
 
-        let pruned_gss = if gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty()) {
+        let accs_empty = gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty());
+        if require_multiple_terminals && terminals.len() < 2 {
+            return None;
+        }
+        if terminals.len() > 1 && (input_state.len() != 1 || !accs_empty) {
+            return None;
+        }
+        let pruned_gss = if accs_empty {
             gss.clone()
         } else {
-            let pruned = prune_single_initial_state_for_exec(
+            let pruned = prune_single_initial_state_for_parts(
                 constraint,
                 gss.clone(),
                 tokenizer_state,
-                &exec_result,
+                exec_states,
+                exec_matches,
             );
             if pruned.is_empty() {
                 continue;
@@ -1784,55 +1915,93 @@ fn commit_bytes_full_width_fast_path(
             pruned
         };
 
-        if let Some(terminal) = terminal {
-            let advanced = if !template_advance_enabled()
-                && let Some(top_state) = pruned_gss.single_exclusive_top_value()
-                && let Some(action) = constraint.table.action(top_state, terminal)
-                && let Some(advanced) =
-                    apply_single_top_action_fast(
-                        &constraint.table,
-                        &pruned_gss,
-                        top_state,
-                        terminal,
-                        action,
-                    )
-            {
-                advanced
-            } else {
-                advance_parser_stacks_if_possible(constraint, &pruned_gss, terminal)?
+        for terminal in terminals {
+            let advanced = advance_cache
+                .iter()
+                .find(|(cached_terminal, input, _)| {
+                    *cached_terminal == terminal
+                        && (input.ptr_eq(&pruned_gss) || input == &pruned_gss)
+                })
+                .map(|(_, _, advanced)| advanced.clone());
+            let advanced = match advanced {
+                Some(advanced) => advanced,
+                None => {
+                    let advanced = if !template_advance_enabled()
+                        && let Some(top_state) = pruned_gss.single_exclusive_top_value()
+                        && let Some(action) = constraint.table.action(top_state, terminal)
+                        && let Some(advanced) = apply_single_top_action_fast(
+                            &constraint.table,
+                            &pruned_gss,
+                            top_state,
+                            terminal,
+                            action,
+                        )
+                    {
+                        advanced
+                    } else {
+                        advance_parser_stacks_if_possible(constraint, &pruned_gss, terminal)?
+                    };
+                    if advance_cache.len() == advance_cache.capacity() {
+                        return None;
+                    }
+                    advance_cache.push((terminal, pruned_gss.clone(), advanced.clone()));
+                    advanced
+                }
             };
             if advanced.is_empty() {
                 continue;
             }
-            let advanced = apply_future_terminal_disallow(
+            let advanced = apply_future_terminal_disallow_for_states(
                 constraint,
-                &exec_result,
+                exec_states,
                 terminal,
                 advanced,
             );
-            if !advanced.is_empty() {
-                merge_parser_state(
+            if !advanced.is_empty()
+                && !try_merge_inline_parser_state(
                     &mut output,
                     constraint.tokenizer.initial_state(),
                     advanced,
-                );
+                )
+            {
+                return None;
             }
         }
 
-        for &end_state in &exec_result.end_state {
-            if end_state_may_advance(constraint, &pruned_gss, end_state) {
-                merge_parser_state(&mut output, end_state, pruned_gss.clone());
+        for &end_state in exec_states {
+            if end_state_may_advance(constraint, &pruned_gss, end_state)
+                && !try_merge_inline_parser_state(
+                    &mut output,
+                    end_state,
+                    pruned_gss.clone(),
+                )
+            {
+                return None;
             }
         }
     }
 
-    let new_state = finalize_pending_state(&mut output);
-    if new_state.is_empty() {
+    output.sort_unstable_by_key(|(tokenizer_state, _)| *tokenizer_state);
+    let mut fused_cache = SmallVec::<[(usize, ParserGSS); 4]>::new();
+    for (_, parser_state) in &mut output {
+        let key = parser_state.ptr_key();
+        if let Some((_, fused)) = fused_cache.iter().find(|(existing, _)| *existing == key) {
+            *parser_state = fused.clone();
+            continue;
+        }
+        let fused = parser_state.fuse(Some(1));
+        if fused_cache.len() < fused_cache.capacity() {
+            fused_cache.push((key, fused.clone()));
+        }
+        *parser_state = fused;
+    }
+    output.retain(|(_, parser_state)| !parser_state.is_empty());
+    if output.is_empty() {
         return Some(Err(
             "commit rejected: no valid parser states remain".to_string(),
         ));
     }
-    *state = new_state;
+    state.entries = output;
     Some(Ok(()))
 }
 
@@ -1843,11 +2012,138 @@ fn merge_small_parser_state(
 ) {
     for (existing_state, existing_gss) in states.iter_mut() {
         if *existing_state == tokenizer_state {
-            *existing_gss = existing_gss.merge(&gss);
+            if !existing_gss.ptr_eq(&gss) && existing_gss != &gss {
+                *existing_gss = existing_gss.merge(&gss);
+            }
             return;
         }
     }
     states.push((tokenizer_state, gss));
+}
+
+/// Canonicalize repeated small parser languages to one shared GSS pointer.
+/// The semantic key ignores accumulator values, so this is restricted to
+/// all-empty accumulators. Cheap shape checks avoid invoking the interner for
+/// frontiers that cannot contain a repeated language.
+fn share_small_semantically_equal_empty_frontiers(
+    state: &mut ParserStateMap,
+    bytes: &[u8],
+    keys: &mut GssSemanticKeyInterner<u32, TerminalsDisallowed>,
+) {
+    if state.len() < 2 || state.len() > 4 || bytes.is_empty() || bytes.len() > 8 {
+        return;
+    }
+    if state
+        .values()
+        .any(|gss| !gss.all_accs_satisfy(|acc: &TerminalsDisallowed| acc.is_empty()))
+    {
+        return;
+    }
+
+    let mut possible_duplicate = false;
+    for right in 1..state.entries.len() {
+        for left in 0..right {
+            let left_gss = &state.entries[left].1;
+            let right_gss = &state.entries[right].1;
+            if left_gss.ptr_eq(right_gss) {
+                possible_duplicate = true;
+                break;
+            }
+            if left_gss.max_depth() == right_gss.max_depth() {
+                let mut left_tops = left_gss.peek_values();
+                let mut right_tops = right_gss.peek_values();
+                left_tops.sort_unstable();
+                right_tops.sort_unstable();
+                if left_tops == right_tops {
+                    possible_duplicate = true;
+                    break;
+                }
+            }
+        }
+        if possible_duplicate {
+            break;
+        }
+    }
+    if !possible_duplicate {
+        return;
+    }
+
+    keys.clear();
+    let mut representatives = SmallVec::<[(u32, ParserGSS); 4]>::new();
+    for (_, gss) in &mut state.entries {
+        let key = keys.key(gss);
+        if let Some((_, representative)) = representatives
+            .iter()
+            .find(|(existing_key, _)| *existing_key == key)
+        {
+            *gss = representative.clone();
+        } else {
+            representatives.push((key, gss.clone()));
+        }
+    }
+}
+
+/// Two lexer states carrying the same ambiguous parser frontier let the small
+/// queue compute each parser advance once and reuse it for the sibling key.
+/// Trying the flat-frontier kernel first duplicates that parser language into
+/// concrete branches and can spend substantial work before declining.
+fn prefer_small_queue_before_flat_frontier(
+    state: &ParserStateMap,
+    bytes: &[u8],
+) -> bool {
+    if state.is_empty() || state.len() > 8 || bytes.is_empty() || bytes.len() > 8 {
+        return false;
+    }
+    if state.len() == 1 {
+        let gss = state.values().next().expect("non-empty parser state");
+        return bytes.len() <= 3 && gss.peek_values().len() > 1;
+    }
+
+    let mut representatives = SmallVec::<[&ParserGSS; 4]>::new();
+    for gss in state.values() {
+        if representatives.iter().any(|existing| existing.ptr_eq(gss)) {
+            continue;
+        }
+        if representatives.len() == representatives.capacity() {
+            return false;
+        }
+        representatives.push(gss);
+    }
+
+    representatives.len() < state.len()
+        && representatives
+            .iter()
+            .any(|gss| gss.peek_values().len() > 1)
+}
+
+/// A wider lexer frontier backed by one or two shared parser GSS values is
+/// better handled as whole GSS advances than as a Cartesian set of concrete
+/// flat stacks. The full-width kernel caches each distinct parser advance and
+/// reuses it across every lexer key carrying that GSS.
+fn prefer_full_width_before_flat_frontier(
+    state: &ParserStateMap,
+    bytes: &[u8],
+) -> bool {
+    if state.len() < 3
+        || state.len() > INLINE_PARSER_STATE_CAPACITY
+        || bytes.is_empty()
+    {
+        return false;
+    }
+
+    let mut representatives = SmallVec::<[&ParserGSS; 2]>::new();
+    for gss in state.values() {
+        if representatives.iter().any(|existing| existing.ptr_eq(gss)) {
+            continue;
+        }
+        if representatives.len() == representatives.capacity() {
+            return false;
+        }
+        representatives.push(gss);
+    }
+    representatives
+        .iter()
+        .all(|gss| gss.all_accs_satisfy(|acc: &TerminalsDisallowed| acc.is_empty()))
 }
 
 fn commit_bytes_small_queue_fast_path(
@@ -1857,7 +2153,7 @@ fn commit_bytes_small_queue_fast_path(
     tokenizer_scratch: &mut tokenizer_scan::ReusableTokenizerExecScratch,
     queue_scratch: &mut SmallCommitQueueScratch,
 ) -> Option<Result<(), String>> {
-    if bytes.len() > 8 || state.len() > 2 {
+    if bytes.len() > 8 || state.len() > 8 {
         return None;
     }
     queue_scratch.clear();
@@ -1948,7 +2244,21 @@ fn commit_bytes_small_queue_fast_path(
                     )
                 {
                     advanced
+                } else if let Some((_, _, cached)) = queue_scratch
+                    .advance_cache
+                    .iter()
+                    .find(|(terminal, input, _)| {
+                        *terminal == matched.terminal_id
+                            && (input.ptr_eq(&gss_at_offset) || input == &gss_at_offset)
+                    })
+                {
+                    cached.clone()
                 } else {
+                    if queue_scratch.advance_cache.len()
+                        == queue_scratch.advance_cache.capacity()
+                    {
+                        return None;
+                    }
                     let Some(advanced) = advance_parser_stacks_if_possible(
                         constraint,
                         &gss_at_offset,
@@ -1956,6 +2266,11 @@ fn commit_bytes_small_queue_fast_path(
                     ) else {
                         continue;
                     };
+                    queue_scratch.advance_cache.push((
+                        matched.terminal_id,
+                        gss_at_offset.clone(),
+                        advanced.clone(),
+                    ));
                     advanced
                 };
                 let advanced = apply_future_terminal_disallow_for_states(
@@ -3911,6 +4226,7 @@ fn flat_group_accepted_terminals(
     constraint: &Constraint,
     frontier: &FlatFrontierScratch,
     tokenizer_state: u32,
+    current_top: u32,
     matches: &[TokenizerMatch],
 ) -> SmallVec<[u32; SMALL_NORMALIZED_MATCH_LINEAR_SCAN_MAX]> {
     let mut accepted = SmallVec::new();
@@ -3920,13 +4236,16 @@ fn flat_group_accepted_terminals(
         {
             continue;
         }
-        let actionable = frontier.branches[..frontier.len].iter().any(|branch| {
-            branch.offset == 0
-                && branch.tokenizer_state == tokenizer_state
-                && branch.stack.last().is_some_and(|top| {
-                    constraint.table.advance_row_allows(*top, matched.id)
-                })
-        });
+        let actionable = constraint
+            .table
+            .advance_row_allows(current_top, matched.id)
+            || frontier.branches[..frontier.len].iter().any(|branch| {
+                branch.offset == 0
+                    && branch.tokenizer_state == tokenizer_state
+                    && branch.stack.last().is_some_and(|top| {
+                        constraint.table.advance_row_allows(*top, matched.id)
+                    })
+            });
         if actionable {
             accepted.push(matched.id);
         }
@@ -3953,6 +4272,1013 @@ fn apply_flat_future_disallow(
     Some(updated)
 }
 
+/// Remap several lexer states that share the same parser GSS when the model
+/// token crosses no actionable or ignored terminal boundary. The parser state
+/// is retained verbatim; only the viable tokenizer continuation keys change.
+fn try_commit_shared_parser_gss_lexer_remap(
+    constraint: &Constraint,
+    state: &mut ParserStateMap,
+    bytes: &[u8],
+    tokenizer_scratch: &mut tokenizer_scan::ReusableTokenizerExecScratch,
+) -> Option<Result<(), String>> {
+    if state.len() < 2 || state.len() > INLINE_PARSER_STATE_CAPACITY || bytes.is_empty() {
+        return None;
+    }
+
+    let (_, shared_gss) = state.iter().next()?;
+    if !shared_gss.all_accs_satisfy(|acc: &TerminalsDisallowed| acc.is_empty())
+        || state
+            .values()
+            .skip(1)
+            .any(|gss| !shared_gss.ptr_eq(gss) && shared_gss != gss)
+    {
+        return None;
+    }
+    if constraint.table.admission_policy != AdmissionPolicy::RowPresenceExact {
+        return None;
+    }
+    let actionable = ActionableTerminals::from_gss(constraint, shared_gss)?;
+    let input_keys = SmallVec::<[u32; INLINE_PARSER_STATE_CAPACITY]>::from_iter(
+        state.keys().copied(),
+    );
+    let mut output_keys = SmallVec::<[u32; INLINE_PARSER_STATE_CAPACITY]>::new();
+
+    for tokenizer_state in input_keys {
+        if !execute_tokenizer_reusable(
+            constraint,
+            bytes,
+            tokenizer_state,
+            tokenizer_scratch,
+        ) || tokenizer_scratch.matches.len() > SMALL_NORMALIZED_MATCH_LINEAR_SCAN_MAX
+        {
+            return None;
+        }
+        if !collect_unique_actionable_matches(
+            constraint,
+            Some(&actionable),
+            constraint.ignore_terminal,
+            &tokenizer_scratch.matches,
+            None,
+        )
+        .is_empty()
+        {
+            return None;
+        }
+
+        for &end_state in &tokenizer_scratch.states {
+            if end_state != constraint.tokenizer.initial_state()
+                && !actionable.intersects(
+                    constraint,
+                    constraint.tokenizer.possible_future_terminals(end_state),
+                )
+            {
+                continue;
+            }
+            match output_keys.binary_search(&end_state) {
+                Ok(_) => {}
+                Err(index) => {
+                    if output_keys.len() == output_keys.capacity() {
+                        return None;
+                    }
+                    output_keys.insert(index, end_state);
+                }
+            }
+        }
+    }
+
+    if output_keys.is_empty() {
+        return Some(Err(
+            "commit rejected: no valid parser states remain".to_string(),
+        ));
+    }
+    state
+        .replace_uniform_gss_keys(&output_keys)
+        .then_some(Ok(()))
+}
+
+/// Advance a small set of lexer states that all carry the same concrete parser
+/// stack and no terminal exclusions. This factors the common parser state out
+/// of the lexer frontier: each lexer input is scanned exactly once, while
+/// identical parser actions and output branches are deduplicated directly.
+/// The general correlated queue remains authoritative for partial-width,
+/// ignored, or otherwise non-uniform terminal boundaries.
+fn try_commit_uniform_parser_frontier(
+    constraint: &Constraint,
+    state: &mut ParserStateMap,
+    bytes: &[u8],
+    original: &mut Vec<u32>,
+    work: &mut Vec<u32>,
+    tokenizer_scratch: &mut tokenizer_scan::ReusableTokenizerExecScratch,
+    frontier: &mut FlatFrontierScratch,
+) -> Option<Result<(), String>> {
+    if state.len() < 2 || state.len() > INLINE_PARSER_STATE_CAPACITY || bytes.is_empty() {
+        return None;
+    }
+
+    original.clear();
+    let (_, first_gss) = state.iter().next()?;
+    let acc = first_gss.single_path_acc()?;
+    if !acc.is_empty() || !first_gss.copy_single_path_stack_into(original) {
+        return None;
+    }
+    let top = *original.last()?;
+
+    for (_, gss) in state.iter().skip(1) {
+        let other_acc = gss.single_path_acc()?;
+        if !other_acc.is_empty()
+            || !gss.copy_single_path_stack_into(work)
+            || work != original
+        {
+            return None;
+        }
+    }
+
+    frontier.clear();
+    let actionable = ActionableTerminals::SingleState(top);
+    let initial_tokenizer_state = constraint.tokenizer.initial_state();
+    let input_keys = SmallVec::<[u32; INLINE_PARSER_STATE_CAPACITY]>::from_iter(
+        state.keys().copied(),
+    );
+
+    for tokenizer_state in input_keys {
+        if !execute_tokenizer_reusable(
+            constraint,
+            bytes,
+            tokenizer_state,
+            tokenizer_scratch,
+        ) || tokenizer_scratch.matches.len() > SMALL_NORMALIZED_MATCH_LINEAR_SCAN_MAX
+        {
+            return None;
+        }
+
+        let normalized_matches = collect_unique_actionable_matches(
+            constraint,
+            Some(&actionable),
+            constraint.ignore_terminal,
+            &tokenizer_scratch.matches,
+            None,
+        );
+        if normalized_matches.len() > 1 {
+            return None;
+        }
+
+        if let Some(matched) = normalized_matches.first() {
+            if matched.ignored || matched.width != bytes.len() {
+                return None;
+            }
+            match apply_terminal_to_flat_stacks(
+                constraint,
+                matched.terminal_id,
+                original,
+                &mut frontier.action,
+            ) {
+                Some(true) => {}
+                Some(false) => {}
+                None => return None,
+            }
+            let advanced_acc = apply_flat_future_disallow(
+                constraint,
+                &acc,
+                &tokenizer_scratch.states,
+                matched.terminal_id,
+            )?;
+            for action_index in 0..frontier.action.complete.len() {
+                work.clear();
+                work.extend_from_slice(&frontier.action.complete[action_index]);
+                if !frontier.enqueue(
+                    bytes.len(),
+                    initial_tokenizer_state,
+                    work,
+                    advanced_acc.clone(),
+                ) {
+                    return None;
+                }
+            }
+        }
+
+        for &end_state in &tokenizer_scratch.states {
+            let viable = if end_state == initial_tokenizer_state {
+                true
+            } else {
+                flat_stack_may_advance_on_any(
+                    constraint,
+                    original,
+                    constraint.tokenizer.possible_future_terminals(end_state),
+                    &mut frontier.action,
+                )?
+            };
+            if viable
+                && !frontier.enqueue(bytes.len(), end_state, original, acc.clone())
+            {
+                return None;
+            }
+        }
+    }
+
+    finish_grouped_flat_frontier_commit(
+        state,
+        frontier,
+        bytes.len(),
+        Some((original, &acc)),
+    )
+}
+
+#[inline]
+fn flat_frontier_gss_is_cheap_to_drop(gss: &ParserGSS) -> bool {
+    gss.max_depth() <= LINEAR_STACK_RESERVE as u32 && gss.single_path_acc().is_some()
+}
+
+fn displaced_flat_gss_storage_counts<'a>(
+    gsses: impl IntoIterator<Item = &'a ParserGSS>,
+) -> (usize, usize) {
+    let mut recyclable = 0usize;
+    let mut must_retire = 0usize;
+    for gss in gsses {
+        if gss.can_replace_single_path_state_in_place(&[0]) {
+            recyclable += 1;
+        } else if !flat_frontier_gss_is_cheap_to_drop(gss) {
+            must_retire += 1;
+        }
+    }
+    (recyclable, must_retire)
+}
+
+fn store_displaced_flat_gsses(
+    frontier: &mut FlatFrontierScratch,
+    gsses: impl IntoIterator<Item = ParserGSS>,
+) {
+    let mut cheap_to_drop =
+        SmallVec::<[ParserGSS; INLINE_PARSER_STATE_CAPACITY]>::new();
+    for gss in gsses {
+        if gss.can_replace_single_path_state_in_place(&[0]) {
+            frontier.gss_pool.push(gss);
+        } else if flat_frontier_gss_is_cheap_to_drop(&gss) {
+            cheap_to_drop.push(gss);
+        } else {
+            frontier.retired_gss.push(gss);
+        }
+    }
+    for gss in cheap_to_drop {
+        if frontier.retired_gss.len() < FLAT_FRONTIER_RETIRED_GSS_CAPACITY {
+            frontier.retired_gss.push(gss);
+        } else {
+            drop(gss);
+        }
+    }
+}
+
+fn finish_grouped_flat_frontier_commit(
+    state: &mut ParserStateMap,
+    frontier: &mut FlatFrontierScratch,
+    final_offset: usize,
+    unchanged: Option<(&[u32], &TerminalsDisallowed)>,
+) -> Option<Result<(), String>> {
+    let mut outputs = SmallVec::<[usize; FLAT_FRONTIER_MAX_BRANCHES]>::new();
+    for index in 0..frontier.len {
+        if frontier.branches[index].offset == final_offset {
+            if outputs.len() == outputs.capacity() {
+                return None;
+            }
+            outputs.push(index);
+        }
+    }
+    if outputs.is_empty() {
+        return Some(Err(
+            "commit rejected: no valid parser states remain".to_string(),
+        ));
+    }
+    outputs.sort_unstable_by(|&left, &right| {
+        frontier.branches[left]
+            .tokenizer_state
+            .cmp(&frontier.branches[right].tokenizer_state)
+            .then_with(|| frontier.branches[left].stack.cmp(&frontier.branches[right].stack))
+    });
+
+    let mut group_representatives = SmallVec::<[usize; INLINE_PARSER_STATE_CAPACITY]>::new();
+    let mut output_groups = SmallVec::<[usize; FLAT_FRONTIER_MAX_BRANCHES]>::new();
+    for &output in &outputs {
+        let branch = &frontier.branches[output];
+        let group = group_representatives.iter().position(|&representative| {
+            let existing = &frontier.branches[representative];
+            existing.stack == branch.stack && existing.acc == branch.acc
+        });
+        let group = match group {
+            Some(group) => group,
+            None => {
+                if group_representatives.len() == group_representatives.capacity() {
+                    return None;
+                }
+                group_representatives.push(output);
+                group_representatives.len() - 1
+            }
+        };
+        output_groups.push(group);
+    }
+
+    let compressed_cartesian = {
+        let mut keys = SmallVec::<[u32; INLINE_PARSER_STATE_CAPACITY]>::new();
+        let mut expected_groups = SmallVec::<[usize; INLINE_PARSER_STATE_CAPACITY]>::new();
+        let mut cursor = 0usize;
+        let mut valid = true;
+        while cursor < outputs.len() {
+            let key = frontier.branches[outputs[cursor]].tokenizer_state;
+            let start = cursor;
+            while cursor < outputs.len()
+                && frontier.branches[outputs[cursor]].tokenizer_state == key
+            {
+                cursor += 1;
+            }
+            let groups = &output_groups[start..cursor];
+            if keys.is_empty() {
+                if groups.len() > expected_groups.capacity() {
+                    valid = false;
+                    break;
+                }
+                expected_groups.extend_from_slice(groups);
+            } else if groups != expected_groups.as_slice() {
+                valid = false;
+                break;
+            }
+            if keys.len() == keys.capacity() {
+                valid = false;
+                break;
+            }
+            keys.push(key);
+        }
+        (valid && keys.len() >= 2 && expected_groups.len() >= 2)
+            .then_some((keys, expected_groups))
+    };
+    if outputs.len() > INLINE_PARSER_STATE_CAPACITY && compressed_cartesian.is_none() {
+        return None;
+    }
+    if let Some((keys, groups)) = compressed_cartesian.as_ref() {
+        let (recyclable, must_retire) = {
+            let mut unique =
+                SmallVec::<[&ParserGSS; INLINE_PARSER_STATE_CAPACITY]>::new();
+            for (_, gss) in &state.entries {
+                if !unique.iter().any(|existing| existing.ptr_eq(gss)) {
+                    unique.push(gss);
+                }
+            }
+            displaced_flat_gss_storage_counts(unique.iter().copied())
+        };
+        if frontier.gss_pool.len() + recyclable > FLAT_FRONTIER_GSS_POOL_CAPACITY
+            || frontier.retired_gss.len() + must_retire
+                > FLAT_FRONTIER_RETIRED_GSS_CAPACITY
+        {
+            return None;
+        }
+
+        let compressed = {
+            let first = &frontier.branches[group_representatives[*groups.first()?]];
+            let acc = first.acc.clone();
+            let mut stack_slices =
+                SmallVec::<[&[u32]; INLINE_PARSER_STATE_CAPACITY]>::new();
+            for &group in groups {
+                let branch = &frontier.branches[group_representatives[group]];
+                if branch.acc != acc {
+                    return None;
+                }
+                stack_slices.push(branch.stack.as_slice());
+            }
+            ParserGSS::from_small_stack_slices_shared_prefix(&stack_slices, acc)?
+        };
+
+        let old_entries = std::mem::take(&mut state.entries);
+        let mut old_representatives =
+            SmallVec::<[ParserGSS; INLINE_PARSER_STATE_CAPACITY]>::new();
+        for (_, gss) in old_entries {
+            if !old_representatives.iter().any(|existing| existing.ptr_eq(&gss)) {
+                old_representatives.push(gss);
+            }
+        }
+        store_displaced_flat_gsses(frontier, old_representatives);
+
+        let mut new_entries =
+            SmallVec::<[(u32, ParserGSS); INLINE_PARSER_STATE_CAPACITY]>::new();
+        for &key in keys {
+            new_entries.push((key, compressed.clone()));
+        }
+        state.entries = new_entries;
+        return Some(Ok(()));
+    }
+    let unchanged_group = unchanged.and_then(|(original_stack, original_acc)| {
+        group_representatives.iter().position(|&representative| {
+            let branch = &frontier.branches[representative];
+            branch.stack.as_slice() == original_stack && &branch.acc == original_acc
+        })
+    });
+
+    // Collapse active Arc-duplicates before planning reuse. A parser state is
+    // commonly shared across several lexer keys; retaining one representative
+    // and dropping its sibling handles makes that object uniquely mutable again.
+    let old_entries = std::mem::take(&mut state.entries);
+    let mut active_representatives =
+        SmallVec::<[ParserGSS; INLINE_PARSER_STATE_CAPACITY]>::new();
+    let mut old_layout =
+        SmallVec::<[(u32, usize); INLINE_PARSER_STATE_CAPACITY]>::new();
+    for (key, gss) in old_entries {
+        let representative = active_representatives
+            .iter()
+            .position(|existing| gss.ptr_eq(existing));
+        let representative = match representative {
+            Some(representative) => representative,
+            None => {
+                active_representatives.push(gss);
+                active_representatives.len() - 1
+            }
+        };
+        old_layout.push((key, representative));
+    }
+
+    let restore_old_state = |state: &mut ParserStateMap,
+                             active: &[ParserGSS],
+                             layout: &[(u32, usize)]| {
+        let mut restored =
+            SmallVec::<[(u32, ParserGSS); INLINE_PARSER_STATE_CAPACITY]>::new();
+        for &(key, representative) in layout {
+            restored.push((key, active[representative].clone()));
+        }
+        state.entries = restored;
+    };
+
+    let rebuild_by_key_languages =
+        |state: &mut ParserStateMap,
+         frontier: &mut FlatFrontierScratch,
+         active_representatives: SmallVec<
+            [ParserGSS; INLINE_PARSER_STATE_CAPACITY],
+        >,
+         old_layout: SmallVec<[(u32, usize); INLINE_PARSER_STATE_CAPACITY]>|
+         -> bool {
+            let (recyclable, must_retire) =
+                displaced_flat_gss_storage_counts(active_representatives.iter());
+            if frontier.gss_pool.len() + recyclable > FLAT_FRONTIER_GSS_POOL_CAPACITY
+                || frontier.retired_gss.len() + must_retire
+                    > FLAT_FRONTIER_RETIRED_GSS_CAPACITY
+            {
+                restore_old_state(state, &active_representatives, &old_layout);
+                return false;
+            }
+
+            let mut built_languages = SmallVec::<
+                [
+                    (
+                        SmallVec<[usize; INLINE_PARSER_STATE_CAPACITY]>,
+                        ParserGSS,
+                    );
+                    INLINE_PARSER_STATE_CAPACITY
+                ],
+            >::new();
+            let mut new_entries = SmallVec::<
+                [(u32, ParserGSS); INLINE_PARSER_STATE_CAPACITY],
+            >::new();
+            let mut cursor = 0usize;
+            while cursor < outputs.len() {
+                if new_entries.len() == new_entries.capacity() {
+                    restore_old_state(state, &active_representatives, &old_layout);
+                    return false;
+                }
+                let key = frontier.branches[outputs[cursor]].tokenizer_state;
+                let start = cursor;
+                while cursor < outputs.len()
+                    && frontier.branches[outputs[cursor]].tokenizer_state == key
+                {
+                    cursor += 1;
+                }
+
+                let mut pattern =
+                    SmallVec::<[usize; INLINE_PARSER_STATE_CAPACITY]>::new();
+                if cursor - start > pattern.capacity() {
+                    restore_old_state(state, &active_representatives, &old_layout);
+                    return false;
+                }
+                pattern.extend_from_slice(&output_groups[start..cursor]);
+
+                let language = if let Some((_, existing)) = built_languages
+                    .iter()
+                    .find(|(existing_pattern, _)| existing_pattern == &pattern)
+                {
+                    existing.clone()
+                } else {
+                    if built_languages.len() == built_languages.capacity() {
+                        restore_old_state(state, &active_representatives, &old_layout);
+                        return false;
+                    }
+                    let first = &frontier.branches[outputs[start]];
+                    let common_acc = first.acc.clone();
+                    let same_acc = outputs[start..cursor]
+                        .iter()
+                        .all(|&output| frontier.branches[output].acc == common_acc);
+                    let language = if same_acc {
+                        let mut slices = SmallVec::<
+                            [&[u32]; INLINE_PARSER_STATE_CAPACITY],
+                        >::new();
+                        for &output in &outputs[start..cursor] {
+                            slices.push(frontier.branches[output].stack.as_slice());
+                        }
+                        ParserGSS::from_small_stack_slices_shared_prefix(
+                            &slices,
+                            common_acc,
+                        )
+                        .unwrap_or_else(|| {
+                            let mut stacks = SmallVec::<
+                                [
+                                    (Vec<u32>, TerminalsDisallowed);
+                                    INLINE_PARSER_STATE_CAPACITY
+                                ],
+                            >::new();
+                            for &output in &outputs[start..cursor] {
+                                let branch = &frontier.branches[output];
+                                stacks.push((branch.stack.clone(), branch.acc.clone()));
+                            }
+                            ParserGSS::from_stacks(&stacks)
+                        })
+                    } else {
+                        let mut stacks = SmallVec::<
+                            [
+                                (Vec<u32>, TerminalsDisallowed);
+                                INLINE_PARSER_STATE_CAPACITY
+                            ],
+                        >::new();
+                        for &output in &outputs[start..cursor] {
+                            let branch = &frontier.branches[output];
+                            stacks.push((branch.stack.clone(), branch.acc.clone()));
+                        }
+                        ParserGSS::from_stacks(&stacks)
+                    };
+                    built_languages.push((pattern, language.clone()));
+                    language
+                };
+                new_entries.push((key, language));
+            }
+
+            store_displaced_flat_gsses(frontier, active_representatives);
+            state.entries = new_entries;
+            true
+        };
+
+    let distinct_output_keys = outputs
+        .iter()
+        .enumerate()
+        .filter(|(index, output)| {
+            *index == 0
+                || frontier.branches[outputs[*index - 1]].tokenizer_state
+                    != frontier.branches[**output].tokenizer_state
+        })
+        .count();
+    if unchanged.is_none()
+        && outputs.len() >= 8
+        && distinct_output_keys <= 2
+        && distinct_output_keys < group_representatives.len()
+    {
+        return rebuild_by_key_languages(
+            state,
+            frontier,
+            active_representatives,
+            old_layout,
+        )
+        .then_some(Ok(()));
+    }
+
+    // Plan one unique active representative or spare GSS per distinct output
+    // parser state. The unchanged uniform group must retain an active object;
+    // every other group is validated for in-place replacement before mutation.
+    let mut active_used = [false; INLINE_PARSER_STATE_CAPACITY];
+    let mut pool_used = [false; FLAT_FRONTIER_GSS_POOL_CAPACITY];
+    let mut assignments =
+        SmallVec::<[(bool, usize); INLINE_PARSER_STATE_CAPACITY]>::new();
+    for (group, &representative) in group_representatives.iter().enumerate() {
+        let stack = &frontier.branches[representative].stack;
+        let active = active_representatives
+            .iter()
+            .enumerate()
+            .find_map(|(index, gss)| {
+                if active_used[index] {
+                    return None;
+                }
+                (Some(group) == unchanged_group
+                    || gss.can_replace_single_path_state_in_place(stack))
+                .then_some(index)
+            });
+        if let Some(index) = active {
+            active_used[index] = true;
+            assignments.push((true, index));
+            continue;
+        }
+        if Some(group) == unchanged_group {
+            restore_old_state(state, &active_representatives, &old_layout);
+            return None;
+        }
+        let pool = frontier
+            .gss_pool
+            .iter()
+            .enumerate()
+            .find_map(|(index, gss)| {
+                (!pool_used[index] && gss.can_replace_single_path_state_in_place(stack))
+                    .then_some(index)
+            });
+        let Some(pool) = pool else {
+            return rebuild_by_key_languages(
+                state,
+                frontier,
+                active_representatives,
+                old_layout,
+            )
+            .then_some(Ok(()));
+        };
+        pool_used[pool] = true;
+        assignments.push((false, pool));
+    }
+
+    // Validate storage for distinct active parser objects not selected as an
+    // output group. Pointer duplicates were already discarded above, so every
+    // remaining representative is independently recyclable or retired.
+    let unused_active = active_representatives
+        .iter()
+        .enumerate()
+        .filter_map(|(index, gss)| (!active_used[index]).then_some(gss));
+    let (recyclable, must_retire) = displaced_flat_gss_storage_counts(unused_active);
+    let selected_pool = pool_used.iter().filter(|&&used| used).count();
+    if frontier.gss_pool.len() - selected_pool + recyclable
+        > FLAT_FRONTIER_GSS_POOL_CAPACITY
+        || frontier.retired_gss.len() + must_retire
+            > FLAT_FRONTIER_RETIRED_GSS_CAPACITY
+    {
+        restore_old_state(state, &active_representatives, &old_layout);
+        return None;
+    }
+
+    let mut active_slots = SmallVec::<
+        [Option<ParserGSS>; INLINE_PARSER_STATE_CAPACITY],
+    >::from_iter(active_representatives.into_iter().map(Some));
+    let old_pool = std::mem::take(&mut frontier.gss_pool);
+    let mut pool_slots = SmallVec::<
+        [Option<ParserGSS>; FLAT_FRONTIER_GSS_POOL_CAPACITY],
+    >::from_iter(old_pool.into_iter().map(Some));
+
+    let mut group_gss =
+        SmallVec::<[ParserGSS; INLINE_PARSER_STATE_CAPACITY]>::new();
+    for (group, (&representative, &(active, index))) in group_representatives
+        .iter()
+        .zip(&assignments)
+        .enumerate()
+    {
+        let mut gss = if active {
+            active_slots[index]
+                .take()
+                .expect("active assignment validated")
+        } else {
+            pool_slots[index]
+                .take()
+                .expect("pool assignment validated")
+        };
+        if Some(group) != unchanged_group {
+            let branch = &frontier.branches[representative];
+            let replaced = gss.try_replace_single_path_state_in_place(
+                &branch.stack,
+                branch.acc.clone(),
+            );
+            debug_assert!(replaced, "grouped parser-state eligibility changed");
+            if !replaced {
+                unreachable!("grouped parser state was validated before mutation");
+            }
+        }
+        group_gss.push(gss);
+    }
+
+    frontier.gss_pool.extend(pool_slots.into_iter().flatten());
+    store_displaced_flat_gsses(frontier, active_slots.into_iter().flatten());
+
+    let mut new_entries =
+        SmallVec::<[(u32, ParserGSS); INLINE_PARSER_STATE_CAPACITY]>::new();
+    for (&output, &group) in outputs.iter().zip(&output_groups) {
+        new_entries.push((
+            frontier.branches[output].tokenizer_state,
+            group_gss[group].clone(),
+        ));
+    }
+    state.entries = new_entries;
+    Some(Ok(()))
+}
+
+fn finish_flat_frontier_commit(
+    state: &mut ParserStateMap,
+    frontier: &mut FlatFrontierScratch,
+    final_offset: usize,
+) -> Option<Result<(), String>> {
+    finish_grouped_flat_frontier_commit(state, frontier, final_offset, None)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FlatContinuationGroupOutcome {
+    NotApplicable,
+    Handled,
+    Decline,
+}
+
+/// Process several flat parser branches sharing one tokenizer state with a
+/// single lexer scan. Initial-state exclusions are pruned against the terminals
+/// accepted by the complete correlated group, matching the authoritative GSS
+/// path while avoiding one tokenizer execution per concrete stack.
+fn try_process_flat_same_key_group(
+    constraint: &Constraint,
+    bytes: &[u8],
+    offset: usize,
+    tokenizer_state: u32,
+    tokenizer_scratch: &mut tokenizer_scan::ReusableTokenizerExecScratch,
+    frontier: &mut FlatFrontierScratch,
+) -> FlatContinuationGroupOutcome {
+    let mut indices = SmallVec::<[usize; FLAT_FRONTIER_MAX_BRANCHES]>::new();
+    for index in 0..frontier.len {
+        let branch = &frontier.branches[index];
+        if branch.offset == offset && branch.tokenizer_state == tokenizer_state {
+            if !branch.acc.is_inline() {
+                return FlatContinuationGroupOutcome::NotApplicable;
+            }
+            indices.push(index);
+        }
+    }
+    if indices.len() < 2 {
+        return FlatContinuationGroupOutcome::NotApplicable;
+    }
+
+    if !execute_tokenizer_reusable(
+        constraint,
+        &bytes[offset..],
+        tokenizer_state,
+        tokenizer_scratch,
+    ) || tokenizer_scratch.matches.len() > SMALL_NORMALIZED_MATCH_LINEAR_SCAN_MAX
+    {
+        return FlatContinuationGroupOutcome::Decline;
+    }
+
+    let Some(&first_top) = frontier.branches[indices[0]].stack.last() else {
+        return FlatContinuationGroupOutcome::Decline;
+    };
+    let accepted_terminals = if offset == 0 {
+        flat_group_accepted_terminals(
+            constraint,
+            frontier,
+            tokenizer_state,
+            first_top,
+            &tokenizer_scratch.matches,
+        )
+    } else {
+        SmallVec::new()
+    };
+
+    let mut stacks = SmallVec::<
+        [(FlatInlineStack, TerminalsDisallowed); FLAT_FRONTIER_MAX_BRANCHES],
+    >::new();
+    for &index in &indices {
+        let branch = &frontier.branches[index];
+        if branch.stack.len() > LINEAR_STACK_RESERVE {
+            return FlatContinuationGroupOutcome::Decline;
+        }
+        let mut stack = FlatInlineStack::new();
+        stack.extend_from_slice(&branch.stack);
+        stacks.push((stack, branch.acc.clone()));
+    }
+    for &index in indices.iter().rev() {
+        frontier.remove_branch(index);
+    }
+
+    let initial_tokenizer_state = constraint.tokenizer.initial_state();
+    let mut surviving = SmallVec::<
+        [(FlatInlineStack, TerminalsDisallowed); FLAT_FRONTIER_MAX_BRANCHES],
+    >::new();
+    for (stack, original_acc) in stacks {
+        let mut acc = original_acc;
+        if offset == 0 {
+            match prune_flat_branch_acc(
+                &acc,
+                tokenizer_state,
+                &tokenizer_scratch.states,
+                &accepted_terminals,
+            ) {
+                None => return FlatContinuationGroupOutcome::Decline,
+                Some(Some(pruned)) => acc = pruned,
+                Some(None) => continue,
+            }
+        }
+        surviving.push((stack, acc));
+    }
+
+    for (stack, acc) in &surviving {
+        let Some(&top_state) = stack.last() else {
+            return FlatContinuationGroupOutcome::Decline;
+        };
+        let actionable = ActionableTerminals::SingleState(top_state);
+        let normalized_matches = collect_unique_actionable_matches(
+            constraint,
+            Some(&actionable),
+            constraint.ignore_terminal,
+            &tokenizer_scratch.matches,
+            None,
+        );
+
+        for matched in normalized_matches {
+            let new_offset = offset + matched.width;
+            if matched.width == 0 || new_offset > bytes.len() {
+                return FlatContinuationGroupOutcome::Decline;
+            }
+            if matched.ignored {
+                if !frontier.enqueue(
+                    new_offset,
+                    initial_tokenizer_state,
+                    stack,
+                    acc.clone(),
+                ) {
+                    return FlatContinuationGroupOutcome::Decline;
+                }
+                continue;
+            }
+
+            match apply_terminal_to_flat_stacks(
+                constraint,
+                matched.terminal_id,
+                stack,
+                &mut frontier.action,
+            ) {
+                Some(true) => {}
+                Some(false) => continue,
+                None => return FlatContinuationGroupOutcome::Decline,
+            }
+            let Some(advanced_acc) = apply_flat_future_disallow(
+                constraint,
+                acc,
+                &tokenizer_scratch.states,
+                matched.terminal_id,
+            ) else {
+                return FlatContinuationGroupOutcome::Decline;
+            };
+            for action_index in 0..frontier.action.complete.len() {
+                let advanced_stack = frontier.action.complete[action_index].clone();
+                if !frontier.enqueue(
+                    new_offset,
+                    initial_tokenizer_state,
+                    &advanced_stack,
+                    advanced_acc.clone(),
+                ) {
+                    return FlatContinuationGroupOutcome::Decline;
+                }
+            }
+        }
+    }
+
+    for &end_state in &tokenizer_scratch.states {
+        let viable = if end_state == initial_tokenizer_state {
+            true
+        } else {
+            let future = constraint.tokenizer.possible_future_terminals(end_state);
+            let mut any_path = false;
+            for (stack, _) in &surviving {
+                match flat_stack_may_advance_on_any(
+                    constraint,
+                    stack,
+                    future,
+                    &mut frontier.action,
+                ) {
+                    Some(true) => any_path = true,
+                    Some(false) => {}
+                    None => return FlatContinuationGroupOutcome::Decline,
+                }
+            }
+            any_path
+        };
+        if !viable {
+            continue;
+        }
+        for (stack, acc) in &surviving {
+            if !frontier.enqueue(bytes.len(), end_state, stack, acc.clone()) {
+                return FlatContinuationGroupOutcome::Decline;
+            }
+        }
+    }
+
+    FlatContinuationGroupOutcome::Handled
+}
+
+/// Handle a no-terminal lexer continuation for a group of concrete parser
+/// paths as one parser frontier. The general runtime keeps the complete GSS
+/// under every lexer end state whose future terminals are accepted by any
+/// represented path. Processing paths independently would incorrectly filter
+/// that frontier path-by-path instead of preserving the group semantics.
+fn try_process_flat_continuation_group(
+    constraint: &Constraint,
+    bytes: &[u8],
+    offset: usize,
+    tokenizer_state: u32,
+    tokenizer_scratch: &mut tokenizer_scan::ReusableTokenizerExecScratch,
+    frontier: &mut FlatFrontierScratch,
+) -> FlatContinuationGroupOutcome {
+    if offset == 0 {
+        return FlatContinuationGroupOutcome::NotApplicable;
+    }
+
+    let mut indices = SmallVec::<[usize; FLAT_FRONTIER_MAX_BRANCHES]>::new();
+    for index in 0..frontier.len {
+        let branch = &frontier.branches[index];
+        if branch.offset == offset && branch.tokenizer_state == tokenizer_state {
+            indices.push(index);
+        }
+    }
+    if indices.len() < 2 {
+        return FlatContinuationGroupOutcome::NotApplicable;
+    }
+
+    if !execute_tokenizer_reusable(
+        constraint,
+        &bytes[offset..],
+        tokenizer_state,
+        tokenizer_scratch,
+    ) || tokenizer_scratch.matches.len() > SMALL_NORMALIZED_MATCH_LINEAR_SCAN_MAX
+    {
+        return FlatContinuationGroupOutcome::Decline;
+    }
+
+    // Terminal or ignore boundaries still use the ordinary per-path parser
+    // transition machinery. This shortcut is only for a pure lexer
+    // continuation over the remaining bytes.
+    for &index in &indices {
+        let Some(&top_state) = frontier.branches[index].stack.last() else {
+            return FlatContinuationGroupOutcome::Decline;
+        };
+        let actionable = ActionableTerminals::SingleState(top_state);
+        if !collect_unique_actionable_matches(
+            constraint,
+            Some(&actionable),
+            constraint.ignore_terminal,
+            &tokenizer_scratch.matches,
+            None,
+        )
+        .is_empty()
+        {
+            return FlatContinuationGroupOutcome::NotApplicable;
+        }
+    }
+
+    let initial_tokenizer_state = constraint.tokenizer.initial_state();
+    let mut viable_end_states = SmallVec::<[u32; INLINE_PARSER_STATE_CAPACITY]>::new();
+    for &end_state in &tokenizer_scratch.states {
+        let viable = if end_state == initial_tokenizer_state {
+            true
+        } else {
+            let future = constraint.tokenizer.possible_future_terminals(end_state);
+            let mut any_path = false;
+            for &index in &indices {
+                match flat_stack_may_advance_on_any(
+                    constraint,
+                    &frontier.branches[index].stack,
+                    future,
+                    &mut frontier.action,
+                ) {
+                    Some(true) => any_path = true,
+                    Some(false) => {}
+                    None => return FlatContinuationGroupOutcome::Decline,
+                }
+            }
+            any_path
+        };
+        if viable {
+            if viable_end_states.len() == viable_end_states.capacity() {
+                return FlatContinuationGroupOutcome::Decline;
+            }
+            viable_end_states.push(end_state);
+        }
+    }
+
+    let projected = frontier
+        .len
+        .saturating_sub(indices.len())
+        .saturating_add(indices.len().saturating_mul(viable_end_states.len()));
+    if projected > FLAT_FRONTIER_MAX_BRANCHES {
+        return FlatContinuationGroupOutcome::Decline;
+    }
+
+    let mut saved = SmallVec::<
+        [(FlatInlineStack, TerminalsDisallowed); FLAT_FRONTIER_MAX_BRANCHES],
+    >::new();
+    for &index in &indices {
+        let branch = &frontier.branches[index];
+        let mut stack = FlatInlineStack::new();
+        stack.extend_from_slice(&branch.stack);
+        saved.push((stack, branch.acc.clone()));
+    }
+    for &index in indices.iter().rev() {
+        frontier.remove_branch(index);
+    }
+
+    for end_state in viable_end_states {
+        for (stack, acc) in &saved {
+            if !frontier.enqueue(bytes.len(), end_state, stack, acc.clone()) {
+                return FlatContinuationGroupOutcome::Decline;
+            }
+        }
+    }
+    FlatContinuationGroupOutcome::Handled
+}
+
 fn try_commit_flat_frontier_in_place(
     constraint: &Constraint,
     state: &mut ParserStateMap,
@@ -3964,7 +5290,15 @@ fn try_commit_flat_frontier_in_place(
 ) -> Option<Result<(), String>> {
     macro_rules! flat_decline {
         ($reason:literal) => {{
-            let _ = $reason;
+            if std::env::var_os("GLRMASK_TRACE_FLAT_FRONTIER_DECLINE").is_some() {
+                eprintln!(
+                    "flat-frontier-decline reason={} bytes_len={} input_states={} frontier_len={}",
+                    $reason,
+                    bytes.len(),
+                    state.len(),
+                    frontier.len
+                );
+            }
             return None;
         }};
     }
@@ -3973,14 +5307,41 @@ fn try_commit_flat_frontier_in_place(
     }
     frontier.clear();
     for (&tokenizer_state, gss) in state.iter() {
-        if !gss.copy_single_path_stack_into(original) {
-            flat_decline!("input-not-single-path");
+        if gss.copy_single_path_stack_into(original) {
+            let Some(acc) = gss.single_path_acc() else {
+                flat_decline!("missing-single-acc");
+            };
+            if !frontier.enqueue(0, tokenizer_state, original, acc) {
+                flat_decline!("initial-enqueue");
+            }
+            continue;
         }
-        let Some(acc) = gss.single_path_acc() else {
-            flat_decline!("missing-single-acc");
-        };
-        if !frontier.enqueue(0, tokenizer_state, original, acc) {
-            flat_decline!("initial-enqueue");
+
+        // Small ambiguous GSSes are still concrete bounded frontiers. Flatten
+        // them directly into the existing preallocated branch bank rather than
+        // falling back to allocating GSS advances. The traversal itself keeps
+        // its path buffer inline through depth 64.
+        let remaining = FLAT_FRONTIER_MAX_BRANCHES.saturating_sub(frontier.len);
+        if remaining == 0 {
+            flat_decline!("initial-multipath-capacity");
+        }
+        let mut admitted = true;
+        let complete = gss.for_each_stack_top_first_bounded(
+            remaining,
+            |top_first, acc| {
+                if !admitted || top_first.is_empty() || top_first.len() > original.capacity() {
+                    admitted = false;
+                    return;
+                }
+                original.clear();
+                original.extend(top_first.iter().rev().copied());
+                if !frontier.enqueue(0, tokenizer_state, original, acc.clone()) {
+                    admitted = false;
+                }
+            },
+        );
+        if !complete || !admitted {
+            flat_decline!("initial-multipath-traversal");
         }
     }
 
@@ -3988,21 +5349,50 @@ fn try_commit_flat_frontier_in_place(
     for offset in 0..bytes.len() {
         let mut index = 0usize;
         while index < frontier.len {
-            if frontier.branches[index].processed
-                || frontier.branches[index].offset != offset
-            {
+            if frontier.branches[index].offset != offset {
                 index += 1;
                 continue;
             }
 
             let tokenizer_state = frontier.branches[index].tokenizer_state;
+            match try_process_flat_same_key_group(
+                constraint,
+                bytes,
+                offset,
+                tokenizer_state,
+                tokenizer_scratch,
+                frontier,
+            ) {
+                FlatContinuationGroupOutcome::Handled => continue,
+                FlatContinuationGroupOutcome::Decline => {
+                    flat_decline!("same-key-group");
+                }
+                FlatContinuationGroupOutcome::NotApplicable => {}
+            }
+            match try_process_flat_continuation_group(
+                constraint,
+                bytes,
+                offset,
+                tokenizer_state,
+                tokenizer_scratch,
+                frontier,
+            ) {
+                FlatContinuationGroupOutcome::Handled => continue,
+                FlatContinuationGroupOutcome::Decline => {
+                    flat_decline!("continuation-group");
+                }
+                FlatContinuationGroupOutcome::NotApplicable => {}
+            }
             if frontier.branches[index].stack.len() > original.capacity() {
                 flat_decline!("copy-capacity");
             }
             original.clear();
             original.extend_from_slice(&frontier.branches[index].stack);
             let mut acc = frontier.branches[index].acc.clone();
-            frontier.branches[index].processed = true;
+            // The branch is fully copied into scratch. Reclaim its fixed slot
+            // before enqueuing successors, so capacity tracks the live frontier
+            // rather than cumulative branches processed across byte offsets.
+            frontier.remove_branch(index);
 
             if !execute_tokenizer_reusable(
                 constraint,
@@ -4019,6 +5409,7 @@ fn try_commit_flat_frontier_in_place(
                     constraint,
                     frontier,
                     tokenizer_state,
+                    top_state,
                     &tokenizer_scratch.matches,
                 );
                 match prune_flat_branch_acc(
@@ -4030,10 +5421,7 @@ fn try_commit_flat_frontier_in_place(
                     None => flat_decline!("prune-acc-promotion"),
                     Some(result) => match result {
                         Some(pruned) => acc = pruned,
-                        None => {
-                            index += 1;
-                            continue;
-                        }
+                        None => continue,
                     },
                 }
             }
@@ -4163,72 +5551,21 @@ fn try_commit_flat_frontier_in_place(
                     flat_decline!("continuation-enqueue");
                 }
             }
-            index += 1;
         }
     }
 
-    let mut outputs = SmallVec::<[usize; INLINE_PARSER_STATE_CAPACITY]>::new();
-    for index in 0..frontier.len {
-        if frontier.branches[index].offset == bytes.len() {
-            if outputs.len() == outputs.capacity() {
-                flat_decline!("output-capacity");
-            }
-            outputs.push(index);
-        }
-    }
-    if outputs.is_empty() {
-        return Some(Err(
-            "commit rejected: no valid parser states remain".to_string(),
-        ));
-    }
-    outputs.sort_unstable_by(|&left, &right| {
-        frontier.branches[left]
-            .tokenizer_state
-            .cmp(&frontier.branches[right].tokenizer_state)
-            .then_with(|| frontier.branches[left].stack.cmp(&frontier.branches[right].stack))
-    });
-
-    // Use a preallocated spare GSS for every output. This is deliberately a
-    // double buffer: active GSS objects may be shared by rollback snapshots or
-    // by a prior lexer split, while spare objects remain uniquely mutable.
-    if frontier.gss_pool.len() < outputs.len()
-        || !frontier.can_recycle_old_state(state, outputs.len())
+    let result = finish_flat_frontier_commit(state, frontier, bytes.len());
+    if result.is_none()
+        && std::env::var_os("GLRMASK_TRACE_FLAT_FRONTIER_DECLINE").is_some()
     {
-        flat_decline!("gss-pool-capacity");
-    }
-    let mut selected = SmallVec::<[ParserGSS; INLINE_PARSER_STATE_CAPACITY]>::new();
-    for &output in &outputs {
-        let stack = &frontier.branches[output].stack;
-        let Some(pool_index) = frontier
-            .gss_pool
-            .iter()
-            .rposition(|gss| gss.can_replace_single_path_state_in_place(stack))
-        else {
-            for gss in selected.drain(..) {
-                frontier.gss_pool.push(gss);
-            }
-            flat_decline!("gss-pool-shared-or-shape");
-        };
-        selected.push(frontier.gss_pool.swap_remove(pool_index));
-    }
-
-    let mut new_entries = SmallVec::<[(u32, ParserGSS); INLINE_PARSER_STATE_CAPACITY]>::new();
-    for (mut gss, &output) in selected.into_iter().zip(&outputs) {
-        let branch = &frontier.branches[output];
-        let replaced = gss.try_replace_single_path_state_in_place(
-            &branch.stack,
-            branch.acc.clone(),
+        eprintln!(
+            "flat-frontier-decline reason=finalizer bytes_len={} input_states={} frontier_len={}",
+            bytes.len(),
+            state.len(),
+            frontier.len
         );
-        debug_assert!(replaced, "flat-frontier spare eligibility changed");
-        if !replaced {
-            unreachable!("flat-frontier spare was validated before mutation");
-        }
-        new_entries.push((branch.tokenizer_state, gss));
     }
-
-    let old_entries = std::mem::replace(&mut state.entries, new_entries);
-    frontier.recycle_old_entries(old_entries);
-    Some(Ok(()))
+    result
 }
 
 fn try_commit_direct_linear_in_place(
@@ -4376,6 +5713,98 @@ fn commit_bytes_impl(
             &mut bufs.linear_stack_work,
             &mut bufs.reusable_tokenizer_exec,
             &mut bufs.flat_frontier,
+        )
+    {
+        return result;
+    }
+    share_small_semantically_equal_empty_frontiers(
+        state,
+        bytes,
+        &mut bufs.semantic_frontier_keys,
+    );
+    if state.len() <= INLINE_PARSER_STATE_CAPACITY
+        && let Some(result) = try_commit_shared_parser_gss_lexer_remap(
+            constraint,
+            state,
+            bytes,
+            &mut bufs.reusable_tokenizer_exec,
+        )
+    {
+        return result;
+    }
+    if state.len() <= INLINE_PARSER_STATE_CAPACITY
+        && let Some(result) = try_commit_uniform_parser_frontier(
+            constraint,
+            state,
+            bytes,
+            &mut bufs.linear_stack_original,
+            &mut bufs.linear_stack_work,
+            &mut bufs.reusable_tokenizer_exec,
+            &mut bufs.flat_frontier,
+        )
+    {
+        return result;
+    }
+    let duplicate_multi_candidate = bytes.len() <= 3
+        && (3..=8).contains(&state.len())
+        && state.has_duplicate_keys()
+        && state.entries.first().is_some_and(|(first_key, _)| {
+            state.entries.iter().all(|(key, gss)| {
+                key == first_key
+                    && gss.single_exclusive_top_value().is_some()
+                    && gss
+                        .single_path_acc()
+                        .is_some_and(|acc: TerminalsDisallowed| acc.is_empty())
+            })
+        });
+    if duplicate_multi_candidate {
+        let mut normalized = state.clone();
+        normalized.normalize_duplicate_keys();
+        if normalized.len() == 1
+            && let Some(result) = commit_bytes_full_width_fast_path(
+                constraint,
+                &mut normalized,
+                bytes,
+                &mut bufs.reusable_tokenizer_exec,
+                Some(&mut bufs.small_exec_result),
+                true,
+            )
+        {
+            *state = normalized;
+            return result;
+        }
+    }
+    if bytes.len() <= 3 && state.len() == 1
+        && let Some(result) = commit_bytes_full_width_fast_path(
+            constraint,
+            state,
+            bytes,
+            &mut bufs.reusable_tokenizer_exec,
+            Some(&mut bufs.small_exec_result),
+            true,
+        )
+    {
+        return result;
+    }
+    if prefer_small_queue_before_flat_frontier(state, bytes)
+        && let Some(result) = commit_bytes_small_queue_fast_path(
+            constraint,
+            state,
+            bytes,
+            &mut bufs.reusable_tokenizer_exec,
+            &mut bufs.small_queue,
+        )
+    {
+        return result;
+    }
+    if prefer_full_width_before_flat_frontier(state, bytes)
+        && let Some(result) = commit_bytes_full_width_fast_path(
+            constraint,
+            state,
+            bytes,
+            &mut bufs.reusable_tokenizer_exec,
+            None,
+            false,
         )
     {
         return result;
@@ -4551,6 +5980,17 @@ fn commit_bytes_impl(
         }
     }
 
+    if let Some(result) = commit_bytes_full_width_fast_path(
+        constraint,
+        state,
+        bytes,
+        &mut bufs.reusable_tokenizer_exec,
+        None,
+        false,
+    ) {
+        return result;
+    }
+
     let small_queue_result = commit_bytes_small_queue_fast_path(
         constraint,
         state,
@@ -4559,10 +5999,6 @@ fn commit_bytes_impl(
         &mut bufs.small_queue,
     );
     if let Some(result) = small_queue_result {
-        return result;
-    }
-
-    if let Some(result) = commit_bytes_full_width_fast_path(constraint, state, bytes) {
         return result;
     }
 
@@ -5154,6 +6590,390 @@ mod tests {
     }
 
     #[test]
+    fn grouped_flat_finalizer_shares_parser_states_across_tokenizer_keys() {
+        let acc = TerminalsDisallowed::new();
+        let input_stacks = [
+            vec![0, 1, 10, 40, 85, 123, 168, 137],
+            vec![0, 1, 10, 40, 85, 123, 181, 137],
+            vec![0, 1, 10, 40, 85, 123, 198, 137],
+            vec![0, 1, 10, 40, 85, 123, 322, 133],
+        ];
+        let mut state = ParserStateMap::default();
+        for &key in &[12, 123] {
+            for stack in &input_stacks {
+                state.entries.push((
+                    key,
+                    ParserGSS::from_single_stack(stack.clone(), acc.clone()),
+                ));
+            }
+        }
+
+        let mut frontier = FlatFrontierScratch::default();
+        let outputs = [
+            (4, vec![0, 1, 10, 40, 85, 123, 327]),
+            (4, vec![0, 1, 10, 40, 85, 123, 351]),
+            (4, vec![0, 1, 10, 40, 85, 123, 360]),
+            (4, vec![0, 1, 10, 40, 85, 123, 371]),
+            (30, vec![0, 1, 10, 40, 85, 123, 351]),
+            (30, vec![0, 1, 10, 40, 85, 123, 360]),
+            (30, vec![0, 1, 10, 40, 85, 123, 371]),
+            (132, vec![0, 1, 10, 40, 85, 123, 351]),
+            (132, vec![0, 1, 10, 40, 85, 123, 360]),
+            (132, vec![0, 1, 10, 40, 85, 123, 371]),
+            (507, vec![0, 1, 10, 40, 85, 123, 327]),
+        ];
+        for (key, stack) in &outputs {
+            assert!(frontier.enqueue(2, *key, stack, acc.clone()));
+        }
+
+        finish_grouped_flat_frontier_commit(&mut state, &mut frontier, 2, None)
+            .expect("bounded grouped finalization should be applicable")
+            .expect("grouped output should be non-empty");
+
+        let expected = vec![
+            (
+                4,
+                vec![
+                    (vec![0, 1, 10, 40, 85, 123, 327], vec![]),
+                    (vec![0, 1, 10, 40, 85, 123, 351], vec![]),
+                    (vec![0, 1, 10, 40, 85, 123, 360], vec![]),
+                    (vec![0, 1, 10, 40, 85, 123, 371], vec![]),
+                ],
+            ),
+            (
+                30,
+                vec![
+                    (vec![0, 1, 10, 40, 85, 123, 351], vec![]),
+                    (vec![0, 1, 10, 40, 85, 123, 360], vec![]),
+                    (vec![0, 1, 10, 40, 85, 123, 371], vec![]),
+                ],
+            ),
+            (
+                132,
+                vec![
+                    (vec![0, 1, 10, 40, 85, 123, 351], vec![]),
+                    (vec![0, 1, 10, 40, 85, 123, 360], vec![]),
+                    (vec![0, 1, 10, 40, 85, 123, 371], vec![]),
+                ],
+            ),
+            (
+                507,
+                vec![(vec![0, 1, 10, 40, 85, 123, 327], vec![])],
+            ),
+        ];
+        assert_eq!(canonical_commit_state(&state), expected);
+
+        let distinct_parser_states = state
+            .values()
+            .map(ParserGSS::ptr_key)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(distinct_parser_states.len(), 4);
+        assert_eq!(state.len(), outputs.len());
+    }
+
+    #[test]
+    fn grouped_flat_finalizer_compresses_small_cartesian_outputs() {
+        let acc = TerminalsDisallowed::new();
+        let mut state = ParserStateMap::default();
+        state.entries.push((
+            3,
+            ParserGSS::from_single_stack(vec![0, 3, 21, 38], acc.clone()),
+        ));
+        state.entries.push((
+            15,
+            ParserGSS::from_single_stack(vec![0, 3, 30, 32, 11], acc.clone()),
+        ));
+
+        let stacks = [vec![0, 3, 21, 38], vec![0, 3, 30, 32, 11]];
+        let mut frontier = FlatFrontierScratch::default();
+        for &key in &[50, 138] {
+            for stack in &stacks {
+                assert!(frontier.enqueue(5, key, stack, acc.clone()));
+            }
+        }
+
+        finish_grouped_flat_frontier_commit(&mut state, &mut frontier, 5, None)
+            .expect("small Cartesian finalization should be applicable")
+            .expect("small Cartesian output should be non-empty");
+
+        let expected_stacks = stacks
+            .iter()
+            .cloned()
+            .map(|stack| (stack, vec![]))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            canonical_commit_state(&state),
+            vec![(50, expected_stacks.clone()), (138, expected_stacks)],
+        );
+        assert_eq!(state.len(), 2);
+        assert!(state.entries[0].1.ptr_eq(&state.entries[1].1));
+    }
+
+    #[test]
+    fn grouped_flat_finalizer_eagerly_rebuilds_two_wide_key_languages() {
+        let acc = TerminalsDisallowed::new();
+        let mut state = ParserStateMap::default();
+        state.entries.push((
+            0,
+            ParserGSS::from_single_stack(vec![0, 1, 7, 14, 105], acc.clone()),
+        ));
+        state.entries.push((
+            29,
+            ParserGSS::from_single_stack(vec![0, 1, 7, 14, 127], acc.clone()),
+        ));
+
+        let key_zero = [
+            vec![0, 1, 7, 14, 114, 105],
+            vec![0, 1, 7, 14, 122, 105],
+            vec![0, 1, 7, 14, 124, 105],
+            vec![0, 1, 7, 14, 156],
+        ];
+        let key_twenty_nine = [
+            vec![0, 1, 7, 14, 114],
+            vec![0, 1, 7, 14, 122],
+            vec![0, 1, 7, 14, 124],
+            vec![0, 1, 7, 14, 127],
+        ];
+        let mut frontier = FlatFrontierScratch::default();
+        for stack in &key_zero {
+            assert!(frontier.enqueue(1, 0, stack, acc.clone()));
+        }
+        for stack in &key_twenty_nine {
+            assert!(frontier.enqueue(1, 29, stack, acc.clone()));
+        }
+
+        finish_grouped_flat_frontier_commit(&mut state, &mut frontier, 1, None)
+            .expect("wide two-key finalization should be applicable")
+            .expect("wide two-key output should be non-empty");
+
+        assert_eq!(state.len(), 2);
+        let expected = vec![
+            (
+                0,
+                key_zero
+                    .iter()
+                    .cloned()
+                    .map(|stack| (stack, vec![]))
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                29,
+                key_twenty_nine
+                    .iter()
+                    .cloned()
+                    .map(|stack| (stack, vec![]))
+                    .collect::<Vec<_>>(),
+            ),
+        ];
+        assert_eq!(canonical_commit_state(&state), expected);
+    }
+
+    #[test]
+    fn grouped_flat_finalizer_rebuilds_key_languages_when_slots_are_exhausted() {
+        let empty = TerminalsDisallowed::new();
+        let blocked_a = TerminalsDisallowed::new().with_insert(0, 11);
+        let blocked_b = TerminalsDisallowed::new().with_insert(0, 12);
+
+        let active_a = ParserGSS::from_stacks(&[
+            (vec![0, 1, 10, 40, 56, 90], empty.clone()),
+            (vec![0, 1, 10, 40, 57, 90], empty.clone()),
+        ]);
+        let active_b = ParserGSS::from_stacks(&[
+            (vec![0, 1, 10, 40, 58, 91], empty.clone()),
+            (vec![0, 1, 10, 40, 59, 91], empty.clone()),
+            (vec![0, 1, 10, 40, 60, 91], empty.clone()),
+        ]);
+        assert!(!active_a.can_replace_single_path_state_in_place(&[0]));
+        assert!(!active_b.can_replace_single_path_state_in_place(&[0]));
+
+        let mut state = ParserStateMap::default();
+        state.entries.push((0, active_a));
+        for &key in &[4, 30, 473, 673, 696, 719, 741] {
+            state.entries.push((key, active_b.clone()));
+        }
+
+        let stacks = [
+            vec![0, 1, 10, 40, 70, 100],
+            vec![0, 1, 10, 40, 71, 100],
+            vec![0, 1, 10, 40, 72, 101],
+            vec![0, 1, 10, 40, 73, 102],
+            vec![0, 1, 10, 40, 74, 102],
+            vec![0, 1, 10, 40, 75, 103],
+            vec![0, 1, 10, 40, 76, 103],
+        ];
+        let mut frontier = FlatFrontierScratch::default();
+        frontier.gss_pool.truncate(1);
+        for (key, groups) in [
+            (0, &[0usize, 1][..]),
+            (44, &[2][..]),
+            (324, &[3, 4][..]),
+            (473, &[5, 6][..]),
+            (671, &[5, 6][..]),
+            (696, &[5, 6][..]),
+            (719, &[5, 6][..]),
+            (741, &[5, 6][..]),
+        ] {
+            for &group in groups {
+                let acc = match group {
+                    0 => blocked_a.clone(),
+                    1 => blocked_b.clone(),
+                    _ => empty.clone(),
+                };
+                assert!(frontier.enqueue(8, key, &stacks[group], acc));
+            }
+        }
+
+        finish_grouped_flat_frontier_commit(&mut state, &mut frontier, 8, None)
+            .expect("key-language reconstruction should be applicable")
+            .expect("grouped output should be non-empty");
+
+        let mut expected = ParserStateMap::default();
+        expected.entries.push((
+            0,
+            ParserGSS::from_stacks(&[
+                (stacks[0].clone(), blocked_a),
+                (stacks[1].clone(), blocked_b),
+            ]),
+        ));
+        expected.entries.push((
+            44,
+            ParserGSS::from_single_stack(stacks[2].clone(), empty.clone()),
+        ));
+        expected.entries.push((
+            324,
+            ParserGSS::from_stacks(&[
+                (stacks[3].clone(), empty.clone()),
+                (stacks[4].clone(), empty.clone()),
+            ]),
+        ));
+        let shared = ParserGSS::from_stacks(&[
+            (stacks[5].clone(), empty.clone()),
+            (stacks[6].clone(), empty),
+        ]);
+        for &key in &[473, 671, 696, 719, 741] {
+            expected.entries.push((key, shared.clone()));
+        }
+
+        assert_eq!(canonical_commit_state(&state), canonical_commit_state(&expected));
+        let distinct_parser_states = state
+            .values()
+            .map(ParserGSS::ptr_key)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(distinct_parser_states.len(), 4);
+        assert_eq!(state.len(), 8);
+    }
+
+    #[test]
+    fn single_key_ambiguous_frontier_prefers_small_queue_before_flattening() {
+        let gss = ParserGSS::from_stacks(&[
+            (vec![0, 10, 20], TerminalsDisallowed::new()),
+            (vec![0, 11, 21], TerminalsDisallowed::new()),
+            (vec![0, 12, 22], TerminalsDisallowed::new()),
+        ]);
+        let state = ParserStateMap::singleton(0, gss);
+
+        assert!(prefer_small_queue_before_flat_frontier(&state, b"102"));
+        assert!(!prefer_small_queue_before_flat_frontier(&state, b""));
+        assert!(!prefer_small_queue_before_flat_frontier(&state, b"123456789"));
+    }
+
+    #[test]
+    fn shared_ambiguous_frontier_prefers_small_queue_before_flattening() {
+        let acc = TerminalsDisallowed::new();
+        let shared = ParserGSS::from_stacks(&[
+            (vec![0, 10, 20], acc.clone()),
+            (vec![0, 11, 21], acc),
+        ]);
+        let mut state = ParserStateMap::default();
+        state.entries.push((4, shared.clone()));
+        state.entries.push((30, shared));
+
+        assert!(prefer_small_queue_before_flat_frontier(&state, b"ab"));
+        assert!(!prefer_small_queue_before_flat_frontier(&state, b""));
+        assert!(!prefer_small_queue_before_flat_frontier(&state, b"123456789"));
+
+        let rebuilt_equal = ParserGSS::from_stacks(&[
+            (vec![0, 10, 20], TerminalsDisallowed::new()),
+            (vec![0, 11, 21], TerminalsDisallowed::new()),
+        ]);
+        assert!(!state.entries[0].1.ptr_eq(&rebuilt_equal));
+        state.entries[1].1 = rebuilt_equal;
+        let mut keys = GssSemanticKeyInterner::with_capacity(64);
+        share_small_semantically_equal_empty_frontiers(&mut state, b"ab", &mut keys);
+        assert!(state.entries[0].1.ptr_eq(&state.entries[1].1));
+        assert!(prefer_small_queue_before_flat_frontier(&state, b"ab"));
+
+        state.entries[1].1 = ParserGSS::from_stacks(&[
+            (vec![0, 10, 20], TerminalsDisallowed::new()),
+            (vec![0, 12, 22], TerminalsDisallowed::new()),
+        ]);
+        share_small_semantically_equal_empty_frontiers(&mut state, b"ab", &mut keys);
+        assert!(!state.entries[0].1.ptr_eq(&state.entries[1].1));
+        assert!(!prefer_small_queue_before_flat_frontier(&state, b"ab"));
+    }
+
+    #[test]
+    fn eight_key_shared_frontier_prefers_small_queue() {
+        let empty = TerminalsDisallowed::new();
+        let shared = ParserGSS::from_stacks(&[
+            (vec![0, 10, 20], empty.clone()),
+            (vec![0, 11, 21], empty.clone()),
+            (vec![0, 12, 22], empty.clone()),
+        ]);
+        let annotated = ParserGSS::from_single_stack(
+            vec![0, 13, 23],
+            TerminalsDisallowed::from_map(std::collections::BTreeMap::from([(
+                7,
+                std::collections::BTreeSet::from([9]),
+            )])),
+        );
+        let other = ParserGSS::from_single_stack(vec![0, 14, 24], empty);
+        let mut state = ParserStateMap::default();
+        state.entries.push((0, annotated));
+        state.entries.push((1, other));
+        for key in 2..8 {
+            state.entries.push((key, shared.clone()));
+        }
+
+        assert!(prefer_small_queue_before_flat_frontier(&state, b"token"));
+    }
+
+    #[test]
+    fn wide_shared_frontier_prefers_full_width_before_flattening() {
+        let empty = TerminalsDisallowed::new();
+        let first = ParserGSS::from_stacks(&[
+            (vec![0, 10, 20], empty.clone()),
+            (vec![0, 11, 21], empty.clone()),
+        ]);
+        let second = ParserGSS::from_stacks(&[
+            (vec![0, 12, 22], empty.clone()),
+            (vec![0, 13, 23], empty.clone()),
+            (vec![0, 14, 24], empty),
+        ]);
+        let mut state = ParserStateMap::default();
+        let rebuilt_second = ParserGSS::from_stacks(&second.to_stacks(16).unwrap());
+        assert!(!second.ptr_eq(&rebuilt_second));
+        state.entries.push((0, first.clone()));
+        state.entries.push((4, second.clone()));
+        state.entries.push((30, rebuilt_second));
+        state.entries.push((473, second));
+
+        let mut keys = GssSemanticKeyInterner::with_capacity(64);
+        share_small_semantically_equal_empty_frontiers(&mut state, b"token", &mut keys);
+        assert!(state.entries[1].1.ptr_eq(&state.entries[2].1));
+        assert!(prefer_small_queue_before_flat_frontier(&state, b"token"));
+        assert!(prefer_full_width_before_flat_frontier(&state, b"token"));
+        assert!(!prefer_full_width_before_flat_frontier(&state, b""));
+
+        let third = ParserGSS::from_single_stack(
+            vec![0, 15, 25],
+            TerminalsDisallowed::new(),
+        );
+        state.entries.push((500, third));
+        assert!(!prefer_full_width_before_flat_frontier(&state, b"token"));
+    }
+
+    #[test]
     fn duplicate_key_flat_state_reports_completion_without_normalization() {
         let constraint = Constraint::from_glrm_grammar(
             r#"
@@ -5169,10 +6989,19 @@ mod tests {
 
         let mut state = constraint.start();
         state.commit_token(0).unwrap();
+        let mut flat_state = ParserStateMap::default();
+        for (&key, gss) in state.state.iter() {
+            for (stack, acc) in gss.to_stacks(8).expect("bounded completed state") {
+                flat_state
+                    .entries
+                    .push((key, ParserGSS::from_single_stack(stack, acc)));
+            }
+        }
         assert!(
-            state.state.has_duplicate_keys(),
-            "the bounded runtime should retain the completed alternatives separately"
+            flat_state.has_duplicate_keys(),
+            "the test must expose completed alternatives under one lexer key"
         );
+        state.state = flat_state;
         assert!(state.is_complete());
 
         let mut normalized = state.clone();
@@ -5182,6 +7011,320 @@ mod tests {
             canonical_commit_state(&state.state),
             canonical_commit_state(&normalized.state),
         );
+    }
+
+    #[test]
+    fn flat_finalizer_drops_small_displaced_gss_when_retired_bank_is_full() {
+        let mut frontier = FlatFrontierScratch::default();
+        while frontier.retired_gss.len() < FLAT_FRONTIER_RETIRED_GSS_CAPACITY {
+            let value = 100 + frontier.retired_gss.len() as u32;
+            frontier.retired_gss.push(ParserGSS::from_single_stack(
+                vec![0, value],
+                TerminalsDisallowed::new(),
+            ));
+        }
+
+        let left = ParserGSS::from_single_stack(
+            vec![0, 10, 20],
+            TerminalsDisallowed::new(),
+        );
+        let right = ParserGSS::from_single_stack(
+            vec![0, 11, 21],
+            TerminalsDisallowed::new(),
+        );
+        let _left_hold = left.clone();
+        let _right_hold = right.clone();
+        let mut state = ParserStateMap::default();
+        state.entries.push((4, left));
+        state.entries.push((30, right));
+
+        assert!(frontier.enqueue(
+            3,
+            0,
+            &[0, 99],
+            TerminalsDisallowed::new(),
+        ));
+        assert_eq!(
+            finish_flat_frontier_commit(&mut state, &mut frontier, 3),
+            Some(Ok(())),
+        );
+        assert_eq!(
+            canonical_commit_state(&state),
+            vec![(0, vec![(vec![0, 99], Vec::new())])],
+        );
+        assert_eq!(
+            frontier.retired_gss.len(),
+            FLAT_FRONTIER_RETIRED_GSS_CAPACITY,
+        );
+    }
+
+    #[test]
+    fn duplicate_key_multi_terminal_fast_path_matches_authoritative_commit() {
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                t P ::= "p";
+                t Q ::= "q";
+                t R ::= "r";
+                t S ::= "s";
+                t X ::= "102";
+                t Y ::= "102";
+                t Z ::= "102";
+                t W ::= "102";
+                nt start ::= P X | Q Y | R Z | S W;
+            "#,
+            &Vocab::new(vec![
+                (0, b"p".to_vec()),
+                (1, b"q".to_vec()),
+                (2, b"r".to_vec()),
+                (3, b"s".to_vec()),
+                (4, b"102".to_vec()),
+            ]),
+        )
+        .unwrap();
+
+        let lexer_key = constraint.tokenizer.initial_state();
+        let mut flat_state = ParserStateMap::default();
+        for prefix_token in 0..4 {
+            let mut branch = constraint.start();
+            branch.commit_token(prefix_token).unwrap();
+            branch.state.normalize_duplicate_keys();
+            let stacks = branch
+                .state
+                .values()
+                .flat_map(|gss| gss.to_stacks(8).expect("bounded prefix parser state"))
+                .collect::<Vec<_>>();
+            assert_eq!(stacks.len(), 1, "prefix={prefix_token} stacks={stacks:?}");
+            let (stack, acc) = stacks.into_iter().next().unwrap();
+            assert!(acc.is_empty());
+            flat_state.entries.push((
+                lexer_key,
+                ParserGSS::from_single_stack(stack, acc),
+            ));
+        }
+        assert!(flat_state.has_duplicate_keys());
+        assert_eq!(flat_state.len(), 4);
+        assert!(flat_state.entries.iter().all(|(key, gss)| {
+            *key == lexer_key
+                && gss.single_exclusive_top_value().is_some()
+                && gss
+                    .single_path_acc()
+                    .is_some_and(|acc: TerminalsDisallowed| acc.is_empty())
+        }));
+
+        let mut fast_state = flat_state;
+        let mut reference_state = fast_state.clone();
+        let mut buffers = CommitBuffers::default();
+        commit_token_impl(&constraint, &mut fast_state, &mut buffers, 4).unwrap();
+        commit_token_no_fast_path_reference(&constraint, &mut reference_state, 4).unwrap();
+
+        assert_eq!(
+            canonical_commit_state(&fast_state),
+            canonical_commit_state(&reference_state),
+        );
+        let mut fast = constraint.start();
+        fast.state = fast_state;
+        let mut reference = constraint.start();
+        reference.state = reference_state;
+        assert_eq!(fast.mask(), reference.mask());
+    }
+
+    #[test]
+    fn empty_acc_duplicate_key_group_matches_authoritative_commit() {
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                t A ::= "a";
+                t B ::= "a" | "ab";
+                nt item ::= A | B;
+                nt start ::= item;
+            "#,
+            &Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]),
+        )
+        .unwrap();
+
+        let mut source = constraint.start();
+        source.commit_token(0).unwrap();
+
+        let mut flat_state = ParserStateMap::default();
+        for (&key, gss) in source.state.iter() {
+            for (stack, _) in gss.to_stacks(8).expect("bounded completed alternatives") {
+                flat_state.entries.push((
+                    key,
+                    ParserGSS::from_single_stack(stack, TerminalsDisallowed::new()),
+                ));
+            }
+        }
+        assert!(flat_state.has_duplicate_keys());
+
+        let duplicate_key = flat_state
+            .entries
+            .windows(2)
+            .find_map(|pair| (pair[0].0 == pair[1].0).then_some(pair[0].0))
+            .expect("duplicate key checked");
+        let mut frontier = FlatFrontierScratch::default();
+        let mut stack = Vec::with_capacity(LINEAR_STACK_RESERVE);
+        for gss in flat_state.values_for_key(duplicate_key) {
+            stack.clear();
+            assert!(gss.copy_single_path_stack_into(&mut stack));
+            assert!(frontier.enqueue(
+                0,
+                duplicate_key,
+                &stack,
+                TerminalsDisallowed::new(),
+            ));
+        }
+        let mut tokenizer_scratch = tokenizer_scan::ReusableTokenizerExecScratch::default();
+        assert_eq!(
+            try_process_flat_same_key_group(
+                &constraint,
+                b"b",
+                0,
+                duplicate_key,
+                &mut tokenizer_scratch,
+                &mut frontier,
+            ),
+            FlatContinuationGroupOutcome::Handled,
+        );
+
+        let mut actual_state = flat_state.clone();
+        let mut actual_buffers = CommitBuffers::default();
+        commit_token_impl(&constraint, &mut actual_state, &mut actual_buffers, 1)
+            .expect("grouped flat commit should accept b");
+        let mut reference_state = flat_state;
+        commit_token_no_fast_path_reference(&constraint, &mut reference_state, 1)
+            .expect("authoritative commit should accept b");
+
+        assert_eq!(
+            canonical_commit_state(&actual_state),
+            canonical_commit_state(&reference_state),
+        );
+    }
+
+    #[test]
+    fn inline_acc_duplicate_key_group_matches_authoritative_commit() {
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                t A ::= "a";
+                t B ::= "a" | "ab";
+                nt item ::= A | B;
+                nt start ::= item;
+            "#,
+            &Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]),
+        )
+        .unwrap();
+
+        let mut source = constraint.start();
+        source.commit_token(0).unwrap();
+
+        let mut flat_state = ParserStateMap::default();
+        for (&key, gss) in source.state.iter() {
+            for (stack, acc) in gss.to_stacks(8).expect("bounded duplicate-key state") {
+                flat_state
+                    .entries
+                    .push((key, ParserGSS::from_single_stack(stack, acc)));
+            }
+        }
+        assert!(flat_state.has_duplicate_keys());
+        assert!(flat_state.entries.iter().any(|(_, gss)| {
+            gss.single_path_acc()
+                .is_some_and(|acc: TerminalsDisallowed| !acc.is_empty())
+        }));
+
+        let duplicate_key = flat_state
+            .entries
+            .windows(2)
+            .find_map(|pair| (pair[0].0 == pair[1].0).then_some(pair[0].0))
+            .expect("duplicate key checked");
+        let mut frontier = FlatFrontierScratch::default();
+        let mut stack = Vec::with_capacity(LINEAR_STACK_RESERVE);
+        for gss in flat_state.values_for_key(duplicate_key) {
+            stack.clear();
+            assert!(gss.copy_single_path_stack_into(&mut stack));
+            let acc = gss.single_path_acc().expect("single-path accumulator");
+            assert!(frontier.enqueue(0, duplicate_key, &stack, acc));
+        }
+        let mut tokenizer_scratch = tokenizer_scan::ReusableTokenizerExecScratch::default();
+        assert_eq!(
+            try_process_flat_same_key_group(
+                &constraint,
+                b"b",
+                0,
+                duplicate_key,
+                &mut tokenizer_scratch,
+                &mut frontier,
+            ),
+            FlatContinuationGroupOutcome::Handled,
+        );
+
+        let mut actual_state = flat_state.clone();
+        let mut actual_buffers = CommitBuffers::default();
+        commit_token_impl(&constraint, &mut actual_state, &mut actual_buffers, 1)
+            .expect("grouped inline-acc commit should accept b");
+        let mut reference_state = flat_state;
+        commit_token_no_fast_path_reference(&constraint, &mut reference_state, 1)
+            .expect("authoritative commit should accept b");
+
+        assert_eq!(
+            canonical_commit_state(&actual_state),
+            canonical_commit_state(&reference_state),
+        );
+    }
+
+    #[test]
+    fn general_advance_cache_reuses_structurally_equal_gss() {
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                t A ::= "a";
+                nt start ::= A;
+            "#,
+            &Vocab::new(vec![(0, b"a".to_vec())]),
+        )
+        .unwrap();
+        let state = constraint.start();
+        let (&tokenizer_state, original) = state.state.iter().next().unwrap();
+        let rebuilt = ParserGSS::from_stacks(
+            &original
+                .to_stacks(64)
+                .expect("tiny initial state should enumerate"),
+        );
+        assert_eq!(original, &rebuilt);
+        assert!(!original.ptr_eq(&rebuilt));
+
+        let exec = execute_tokenizer_from_state_small(&constraint, b"a", tokenizer_state);
+        let terminal = exec
+            .matches
+            .iter()
+            .find(|matched| matched.width == 1)
+            .expect("a should match its terminal")
+            .id;
+        let mut advances = AdvanceResultCache::default();
+        let mut terminal_results = FxHashMap::default();
+        let first = advance_terminal_match(
+            &constraint,
+            original,
+            terminal,
+            &exec,
+            &mut advances,
+            &mut terminal_results,
+        )
+        .expect("original state should advance");
+        assert_eq!(advances.len(), 1);
+
+        terminal_results.clear();
+        let second = advance_terminal_match(
+            &constraint,
+            &rebuilt,
+            terminal,
+            &exec,
+            &mut advances,
+            &mut terminal_results,
+        )
+        .expect("equivalent rebuilt state should advance");
+        assert_eq!(advances.len(), 1, "structural cache hit must avoid a second entry");
+        assert!(first.ptr_eq(&second));
     }
 
     #[test]
@@ -5200,7 +7343,16 @@ mod tests {
 
         let mut flat = constraint.start();
         flat.commit_token(0).unwrap();
-        assert!(flat.state.has_duplicate_keys());
+        let mut duplicate_state = ParserStateMap::default();
+        for (&key, gss) in flat.state.iter() {
+            for (stack, acc) in gss.to_stacks(8).expect("bounded special-token state") {
+                duplicate_state
+                    .entries
+                    .push((key, ParserGSS::from_single_stack(stack, acc)));
+            }
+        }
+        assert!(duplicate_state.has_duplicate_keys());
+        flat.state = duplicate_state;
 
         let mut normalized = flat.clone();
         normalized.state.normalize_duplicate_keys();
@@ -6004,6 +8156,85 @@ nt start ::= item item? item?;
             }
             frontier = next;
         }
+    }
+
+    #[test]
+    fn full_width_continuation_preserves_duplicate_key_parser_language() {
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                t LEFT ::= "x";
+                t RIGHT ::= "y";
+                t A ::= "threea";
+                t B ::= "threeb";
+                nt start ::= LEFT A | RIGHT B;
+            "#,
+            &Vocab::new(vec![
+                (0, b"x".to_vec()),
+                (1, b"y".to_vec()),
+                (2, b"three".to_vec()),
+                (3, b"a".to_vec()),
+                (4, b"b".to_vec()),
+            ]),
+        )
+        .unwrap();
+
+        let mut left = constraint.start();
+        left.commit_token(0).unwrap();
+        let mut right = constraint.start();
+        right.commit_token(1).unwrap();
+
+        let lexer_key = constraint.tokenizer.initial_state();
+        let mut split = ParserStateMap::default();
+        for source in [&left.state, &right.state] {
+            for gss in source.values() {
+                for (stack, acc) in gss.to_stacks(8).expect("bounded post-prefix parser state") {
+                    split
+                        .entries
+                        .push((lexer_key, ParserGSS::from_single_stack(stack, acc)));
+                }
+            }
+        }
+        assert!(split.has_duplicate_keys());
+        assert_eq!(
+            split
+                .entries
+                .iter()
+                .flat_map(|(_, gss)| gss.to_stacks(8).unwrap())
+                .count(),
+            2,
+        );
+
+        let mut fast = split.clone();
+        let mut reference = split;
+        let mut tokenizer_scratch = tokenizer_scan::ReusableTokenizerExecScratch::default();
+        commit_bytes_full_width_fast_path(
+            &constraint,
+            &mut fast,
+            b"three",
+            &mut tokenizer_scratch,
+            None,
+            false,
+        )
+        .expect("duplicate-key full-width continuation should be applicable")
+        .expect("duplicate-key full-width continuation should remain viable");
+        commit_bytes_impl_profiled(
+            &constraint,
+            &mut reference,
+            b"three",
+            &mut CommitBuffers::default(),
+            None,
+            false,
+        )
+        .expect("authoritative continuation should remain viable");
+
+        assert_eq!(
+            canonical_commit_state(&fast),
+            canonical_commit_state(&reference),
+        );
+        assert!(canonical_commit_state(&fast)
+            .iter()
+            .all(|(_, stacks)| stacks.len() == 2));
     }
 
     #[test]
