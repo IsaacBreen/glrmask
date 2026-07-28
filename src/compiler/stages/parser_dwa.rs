@@ -13,7 +13,9 @@ use crate::automata::weighted::nwa::{NWA, NwaBody};
 use crate::automata::weighted::terminal_automaton::TerminalAutomaton;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::labels::DEFAULT_LABEL;
-use crate::compiler::glr::table::{Action, AdmissionPolicy, GLRTable};
+use crate::compiler::glr::table::{
+    Action, AdmissionPolicy, GLRTable, GlrTableConstruction,
+};
 use crate::grammar::flat::TerminalID;
 use crate::compiler::stages::equiv_types::InternalIdMap;
 use crate::compiler::stages::id_map_and_terminal_dwa::types::compile_profile_enabled;
@@ -2767,7 +2769,10 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     };
 
     let resolve_negative_started_at = Instant::now();
-    resolve_negative_codes_in_nwa(&mut parser_nwa);
+    resolve_negative_codes_in_nwa(
+        &mut parser_nwa,
+        table.construction == GlrTableConstruction::ExperimentalCoreMerged,
+    );
     let resolve_negative_ms = elapsed_ms(resolve_negative_started_at);
 
     let support_determinize_started_at = Instant::now();

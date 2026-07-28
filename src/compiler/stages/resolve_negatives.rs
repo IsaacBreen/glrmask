@@ -23,6 +23,9 @@ type SubsetMemo = FxHashMap<(usize, usize), bool>;
 /// the small and large BFCL catalogs while leaving genuinely small parsers on
 /// the lower-overhead serial solver.
 const MIN_PARALLEL_FINALITY_EDGES_PER_WORKER: usize = 512;
+/// Grouping identical cancellation queries pays for a wave/group build. Large
+/// parser NWAs amortize it heavily; small NWAs are faster with the direct FIFO.
+const GROUPED_CANCELLATION_MIN_STATES: usize = 4_096;
 
 #[derive(Clone, Default)]
 enum SmallQueryWeights {
@@ -443,6 +446,298 @@ fn extend_derived_epsilons(
     }
 }
 
+fn extend_derived_epsilon_precomputed(
+    source_state: u32,
+    target_state: u32,
+    new_derived_weight: &Weight,
+    query_weights: &mut QueryWeights,
+    worklist: &mut VecDeque<CancellationTask>,
+    derived_epsilons: &mut DerivedEpsilons,
+    subset_memo: &mut SubsetMemo,
+) {
+    if new_derived_weight.is_empty() {
+        return;
+    }
+
+    {
+        let derived_weight = derived_epsilons[source_state as usize]
+            .get_or_insert_with(FxHashMap::default)
+            .entry(target_state)
+            .or_insert_with(Weight::empty);
+        if !merge_weight(derived_weight, new_derived_weight.clone()) {
+            return;
+        }
+    }
+
+    let Some(derived_weight) = derived_epsilons[source_state as usize]
+        .as_ref()
+        .and_then(|targets| targets.get(&target_state))
+    else {
+        return;
+    };
+    let existing_queries = &query_weights[source_state as usize];
+    if existing_queries.is_empty() {
+        return;
+    }
+
+    let mut propagated_updates = Vec::with_capacity(existing_queries.len());
+    existing_queries.for_each(|(upstream_source_state, upstream_label), upstream_weight| {
+        let propagated = intersect_or_clone_right_if_subset_cached(
+            upstream_weight,
+            derived_weight,
+            subset_memo,
+        );
+        if !propagated.is_empty() {
+            propagated_updates.push((upstream_source_state, upstream_label, propagated));
+        }
+    });
+    for (upstream_source_state, upstream_label, propagated) in propagated_updates {
+        queue_query_weight(
+            query_weights,
+            worklist,
+            target_state,
+            upstream_source_state,
+            upstream_label,
+            propagated,
+        );
+    }
+}
+
+#[derive(Debug)]
+struct CancellationQueryGroup {
+    current_state: u32,
+    positive_label: i32,
+    weight: Weight,
+    sources: SmallVec<[u32; 8]>,
+}
+
+fn build_cancellation_query_groups(
+    worklist: &mut VecDeque<CancellationTask>,
+    query_weights: &QueryWeights,
+) -> Vec<CancellationQueryGroup> {
+    let mut seen_tasks = FxHashSet::<CancellationTask>::default();
+    let mut group_index = FxHashMap::<(u32, i32, usize), usize>::default();
+    let mut groups = Vec::<CancellationQueryGroup>::new();
+
+    while let Some((current_state, source_state, positive_label)) = worklist.pop_front() {
+        if !seen_tasks.insert((current_state, source_state, positive_label)) {
+            continue;
+        }
+        let Some(weight) = query_weights[current_state as usize]
+            .get(&(source_state, positive_label))
+            .cloned()
+        else {
+            continue;
+        };
+        let key = (current_state, positive_label, weight.ptr_key());
+        if let Some(&index) = group_index.get(&key) {
+            groups[index].sources.push(source_state);
+        } else {
+            let index = groups.len();
+            group_index.insert(key, index);
+            groups.push(CancellationQueryGroup {
+                current_state,
+                positive_label,
+                weight,
+                sources: smallvec::smallvec![source_state],
+            });
+        }
+    }
+    for group in &mut groups {
+        group.sources.sort_unstable();
+        group.sources.dedup();
+    }
+    groups
+}
+
+fn queue_group_propagation(
+    query_weights: &mut QueryWeights,
+    worklist: &mut VecDeque<CancellationTask>,
+    sources: &[u32],
+    target_state: u32,
+    positive_label: i32,
+    propagated: &Weight,
+) {
+    if propagated.is_empty() {
+        return;
+    }
+    for &source_state in sources {
+        queue_query_weight(
+            query_weights,
+            worklist,
+            target_state,
+            source_state,
+            positive_label,
+            propagated.clone(),
+        );
+    }
+}
+
+fn compute_cancellations_range_grouped_inner(
+    nwa: &NWA,
+    range: std::ops::Range<u32>,
+    foreign_derived: Option<&DerivedEpsilons>,
+) -> Vec<(u32, u32, Weight)> {
+    let state_count = nwa.states().len() as u32;
+    if state_count == 0 {
+        return Vec::new();
+    }
+
+    let mut query_weights: QueryWeights = vec![SmallQueryWeights::Empty; state_count as usize];
+    let mut worklist = VecDeque::<CancellationTask>::new();
+    let mut derived_epsilons: DerivedEpsilons = vec![None; state_count as usize];
+    let mut subset_memo = SubsetMemo::default();
+
+    for source_state in range {
+        if source_state >= state_count {
+            continue;
+        }
+        for (&label, targets) in nwa.states()[source_state as usize].transitions.range(..0) {
+            let positive_label = negative_to_positive_label(label);
+            for (target_state, weight) in targets {
+                if *target_state < state_count && !weight.is_empty() {
+                    queue_query_weight(
+                        &mut query_weights,
+                        &mut worklist,
+                        *target_state,
+                        source_state,
+                        positive_label,
+                        weight.clone(),
+                    );
+                }
+            }
+        }
+    }
+
+    let profile_detail = std::env::var_os("GLRMASK_PROFILE_CANCELLATION_DETAIL").is_some();
+    let initial_tasks = worklist.len();
+    let initial_groups = if profile_detail {
+        let mut groups = FxHashSet::<(u32, i32, usize)>::default();
+        for (state, queries) in query_weights.iter().enumerate() {
+            queries.for_each(|(_source, label), weight| {
+                groups.insert((state as u32, label, weight.ptr_key()));
+            });
+        }
+        groups.len()
+    } else {
+        0
+    };
+    let mut rounds = 0usize;
+    let mut groups_processed = 0usize;
+    let mut source_queries_processed = 0usize;
+
+    while !worklist.is_empty() {
+        rounds += 1;
+        let groups = build_cancellation_query_groups(&mut worklist, &query_weights);
+        groups_processed += groups.len();
+        for group in groups {
+            source_queries_processed += group.sources.len();
+            let query_single = group.weight.single_compact_entry_parts();
+            let current_state = group.current_state;
+            let positive_label = group.positive_label;
+
+            let propagate_map = |targets: &FxHashMap<u32, Weight>,
+                                 query_weights: &mut QueryWeights,
+                                 worklist: &mut VecDeque<CancellationTask>| {
+                for (&target_state, epsilon_weight) in targets {
+                    let propagated = intersect_with_single_weight_hint(
+                        &group.weight,
+                        query_single.as_ref(),
+                        epsilon_weight,
+                    );
+                    queue_group_propagation(
+                        query_weights,
+                        worklist,
+                        &group.sources,
+                        target_state,
+                        positive_label,
+                        &propagated,
+                    );
+                }
+            };
+            if let Some(local) = derived_epsilons[current_state as usize].as_ref() {
+                propagate_map(local, &mut query_weights, &mut worklist);
+            }
+            if let Some(foreign) = foreign_derived
+                .and_then(|derived| derived[current_state as usize].as_ref())
+            {
+                propagate_map(foreign, &mut query_weights, &mut worklist);
+            }
+
+            let state = &nwa.states()[current_state as usize];
+            for targets in [
+                state.transitions.get(&positive_label),
+                state.transitions.get(&DEFAULT_LABEL),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                for (target_state, edge_weight) in targets {
+                    if *target_state >= state_count {
+                        continue;
+                    }
+                    let new_derived_weight = intersect_with_single_weight_hint(
+                        &group.weight,
+                        query_single.as_ref(),
+                        edge_weight,
+                    );
+                    if new_derived_weight.is_empty() {
+                        continue;
+                    }
+                    for &source_state in &group.sources {
+                        extend_derived_epsilon_precomputed(
+                            source_state,
+                            *target_state,
+                            &new_derived_weight,
+                            &mut query_weights,
+                            &mut worklist,
+                            &mut derived_epsilons,
+                            &mut subset_memo,
+                        );
+                    }
+                }
+            }
+
+            for (target_state, epsilon_weight) in &state.epsilons {
+                if *target_state >= state_count {
+                    continue;
+                }
+                let propagated = intersect_with_single_weight_hint(
+                    &group.weight,
+                    query_single.as_ref(),
+                    epsilon_weight,
+                );
+                queue_group_propagation(
+                    &mut query_weights,
+                    &mut worklist,
+                    &group.sources,
+                    *target_state,
+                    positive_label,
+                    &propagated,
+                );
+            }
+        }
+    }
+
+    let mut derived = collect_non_empty_derived_epsilons(derived_epsilons);
+    derived.sort_by_key(|(from, to, _)| (*from, *to));
+    if profile_detail {
+        eprintln!(
+            "[glrmask/profile][cancellation_grouped] states={} initial_tasks={} initial_groups={} initial_compression={:.2} rounds={} groups={} source_queries={} compression={:.2} derived_edges={}",
+            state_count,
+            initial_tasks,
+            initial_groups,
+            initial_tasks as f64 / initial_groups.max(1) as f64,
+            rounds,
+            groups_processed,
+            source_queries_processed,
+            source_queries_processed as f64 / groups_processed.max(1) as f64,
+            derived.len(),
+        );
+    }
+    derived
+}
+
 fn collect_non_empty_derived_epsilons(
     derived_epsilons: DerivedEpsilons,
 ) -> Vec<(u32, u32, Weight)> {
@@ -465,11 +760,22 @@ fn collect_non_empty_derived_epsilons(
 pub(crate) fn compute_cancellations_range(
     nwa: &NWA,
     range: std::ops::Range<u32>,
+    allow_grouped: bool,
 ) -> Vec<(u32, u32, Weight)> {
-    compute_cancellations_range_inner(nwa, range, None)
+    let solver_override = std::env::var("GLRMASK_CANCELLATION_SOLVER").ok();
+    let use_grouped = match solver_override.as_deref().map(str::trim) {
+        Some(value) if value.eq_ignore_ascii_case("grouped") => true,
+        Some(value) if value.eq_ignore_ascii_case("serial") => false,
+        _ => allow_grouped && nwa.states().len() >= GROUPED_CANCELLATION_MIN_STATES,
+    };
+    if use_grouped {
+        compute_cancellations_range_grouped_inner(nwa, range, None)
+    } else {
+        compute_cancellations_range_serial_inner(nwa, range, None)
+    }
 }
 
-fn compute_cancellations_range_inner(
+fn compute_cancellations_range_serial_inner(
     nwa: &NWA,
     range: std::ops::Range<u32>,
     foreign_derived: Option<&DerivedEpsilons>,
@@ -600,8 +906,12 @@ fn compute_cancellations_range_inner(
     collect_non_empty_derived_epsilons(derived_epsilons)
 }
 
-pub(crate) fn apply_cancellations_range(nwa: &mut NWA, range: std::ops::Range<u32>) {
-    for (from, to, weight) in compute_cancellations_range(nwa, range) {
+pub(crate) fn apply_cancellations_range(
+    nwa: &mut NWA,
+    range: std::ops::Range<u32>,
+    allow_grouped: bool,
+) {
+    for (from, to, weight) in compute_cancellations_range(nwa, range, allow_grouped) {
         nwa.add_epsilon(from, to, weight);
     }
 }
@@ -1263,12 +1573,16 @@ pub(crate) fn remove_redundant_default_transitions(nwa: &mut NWA) {
     prune_terminal_default_targets(nwa, &terminal_states);
 }
 
-pub(crate) fn resolve_negative_codes_in_nwa(nwa: &mut NWA) {
+pub(crate) fn resolve_negative_codes_in_nwa(nwa: &mut NWA, allow_grouped_cancellation: bool) {
     let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
         || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
     let cancellation_started_at = profile_enabled.then(std::time::Instant::now);
     if !nwa.states().is_empty() {
-        apply_cancellations_range(nwa, 0..nwa.states().len() as u32);
+        apply_cancellations_range(
+            nwa,
+            0..nwa.states().len() as u32,
+            allow_grouped_cancellation,
+        );
     }
     let cancellation_ms = cancellation_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
@@ -1308,6 +1622,87 @@ mod terminal_default_tests {
 
     fn weight(tokens: std::ops::RangeInclusive<u32>) -> Weight {
         Weight::from_token_set_for_tsid(0, RangeSetBlaze::from_iter([tokens]))
+    }
+
+    fn normalize_cancellations(
+        mut cancellations: Vec<(u32, u32, Weight)>,
+    ) -> Vec<(u32, u32, Weight)> {
+        cancellations.sort_by_key(|(from, to, _)| (*from, *to));
+        cancellations
+    }
+
+    fn generated_cancellation_nwa(seed: u32) -> NWA {
+        use crate::compiler::glr::labels::encode_negative_label;
+
+        let state_count = 8 + (seed % 5);
+        let mut nwa = NWA::new(1, 31);
+        for _ in 0..state_count {
+            nwa.add_state();
+        }
+        let weights = [
+            weight(0..=7),
+            weight(4..=15),
+            weight(8..=23),
+            weight(16..=31),
+            weight(0..=31),
+        ];
+
+        for state in 0..state_count {
+            let label = (state + seed) % 3;
+            let negative_target = (state * 3 + seed + 1) % state_count;
+            nwa.add_transition(
+                state,
+                encode_negative_label(label),
+                negative_target,
+                weights[((state + seed) as usize) % weights.len()].clone(),
+            );
+
+            for positive_label in 0..3 {
+                let target = (state * 5 + positive_label + seed + 2) % state_count;
+                nwa.add_transition(
+                    state,
+                    positive_label as i32,
+                    target,
+                    weights[((state + positive_label + seed + 1) as usize) % weights.len()]
+                        .clone(),
+                );
+            }
+            if (state + seed) % 2 == 0 {
+                nwa.add_transition(
+                    state,
+                    DEFAULT_LABEL,
+                    (state + 2) % state_count,
+                    weights[((state + seed + 2) as usize) % weights.len()].clone(),
+                );
+            }
+            if (state + seed) % 3 != 0 {
+                nwa.add_epsilon(
+                    state,
+                    (state + 1) % state_count,
+                    weights[((state + seed + 3) as usize) % weights.len()].clone(),
+                );
+            }
+        }
+        nwa
+    }
+
+    #[test]
+    fn grouped_cancellation_matches_serial_solver_on_generated_nwas() {
+        for seed in 0..32 {
+            let nwa = generated_cancellation_nwa(seed);
+            let range = 0..nwa.num_states();
+            let serial = normalize_cancellations(compute_cancellations_range_serial_inner(
+                &nwa,
+                range.clone(),
+                None,
+            ));
+            let grouped = normalize_cancellations(compute_cancellations_range_grouped_inner(
+                &nwa,
+                range,
+                None,
+            ));
+            assert_eq!(grouped, serial, "cancellation mismatch for seed {seed}");
+        }
     }
 
     #[test]
