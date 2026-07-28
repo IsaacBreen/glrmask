@@ -14,7 +14,6 @@ use crate::compiler::glr::parser::{
     advance_stacks,
     advance_stacks_profiled,
     advance_stacks_owned,
-    try_advance_stacks_structural_before_template,
     AdvanceProfile,
     stack_may_advance_on,
     stack_may_advance_on_any,
@@ -332,11 +331,6 @@ fn advance_parser_stacks(
     stack: &ParserGSS,
     terminal: u32,
 ) -> ParserGSS {
-    if let Some(advanced) =
-        try_advance_stacks_structural_before_template(&constraint.table, stack, terminal)
-    {
-        return advanced;
-    }
     if template_advance_enabled()
         && let Some(template_advanced) = advance_stacks_template_dfa(constraint, stack, terminal)
     {
@@ -360,11 +354,6 @@ fn advance_parser_stacks_owned(
     stack: ParserGSS,
     terminal: u32,
 ) -> ParserGSS {
-    if let Some(advanced) =
-        try_advance_stacks_structural_before_template(&constraint.table, &stack, terminal)
-    {
-        return advanced;
-    }
     if template_advance_enabled()
         && let Some(template_advanced) =
             advance_stacks_template_dfa_owned(constraint, stack.clone(), terminal)
@@ -389,26 +378,6 @@ fn advance_parser_stacks_profiled(
     stack: &ParserGSS,
     terminal: u32,
 ) -> (ParserGSS, AdvanceProfile) {
-    let structural_start = std::time::Instant::now();
-    if let Some(advanced) =
-        try_advance_stacks_structural_before_template(&constraint.table, stack, terminal)
-    {
-        let elapsed = structural_start.elapsed().as_nanos() as u64;
-        return (
-            advanced,
-            AdvanceProfile {
-                total_ns: elapsed,
-                fast_path_ns: elapsed,
-                stack_shift_apply_ns: elapsed,
-                top_states: stack.peek_values().len() as u32,
-                gss_depth: stack.max_depth(),
-                vstack_len: stack
-                    .try_virtual_stack()
-                    .map_or(0, |vstack| vstack.len() as u32),
-                ..AdvanceProfile::default()
-            },
-        );
-    }
     let template_start = std::time::Instant::now();
     if template_advance_enabled()
         && let Some(template_advanced) = advance_stacks_template_dfa(constraint, stack, terminal)
