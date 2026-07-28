@@ -158,7 +158,7 @@ pub(super) fn build_table_with_default_construction(
     // row support before that lowering so runtime `may_advance` stays a pure
     // row-presence query.
     table.rebuild_advance_rows_from_actions();
-    let unit_collapse_skip_reason = if construction != GlrTableConstruction::LegacyRowBisim {
+    let unit_collapse_skip_reason = if construction == GlrTableConstruction::Lalr {
         "construction"
     } else if !unit_reduction_inlining_enabled() {
         "disabled"

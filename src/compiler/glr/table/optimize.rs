@@ -24,11 +24,14 @@ const UNIT_INLINE_WORK_MAX_CELLS_ENV: &str = "GLRMASK_UNIT_REDUCTION_INLINE_MAX_
 const UNIT_INLINE_WORK_MAX_SYNTHETIC_STATES_ENV: &str =
     "GLRMASK_UNIT_REDUCTION_INLINE_MAX_SYNTHETIC_STATES";
 const UNIT_INLINE_WORK_MAX_STACK_EFFECT_VISITS_ENV: &str = "GLRMASK_UNIT_REDUCTION_INLINE_MAX_STACK_VISITS";
+const UNIT_INLINE_STATE_MAX_STACK_EFFECT_VISITS_ENV: &str =
+    "GLRMASK_UNIT_REDUCTION_INLINE_STATE_MAX_STACK_VISITS";
 const DEFAULT_UNIT_INLINE_WORK_MAX_WALL_MS: u128 = 5_000;
 const DEFAULT_UNIT_INLINE_WORK_MAX_ITERATIONS: usize = 64;
 const DEFAULT_UNIT_INLINE_WORK_MAX_CELLS: usize = 2_000_000;
 const DEFAULT_UNIT_INLINE_WORK_MAX_SYNTHETIC_STATES: usize = 4_096;
 const DEFAULT_UNIT_INLINE_WORK_MAX_STACK_EFFECT_VISITS: usize = 100_000;
+const DEFAULT_UNIT_INLINE_STATE_MAX_STACK_EFFECT_VISITS: usize = 512;
 
 // Most unit-inlining states are singleton constituents. Keeping those
 // inline avoids thousands of tiny BTreeSet allocations before any synthetic
@@ -71,6 +74,13 @@ fn env_flag_enabled(name: &str, default: bool) -> bool {
             !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
         })
         .unwrap_or(default)
+}
+
+fn unit_inline_state_max_stack_effect_visits() -> usize {
+    env_usize(
+        UNIT_INLINE_STATE_MAX_STACK_EFFECT_VISITS_ENV,
+        DEFAULT_UNIT_INLINE_STATE_MAX_STACK_EFFECT_VISITS,
+    )
 }
 
 fn max_guarded_stack_effects() -> Option<usize> {
@@ -350,9 +360,18 @@ impl UnitInlineBudget {
         }
     }
 
-    /// Fold a child budget's consumption back into this one and re-check the
-    /// global caps, so total work across the parallel tasks is still bounded.
-    fn fold_in(&self, child: &UnitInlineBudget) {
+    /// Create one independently bounded parser-state analysis. A state that
+    /// exceeds this local stack-effect limit is skipped, while sibling states
+    /// and the enclosing fixed-point iteration may still complete.
+    fn child_with_stack_effect_visit_limit(&self, limit: usize) -> UnitInlineBudget {
+        let child = self.child();
+        UnitInlineBudget {
+            max_stack_effect_visits: child.max_stack_effect_visits.min(limit),
+            ..child
+        }
+    }
+
+    fn fold_in_counts(&self, child: &UnitInlineBudget) {
         use std::sync::atomic::Ordering::Relaxed;
         self.synthetic_states
             .fetch_add(child.synthetic_states(), Relaxed);
@@ -363,8 +382,27 @@ impl UnitInlineBudget {
         if total > self.max_stack_effect_visits {
             self.abort(ABORT_STACK_EFFECT_VISITS);
         }
+    }
+
+    /// Fold a child budget's consumption back into this one and re-check the
+    /// global caps, so total work across the parallel tasks is still bounded.
+    fn fold_in(&self, child: &UnitInlineBudget) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.fold_in_counts(child);
         let child_code = child.abort_code.load(Relaxed);
         if child_code != ABORT_NONE {
+            self.abort(child_code);
+        }
+    }
+
+    /// Fold one core-merged parser-state analysis. Local stack-effect
+    /// exhaustion rejects only that state, but its work still contributes to
+    /// the aggregate cap. Other abort causes remain global.
+    fn fold_in_isolated_state(&self, child: &UnitInlineBudget) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.fold_in_counts(child);
+        let child_code = child.abort_code.load(Relaxed);
+        if child_code != ABORT_NONE && child_code != ABORT_STACK_EFFECT_VISITS {
             self.abort(child_code);
         }
     }
@@ -1263,6 +1301,9 @@ impl GLRTable {
                     .collect::<Vec<_>>()
             };
             let stack_phase_started_at = profile_enabled.then(std::time::Instant::now);
+            let isolate_state_stack_effect_budget =
+                self.construction == GlrTableConstruction::ExperimentalCoreMerged;
+            let state_stack_effect_visit_limit = unit_inline_state_max_stack_effect_visits();
             let per_state: Vec<(
                 usize,
                 Vec<(TerminalID, StackInlineAttempt)>,
@@ -1274,7 +1315,13 @@ impl GLRTable {
                 candidate_states
                     .par_iter()
                     .map(|&state| {
-                        let local_budget = budget.child();
+                        let local_budget = if isolate_state_stack_effect_budget {
+                            budget.child_with_stack_effect_visit_limit(
+                                state_stack_effect_visit_limit,
+                            )
+                        } else {
+                            budget.child()
+                        };
                         let mut local_depth_cache: FxHashMap<(u32, u32), Option<StateSubset>> =
                             FxHashMap::default();
                         let mut reads = Vec::new();
@@ -1344,7 +1391,11 @@ impl GLRTable {
             // indexed-iterator collection order.
             if !budget.is_aborted() {
                 'scan: for (state, row_stack_shifts, reads, local_budget) in per_state {
-                    budget.fold_in(&local_budget);
+                    if isolate_state_stack_effect_budget {
+                        budget.fold_in_isolated_state(&local_budget);
+                    } else {
+                        budget.fold_in(&local_budget);
+                    }
                     dependencies.record_reads(reads);
                     if budget.is_aborted() {
                         break 'scan;
@@ -3574,7 +3625,9 @@ fn unit_reduce_destination(
     lhs: NonterminalID,
 ) -> Option<u32> {
     let preds = &predecessors[state as usize];
-    assert!(!preds.is_empty());
+    if preds.is_empty() {
+        return None;
+    }
 
     let relevant_preds: Vec<u32> = preds
         .iter()
@@ -4017,6 +4070,15 @@ fn stack_effect_action(table: &GLRTable, mut effects: Vec<GuardedStackShift>) ->
     if effects.is_empty() {
         return None;
     }
+    // Core-merged predecessor graphs can encode guarded effects very
+    // compactly in the LR table but expand them into runtime guard scans. The
+    // reduction interpreter is cheaper for those origin-dependent actions.
+    // Unguarded effects are deterministic stack rewrites and remain profitable.
+    if table.construction == GlrTableConstruction::ExperimentalCoreMerged
+        && effects.iter().any(|effect| !effect.guards.is_empty())
+    {
+        return None;
+    }
     if effects.iter().all(|effect| effect.guards.is_empty()) {
         let mut shifts: Vec<_> = effects
             .into_iter()
@@ -4290,6 +4352,19 @@ mod tests {
         }
     }
 
+    fn guarded_effect(pop: u32, guard_count: u32) -> GuardedStackShift {
+        GuardedStackShift {
+            guards: (0..guard_count)
+                .map(|guard_pop| StackShiftGuard {
+                    pop: guard_pop,
+                    states: vec![0],
+                })
+                .collect(),
+            pop: pop.max(guard_count.saturating_sub(1)),
+            pushes: vec![1],
+        }
+    }
+
     fn table_with_stack_shifts(
         shifts: Vec<StackShift>,
         goto_rows: &[(u32, &[(NonterminalID, (u32, bool))])],
@@ -4326,6 +4401,78 @@ mod tests {
             Action::StackShifts(shifts) => shifts.clone(),
             action => panic!("expected stack shifts, got {action:?}"),
         }
+    }
+
+    #[test]
+    fn state_local_stack_effect_exhaustion_does_not_abort_parent_budget() {
+        let parent = default_unit_inline_budget();
+        let child = parent.child_with_stack_effect_visit_limit(2);
+
+        assert!(child.record_stack_effect_visit());
+        assert!(child.record_stack_effect_visit());
+        assert!(!child.record_stack_effect_visit());
+        assert_eq!(
+            child.abort_code.load(std::sync::atomic::Ordering::Relaxed),
+            ABORT_STACK_EFFECT_VISITS,
+        );
+
+        parent.fold_in_isolated_state(&child);
+
+        assert_eq!(parent.stack_effect_visits(), 3);
+        assert!(!parent.is_aborted());
+    }
+
+    #[test]
+    fn state_local_work_still_counts_towards_global_stack_effect_limit() {
+        let mut parent = default_unit_inline_budget();
+        parent.max_stack_effect_visits = 4;
+
+        let first = parent.child_with_stack_effect_visit_limit(2);
+        assert!(first.record_stack_effect_visit());
+        assert!(first.record_stack_effect_visit());
+        assert!(!first.record_stack_effect_visit());
+        parent.fold_in_isolated_state(&first);
+        assert!(!parent.is_aborted());
+
+        let second = parent.child_with_stack_effect_visit_limit(2);
+        assert!(second.record_stack_effect_visit());
+        assert!(second.record_stack_effect_visit());
+        parent.fold_in_isolated_state(&second);
+
+        assert!(parent.is_aborted());
+        assert_eq!(parent.report().reason, Some("stack_effect_visits"));
+    }
+
+    #[test]
+    fn core_merged_stack_effect_lowering_accepts_only_unguarded_effects() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = EnvVarGuard::set(MAX_GUARDED_STACK_EFFECTS_ENV, "1000000");
+        let mut table = table_with_stack_shifts(Vec::new(), &[]);
+        table.construction = GlrTableConstruction::ExperimentalCoreMerged;
+
+        let unguarded = vec![GuardedStackShift {
+            guards: Vec::new(),
+            pop: 2,
+            pushes: vec![2],
+        }];
+        assert!(matches!(
+            stack_effect_action(&table, unguarded),
+            Some(Action::StackShifts(shifts)) if shifts.len() == 1
+        ));
+
+        assert!(stack_effect_action(&table, vec![guarded_effect(1, 1)]).is_none());
+    }
+
+    #[test]
+    fn legacy_stack_effect_lowering_still_accepts_guarded_effects() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = EnvVarGuard::set(MAX_GUARDED_STACK_EFFECTS_ENV, "1000000");
+        let table = table_with_stack_shifts(Vec::new(), &[]);
+
+        assert!(matches!(
+            stack_effect_action(&table, vec![guarded_effect(1, 1)]),
+            Some(Action::GuardedStackShifts(shifts)) if shifts.len() == 1
+        ));
     }
 
     #[test]
@@ -5213,6 +5360,27 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn unit_reduce_destination_without_predecessors_is_not_inlineable() {
+        let table = GLRTable {
+            action: vec![ActionRow::default(); 2],
+            goto: vec![GotoRow::default(); 2],
+            num_states: 2,
+            num_terminals: 1,
+            num_rules: 0,
+            rules: Vec::new(),
+            nonterminal_display_names: Vec::new(),
+            construction: GlrTableConstruction::ExperimentalCoreMerged,
+            admission_policy: AdmissionPolicy::RowPresenceExact,
+            advance: Vec::new(),
+            forwarded_shifts: FxHashSet::default(),
+            guarded_shift_index: Vec::new(),
+        };
+        let predecessors = vec![PredecessorSet::new(); 2];
+
+        assert_eq!(unit_reduce_destination(&table, &predecessors, 1, 10), None);
     }
 
     #[test]
