@@ -4495,21 +4495,6 @@ fn finish_grouped_flat_frontier_commit(
         return None;
     }
     if let Some((keys, groups)) = compressed_cartesian.as_ref() {
-        let compressed = {
-            let first = &frontier.branches[group_representatives[*groups.first()?]];
-            let acc = first.acc.clone();
-            let mut stack_slices =
-                SmallVec::<[&[u32]; INLINE_PARSER_STATE_CAPACITY]>::new();
-            for &group in groups {
-                let branch = &frontier.branches[group_representatives[group]];
-                if branch.acc != acc {
-                    return None;
-                }
-                stack_slices.push(branch.stack.as_slice());
-            }
-            ParserGSS::from_small_stack_slices_shared_prefix(&stack_slices, acc)?
-        };
-
         let (recyclable, must_retire) = {
             let mut unique =
                 SmallVec::<[&ParserGSS; INLINE_PARSER_STATE_CAPACITY]>::new();
@@ -4526,6 +4511,22 @@ fn finish_grouped_flat_frontier_commit(
         {
             return None;
         }
+
+        let compressed = {
+            let first = &frontier.branches[group_representatives[*groups.first()?]];
+            let acc = first.acc.clone();
+            let mut stack_slices =
+                SmallVec::<[&[u32]; INLINE_PARSER_STATE_CAPACITY]>::new();
+            for &group in groups {
+                let branch = &frontier.branches[group_representatives[group]];
+                if branch.acc != acc {
+                    return None;
+                }
+                stack_slices.push(branch.stack.as_slice());
+            }
+            ParserGSS::from_small_stack_slices_shared_prefix(&stack_slices, acc)?
+        };
+
         let old_entries = std::mem::take(&mut state.entries);
         let mut old_representatives =
             SmallVec::<[ParserGSS; INLINE_PARSER_STATE_CAPACITY]>::new();
