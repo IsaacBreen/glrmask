@@ -69,6 +69,7 @@ impl SmallCommitQueueScratch {
 }
 
 const FLAT_FRONTIER_MAX_BRANCHES: usize = 16;
+const FLAT_CONTINUATION_CACHE_CAPACITY: usize = 32;
 const FLAT_ACTION_MAX_BRANCHES: usize = 16;
 const FLAT_ACTION_MAX_STEPS: usize = 256;
 const FLAT_FRONTIER_PREALLOCATED_GSS: usize = 8;
@@ -121,6 +122,14 @@ struct FlatBranchScratch {
     processed: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct FlatContinuationDecision {
+    offset: usize,
+    tokenizer_state: u32,
+    end_state: u32,
+    viable: bool,
+}
+
 impl Default for FlatBranchScratch {
     fn default() -> Self {
         Self {
@@ -138,6 +147,8 @@ pub(crate) struct FlatFrontierScratch {
     branches: [FlatBranchScratch; FLAT_FRONTIER_MAX_BRANCHES],
     len: usize,
     action: FlatActionScratch,
+    continuation_cache: [FlatContinuationDecision; FLAT_CONTINUATION_CACHE_CAPACITY],
+    continuation_cache_len: usize,
     // Double-buffered single-path GSS objects. Runtime commits write a small
     // output frontier into these preallocated objects and then swap them with
     // the active state. This permits branch creation/collapse without allocator
@@ -167,6 +178,9 @@ impl Default for FlatFrontierScratch {
             branches: std::array::from_fn(|_| FlatBranchScratch::default()),
             len: 0,
             action: FlatActionScratch::default(),
+            continuation_cache: [FlatContinuationDecision::default();
+                FLAT_CONTINUATION_CACHE_CAPACITY],
+            continuation_cache_len: 0,
             gss_pool,
             retired_gss: SmallVec::new(),
         }
@@ -177,6 +191,42 @@ impl FlatFrontierScratch {
     pub(crate) fn clear(&mut self) {
         self.len = 0;
         self.action.clear();
+        self.continuation_cache_len = 0;
+    }
+
+    fn continuation_decision(
+        &self,
+        offset: usize,
+        tokenizer_state: u32,
+        end_state: u32,
+    ) -> Option<bool> {
+        self.continuation_cache[..self.continuation_cache_len]
+            .iter()
+            .find(|decision| {
+                decision.offset == offset
+                    && decision.tokenizer_state == tokenizer_state
+                    && decision.end_state == end_state
+            })
+            .map(|decision| decision.viable)
+    }
+
+    fn cache_continuation_decision(
+        &mut self,
+        offset: usize,
+        tokenizer_state: u32,
+        end_state: u32,
+        viable: bool,
+    ) {
+        if self.continuation_cache_len == self.continuation_cache.len() {
+            return;
+        }
+        self.continuation_cache[self.continuation_cache_len] = FlatContinuationDecision {
+            offset,
+            tokenizer_state,
+            end_state,
+            viable,
+        };
+        self.continuation_cache_len += 1;
     }
 
     fn enqueue(
@@ -3799,6 +3849,42 @@ fn flat_stack_may_advance_on_any(
     (!unknown).then_some(false)
 }
 
+fn flat_frontier_group_may_advance_on_any(
+    constraint: &Constraint,
+    branches: &[FlatBranchScratch],
+    offset: usize,
+    tokenizer_state: u32,
+    terminals: &crate::ds::bitset::BitSet,
+    scratch: &mut FlatActionScratch,
+) -> Option<bool> {
+    let mut saw_branch = false;
+    let mut unknown = false;
+    for branch in branches {
+        if branch.offset != offset || branch.tokenizer_state != tokenizer_state {
+            continue;
+        }
+        saw_branch = true;
+        match flat_stack_may_advance_on_any(
+            constraint,
+            &branch.stack,
+            terminals,
+            scratch,
+        ) {
+            Some(true) => return Some(true),
+            Some(false) => {}
+            None => unknown = true,
+        }
+    }
+
+    if !saw_branch {
+        Some(false)
+    } else if unknown {
+        None
+    } else {
+        Some(false)
+    }
+}
+
 fn prune_flat_branch_acc(
     acc: &TerminalsDisallowed,
     tokenizer_state: u32,
@@ -4013,15 +4099,63 @@ fn try_commit_flat_frontier_in_place(
                 let viable = if end_state == initial_tokenizer_state {
                     true
                 } else {
-                    let Some(viable) = flat_stack_may_advance_on_any(
-                        constraint,
-                        original,
-                        constraint.tokenizer.possible_future_terminals(end_state),
-                        &mut frontier.action,
-                    ) else {
-                        flat_decline!("continuation-admission-ambiguous");
+                    let branches = &frontier.branches[..frontier.len];
+                    let mut group = branches.iter().filter(|branch| {
+                        branch.offset == offset && branch.tokenizer_state == tokenizer_state
+                    });
+                    let Some(first) = group.next() else {
+                        flat_decline!("missing-continuation-group");
                     };
-                    viable
+                    let correlated = group.next().is_some();
+                    let possible = constraint
+                        .tokenizer
+                        .possible_future_terminals(end_state);
+                    if !correlated {
+                        let Some(viable) = flat_stack_may_advance_on_any(
+                            constraint,
+                            &first.stack,
+                            possible,
+                            &mut frontier.action,
+                        ) else {
+                            flat_decline!("continuation-admission-ambiguous");
+                        };
+                        viable
+                    } else if let Some(viable) = frontier.continuation_decision(
+                        offset,
+                        tokenizer_state,
+                        end_state,
+                    ) {
+                        viable
+                    } else {
+                        let group_is_safe = offset > 0
+                            || branches
+                                .iter()
+                                .filter(|branch| {
+                                    branch.offset == offset
+                                        && branch.tokenizer_state == tokenizer_state
+                                })
+                                .all(|branch| branch.acc.is_empty());
+                        if !group_is_safe {
+                            flat_decline!("initial-continuation-group-needs-pruning");
+                        }
+                        let Some(viable) = flat_frontier_group_may_advance_on_any(
+                            constraint,
+                            branches,
+                            offset,
+                            tokenizer_state,
+                            possible,
+                            &mut frontier.action,
+                        ) else {
+                            flat_decline!("continuation-admission-ambiguous");
+                        };
+                        frontier.cache_continuation_decision(
+                            offset,
+                            tokenizer_state,
+                            end_state,
+                            viable,
+                        );
+                        viable
+                    }
                 };
                 if viable
                     && !frontier.enqueue(bytes.len(), end_state, original, acc.clone())
@@ -5548,6 +5682,54 @@ nt start ::= item item? item?;
         );
 
         Some(fast)
+    }
+
+    #[test]
+    fn flat_frontier_preserves_all_stacks_in_a_live_lexer_continuation_group() {
+        let vocab = Vocab::new(vec![
+            (0, b"a".to_vec()),
+            (1, b"b".to_vec()),
+            (2, b"ab".to_vec()),
+            (3, b"ba".to_vec()),
+        ]);
+        let grammar = r#"
+            start start;
+            t A ::= "a";
+            t B ::= "b" | "ab";
+            nt item ::= A | B;
+            nt start ::= item item? item?;
+        "#;
+        let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
+        let start = constraint.start();
+        let after_ab = assert_fast_and_general_queue_match(
+            &constraint,
+            &start,
+            2,
+            b"ab",
+            "grouped lexer continuation regression after ab",
+        )
+        .unwrap();
+        let after_ba = assert_fast_and_general_queue_match(
+            &constraint,
+            &after_ab,
+            3,
+            b"ba",
+            "grouped lexer continuation regression after ab, ba",
+        )
+        .unwrap();
+
+        let stacks = canonical_commit_state(&after_ba.state);
+        let tokenizer_one = stacks
+            .iter()
+            .find(|(tokenizer_state, _)| *tokenizer_state == 1)
+            .expect("lexer continuation state must remain live");
+        assert_eq!(
+            tokenizer_one.1,
+            vec![
+                (vec![0, 3, 2], Vec::new()),
+                (vec![0, 3, 5, 2], Vec::new()),
+            ],
+        );
     }
 
     #[test]
