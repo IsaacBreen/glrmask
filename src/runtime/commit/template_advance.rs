@@ -7,10 +7,12 @@ use crate::compiler::glr::labels::{
     negative_to_positive_label,
 };
 use crate::compiler::glr::parser::ParserGSS;
-use crate::ds::leveled_gss::VirtualStack;
+use crate::ds::leveled_gss::{GssSemanticKeyInterner, VirtualStack};
 use crate::grammar::flat::TerminalID;
 use crate::runtime::CommitTemplateDfas;
 use crate::runtime::constraint::Constraint;
+use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 
 pub(super) fn advance_stacks_template_dfa(
     constraint: &Constraint,
@@ -36,6 +38,110 @@ pub(super) fn advance_stacks_template_dfa_owned(
     Some(advance_with_template(dfa, stack))
 }
 
+pub(crate) struct TemplateAdvanceRuntime {
+    interner: GssSemanticKeyInterner<u32, TerminalsDisallowed>,
+    memo: FxHashMap<(u32, Phase, u32, u32), u32>,
+    calls: u64,
+    memo_hits: u64,
+}
+
+impl Default for TemplateAdvanceRuntime {
+    fn default() -> Self {
+        Self {
+            interner: GssSemanticKeyInterner::new(),
+            memo: FxHashMap::default(),
+            calls: 0,
+            memo_hits: 0,
+        }
+    }
+}
+
+impl std::fmt::Debug for TemplateAdvanceRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TemplateAdvanceRuntime")
+            .field("memo", &self.memo.len())
+            .field("calls", &self.calls)
+            .field("memo_hits", &self.memo_hits)
+            .finish_non_exhaustive()
+    }
+}
+
+impl TemplateAdvanceRuntime {
+    pub(crate) fn clear_commit(&mut self) {
+        *self = Self::default();
+    }
+
+    pub(crate) fn memo_summary(&self) -> (u64, u64, usize) {
+        (self.calls, self.memo_hits, self.memo.len())
+    }
+
+    pub(crate) fn language_from_uniform_gss(
+        &mut self,
+        stack: &ParserGSS,
+    ) -> Option<(u32, TerminalsDisallowed)> {
+        let accumulator = stack.uniform_accumulator()?;
+        Some((self.interner.key(stack), accumulator))
+    }
+
+    pub(crate) fn language_components_from_gss(
+        &mut self,
+        stack: &ParserGSS,
+    ) -> Vec<(u32, TerminalsDisallowed)> {
+        if let Some(component) = self.language_from_uniform_gss(stack) {
+            return vec![component];
+        }
+
+        stack
+            .partition_by_accumulator()
+            .into_iter()
+            .map(|(paths, accumulator)| {
+                let restored = paths.apply(|_| accumulator.clone());
+                (self.interner.key(&restored), accumulator)
+            })
+            .collect()
+    }
+
+    pub(crate) fn gss_from_language(
+        &mut self,
+        language: u32,
+        accumulator: TerminalsDisallowed,
+    ) -> ParserGSS {
+        self.interner.gss_from_key(language, accumulator)
+    }
+
+    pub(crate) fn language_top_states(&self, language: u32) -> SmallVec<[u32; 8]> {
+        self.interner
+            .top_branches(language)
+            .iter()
+            .map(|(state, _)| *state)
+            .collect()
+    }
+
+    pub(crate) fn union_languages(&mut self, left: u32, right: u32) -> u32 {
+        self.interner.union_keys(left, right)
+    }
+
+    pub(crate) fn advance_language(
+        &mut self,
+        constraint: &Constraint,
+        terminal: TerminalID,
+        language: u32,
+    ) -> Option<u32> {
+        let template = constraint
+            .template_dfas_by_terminal
+            .get(terminal as usize)?
+            .as_ref()?;
+        Some(evaluate_template_language(
+            template,
+            terminal,
+            Phase::Pop,
+            template.pop.start_state,
+            language,
+            self,
+        ))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Phase {
     Pop,
@@ -43,12 +149,183 @@ enum Phase {
     Push,
 }
 
-fn advance_with_template(template: &CommitTemplateDfas, stack: ParserGSS) -> ParserGSS {
-    if let Some(vstack) = stack.try_virtual_stack()
-        && let Some(advanced) = advance_virtual_stack_single_path(template, vstack)
-    {
-        return advanced;
+fn evaluate_template_language(
+    template: &CommitTemplateDfas,
+    terminal: TerminalID,
+    phase: Phase,
+    state_id: u32,
+    language: u32,
+    runtime: &mut TemplateAdvanceRuntime,
+) -> u32 {
+    if language == 0 {
+        return 0;
     }
+    runtime.calls += 1;
+    let memo_key = (terminal, phase, state_id, language);
+    if let Some(&cached) = runtime.memo.get(&memo_key) {
+        runtime.memo_hits += 1;
+        return cached;
+    }
+
+    let mut output = 0;
+
+    fn merge_target(
+        groups: &mut SmallVec<[(u32, u32); 8]>,
+        target: u32,
+        language: u32,
+        runtime: &mut TemplateAdvanceRuntime,
+    ) {
+        if let Some((_, existing)) = groups
+            .iter_mut()
+            .find(|(candidate, _)| *candidate == target)
+        {
+            *existing = runtime.interner.union_keys(*existing, language);
+        } else {
+            groups.push((target, language));
+        }
+    }
+
+    match phase {
+        Phase::Pop => {
+            let Some(dfa_state) = template.pop.states.get(state_id as usize) else {
+                return 0;
+            };
+            if dfa_state.is_accepting {
+                output = language;
+            }
+
+            let branches = runtime
+                .interner
+                .top_branches(language)
+                .iter()
+                .copied()
+                .collect::<SmallVec<[(u32, u32); 8]>>();
+            let default_target = dfa_state.transitions.get(&DEFAULT_LABEL).copied();
+            let mut by_target = SmallVec::<[(u32, u32); 8]>::new();
+            for (top, suffix) in branches {
+                let target = dfa_state
+                    .transitions
+                    .get(&(top as i32))
+                    .copied()
+                    .or(default_target);
+                if let Some(target) = target {
+                    merge_target(&mut by_target, target, suffix, runtime);
+                }
+            }
+            for (target, suffixes) in by_target {
+                let branch = evaluate_template_language(
+                    template,
+                    terminal,
+                    Phase::Pop,
+                    target,
+                    suffixes,
+                    runtime,
+                );
+                output = runtime.interner.union_keys(output, branch);
+            }
+
+            if let Some(Some(read_state)) = template.pop_to_read.get(state_id as usize) {
+                let branch = evaluate_template_language(
+                    template,
+                    terminal,
+                    Phase::Read,
+                    *read_state,
+                    language,
+                    runtime,
+                );
+                output = runtime.interner.union_keys(output, branch);
+            }
+            if let Some(Some(push_state)) = template.pop_to_push.get(state_id as usize) {
+                let branch = evaluate_template_language(
+                    template,
+                    terminal,
+                    Phase::Push,
+                    *push_state,
+                    language,
+                    runtime,
+                );
+                output = runtime.interner.union_keys(output, branch);
+            }
+        }
+        Phase::Read => {
+            let Some(dfa_state) = template.read.states.get(state_id as usize) else {
+                return 0;
+            };
+            if dfa_state.is_accepting {
+                output = language;
+            }
+
+            let branches = runtime
+                .interner
+                .top_branches(language)
+                .iter()
+                .copied()
+                .collect::<SmallVec<[(u32, u32); 8]>>();
+            let mut by_target = SmallVec::<[(u32, u32); 8]>::new();
+            for (top, suffix) in branches {
+                if let Some(&target) = dfa_state.transitions.get(&(top as i32)) {
+                    let selected = runtime.interner.push_key(suffix, top);
+                    merge_target(&mut by_target, target, selected, runtime);
+                }
+            }
+            for (target, selected) in by_target {
+                let branch = evaluate_template_language(
+                    template,
+                    terminal,
+                    Phase::Read,
+                    target,
+                    selected,
+                    runtime,
+                );
+                output = runtime.interner.union_keys(output, branch);
+            }
+
+            if let Some(Some(push_state)) = template.read_to_push.get(state_id as usize) {
+                let branch = evaluate_template_language(
+                    template,
+                    terminal,
+                    Phase::Push,
+                    *push_state,
+                    language,
+                    runtime,
+                );
+                output = runtime.interner.union_keys(output, branch);
+            }
+        }
+        Phase::Push => {
+            let Some(dfa_state) = template.push.states.get(state_id as usize) else {
+                return 0;
+            };
+            if dfa_state.is_accepting {
+                output = language;
+            }
+            for (&label, &target) in &dfa_state.transitions {
+                if !is_negative_label(label) {
+                    panic!(
+                        "commit template push DFA contains non-push label {label} at state {state_id}"
+                    );
+                }
+                let pushed = runtime
+                    .interner
+                    .push_key(language, negative_to_positive_label(label) as u32);
+                let branch = evaluate_template_language(
+                    template,
+                    terminal,
+                    Phase::Push,
+                    target,
+                    pushed,
+                    runtime,
+                );
+                output = runtime.interner.union_keys(output, branch);
+            }
+        }
+    }
+
+    runtime.memo.insert(memo_key, output);
+    output
+}
+
+fn advance_with_template(template: &CommitTemplateDfas, stack: ParserGSS) -> ParserGSS {
 
     let mut output = ParserGSS::empty();
     let mut worklist = vec![(Phase::Pop, template.pop.start_state, stack)];

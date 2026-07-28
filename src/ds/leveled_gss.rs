@@ -1677,6 +1677,62 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
             .expect("semantic trie root union was not constructed")
     }
 
+    pub(crate) fn union_keys(&mut self, left: u32, right: u32) -> u32 {
+        self.union_ids(left, right)
+    }
+
+    pub(crate) fn top_branches(&self, root: u32) -> &[(T, u32)] {
+        &self.nodes[root as usize].children
+    }
+
+    pub(crate) fn push_key(&mut self, root: u32, value: T) -> u32 {
+        if root == 0 {
+            return 0;
+        }
+        self.intern_node(false, vec![(value, root)])
+    }
+
+    pub(crate) fn gss_from_key(&mut self, root: u32, accumulator: A) -> LeveledGSS<T, A> {
+        if root == 0 {
+            return LeveledGSS::empty();
+        }
+
+        fn build<T: Clone + Eq + Hash + Ord>(
+            nodes: &[SemanticTrieNode<T>],
+            id: u32,
+            memo: &mut FxHashMap<u32, Arc<Lower<T>>>,
+        ) -> Arc<Lower<T>> {
+            if let Some(cached) = memo.get(&id) {
+                return cached.clone();
+            }
+            let node = &nodes[id as usize];
+            let mut children: Children<T, Lower<T>> = CompactMap::new();
+            for (value, child_id) in &node.children {
+                let child = build(nodes, *child_id, memo);
+                insert_lower_child_shared(
+                    &mut children,
+                    value.clone(),
+                    child.max_depth(),
+                    child,
+                );
+            }
+            let lower = new_lower(children, node.empty);
+            memo.insert(id, lower.clone());
+            lower
+        }
+
+        let mut memo = FxHashMap::default();
+        let lower = build(&self.nodes, root, &mut memo);
+        let gss = LeveledGSS {
+            inner: new_interface(lower, accumulator),
+        };
+        self.upper_memo.insert(
+            Arc::as_ptr(&gss.inner) as usize,
+            (gss.inner.clone(), root),
+        );
+        gss
+    }
+
     pub(crate) fn key(&mut self, gss: &LeveledGSS<T, A>) -> u32 {
         if let Some(id) = self.upper_id(&gss.inner) {
             return id;
@@ -5152,6 +5208,17 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         }
         let mut visited = VisitedPtrs::new();
         walk(&self.inner, &mut visited, &mut f);
+    }
+
+    pub(crate) fn uniform_accumulator(&self) -> Option<A> {
+        let mut value: Option<A> = None;
+        let mut uniform = true;
+        self.for_each_acc(|candidate| match &value {
+            None => value = Some(candidate.clone()),
+            Some(existing) if existing == candidate => {}
+            Some(_) => uniform = false,
+        });
+        uniform.then_some(value).flatten()
     }
 
     /// Returns true if all accumulators in the upper tree satisfy the predicate.

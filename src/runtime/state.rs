@@ -266,6 +266,7 @@ pub(crate) struct CommitBuffers {
     pub linear_stack_original: Vec<u32>,
     pub linear_stack_work: Vec<u32>,
     pub processing_queue: Vec<FxHashMap<u32, ParserGSS>>,
+    pub template_advance_runtime: crate::runtime::commit::TemplateAdvanceRuntime,
 }
 
 impl Default for CommitBuffers {
@@ -287,6 +288,8 @@ impl Default for CommitBuffers {
             linear_stack_original: Vec::with_capacity(LINEAR_STACK_RESERVE),
             linear_stack_work: Vec::with_capacity(LINEAR_STACK_RESERVE),
             processing_queue: Vec::new(),
+            template_advance_runtime:
+                crate::runtime::commit::TemplateAdvanceRuntime::default(),
         }
     }
 }
@@ -316,6 +319,7 @@ impl CommitBuffers {
         for bucket in &mut self.processing_queue {
             bucket.clear();
         }
+        self.template_advance_runtime.clear_commit();
     }
 }
 
