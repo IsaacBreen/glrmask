@@ -8,6 +8,7 @@ use smallvec::SmallVec;
 use crate::automata::lexer::{Lexer, tokenizer::Tokenizer};
 use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
 use crate::automata::weighted::dwa::DWA;
+use crate::compiler::glr::labels::DEFAULT_LABEL;
 use crate::compiler::glr::table::GLRTable;
 use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::ds::leveled_gss::LeveledGSS;
@@ -117,6 +118,115 @@ impl FastTokenizerTransitions {
     }
 }
 pub(crate) type TemplateDfasByTerminal = Vec<Option<Arc<CommitTemplateDfas>>>;
+pub(crate) type FastTemplateDfasByTerminal = Vec<Option<Arc<FastCommitTemplateDfas>>>;
+
+const INLINE_TEMPLATE_TRANSITION_LIMIT: usize = 8;
+
+#[derive(Debug, Clone, Default)]
+pub(crate) enum FastTemplateTransitionRow {
+    #[default]
+    Empty,
+    Inline(SmallVec<[(i32, u32); 4]>),
+    Hash(FxHashMap<i32, u32>),
+}
+
+impl FastTemplateTransitionRow {
+    fn from_entries(entries: impl IntoIterator<Item = (i32, u32)>) -> Self {
+        let entries = entries.into_iter().collect::<SmallVec<[_; 4]>>();
+        match entries.len() {
+            0 => Self::Empty,
+            len if len <= INLINE_TEMPLATE_TRANSITION_LIMIT => Self::Inline(entries),
+            _ => Self::Hash(entries.into_iter().collect()),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn get(&self, label: i32) -> Option<u32> {
+        match self {
+            Self::Empty => None,
+            Self::Inline(entries) => entries
+                .iter()
+                .find_map(|(candidate, target)| (*candidate == label).then_some(*target)),
+            Self::Hash(entries) => entries.get(&label).copied(),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn for_each(&self, mut f: impl FnMut(i32, u32)) {
+        match self {
+            Self::Empty => {}
+            Self::Inline(entries) => {
+                for &(label, target) in entries {
+                    f(label, target);
+                }
+            }
+            Self::Hash(entries) => {
+                for (&label, &target) in entries {
+                    f(label, target);
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FastTemplateDfaState {
+    pub(crate) is_accepting: bool,
+    pub(crate) default_target: Option<u32>,
+    pub(crate) transitions: FastTemplateTransitionRow,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FastTemplateDfa {
+    pub(crate) states: Vec<FastTemplateDfaState>,
+    pub(crate) start_state: u32,
+}
+
+impl FastTemplateDfa {
+    fn from_dfa(dfa: &UnweightedDfa) -> Self {
+        Self {
+            states: dfa
+                .states
+                .iter()
+                .map(|state| FastTemplateDfaState {
+                    is_accepting: state.is_accepting,
+                    default_target: state.transitions.get(&DEFAULT_LABEL).copied(),
+                    transitions: FastTemplateTransitionRow::from_entries(
+                        state
+                            .transitions
+                            .iter()
+                            .filter(|(label, _)| **label != DEFAULT_LABEL)
+                            .map(|(&label, &target)| (label, target)),
+                    ),
+                })
+                .collect(),
+            start_state: dfa.start_state,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FastCommitTemplateDfas {
+    pub(crate) pop: FastTemplateDfa,
+    pub(crate) read: FastTemplateDfa,
+    pub(crate) push: FastTemplateDfa,
+    pub(crate) pop_to_read: Vec<Option<u32>>,
+    pub(crate) pop_to_push: Vec<Option<u32>>,
+    pub(crate) read_to_push: Vec<Option<u32>>,
+}
+
+impl FastCommitTemplateDfas {
+    pub(crate) fn from_template(template: &CommitTemplateDfas) -> Self {
+        Self {
+            pop: FastTemplateDfa::from_dfa(&template.pop),
+            read: FastTemplateDfa::from_dfa(&template.read),
+            push: FastTemplateDfa::from_dfa(&template.push),
+            pop_to_read: template.pop_to_read.clone(),
+            pop_to_push: template.pop_to_push.clone(),
+            read_to_push: template.read_to_push.clone(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SpecialTokenTerminal {
@@ -2477,6 +2587,9 @@ pub struct Constraint {
     pub(crate) state_to_internal_tsid: Vec<u32>,
     pub(crate) internal_tsid_to_states: Vec<Vec<u32>>,
     pub(crate) template_dfas_by_terminal: TemplateDfasByTerminal,
+    /// Runtime-only compact transition view for commit template products.
+    #[serde(skip, default)]
+    pub(crate) fast_template_dfas_by_terminal: FastTemplateDfasByTerminal,
     /// Original token -> final shared constraint-internal token id.
     ///
     /// This is not necessarily equal to the parser-DWA compaction vocab map

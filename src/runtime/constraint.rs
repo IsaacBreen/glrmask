@@ -22,8 +22,8 @@ use super::artifact::{
     DynamicMaskTrie,
     DynamicMaskTrieEdge,
     DynamicMaskVocab,
-    FastDwaTransitionRow, FastDwaTransitions,
-    FastTokenizerTransitions,
+    FastCommitTemplateDfas, FastDwaTransitionRow, FastDwaTransitions,
+    FastTemplateDfasByTerminal, FastTokenizerTransitions,
     InternalTokenBufMasks,
     SeedTerminalDenseMasks,
     SparseWeightBufMaskCache,
@@ -793,6 +793,7 @@ impl Constraint {
         let total_started_at = profile.then(std::time::Instant::now);
         let guarded_shift_started_at = profile.then(std::time::Instant::now);
         self.table.rebuild_guarded_shift_index();
+        let fast_template_dfas_by_terminal = self.compute_fast_template_dfas();
         let guarded_shift_ms = guarded_shift_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         // This mapping is a derived cache. Reset it before scheduling the
@@ -1080,6 +1081,7 @@ impl Constraint {
         self.direct_sparse_weight_token_sets = direct_sparse_weight_token_sets;
         let weight_sparse_ms = 0.0;
         self.dwa_fast_transitions = fast_transitions;
+        self.fast_template_dfas_by_terminal = fast_template_dfas_by_terminal;
         self.tokenizer_fast_transitions = tokenizer_fast_transitions;
         let derived_ms = derived_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let seed_started_at = profile.then(std::time::Instant::now);
@@ -1928,6 +1930,18 @@ impl Constraint {
             dense[token_id as usize] = Some(bytes.clone().into_boxed_slice());
         }
         dense
+    }
+
+    fn compute_fast_template_dfas(&self) -> FastTemplateDfasByTerminal {
+        self.template_dfas_by_terminal
+            .iter()
+            .map(|template| {
+                template
+                    .as_deref()
+                    .map(FastCommitTemplateDfas::from_template)
+                    .map(Arc::new)
+            })
+            .collect()
     }
 
     fn compute_fast_transitions(&self) -> FastDwaTransitions {

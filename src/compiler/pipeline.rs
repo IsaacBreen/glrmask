@@ -3154,6 +3154,7 @@ fn compile_prepared_with_profile_and_table_construction(
             original_token_to_internal: internal_ids.vocab_tokens.original_to_internal.clone(),
             internal_token_to_tokens: internal_ids.vocab_tokens.internal_to_originals_vecs(),
             template_dfas_by_terminal,
+            fast_template_dfas_by_terminal: Vec::new(),
             token_bytes,
             internal_token_bytes,
             token_bytes_dense: Vec::new(),

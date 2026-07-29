@@ -7,7 +7,7 @@ use crate::compiler::glr::labels::{
 use crate::compiler::glr::parser::ParserGSS;
 use crate::ds::leveled_gss::{GssSemanticKeyInterner, VirtualStack};
 use crate::grammar::flat::TerminalID;
-use crate::runtime::CommitTemplateDfas;
+use crate::runtime::{CommitTemplateDfas, FastCommitTemplateDfas};
 use crate::runtime::constraint::Constraint;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -297,10 +297,21 @@ impl TemplateAdvanceRuntime {
         if self.is_exhausted() {
             return None;
         }
-        let template = constraint
+        let serialized_template = constraint
             .template_dfas_by_terminal
             .get(terminal as usize)?
             .as_ref()?;
+        let fallback_template;
+        let template = if let Some(template) = constraint
+            .fast_template_dfas_by_terminal
+            .get(terminal as usize)
+            .and_then(Option::as_deref)
+        {
+            template
+        } else {
+            fallback_template = FastCommitTemplateDfas::from_template(serialized_template);
+            &fallback_template
+        };
         let advanced = evaluate_template_language(
             template,
             terminal,
@@ -337,7 +348,7 @@ enum Phase {
 /// the union of equal-target suffixes. Exactness follows by induction on the
 /// acyclic product of template phase/state and canonical stack-trie node.
 fn evaluate_template_language(
-    template: &CommitTemplateDfas,
+    template: &FastCommitTemplateDfas,
     terminal: TerminalID,
     phase: Phase,
     state_id: u32,
@@ -390,14 +401,10 @@ fn evaluate_template_language(
                 .iter()
                 .copied()
                 .collect::<SmallVec<[(u32, u32); 8]>>();
-            let default_target = dfa_state.transitions.get(&DEFAULT_LABEL).copied();
+            let default_target = dfa_state.default_target;
             let mut by_target = SmallVec::<[(u32, u32); 8]>::new();
             for (top, suffix) in branches {
-                let target = dfa_state
-                    .transitions
-                    .get(&(top as i32))
-                    .copied()
-                    .or(default_target);
+                let target = dfa_state.transitions.get(top as i32).or(default_target);
                 if let Some(target) = target {
                     merge_target(&mut by_target, target, suffix, runtime);
                 }
@@ -453,7 +460,7 @@ fn evaluate_template_language(
                 .collect::<SmallVec<[(u32, u32); 8]>>();
             let mut by_target = SmallVec::<[(u32, u32); 8]>::new();
             for (top, suffix) in branches {
-                if let Some(&target) = dfa_state.transitions.get(&(top as i32)) {
+                if let Some(target) = dfa_state.transitions.get(top as i32) {
                     let selected = runtime.interner.push_key(suffix, top);
                     merge_target(&mut by_target, target, selected, runtime);
                 }
@@ -489,7 +496,7 @@ fn evaluate_template_language(
             if dfa_state.is_accepting {
                 output = language;
             }
-            for (&label, &target) in &dfa_state.transitions {
+            dfa_state.transitions.for_each(|label, target| {
                 if !is_negative_label(label) {
                     panic!(
                         "commit template push DFA contains non-push label {label} at state {state_id}"
@@ -508,7 +515,7 @@ fn evaluate_template_language(
                     runtime,
                 );
                 output = runtime.union_languages(output, branch);
-            }
+            });
         }
     }
 
@@ -920,7 +927,7 @@ mod tests {
     use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
     use crate::compiler::glr::accumulator::TerminalsDisallowed;
     use crate::compiler::glr::parser::ParserGSS;
-    use crate::runtime::CommitTemplateDfas;
+    use crate::runtime::{CommitTemplateDfas, FastCommitTemplateDfas};
 
     #[test]
     fn template_advance_distributes_over_merged_branched_floor() {
@@ -989,11 +996,12 @@ mod tests {
         let (language, accumulator) = runtime
             .language_from_uniform_gss(&merged)
             .expect("test GSS has one uniform accumulator");
+        let fast_template = FastCommitTemplateDfas::from_template(&template);
         let output = evaluate_template_language(
-            &template,
+            &fast_template,
             0,
             Phase::Pop,
-            template.pop.start_state,
+            fast_template.pop.start_state,
             language,
             &mut runtime,
         );
@@ -1029,11 +1037,12 @@ mod tests {
         let (language, _) = runtime
             .language_from_uniform_gss(&input)
             .expect("input canonicalization fits its independent budget");
+        let fast_template = FastCommitTemplateDfas::from_template(&template);
         let output = evaluate_template_language(
-            &template,
+            &fast_template,
             0,
             Phase::Pop,
-            template.pop.start_state,
+            fast_template.pop.start_state,
             language,
             &mut runtime,
         );

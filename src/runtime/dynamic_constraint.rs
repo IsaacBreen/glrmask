@@ -184,6 +184,7 @@ impl DynamicConstraint {
             state_to_internal_tsid: Vec::new(),
             internal_tsid_to_states: Vec::new(),
             template_dfas_by_terminal: Vec::new(),
+            fast_template_dfas_by_terminal: Vec::new(),
             original_token_to_internal: Vec::new(),
             internal_token_to_tokens: Vec::new(),
             token_bytes: payload.token_bytes,

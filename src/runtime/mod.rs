@@ -9,7 +9,7 @@ mod serde;
 mod state;
 mod token_space;
 pub(crate) use artifact::{
-    CommitTemplateDfas, DynamicMaskTrie, DynamicMaskVocab,
+    CommitTemplateDfas, DynamicMaskTrie, DynamicMaskVocab, FastCommitTemplateDfas,
     DynamicTokenProgramPartition, SpecialTokenTerminal,
 };
 #[allow(unused_imports)]

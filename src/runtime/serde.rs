@@ -139,12 +139,26 @@ mod tests {
         let loaded_template = loaded.template_dfas_by_terminal[1]
             .as_deref()
             .expect("serialized template should survive load");
+        let loaded_fast_template = loaded.fast_template_dfas_by_terminal[1]
+            .as_deref()
+            .expect("runtime template transition cache should be rebuilt after load");
         assert_eq!(loaded_template.pop, template.pop);
         assert_eq!(loaded_template.read, template.read);
         assert_eq!(loaded_template.push, template.push);
         assert_eq!(loaded_template.pop_to_read, template.pop_to_read);
         assert_eq!(loaded_template.pop_to_push, template.pop_to_push);
         assert_eq!(loaded_template.read_to_push, template.read_to_push);
+        assert_eq!(loaded_fast_template.pop.start_state, template.pop.start_state);
+        assert_eq!(
+            loaded_fast_template.pop.states[accepted as usize].is_accepting,
+            template.pop.states[accepted as usize].is_accepting
+        );
+        assert_eq!(
+            loaded_fast_template.pop.states[template.pop.start_state as usize]
+                .transitions
+                .get(7),
+            Some(accepted)
+        );
     }
 
 }
