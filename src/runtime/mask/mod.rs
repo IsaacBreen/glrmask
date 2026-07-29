@@ -938,13 +938,35 @@ struct SingleDenseTransition {
     mask: SingleDenseTransitionMask,
 }
 
+
+#[derive(Clone)]
+struct SingleLowerMemoEntry {
+    dwa_state: u32,
+    accumulator_id: u32,
+    result: Option<Arc<[u64]>>,
+}
+
+#[derive(Clone)]
+struct SingleSegmentMemoEntry {
+    offset: usize,
+    dwa_state: u32,
+    accumulator_id: u32,
+    result: Option<Arc<[u64]>>,
+}
+
+struct SingleSourceMemo {
+    source: IndexedLowerIdentity<u32>,
+    lower: SmallVec<[SingleLowerMemoEntry; 8]>,
+    segments: SmallVec<[SingleSegmentMemoEntry; 8]>,
+}
+
 #[derive(Default)]
 pub(crate) struct IndexedDagMaskRuntime {
     lower_memo: FxHashMap<(u32, usize, u32), Option<DenseMaskAcc>>,
     segment_memo: FxHashMap<(usize, usize, u32, u32), Option<DenseMaskAcc>>,
     final_memo: FxHashMap<(u32, u32), Option<DenseMaskAcc>>,
-    single_lower_memo: FxHashMap<(u32, usize, u32), Option<Arc<[u64]>>>,
-    single_segment_memo: FxHashMap<(usize, usize, u32, u32), Option<Arc<[u64]>>>,
+    single_source_ids: FxHashMap<usize, u32>,
+    single_sources: Vec<SingleSourceMemo>,
     single_final_memo: FxHashMap<(u32, u32), Option<Arc<[u64]>>>,
     single_transition_memo:
         FxHashMap<(u32, u32, u32), Option<SingleDenseTransition>>,
@@ -958,6 +980,7 @@ struct IndexedDagMaskEvaluator<'a, 'r> {
     dag: &'a IndexedLeveledGss<u32, DenseMaskAcc>,
     precomputed: &'a DenseTokenMaskCache,
     runtime: &'r mut IndexedDagMaskRuntime,
+    source_slots: Vec<u32>,
     upper_memo: FxHashMap<(u32, u32), Option<DenseMaskAcc>>,
     all_upper_memo: FxHashMap<u32, Option<DenseMaskAcc>>,
     upper_calls: u64,
@@ -979,11 +1002,37 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
         precomputed: &'a DenseTokenMaskCache,
         runtime: &'r mut IndexedDagMaskRuntime,
     ) -> Self {
+        let source_slots = dag
+            .nodes
+            .iter()
+            .map(|node| match node {
+                IndexedLeveledGssNode::LowerGeneral { source, .. }
+                | IndexedLeveledGssNode::LowerSegment { source, .. } => {
+                    let ptr = source.ptr_key();
+                    if let Some(slot) = runtime.single_source_ids.get(&ptr) {
+                        *slot
+                    } else {
+                        let slot = u32::try_from(runtime.single_sources.len())
+                            .expect("indexed mask source slots exceeded u32");
+                        runtime.single_sources.push(SingleSourceMemo {
+                            source: source.clone(),
+                            lower: SmallVec::new(),
+                            segments: SmallVec::new(),
+                        });
+                        runtime.single_source_ids.insert(ptr, slot);
+                        slot
+                    }
+                }
+                IndexedLeveledGssNode::UpperBranch { .. }
+                | IndexedLeveledGssNode::Interface { .. } => u32::MAX,
+            })
+            .collect();
         Self {
             constraint,
             dag,
             precomputed,
             runtime,
+            source_slots,
             upper_memo: FxHashMap::default(),
             all_upper_memo: FxHashMap::default(),
             upper_calls: 0,
@@ -1292,83 +1341,96 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
         dense: &Arc<[u64]>,
     ) -> Option<Arc<[u64]>> {
         self.lower_calls += 1;
-        let source_ptr = match &self.dag.nodes[node as usize] {
-            IndexedLeveledGssNode::LowerGeneral { source, .. }
-            | IndexedLeveledGssNode::LowerSegment { source, .. } => source.ptr_key(),
-            IndexedLeveledGssNode::UpperBranch { .. }
-            | IndexedLeveledGssNode::Interface { .. } => {
-                debug_assert!(false, "single lower evaluation reached upper node");
-                return None;
-            }
-        };
-        let key = (dwa_state, source_ptr, accumulator_id);
-        if let Some(cached) = self.runtime.single_lower_memo.get(&key) {
-            self.lower_hits += 1;
-            return cached.clone();
+        let source_slot = self.source_slots[node as usize];
+        if source_slot == u32::MAX {
+            debug_assert!(false, "single lower evaluation reached upper node");
+            return None;
         }
-        let indexed = self.dag.nodes[node as usize].clone();
-        let source = match &indexed {
-            IndexedLeveledGssNode::LowerGeneral { source, .. }
-            | IndexedLeveledGssNode::LowerSegment { source, .. } => source.clone(),
-            _ => unreachable!(),
-        };
-        let out = match indexed {
+        let cached = self.runtime.single_sources[source_slot as usize]
+            .lower
+            .iter()
+            .find(|entry| {
+                entry.dwa_state == dwa_state
+                    && entry.accumulator_id == accumulator_id
+            })
+            .map(|entry| entry.result.clone());
+        if let Some(cached) = cached {
+            self.lower_hits += 1;
+            return cached;
+        }
+        let (empty, child_count) = match &self.dag.nodes[node as usize] {
             IndexedLeveledGssNode::LowerGeneral {
                 empty, children, ..
-            } => {
-                let mut out = (empty || !children.is_empty())
-                    .then(|| {
-                        self.final_for_single_accumulator(
-                            dwa_state,
-                            accumulator_id,
-                            tsid,
-                            dense,
-                        )
-                    })
-                    .flatten();
-                for (parser_state, child) in children {
-                    let Some(transition) = self.single_transition(
+            } => (*empty, children.len()),
+            IndexedLeveledGssNode::LowerSegment { .. } => {
+                let out = self.eval_segment_single(
+                    dwa_state,
+                    node,
+                    0,
+                    accumulator_id,
+                    tsid,
+                    dense,
+                );
+                self.runtime.single_sources[source_slot as usize]
+                    .lower
+                    .push(SingleLowerMemoEntry {
                         dwa_state,
-                        parser_state,
-                        tsid,
-                    ) else {
-                        continue;
-                    };
-                    if matches!(transition.mask, SingleDenseTransitionMask::Empty) {
-                        continue;
-                    }
-                    let child_result = self.eval_lower_single(
-                        transition.target,
-                        child,
                         accumulator_id,
-                        tsid,
-                        dense,
-                    );
-                    let child_result = child_result.and_then(|child_result| {
-                        Self::intersect_single_with_dense_mask(
-                            &child_result,
-                            &transition.mask,
-                        )
+                        result: out.clone(),
                     });
-                    Self::merge_single_result(&mut out, child_result);
-                }
-                out
+                return out;
             }
-            IndexedLeveledGssNode::LowerSegment { .. } => self.eval_segment_single(
+            _ => unreachable!(),
+        };
+        let mut out = (empty || child_count != 0)
+            .then(|| {
+                self.final_for_single_accumulator(
+                    dwa_state,
+                    accumulator_id,
+                    tsid,
+                    dense,
+                )
+            })
+            .flatten();
+        for child_index in 0..child_count {
+            let (parser_state, child) = match &self.dag.nodes[node as usize] {
+                IndexedLeveledGssNode::LowerGeneral { children, .. } => {
+                    children[child_index]
+                }
+                _ => unreachable!(),
+            };
+            let Some(transition) = self.single_transition(
                 dwa_state,
-                node,
-                0,
+                parser_state,
+                tsid,
+            ) else {
+                continue;
+            };
+            if matches!(transition.mask, SingleDenseTransitionMask::Empty) {
+                continue;
+            }
+            let child_result = self.eval_lower_single(
+                transition.target,
+                child,
                 accumulator_id,
                 tsid,
                 dense,
-            ),
-            _ => unreachable!(),
-        };
-        self.runtime
-            .lower_sources
-            .entry(source_ptr)
-            .or_insert(source);
-        self.runtime.single_lower_memo.insert(key, out.clone());
+            );
+            let child_result = child_result.and_then(|child_result| {
+                Self::intersect_single_with_dense_mask(
+                    &child_result,
+                    &transition.mask,
+                )
+            });
+            Self::merge_single_result(&mut out, child_result);
+        }
+        self.runtime.single_sources[source_slot as usize]
+            .lower
+            .push(SingleLowerMemoEntry {
+                dwa_state,
+                accumulator_id,
+                result: out.clone(),
+            });
         out
     }
 
@@ -1382,22 +1444,37 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
         dense: &Arc<[u64]>,
     ) -> Option<Arc<[u64]>> {
         self.segment_calls += 1;
-        let source_ptr = match &self.dag.nodes[node as usize] {
-            IndexedLeveledGssNode::LowerSegment { source, .. } => source.ptr_key(),
-            _ => return None,
-        };
-        let key = (source_ptr, offset, dwa_state, accumulator_id);
-        if let Some(cached) = self.runtime.single_segment_memo.get(&key) {
-            self.segment_hits += 1;
-            return cached.clone();
+        let source_slot = self.source_slots[node as usize];
+        if source_slot == u32::MAX {
+            return None;
         }
-        let IndexedLeveledGssNode::LowerSegment {
-            source,
-            values,
-            next,
-        } = self.dag.nodes[node as usize].clone()
-        else {
-            unreachable!();
+        let cached = self.runtime.single_sources[source_slot as usize]
+            .segments
+            .iter()
+            .find(|entry| {
+                entry.offset == offset
+                    && entry.dwa_state == dwa_state
+                    && entry.accumulator_id == accumulator_id
+            })
+            .map(|entry| entry.result.clone());
+        if let Some(cached) = cached {
+            self.segment_hits += 1;
+            return cached;
+        }
+        let (parser_state, next, has_more) = match &self.dag.nodes[node as usize] {
+            IndexedLeveledGssNode::LowerSegment {
+                values,
+                next,
+                ..
+            } => {
+                let Some(&parser_state) =
+                    values.get(values.len().saturating_sub(1 + offset))
+                else {
+                    return None;
+                };
+                (parser_state, *next, offset + 1 < values.len())
+            }
+            _ => unreachable!(),
         };
         let mut out = self.final_for_single_accumulator(
             dwa_state,
@@ -1405,11 +1482,10 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
             tsid,
             dense,
         );
-        if let Some(&parser_state) = values.get(values.len().saturating_sub(1 + offset))
-            && let Some(transition) = self.single_transition(dwa_state, parser_state, tsid)
+        if let Some(transition) = self.single_transition(dwa_state, parser_state, tsid)
             && !matches!(transition.mask, SingleDenseTransitionMask::Empty)
         {
-            let child_result = if offset + 1 < values.len() {
+            let child_result = if has_more {
                 self.eval_segment_single(
                     transition.target,
                     node,
@@ -1435,11 +1511,14 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
             });
             Self::merge_single_result(&mut out, child_result);
         }
-        self.runtime
-            .lower_sources
-            .entry(source_ptr)
-            .or_insert(source);
-        self.runtime.single_segment_memo.insert(key, out.clone());
+        self.runtime.single_sources[source_slot as usize]
+            .segments
+            .push(SingleSegmentMemoEntry {
+                offset,
+                dwa_state,
+                accumulator_id,
+                result: out.clone(),
+            });
         out
     }
 

@@ -323,7 +323,11 @@ impl CommitBuffers {
         for bucket in &mut self.processing_queue {
             bucket.clear();
         }
-        self.template_advance_runtime.clear_commit();
+    }
+
+    pub(crate) fn reset_all(&mut self) {
+        self.clear_all();
+        self.template_advance_runtime.reset_all();
     }
 }
 
@@ -444,7 +448,7 @@ impl<'a> ConstraintState<'a> {
         self.history.truncate(target_index);
         self.state = snapshot.state;
         self.generation = snapshot.generation;
-        self.buffers.clear_all();
+        self.buffers.reset_all();
         *self.mask_cache.lock().unwrap() = None;
         *self.mask_scratch.lock().unwrap() = MaskScratch::for_constraint(self.constraint);
         Ok(())

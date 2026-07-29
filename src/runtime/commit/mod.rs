@@ -860,7 +860,7 @@ fn commit_token_impl(
     if let Some(bytes) = bytes {
         if commit_bytes_impl(constraint, state, bytes, buffers).is_err() {
             state.clear();
-            buffers.clear_all();
+            buffers.reset_all();
         }
     } else {
         state.clear();
@@ -2003,6 +2003,18 @@ fn language_end_state_may_advance(
     Some(false)
 }
 
+fn dual_language_metadata_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("GLRMASK_ENABLE_DUAL_LANGUAGE_METADATA")
+            .map(|value| {
+                let normalized = value.trim().to_ascii_lowercase();
+                matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(false)
+    })
+}
+
 fn language_small_queue_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -2052,38 +2064,33 @@ fn language_small_queue_is_profitable(
     false
 }
 
-fn commit_bytes_language_small_queue_fast_path(
+#[derive(Default)]
+struct LanguageCommitSimulationProfile {
+    canonicalize_ns: u64,
+    evaluate_ns: u64,
+    continuation_reconstruct_ns: u64,
+    continuation_check_ns: u64,
+}
+
+fn simulate_language_commit(
     constraint: &Constraint,
-    state: &mut ParserStateMap,
+    state: &ParserStateMap,
     bytes: &[u8],
     tokenizer_scratch: &mut tokenizer_scan::ReusableTokenizerExecScratch,
     queue_scratch: &mut SmallCommitQueueScratch,
     template_runtime: &mut TemplateAdvanceRuntime,
-) -> Option<Result<(), String>> {
-    if !language_small_queue_enabled()
-        || !(2..=8).contains(&bytes.len())
-        || state.len() > 2
-    {
-        return None;
-    }
-    if !language_small_queue_is_profitable(constraint, state, bytes, tokenizer_scratch) {
+    mut profile: Option<&mut LanguageCommitSimulationProfile>,
+) -> Option<Result<SmallLanguageParserStates, String>> {
+    if bytes.is_empty() || bytes.len() > 8 || state.is_empty() || state.len() > 8 {
         return None;
     }
 
-    let profile = std::env::var_os("GLRMASK_PROFILE_LANGUAGE_SMALL_QUEUE").is_some();
-    let total_started = profile.then(std::time::Instant::now);
-    let mut canonicalize_ns = 0u64;
-    let mut evaluate_ns = 0u64;
-    let mut continuation_reconstruct_ns = 0u64;
-    let mut continuation_check_ns = 0u64;
-    let mut final_reconstruct_ns = 0u64;
-    template_runtime.clear_commit();
     queue_scratch.clear();
     for (&tokenizer_state, gss) in state.iter() {
-        let started = profile.then(std::time::Instant::now);
+        let started = profile.is_some().then(std::time::Instant::now);
         let components = template_runtime.language_components_from_gss(gss);
-        if let Some(started) = started {
-            canonicalize_ns += started.elapsed().as_nanos() as u64;
+        if let (Some(profile), Some(started)) = (profile.as_deref_mut(), started) {
+            profile.canonicalize_ns += started.elapsed().as_nanos() as u64;
         }
         for (language, accumulator) in components {
             if !merge_small_language_parser_state(
@@ -2149,14 +2156,14 @@ fn commit_bytes_language_small_queue_fast_path(
                 let (advanced_language, advanced_accumulator) = if matched.ignored {
                     (entry.language, entry.accumulator.clone())
                 } else {
-                    let started = profile.then(std::time::Instant::now);
+                    let started = profile.is_some().then(std::time::Instant::now);
                     let advanced = template_runtime.advance_language(
                         constraint,
                         matched.terminal_id,
                         entry.language,
                     )?;
-                    if let Some(started) = started {
-                        evaluate_ns += started.elapsed().as_nanos() as u64;
+                    if let (Some(profile), Some(started)) = (profile.as_deref_mut(), started) {
+                        profile.evaluate_ns += started.elapsed().as_nanos() as u64;
                     }
                     if advanced == 0 {
                         continue;
@@ -2204,7 +2211,7 @@ fn commit_bytes_language_small_queue_fast_path(
             if !tokenizer_scratch.states.is_empty() {
                 let mut fallback_gss = None;
                 for &end_state in &tokenizer_scratch.states {
-                    let check_started = profile.then(std::time::Instant::now);
+                    let check_started = profile.is_some().then(std::time::Instant::now);
                     let viable = match language_end_state_may_advance(
                         constraint,
                         template_runtime,
@@ -2213,22 +2220,28 @@ fn commit_bytes_language_small_queue_fast_path(
                     ) {
                         Some(viable) => viable,
                         None => {
-                            let reconstruct_started = profile.then(std::time::Instant::now);
+                            let reconstruct_started =
+                                profile.is_some().then(std::time::Instant::now);
                             let gss = fallback_gss.get_or_insert_with(|| {
                                 template_runtime.gss_from_language(
                                     entry.language,
                                     entry.accumulator.clone(),
                                 )
                             });
-                            if let Some(started) = reconstruct_started {
-                                continuation_reconstruct_ns +=
+                            if let (Some(profile), Some(started)) =
+                                (profile.as_deref_mut(), reconstruct_started)
+                            {
+                                profile.continuation_reconstruct_ns +=
                                     started.elapsed().as_nanos() as u64;
                             }
                             end_state_may_advance(constraint, gss, end_state)
                         }
                     };
-                    if let Some(started) = check_started {
-                        continuation_check_ns += started.elapsed().as_nanos() as u64;
+                    if let (Some(profile), Some(started)) =
+                        (profile.as_deref_mut(), check_started)
+                    {
+                        profile.continuation_check_ns +=
+                            started.elapsed().as_nanos() as u64;
                     }
                     if viable
                         && !merge_small_language_parser_state(
@@ -2252,10 +2265,93 @@ fn commit_bytes_language_small_queue_fast_path(
             "commit rejected: no valid parser states remain".to_string(),
         ));
     }
+    Some(Ok(std::mem::take(
+        &mut queue_scratch.language_pending,
+    )))
+}
 
+fn register_language_components_for_state(
+    runtime: &mut TemplateAdvanceRuntime,
+    state: &ParserStateMap,
+    pending: SmallLanguageParserStates,
+) -> bool {
+    if state.has_duplicate_keys() {
+        return false;
+    }
+    let mut grouped = SmallVec::<[
+        (u32, Vec<(u32, TerminalsDisallowed)>);
+        INLINE_PARSER_STATE_CAPACITY
+    ]>::new();
+    for entry in pending {
+        if let Some((_, components)) = grouped
+            .iter_mut()
+            .find(|(tokenizer_state, _)| *tokenizer_state == entry.tokenizer_state)
+        {
+            components.push((entry.language, entry.accumulator));
+        } else {
+            grouped.push((
+                entry.tokenizer_state,
+                vec![(entry.language, entry.accumulator)],
+            ));
+        }
+    }
+    if grouped.len() != state.len() {
+        return false;
+    }
+    for (tokenizer_state, components) in &grouped {
+        let Some(gss) = state.get(tokenizer_state) else {
+            return false;
+        };
+        runtime.register_components(gss, components.clone());
+    }
+    true
+}
+
+fn commit_bytes_language_small_queue_fast_path(
+    constraint: &Constraint,
+    state: &mut ParserStateMap,
+    bytes: &[u8],
+    tokenizer_scratch: &mut tokenizer_scan::ReusableTokenizerExecScratch,
+    queue_scratch: &mut SmallCommitQueueScratch,
+    template_runtime: &mut TemplateAdvanceRuntime,
+    profitability_prechecked: bool,
+) -> Option<Result<(), String>> {
+    if !language_small_queue_enabled()
+        || !(2..=8).contains(&bytes.len())
+        || state.len() > 2
+        || (!profitability_prechecked
+            && !language_small_queue_is_profitable(
+                constraint,
+                state,
+                bytes,
+                tokenizer_scratch,
+            ))
+    {
+        return None;
+    }
+
+    let profile_enabled = std::env::var_os("GLRMASK_PROFILE_LANGUAGE_SMALL_QUEUE").is_some();
+    let total_started = profile_enabled.then(std::time::Instant::now);
+    let mut profile = LanguageCommitSimulationProfile::default();
+    template_runtime.begin_commit();
+    let pending = match simulate_language_commit(
+        constraint,
+        state,
+        bytes,
+        tokenizer_scratch,
+        queue_scratch,
+        template_runtime,
+        profile_enabled.then_some(&mut profile),
+    )? {
+        Ok(pending) => pending,
+        Err(error) => return Some(Err(error)),
+    };
+
+    let mut final_reconstruct_ns = 0u64;
     let mut new_state = ParserStateMap::default();
-    for entry in queue_scratch.language_pending.drain(..) {
-        let started = profile.then(std::time::Instant::now);
+    let registered = pending.clone();
+    for entry in pending {
+        let started = profile_enabled.then(std::time::Instant::now);
         let gss = template_runtime.gss_from_language(entry.language, entry.accumulator);
         if let Some(started) = started {
             final_reconstruct_ns += started.elapsed().as_nanos() as u64;
@@ -2271,17 +2367,18 @@ fn commit_bytes_language_small_queue_fast_path(
             "commit rejected: no valid parser states remain".to_string(),
         ));
     }
-    if profile {
+    let _ = register_language_components_for_state(template_runtime, &new_state, registered);
+    if profile_enabled {
         let (template_calls, template_memo_hits, template_memo_entries) =
             template_runtime.memo_summary();
         eprintln!(
             "[glrmask/profile][language_small_queue] bytes={} total_ns={} canonicalize_ns={} evaluate_ns={} continuation_reconstruct_ns={} continuation_check_ns={} final_reconstruct_ns={} template_calls={} template_memo_hits={} template_memo_entries={} final_summaries={:?}",
             format_token_bytes(bytes),
             total_started.expect("language queue profile start exists").elapsed().as_nanos(),
-            canonicalize_ns,
-            evaluate_ns,
-            continuation_reconstruct_ns,
-            continuation_check_ns,
+            profile.canonicalize_ns,
+            profile.evaluate_ns,
+            profile.continuation_reconstruct_ns,
+            profile.continuation_check_ns,
             final_reconstruct_ns,
             template_calls,
             template_memo_hits,
@@ -4804,6 +4901,64 @@ fn commit_bytes_impl(
     bytes: &[u8],
     bufs: &mut CommitBuffers,
 ) -> Result<(), String> {
+    if !dual_language_metadata_enabled() || bytes.is_empty() {
+        return commit_bytes_impl_inner(constraint, state, bytes, bufs);
+    }
+
+    let hot_language_path = language_small_queue_enabled()
+        && (2..=8).contains(&bytes.len())
+        && state.len() <= 2
+        && language_small_queue_is_profitable(
+            constraint,
+            state,
+            bytes,
+            &mut bufs.reusable_tokenizer_exec,
+        );
+    if hot_language_path
+        && let Some(result) = commit_bytes_language_small_queue_fast_path(
+            constraint,
+            state,
+            bytes,
+            &mut bufs.reusable_tokenizer_exec,
+            &mut bufs.small_queue,
+            &mut bufs.template_advance_runtime,
+            true,
+        )
+    {
+        return result;
+    }
+
+    bufs.template_advance_runtime.begin_commit();
+    let simulated = simulate_language_commit(
+        constraint,
+        state,
+        bytes,
+        &mut bufs.reusable_tokenizer_exec,
+        &mut bufs.small_queue,
+        &mut bufs.template_advance_runtime,
+        None,
+    );
+    let result = commit_bytes_impl_inner(constraint, state, bytes, bufs);
+    match (&result, simulated) {
+        (Ok(()), Some(Ok(pending))) => {
+            let _ = register_language_components_for_state(
+                &mut bufs.template_advance_runtime,
+                state,
+                pending,
+            );
+        }
+        (Err(_), _) => bufs.template_advance_runtime.reset_all(),
+        _ => {}
+    }
+    result
+}
+
+fn commit_bytes_impl_inner(
+    constraint: &Constraint,
+    state: &mut ParserStateMap,
+    bytes: &[u8],
+    bufs: &mut CommitBuffers,
+) -> Result<(), String> {
     if bytes.is_empty() {
         return Ok(());
     }
@@ -4986,7 +5141,7 @@ fn commit_bytes_impl(
                     LinearFastPathResult::Continue { gss, offset } => {
                         state.clear();
                         state.insert(constraint.tokenizer.initial_state(), gss);
-                        return commit_bytes_impl(constraint, state, &bytes[offset..], bufs);
+                        return commit_bytes_impl_inner(constraint, state, &bytes[offset..], bufs);
                     }
                     LinearFastPathResult::Restart => {}
                 }
@@ -5001,6 +5156,7 @@ fn commit_bytes_impl(
         &mut bufs.reusable_tokenizer_exec,
         &mut bufs.small_queue,
         &mut bufs.template_advance_runtime,
+        false,
     );
     if let Some(result) = language_small_queue_result {
         return result;
@@ -5079,7 +5235,7 @@ fn commit_bytes_impl(
                     state.insert(constraint.tokenizer.initial_state(), gss);
 
                     if bytes.len() - offset == 1 {
-                        return commit_bytes_impl(constraint, state, &bytes[offset..], bufs);
+                        return commit_bytes_impl_inner(constraint, state, &bytes[offset..], bufs);
                     }
 
                     let needed_queue_len = bytes.len() + 1;
@@ -5444,7 +5600,7 @@ impl<'a> ConstraintState<'a> {
                 Ok(profile) => profile,
                 Err(_) => {
                     self.state.clear();
-                    self.buffers.clear_all();
+                    self.buffers.reset_all();
                     CommitProfile::default()
                 }
             }

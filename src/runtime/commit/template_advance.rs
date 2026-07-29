@@ -41,6 +41,8 @@ pub(super) fn advance_stacks_template_dfa_owned(
 pub(crate) struct TemplateAdvanceRuntime {
     interner: GssSemanticKeyInterner<u32, TerminalsDisallowed>,
     memo: FxHashMap<(u32, Phase, u32, u32), u32>,
+    component_cache:
+        FxHashMap<usize, (ParserGSS, Vec<(u32, TerminalsDisallowed)>)>,
     calls: u64,
     memo_hits: u64,
 }
@@ -50,6 +52,7 @@ impl Default for TemplateAdvanceRuntime {
         Self {
             interner: GssSemanticKeyInterner::new(),
             memo: FxHashMap::default(),
+            component_cache: FxHashMap::default(),
             calls: 0,
             memo_hits: 0,
         }
@@ -60,6 +63,7 @@ impl std::fmt::Debug for TemplateAdvanceRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TemplateAdvanceRuntime")
             .field("memo", &self.memo.len())
+            .field("component_cache", &self.component_cache.len())
             .field("calls", &self.calls)
             .field("memo_hits", &self.memo_hits)
             .finish_non_exhaustive()
@@ -67,7 +71,21 @@ impl std::fmt::Debug for TemplateAdvanceRuntime {
 }
 
 impl TemplateAdvanceRuntime {
-    pub(crate) fn clear_commit(&mut self) {
+    const MAX_PERSISTENT_MEMO_ENTRIES: usize = 32_768;
+    const MAX_PERSISTENT_COMPONENT_ROOTS: usize = 256;
+
+    pub(crate) fn begin_commit(&mut self) {
+        if self.memo.len() > Self::MAX_PERSISTENT_MEMO_ENTRIES
+            || self.component_cache.len() > Self::MAX_PERSISTENT_COMPONENT_ROOTS
+        {
+            *self = Self::default();
+        } else {
+            self.calls = 0;
+            self.memo_hits = 0;
+        }
+    }
+
+    pub(crate) fn reset_all(&mut self) {
         *self = Self::default();
     }
 
@@ -87,18 +105,34 @@ impl TemplateAdvanceRuntime {
         &mut self,
         stack: &ParserGSS,
     ) -> Vec<(u32, TerminalsDisallowed)> {
-        if let Some(component) = self.language_from_uniform_gss(stack) {
-            return vec![component];
+        let ptr = stack.ptr_key();
+        if let Some((_, cached)) = self.component_cache.get(&ptr) {
+            return cached.clone();
         }
 
-        stack
-            .partition_by_accumulator()
-            .into_iter()
-            .map(|(paths, accumulator)| {
-                let restored = paths.apply(|_| accumulator.clone());
-                (self.interner.key(&restored), accumulator)
-            })
-            .collect()
+        let components = if let Some(component) = self.language_from_uniform_gss(stack) {
+            vec![component]
+        } else {
+            stack
+                .partition_by_accumulator()
+                .into_iter()
+                .map(|(paths, accumulator)| {
+                    let restored = paths.apply(|_| accumulator.clone());
+                    (self.interner.key(&restored), accumulator)
+                })
+                .collect()
+        };
+        self.register_components(stack, components.clone());
+        components
+    }
+
+    pub(crate) fn register_components(
+        &mut self,
+        stack: &ParserGSS,
+        components: Vec<(u32, TerminalsDisallowed)>,
+    ) {
+        self.component_cache
+            .insert(stack.ptr_key(), (stack.clone(), components));
     }
 
     pub(crate) fn gss_from_language(
