@@ -702,6 +702,14 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> Upper<T, A> {
         }
     }
 
+    #[inline(always)]
+    fn children_len(&self) -> usize {
+        match self {
+            Upper::Branch(branch) => branch.children.len(),
+            Upper::Interface(interface) => interface.inner.children_len(),
+        }
+    }
+
     fn children_keys(&self) -> SmallVec<[T; 8]> {
         match self {
             Upper::Branch(branch) => branch.children.keys().cloned().collect(),
@@ -1505,12 +1513,24 @@ pub(crate) struct GssSemanticKeyInterner<
     lower_memo: FxHashMap<usize, (Arc<Lower<T>>, u32)>,
     upper_memo: FxHashMap<usize, (Arc<Upper<T, A>>, u32)>,
     union_memo: FxHashMap<(u32, u32), u32>,
+    max_nodes: usize,
+    max_source_keys: usize,
+    max_union_entries: usize,
+    exhausted: bool,
 }
 
 impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
     GssSemanticKeyInterner<T, A>
 {
     pub(crate) fn new() -> Self {
+        Self::with_budget(usize::MAX, usize::MAX, usize::MAX)
+    }
+
+    pub(crate) fn with_budget(
+        max_nodes: usize,
+        max_source_keys: usize,
+        max_union_entries: usize,
+    ) -> Self {
         let empty_language = SemanticTrieNode {
             empty: false,
             children: Vec::new(),
@@ -1524,6 +1544,27 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
             lower_memo: FxHashMap::default(),
             upper_memo: FxHashMap::default(),
             union_memo: FxHashMap::default(),
+            max_nodes: max_nodes.max(1),
+            max_source_keys,
+            max_union_entries,
+            exhausted: false,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn is_exhausted(&self) -> bool {
+        self.exhausted
+    }
+
+    #[inline]
+    fn source_budget_available(&mut self) -> bool {
+        if self.lower_memo.len().saturating_add(self.upper_memo.len())
+            >= self.max_source_keys
+        {
+            self.exhausted = true;
+            false
+        } else {
+            true
         }
     }
 
@@ -1558,6 +1599,10 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
         if let Some(id) = self.interned.get(&node) {
             return *id;
         }
+        if self.nodes.len() >= self.max_nodes {
+            self.exhausted = true;
+            return 0;
+        }
         let id = u32::try_from(self.nodes.len()).expect("semantic GSS trie exceeded u32 node IDs");
         self.nodes.push(node.clone());
         self.interned.insert(node, id);
@@ -1574,6 +1619,9 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
     }
 
     fn union_ids(&mut self, left: u32, right: u32) -> u32 {
+        if self.exhausted {
+            return 0;
+        }
         if left == right || right == 0 {
             return left;
         }
@@ -1594,6 +1642,10 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
             }
             if !unseen.insert(pair) {
                 continue;
+            }
+            if unseen.len() > self.max_union_entries {
+                self.exhausted = true;
+                return 0;
             }
             order.push(pair);
 
@@ -1668,13 +1720,17 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
                 }
             }
             let id = self.intern_node(left_node.empty || right_node.empty, children);
+            if self.exhausted {
+                return 0;
+            }
+            if self.union_memo.len() >= self.max_union_entries {
+                self.exhausted = true;
+                return 0;
+            }
             self.union_memo.insert(pair, id);
         }
 
-        *self
-            .union_memo
-            .get(&root)
-            .expect("semantic trie root union was not constructed")
+        self.union_memo.get(&root).copied().unwrap_or(0)
     }
 
     pub(crate) fn union_keys(&mut self, left: u32, right: u32) -> u32 {
@@ -1734,6 +1790,9 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
     }
 
     pub(crate) fn key(&mut self, gss: &LeveledGSS<T, A>) -> u32 {
+        if self.exhausted {
+            return 0;
+        }
         if let Some(id) = self.upper_id(&gss.inner) {
             return id;
         }
@@ -1749,6 +1808,9 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
             let mut id = self.intern_node(true, Vec::new());
             for value in stack {
                 id = self.intern_node(false, vec![(value, id)]);
+            }
+            if self.exhausted || !self.source_budget_available() {
+                return 0;
             }
             self.upper_memo.insert(
                 Arc::as_ptr(&gss.inner) as usize,
@@ -1768,6 +1830,17 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
                     let ptr = lower_node_id(lower);
                     if self.lower_memo.contains_key(&ptr) || !seen_lower.insert(ptr) {
                         continue;
+                    }
+                    if self
+                        .lower_memo
+                        .len()
+                        .saturating_add(self.upper_memo.len())
+                        .saturating_add(seen_lower.len())
+                        .saturating_add(seen_upper.len())
+                        > self.max_source_keys
+                    {
+                        self.exhausted = true;
+                        return 0;
                     }
                     match &**lower {
                         Lower::Segment(segment) => {
@@ -1789,6 +1862,17 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
                     let ptr = Arc::as_ptr(upper) as usize;
                     if self.upper_memo.contains_key(&ptr) || !seen_upper.insert(ptr) {
                         continue;
+                    }
+                    if self
+                        .lower_memo
+                        .len()
+                        .saturating_add(self.upper_memo.len())
+                        .saturating_add(seen_lower.len())
+                        .saturating_add(seen_upper.len())
+                        > self.max_source_keys
+                    {
+                        self.exhausted = true;
+                        return 0;
                     }
                     match &**upper {
                         Upper::Interface(interface) => {
@@ -1812,6 +1896,9 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
 
         nodes.sort_unstable_by_key(SemanticPendingNode::sort_key);
         for node in nodes {
+            if self.exhausted {
+                return 0;
+            }
             match node {
                 SemanticPendingNode::Lower(lower) => {
                     let ptr = lower_node_id(&lower);
@@ -1845,6 +1932,9 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
                             self.intern_node(*empty, canonical_children)
                         }
                     };
+                    if self.exhausted || !self.source_budget_available() {
+                        return 0;
+                    }
                     self.lower_memo.insert(ptr, (lower, id));
                 }
                 SemanticPendingNode::Upper(upper) => {
@@ -1871,13 +1961,24 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
                             self.intern_node(branch.empty.is_some(), canonical_children)
                         }
                     };
+                    if self.exhausted || !self.source_budget_available() {
+                        return 0;
+                    }
                     self.upper_memo.insert(ptr, (upper, id));
                 }
             }
         }
 
-        self.upper_id(&gss.inner)
-            .expect("semantic trie root must be canonicalized")
+        self.upper_id(&gss.inner).unwrap_or(0)
+    }
+
+    pub(crate) fn work_summary(&self) -> (usize, usize, usize, usize) {
+        (
+            self.nodes.len(),
+            self.lower_memo.len(),
+            self.upper_memo.len(),
+            self.union_memo.len(),
+        )
     }
 
     #[cfg(test)]
@@ -2515,6 +2616,11 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
     pub fn ptr_key(&self) -> usize {
         Arc::as_ptr(&self.inner) as usize
+    }
+
+    #[inline(always)]
+    pub(crate) fn top_value_count(&self) -> usize {
+        self.inner.children_len()
     }
 
     pub(crate) fn single_interface_lower_id(&self) -> Option<usize> {
@@ -4515,21 +4621,71 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     /// users can keep the accumulator as branch-local state without losing its
     /// correlation with parser paths.
     pub fn partition_by_accumulator(&self) -> Vec<(LeveledGSS<T, ()>, A)> {
-        let mut accumulators = Vec::new();
-        self.for_each_acc(|accumulator| {
-            if !accumulators.contains(accumulator) {
-                accumulators.push(accumulator.clone());
-            }
-        });
+        self.partition_by_accumulator_at_most(usize::MAX, usize::MAX)
+            .expect("unbounded accumulator partition cannot exhaust its budget")
+    }
 
-        accumulators
-            .into_iter()
-            .map(|accumulator| {
-                let paths = self
-                    .apply_and_prune(|candidate| (candidate == &accumulator).then_some(()));
-                (paths, accumulator)
-            })
-            .collect()
+    /// Partition by accumulator while bounding the accumulator-labelled upper
+    /// structure inspected before any transformed GSSes are built.
+    ///
+    /// Lower GSS nodes carry no accumulator and are therefore irrelevant to
+    /// discovering the partition labels. Returning `None` is transactional:
+    /// `self` is immutable and no partial partition escapes.
+    pub(crate) fn partition_by_accumulator_at_most(
+        &self,
+        max_accumulators: usize,
+        max_upper_nodes: usize,
+    ) -> Option<Vec<(LeveledGSS<T, ()>, A)>> {
+        let mut accumulators = Vec::new();
+        let mut pending = vec![self.inner.clone()];
+        let mut visited = HashSet::new();
+
+        while let Some(node) = pending.pop() {
+            let ptr = Arc::as_ptr(&node) as usize;
+            if !visited.insert(ptr) {
+                continue;
+            }
+            if visited.len() > max_upper_nodes {
+                return None;
+            }
+
+            let mut record = |accumulator: &A| -> Option<()> {
+                if !accumulators.contains(accumulator) {
+                    if accumulators.len() == max_accumulators {
+                        return None;
+                    }
+                    accumulators.push(accumulator.clone());
+                }
+                Some(())
+            };
+
+            match &*node {
+                Upper::Interface(interface) => record(&interface.acc)?,
+                Upper::Branch(branch) => {
+                    if let Some(accumulator) = &branch.empty {
+                        record(accumulator)?;
+                    }
+                    pending.extend(
+                        branch
+                            .children
+                            .values()
+                            .flat_map(|kids| kids.values())
+                            .cloned(),
+                    );
+                }
+            }
+        }
+
+        Some(
+            accumulators
+                .into_iter()
+                .map(|accumulator| {
+                    let paths = self
+                        .apply_and_prune(|candidate| (candidate == &accumulator).then_some(()));
+                    (paths, accumulator)
+                })
+                .collect(),
+        )
     }
 
     pub fn apply_and_prune<B, M>(&self, mut mutator: M) -> LeveledGSS<T, B>
@@ -5153,6 +5309,66 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
     pub fn single_exclusive_top_value(&self) -> Option<T> {
         self.inner.single_child_key_without_empty()
+    }
+
+    /// Count unique reachable upper and lower GSS nodes, stopping at `limit`.
+    ///
+    /// This measures compact representation work rather than represented stack
+    /// count. It retains no node identities after returning and never expands
+    /// concrete paths.
+    pub(crate) fn node_count_at_most(&self, limit: usize) -> usize {
+        if limit == 0 || self.is_empty() {
+            return 0;
+        }
+
+        let mut upper_pending = vec![self.inner.clone()];
+        let mut lower_pending = Vec::new();
+        let mut upper_seen = HashSet::new();
+        let mut lower_seen = HashSet::new();
+        let mut count = 0usize;
+
+        while let Some(node) = upper_pending.pop() {
+            let ptr = Arc::as_ptr(&node) as usize;
+            if !upper_seen.insert(ptr) {
+                continue;
+            }
+            count += 1;
+            if count == limit {
+                return limit;
+            }
+            match &*node {
+                Upper::Branch(branch) => upper_pending.extend(
+                    branch
+                        .children
+                        .values()
+                        .flat_map(|kids| kids.values())
+                        .cloned(),
+                ),
+                Upper::Interface(interface) => lower_pending.push(interface.inner.clone()),
+            }
+        }
+
+        while let Some(node) = lower_pending.pop() {
+            let ptr = lower_node_id(&node);
+            if !lower_seen.insert(ptr) {
+                continue;
+            }
+            count += 1;
+            if count == limit {
+                return limit;
+            }
+            match &*node {
+                Lower::Segment(segment) => lower_pending.push(segment.next.clone()),
+                Lower::General { children, .. } => lower_pending.extend(
+                    children
+                        .values()
+                        .flat_map(|kids| kids.values())
+                        .cloned(),
+                ),
+            }
+        }
+
+        count
     }
 
     pub fn path_count_at_most(&self, limit: usize) -> usize {
@@ -6026,6 +6242,53 @@ mod tests {
         assert_ne!(interner.key(&gss), 0);
         // Empty language + accepting floor + one canonical node per GSS level.
         assert_eq!(interner.node_count(), 42);
+    }
+
+    #[test]
+    fn node_count_at_most_counts_compact_nodes_without_expanding_paths() {
+        let gss = LeveledGSS::from_stacks(&[
+            (vec![0_u32, 1, 3], TestAcc(1)),
+            (vec![0, 2, 3], TestAcc(1)),
+        ]);
+        let exact = gss.summary().total_unique_nodes;
+        assert_eq!(gss.node_count_at_most(usize::MAX), exact);
+        for limit in 0..=exact + 1 {
+            assert_eq!(gss.node_count_at_most(limit), exact.min(limit));
+        }
+    }
+
+    #[test]
+    fn bounded_accumulator_partition_declines_without_partial_output() {
+        let gss = LeveledGSS::from_stacks(&[
+            (vec![0_u32, 1], TestAcc(1)),
+            (vec![0, 2], TestAcc(2)),
+            (vec![0, 3], TestAcc(3)),
+        ]);
+        assert!(gss.partition_by_accumulator_at_most(2, 64).is_none());
+        let partitions = gss
+            .partition_by_accumulator_at_most(3, 64)
+            .expect("three accumulator components fit the exact budget");
+        assert_eq!(partitions.len(), 3);
+        for (paths, accumulator) in partitions {
+            let stacks = paths
+                .to_stacks(4)
+                .expect("each bounded partition has one explicit stack");
+            assert_eq!(stacks.len(), 1);
+            assert_eq!(stacks[0].1, ());
+            assert_eq!(stacks[0].0.last().copied(), Some(accumulator.0));
+        }
+    }
+
+    #[test]
+    fn semantic_key_budget_declines_without_partial_language() {
+        let gss = LeveledGSS::from_single_stack(
+            vec![0_u32, 1, 2, 3, 4],
+            TestAcc(1),
+        );
+        let mut interner = GssSemanticKeyInterner::with_budget(3, 64, 64);
+        assert_eq!(interner.key(&gss), 0);
+        assert!(interner.is_exhausted());
+        assert!(interner.node_count() <= 3);
     }
 
     #[test]

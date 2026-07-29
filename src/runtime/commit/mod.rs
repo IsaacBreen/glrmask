@@ -46,6 +46,10 @@ type SmallParserStates =
     SmallVec<[(u32, ParserGSS); INLINE_PARSER_STATE_CAPACITY]>;
 
 const SMALL_LANGUAGE_QUEUE_CAPACITY: usize = 32;
+const LANGUAGE_QUEUE_MAX_INPUT_STACK_DEPTH: u32 = 512;
+const LANGUAGE_QUEUE_MIN_TOP_VALUES: usize = 3;
+const LANGUAGE_QUEUE_MIN_PATHS: usize = 32;
+const LANGUAGE_QUEUE_MIN_NODES: usize = 48;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SmallLanguageParserState {
@@ -1883,7 +1887,7 @@ fn merge_small_language_parser_state(
     for existing in states.iter_mut() {
         if existing.tokenizer_state == tokenizer_state && existing.accumulator == accumulator {
             existing.language = runtime.union_languages(existing.language, language);
-            return true;
+            return !runtime.is_exhausted();
         }
     }
     if states.len() == SMALL_LANGUAGE_QUEUE_CAPACITY {
@@ -2003,6 +2007,42 @@ fn language_end_state_may_advance(
     Some(false)
 }
 
+fn language_queue_top_value_count_at_most(
+    state: &ParserStateMap,
+    limit: usize,
+) -> usize {
+    let mut count = 0usize;
+    for (_, gss) in state.iter() {
+        count = count.saturating_add(gss.top_value_count()).min(limit);
+        if count == limit {
+            break;
+        }
+    }
+    count
+}
+
+fn language_queue_path_count_at_most(state: &ParserStateMap, limit: usize) -> usize {
+    let mut count = 0usize;
+    for (_, gss) in state.iter() {
+        count = count.saturating_add(gss.path_count_at_most(limit)).min(limit);
+        if count == limit {
+            break;
+        }
+    }
+    count
+}
+
+fn language_queue_node_count_at_most(state: &ParserStateMap, limit: usize) -> usize {
+    let mut count = 0usize;
+    for (_, gss) in state.iter() {
+        count = count.saturating_add(gss.node_count_at_most(limit)).min(limit);
+        if count == limit {
+            break;
+        }
+    }
+    count
+}
+
 fn language_small_queue_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -2013,6 +2053,12 @@ fn language_small_queue_enabled() -> bool {
             })
             .unwrap_or(false)
     })
+}
+
+fn language_queue_input_is_bounded(state: &ParserStateMap) -> bool {
+    state
+        .iter()
+        .all(|(_, gss)| gss.max_depth() <= LANGUAGE_QUEUE_MAX_INPUT_STACK_DEPTH)
 }
 
 /// Return whether one model token contains multiple parser-actionable,
@@ -2085,9 +2131,12 @@ fn simulate_language_commit(
     queue_scratch.clear();
     for (&tokenizer_state, gss) in state.iter() {
         let started = profile.is_some().then(std::time::Instant::now);
-        let components = template_runtime.language_components_from_gss(gss);
+        let components = template_runtime.language_components_from_gss(gss)?;
         if let (Some(profile), Some(started)) = (profile.as_deref_mut(), started) {
             profile.canonicalize_ns += started.elapsed().as_nanos() as u64;
+        }
+        if template_runtime.is_exhausted() {
+            return None;
         }
         for (language, accumulator) in components {
             if !merge_small_language_parser_state(
@@ -2209,12 +2258,16 @@ fn simulate_language_commit(
                 let mut fallback_gss = None;
                 for &end_state in &tokenizer_scratch.states {
                     let check_started = profile.is_some().then(std::time::Instant::now);
-                    let viable = match language_end_state_may_advance(
+                    let language_viable = language_end_state_may_advance(
                         constraint,
                         template_runtime,
                         entry.language,
                         end_state,
-                    ) {
+                    );
+                    if template_runtime.is_exhausted() {
+                        return None;
+                    }
+                    let viable = match language_viable {
                         Some(viable) => viable,
                         None => {
                             let reconstruct_started =
@@ -2257,6 +2310,9 @@ fn simulate_language_commit(
         offset += 1;
     }
 
+    if template_runtime.is_exhausted() {
+        return None;
+    }
     if queue_scratch.language_pending.is_empty() {
         return Some(Err(
             "commit rejected: no valid parser states remain".to_string(),
@@ -2276,25 +2332,84 @@ fn commit_bytes_language_small_queue_fast_path(
     template_runtime: &mut TemplateAdvanceRuntime,
     profitability_prechecked: bool,
 ) -> Option<Result<(), String>> {
-    if !language_small_queue_enabled()
-        || !(2..=8).contains(&bytes.len())
-        || state.len() > 2
-        || (!profitability_prechecked
-            && !has_multiple_actionable_terminal_boundaries(
-                constraint,
-                state,
-                bytes,
-                tokenizer_scratch,
-            ))
-    {
+    if !language_small_queue_enabled() || !(2..=8).contains(&bytes.len()) || state.len() > 2 {
         return None;
     }
 
     let profile_enabled = std::env::var_os("GLRMASK_PROFILE_LANGUAGE_SMALL_QUEUE").is_some();
+    let top_values =
+        language_queue_top_value_count_at_most(state, LANGUAGE_QUEUE_MIN_TOP_VALUES);
+    if top_values < LANGUAGE_QUEUE_MIN_TOP_VALUES {
+        if profile_enabled {
+            eprintln!(
+                "[glrmask/profile][language_small_queue_decline] reason=narrow_top_frontier bytes={} top_values={} min_top_values={}",
+                format_token_bytes(bytes),
+                top_values,
+                LANGUAGE_QUEUE_MIN_TOP_VALUES,
+            );
+        }
+        return None;
+    }
+
+    if !profitability_prechecked
+        && !has_multiple_actionable_terminal_boundaries(
+            constraint,
+            state,
+            bytes,
+            tokenizer_scratch,
+        )
+    {
+        return None;
+    }
+
+    let parser_paths = language_queue_path_count_at_most(state, LANGUAGE_QUEUE_MIN_PATHS);
+    if parser_paths < LANGUAGE_QUEUE_MIN_PATHS {
+        if profile_enabled {
+            eprintln!(
+                "[glrmask/profile][language_small_queue_decline] reason=insufficient_stack_ambiguity bytes={} parser_paths={} min_paths={}",
+                format_token_bytes(bytes),
+                parser_paths,
+                LANGUAGE_QUEUE_MIN_PATHS,
+            );
+        }
+        return None;
+    }
+    let parser_nodes = language_queue_node_count_at_most(state, LANGUAGE_QUEUE_MIN_NODES);
+    if parser_nodes < LANGUAGE_QUEUE_MIN_NODES {
+        if profile_enabled {
+            eprintln!(
+                "[glrmask/profile][language_small_queue_decline] reason=insufficient_compact_gss_work bytes={} parser_paths_at_least={} parser_nodes={} min_nodes={}",
+                format_token_bytes(bytes),
+                LANGUAGE_QUEUE_MIN_PATHS,
+                parser_nodes,
+                LANGUAGE_QUEUE_MIN_NODES,
+            );
+        }
+        return None;
+    }
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][language_small_queue_dispatch] selected bytes={} state_entries={} parser_paths_at_least={} parser_nodes_at_least={}",
+            format_token_bytes(bytes),
+            state.len(),
+            LANGUAGE_QUEUE_MIN_PATHS,
+            LANGUAGE_QUEUE_MIN_NODES,
+        );
+    }
+    if !language_queue_input_is_bounded(state) {
+        if profile_enabled {
+            eprintln!(
+                "[glrmask/profile][language_small_queue_decline] reason=input_depth bytes={}",
+                format_token_bytes(bytes),
+            );
+        }
+        return None;
+    }
+
     let total_started = profile_enabled.then(std::time::Instant::now);
     let mut profile = LanguageCommitSimulationProfile::default();
     template_runtime.begin_commit();
-    let pending = match simulate_language_commit(
+    let simulation = simulate_language_commit(
         constraint,
         state,
         bytes,
@@ -2302,11 +2417,36 @@ fn commit_bytes_language_small_queue_fast_path(
         queue_scratch,
         template_runtime,
         profile_enabled.then_some(&mut profile),
-    )? {
+    );
+    let Some(simulation) = simulation else {
+        if profile_enabled {
+            let reason = if template_runtime.is_exhausted() {
+                "work_budget"
+            } else {
+                "simulation_bound_or_missing_template"
+            };
+            eprintln!(
+                "[glrmask/profile][language_small_queue_decline] reason={} bytes={}",
+                reason,
+                format_token_bytes(bytes),
+            );
+        }
+        return None;
+    };
+    let pending = match simulation {
         Ok(pending) => pending,
         Err(error) => return Some(Err(error)),
     };
 
+    if template_runtime.is_exhausted() {
+        if profile_enabled {
+            eprintln!(
+                "[glrmask/profile][language_small_queue_decline] reason=work_budget_after_simulation bytes={}",
+                format_token_bytes(bytes),
+            );
+        }
+        return None;
+    }
     let mut final_reconstruct_ns = 0u64;
     let mut new_state = ParserStateMap::default();
     for entry in pending {
@@ -2327,10 +2467,18 @@ fn commit_bytes_language_small_queue_fast_path(
         ));
     }
     if profile_enabled {
-        let (template_calls, template_memo_hits, template_memo_entries) =
-            template_runtime.memo_summary();
+        let (
+            template_calls,
+            template_memo_hits,
+            template_memo_entries,
+            template_products_started,
+            semantic_nodes,
+            semantic_lower_keys,
+            semantic_upper_keys,
+            semantic_union_entries,
+        ) = template_runtime.work_summary();
         eprintln!(
-            "[glrmask/profile][language_small_queue] bytes={} total_ns={} canonicalize_ns={} evaluate_ns={} continuation_reconstruct_ns={} continuation_check_ns={} final_reconstruct_ns={} template_calls={} template_memo_hits={} template_memo_entries={} final_summaries={:?}",
+            "[glrmask/profile][language_small_queue] bytes={} total_ns={} canonicalize_ns={} evaluate_ns={} continuation_reconstruct_ns={} continuation_check_ns={} final_reconstruct_ns={} template_calls={} template_memo_hits={} template_memo_entries={} template_products_started={} semantic_nodes={} semantic_lower_keys={} semantic_upper_keys={} semantic_union_entries={} final_summaries={:?}",
             format_token_bytes(bytes),
             total_started.expect("language queue profile start exists").elapsed().as_nanos(),
             profile.canonicalize_ns,
@@ -2341,6 +2489,11 @@ fn commit_bytes_language_small_queue_fast_path(
             template_calls,
             template_memo_hits,
             template_memo_entries,
+            template_products_started,
+            semantic_nodes,
+            semantic_lower_keys,
+            semantic_upper_keys,
+            semantic_union_entries,
             new_state.values().map(ParserGSS::summary).collect::<Vec<_>>(),
         );
     }
@@ -5626,6 +5779,48 @@ mod tests {
         state: &ParserStateMap,
     ) -> CanonicalCommitState {
         canonical_commit_state_for_equivalence_assert(state)
+    }
+
+    #[test]
+    fn language_queue_structural_gate_rejects_tiny_and_accepts_wide_complex_gss() {
+        let mut tiny = ParserStateMap::default();
+        tiny.insert(
+            0,
+            ParserGSS::from_single_stack(
+                vec![0_u32, 1, 2],
+                TerminalsDisallowed::new(),
+            ),
+        );
+        assert!(
+            language_queue_top_value_count_at_most(&tiny, LANGUAGE_QUEUE_MIN_TOP_VALUES)
+                < LANGUAGE_QUEUE_MIN_TOP_VALUES
+        );
+
+        let stacks = (0_u32..64)
+            .map(|index| {
+                (
+                    vec![0, 1_000 + index, 2_000 + index, 10 + index % 4],
+                    TerminalsDisallowed::new(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut complex = ParserStateMap::default();
+        complex.insert(0, ParserGSS::from_stacks(&stacks));
+        assert_eq!(
+            language_queue_top_value_count_at_most(
+                &complex,
+                LANGUAGE_QUEUE_MIN_TOP_VALUES,
+            ),
+            LANGUAGE_QUEUE_MIN_TOP_VALUES,
+        );
+        assert_eq!(
+            language_queue_path_count_at_most(&complex, LANGUAGE_QUEUE_MIN_PATHS),
+            LANGUAGE_QUEUE_MIN_PATHS,
+        );
+        assert_eq!(
+            language_queue_node_count_at_most(&complex, LANGUAGE_QUEUE_MIN_NODES),
+            LANGUAGE_QUEUE_MIN_NODES,
+        );
     }
 
     #[test]

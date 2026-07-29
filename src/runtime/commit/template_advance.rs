@@ -12,6 +12,17 @@ use crate::runtime::constraint::Constraint;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
+// The token-local language evaluator is an optimization with an exact table
+// fallback. Keep every internal representation explicitly bounded so a compact
+// but adversarial GSS/template product cannot turn the fast path into a runtime
+// cliff before fallback.
+const LANGUAGE_QUEUE_MAX_SEMANTIC_NODES: usize = 1_024;
+const LANGUAGE_QUEUE_MAX_SOURCE_KEYS: usize = 1_024;
+const LANGUAGE_QUEUE_MAX_UNION_ENTRIES: usize = 2_048;
+const LANGUAGE_QUEUE_MAX_TEMPLATE_PRODUCTS: usize = 1_024;
+const LANGUAGE_QUEUE_MAX_ACCUMULATOR_COMPONENTS: usize = 32;
+const LANGUAGE_QUEUE_MAX_ACCUMULATOR_UPPER_NODES: usize = 512;
+
 pub(super) fn advance_stacks_template_dfa(
     constraint: &Constraint,
     stack: &ParserGSS,
@@ -43,17 +54,19 @@ pub(crate) struct TemplateAdvanceRuntime {
         FxHashMap<usize, (ParserGSS, Vec<(u32, TerminalsDisallowed)>)>,
     calls: u64,
     memo_hits: u64,
+    products_started: usize,
+    max_template_products: usize,
+    exhausted: bool,
 }
 
 impl Default for TemplateAdvanceRuntime {
     fn default() -> Self {
-        Self {
-            interner: GssSemanticKeyInterner::new(),
-            memo: FxHashMap::default(),
-            component_cache: FxHashMap::default(),
-            calls: 0,
-            memo_hits: 0,
-        }
+        Self::with_budget(
+            LANGUAGE_QUEUE_MAX_SEMANTIC_NODES,
+            LANGUAGE_QUEUE_MAX_SOURCE_KEYS,
+            LANGUAGE_QUEUE_MAX_UNION_ENTRIES,
+            LANGUAGE_QUEUE_MAX_TEMPLATE_PRODUCTS,
+        )
     }
 }
 
@@ -64,11 +77,58 @@ impl std::fmt::Debug for TemplateAdvanceRuntime {
             .field("component_cache", &self.component_cache.len())
             .field("calls", &self.calls)
             .field("memo_hits", &self.memo_hits)
+            .field("products_started", &self.products_started)
+            .field("exhausted", &self.exhausted)
             .finish_non_exhaustive()
     }
 }
 
 impl TemplateAdvanceRuntime {
+    fn with_budget(
+        max_semantic_nodes: usize,
+        max_source_keys: usize,
+        max_union_entries: usize,
+        max_template_products: usize,
+    ) -> Self {
+        Self {
+            interner: GssSemanticKeyInterner::with_budget(
+                max_semantic_nodes,
+                max_source_keys,
+                max_union_entries,
+            ),
+            memo: FxHashMap::default(),
+            component_cache: FxHashMap::default(),
+            calls: 0,
+            memo_hits: 0,
+            products_started: 0,
+            max_template_products,
+            exhausted: false,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn is_exhausted(&self) -> bool {
+        self.exhausted || self.interner.is_exhausted()
+    }
+
+    #[inline]
+    fn sync_interner_budget(&mut self) -> bool {
+        if self.interner.is_exhausted() {
+            self.exhausted = true;
+        }
+        !self.exhausted
+    }
+
+    #[inline]
+    fn push_language(&mut self, language: u32, state: u32) -> u32 {
+        if self.is_exhausted() {
+            return 0;
+        }
+        let pushed = self.interner.push_key(language, state);
+        self.sync_interner_budget();
+        pushed
+    }
+
     pub(crate) fn begin_commit(&mut self) {
         // The canonical language representation is intentionally token-local.
         // Rebuild it from the authoritative compact GSS for each selected token
@@ -84,28 +144,52 @@ impl TemplateAdvanceRuntime {
         (self.calls, self.memo_hits, self.memo.len())
     }
 
+    pub(crate) fn work_summary(
+        &self,
+    ) -> (u64, u64, usize, usize, usize, usize, usize, usize) {
+        let (semantic_nodes, lower_keys, upper_keys, union_entries) =
+            self.interner.work_summary();
+        (
+            self.calls,
+            self.memo_hits,
+            self.memo.len(),
+            self.products_started,
+            semantic_nodes,
+            lower_keys,
+            upper_keys,
+            union_entries,
+        )
+    }
+
     pub(crate) fn language_from_uniform_gss(
         &mut self,
         stack: &ParserGSS,
     ) -> Option<(u32, TerminalsDisallowed)> {
+        if self.is_exhausted() {
+            return None;
+        }
         let accumulator = stack.uniform_accumulator()?;
-        Some((self.interner.key(stack), accumulator))
+        let language = self.interner.key(stack);
+        self.sync_interner_budget().then_some((language, accumulator))
     }
 
     pub(crate) fn language_components_from_gss(
         &mut self,
         stack: &ParserGSS,
-    ) -> Vec<(u32, TerminalsDisallowed)> {
+    ) -> Option<Vec<(u32, TerminalsDisallowed)>> {
         let ptr = stack.ptr_key();
         if let Some((_, cached)) = self.component_cache.get(&ptr) {
-            return cached.clone();
+            return Some(cached.clone());
         }
 
         let components = if let Some(component) = self.language_from_uniform_gss(stack) {
             vec![component]
         } else {
             stack
-                .partition_by_accumulator()
+                .partition_by_accumulator_at_most(
+                    LANGUAGE_QUEUE_MAX_ACCUMULATOR_COMPONENTS,
+                    LANGUAGE_QUEUE_MAX_ACCUMULATOR_UPPER_NODES,
+                )?
                 .into_iter()
                 .map(|(paths, accumulator)| {
                     let restored = paths.apply(|_| accumulator.clone());
@@ -113,8 +197,11 @@ impl TemplateAdvanceRuntime {
                 })
                 .collect()
         };
+        if self.is_exhausted() {
+            return None;
+        }
         self.register_components(stack, components.clone());
-        components
+        Some(components)
     }
 
     pub(crate) fn register_components(
@@ -122,8 +209,10 @@ impl TemplateAdvanceRuntime {
         stack: &ParserGSS,
         components: Vec<(u32, TerminalsDisallowed)>,
     ) {
-        self.component_cache
-            .insert(stack.ptr_key(), (stack.clone(), components));
+        if !self.is_exhausted() {
+            self.component_cache
+                .insert(stack.ptr_key(), (stack.clone(), components));
+        }
     }
 
     pub(crate) fn gss_from_language(
@@ -143,7 +232,12 @@ impl TemplateAdvanceRuntime {
     }
 
     pub(crate) fn union_languages(&mut self, left: u32, right: u32) -> u32 {
-        self.interner.union_keys(left, right)
+        if self.is_exhausted() {
+            return 0;
+        }
+        let union = self.interner.union_keys(left, right);
+        self.sync_interner_budget();
+        union
     }
 
     pub(crate) fn advance_language(
@@ -152,18 +246,22 @@ impl TemplateAdvanceRuntime {
         terminal: TerminalID,
         language: u32,
     ) -> Option<u32> {
+        if self.is_exhausted() {
+            return None;
+        }
         let template = constraint
             .template_dfas_by_terminal
             .get(terminal as usize)?
             .as_ref()?;
-        Some(evaluate_template_language(
+        let advanced = evaluate_template_language(
             template,
             terminal,
             Phase::Pop,
             template.pop.start_state,
             language,
             self,
-        ))
+        );
+        (!self.is_exhausted()).then_some(advanced)
     }
 }
 
@@ -190,7 +288,7 @@ fn evaluate_template_language(
     language: u32,
     runtime: &mut TemplateAdvanceRuntime,
 ) -> u32 {
-    if language == 0 {
+    if language == 0 || runtime.is_exhausted() {
         return 0;
     }
     runtime.calls += 1;
@@ -199,6 +297,11 @@ fn evaluate_template_language(
         runtime.memo_hits += 1;
         return cached;
     }
+    if runtime.products_started >= runtime.max_template_products {
+        runtime.exhausted = true;
+        return 0;
+    }
+    runtime.products_started += 1;
 
     let mut output = 0;
 
@@ -212,7 +315,7 @@ fn evaluate_template_language(
             .iter_mut()
             .find(|(candidate, _)| *candidate == target)
         {
-            *existing = runtime.interner.union_keys(*existing, language);
+            *existing = runtime.union_languages(*existing, language);
         } else {
             groups.push((target, language));
         }
@@ -254,7 +357,7 @@ fn evaluate_template_language(
                     suffixes,
                     runtime,
                 );
-                output = runtime.interner.union_keys(output, branch);
+                output = runtime.union_languages(output, branch);
             }
 
             if let Some(Some(read_state)) = template.pop_to_read.get(state_id as usize) {
@@ -266,7 +369,7 @@ fn evaluate_template_language(
                     language,
                     runtime,
                 );
-                output = runtime.interner.union_keys(output, branch);
+                output = runtime.union_languages(output, branch);
             }
             if let Some(Some(push_state)) = template.pop_to_push.get(state_id as usize) {
                 let branch = evaluate_template_language(
@@ -277,7 +380,7 @@ fn evaluate_template_language(
                     language,
                     runtime,
                 );
-                output = runtime.interner.union_keys(output, branch);
+                output = runtime.union_languages(output, branch);
             }
         }
         Phase::Read => {
@@ -310,7 +413,7 @@ fn evaluate_template_language(
                     selected,
                     runtime,
                 );
-                output = runtime.interner.union_keys(output, branch);
+                output = runtime.union_languages(output, branch);
             }
 
             if let Some(Some(push_state)) = template.read_to_push.get(state_id as usize) {
@@ -322,7 +425,7 @@ fn evaluate_template_language(
                     language,
                     runtime,
                 );
-                output = runtime.interner.union_keys(output, branch);
+                output = runtime.union_languages(output, branch);
             }
         }
         Phase::Push => {
@@ -338,9 +441,10 @@ fn evaluate_template_language(
                         "commit template push DFA contains non-push label {label} at state {state_id}"
                     );
                 }
-                let pushed = runtime
-                    .interner
-                    .push_key(language, negative_to_positive_label(label) as u32);
+                let pushed = runtime.push_language(
+                    language,
+                    negative_to_positive_label(label) as u32,
+                );
                 let branch = evaluate_template_language(
                     template,
                     terminal,
@@ -349,11 +453,14 @@ fn evaluate_template_language(
                     pushed,
                     runtime,
                 );
-                output = runtime.interner.union_keys(output, branch);
+                output = runtime.union_languages(output, branch);
             }
         }
     }
 
+    if runtime.is_exhausted() {
+        return 0;
+    }
     runtime.memo.insert(memo_key, output);
     output
 }
@@ -842,6 +949,43 @@ mod tests {
                 .semantically_eq(&expected, 4_096)
                 .expect("test languages should remain explicitly bounded")
         );
+    }
+
+    #[test]
+    fn template_product_budget_declines_transactionally() {
+        let mut pop = UnweightedDfa::new();
+        let after_top = pop.add_state();
+        let accepting = pop.add_state();
+        pop.add_transition(pop.start_state, 2, after_top);
+        pop.add_transition(after_top, 1, accepting);
+        pop.set_accepting(accepting, true);
+        let template = CommitTemplateDfas {
+            pop,
+            read: UnweightedDfa::default(),
+            push: UnweightedDfa::default(),
+            pop_to_read: vec![None; 3],
+            pop_to_push: vec![None; 3],
+            read_to_push: Vec::new(),
+        };
+        let input = ParserGSS::from_single_stack(
+            vec![0, 1, 2],
+            TerminalsDisallowed::new(),
+        );
+        let mut runtime = TemplateAdvanceRuntime::with_budget(64, 64, 64, 1);
+        let (language, _) = runtime
+            .language_from_uniform_gss(&input)
+            .expect("input canonicalization fits its independent budget");
+        let output = evaluate_template_language(
+            &template,
+            0,
+            Phase::Pop,
+            template.pop.start_state,
+            language,
+            &mut runtime,
+        );
+        assert_eq!(output, 0);
+        assert!(runtime.is_exhausted());
+        assert!(runtime.memo.is_empty(), "partial products must not be published");
     }
 
     #[test]
