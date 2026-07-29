@@ -24,6 +24,38 @@ type GrammarParser = fn(&str) -> crate::Result<GrammarDef>;
 type NamedGrammarParser = fn(&str) -> crate::Result<ast::NamedGrammar>;
 type NamedGrammarTransform = fn(&mut ast::NamedGrammar) -> crate::Result<()>;
 
+const LARGE_IMPORT_SOURCE_BYTES: usize = 64 * 1024;
+#[cfg(windows)]
+const WINDOWS_LARGE_IMPORT_STACK_BYTES: usize = 64 * 1024 * 1024;
+
+fn with_large_import_stack<T, F>(source_len: usize, compile: F) -> T
+where
+    T: Send,
+    F: FnOnce() -> T + Send,
+{
+    #[cfg(windows)]
+    {
+        if source_len >= LARGE_IMPORT_SOURCE_BYTES {
+            return std::thread::scope(|scope| {
+                let thread = std::thread::Builder::new()
+                    .name("glrmask-grammar-compile".to_owned())
+                    .stack_size(WINDOWS_LARGE_IMPORT_STACK_BYTES)
+                    .spawn_scoped(scope, compile)
+                    .expect("failed to spawn large-stack grammar compiler thread");
+                match thread.join() {
+                    Ok(result) => result,
+                    Err(panic) => std::panic::resume_unwind(panic),
+                }
+            });
+        }
+    }
+
+    #[cfg(not(windows))]
+    let _ = source_len;
+
+    compile()
+}
+
 pub(crate) fn choice_or_single(mut options: Vec<ast::GrammarExpr>) -> ast::GrammarExpr {
     if options.len() == 1 {
         options.pop().unwrap()
@@ -207,15 +239,17 @@ impl Constraint {
         vocab: &crate::Vocab,
         end_token_ids: &[u32],
     ) -> crate::Result<Self> {
-        compile_from_source(
-            ebnf,
-            vocab,
-            "ebnf",
-            GlrTableConstruction::ExperimentalCoreMerged,
-            ebnf::parse_ebnf_to_named,
-            None,
-            end_token_ids,
-        )
+        with_large_import_stack(ebnf.len(), || {
+            compile_from_source(
+                ebnf,
+                vocab,
+                "ebnf",
+                GlrTableConstruction::ExperimentalCoreMerged,
+                ebnf::parse_ebnf_to_named,
+                None,
+                end_token_ids,
+            )
+        })
     }
 
     /// Compile a Lark grammar for `vocab`.
@@ -229,15 +263,17 @@ impl Constraint {
         vocab: &crate::Vocab,
         end_token_ids: &[u32],
     ) -> crate::Result<Self> {
-        compile_from_source(
-            lark,
-            vocab,
-            "lark",
-            GlrTableConstruction::ExperimentalCoreMerged,
-            lark::parse_lark_to_named,
-            None,
-            end_token_ids,
-        )
+        with_large_import_stack(lark.len(), || {
+            compile_from_source(
+                lark,
+                vocab,
+                "lark",
+                GlrTableConstruction::ExperimentalCoreMerged,
+                lark::parse_lark_to_named,
+                None,
+                end_token_ids,
+            )
+        })
     }
 
     /// Compile a JSON Schema for `vocab`.
@@ -251,16 +287,18 @@ impl Constraint {
         vocab: &crate::Vocab,
         end_token_ids: &[u32],
     ) -> crate::Result<Self> {
-        crate::compiler::stages::id_map_and_terminal_dwa::l2p::with_ti_pool(|| {
-            compile_from_source(
-                schema,
-                vocab,
-                "json_schema",
-                GlrTableConstruction::LegacyRowBisim,
-                parse_json_schema_to_named,
-                Some(json_schema::prepare_named_grammar),
-                end_token_ids,
-            )
+        with_large_import_stack(schema.len(), || {
+            crate::compiler::stages::id_map_and_terminal_dwa::l2p::with_ti_pool(|| {
+                compile_from_source(
+                    schema,
+                    vocab,
+                    "json_schema",
+                    GlrTableConstruction::LegacyRowBisim,
+                    parse_json_schema_to_named,
+                    Some(json_schema::prepare_named_grammar),
+                    end_token_ids,
+                )
+            })
         })
     }
 
@@ -275,15 +313,17 @@ impl Constraint {
         vocab: &crate::Vocab,
         end_token_ids: &[u32],
     ) -> crate::Result<Self> {
-        compile_from_source(
-            glrm,
-            vocab,
-            "glrm",
-            GlrTableConstruction::ExperimentalCoreMerged,
-            crate::grammar::glrm::from_glrm,
-            None,
-            end_token_ids,
-        )
+        with_large_import_stack(glrm.len(), || {
+            compile_from_source(
+                glrm,
+                vocab,
+                "glrm",
+                GlrTableConstruction::ExperimentalCoreMerged,
+                crate::grammar::glrm::from_glrm,
+                None,
+                end_token_ids,
+            )
+        })
     }
 }
 
@@ -299,14 +339,16 @@ impl DynamicConstraint {
         vocab: &crate::Vocab,
         end_token_ids: &[u32],
     ) -> crate::Result<Self> {
-        compile_dynamic_from_source(
-            ebnf,
-            vocab,
-            GlrTableConstruction::ExperimentalCoreMerged,
-            ebnf::parse_ebnf_to_named,
-            None,
-            end_token_ids,
-        )
+        with_large_import_stack(ebnf.len(), || {
+            compile_dynamic_from_source(
+                ebnf,
+                vocab,
+                GlrTableConstruction::ExperimentalCoreMerged,
+                ebnf::parse_ebnf_to_named,
+                None,
+                end_token_ids,
+            )
+        })
     }
 
     /// Compile a Lark grammar with reduced compilation latency.
@@ -320,14 +362,16 @@ impl DynamicConstraint {
         vocab: &crate::Vocab,
         end_token_ids: &[u32],
     ) -> crate::Result<Self> {
-        compile_dynamic_from_source(
-            lark,
-            vocab,
-            GlrTableConstruction::ExperimentalCoreMerged,
-            lark::parse_lark_to_named,
-            None,
-            end_token_ids,
-        )
+        with_large_import_stack(lark.len(), || {
+            compile_dynamic_from_source(
+                lark,
+                vocab,
+                GlrTableConstruction::ExperimentalCoreMerged,
+                lark::parse_lark_to_named,
+                None,
+                end_token_ids,
+            )
+        })
     }
 
     /// Compile a JSON Schema with reduced compilation latency.
@@ -341,14 +385,16 @@ impl DynamicConstraint {
         vocab: &crate::Vocab,
         end_token_ids: &[u32],
     ) -> crate::Result<Self> {
-        compile_dynamic_from_source(
-            schema,
-            vocab,
-            GlrTableConstruction::Lalr,
-            parse_json_schema_to_named,
-            Some(json_schema::prepare_named_grammar),
-            end_token_ids,
-        )
+        with_large_import_stack(schema.len(), || {
+            compile_dynamic_from_source(
+                schema,
+                vocab,
+                GlrTableConstruction::Lalr,
+                parse_json_schema_to_named,
+                Some(json_schema::prepare_named_grammar),
+                end_token_ids,
+            )
+        })
     }
 
     /// Compile a GLRM grammar with reduced compilation latency.
@@ -362,14 +408,16 @@ impl DynamicConstraint {
         vocab: &crate::Vocab,
         end_token_ids: &[u32],
     ) -> crate::Result<Self> {
-        compile_dynamic_from_source(
-            glrm,
-            vocab,
-            GlrTableConstruction::ExperimentalCoreMerged,
-            crate::grammar::glrm::from_glrm,
-            None,
-            end_token_ids,
-        )
+        with_large_import_stack(glrm.len(), || {
+            compile_dynamic_from_source(
+                glrm,
+                vocab,
+                GlrTableConstruction::ExperimentalCoreMerged,
+                crate::grammar::glrm::from_glrm,
+                None,
+                end_token_ids,
+            )
+        })
     }
 }
 
@@ -379,6 +427,15 @@ mod tests {
     use super::*;
     use crate::compiler::glr::table::{AdmissionPolicy, GlrTableConstruction};
     use crate::Vocab;
+
+    #[cfg(windows)]
+    #[test]
+    fn large_imports_use_dedicated_windows_stack() {
+        let thread_name = with_large_import_stack(LARGE_IMPORT_SOURCE_BYTES, || {
+            std::thread::current().name().map(str::to_owned)
+        });
+        assert_eq!(thread_name.as_deref(), Some("glrmask-grammar-compile"));
+    }
 
     fn vocab(entries: &[&str]) -> Vocab {
         Vocab::new(
