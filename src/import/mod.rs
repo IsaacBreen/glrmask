@@ -10,6 +10,7 @@ use crate::compiler::compile::{
     compile_owned_profiled_with_table_construction,
     compile_owned_with_table_construction,
     compile_profile_enabled,
+    compile_top_profile_enabled,
     emit_compile_profile_summary,
 };
 use crate::compiler::pipeline::compile_dynamic_owned_with_table_construction;
@@ -127,7 +128,7 @@ fn compile_from_source(
     end_token_ids: &[u32],
 ) -> crate::Result<Constraint> {
     let compile_from_source_started_at = emit_import_phase_start("compile_from_source");
-    if compile_profile_enabled() {
+    if compile_profile_enabled() || compile_top_profile_enabled() {
         let parse_started_at = std::time::Instant::now();
         let grammar = lower_factored_named_grammar(source, parse, transform, end_token_ids)?;
         let import_ms = parse_started_at.elapsed().as_secs_f64() * 1000.0;

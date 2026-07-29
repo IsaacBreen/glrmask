@@ -183,6 +183,10 @@ pub(crate) fn compile_profile_summary_enabled() -> bool {
     env_flag_enabled("GLRMASK_PROFILE_COMPILE_SUMMARY")
 }
 
+pub(crate) fn compile_top_profile_enabled() -> bool {
+    env_flag_enabled("GLRMASK_PROFILE_COMPILE_TOP")
+}
+
 pub(crate) fn compile_profile_enabled() -> bool {
     compile_profile_summary_enabled()
 }
@@ -293,7 +297,7 @@ pub(crate) fn emit_compile_profile_summary(
     import_ms: Option<f64>,
     profile: &CompilePhaseProfile,
 ) {
-    if !compile_profile_summary_enabled() {
+    if !compile_profile_summary_enabled() && !compile_top_profile_enabled() {
         return;
     }
 
@@ -3308,15 +3312,23 @@ fn compile_prepared_with_profile_and_table_construction(
             }
             profile.compact_ms += elapsed_ms(compact_started_at);
         }
-        let terminal_dwa_interned_ranges_before_pm_reconcile =
-            terminal_family_interned_range_count(&terminal_dwas);
-        let possible_matches_interned_ranges_before_pm_reconcile =
-            interned_range_count_for_artifact(possible_matches.artifact_mut());
-        let terminal_pm_joint_interned_ranges_before_reconcile =
-            terminal_family_joint_interned_range_count(
-                &terminal_dwas,
-                possible_matches.artifact(),
-            );
+        let collect_expensive_profile_stats = compile_profile_summary_enabled();
+        let (
+            terminal_dwa_interned_ranges_before_pm_reconcile,
+            possible_matches_interned_ranges_before_pm_reconcile,
+            terminal_pm_joint_interned_ranges_before_reconcile,
+        ) = if collect_expensive_profile_stats {
+            (
+                terminal_family_interned_range_count(&terminal_dwas),
+                interned_range_count_for_artifact(possible_matches.artifact_mut()),
+                terminal_family_joint_interned_range_count(
+                    &terminal_dwas,
+                    possible_matches.artifact(),
+                ),
+            )
+        } else {
+            (0, 0, 0)
+        };
 
         let (mut parser_dwa, parser_dwa_ms) = if let Some((
             parser_dwa,
@@ -3415,7 +3427,7 @@ fn compile_prepared_with_profile_and_table_construction(
             };
             (parser_dwa, elapsed_ms(parser_dwa_started_at))
         };
-        if compile_profile_enabled() {
+        if compile_profile_enabled() || compile_top_profile_enabled() {
             if let Some((parser_dwa_started_ms, parser_dwa_finished_ms)) = parser_dag_timing {
                 let overlap_ms = possible_matches_finished_ms.min(parser_dwa_finished_ms)
                     - possible_matches_started_ms.max(parser_dwa_started_ms);
@@ -3442,10 +3454,14 @@ fn compile_prepared_with_profile_and_table_construction(
             }
         }
 
-        let terminal_pm_joint_interned_ranges = terminal_family_joint_interned_range_count(
-            &terminal_dwas,
-            possible_matches.artifact(),
-        );
+        let terminal_pm_joint_interned_ranges = if collect_expensive_profile_stats {
+            terminal_family_joint_interned_range_count(
+                &terminal_dwas,
+                possible_matches.artifact(),
+            )
+        } else {
+            0
+        };
 
         // Parser-family union may choose a different but equivalent internal ID
         // numbering from the reconciled terminal families.  Always make the
@@ -3484,15 +3500,26 @@ fn compile_prepared_with_profile_and_table_construction(
         possible_matches =
             MappedArtifact::new(possible_matches_artifact, internal_ids.clone());
 
-        let parser_dwa_interned_ranges =
-            count_interned_ranges_for_weights(parser_dwa.artifact().weight_refs()).total_ranges();
-        let (possible_matches_interned_ranges, parser_pm_joint_interned_ranges) = {
+        let (
+            parser_dwa_interned_ranges,
+            possible_matches_interned_ranges,
+            parser_pm_joint_interned_ranges,
+        ) = if collect_expensive_profile_stats {
+            let parser_dwa_interned_ranges =
+                count_interned_ranges_for_weights(parser_dwa.artifact().weight_refs())
+                    .total_ranges();
             let (parser_dwa_artifact, _) = parser_dwa.parts_mut();
             let (possible_matches_artifact, _) = possible_matches.parts_mut();
             (
+                parser_dwa_interned_ranges,
                 interned_range_count_for_artifact(possible_matches_artifact),
-                joint_interned_range_count_for_artifacts(parser_dwa_artifact, possible_matches_artifact),
+                joint_interned_range_count_for_artifacts(
+                    parser_dwa_artifact,
+                    possible_matches_artifact,
+                ),
             )
+        } else {
+            (0, 0, 0)
         };
         let (
             parser_dwa,
@@ -3685,7 +3712,7 @@ pub(crate) fn compile_owned_with_table_construction(
     vocab: &Vocab,
     default_table_construction: GlrTableConstruction,
 ) -> Constraint {
-    if compile_profile_summary_enabled() {
+    if compile_profile_summary_enabled() || compile_top_profile_enabled() {
         let (constraint, profile) =
             compile_owned_profiled_with_table_construction(grammar, vocab, default_table_construction);
         emit_compile_profile_summary(None, None, &profile);
