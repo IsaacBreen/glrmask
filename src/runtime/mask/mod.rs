@@ -1055,7 +1055,11 @@ fn dense_acc_identity(accumulator: &DenseMaskAcc) -> DenseAccIdentity {
 #[derive(Clone)]
 enum SingleDenseTransitionMask {
     Full,
-    Dense(Arc<[u64]>),
+    Dense {
+        words: Arc<[u64]>,
+        start: usize,
+        end: usize,
+    },
     Empty,
 }
 
@@ -1410,17 +1414,25 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
         };
         let token_key = Arc::as_ptr(tokens) as usize;
         if let Some(dense) = self.precomputed.get(&token_key) {
-            return SingleDenseTransitionMask::Dense(Arc::clone(dense));
+            return Self::single_dense_transition_mask(Arc::clone(dense));
         }
         let mut dense = vec![0u64; self.constraint.internal_token_dense_words];
         DenseMaskAcc::for_each_token_range_word(tokens, dense.len(), |index, mask| {
             dense[index] |= mask;
         });
-        if dense.iter().all(|word| *word == 0) {
-            SingleDenseTransitionMask::Empty
-        } else {
-            SingleDenseTransitionMask::Dense(dense.into())
-        }
+        Self::single_dense_transition_mask(dense.into())
+    }
+
+    fn single_dense_transition_mask(words: Arc<[u64]>) -> SingleDenseTransitionMask {
+        let Some(start) = words.iter().position(|word| *word != 0) else {
+            return SingleDenseTransitionMask::Empty;
+        };
+        let end = words
+            .iter()
+            .rposition(|word| *word != 0)
+            .expect("nonzero start implies nonzero end")
+            + 1;
+        SingleDenseTransitionMask::Dense { words, start, end }
     }
 
     fn single_transition(
@@ -1455,11 +1467,35 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
         match mask {
             SingleDenseTransitionMask::Full => Some(Arc::clone(dense)),
             SingleDenseTransitionMask::Empty => None,
-            SingleDenseTransitionMask::Dense(mask) => {
+            SingleDenseTransitionMask::Dense {
+                words: mask,
+                start,
+                end,
+            } => {
+                let end = (*end).min(dense.len()).min(mask.len());
+                if *start >= end {
+                    return None;
+                }
+                if *start != 0 || end != dense.len() {
+                    let mut out = vec![0u64; end];
+                    let mut last_nonzero = 0usize;
+                    for index in *start..end {
+                        let word = dense[index] & mask[index];
+                        out[index] = word;
+                        if word != 0 {
+                            last_nonzero = index + 1;
+                        }
+                    }
+                    if last_nonzero == 0 {
+                        return None;
+                    }
+                    out.truncate(last_nonzero);
+                    return Some(out.into());
+                }
                 let mut any = false;
                 let mut out: Option<Vec<u64>> = None;
                 for index in 0..dense.len() {
-                    let word = dense[index] & mask.get(index).copied().unwrap_or(0);
+                    let word = dense[index] & mask[index];
                     any |= word != 0;
                     if let Some(out) = out.as_mut() {
                         out.push(word);
@@ -1523,34 +1559,42 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
                 Self::merge_single_result(current, Some(incoming));
             }
             SingleDenseTransitionMask::Empty => {}
-            SingleDenseTransitionMask::Dense(mask) => {
+            SingleDenseTransitionMask::Dense {
+                words: mask,
+                start,
+                end,
+            } => {
                 let Some(existing) = current.as_mut() else {
-                    let transition_mask =
-                        SingleDenseTransitionMask::Dense(Arc::clone(mask));
-                    *current = Self::intersect_single_with_dense_mask(
-                        &incoming,
-                        &transition_mask,
-                    );
+                    let transition_mask = SingleDenseTransitionMask::Dense {
+                        words: Arc::clone(mask),
+                        start: *start,
+                        end: *end,
+                    };
+                    *current =
+                        Self::intersect_single_with_dense_mask(&incoming, &transition_mask);
                     return;
                 };
                 if Arc::ptr_eq(existing, &incoming) {
                     return;
                 }
-                if existing.len() == incoming.len() {
+                let end = (*end).min(incoming.len()).min(mask.len());
+                if *start >= end {
+                    return;
+                }
+                if existing.len() >= end {
                     let existing = Arc::make_mut(existing);
-                    for index in 0..existing.len() {
-                        existing[index] |=
-                            incoming[index] & mask.get(index).copied().unwrap_or(0);
+                    for index in *start..end {
+                        existing[index] |= incoming[index] & mask[index];
                     }
                     return;
                 }
-                let len = existing.len().max(incoming.len());
+                let len = existing.len().max(end);
                 let mut combined = vec![0u64; len];
                 for (index, word) in existing.iter().enumerate() {
                     combined[index] = *word;
                 }
-                for index in 0..incoming.len() {
-                    combined[index] |= incoming[index] & mask.get(index).copied().unwrap_or(0);
+                for index in *start..end {
+                    combined[index] |= incoming[index] & mask[index];
                 }
                 *existing = combined.into();
             }
@@ -1581,7 +1625,7 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
                 SingleDenseTransitionMask::Full => {
                     Some(Arc::clone(&self.constraint.seed_universe_dense))
                 }
-                SingleDenseTransitionMask::Dense(dense) => Some(dense),
+                SingleDenseTransitionMask::Dense { words, .. } => Some(words),
                 SingleDenseTransitionMask::Empty => None,
             });
         self.runtime.single_final_memo.insert(key, result.clone());
@@ -1738,10 +1782,8 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
             .map(|(tsid, dense)| (*tsid, Arc::clone(dense)))
         {
             let transfer = self.eval_lower_single_transfer(dwa_state, node, tsid)?;
-            return Self::intersect_single_with_dense_mask(
-                &dense,
-                &SingleDenseTransitionMask::Dense(transfer),
-            )
+            let transfer = Self::single_dense_transition_mask(transfer);
+            return Self::intersect_single_with_dense_mask(&dense, &transfer)
             .and_then(|result| DenseMaskAcc::from_dense_arc(tsid, result));
         }
         self.lower_calls += 1;
