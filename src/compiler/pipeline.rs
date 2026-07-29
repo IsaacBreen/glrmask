@@ -2932,7 +2932,8 @@ fn compile_prepared_with_profile_and_table_construction(
                     tokenizer_ready_ms: elapsed_ms(analysis_started_for_tokenizer),
                 };
 
-                let eager_possible_matches = env_flag_enabled("GLRMASK_EAGER_POSSIBLE_MATCHES");
+                let eager_possible_matches =
+                    env_flag_enabled_by_default("GLRMASK_EAGER_POSSIBLE_MATCHES");
                 if !eager_possible_matches {
                     let possible_matches_tokenizer = Arc::clone(&tokenizer_lane.tokenizer);
                     let compile_started_for_cpm = compile_started_for_tokenizer.clone();
@@ -3292,6 +3293,7 @@ fn compile_prepared_with_profile_and_table_construction(
         profile.global_merge_ms = terminal_phase_profile.global_merge_ms;
 
         let runtime_dynamic_vocab = cpm_result.runtime_dynamic_vocab;
+        let possible_matches_complete = cpm_result.complete;
         let mut possible_matches = cpm_result.mapped_possible_matches;
         let cpm_profile = cpm_result.profile;
         let parser_dag_timing = prebuilt_parser_dwa
@@ -3548,6 +3550,7 @@ fn compile_prepared_with_profile_and_table_construction(
             dynamic_mask_vocab: runtime_dynamic_vocab.vocab,
             lazy_dynamic_mask_vocab: std::sync::OnceLock::new(),
             possible_matches: possible_matches.into_artifact(),
+            possible_matches_complete,
             state_to_internal_tsid: runtime_tokenizer_state_map.original_to_internal.clone(),
             internal_tsid_to_states: runtime_tokenizer_state_map.internal_to_originals_vecs(),
             original_token_to_internal: internal_ids.vocab_tokens.original_to_internal.clone(),

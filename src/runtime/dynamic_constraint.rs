@@ -182,6 +182,7 @@ impl DynamicConstraint {
             dynamic_mask_vocab,
             lazy_dynamic_mask_vocab: std::sync::OnceLock::new(),
             possible_matches: BTreeMap::new(),
+            possible_matches_complete: false,
             state_to_internal_tsid: Vec::new(),
             internal_tsid_to_states: Vec::new(),
             template_dfas_by_terminal: Vec::new(),

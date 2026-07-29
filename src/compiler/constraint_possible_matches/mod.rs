@@ -60,6 +60,11 @@ impl ConstraintPossibleMatchesConfig {
     pub(crate) const DEFER_TO_DYNAMIC_MASK: Self = Self {
         defer_to_dynamic_mask: true,
     };
+
+    #[inline]
+    pub(crate) const fn is_complete(self) -> bool {
+        !self.defer_to_dynamic_mask
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -73,6 +78,7 @@ pub(crate) struct ConstraintPossibleMatchesProfile {
 pub(crate) struct ConstraintPossibleMatchesComputation {
     pub(crate) mapped_possible_matches: MappedArtifact<RuntimePossibleMatchesByTerminal>,
     pub(crate) runtime_dynamic_vocab: RuntimeDynamicMaskVocabArtifacts,
+    pub(crate) complete: bool,
     pub(crate) profile: ConstraintPossibleMatchesProfile,
 }
 
@@ -2324,6 +2330,7 @@ fn empty_possible_matches_computation(
             possible_matches_id_map,
         ),
         runtime_dynamic_vocab,
+        complete: false,
         profile: ConstraintPossibleMatchesProfile::default(),
     }
 }
@@ -2473,6 +2480,7 @@ fn compute_constraint_possible_matches_with_artifacts(
     ConstraintPossibleMatchesComputation {
         mapped_possible_matches: MappedArtifact::new(possible_matches, possible_matches_id_map),
         runtime_dynamic_vocab,
+        complete: true,
         profile: ConstraintPossibleMatchesProfile {
             vocab_equiv_ms: 0.0,
             possible_matches_collect_ms,
@@ -2594,6 +2602,12 @@ mod tests {
     use crate::automata::lexer::tokenizer::arbitrary_epsilon_l1_test_tokenizer;
     use crate::compiler::pipeline::build_tokenizer_from_exprs_partitioned_with_adaptive;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn possible_match_configs_report_table_completeness() {
+        assert!(ConstraintPossibleMatchesConfig::EAGER.is_complete());
+        assert!(!ConstraintPossibleMatchesConfig::DEFER_TO_DYNAMIC_MASK.is_complete());
+    }
 
     fn directly_matched_terminals(
         tokenizer: &Tokenizer,
