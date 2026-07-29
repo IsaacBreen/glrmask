@@ -349,7 +349,10 @@ impl Constraint {
         DynamicMaskVocab::from_packed(Arc::new(trie), Arc::new(token_aliases))
     }
 
-    pub(crate) fn rebuild_dynamic_runtime_caches(&mut self) {
+    pub(crate) fn rebuild_dynamic_runtime_caches(
+        &mut self,
+        prebuild_initial_token_programs_by_default: bool,
+    ) {
         let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
         let total_started_at = profile.then(std::time::Instant::now);
@@ -376,7 +379,7 @@ impl Constraint {
                 let normalized = value.trim().to_ascii_lowercase();
                 !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
             })
-            .unwrap_or(true);
+            .unwrap_or(prebuild_initial_token_programs_by_default);
         if prebuild_dynamic_token_programs {
             self.dynamic_mask_vocab
                 .prebuild_initial_token_program_partition(&self.tokenizer, self.mask_len());

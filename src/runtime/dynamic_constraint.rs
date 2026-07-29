@@ -78,6 +78,7 @@ impl DynamicConstraint {
         ignore_terminal: Option<TerminalID>,
         special_token_terminals: Vec<SpecialTokenTerminal>,
         vocab: &Vocab,
+        prebuild_initial_token_programs_by_default: bool,
     ) -> Self {
         let dynamic_mask_vocab =
             crate::compiler::constraint_possible_matches::runtime_dynamic_vocab_for_vocab(vocab);
@@ -94,6 +95,7 @@ impl DynamicConstraint {
             },
             dynamic_mask_vocab,
             None,
+            prebuild_initial_token_programs_by_default,
         )
     }
 
@@ -130,6 +132,8 @@ impl DynamicConstraint {
     }
 
     fn from_legacy_payload_v3(payload: LegacyDynamicConstraintPayloadV3) -> crate::Result<Self> {
+        let prebuild_initial_token_programs_by_default =
+            payload.initial_token_program_partition.is_some();
         Ok(Self::from_payload_v2_with_dynamic_vocab(
             DynamicConstraintPayloadV2 {
                 v1: Self::migrate_legacy_v1(payload.v2.v1)?,
@@ -137,6 +141,7 @@ impl DynamicConstraint {
             },
             DynamicMaskVocab::default(),
             payload.initial_token_program_partition,
+            prebuild_initial_token_programs_by_default,
         ))
     }
 
@@ -145,6 +150,7 @@ impl DynamicConstraint {
             payload,
             DynamicMaskVocab::default(),
             None,
+            true,
         )
     }
 
@@ -152,6 +158,7 @@ impl DynamicConstraint {
         payload: DynamicConstraintPayloadV2,
         dynamic_mask_vocab: DynamicMaskVocab,
         initial_token_program_partition: Option<DynamicTokenProgramPartition>,
+        prebuild_initial_token_programs_by_default: bool,
     ) -> Self {
         let DynamicConstraintPayloadV2 {
             v1: payload,
@@ -227,7 +234,7 @@ impl DynamicConstraint {
             word_group_buf_op_costs: Vec::new(),
             final_mask_mapping: Default::default(),
         };
-        inner.rebuild_dynamic_runtime_caches();
+        inner.rebuild_dynamic_runtime_caches(prebuild_initial_token_programs_by_default);
         Self { inner }
     }
 
@@ -313,10 +320,13 @@ impl DynamicConstraint {
                 let payload: DynamicConstraintPayloadV3 =
                     bincode::deserialize(&bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..])
                         .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
+                let prebuild_initial_token_programs_by_default =
+                    payload.initial_token_program_partition.is_some();
                 Ok(Self::from_payload_v2_with_dynamic_vocab(
                     payload.v2,
                     DynamicMaskVocab::default(),
                     payload.initial_token_program_partition,
+                    prebuild_initial_token_programs_by_default,
                 ))
             }
             _ => unreachable!("version was validated above"),
@@ -453,6 +463,28 @@ mod tests {
         );
         assert_eq!(constraint.mask_len(), loaded.mask_len());
         assert_eq!(constraint.start().mask(), loaded.start().mask());
+    }
+
+    #[test]
+    fn direct_regular_dynamic_constraint_defers_initial_token_programs() {
+        let vocab = vocab();
+        let mut grammar = String::from("start: r0\n");
+        for index in 0..63 {
+            grammar.push_str(&format!("r{index}: \"a\" r{}\n", index + 1));
+        }
+        grammar.push_str("r63: \"b\"\n");
+
+        let normal = crate::Constraint::from_lark(&grammar, &vocab).unwrap();
+        let dynamic = DynamicConstraint::from_lark(&grammar, &vocab).unwrap();
+        assert_eq!(dynamic.inner.table.num_rules, 0);
+        assert!(
+            dynamic
+                .inner
+                .dynamic_mask_vocab
+                .initial_token_program_partition()
+                .is_none()
+        );
+        assert_eq!(normal.start().mask(), dynamic.start().mask());
     }
 
     #[test]

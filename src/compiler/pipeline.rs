@@ -3690,6 +3690,7 @@ pub(crate) fn compile_dynamic_owned_with_table_construction(
             prepared_grammar.ignore_terminal,
             collect_special_token_terminals(&prepared_grammar),
             vocab,
+            prepared_grammar.direct_regular_automaton.is_none(),
         );
         if let Some(total_started_at) = total_started_at {
             eprintln!(
