@@ -1488,22 +1488,29 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
         let Some(incoming) = incoming else {
             return;
         };
-        let Some(existing) = current.as_ref() else {
+        let Some(existing) = current.as_mut() else {
             *current = Some(incoming);
             return;
         };
         if Arc::ptr_eq(existing, &incoming) {
             return;
         }
-        let len = existing.len().max(incoming.len());
-        let mut combined = Vec::with_capacity(len);
-        for index in 0..len {
-            combined.push(
-                existing.get(index).copied().unwrap_or(0)
-                    | incoming.get(index).copied().unwrap_or(0),
-            );
+        if existing.len() == incoming.len() {
+            let existing = Arc::make_mut(existing);
+            for (word, incoming_word) in existing.iter_mut().zip(incoming.iter()) {
+                *word |= *incoming_word;
+            }
+            return;
         }
-        *current = Some(combined.into());
+        let len = existing.len().max(incoming.len());
+        let mut combined = vec![0u64; len];
+        for (index, word) in existing.iter().enumerate() {
+            combined[index] |= *word;
+        }
+        for (index, word) in incoming.iter().enumerate() {
+            combined[index] |= *word;
+        }
+        *existing = combined.into();
     }
 
     /// Return the parser/GSS transfer mask for one internal tokenizer state,
