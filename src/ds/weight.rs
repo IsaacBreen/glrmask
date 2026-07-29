@@ -1,5 +1,8 @@
 use once_cell::sync::Lazy;
-use range_set_blaze::{CheckSortedDisjoint, RangeMapBlaze, RangeSetBlaze, SortedDisjointMap};
+use range_set_blaze::{
+    CheckSortedDisjoint, CheckSortedDisjointMap, RangeMapBlaze, RangeSetBlaze,
+    SortedDisjointMap,
+};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -2140,6 +2143,45 @@ impl Weight {
         self.0
             .range_values()
             .map(|(range, tokens)| (*range.start(), *range.end(), tokens))
+    }
+
+    /// Remap only the inner token sets while preserving the already-sorted,
+    /// disjoint TSID ranges. This avoids rebuilding a large weight through one
+    /// B-tree insertion per range when its outer coordinates are unchanged.
+    pub(crate) fn remap_token_sets_preserving_tsid_ranges(
+        &self,
+        mut remap: impl FnMut(&SharedTokenSet) -> SharedTokenSet,
+    ) -> Self {
+        if self.is_empty() || self.is_full() {
+            return self.clone();
+        }
+
+        let mut ranges = Vec::<(std::ops::RangeInclusive<u32>, SharedTokenSet)>::new();
+        for (start, end, tokens) in self.range_entries() {
+            let mapped = remap(tokens);
+            if mapped.is_empty() {
+                continue;
+            }
+            if let Some((previous_range, previous_tokens)) = ranges.last_mut()
+                && previous_range.end().checked_add(1) == Some(start)
+                && same_shared_token_set(previous_tokens, &mapped)
+            {
+                let previous_start = *previous_range.start();
+                *previous_range = previous_start..=end;
+            } else {
+                ranges.push((start..=end, mapped));
+            }
+        }
+        if ranges.is_empty() {
+            return Self::empty();
+        }
+
+        let map = WeightMap::from_sorted_disjoint_map(CheckSortedDisjointMap::new(
+            ranges
+                .iter()
+                .map(|(range, tokens)| (range.clone(), tokens)),
+        ));
+        finalize_weight_map(map)
     }
 
     pub fn empty() -> Self {

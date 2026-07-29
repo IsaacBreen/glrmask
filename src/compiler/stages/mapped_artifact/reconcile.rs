@@ -940,6 +940,41 @@ fn remap_weight_with_disjoint_tsid_runs(
     Some(Weight::from_tsid_ranges_shared(entries))
 }
 
+fn local_to_common_is_identity(map: &[Vec<u32>], common_count: usize) -> bool {
+    map.len() == common_count
+        && map
+            .iter()
+            .enumerate()
+            .all(|(local, targets)| targets.as_slice() == [local as u32])
+}
+
+fn remap_weight_with_identity_tsids(
+    weight: &Weight,
+    token_map: Option<&InjectiveLocalMap>,
+    token_run_map: Option<&DisjointRunLocalMap>,
+    precomputed_token_sets: Option<&FxHashMap<usize, SharedTokenSet>>,
+    local_to_common_tokens: &[Vec<u32>],
+) -> Weight {
+    if weight.is_empty() || weight.is_full() {
+        return weight.clone();
+    }
+    let mut token_cache = HashMap::<usize, SharedTokenSet>::new();
+    weight.remap_token_sets_preserving_tsid_ranges(|tokens| {
+        if let Some(token_map) = token_map {
+            remap_token_set_with_injective_map(tokens, token_map, &mut token_cache)
+        } else if let Some(precomputed_token_sets) = precomputed_token_sets {
+            precomputed_token_sets
+                .get(&(Arc::as_ptr(tokens) as usize))
+                .cloned()
+                .expect("precomputed token remap must cover every source token set")
+        } else if let Some(token_run_map) = token_run_map {
+            remap_token_set_with_disjoint_runs(tokens, token_run_map, &mut token_cache)
+        } else {
+            remap_token_set_with_general_map(tokens, local_to_common_tokens, &mut token_cache)
+        }
+    })
+}
+
 fn remap_weights_with_maps(
     weights: &mut [&mut Weight],
     local_to_common_tsids: &[Vec<u32>],
@@ -963,6 +998,7 @@ fn remap_weights_with_maps(
     );
     let token_run_map =
         DisjointRunLocalMap::from_local_to_common(local_to_common_tokens, common_token_count);
+    let identity_tsids = local_to_common_is_identity(local_to_common_tsids, common_tsid_count);
     let mut unique_by_ptr = HashMap::<usize, usize>::new();
     let mut unique_weights = Vec::<Weight>::new();
     let mut weight_to_unique = Vec::with_capacity(weights.len());
@@ -1045,9 +1081,17 @@ fn remap_weights_with_maps(
 
     let remap_one =
         |weight: &Weight,
-         precomputed_token_sets: Option<&FxHashMap<usize, SharedTokenSet>>| match (
-            &tsid_map, &token_map,
-        ) {
+         precomputed_token_sets: Option<&FxHashMap<usize, SharedTokenSet>>| {
+            if identity_tsids {
+                return remap_weight_with_identity_tsids(
+                    weight,
+                    token_map.as_ref(),
+                    token_run_map.as_ref(),
+                    precomputed_token_sets,
+                    local_to_common_tokens,
+                );
+            }
+            match (&tsid_map, &token_map) {
         (Some(tsid_map), Some(token_map)) if !weight.is_full() => {
             let mut token_cache = HashMap::<usize, SharedTokenSet>::new();
             remap_weight_with_injective_maps(weight, tsid_map, token_map, &mut token_cache)
@@ -1082,7 +1126,8 @@ fn remap_weights_with_maps(
             local_to_common_tokens,
             common_tsid_count,
         ),
-    };
+            }
+        };
 
     const PARALLEL_UNIQUE_WEIGHT_THRESHOLD: usize = 256;
     let unique_remap_started_at = profiling.then(Instant::now);
@@ -1141,13 +1186,14 @@ fn remap_weights_with_maps(
         let (token_set_refs, unique_token_sets, unique_local_tokens, unique_local_ranges) =
             token_set_profile.unwrap_or_default();
         eprintln!(
-            "[glrmask/profile][token_run_reconcile] weights={} unique_weights={} token_set_refs={} unique_token_sets={} unique_local_tokens={} unique_local_ranges={} tsid_map={} tsid_run_map={} token_map={} token_run_map={} precomputed_token_sets={} precompute_ms={precompute_ms:.3} unique_remap_ms={unique_remap_ms:.3} total_ms={:.3}",
+            "[glrmask/profile][token_run_reconcile] weights={} unique_weights={} token_set_refs={} unique_token_sets={} unique_local_tokens={} unique_local_ranges={} identity_tsids={} tsid_map={} tsid_run_map={} token_map={} token_run_map={} precomputed_token_sets={} precompute_ms={precompute_ms:.3} unique_remap_ms={unique_remap_ms:.3} total_ms={:.3}",
             weights.len(),
             unique_weights.len(),
             token_set_refs,
             unique_token_sets,
             unique_local_tokens,
             unique_local_ranges,
+            identity_tsids,
             tsid_map.is_some(),
             tsid_run_map.is_some(),
             token_map.is_some(),
@@ -1448,6 +1494,42 @@ mod tests {
         );
 
         assert_eq!(entries_key(&fast), entries_key(&general));
+    }
+
+    #[test]
+    fn identity_tsid_remap_matches_general_with_split_token_class() {
+        let weight = Weight::from_tsid_ranges_shared([
+            (
+                0,
+                2,
+                Arc::new(RangeSetBlaze::from_iter([0..=1, 3..=3])),
+            ),
+            (5, 9, Arc::new(RangeSetBlaze::from_iter([2..=2]))),
+        ]);
+        let tsid_map = (0..10).map(|tsid| vec![tsid]).collect::<Vec<_>>();
+        let token_map = vec![vec![0], vec![1, 2, 3], vec![4], vec![5]];
+        assert!(local_to_common_is_identity(&tsid_map, 10));
+
+        let general = remap_weight_general(&weight, &tsid_map, &token_map, 10);
+        let token_run_map =
+            DisjointRunLocalMap::from_local_to_common(&token_map, 6).expect("disjoint token runs");
+        let fast = remap_weight_with_identity_tsids(
+            &weight,
+            None,
+            Some(&token_run_map),
+            None,
+            &token_map,
+        );
+
+        assert_eq!(entries_key(&fast), entries_key(&general));
+        assert_eq!(
+            entries_key(&fast)
+                .into_iter()
+                .map(|(start, end, _)| (start, end))
+                .collect::<Vec<_>>(),
+            vec![(0, 2), (5, 9)],
+            "identity TSID remapping must preserve source ranges",
+        );
     }
 
     #[test]

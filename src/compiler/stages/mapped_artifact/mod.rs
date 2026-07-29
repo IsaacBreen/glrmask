@@ -110,6 +110,18 @@ impl<K: Ord> WeightRefs for BTreeMap<K, Weight> {
     }
 }
 
+impl<K: Ord> WeightRefs for BTreeMap<K, Vec<Weight>> {
+    fn weight_refs(&self) -> Vec<&Weight> {
+        self.values().flat_map(|weights| weights.iter()).collect()
+    }
+
+    fn weight_refs_mut(&mut self) -> Vec<&mut Weight> {
+        self.values_mut()
+            .flat_map(|weights| weights.iter_mut())
+            .collect()
+    }
+}
+
 impl<A, B> WeightRefs for (A, B)
 where
     A: WeightRefs,

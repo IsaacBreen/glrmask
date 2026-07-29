@@ -13,7 +13,8 @@ use crate::automata::unweighted_u32::minimize_acyclic::reindex_minimized_acyclic
 use crate::automata::lexer::regex::parse_regex;
 use crate::ds::u8set::U8Set;
 use crate::grammar::flat::{
-    GrammarDef, NonterminalID, Rule, Symbol, Terminal, TerminalID,
+    DirectRegularAutomaton, DirectRegularState, GrammarDef, NonterminalID, Rule, Symbol, Terminal,
+    TerminalID,
 };
 use crate::grammar::expr_nfa::ExprNFA;
 
@@ -631,6 +632,7 @@ struct Lowerer<'a> {
     /// Shared cache for repeat-min1-max nonterminals, keyed by (symbol, max).
     /// repeat_min1_max_N matches exactly 1..N elements (N >= 1).
     repeat_min1_max_cache: BTreeMap<(Symbol, usize), NonterminalID>,
+    direct_regular_automaton: Option<DirectRegularAutomaton>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -739,6 +741,7 @@ impl<'a> Lowerer<'a> {
             repeat_range_cache: BTreeMap::new(),
             repeat_max_cache: BTreeMap::new(),
             repeat_min1_max_cache: BTreeMap::new(),
+            direct_regular_automaton: None,
         }
     }
 
@@ -902,6 +905,7 @@ impl<'a> Lowerer<'a> {
                 // Symbol canonicalization can merge formerly distinct labels,
                 // so conservatively re-run minimization before lowering.
                 is_determinized_and_minimized: false,
+                prefer_direct_nfa_emission: expr_nfa.prefer_direct_nfa_emission,
                 canonical_dfa: None,
             })),
             GrammarExpr::Epsilon
@@ -1931,7 +1935,328 @@ impl<'a> Lowerer<'a> {
         Ok(())
     }
 
+    fn direct_regular_add_state(automaton: &mut DirectRegularAutomaton) -> u32 {
+        let state = automaton.states.len() as u32;
+        automaton.states.push(DirectRegularState::default());
+        state
+    }
+
+    fn direct_regular_terminal_id(
+        &mut self,
+        expr: &GrammarExpr,
+    ) -> Result<TerminalID, GlrMaskError> {
+        if let GrammarExpr::Ref(name) = expr {
+            let Some(true) = self.named_rule_is_terminal.get(name).copied() else {
+                return Err(GlrMaskError::GrammarParse(format!(
+                    "direct regular edge references nonterminal rule {name}"
+                )));
+            };
+            if let Some(&terminal) = self.terminal_ids_by_name.get(name) {
+                return Ok(terminal);
+            }
+            let body = self.named_rule_exprs.get(name).ok_or_else(|| {
+                GlrMaskError::GrammarParse(format!(
+                    "direct regular edge references unknown terminal rule {name}"
+                ))
+            })?;
+            let resolved = self.resolve_terminal_expr(Some(name), body)?;
+            return Ok(self.register_terminal_expr(name, resolved));
+        }
+
+        match self.lower_expr_terminalish(expr)? {
+            Symbol::Terminal(terminal) => Ok(terminal),
+            Symbol::Nonterminal(nonterminal) => Err(GlrMaskError::GrammarParse(format!(
+                "direct regular edge unexpectedly lowered to nonterminal {nonterminal}"
+            ))),
+        }
+    }
+
+    fn emit_direct_regular_expr(
+        &mut self,
+        automaton: &mut DirectRegularAutomaton,
+        expr: &GrammarExpr,
+        from: u32,
+        to: u32,
+    ) -> Result<(), GlrMaskError> {
+        match expr {
+            GrammarExpr::Grouped(inner) => {
+                self.emit_direct_regular_expr(automaton, inner, from, to)
+            }
+            GrammarExpr::Sequence(parts) => {
+                if parts.is_empty() {
+                    automaton.states[from as usize].epsilons.push(to);
+                    return Ok(());
+                }
+                let mut current = from;
+                for (index, part) in parts.iter().enumerate() {
+                    let next = if index + 1 == parts.len() {
+                        to
+                    } else {
+                        Self::direct_regular_add_state(automaton)
+                    };
+                    self.emit_direct_regular_expr(automaton, part, current, next)?;
+                    current = next;
+                }
+                Ok(())
+            }
+            GrammarExpr::Choice(options) => {
+                for option in options {
+                    self.emit_direct_regular_expr(automaton, option, from, to)?;
+                }
+                Ok(())
+            }
+            GrammarExpr::Epsilon => {
+                automaton.states[from as usize].epsilons.push(to);
+                Ok(())
+            }
+            GrammarExpr::Quantified(inner, Quantifier::Optional) => {
+                automaton.states[from as usize].epsilons.push(to);
+                self.emit_direct_regular_expr(automaton, inner, from, to)
+            }
+            GrammarExpr::Quantified(inner, Quantifier::ZeroPlus) => {
+                automaton.states[from as usize].epsilons.push(to);
+                let body_end = Self::direct_regular_add_state(automaton);
+                self.emit_direct_regular_expr(automaton, inner, from, body_end)?;
+                automaton.states[body_end as usize].epsilons.push(from);
+                Ok(())
+            }
+            GrammarExpr::Quantified(inner, Quantifier::OnePlus) => {
+                let body_end = Self::direct_regular_add_state(automaton);
+                self.emit_direct_regular_expr(automaton, inner, from, body_end)?;
+                automaton.states[body_end as usize].epsilons.push(from);
+                automaton.states[body_end as usize].epsilons.push(to);
+                Ok(())
+            }
+            GrammarExpr::Quantified(inner, Quantifier::Range(min, max)) => {
+                let mut current = from;
+                for index in 0..*min {
+                    let next = if index + 1 == *min && max == &Some(*min) {
+                        to
+                    } else {
+                        Self::direct_regular_add_state(automaton)
+                    };
+                    self.emit_direct_regular_expr(automaton, inner, current, next)?;
+                    current = next;
+                }
+                if *min == 0 && max == &Some(0) {
+                    automaton.states[from as usize].epsilons.push(to);
+                    return Ok(());
+                }
+                match max {
+                    Some(max) => {
+                        for index in *min..*max {
+                            automaton.states[current as usize].epsilons.push(to);
+                            let next = if index + 1 == *max {
+                                to
+                            } else {
+                                Self::direct_regular_add_state(automaton)
+                            };
+                            self.emit_direct_regular_expr(automaton, inner, current, next)?;
+                            current = next;
+                        }
+                        if *min == *max && current != to {
+                            automaton.states[current as usize].epsilons.push(to);
+                        }
+                    }
+                    None => {
+                        automaton.states[current as usize].epsilons.push(to);
+                        let body_end = Self::direct_regular_add_state(automaton);
+                        self.emit_direct_regular_expr(automaton, inner, current, body_end)?;
+                        automaton.states[body_end as usize].epsilons.push(current);
+                    }
+                }
+                Ok(())
+            }
+            GrammarExpr::SeparatedSequence { .. } | GrammarExpr::ExprNFA(_) => {
+                Err(GlrMaskError::GrammarParse(
+                    "unsupported nested expression in direct regular edge".into(),
+                ))
+            }
+            GrammarExpr::Ref(_)
+            | GrammarExpr::Literal(_)
+            | GrammarExpr::SpecialToken(_)
+            | GrammarExpr::CharClass { .. }
+            | GrammarExpr::RawRegex(_)
+            | GrammarExpr::LexerDfa(_)
+            | GrammarExpr::AnyByte
+            | GrammarExpr::Exclude { .. }
+            | GrammarExpr::Intersect { .. } => {
+                let terminal = self.direct_regular_terminal_id(expr)?;
+                automaton.states[from as usize]
+                    .transitions
+                    .entry(terminal)
+                    .or_default()
+                    .push(to);
+                Ok(())
+            }
+        }
+    }
+
+    fn lower_direct_regular_automaton(
+        &mut self,
+        expr_nfa: &ExprNFA,
+    ) -> Result<DirectRegularAutomaton, GlrMaskError> {
+        let mut automaton = DirectRegularAutomaton {
+            states: vec![DirectRegularState::default(); expr_nfa.nfa.states.len()],
+            start_states: expr_nfa.nfa.start_states.clone(),
+        };
+        for (state_index, state) in expr_nfa.nfa.states.iter().enumerate() {
+            automaton.states[state_index].is_accepting = state.is_accepting;
+            automaton.states[state_index]
+                .epsilons
+                .extend(state.epsilons.iter().copied());
+            for (&label, targets) in &state.transitions {
+                let label_index = usize::try_from(label).map_err(|_| {
+                    GlrMaskError::GrammarParse(format!(
+                        "ExprNFA transition label {label} is negative"
+                    ))
+                })?;
+                let symbol_expr = expr_nfa.symbols.get(label_index).ok_or_else(|| {
+                    GlrMaskError::GrammarParse(format!(
+                        "ExprNFA transition label {label} is not a valid symbol index"
+                    ))
+                })?;
+                for &target in targets {
+                    self.emit_direct_regular_expr(
+                        &mut automaton,
+                        symbol_expr,
+                        state_index as u32,
+                        target,
+                    )?;
+                }
+            }
+        }
+        for state in &mut automaton.states {
+            state.epsilons.sort_unstable();
+            state.epsilons.dedup();
+            for targets in state.transitions.values_mut() {
+                targets.sort_unstable();
+                targets.dedup();
+            }
+        }
+        Ok(automaton)
+    }
+
+    fn emit_expr_nfa_direct_leftlinear(
+        &mut self,
+        lhs: NonterminalID,
+        expr_nfa: &ExprNFA,
+    ) -> Result<(), GlrMaskError> {
+        let direct_automaton = self.lower_direct_regular_automaton(expr_nfa)?;
+        if self.direct_regular_automaton.replace(direct_automaton).is_some() {
+            return Err(GlrMaskError::GrammarParse(
+                "multiple direct regular parser automata in one grammar".into(),
+            ));
+        }
+        let state_count = expr_nfa.nfa.states.len();
+        if state_count == 0 || expr_nfa.nfa.start_states.is_empty() {
+            return Err(GlrMaskError::GrammarParse(
+                "ExprNFA direct emission requires at least one start state".into(),
+            ));
+        }
+        let nts = self.expr_nfa_state_nonterminals(
+            state_count,
+            expr_nfa.nfa.start_states[0] as usize,
+            "expr_nfa_direct",
+            None,
+        )?;
+        let rules_before = self.rules.len();
+        let mut reusable_symbols: Vec<Option<Vec<Symbol>>> = vec![None; expr_nfa.symbols.len()];
+        let mut labeled_edges = 0usize;
+        let mut epsilon_edges = 0usize;
+
+        for &start in &expr_nfa.nfa.start_states {
+            let start = start as usize;
+            if start >= state_count {
+                return Err(GlrMaskError::GrammarParse(format!(
+                    "ExprNFA start state {start} is out of range for {state_count} states"
+                )));
+            }
+            self.rules.push(Rule {
+                lhs: nts[start],
+                rhs: Vec::new(),
+            });
+        }
+
+        for (state_index, state) in expr_nfa.nfa.states.iter().enumerate() {
+            for &target in &state.epsilons {
+                let target = target as usize;
+                if target >= state_count {
+                    return Err(GlrMaskError::GrammarParse(format!(
+                        "ExprNFA epsilon transition from state {state_index} targets out-of-range state {target}"
+                    )));
+                }
+                epsilon_edges += 1;
+                self.rules.push(Rule {
+                    lhs: nts[target],
+                    rhs: vec![Symbol::Nonterminal(nts[state_index])],
+                });
+            }
+            for (&label, targets) in &state.transitions {
+                let label_index = usize::try_from(label).map_err(|_| {
+                    GlrMaskError::GrammarParse(format!(
+                        "ExprNFA transition label {label} is negative"
+                    ))
+                })?;
+                let symbol_expr = expr_nfa.symbols.get(label_index).ok_or_else(|| {
+                    GlrMaskError::GrammarParse(format!(
+                        "ExprNFA transition label {label} is not a valid symbol index"
+                    ))
+                })?;
+                let symbols = if let Some(symbols) = reusable_symbols[label_index].as_ref() {
+                    symbols.clone()
+                } else {
+                    let symbols = self.lower_expr_nfa_transition_symbols(symbol_expr)?;
+                    reusable_symbols[label_index] = Some(symbols.clone());
+                    symbols
+                };
+                for &target in targets {
+                    let target = target as usize;
+                    if target >= state_count {
+                        return Err(GlrMaskError::GrammarParse(format!(
+                            "ExprNFA transition from state {state_index} targets out-of-range state {target}"
+                        )));
+                    }
+                    labeled_edges += 1;
+                    let mut rhs = Vec::with_capacity(1 + symbols.len());
+                    rhs.push(Symbol::Nonterminal(nts[state_index]));
+                    rhs.extend(symbols.iter().cloned());
+                    self.rules.push(Rule {
+                        lhs: nts[target],
+                        rhs,
+                    });
+                }
+            }
+        }
+
+        for (state_index, state) in expr_nfa.nfa.states.iter().enumerate() {
+            if state.is_accepting {
+                self.rules.push(Rule {
+                    lhs,
+                    rhs: vec![Symbol::Nonterminal(nts[state_index])],
+                });
+            }
+        }
+
+        if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+        {
+            eprintln!(
+                "[glrmask/profile][expr_nfa_direct_emit] states={} labeled_edges={} epsilon_edges={} symbols={} emitted_rules={}",
+                state_count,
+                labeled_edges,
+                epsilon_edges,
+                expr_nfa.symbols.len(),
+                self.rules.len() - rules_before,
+            );
+        }
+        Ok(())
+    }
+
     fn emit_expr_nfa(&mut self, lhs: NonterminalID, expr_nfa: &ExprNFA) -> Result<(), GlrMaskError> {
+        if expr_nfa.prefer_direct_nfa_emission {
+            return self.emit_expr_nfa_direct_leftlinear(lhs, expr_nfa);
+        }
         if expr_nfa.is_determinized_and_minimized
             && let Some(dfa) = &expr_nfa.canonical_dfa
             && dfa.is_acyclic()
@@ -2919,11 +3244,12 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
             let GrammarExpr::ExprNFA(expr_nfa) = &rule.expr else {
                 return None;
             };
-            let hits_fast_path = expr_nfa.is_determinized_and_minimized
-                && expr_nfa
-                    .canonical_dfa
-                    .as_ref()
-                    .is_some_and(|dfa| dfa.is_acyclic());
+            let hits_fast_path = expr_nfa.prefer_direct_nfa_emission
+                || (expr_nfa.is_determinized_and_minimized
+                    && expr_nfa
+                        .canonical_dfa
+                        .as_ref()
+                        .is_some_and(|dfa| dfa.is_acyclic()));
             if hits_fast_path {
                 return None;
             }
@@ -3179,6 +3505,7 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
         lexer_partitions,
         residual_isolation_classes: BTreeMap::new(),
         requires_global_terminal_observation,
+        direct_regular_automaton: lowerer.direct_regular_automaton,
     })
 }
 

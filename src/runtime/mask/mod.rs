@@ -40,7 +40,6 @@ const MASK_SINGLE_PATH_DIRECT_INLINE_STACK_DEPTH: usize = 64;
 const MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_STACK_VALUES: usize = 640;
 const MASK_SINGLE_PATH_DIRECT_TWO_PASS_MIN_STATE_COUNT: usize =
     MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_PATHS / 2;
-
 fn single_path_direct_stack_work_within_budget(
     stack_lengths: impl IntoIterator<Item = usize>,
 ) -> bool {
@@ -1171,7 +1170,6 @@ impl<'a> ConstraintState<'a> {
         if parser_dwa.states().is_empty() {
             return false;
         }
-
         buf.fill(0);
 
         let precomputed = &self.constraint.weight_token_dense_masks;
@@ -1282,6 +1280,34 @@ impl<'a> ConstraintState<'a> {
                             Some(&mut *buf),
                             &mut direct_buf_dirty,
                         );
+                    }
+                    if let Some(accept_parts) = self
+                        .constraint
+                        .parser_top_accept_parts
+                        .get(&positive_label)
+                        .or_else(|| {
+                            self.constraint
+                                .parser_top_accept_parts
+                                .get(&DEFAULT_LABEL)
+                        })
+                    {
+                        used_direct_final = true;
+                        let dense = if dense_is_seed {
+                            seed_base.as_ref()
+                        } else {
+                            single_path_acc.as_slice()
+                        };
+                        for accept_weight in accept_parts {
+                            self.merge_single_path_final_weight_to_internal(
+                                accept_weight,
+                                internal_tsid,
+                                dense,
+                                precomputed,
+                                &mut merged,
+                                Some(&mut *buf),
+                                &mut direct_buf_dirty,
+                            );
+                        }
                     }
                 }
                 let fast_transitions = &self.constraint.dwa_fast_transitions[dwa_state_id as usize];
@@ -1855,6 +1881,36 @@ impl<'a> ConstraintState<'a> {
                         direct_buf,
                         direct_buf_dirty,
                     );
+                    if let (Some(profile), Some(start)) = (profile.as_mut(), accumulate_start) {
+                        profile.token_accumulation_ns += elapsed_ns(start);
+                    }
+                }
+                if let Some(accept_parts) = self
+                    .constraint
+                    .parser_top_accept_parts
+                    .get(&positive_label)
+                    .or_else(|| {
+                        self.constraint
+                            .parser_top_accept_parts
+                            .get(&DEFAULT_LABEL)
+                    })
+                {
+                    let accumulate_start = if profile.is_some() {
+                        Some(Instant::now())
+                    } else {
+                        None
+                    };
+                    *direct_buf_used = true;
+                    for accept_weight in accept_parts {
+                        *direct_buf_possible &= self.merge_final_weight_for_gss(
+                            accept_weight,
+                            popped,
+                            precomputed,
+                            merged,
+                            direct_buf,
+                            direct_buf_dirty,
+                        );
+                    }
                     if let (Some(profile), Some(start)) = (profile.as_mut(), accumulate_start) {
                         profile.token_accumulation_ns += elapsed_ns(start);
                     }

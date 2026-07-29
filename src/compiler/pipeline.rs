@@ -59,7 +59,8 @@ use crate::compiler::stages::mapped_artifact::{
 };
 use crate::compiler::stages::parser_dwa::{
     build_parser_dwa_from_terminal_dwa_with_precomputed_templates,
-    try_build_immediate_parser_dwa,
+    try_build_direct_regular_parser_top_accept_parts, try_build_immediate_parser_dwa,
+    try_build_immediate_parser_top_accept_parts,
 };
 use crate::compiler::stages::templates::Templates;
 use crate::compiler::stages::templates::characterize::characterize_terminals_profiled;
@@ -589,6 +590,78 @@ pub(crate) fn build_tokenizer_with_partition_options(
         Some(&residual_isolation_classes),
         Some(adaptive),
     )
+}
+
+#[cfg(test)]
+mod huge_parser_top_accept_collapse_tests {
+    use std::collections::BTreeMap;
+
+    use range_set_blaze::RangeSetBlaze;
+
+    use super::{
+        collapse_huge_parser_top_accept_parts, ParserTopAccept,
+        PARSER_TOP_ACCEPT_COMPILE_UNION_MAX_MISSING_TERMINALS,
+        PARSER_TOP_ACCEPT_COMPILE_UNION_MIN_PARTS,
+    };
+    use crate::ds::weight::Weight;
+
+    fn point_weight(token: u32) -> Weight {
+        Weight::from_per_tsid_token_sets([(
+            0,
+            RangeSetBlaze::from_iter([token..=token]),
+        )])
+    }
+
+    fn top_accept_with_parts(label: i32, count: usize) -> (ParserTopAccept, Weight) {
+        let parts = (0..count as u32).map(point_weight).collect::<Vec<_>>();
+        let expected = Weight::union_all(parts.iter());
+        (
+            ParserTopAccept {
+                combined: BTreeMap::new(),
+                parts: BTreeMap::from([(label, parts)]),
+            },
+            expected,
+        )
+    }
+
+    #[test]
+    fn large_near_universal_top_accept_parts_collapse_with_exact_union() {
+        let count = PARSER_TOP_ACCEPT_COMPILE_UNION_MIN_PARTS;
+        let num_terminals = count + PARSER_TOP_ACCEPT_COMPILE_UNION_MAX_MISSING_TERMINALS;
+        let (mut top_accept, expected) = top_accept_with_parts(11, count);
+
+        let report = collapse_huge_parser_top_accept_parts(&mut top_accept, num_terminals);
+        let combined = top_accept.combined.get(&11).expect("collapsed label");
+        assert!(combined.is_subset(&expected));
+        assert!(expected.is_subset(combined));
+        assert!(!top_accept.parts.contains_key(&11));
+        assert_eq!(report.labels_collapsed, 1);
+        assert_eq!(report.part_refs_after, 0);
+    }
+
+    #[test]
+    fn large_non_universal_top_accept_parts_remain_partitioned() {
+        let count = PARSER_TOP_ACCEPT_COMPILE_UNION_MIN_PARTS;
+        let num_terminals = count + PARSER_TOP_ACCEPT_COMPILE_UNION_MAX_MISSING_TERMINALS + 1;
+        let (mut top_accept, _) = top_accept_with_parts(7, count);
+
+        let report = collapse_huge_parser_top_accept_parts(&mut top_accept, num_terminals);
+        assert!(top_accept.combined.is_empty());
+        assert_eq!(top_accept.parts[&7].len(), count);
+        assert_eq!(report.labels_collapsed, 0);
+        assert_eq!(report.part_refs_after, count);
+    }
+
+    #[test]
+    fn small_near_universal_top_accept_parts_remain_partitioned() {
+        let count = PARSER_TOP_ACCEPT_COMPILE_UNION_MIN_PARTS - 1;
+        let (mut top_accept, _) = top_accept_with_parts(5, count);
+
+        let report = collapse_huge_parser_top_accept_parts(&mut top_accept, count);
+        assert!(top_accept.combined.is_empty());
+        assert_eq!(top_accept.parts[&5].len(), count);
+        assert_eq!(report.labels_collapsed, 0);
+    }
 }
 
 #[cfg(test)]
@@ -1481,15 +1554,22 @@ fn finalize_constraint(mut constraint: Constraint) -> Constraint {
 }
 
 #[derive(Clone, Debug, Default)]
-struct ParserTopAccept(BTreeMap<i32, Weight>);
+struct ParserTopAccept {
+    combined: BTreeMap<i32, Weight>,
+    parts: BTreeMap<i32, Vec<Weight>>,
+}
 
 impl WeightRefs for ParserTopAccept {
     fn weight_refs(&self) -> Vec<&Weight> {
-        self.0.values().collect()
+        let mut weights = self.combined.weight_refs();
+        weights.extend(self.parts.weight_refs());
+        weights
     }
 
     fn weight_refs_mut(&mut self) -> Vec<&mut Weight> {
-        self.0.values_mut().collect()
+        let mut weights = self.combined.weight_refs_mut();
+        weights.extend(self.parts.weight_refs_mut());
+        weights
     }
 }
 
@@ -1505,6 +1585,66 @@ fn build_templates_for_compile(
     f64,
 ) {
     let templates_started_at = Instant::now();
+    if analyzed_grammar.direct_regular_automaton.is_some()
+        && !commit_template_dfas_enabled()
+    {
+        let templates_ms = elapsed_ms(templates_started_at);
+        if compile_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][templates_direct_regular] terminals={} skipped=true reason=no_commit_template_dfas total_ms={:.3}",
+                analyzed_grammar.num_terminals,
+                templates_ms,
+            );
+        }
+        return (
+            Templates::default(),
+            vec![None; analyzed_grammar.num_terminals as usize],
+            templates_ms,
+        );
+    }
+    if analyzed_grammar.direct_regular_automaton.is_some()
+        && let Some(templates) =
+            Templates::from_direct_regular_table(table, analyzed_grammar.num_terminals)
+    {
+        let mut template_dfas_by_terminal = vec![None; analyzed_grammar.num_terminals as usize];
+        let commit_template_dfas_enabled = commit_template_dfas_enabled();
+        let mut commit_template_dfas_built = 0usize;
+        if commit_template_dfas_enabled {
+            for (&terminal, dfa) in &templates.by_terminal {
+                if let Some(slot) = template_dfas_by_terminal.get_mut(terminal as usize) {
+                    let commit_dfa = specialize_template_dfa_defaults_for_commit_split_input(dfa);
+                    let split_commit_dfas = split_commit_template_dfas(&commit_dfa);
+                    *slot = Some(Arc::new(split_commit_dfas));
+                    commit_template_dfas_built += 1;
+                }
+            }
+        }
+        let dfa_states = templates
+            .by_terminal
+            .values()
+            .map(|dfa| dfa.states.len())
+            .sum::<usize>();
+        let dfa_transitions = templates
+            .by_terminal
+            .values()
+            .flat_map(|dfa| dfa.states.iter())
+            .map(|state| state.transitions.len())
+            .sum::<usize>();
+        let templates_ms = elapsed_ms(templates_started_at);
+        if compile_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][templates_direct_regular] terminals={} dfa_states={} dfa_transitions={} commit_template_dfas_enabled={} commit_template_dfas_built={} total_ms={:.3}",
+                templates.by_terminal.len(),
+                dfa_states,
+                dfa_transitions,
+                commit_template_dfas_enabled,
+                commit_template_dfas_built,
+                templates_ms,
+            );
+        }
+        return (templates, template_dfas_by_terminal, templates_ms);
+    }
+
     let (characterizations, characterization_profile) =
         characterize_terminals_profiled(table, analyzed_grammar);
     let (templates, template_profile) =
@@ -1770,6 +1910,90 @@ fn build_parser_dwa_for_terminal_family(
     Some(MappedArtifact::new(parser_dwa, internal_ids))
 }
 
+fn merge_parser_top_accept(mut left: ParserTopAccept, right: ParserTopAccept) -> ParserTopAccept {
+    for (label, weight) in right.combined {
+        left.combined
+            .entry(label)
+            .and_modify(|existing| *existing = existing.union(&weight))
+            .or_insert(weight);
+    }
+    for (label, mut parts) in right.parts {
+        left.parts.entry(label).or_default().append(&mut parts);
+    }
+    left
+}
+
+// Directly replaying a large acceptance-part list is linear in the number of
+// terminal-family certificates. Collapse only near-universal lists: this catches
+// broad parser rows while avoiding the expensive bulk union of ordinary rows.
+const PARSER_TOP_ACCEPT_COMPILE_UNION_MIN_PARTS: usize = 128;
+const PARSER_TOP_ACCEPT_COMPILE_UNION_MAX_MISSING_TERMINALS: usize = 5;
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ParserTopAcceptCollapseReport {
+    labels_collapsed: usize,
+    part_refs_before: usize,
+    part_refs_after: usize,
+    max_parts_before: usize,
+    unique_unions_built: usize,
+}
+
+fn collapse_huge_parser_top_accept_parts(
+    top_accept: &mut ParserTopAccept,
+    num_terminals: usize,
+) -> ParserTopAcceptCollapseReport {
+    let mut report = ParserTopAcceptCollapseReport {
+        part_refs_before: top_accept.parts.values().map(Vec::len).sum(),
+        max_parts_before: top_accept.parts.values().map(Vec::len).max().unwrap_or(0),
+        ..ParserTopAcceptCollapseReport::default()
+    };
+    let mut union_cache = rustc_hash::FxHashMap::<Vec<usize>, Weight>::default();
+    let parts = std::mem::take(&mut top_accept.parts);
+    for (label, mut weights) in parts {
+        weights.sort_unstable_by_key(Weight::ptr_key);
+        weights.dedup_by_key(|weight| weight.ptr_key());
+        let near_universal = weights.len()
+            .saturating_add(PARSER_TOP_ACCEPT_COMPILE_UNION_MAX_MISSING_TERMINALS)
+            >= num_terminals;
+        if weights.len() < PARSER_TOP_ACCEPT_COMPILE_UNION_MIN_PARTS || !near_universal {
+            report.part_refs_after += weights.len();
+            top_accept.parts.insert(label, weights);
+            continue;
+        }
+        let key = weights.iter().map(Weight::ptr_key).collect::<Vec<_>>();
+        let union = if let Some(cached) = union_cache.get(&key) {
+            cached.clone()
+        } else {
+            let union = Weight::union_all_direct(weights.iter());
+            union_cache.insert(key, union.clone());
+            report.unique_unions_built += 1;
+            union
+        };
+        top_accept
+            .combined
+            .entry(label)
+            .and_modify(|existing| *existing = existing.union(&union))
+            .or_insert(union);
+        report.labels_collapsed += 1;
+    }
+    report
+}
+
+fn reconcile_parser_top_accept_parts(
+    mut inputs: Vec<MappedArtifact<ParserTopAccept>>,
+) -> Option<MappedArtifact<ParserTopAccept>> {
+    if inputs.is_empty() {
+        return None;
+    }
+    inputs.sort_unstable_by_key(|mapped| std::cmp::Reverse(mapped.id_map().num_tsids()));
+    let mut merged = inputs.remove(0);
+    for next in inputs {
+        let ((left, right), id_map) = merged.pair_forced_common(next).into_parts();
+        merged = MappedArtifact::new(merge_parser_top_accept(left, right), id_map);
+    }
+    Some(merged)
+}
+
 fn build_and_merge_parser_dwa_families(
     terminal_dwas: &TerminalDwaFamilies,
     table: &GLRTable,
@@ -1779,57 +2003,229 @@ fn build_and_merge_parser_dwa_families(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
 ) -> MappedParserDwa {
+    let total_started_at = Instant::now();
     let collapse_immediate_acceptance = !tokenizer.has_epsilon_transitions();
+    let direct_l1_parts = grammar
+        .direct_regular_automaton
+        .as_ref()
+        .and_then(|_| terminal_dwas.l1.as_ref())
+        .and_then(|family| {
+            try_build_immediate_parser_top_accept_parts(family.artifact(), grammar, table).map(
+                |parts| {
+                    MappedArtifact::new(
+                        ParserTopAccept {
+                            combined: BTreeMap::new(),
+                            parts,
+                        },
+                        family.id_map().clone(),
+                    )
+                },
+            )
+        });
+    let direct_l2p_parts = grammar
+        .direct_regular_automaton
+        .as_ref()
+        .and_then(|_| terminal_dwas.l2p.as_ref())
+        .and_then(|family| {
+            try_build_direct_regular_parser_top_accept_parts(
+                family.artifact(),
+                grammar,
+                table,
+            )
+            .map(|parts| {
+                MappedArtifact::new(
+                    ParserTopAccept {
+                        combined: BTreeMap::new(),
+                        parts,
+                    },
+                    family.id_map().clone(),
+                )
+            })
+        });
+    let direct_special_parts = grammar
+        .direct_regular_automaton
+        .as_ref()
+        .and_then(|_| terminal_dwas.special.as_ref())
+        .and_then(|family| {
+            try_build_direct_regular_parser_top_accept_parts(
+                family.artifact(),
+                grammar,
+                table,
+            )
+            .map(|parts| {
+                MappedArtifact::new(
+                    ParserTopAccept {
+                        combined: BTreeMap::new(),
+                        parts,
+                    },
+                    family.id_map().clone(),
+                )
+            })
+        });
+    let use_direct_l1_parts = direct_l1_parts.is_some();
+    let use_direct_l2p_parts = direct_l2p_parts.is_some();
+    let use_direct_special_parts = direct_special_parts.is_some();
+    if grammar.direct_regular_automaton.is_some() && templates.by_terminal.is_empty() {
+        assert_eq!(
+            terminal_dwas.l1.is_some(),
+            use_direct_l1_parts,
+            "direct-regular L1 family must have an exact direct acceptance path",
+        );
+        assert_eq!(
+            terminal_dwas.l2p.is_some(),
+            use_direct_l2p_parts,
+            "direct-regular L2P family must have an exact direct acceptance path",
+        );
+        assert_eq!(
+            terminal_dwas.special.is_some(),
+            use_direct_special_parts,
+            "direct-regular special-token family must have an exact direct acceptance path",
+        );
+    }
+
     let (l1_parser, l2p_parser) = rayon::join(
         || {
-            build_parser_dwa_for_terminal_family(
-                "l1",
-                terminal_dwas.l1.as_ref(),
-                table,
-                grammar,
-                &templates,
-                vocab,
-                collapse_immediate_acceptance,
-            )
+            (!use_direct_l1_parts)
+                .then(|| {
+                    build_parser_dwa_for_terminal_family(
+                        "l1",
+                        terminal_dwas.l1.as_ref(),
+                        table,
+                        grammar,
+                        &templates,
+                        vocab,
+                        collapse_immediate_acceptance,
+                    )
+                })
+                .flatten()
         },
         || {
+            (!use_direct_l2p_parts)
+                .then(|| {
+                    build_parser_dwa_for_terminal_family(
+                        "l2p",
+                        terminal_dwas.l2p.as_ref(),
+                        table,
+                        grammar,
+                        &templates,
+                        vocab,
+                        collapse_immediate_acceptance,
+                    )
+                })
+                .flatten()
+        },
+    );
+    let special_parser = (!use_direct_special_parts)
+        .then(|| {
             build_parser_dwa_for_terminal_family(
-                "l2p",
-                terminal_dwas.l2p.as_ref(),
+                "special",
+                terminal_dwas.special.as_ref(),
                 table,
                 grammar,
                 &templates,
                 vocab,
                 collapse_immediate_acceptance,
             )
-        },
-    );
-    let special_parser = build_parser_dwa_for_terminal_family(
-        "special",
-        terminal_dwas.special.as_ref(),
-        table,
-        grammar,
-        &templates,
-        vocab,
-        collapse_immediate_acceptance,
-    );
+        })
+        .flatten();
     let parser_dwas: Vec<MappedArtifact<DWA>> = l1_parser
         .into_iter()
         .chain(l2p_parser)
         .chain(special_parser)
         .collect();
+    let direct_parts = reconcile_parser_top_accept_parts(
+        direct_l1_parts
+            .into_iter()
+            .chain(direct_l2p_parts)
+            .chain(direct_special_parts)
+            .collect(),
+    );
     let max_token_id = terminal_dwas
         .max_original_token_id()
         .unwrap_or_else(|| vocab.max_token_id())
         .max(vocab.max_token_id());
-    let (mapped_dwa, top_accept) =
+
+    if let Some(mapped_parts) = direct_parts {
+        let (dwa, top_accept, id_map, parts_first) = if parser_dwas.is_empty() {
+            let (top_accept, id_map) = mapped_parts.into_parts();
+            (
+                DWA::new(id_map.num_tsids(), id_map.max_internal_token_id()),
+                top_accept,
+                id_map,
+                true,
+            )
+        } else {
+            let mapped_dwa =
+                crate::compiler::stages::id_map_and_terminal_dwa::merge::merge_mapped_parser_dwas(
+                    parser_dwas,
+                    tokenizer.num_states() as usize,
+                    max_token_id,
+                );
+            let parts_first = mapped_parts.id_map().num_tsids() > mapped_dwa.id_map().num_tsids();
+            if parts_first {
+                let ((top_accept, dwa), id_map) =
+                    mapped_parts.pair_forced_common(mapped_dwa).into_parts();
+                (dwa, top_accept, id_map, true)
+            } else {
+                let ((dwa, top_accept), id_map) =
+                    mapped_dwa.pair_forced_common(mapped_parts).into_parts();
+                (dwa, top_accept, id_map, false)
+            }
+        };
+        let mut top_accept = top_accept;
+        let collapse_started_at = Instant::now();
+        let collapse_report = collapse_huge_parser_top_accept_parts(
+            &mut top_accept,
+            grammar.num_terminals as usize,
+        );
+        let collapse_ms = elapsed_ms(collapse_started_at);
+        if compile_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][parser_dwa_merge] mode=top_accept_parts l1_direct={} l2p_direct={} special_direct={} id_order={} labels={} part_refs={} unique_part_weights={} huge_collapsed_labels={} huge_part_refs_before={} huge_part_refs_after={} huge_max_parts_before={} huge_unique_unions={} huge_collapse_ms={:.3} states={} transitions={} total_ms={:.3}",
+                use_direct_l1_parts,
+                use_direct_l2p_parts,
+                use_direct_special_parts,
+                if parts_first { "parts" } else { "primary" },
+                top_accept.parts.len(),
+                top_accept.parts.values().map(Vec::len).sum::<usize>(),
+                top_accept
+                    .parts
+                    .values()
+                    .flatten()
+                    .map(Weight::ptr_key)
+                    .collect::<rustc_hash::FxHashSet<_>>()
+                    .len(),
+                collapse_report.labels_collapsed,
+                collapse_report.part_refs_before,
+                collapse_report.part_refs_after,
+                collapse_report.max_parts_before,
+                collapse_report.unique_unions_built,
+                collapse_ms,
+                dwa.num_states(),
+                dwa.num_transitions(),
+                total_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        return MappedArtifact::new((dwa, top_accept), id_map);
+    }
+
+    let (mapped_dwa, combined) =
         crate::compiler::stages::id_map_and_terminal_dwa::merge::merge_mapped_parser_dwas_with_top_accept(
             parser_dwas,
             tokenizer.num_states() as usize,
             max_token_id,
         );
     let (dwa, id_map) = mapped_dwa.into_parts();
-    MappedArtifact::new((dwa, ParserTopAccept(top_accept)), id_map)
+    MappedArtifact::new(
+        (
+            dwa,
+            ParserTopAccept {
+                combined,
+                parts: BTreeMap::new(),
+            },
+        ),
+        id_map,
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -3098,7 +3494,13 @@ fn compile_prepared_with_profile_and_table_construction(
                 joint_interned_range_count_for_artifacts(parser_dwa_artifact, possible_matches_artifact),
             )
         };
-        let (parser_dwa, ParserTopAccept(parser_top_accept)) = parser_dwa.into_artifact();
+        let (
+            parser_dwa,
+            ParserTopAccept {
+                combined: parser_top_accept,
+                parts: parser_top_accept_parts,
+            },
+        ) = parser_dwa.into_artifact();
 
         let internal_token_bytes_started_at = Instant::now();
         let internal_token_bytes = cpm::build_internal_token_bytes_from_groups(
@@ -3137,6 +3539,7 @@ fn compile_prepared_with_profile_and_table_construction(
         let constraint = finalize_constraint(Constraint {
             parser_dwa,
             parser_top_accept,
+            parser_top_accept_parts,
             table,
             terminal_display_names: analyzed_grammar.terminal_display_names.clone(),
             tokenizer,

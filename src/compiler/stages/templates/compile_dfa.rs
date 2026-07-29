@@ -13,11 +13,9 @@ use crate::automata::unweighted_u32::minimize_acyclic::minimize_acyclic as minim
 use crate::automata::unweighted_u32::nfa::NFA;
 use crate::automata::weighted::nwa::{NWA, NWAState};
 use crate::compiler::glr::labels::{
-    DEFAULT_LABEL,
-    encode_negative_label,
-    encode_positive_label,
-    is_negative_label,
+    DEFAULT_LABEL, encode_negative_label, encode_positive_label, is_negative_label,
 };
+use crate::compiler::glr::table::{Action, GLRTable};
 use crate::compiler::stages::templates::characterize::{StackMatcher, TerminalCharacterization};
 use crate::ds::weight::Weight;
 use crate::grammar::flat::TerminalID;
@@ -506,6 +504,80 @@ pub struct Templates {
 }
 
 impl Templates {
+    /// Build exact templates for a constant-depth direct-regular parser table.
+    ///
+    /// Every terminal action replaces the current parser top with one of a
+    /// finite set of targets. Its template language is therefore exactly the
+    /// set of two-label words `old_top, -new_top`. Construct that DFA directly,
+    /// sharing middle states by target set, instead of passing through generic
+    /// stack-effect characterization, NFA construction, determinization and
+    /// minimization.
+    pub(crate) fn from_direct_regular_table(
+        table: &GLRTable,
+        num_terminals: u32,
+    ) -> Option<Self> {
+        let mut targets_by_terminal = (0..num_terminals)
+            .map(|_| BTreeMap::<u32, Vec<u32>>::new())
+            .collect::<Vec<_>>();
+        for (source, row) in table.action.iter().enumerate() {
+            for (terminal, action) in row {
+                if terminal >= num_terminals {
+                    continue;
+                }
+                let targets = targets_by_terminal[terminal as usize]
+                    .entry(source as u32)
+                    .or_default();
+                match action {
+                    Action::Shift(target, true) => targets.push(*target),
+                    Action::StackShifts(shifts) => {
+                        for shift in shifts {
+                            if shift.pop != 1 || shift.pushes.len() != 1 {
+                                return None;
+                            }
+                            targets.push(shift.pushes[0]);
+                        }
+                    }
+                    _ => return None,
+                }
+            }
+        }
+
+        let mut by_terminal = BTreeMap::new();
+        let mut by_terminal_nwa = BTreeMap::new();
+        for (terminal, targets_by_source) in targets_by_terminal.into_iter().enumerate() {
+            let terminal = terminal as u32;
+            let mut dfa = UnweightedDfa::new();
+            if !targets_by_source.is_empty() {
+                let accept = dfa.add_state();
+                dfa.set_accepting(accept, true);
+                let mut middle_by_targets = BTreeMap::<Vec<u32>, u32>::new();
+                for (source, mut targets) in targets_by_source {
+                    targets.sort_unstable();
+                    targets.dedup();
+                    let middle = if let Some(&middle) = middle_by_targets.get(&targets) {
+                        middle
+                    } else {
+                        let middle = dfa.add_state();
+                        for &target in &targets {
+                            dfa.add_transition(middle, encode_negative_label(target), accept);
+                        }
+                        middle_by_targets.insert(targets, middle);
+                        middle
+                    };
+                    dfa.add_transition(dfa.start_state, encode_positive_label(source), middle);
+                }
+            }
+            let skeleton = dfa_to_nwa_skeleton(&dfa);
+            by_terminal.insert(terminal, dfa);
+            by_terminal_nwa.insert(terminal, skeleton);
+        }
+
+        Some(Self {
+            by_terminal,
+            by_terminal_nwa,
+        })
+    }
+
     pub(crate) fn from_characterizations(
         characterizations: &BTreeMap<TerminalID, TerminalCharacterization>,
     ) -> Self {
@@ -1002,4 +1074,79 @@ fn build_template_nfa(characterization: &TerminalCharacterization) -> NFA {
     }
 
     nfa
+}
+
+#[cfg(test)]
+mod direct_regular_tests {
+    use super::{find_dfa_language_mismatch, nwa_skeleton_matches_dfa, Templates};
+    use crate::compiler::glr::analysis::AnalyzedGrammar;
+    use crate::compiler::glr::table::testing::build_test_table;
+    use crate::compiler::glr::table::{Action, StackShift};
+    use crate::compiler::stages::templates::characterize::characterize_terminals;
+    use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
+
+    #[test]
+    fn direct_regular_templates_match_generic_compilation() {
+        let table = build_test_table(
+            3,
+            2,
+            &[
+                &[(0, Action::Shift(1, true))],
+                &[
+                    (
+                        0,
+                        Action::StackShifts(vec![
+                            StackShift {
+                                pop: 1,
+                                pushes: vec![1],
+                            },
+                            StackShift {
+                                pop: 1,
+                                pushes: vec![2],
+                            },
+                        ]),
+                    ),
+                    (1, Action::Shift(2, true)),
+                ],
+                &[(1, Action::Shift(0, true))],
+            ],
+            &[&[], &[], &[]],
+        );
+        let grammar = AnalyzedGrammar::from_grammar_def(&GrammarDef {
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0)],
+            }],
+            start: 0,
+            terminals: vec![
+                Terminal::Literal {
+                    id: 0,
+                    bytes: b"a".to_vec(),
+                },
+                Terminal::Literal {
+                    id: 1,
+                    bytes: b"b".to_vec(),
+                },
+            ],
+            ..GrammarDef::default()
+        });
+
+        let generic = Templates::from_characterizations(&characterize_terminals(&table, &grammar));
+        let direct = Templates::from_direct_regular_table(&table, grammar.num_terminals)
+            .expect("table has only direct-regular replace-top actions");
+
+        for terminal in 0..grammar.num_terminals {
+            let generic_dfa = generic.by_terminal.get(&terminal).unwrap();
+            let direct_dfa = direct.by_terminal.get(&terminal).unwrap();
+            assert_eq!(
+                find_dfa_language_mismatch(generic_dfa, direct_dfa),
+                None,
+                "template language mismatch for terminal {terminal}",
+            );
+            assert!(nwa_skeleton_matches_dfa(
+                direct_dfa,
+                direct.by_terminal_nwa.get(&terminal).unwrap(),
+            ));
+        }
+    }
 }

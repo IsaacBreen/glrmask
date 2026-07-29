@@ -381,7 +381,7 @@ fn skip_max_length_for_partition(partition_label: &str) -> bool {
 }
 
 fn skip_l1_max_length_for_partition(partition_label: &str) -> bool {
-    if matches!(partition_label, "p4" | "p6") {
+    if matches!(partition_label, "p1" | "p4" | "p6") {
         return true;
     }
     static SKIPPED_L1_PARTITIONS: OnceLock<Vec<String>> = OnceLock::new();
@@ -439,16 +439,24 @@ fn should_skip_max_length_for_partition(
         || (projected_by_global && initial_state_count <= 8192)
 }
 
-fn fast_projected_l1_id_map_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
+fn fast_projected_l1_id_map_override() -> Option<bool> {
+    static OVERRIDE: OnceLock<Option<bool>> = OnceLock::new();
+    *OVERRIDE.get_or_init(|| {
         std::env::var("GLRMASK_L1_FAST_PROJECTED_ID_MAP")
+            .ok()
             .map(|value| {
                 let trimmed = value.trim();
-                trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
+                trimmed.is_empty()
+                    || !matches!(
+                        trimmed.to_ascii_lowercase().as_str(),
+                        "0" | "false" | "no" | "off"
+                    )
             })
-            .unwrap_or(true)
     })
+}
+
+fn fast_projected_l1_id_map_enabled() -> bool {
+    fast_projected_l1_id_map_override().unwrap_or(true)
 }
 
 pub(crate) fn fast_projected_l1_id_map_max_tsids() -> usize {
@@ -462,7 +470,18 @@ pub(crate) fn fast_projected_l1_id_map_max_tsids() -> usize {
 }
 
 #[inline]
+fn prefer_exact_profiles_over_projected_l1(
+    partition_label: &str,
+    vocab_count: usize,
+    projected_states: usize,
+) -> bool {
+    partition_label == "p2" && vocab_count >= 50_000 && projected_states >= 1_024
+}
+
+#[inline]
 fn should_use_fast_projected_l1_id_map(
+    partition_label: &str,
+    vocab_count: usize,
     initial_state_map: Option<&ManyToOneIdMap>,
     num_dfa_states: usize,
 ) -> bool {
@@ -473,9 +492,28 @@ fn should_use_fast_projected_l1_id_map(
         return false;
     };
     let projected_states = map.num_internal_ids() as usize;
-    map.original_to_internal.len() == num_dfa_states
+    let structurally_eligible = map.original_to_internal.len() == num_dfa_states
         && projected_states < num_dfa_states
-        && projected_states <= fast_projected_l1_id_map_max_tsids()
+        && projected_states <= fast_projected_l1_id_map_max_tsids();
+    if !structurally_eligible {
+        return false;
+    }
+
+    // A large p2 vocabulary is the measured crossover where retaining the
+    // projected classes merely defers exact whole-token equivalence to terminal
+    // materialisation. Running the exact classifier here produces reusable walk
+    // profiles and avoids a second ~40 ms per-state assembly pass. An explicit
+    // true environment override still forces the projected path for diagnostics.
+    if fast_projected_l1_id_map_override().is_none()
+        && prefer_exact_profiles_over_projected_l1(
+            partition_label,
+            vocab_count,
+            projected_states,
+        )
+    {
+        return false;
+    }
+    true
 }
 
 /// Hash contribution of a single (start, end) range.
@@ -1713,7 +1751,12 @@ fn build_l1_id_map<'a>(
     };
     let projected_by_global = initial_state_map.is_some() && states.len() < num_dfa_states;
 
-    if should_use_fast_projected_l1_id_map(initial_state_map, num_dfa_states) {
+    if should_use_fast_projected_l1_id_map(
+        partition_label,
+        vocab.entries.len(),
+        initial_state_map,
+        num_dfa_states,
+    ) {
         let token_bytes: Vec<&[u8]> = vocab
             .entries
             .values()
@@ -4620,7 +4663,6 @@ fn build_l1_terminal_dwa(
     // Each (terminal_signature, tsid) pair is unique across start groups since TSIDs
     // partition deterministically into start groups. We exploit this by using
     // Arc from the start and skipping merging entirely.
-    let start_states_list: Vec<(&u32, &Vec<u32>)> = states_to_initial_tsids.iter().collect();
     let empty_token_indices = token_buckets.empty_token_indices.as_slice();
     let token_indices_by_first_byte = &token_buckets.token_indices_by_first_byte;
     let suffix_lcps_by_first_byte = &token_buckets.suffix_lcps_by_first_byte;
@@ -4966,6 +5008,9 @@ fn build_l1_terminal_dwa(
     }
 
     // Phase 2: For each start_state, collect walk_cache references per
+
+    let start_states_list: Vec<(&u32, &Vec<u32>)> =
+        states_to_initial_tsids.iter().collect();
 
     // Pre-build empty token ranges (shared across all start_states).
     let empty_token_ranges: Vec<(u32, u32)> = {
@@ -5898,6 +5943,14 @@ struct L1TerminalBuildProfile {
 mod generic_nfa_tests {
     use super::*;
     use crate::automata::lexer::tokenizer::arbitrary_epsilon_l1_test_tokenizer;
+
+    #[test]
+    fn large_p2_projection_prefers_exact_profile_reuse() {
+        assert!(prefer_exact_profiles_over_projected_l1("p2", 82_270, 3_780));
+        assert!(!prefer_exact_profiles_over_projected_l1("p2", 49_999, 3_780));
+        assert!(!prefer_exact_profiles_over_projected_l1("p2", 82_270, 1_023));
+        assert!(!prefer_exact_profiles_over_projected_l1("p1", 82_270, 3_780));
+    }
 
     #[test]
     fn locally_derived_subset_order_matches_standalone_order() {

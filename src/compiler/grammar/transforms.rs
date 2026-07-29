@@ -202,6 +202,11 @@ pub(crate) fn compact_unused_terminals(grammar: &mut GrammarDef) {
     if let Some(ignore_terminal) = grammar.ignore_terminal {
         used.insert(ignore_terminal);
     }
+    if let Some(automaton) = &grammar.direct_regular_automaton {
+        for state in &automaton.states {
+            used.extend(state.transitions.keys().copied());
+        }
+    }
 
     let mut remap = BTreeMap::<TerminalID, TerminalID>::new();
     let mut compacted = Vec::with_capacity(used.len());
@@ -234,6 +239,26 @@ pub(crate) fn compact_unused_terminals(grammar: &mut GrammarDef) {
                 *terminal_id = *remap
                     .get(terminal_id)
                     .expect("used terminal must have been assigned a compacted id");
+            }
+        }
+    }
+
+    if let Some(automaton) = &mut grammar.direct_regular_automaton {
+        for state in &mut automaton.states {
+            let old = std::mem::take(&mut state.transitions);
+            for (old_terminal, targets) in old {
+                let new_terminal = *remap
+                    .get(&old_terminal)
+                    .expect("direct regular terminal must have been assigned a compacted id");
+                state
+                    .transitions
+                    .entry(new_terminal)
+                    .or_default()
+                    .extend(targets);
+            }
+            for targets in state.transitions.values_mut() {
+                targets.sort_unstable();
+                targets.dedup();
             }
         }
     }

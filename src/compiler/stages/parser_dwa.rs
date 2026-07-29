@@ -19,7 +19,9 @@ use crate::compiler::glr::table::{
 use crate::grammar::flat::TerminalID;
 use crate::compiler::stages::equiv_types::InternalIdMap;
 use crate::compiler::stages::id_map_and_terminal_dwa::types::compile_profile_enabled;
-use crate::compiler::stages::resolve_negatives::resolve_negative_codes_in_nwa;
+use crate::compiler::stages::resolve_negatives::{
+    apply_finality_fixpoint, resolve_negative_codes_in_nwa,
+};
 use crate::compiler::stages::templates::Templates;
 use crate::ds::bitset::BitSet;
 use crate::ds::weight::{ScopedWeightOpCache, Weight};
@@ -552,14 +554,10 @@ fn top_row_action_is_unconditionally_applicable(_action: &Action) -> bool {
     true
 }
 
-fn immediate_acceptance_certificates(
+fn immediate_completion_weights_by_terminal(
     terminal_automaton: &TerminalAutomaton,
     grammar: &AnalyzedGrammar,
-    table: &GLRTable,
-) -> Vec<Weight> {
-    if table.admission_policy != AdmissionPolicy::RowPresenceExact {
-        return vec![Weight::empty(); table.num_states as usize];
-    }
+) -> BTreeMap<TerminalID, Weight> {
     let mut complete_by_terminal = BTreeMap::<TerminalID, Weight>::new();
     for start_state in terminal_automaton.start_states() {
         for (target, bundle) in
@@ -581,35 +579,217 @@ fn immediate_acceptance_certificates(
             }
         }
     }
+    complete_by_terminal
+}
 
-    let mut cache = FxHashMap::<Vec<TerminalID>, Weight>::default();
+fn immediate_acceptance_certificate_parts(
+    terminal_automaton: &TerminalAutomaton,
+    grammar: &AnalyzedGrammar,
+    table: &GLRTable,
+) -> BTreeMap<i32, Vec<Weight>> {
+    if table.admission_policy != AdmissionPolicy::RowPresenceExact {
+        return BTreeMap::new();
+    }
+    let complete_by_terminal = immediate_completion_weights_by_terminal(terminal_automaton, grammar);
     table
         .action
         .iter()
-        .map(|row| {
-            let terminals: Vec<TerminalID> = row
+        .enumerate()
+        .filter_map(|(parser_top, row)| {
+            let parts = row
                 .iter()
                 .filter_map(|(terminal, action)| {
-                    (top_row_action_is_unconditionally_applicable(action)
-                        && complete_by_terminal.contains_key(&terminal))
-                    .then_some(terminal)
+                    (top_row_action_is_unconditionally_applicable(action))
+                        .then(|| complete_by_terminal.get(&terminal).cloned())
+                        .flatten()
                 })
-                .collect();
-            if terminals.is_empty() {
-                return Weight::empty();
-            }
-            if let Some(weight) = cache.get(&terminals) {
-                return weight.clone();
-            }
-            let weight = Weight::union_all(
-                terminals
-                    .iter()
-                    .filter_map(|terminal| complete_by_terminal.get(terminal)),
-            );
-            cache.insert(terminals, weight.clone());
-            weight
+                .collect::<Vec<_>>();
+            (!parts.is_empty()).then_some((parser_top as i32, parts))
         })
         .collect()
+}
+
+fn immediate_acceptance_certificates(
+    terminal_automaton: &TerminalAutomaton,
+    grammar: &AnalyzedGrammar,
+    table: &GLRTable,
+) -> Vec<Weight> {
+    let parts = immediate_acceptance_certificate_parts(terminal_automaton, grammar, table);
+    (0..table.num_states)
+        .map(|parser_top| {
+            parts
+                .get(&(parser_top as i32))
+                .map(|weights| Weight::union_all(weights.iter()))
+                .unwrap_or_else(Weight::empty)
+        })
+        .collect()
+}
+
+pub(crate) fn try_build_immediate_parser_top_accept_parts(
+    terminal_automaton: &TerminalAutomaton,
+    grammar: &AnalyzedGrammar,
+    table: &GLRTable,
+) -> Option<BTreeMap<i32, Vec<Weight>>> {
+    terminal_automaton_is_immediate_completion(terminal_automaton, grammar, table)
+        .then(|| immediate_acceptance_certificate_parts(terminal_automaton, grammar, table))
+}
+
+fn direct_regular_action_targets(action: &Action) -> Option<SmallVec<[u32; 4]>> {
+    match action {
+        Action::Shift(target, true) => Some(SmallVec::from_slice(&[*target])),
+        Action::StackShifts(shifts) => {
+            let mut targets = SmallVec::<[u32; 4]>::new();
+            for shift in shifts {
+                if shift.pop != 1 || shift.pushes.len() != 1 {
+                    return None;
+                }
+                targets.push(shift.pushes[0]);
+            }
+            targets.sort_unstable();
+            targets.dedup();
+            (!targets.is_empty()).then_some(targets)
+        }
+        _ => None,
+    }
+}
+
+/// Compute exact token acceptance for a constant-depth direct-regular parser by
+/// solving the weighted product of terminal-automaton states and parser-top
+/// states. All product edges are epsilon edges because the sole parser-stack
+/// symbol has already selected the product's parser-top coordinate.
+pub(crate) fn try_build_direct_regular_parser_top_accept_parts(
+    terminal_automaton: &TerminalAutomaton,
+    grammar: &AnalyzedGrammar,
+    table: &GLRTable,
+) -> Option<BTreeMap<i32, Vec<Weight>>> {
+    if grammar.direct_regular_automaton.is_none()
+        || table.admission_policy != AdmissionPolicy::RowPresenceExact
+        || table.num_states == 0
+    {
+        return None;
+    }
+    let started_at = Instant::now();
+    let parser_state_count = table.num_states as usize;
+    let terminal_state_count = terminal_automaton.num_states();
+    if terminal_state_count == 0 {
+        return None;
+    }
+
+    let mut parser_sources_by_terminal =
+        vec![Vec::<(u32, SmallVec<[u32; 4]>)>::new(); grammar.num_terminals as usize];
+    for (source, row) in table.action.iter().enumerate() {
+        for (terminal, action) in row {
+            if terminal >= grammar.num_terminals {
+                continue;
+            }
+            let targets = direct_regular_action_targets(action)?;
+            if targets.iter().any(|&target| target >= table.num_states) {
+                return None;
+            }
+            parser_sources_by_terminal[terminal as usize].push((source as u32, targets));
+        }
+    }
+
+    let product_state = |terminal_state: usize, parser_state: u32| -> u32 {
+        (terminal_state * parser_state_count + parser_state as usize) as u32
+    };
+    let product_state_count = terminal_state_count.checked_mul(parser_state_count)?;
+    let mut product = NWA::new(0, 0);
+    for _ in 0..product_state_count {
+        product.add_state();
+    }
+
+    for terminal_state in 0..terminal_state_count {
+        if let Some(final_weight) = terminal_state_final_weight(terminal_automaton, terminal_state)
+            && !final_weight.is_empty()
+        {
+            for parser_state in 0..table.num_states {
+                product.set_final_weight(
+                    product_state(terminal_state, parser_state),
+                    final_weight.clone(),
+                );
+            }
+        }
+
+        for (target, weight) in
+            terminal_state_epsilon_branches(terminal_automaton, terminal_state)
+        {
+            if weight.is_empty() || target as usize >= terminal_state_count {
+                continue;
+            }
+            for parser_state in 0..table.num_states {
+                product.add_epsilon(
+                    product_state(terminal_state, parser_state),
+                    product_state(target as usize, parser_state),
+                    weight.clone(),
+                );
+            }
+        }
+
+        for (target, bundle) in
+            group_terminal_edges_by_target(terminal_automaton, grammar, terminal_state as u32)
+        {
+            if target as usize >= terminal_state_count {
+                return None;
+            }
+            for (terminal, edge_weight) in bundle {
+                if edge_weight.is_empty() {
+                    continue;
+                }
+                for (source, parser_targets) in
+                    &parser_sources_by_terminal[terminal as usize]
+                {
+                    let from = product_state(terminal_state, *source);
+                    for &parser_target in parser_targets {
+                        product.add_epsilon(
+                            from,
+                            product_state(target as usize, parser_target),
+                            edge_weight.clone(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    apply_finality_fixpoint(&mut product);
+    let terminal_starts = terminal_automaton.start_states();
+    let mut parts = BTreeMap::new();
+    for parser_top in 0..table.num_states {
+        let weights = terminal_starts
+            .iter()
+            .filter_map(|&terminal_start| {
+                product
+                    .states()
+                    .get(product_state(terminal_start as usize, parser_top) as usize)
+                    .and_then(|state| state.final_weight.clone())
+                    .filter(|weight| !weight.is_empty())
+            })
+            .collect::<Vec<_>>();
+        if !weights.is_empty() {
+            parts.insert(parser_top as i32, weights);
+        }
+    }
+
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][direct_regular_parser_product] terminal_states={} parser_states={} product_states={} product_edges={} labels={} part_refs={} unique_weights={} total_ms={:.3}",
+            terminal_state_count,
+            parser_state_count,
+            product_state_count,
+            product.num_transitions(),
+            parts.len(),
+            parts.values().map(Vec::len).sum::<usize>(),
+            parts
+                .values()
+                .flatten()
+                .map(Weight::ptr_key)
+                .collect::<rustc_hash::FxHashSet<_>>()
+                .len(),
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    Some(parts)
 }
 
 fn terminal_automaton_is_immediate_completion(
@@ -2952,11 +3132,25 @@ mod tests {
 
     use super::{
         PossibleOutgoingIds, collapse_final_leaf_targets,
-        determinize_parser_dwa_with_fallbacks, subtract_final_weights_from_outgoing_dwa_impl,
+        determinize_parser_dwa_with_fallbacks, immediate_acceptance_certificates,
+        try_build_direct_regular_parser_top_accept_parts,
+        try_build_immediate_parser_top_accept_parts,
+        build_parser_dwa_from_terminal_dwa_with_precomputed_templates,
+        subtract_final_weights_from_outgoing_dwa_impl,
     };
     use crate::automata::weighted::dwa::DWA;
+    use crate::automata::weighted::terminal_automaton::TerminalAutomaton;
+    use crate::compiler::glr::analysis::AnalyzedGrammar;
     use crate::compiler::glr::labels::DEFAULT_LABEL;
+    use crate::compiler::glr::table::testing::build_test_table;
+    use crate::compiler::glr::table::Action;
+    use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
+    use crate::compiler::stages::templates::Templates;
     use crate::ds::weight::Weight;
+    use crate::grammar::flat::{
+        DirectRegularAutomaton, GrammarDef, Rule, Symbol, Terminal,
+    };
+    use crate::Vocab;
 
     fn weight(tokens: std::ops::RangeInclusive<u32>) -> Weight {
         Weight::from_token_set_for_tsid(0, RangeSetBlaze::from_iter([tokens]))
@@ -2985,6 +3179,189 @@ mod tests {
             .map_or_else(Weight::empty, |final_weight| {
                 accumulated.intersection(final_weight)
             })
+    }
+
+    #[test]
+    fn immediate_acceptance_parts_union_matches_combined_certificates() {
+        let mut terminal_dwa = DWA::new(1, 31);
+        let accept_a = terminal_dwa.add_state();
+        let accept_b = terminal_dwa.add_state();
+        let accept_c = terminal_dwa.add_state();
+        terminal_dwa.set_final_weight(accept_a, Weight::all());
+        terminal_dwa.set_final_weight(accept_b, Weight::all());
+        terminal_dwa.set_final_weight(accept_c, Weight::all());
+        terminal_dwa.add_transition(
+            terminal_dwa.start_state(),
+            0,
+            accept_a,
+            weight(0..=7),
+        );
+        terminal_dwa.add_transition(
+            terminal_dwa.start_state(),
+            1,
+            accept_b,
+            weight(4..=15),
+        );
+        terminal_dwa.add_transition(
+            terminal_dwa.start_state(),
+            2,
+            accept_c,
+            weight(12..=23),
+        );
+        let terminal_automaton = TerminalAutomaton::Dwa(terminal_dwa);
+
+        let grammar = AnalyzedGrammar::from_grammar_def(&GrammarDef {
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0)],
+            }],
+            start: 0,
+            terminals: (0..3)
+                .map(|id| Terminal::Literal {
+                    id,
+                    bytes: vec![b'a' + id as u8],
+                })
+                .collect(),
+            ..GrammarDef::default()
+        });
+        let table = build_test_table(
+            3,
+            3,
+            &[
+                &[
+                    (0, Action::Shift(0, true)),
+                    (1, Action::Shift(1, true)),
+                ],
+                &[
+                    (1, Action::Shift(1, true)),
+                    (2, Action::Shift(2, true)),
+                ],
+                &[],
+            ],
+            &[&[], &[], &[]],
+        );
+
+        let parts = try_build_immediate_parser_top_accept_parts(
+            &terminal_automaton,
+            &grammar,
+            &table,
+        )
+        .expect("test terminal automaton is an immediate-completion family");
+        let combined = immediate_acceptance_certificates(&terminal_automaton, &grammar, &table);
+
+        assert_eq!(parts.get(&0).map(Vec::len), Some(2));
+        assert_eq!(parts.get(&1).map(Vec::len), Some(2));
+        assert!(!parts.contains_key(&2));
+        for parser_top in 0..table.num_states {
+            let parts_union = parts
+                .get(&(parser_top as i32))
+                .map(|weights| Weight::union_all(weights.iter()))
+                .unwrap_or_else(Weight::empty);
+            assert_eq!(parts_union, combined[parser_top as usize]);
+        }
+    }
+
+    #[test]
+    fn direct_regular_parser_product_matches_generic_parser_dwa() {
+        let mut terminal_dwa = DWA::new(1, 31);
+        let after_zero = terminal_dwa.add_state();
+        let accept = terminal_dwa.add_state();
+        terminal_dwa.set_final_weight(after_zero, weight(0..=7));
+        terminal_dwa.set_final_weight(accept, Weight::all());
+        terminal_dwa.add_transition(
+            terminal_dwa.start_state(),
+            0,
+            after_zero,
+            weight(0..=15),
+        );
+        terminal_dwa.add_transition(after_zero, 0, after_zero, weight(8..=12));
+        terminal_dwa.add_transition(after_zero, 1, accept, weight(4..=20));
+        terminal_dwa.add_transition(
+            terminal_dwa.start_state(),
+            2,
+            accept,
+            weight(16..=23),
+        );
+        let terminal_automaton = TerminalAutomaton::Dwa(terminal_dwa);
+
+        let grammar = AnalyzedGrammar::from_grammar_def(&GrammarDef {
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0)],
+            }],
+            start: 0,
+            terminals: (0..3)
+                .map(|id| Terminal::Literal {
+                    id,
+                    bytes: vec![b'a' + id as u8],
+                })
+                .collect(),
+            direct_regular_automaton: Some(DirectRegularAutomaton::default()),
+            ..GrammarDef::default()
+        });
+        let table = build_test_table(
+            3,
+            3,
+            &[
+                &[
+                    (0, Action::Shift(1, true)),
+                    (2, Action::Shift(2, true)),
+                ],
+                &[
+                    (0, Action::Shift(1, true)),
+                    (1, Action::Shift(2, true)),
+                ],
+                &[],
+            ],
+            &[&[], &[], &[]],
+        );
+        let templates = Templates::from_direct_regular_table(&table, grammar.num_terminals)
+            .expect("test table has direct-regular actions");
+        let vocab = Vocab::new(
+            (0..32)
+                .map(|token| (token, vec![token as u8]))
+                .collect(),
+        );
+        let id_map = InternalIdMap {
+            tokenizer_states: ManyToOneIdMap::from_original_to_internal_with_representatives(
+                vec![0],
+                1,
+                vec![0],
+            ),
+            vocab_tokens: ManyToOneIdMap::from_original_to_internal_with_representatives(
+                (0..32).collect(),
+                32,
+                (0..32).collect(),
+            ),
+            deferred_vocab_singleton_original_ids: None,
+        };
+        let generic = build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
+            &table,
+            &grammar,
+            &terminal_automaton,
+            &templates,
+            &vocab,
+            &id_map,
+            false,
+        );
+        let direct = try_build_direct_regular_parser_top_accept_parts(
+            &terminal_automaton,
+            &grammar,
+            &table,
+        )
+        .expect("direct product should accept the direct parser table");
+
+        for parser_top in 0..table.num_states {
+            let direct_weight = direct
+                .get(&(parser_top as i32))
+                .map(|weights| Weight::union_all(weights.iter()))
+                .unwrap_or_else(Weight::empty);
+            assert_eq!(
+                direct_weight,
+                generic.eval_word(&[parser_top as i32]),
+                "direct product mismatch at parser top {parser_top}",
+            );
+        }
     }
 
     #[test]

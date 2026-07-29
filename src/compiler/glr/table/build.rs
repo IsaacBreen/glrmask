@@ -18,21 +18,62 @@ const SAME_CORE_MAX_PRE_MERGE_STATES_ENV: &str =
 const INCREMENTAL_ROW_MERGE_ENV: &str = "GLRMASK_INCREMENTAL_ROW_MERGE";
 const DEFAULT_SAME_CORE_MAX_PRE_MERGE_STATES: u32 = 4_096;
 
-fn glr_table_construction(default: GlrTableConstruction) -> GlrTableConstruction {
+fn glr_table_construction_override() -> Option<GlrTableConstruction> {
     match std::env::var(GLR_TABLE_CONSTRUCTION_ENV) {
         Ok(value) if value.trim().eq_ignore_ascii_case("legacy")
             || value.trim().eq_ignore_ascii_case("legacy-row-bisim")
             || value.trim().eq_ignore_ascii_case("row-bisim") =>
         {
-            GlrTableConstruction::LegacyRowBisim
+            Some(GlrTableConstruction::LegacyRowBisim)
         }
         Ok(value) if value.trim().eq_ignore_ascii_case("lalr") => {
-            GlrTableConstruction::Lalr
+            Some(GlrTableConstruction::Lalr)
         }
         Ok(value) if value.trim().eq_ignore_ascii_case("core-lac") => {
-            GlrTableConstruction::ExperimentalCoreMerged
+            Some(GlrTableConstruction::ExperimentalCoreMerged)
         }
-        _ => default,
+        _ => None,
+    }
+}
+
+fn is_large_left_linear_grammar(grammar: &AnalyzedGrammar) -> bool {
+    const MIN_RULES: usize = 64;
+    if grammar.rules.len() < MIN_RULES {
+        return false;
+    }
+
+    let mut left_recursive_rules = 0usize;
+    for rule in grammar.rules.iter().skip(1) {
+        let mut nonterminal_positions = rule
+            .rhs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, symbol)| {
+                matches!(symbol, Symbol::Nonterminal(_)).then_some(index)
+            });
+        match (nonterminal_positions.next(), nonterminal_positions.next()) {
+            (None, None) => {}
+            (Some(0), None) => left_recursive_rules += 1,
+            _ => return false,
+        }
+    }
+
+    left_recursive_rules >= MIN_RULES / 2
+}
+
+fn selected_glr_table_construction(
+    grammar: &AnalyzedGrammar,
+    default: GlrTableConstruction,
+) -> GlrTableConstruction {
+    if let Some(explicit) = glr_table_construction_override() {
+        return explicit;
+    }
+    if default == GlrTableConstruction::ExperimentalCoreMerged
+        && is_large_left_linear_grammar(grammar)
+    {
+        GlrTableConstruction::LegacyRowBisim
+    } else {
+        default
     }
 }
 
@@ -106,6 +147,232 @@ fn same_core_quotient_enabled(pre_merge_states: u32) -> bool {
         .is_none_or(|max_pre_merge_states| pre_merge_states <= max_pre_merge_states)
 }
 
+
+struct DirectRegularClosureWorkspace {
+    seen_epoch: Vec<u32>,
+    epoch: u32,
+    stack: Vec<u32>,
+}
+
+impl DirectRegularClosureWorkspace {
+    fn new(state_count: usize) -> Self {
+        Self {
+            seen_epoch: vec![0; state_count],
+            epoch: 0,
+            stack: Vec::new(),
+        }
+    }
+
+    fn begin(&mut self, roots: impl IntoIterator<Item = u32>) {
+        self.epoch = self.epoch.wrapping_add(1);
+        if self.epoch == 0 {
+            self.seen_epoch.fill(0);
+            self.epoch = 1;
+        }
+        self.stack.clear();
+        self.stack.extend(roots);
+    }
+
+    fn mark_new(&mut self, state: u32) -> bool {
+        let entry = &mut self.seen_epoch[state as usize];
+        if *entry == self.epoch {
+            false
+        } else {
+            *entry = self.epoch;
+            true
+        }
+    }
+}
+
+fn direct_regular_action_row_for_roots(
+    grammar: &AnalyzedGrammar,
+    roots: impl IntoIterator<Item = u32>,
+    workspace: &mut DirectRegularClosureWorkspace,
+) -> Option<ActionRow> {
+    let automaton = grammar.direct_regular_automaton.as_ref()?;
+    workspace.begin(roots);
+    let mut accepting = false;
+    let mut targets_by_terminal = BTreeMap::<TerminalID, BTreeSet<u32>>::new();
+
+    while let Some(state_id) = workspace.stack.pop() {
+        if state_id as usize >= automaton.states.len() {
+            return None;
+        }
+        if !workspace.mark_new(state_id) {
+            continue;
+        }
+        let state = &automaton.states[state_id as usize];
+        accepting |= state.is_accepting;
+        workspace.stack.extend(state.epsilons.iter().copied());
+        for (&terminal, targets) in &state.transitions {
+            if terminal >= grammar.num_terminals {
+                return None;
+            }
+            let output = targets_by_terminal.entry(terminal).or_default();
+            for &target in targets {
+                if target as usize >= automaton.states.len() {
+                    return None;
+                }
+                output.insert(target + 1);
+            }
+        }
+    }
+
+    let mut row = Vec::with_capacity(targets_by_terminal.len() + usize::from(accepting));
+    for (terminal, targets) in targets_by_terminal {
+        let targets = targets.into_iter().collect::<Vec<_>>();
+        let action = if targets.len() == 1 {
+            Action::Shift(targets[0], true)
+        } else {
+            Action::StackShifts(
+                targets
+                    .into_iter()
+                    .map(|target| StackShift {
+                        pop: 1,
+                        pushes: vec![target],
+                    })
+                    .collect(),
+            )
+        };
+        row.push((terminal, action));
+    }
+    if accepting {
+        row.push((EOF, Action::Accept));
+    }
+    Some(ActionRow::from_iter(row))
+}
+
+fn try_build_direct_regular_table(grammar: &AnalyzedGrammar) -> Option<GLRTable> {
+    let automaton = grammar.direct_regular_automaton.as_ref()?;
+    if automaton.states.is_empty() || automaton.start_states.is_empty() {
+        return None;
+    }
+
+    // Runtime parser state 0 is fixed as the initial stack state. NFA state N
+    // maps to parser state N+1. Each row is built directly from the epsilon
+    // closure of its corresponding root, reusing one generation-marked DFS
+    // workspace rather than allocating and retaining every closure.
+    let mut workspace = DirectRegularClosureWorkspace::new(automaton.states.len());
+    let mut action = Vec::with_capacity(automaton.states.len() + 1);
+    action.push(direct_regular_action_row_for_roots(
+        grammar,
+        automaton.start_states.iter().copied(),
+        &mut workspace,
+    )?);
+    for root in 0..automaton.states.len() as u32 {
+        action.push(direct_regular_action_row_for_roots(
+            grammar,
+            std::iter::once(root),
+            &mut workspace,
+        )?);
+    }
+
+    let num_states = u32::try_from(action.len()).ok()?;
+    let mut table = GLRTable {
+        goto: vec![SparseRow::default(); action.len()],
+        action,
+        num_states,
+        num_terminals: grammar.num_terminals,
+        num_rules: 0,
+        rules: Vec::new(),
+        nonterminal_display_names: Vec::new(),
+        construction: GlrTableConstruction::LegacyRowBisim,
+        admission_policy: AdmissionPolicy::RowPresenceExact,
+        advance: Vec::new(),
+        forwarded_shifts: FxHashSet::default(),
+        guarded_shift_index: Vec::new(),
+    };
+    table.rebuild_advance_rows_from_actions();
+    table.rebuild_guarded_shift_index();
+    table.compress_default_action_rows();
+    Some(table)
+}
+
+#[cfg(test)]
+fn try_build_direct_regular_table_reference(grammar: &AnalyzedGrammar) -> Option<GLRTable> {
+    let automaton = grammar.direct_regular_automaton.as_ref()?;
+    if automaton.states.is_empty() || automaton.start_states.is_empty() {
+        return None;
+    }
+    let mut action = Vec::with_capacity(automaton.states.len() + 1);
+    let roots = std::iter::once(automaton.start_states.clone())
+        .chain((0..automaton.states.len() as u32).map(|root| vec![root]));
+    for roots in roots {
+        let mut seen = vec![false; automaton.states.len()];
+        let mut stack = roots;
+        let mut closure = Vec::new();
+        while let Some(state) = stack.pop() {
+            if state as usize >= automaton.states.len() {
+                return None;
+            }
+            if std::mem::replace(&mut seen[state as usize], true) {
+                continue;
+            }
+            closure.push(state);
+            stack.extend(automaton.states[state as usize].epsilons.iter().copied());
+        }
+        let accepting = closure
+            .iter()
+            .any(|&state| automaton.states[state as usize].is_accepting);
+        let mut targets_by_terminal = BTreeMap::<TerminalID, BTreeSet<u32>>::new();
+        for state in closure {
+            for (&terminal, targets) in &automaton.states[state as usize].transitions {
+                if terminal >= grammar.num_terminals {
+                    return None;
+                }
+                let output = targets_by_terminal.entry(terminal).or_default();
+                for &target in targets {
+                    if target as usize >= automaton.states.len() {
+                        return None;
+                    }
+                    output.insert(target + 1);
+                }
+            }
+        }
+        let mut row = Vec::with_capacity(targets_by_terminal.len() + usize::from(accepting));
+        for (terminal, targets) in targets_by_terminal {
+            let targets = targets.into_iter().collect::<Vec<_>>();
+            let action = if targets.len() == 1 {
+                Action::Shift(targets[0], true)
+            } else {
+                Action::StackShifts(
+                    targets
+                        .into_iter()
+                        .map(|target| StackShift {
+                            pop: 1,
+                            pushes: vec![target],
+                        })
+                        .collect(),
+                )
+            };
+            row.push((terminal, action));
+        }
+        if accepting {
+            row.push((EOF, Action::Accept));
+        }
+        action.push(ActionRow::from_iter(row));
+    }
+    let num_states = action.len() as u32;
+    let mut table = GLRTable {
+        goto: vec![SparseRow::default(); action.len()],
+        action,
+        num_states,
+        num_terminals: grammar.num_terminals,
+        num_rules: 0,
+        rules: Vec::new(),
+        nonterminal_display_names: Vec::new(),
+        construction: GlrTableConstruction::LegacyRowBisim,
+        admission_policy: AdmissionPolicy::RowPresenceExact,
+        advance: Vec::new(),
+        forwarded_shifts: FxHashSet::default(),
+        guarded_shift_index: Vec::new(),
+    };
+    table.rebuild_advance_rows_from_actions();
+    table.rebuild_guarded_shift_index();
+    table.compress_default_action_rows();
+    Some(table)
+}
+
 pub(super) fn build_table(grammar: &AnalyzedGrammar) -> GLRTable {
     build_table_with_default_construction(grammar, GlrTableConstruction::ExperimentalCoreMerged)
 }
@@ -115,7 +382,22 @@ pub(super) fn build_table_with_default_construction(
     default_construction: GlrTableConstruction,
 ) -> GLRTable {
     let t1 = std::time::Instant::now();
-    let construction = glr_table_construction(default_construction);
+    if glr_table_construction_override().is_none()
+        && let Some(table) = try_build_direct_regular_table(grammar)
+    {
+        if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+        {
+            eprintln!(
+                "[glrmask/profile][glr_table] construction=DirectRegular construction_ms={:.3} pre_merge_states={} post_merge_states={} direct_regular=true",
+                t1.elapsed().as_secs_f64() * 1000.0,
+                table.num_states,
+                table.num_states,
+            );
+        }
+        return table;
+    }
+    let construction = selected_glr_table_construction(grammar, default_construction);
     let mut lr1_ms = 0.0;
     let mut table = match construction {
         GlrTableConstruction::LegacyRowBisim => {
@@ -1849,6 +2131,8 @@ mod tests {
     use super::{
         build_experimental_core_merged_table, build_lalr_table, build_lr1_item_sets, build_table,
         build_table_with_default_construction, grouped_item_lookahead_counts,
+        selected_glr_table_construction, try_build_direct_regular_table,
+        try_build_direct_regular_table_reference,
     };
     use crate::compiler::glr::accumulator::TerminalsDisallowed;
     use crate::compiler::glr::analysis::AnalyzedGrammar;
@@ -1856,8 +2140,10 @@ mod tests {
         advance_stacks, stack_may_advance_on, stacks_finished, ParserGSS,
     };
     use crate::compiler::glr::table::{Action, AdmissionPolicy, GLRTable, GlrTableConstruction};
-    use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
-    use std::collections::VecDeque;
+    use crate::grammar::flat::{
+        DirectRegularAutomaton, DirectRegularState, GrammarDef, Rule, Symbol, Terminal,
+    };
+    use std::collections::{BTreeMap, VecDeque};
 
     fn multi_lookahead_grammar() -> AnalyzedGrammar {
         let grammar = GrammarDef {
@@ -1889,6 +2175,129 @@ mod tests {
             ..GrammarDef::default()
         };
         AnalyzedGrammar::from_grammar_def(&grammar)
+    }
+
+    fn direct_regular_grammar() -> AnalyzedGrammar {
+        AnalyzedGrammar::from_grammar_def(&GrammarDef {
+            rules: vec![
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Terminal(0)],
+                },
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Nonterminal(0), Symbol::Terminal(1)],
+                },
+                Rule {
+                    lhs: 1,
+                    rhs: vec![Symbol::Nonterminal(0), Symbol::Terminal(2)],
+                },
+                Rule {
+                    lhs: 2,
+                    rhs: vec![Symbol::Nonterminal(0), Symbol::Terminal(2)],
+                },
+                Rule {
+                    lhs: 3,
+                    rhs: vec![Symbol::Nonterminal(1), Symbol::Terminal(3)],
+                },
+                Rule {
+                    lhs: 3,
+                    rhs: vec![Symbol::Nonterminal(2), Symbol::Terminal(4)],
+                },
+            ],
+            start: 3,
+            terminals: (0..5)
+                .map(|id| Terminal::Literal {
+                    id,
+                    bytes: vec![b'a' + id as u8],
+                })
+                .collect(),
+            direct_regular_automaton: Some(DirectRegularAutomaton {
+                states: vec![
+                    DirectRegularState {
+                        transitions: BTreeMap::from([(0, vec![1])]),
+                        ..DirectRegularState::default()
+                    },
+                    DirectRegularState {
+                        transitions: BTreeMap::from([(1, vec![1]), (2, vec![2])]),
+                        ..DirectRegularState::default()
+                    },
+                    DirectRegularState {
+                        transitions: BTreeMap::from([(3, vec![3]), (4, vec![3])]),
+                        ..DirectRegularState::default()
+                    },
+                    DirectRegularState {
+                        is_accepting: true,
+                        ..DirectRegularState::default()
+                    },
+                ],
+                start_states: vec![0],
+            }),
+            ..GrammarDef::default()
+        })
+    }
+
+    fn direct_regular_epsilon_cycle_grammar() -> AnalyzedGrammar {
+        AnalyzedGrammar::from_grammar_def(&GrammarDef {
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0)],
+            }],
+            start: 0,
+            terminals: (0..3)
+                .map(|id| Terminal::Literal {
+                    id,
+                    bytes: vec![b'a' + id as u8],
+                })
+                .collect(),
+            direct_regular_automaton: Some(DirectRegularAutomaton {
+                states: vec![
+                    DirectRegularState {
+                        transitions: BTreeMap::from([(0, vec![3])]),
+                        epsilons: vec![1, 2],
+                        is_accepting: false,
+                    },
+                    DirectRegularState {
+                        transitions: BTreeMap::from([(1, vec![1])]),
+                        epsilons: vec![2],
+                        is_accepting: false,
+                    },
+                    DirectRegularState {
+                        transitions: BTreeMap::from([(2, vec![3])]),
+                        epsilons: vec![1],
+                        is_accepting: true,
+                    },
+                    DirectRegularState {
+                        is_accepting: true,
+                        ..DirectRegularState::default()
+                    },
+                ],
+                start_states: vec![0, 1],
+            }),
+            ..GrammarDef::default()
+        })
+    }
+
+    fn large_left_linear_grammar() -> AnalyzedGrammar {
+        let mut rules = vec![Rule {
+            lhs: 0,
+            rhs: vec![Symbol::Terminal(0)],
+        }];
+        for state in 1..=64u32 {
+            rules.push(Rule {
+                lhs: state,
+                rhs: vec![Symbol::Nonterminal(state - 1), Symbol::Terminal(0)],
+            });
+        }
+        AnalyzedGrammar::from_grammar_def(&GrammarDef {
+            rules,
+            start: 64,
+            terminals: vec![Terminal::Literal {
+                id: 0,
+                bytes: b"x".to_vec(),
+            }],
+            ..GrammarDef::default()
+        })
     }
 
     fn mysterious_conflict_grammar() -> AnalyzedGrammar {
@@ -2293,6 +2702,89 @@ mod tests {
             GlrTableConstruction::ExperimentalCoreMerged
         );
         assert_eq!(table.admission_policy, AdmissionPolicy::ExactSimulation);
+    }
+
+    #[test]
+    fn direct_regular_reused_closure_workspace_matches_reference() {
+        let grammar = direct_regular_epsilon_cycle_grammar();
+        let direct = try_build_direct_regular_table(&grammar)
+            .expect("workspace direct table should build");
+        let reference = try_build_direct_regular_table_reference(&grammar)
+            .expect("closure-reference direct table should build");
+        assert_eq!(direct.action, reference.action);
+        assert_eq!(direct.advance, reference.advance);
+        assert_eq!(direct.num_states, reference.num_states);
+    }
+
+    #[test]
+    fn direct_regular_table_matches_legacy_parser() {
+        let grammar = direct_regular_grammar();
+        let direct = try_build_direct_regular_table(&grammar).expect("regular table should build");
+        let mut reference_grammar = grammar.clone();
+        reference_grammar.direct_regular_automaton = None;
+        let reference = build_table_with_default_construction(
+            &reference_grammar,
+            GlrTableConstruction::LegacyRowBisim,
+        );
+
+        let start = ParserGSS::from_single_stack(vec![0], TerminalsDisallowed::new());
+        let mut queue = VecDeque::from([(Vec::<u32>::new(), start.clone(), start)]);
+        let mut visited = 0usize;
+        while let Some((prefix, left, right)) = queue.pop_front() {
+            visited += 1;
+            assert_eq!(
+                stacks_finished(&reference, &left),
+                stacks_finished(&direct, &right),
+                "completion mismatch at {prefix:?}",
+            );
+            if prefix.len() == 6 {
+                continue;
+            }
+            for terminal in 0..reference.num_terminals {
+                assert_eq!(
+                    stack_may_advance_on(&reference, &left, terminal),
+                    stack_may_advance_on(&direct, &right, terminal),
+                    "admission mismatch at {prefix:?} on {terminal}",
+                );
+                let left_next = advance_stacks(&reference, &left, terminal);
+                let right_next = advance_stacks(&direct, &right, terminal);
+                assert_eq!(
+                    left_next.is_empty(),
+                    right_next.is_empty(),
+                    "recognition mismatch at {prefix:?} on {terminal}",
+                );
+                if !left_next.is_empty() {
+                    let mut next = prefix.clone();
+                    next.push(terminal);
+                    queue.push_back((next, left_next, right_next));
+                }
+            }
+        }
+        assert!(visited > 4);
+    }
+
+    #[test]
+    fn large_left_linear_grammar_prefers_row_bisim() {
+        let grammar = large_left_linear_grammar();
+        assert_eq!(
+            selected_glr_table_construction(
+                &grammar,
+                GlrTableConstruction::ExperimentalCoreMerged,
+            ),
+            GlrTableConstruction::LegacyRowBisim,
+        );
+    }
+
+    #[test]
+    fn pushdown_grammar_keeps_core_merged_default() {
+        let grammar = multi_lookahead_grammar();
+        assert_eq!(
+            selected_glr_table_construction(
+                &grammar,
+                GlrTableConstruction::ExperimentalCoreMerged,
+            ),
+            GlrTableConstruction::ExperimentalCoreMerged,
+        );
     }
 
     #[test]

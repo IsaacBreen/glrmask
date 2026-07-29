@@ -1127,5 +1127,7 @@ pub fn parse_lark_to_named(input: &str) -> Result<NamedGrammar, GlrMaskError> {
     let tokens = lexer.tokenize()?;
     let mut parser = Parser::new(tokens);
     let named = parser.parse_grammar()?;
-    normalize_lark_named(named)
+    let mut named = normalize_lark_named(named)?;
+    crate::grammar::right_linear::compress_large_right_linear_grammar(&mut named);
+    Ok(named)
 }

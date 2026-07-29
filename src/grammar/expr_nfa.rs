@@ -23,6 +23,10 @@ pub struct ExprNFA {
     /// current label graph.  AST lowering can then avoid repeating the same
     /// minimization before emitting left-linear rules.
     pub is_determinized_and_minimized: bool,
+    /// Preserve this automaton as a nondeterministic left-linear grammar rather
+    /// than determinizing its label graph during AST lowering. This is
+    /// performance metadata and does not affect expression identity.
+    pub(crate) prefer_direct_nfa_emission: bool,
     /// The exact DFA produced by the first minimization, when available.
     /// This is performance metadata only: equality and hashing deliberately
     /// ignore it, and any graph or symbol rewrite must clear it.
@@ -50,6 +54,7 @@ impl ExprNFA {
             nfa,
             symbols,
             is_determinized_and_minimized: false,
+            prefer_direct_nfa_emission: false,
             canonical_dfa: None,
         }
     }
@@ -76,8 +81,14 @@ impl ExprNFA {
             nfa,
             symbols,
             is_determinized_and_minimized: true,
+            prefer_direct_nfa_emission: false,
             canonical_dfa: Some(dfa),
         }
+    }
+
+    pub(crate) fn with_direct_nfa_emission(mut self) -> Self {
+        self.prefer_direct_nfa_emission = true;
+        self
     }
 
     pub fn determinize(&self) -> DFA {
@@ -521,6 +532,7 @@ mod tests {
             nfa: canonical.nfa.clone(),
             symbols: canonical.symbols.clone(),
             is_determinized_and_minimized: false,
+            prefer_direct_nfa_emission: false,
             canonical_dfa: None,
         };
         assert_eq!(canonical, unmarked);

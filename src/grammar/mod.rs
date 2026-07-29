@@ -6,3 +6,5 @@ pub mod factoring;
 pub mod glrm;
 pub mod named_simplify;
 pub mod terminal_choice_promotion;
+
+pub mod right_linear;

@@ -2315,6 +2315,11 @@ pub struct Constraint {
     /// stack symbol.
     #[serde(default)]
     pub(crate) parser_top_accept: BTreeMap<i32, Weight>,
+    /// Uncombined exact depth-one acceptance parts. Direct-regular grammars
+    /// retain terminal completion weights separately to avoid constructing one
+    /// large union weight per parser state at compile time.
+    #[serde(default)]
+    pub(crate) parser_top_accept_parts: BTreeMap<i32, Vec<Weight>>,
     pub(crate) table: GLRTable,
     #[serde(default)]
     pub(crate) terminal_display_names: Vec<String>,

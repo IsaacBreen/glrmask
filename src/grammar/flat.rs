@@ -32,6 +32,26 @@ pub struct GrammarDef {
     /// rather than projecting to one L2P construction family.
     #[serde(default)]
     pub requires_global_terminal_observation: bool,
+    /// Exact terminal-level automaton for the complete parser language when a
+    /// front-end has proved that language regular. This allows table
+    /// construction to bypass LR machinery without depending on transformed
+    /// production shape.
+    #[serde(default)]
+    pub direct_regular_automaton: Option<DirectRegularAutomaton>,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub struct DirectRegularAutomaton {
+    pub states: Vec<DirectRegularState>,
+    pub start_states: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub struct DirectRegularState {
+    pub is_accepting: bool,
+    pub transitions: BTreeMap<TerminalID, Vec<u32>>,
+    pub epsilons: Vec<u32>,
 }
 
 pub type NonterminalID = u32;
