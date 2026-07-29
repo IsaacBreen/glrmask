@@ -263,20 +263,30 @@ fn try_build_direct_regular_table(grammar: &AnalyzedGrammar) -> Option<GLRTable>
     // maps to parser state N+1. Each row is built directly from the epsilon
     // closure of its corresponding root, reusing one generation-marked DFS
     // workspace rather than allocating and retaining every closure.
-    let mut workspace = DirectRegularClosureWorkspace::new(automaton.states.len());
-    let mut action = Vec::with_capacity(automaton.states.len() + 1);
-    action.push(direct_regular_action_row_for_roots(
+    let mut initial_workspace = DirectRegularClosureWorkspace::new(automaton.states.len());
+    let initial = direct_regular_action_row_for_roots(
         grammar,
         automaton.start_states.iter().copied(),
-        &mut workspace,
-    )?);
-    for root in 0..automaton.states.len() as u32 {
-        action.push(direct_regular_action_row_for_roots(
-            grammar,
-            std::iter::once(root),
-            &mut workspace,
-        )?);
-    }
+        &mut initial_workspace,
+    )?;
+    let rows = (0..automaton.states.len() as u32)
+        .into_par_iter()
+        .map_init(
+            || DirectRegularClosureWorkspace::new(automaton.states.len()),
+            |workspace, root| {
+                direct_regular_action_row_for_roots(
+                    grammar,
+                    std::iter::once(root),
+                    workspace,
+                )
+            },
+        )
+        .collect::<Vec<_>>()
+        .into_iter()
+        .collect::<Option<Vec<_>>>()?;
+    let mut action = Vec::with_capacity(rows.len() + 1);
+    action.push(initial);
+    action.extend(rows);
 
     let num_states = u32::try_from(action.len()).ok()?;
     let mut table = GLRTable {

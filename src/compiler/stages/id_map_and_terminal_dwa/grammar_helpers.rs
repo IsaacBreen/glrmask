@@ -2,6 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use rayon::prelude::*;
+
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::GLRTable;
 use crate::ds::bitset::BitSet;
@@ -256,40 +258,41 @@ fn direct_regular_follow_sets(
 ) -> Option<(Vec<Vec<TerminalID>>, Vec<Vec<TerminalID>>)> {
     let automaton = grammar.direct_regular_automaton.as_ref()?;
     let state_count = automaton.states.len();
-    let mut closure_labels = vec![Vec::<TerminalID>::new(); state_count];
-    let mut seen_epoch = vec![0u32; state_count];
-    let mut epoch = 0u32;
-    let mut stack = Vec::<u32>::new();
-
-    for root in 0..state_count {
-        epoch = epoch.wrapping_add(1);
-        if epoch == 0 {
-            seen_epoch.fill(0);
-            epoch = 1;
-        }
-        stack.clear();
-        stack.push(root as u32);
-        let mut labels = Vec::new();
-        while let Some(state_id) = stack.pop() {
-            let state_index = state_id as usize;
-            if state_index >= state_count || seen_epoch[state_index] == epoch {
-                continue;
-            }
-            seen_epoch[state_index] = epoch;
-            let state = &automaton.states[state_index];
-            stack.extend(state.epsilons.iter().copied());
-            labels.extend(
-                state
-                    .transitions
-                    .keys()
-                    .copied()
-                    .filter(|terminal| *terminal < grammar.num_terminals),
-            );
-        }
-        labels.sort_unstable();
-        labels.dedup();
-        closure_labels[root] = labels;
-    }
+    let closure_labels = (0..state_count)
+        .into_par_iter()
+        .map_init(
+            || (vec![0u32; state_count], 0u32, Vec::<u32>::new()),
+            |(seen_epoch, epoch, stack), root| {
+                *epoch = epoch.wrapping_add(1);
+                if *epoch == 0 {
+                    seen_epoch.fill(0);
+                    *epoch = 1;
+                }
+                stack.clear();
+                stack.push(root as u32);
+                let mut labels = Vec::new();
+                while let Some(state_id) = stack.pop() {
+                    let state_index = state_id as usize;
+                    if state_index >= state_count || seen_epoch[state_index] == *epoch {
+                        continue;
+                    }
+                    seen_epoch[state_index] = *epoch;
+                    let state = &automaton.states[state_index];
+                    stack.extend(state.epsilons.iter().copied());
+                    labels.extend(
+                        state
+                            .transitions
+                            .keys()
+                            .copied()
+                            .filter(|terminal| *terminal < grammar.num_terminals),
+                    );
+                }
+                labels.sort_unstable();
+                labels.dedup();
+                labels
+            },
+        )
+        .collect::<Vec<_>>();
 
     let mut ever = vec![BTreeSet::new(); grammar.num_terminals as usize];
     let mut always = vec![None::<BTreeSet<TerminalID>>; grammar.num_terminals as usize];
