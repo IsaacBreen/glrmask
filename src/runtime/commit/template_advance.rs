@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::compiler::glr::labels::{
     DEFAULT_LABEL,
@@ -364,15 +362,21 @@ fn advance_with_template(template: &CommitTemplateDfas, stack: ParserGSS) -> Par
 
     let mut output = ParserGSS::empty();
     let mut worklist = vec![(Phase::Pop, template.pop.start_state, stack)];
-    let mut visited = HashSet::new();
+    // Retain every visited source GSS. Raw pointer keys alone are not safe:
+    // temporary isolate/push results can be dropped and their addresses reused
+    // later in the same evaluation.
+    let mut visited = FxHashMap::<(Phase, u32, usize), ParserGSS>::default();
 
     while let Some((phase, state_id, gss)) = worklist.pop() {
         if gss.is_empty() {
             continue;
         }
-        if !visited.insert((phase, state_id, gss.ptr_key())) {
+        let visit_key = (phase, state_id, gss.ptr_key());
+        if let Some(source) = visited.get(&visit_key) {
+            debug_assert!(source.ptr_eq(&gss));
             continue;
         }
+        visited.insert(visit_key, gss.clone());
 
         match phase {
             Phase::Pop => {
@@ -839,4 +843,67 @@ mod tests {
                 .expect("test languages should remain explicitly bounded")
         );
     }
+
+    #[test]
+    fn template_walker_retains_temporary_gss_identity_across_pop_read_and_push() {
+        let mut pop = UnweightedDfa::new();
+        let popped = pop.add_state();
+        pop.add_transition(pop.start_state, 9, popped);
+
+        let mut read = UnweightedDfa::new();
+        let read_left = read.add_state();
+        let read_right = read.add_state();
+        read.add_transition(read.start_state, 1, read_left);
+        read.add_transition(read.start_state, 2, read_right);
+
+        let mut push = UnweightedDfa::new();
+        let pushed_left = push.add_state();
+        let pushed_right = push.add_state();
+        push.add_transition(
+            push.start_state,
+            crate::compiler::glr::labels::encode_negative_label(20),
+            pushed_left,
+        );
+        push.add_transition(
+            push.start_state,
+            crate::compiler::glr::labels::encode_negative_label(30),
+            pushed_right,
+        );
+        push.set_accepting(pushed_left, true);
+        push.set_accepting(pushed_right, true);
+
+        let mut pop_to_read = vec![None; pop.states.len()];
+        pop_to_read[popped as usize] = Some(read.start_state);
+        let mut read_to_push = vec![None; read.states.len()];
+        read_to_push[read_left as usize] = Some(push.start_state);
+        read_to_push[read_right as usize] = Some(push.start_state);
+        let template = CommitTemplateDfas {
+            pop,
+            read,
+            push,
+            pop_to_read,
+            pop_to_push: vec![None; 2],
+            read_to_push,
+        };
+
+        let acc_a = TerminalsDisallowed::new();
+        let acc_b = TerminalsDisallowed::new().with_insert(0, 7);
+        let input = ParserGSS::from_stacks(&[
+            (vec![0, 1, 9], acc_a.clone()),
+            (vec![0, 2, 9], acc_b.clone()),
+        ]);
+        let actual = advance_with_template(&template, input);
+        let expected = ParserGSS::from_stacks(&[
+            (vec![0, 1, 20], acc_a.clone()),
+            (vec![0, 1, 30], acc_a),
+            (vec![0, 2, 20], acc_b.clone()),
+            (vec![0, 2, 30], acc_b),
+        ]);
+        assert!(
+            actual
+                .semantically_eq(&expected, 64)
+                .expect("test output is explicitly bounded")
+        );
+    }
+
 }
