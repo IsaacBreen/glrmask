@@ -1,7 +1,7 @@
 use crate::runtime::Constraint;
 
 const CONSTRAINT_MAGIC: [u8; 8] = *b"GLRCONS\0";
-const CONSTRAINT_VERSION: u16 = 4;
+const CONSTRAINT_VERSION: u16 = 5;
 const CONSTRAINT_HEADER_LEN: usize = CONSTRAINT_MAGIC.len() + 2 + 8;
 
 impl Constraint {
@@ -56,6 +56,9 @@ impl Constraint {
 mod tests {
     use super::*;
     use crate::Vocab;
+    use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
+    use crate::runtime::CommitTemplateDfas;
+    use std::sync::Arc;
 
     fn tiny_constraint() -> Constraint {
         Constraint::from_glrm_grammar(
@@ -114,4 +117,34 @@ mod tests {
             .to_string()
             .contains("payload length"));
     }
+
+    #[test]
+    fn constraint_roundtrip_preserves_commit_template_dfas() {
+        let mut constraint = tiny_constraint();
+        let mut pop = UnweightedDfa::new();
+        let accepted = pop.add_state();
+        pop.add_transition(pop.start_state, 7, accepted);
+        pop.set_accepting(accepted, true);
+        let template = CommitTemplateDfas {
+            pop,
+            read: UnweightedDfa::default(),
+            push: UnweightedDfa::default(),
+            pop_to_read: vec![None; 2],
+            pop_to_push: vec![None; 2],
+            read_to_push: Vec::new(),
+        };
+        constraint.template_dfas_by_terminal = vec![None, Some(Arc::new(template.clone()))];
+
+        let loaded = Constraint::load(&constraint.save()).expect("template artifact should load");
+        let loaded_template = loaded.template_dfas_by_terminal[1]
+            .as_deref()
+            .expect("serialized template should survive load");
+        assert_eq!(loaded_template.pop, template.pop);
+        assert_eq!(loaded_template.read, template.read);
+        assert_eq!(loaded_template.push, template.push);
+        assert_eq!(loaded_template.pop_to_read, template.pop_to_read);
+        assert_eq!(loaded_template.pop_to_push, template.pop_to_push);
+        assert_eq!(loaded_template.read_to_push, template.read_to_push);
+    }
+
 }

@@ -2324,7 +2324,7 @@ impl Default for DynamicMaskVocab {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CommitTemplateDfas {
     pub(crate) pop: UnweightedDfa,
     pub(crate) read: UnweightedDfa,
@@ -2379,7 +2379,6 @@ pub struct Constraint {
     pub(crate) possible_matches: PossibleMatchesByTerminal,
     pub(crate) state_to_internal_tsid: Vec<u32>,
     pub(crate) internal_tsid_to_states: Vec<Vec<u32>>,
-    #[serde(skip)]
     pub(crate) template_dfas_by_terminal: TemplateDfasByTerminal,
     /// Original token -> final shared constraint-internal token id.
     ///
