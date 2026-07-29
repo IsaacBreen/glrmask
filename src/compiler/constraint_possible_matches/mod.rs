@@ -1894,7 +1894,7 @@ fn group_pmv_legacy_enabled() -> bool {
 }
 
 const PM_NFA_POWERSET_DEFAULT_MAX_STATES: usize = 12_000;
-const PM_NFA_POWERSET_NARROW_MAX_STATES: usize = 32_768;
+const PM_NFA_POWERSET_NARROW_MAX_STATES: usize = 65_536;
 const PM_NFA_POWERSET_NARROW_MAX_TERMINALS: usize = 256;
 
 fn nfa_powerset_collect_default(state_count: usize, root_terminal_union: usize) -> bool {
@@ -1920,6 +1920,69 @@ struct PossibleMatchPowersetView {
     raw_start_to_view: Vec<u32>,
     boundary_state: Vec<u32>,
     is_end: Vec<bool>,
+}
+
+struct DelayedTerminalDemand {
+    terminals: BitSet,
+    raw_state_relevant: Vec<bool>,
+    raw_query_state: Vec<bool>,
+    accepting_future_states: usize,
+}
+
+fn terminal_iter_intersects_demand(
+    mut terminals: impl Iterator<Item = u32>,
+    demand: &BitSet,
+) -> bool {
+    terminals.any(|terminal| demand.contains(terminal as usize))
+}
+
+/// Exact domain of static possible-match queries.
+///
+/// A terminal is inserted into `TerminalsDisallowed` only after it has matched
+/// and the current tokenizer continuation still has that same terminal in its
+/// strict future. Therefore a terminal can be queried by static masking iff at
+/// least one tokenizer state contains it in both `finalizers` and
+/// `possible_future_terminals`. Accumulator remapping retains an exclusion only
+/// at states where that terminal remains in the strict future, so those states
+/// are the complete query-state domain.
+fn delayed_terminal_demand(tokenizer: &Tokenizer) -> DelayedTerminalDemand {
+    let num_terminals = tokenizer.num_terminals() as usize;
+    let mut terminals = BitSet::new(num_terminals);
+    let mut accepting_future_states = 0usize;
+    for state in 0..tokenizer.num_states() {
+        let future = tokenizer.possible_future_terminals(state);
+        let mut state_relevant = false;
+        for terminal in tokenizer.matched_terminals_iter(state) {
+            if future.contains(terminal as usize) {
+                terminals.set(terminal as usize);
+                state_relevant = true;
+            }
+        }
+        accepting_future_states += usize::from(state_relevant);
+    }
+
+    let mut raw_state_relevant = vec![false; tokenizer.num_states() as usize];
+    let mut raw_query_state = vec![false; tokenizer.num_states() as usize];
+    if !terminals.is_zero() {
+        for state in 0..tokenizer.num_states() {
+            let future_relevant = terminal_iter_intersects_demand(
+                tokenizer.possible_future_terminals_iter(state),
+                &terminals,
+            );
+            let match_relevant = terminal_iter_intersects_demand(
+                tokenizer.matched_terminals_iter(state),
+                &terminals,
+            );
+            raw_query_state[state as usize] = future_relevant;
+            raw_state_relevant[state as usize] = future_relevant || match_relevant;
+        }
+    }
+    DelayedTerminalDemand {
+        terminals,
+        raw_state_relevant,
+        raw_query_state,
+        accepting_future_states,
+    }
 }
 
 fn intern_possible_match_config(
@@ -1972,6 +2035,7 @@ fn build_possible_match_powerset_view(
     tokenizer: &Tokenizer,
     relevant_bytes: &[bool; 256],
     raw_byte_to_class: Option<&[u8; 256]>,
+    demand: &DelayedTerminalDemand,
 ) -> PossibleMatchPowersetView {
     let singleton_closures = tokenizer.all_singleton_epsilon_closures();
     let mut config_ids = FxHashMap::<Vec<u32>, u32>::default();
@@ -1979,14 +2043,22 @@ fn build_possible_match_powerset_view(
     let mut config_is_closed = Vec::<bool>::new();
     let raw_start_to_view = (0..tokenizer.num_states())
         .map(|raw_state| {
+            if !demand.raw_query_state[raw_state as usize] {
+                return u32::MAX;
+            }
+            let relevant_closure = singleton_closures[raw_state as usize]
+                .iter()
+                .copied()
+                .filter(|&state| demand.raw_state_relevant[state as usize])
+                .collect::<Vec<_>>();
             intern_possible_match_config(
-                singleton_closures[raw_state as usize].to_vec(),
+                relevant_closure,
                 true,
                 &mut config_ids,
                 &mut configs,
                 &mut config_is_closed,
             )
-            .expect("epsilon closure of tokenizer state must be nonempty")
+            .expect("a PM query-state closure must retain an active terminal residual")
         })
         .collect::<Vec<_>>();
 
@@ -2023,6 +2095,7 @@ fn build_possible_match_powerset_view(
         let mut finalizers = config
             .iter()
             .flat_map(|&raw_state| tokenizer.matched_terminals_iter(raw_state))
+            .filter(|&terminal| demand.terminals.contains(terminal as usize))
             .map(|terminal| terminal as TerminalID)
             .collect::<Vec<_>>();
         finalizers.sort_unstable();
@@ -2072,6 +2145,9 @@ fn build_possible_match_powerset_view(
                         continue;
                     }
                     for &reachable in singleton_closures[target as usize].iter() {
+                        if !demand.raw_state_relevant[reachable as usize] {
+                            continue;
+                        }
                         let mark = &mut target_marks[reachable as usize];
                         if *mark != target_generation {
                             *mark = target_generation;
@@ -2193,6 +2269,75 @@ fn interval_map_from_sparse_matches(
             .then_with(|| left.ranges.cmp(&right.ranges))
     });
     map
+}
+
+fn filter_interval_map_to_terminals(
+    map: &IntervalPossibleMatchMap,
+    terminals: &BitSet,
+) -> IntervalPossibleMatchMap {
+    let mut by_ranges = BTreeMap::<Vec<(u32, u32)>, Vec<TerminalID>>::new();
+    for group in map {
+        let retained = group
+            .terminals
+            .iter()
+            .copied()
+            .filter(|&terminal| terminals.contains(terminal as usize));
+        by_ranges
+            .entry(group.ranges.clone())
+            .or_default()
+            .extend(retained);
+    }
+    let mut filtered = by_ranges
+        .into_iter()
+        .filter_map(|(ranges, mut terminals)| {
+            terminals.sort_unstable();
+            terminals.dedup();
+            (!terminals.is_empty()).then_some(TerminalRangeGroup {
+                terminals: terminals.into_boxed_slice(),
+                ranges,
+            })
+        })
+        .collect::<Vec<_>>();
+    filtered.sort_unstable_by(|left, right| {
+        left.terminals
+            .as_ref()
+            .cmp(right.terminals.as_ref())
+            .then_with(|| left.ranges.cmp(&right.ranges))
+    });
+    filtered
+}
+
+fn filter_trie_class_result_to_terminals(
+    result: TrieClassBuildResult,
+    terminals: &BitSet,
+) -> TrieClassBuildResult {
+    let mut filtered_maps = Vec::<Arc<IntervalPossibleMatchMap>>::new();
+    let mut map_to_class = FxHashMap::<IntervalPossibleMatchMap, u32>::default();
+    let mut old_to_new = vec![u32::MAX; result.class_maps.len()];
+    for (old_class, map) in result.class_maps.iter().enumerate() {
+        let filtered = filter_interval_map_to_terminals(map.as_ref(), terminals);
+        let next_class = filtered_maps.len() as u32;
+        let class = *map_to_class.entry(filtered.clone()).or_insert_with(|| {
+            filtered_maps.push(Arc::new(filtered));
+            next_class
+        });
+        old_to_new[old_class] = class;
+    }
+    let state_classes = result
+        .state_classes
+        .into_iter()
+        .map(|class| {
+            if class == u32::MAX {
+                u32::MAX
+            } else {
+                old_to_new[class as usize]
+            }
+        })
+        .collect();
+    TrieClassBuildResult {
+        state_classes,
+        class_maps: filtered_maps,
+    }
 }
 
 fn collect_sparse_root_possible_matches(
@@ -2335,6 +2480,37 @@ fn empty_possible_matches_computation(
     }
 }
 
+fn complete_empty_possible_matches_computation(
+    tokenizer: &Tokenizer,
+    original_token_count: usize,
+    runtime_dynamic_vocab: RuntimeDynamicMaskVocabArtifacts,
+    possible_matches_collect_ms: f64,
+) -> ConstraintPossibleMatchesComputation {
+    let possible_matches_id_map = InternalIdMap {
+        tokenizer_states: ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+            vec![u32::MAX; tokenizer.num_states() as usize],
+            0,
+        ),
+        vocab_tokens: ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+            vec![u32::MAX; original_token_count],
+            0,
+        ),
+        deferred_vocab_singleton_original_ids: None,
+    };
+    ConstraintPossibleMatchesComputation {
+        mapped_possible_matches: MappedArtifact::new(
+            RuntimePossibleMatchesByTerminal::new(),
+            possible_matches_id_map,
+        ),
+        runtime_dynamic_vocab,
+        complete: true,
+        profile: ConstraintPossibleMatchesProfile {
+            possible_matches_collect_ms,
+            ..ConstraintPossibleMatchesProfile::default()
+        },
+    }
+}
+
 fn compute_constraint_possible_matches_with_artifacts(
     tokenizer: &Tokenizer,
     original_token_count: usize,
@@ -2350,13 +2526,39 @@ fn compute_constraint_possible_matches_with_artifacts(
     let ordered_vocab = artifacts.ordered_vocab;
     let trie = artifacts.trie;
 
+    let demand = delayed_terminal_demand(tokenizer);
+    if demand.terminals.is_zero() {
+        return complete_empty_possible_matches_computation(
+            tokenizer,
+            original_token_count,
+            runtime_dynamic_vocab,
+            elapsed_ms(pm_started_at),
+        );
+    }
+
     let structured_dispatch = tokenizer.has_deterministic_dispatch();
     let dispatch_start = structured_dispatch.then(|| tokenizer.start_state());
     let trie_build_states: Vec<u32> = (0..tokenizer.num_states())
-        .filter(|state| Some(*state) != dispatch_start)
+        .filter(|state| {
+            Some(*state) != dispatch_start && demand.raw_query_state[*state as usize]
+        })
         .collect();
 
-    let root_terminal_union = root_terminal_union_count(tokenizer, &trie_build_states);
+    if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+    {
+        eprintln!(
+            "[glrmask/profile][pm_delayed_terminal_demand] terminals={} accepting_future_states={} query_states={} relevant_states={} total_terminals={} total_states={}",
+            demand.terminals.count_ones(),
+            demand.accepting_future_states,
+            demand.raw_query_state.iter().filter(|&&active| active).count(),
+            demand.raw_state_relevant.iter().filter(|&&active| active).count(),
+            tokenizer.num_terminals(),
+            tokenizer.num_states(),
+        );
+    }
+
+    let root_terminal_union = demand.terminals.count_ones();
     let use_nfa_powerset_collect = tokenizer.has_epsilon_transitions()
         && !structured_dispatch
         && nfa_powerset_collect_enabled(tokenizer.num_states() as usize, root_terminal_union);
@@ -2377,6 +2579,7 @@ fn compute_constraint_possible_matches_with_artifacts(
             tokenizer,
             &relevant_bytes,
             raw_byte_to_class,
+            &demand,
         );
         let view_build_ms = elapsed_ms(view_started_at);
         let mut view_entries = trie_build_states
@@ -2445,7 +2648,13 @@ fn compute_constraint_possible_matches_with_artifacts(
         )
         .0
     };
-    attach_structured_dispatch_possible_matches(tokenizer, &trie.root, &mut trie_class_result);
+    if tokenizer.has_deterministic_dispatch()
+        && demand.raw_query_state[tokenizer.start_state() as usize]
+    {
+        attach_structured_dispatch_possible_matches(tokenizer, &trie.root, &mut trie_class_result);
+    }
+    trie_class_result =
+        filter_trie_class_result_to_terminals(trie_class_result, &demand.terminals);
 
     let possible_matches_collect_ms = elapsed_ms(pm_started_at);
 
@@ -2601,6 +2810,8 @@ mod tests {
     use crate::automata::lexer::ast::Expr;
     use crate::automata::lexer::tokenizer::arbitrary_epsilon_l1_test_tokenizer;
     use crate::compiler::pipeline::build_tokenizer_from_exprs_partitioned_with_adaptive;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
     use std::collections::BTreeSet;
 
     #[test]
@@ -2616,6 +2827,11 @@ mod tests {
     ) -> BTreeSet<u32> {
         let mut states = tokenizer.execute_from_state_end_only(&[], start_state);
         let mut terminals = BTreeSet::new();
+        if bytes.is_empty() {
+            for &state in &states {
+                terminals.extend(tokenizer.matched_terminals_iter(state));
+            }
+        }
         for &byte in bytes {
             states = tokenizer.step_all(&states, byte);
             for &state in &states {
@@ -2628,8 +2844,61 @@ mod tests {
         terminals
     }
 
+    fn assert_demanded_pm_matches_direct(
+        tokenizer: &Tokenizer,
+        entries: &[(u32, Vec<u8>)],
+        context: &str,
+    ) {
+        let vocab = Vocab::new(entries.to_vec());
+        let computation = compute_constraint_possible_matches_for_vocab(
+            tokenizer,
+            &vocab,
+            ConstraintPossibleMatchesConfig::EAGER,
+        );
+        assert!(computation.complete);
+        let mapped = &computation.mapped_possible_matches;
+        let demand = delayed_terminal_demand(tokenizer);
+
+        for terminal in 0..tokenizer.num_terminals() {
+            if !demand.terminals.contains(terminal as usize) {
+                assert!(
+                    !mapped.artifact().contains_key(&terminal),
+                    "non-demand terminal {terminal} must not force a PM row",
+                );
+            }
+        }
+
+        for state in 0..tokenizer.num_states() {
+            let internal_state =
+                mapped.id_map().tokenizer_states.original_to_internal[state as usize];
+            if !demand.raw_query_state[state as usize] {
+                assert_eq!(internal_state, u32::MAX, "non-query state={state}");
+                continue;
+            }
+            assert_ne!(internal_state, u32::MAX, "query state={state}");
+            for (token_id, bytes) in entries {
+                let internal_token =
+                    mapped.id_map().vocab_tokens.original_to_internal[*token_id as usize];
+                let expected = directly_matched_terminals(tokenizer, state, bytes);
+                for terminal in demand.terminals.iter().map(|terminal| terminal as u32) {
+                    let actual = internal_token != u32::MAX
+                        && mapped.artifact().get(&terminal).is_some_and(|weight| {
+                            weight
+                                .tokens_for_tsid(internal_state)
+                                .contains(internal_token)
+                        });
+                    assert_eq!(
+                        actual,
+                        expected.contains(&terminal),
+                        "{context} state={state} token={token_id} bytes={bytes:?} terminal={terminal}",
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
-    fn structured_dispatch_possible_matches_match_direct_state_set_execution() {
+    fn demanded_possible_matches_match_direct_state_set_execution() {
         let expressions = vec![
             Expr::U8Seq(b"a".to_vec()),
             Expr::U8Seq(b"ab".to_vec()),
@@ -2658,38 +2927,116 @@ mod tests {
             (5, b"x".to_vec()),
             (6, b"ab".to_vec()),
         ];
-        let vocab = Vocab::new(entries.clone());
+        let demand = delayed_terminal_demand(&tokenizer);
+        assert_eq!(demand.terminals.iter().collect::<Vec<_>>(), vec![3]);
+        assert_demanded_pm_matches_direct(&tokenizer, &entries, "structured dispatch");
+    }
+
+    #[test]
+    fn demanded_possible_matches_match_direct_execution_on_random_small_lexers() {
+        let alphabet = [b'a', b'b', b' '];
+        let mut entries = vec![(0u32, Vec::new())];
+        fn add_words(
+            entries: &mut Vec<(u32, Vec<u8>)>,
+            alphabet: &[u8],
+            prefix: &mut Vec<u8>,
+            remaining: usize,
+        ) {
+            if remaining == 0 {
+                return;
+            }
+            for &byte in alphabet {
+                prefix.push(byte);
+                entries.push((entries.len() as u32, prefix.clone()));
+                add_words(entries, alphabet, prefix, remaining - 1);
+                prefix.pop();
+            }
+        }
+        add_words(&mut entries, &alphabet, &mut Vec::new(), 4);
+
+        let mut rng = StdRng::seed_from_u64(0x504d_4445_4d41_4e44);
+        for case in 0..32 {
+            let terminal_count = rng.gen_range(2..=6);
+            let mut expressions = Vec::with_capacity(terminal_count);
+            let mut partitions = Vec::with_capacity(terminal_count);
+            for _ in 0..terminal_count {
+                let byte = alphabet[rng.gen_range(0..alphabet.len())];
+                let other = alphabet[rng.gen_range(0..alphabet.len())];
+                let expression = match rng.gen_range(0..5) {
+                    0 => Expr::U8Seq(vec![byte]),
+                    1 => Expr::Repeat {
+                        expr: Box::new(Expr::U8Seq(vec![byte])),
+                        min: 1,
+                        max: None,
+                    },
+                    2 => Expr::Repeat {
+                        expr: Box::new(Expr::U8Seq(vec![byte])),
+                        min: 1,
+                        max: Some(3),
+                    },
+                    3 => Expr::Seq(vec![
+                        Expr::U8Seq(vec![byte]),
+                        Expr::Repeat {
+                            expr: Box::new(Expr::U8Seq(vec![other])),
+                            min: 0,
+                            max: None,
+                        },
+                    ]),
+                    _ => Expr::Choice(vec![
+                        Expr::U8Seq(vec![byte]),
+                        Expr::U8Seq(vec![byte, other]),
+                    ]),
+                };
+                expressions.push(expression);
+                partitions.push(rng.gen_range(0..3));
+            }
+            let tokenizer = build_tokenizer_from_exprs_partitioned_with_adaptive(
+                &expressions,
+                None,
+                &partitions,
+                false,
+            );
+            assert_demanded_pm_matches_direct(
+                &tokenizer,
+                &entries,
+                &format!("case={case} expressions={expressions:?} partitions={partitions:?}"),
+            );
+        }
+    }
+
+    #[test]
+    fn no_delayed_terminals_produces_complete_empty_possible_matches() {
+        let tokenizer = build_tokenizer_from_exprs_partitioned_with_adaptive(
+            &[Expr::U8Seq(b"a".to_vec()), Expr::U8Seq(b"b".to_vec())],
+            None,
+            &[0, 1],
+            false,
+        );
+        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
+        let demand = delayed_terminal_demand(&tokenizer);
+        assert!(demand.terminals.is_zero());
+
         let computation = compute_constraint_possible_matches_for_vocab(
             &tokenizer,
             &vocab,
             ConstraintPossibleMatchesConfig::EAGER,
         );
-        let mapped = &computation.mapped_possible_matches;
-
-        for state in 0..tokenizer.num_states() {
-            let internal_state = mapped.id_map().tokenizer_states.original_to_internal[state as usize];
-            assert_ne!(internal_state, u32::MAX, "state={state}");
-            for (token_id, bytes) in &entries {
-                let internal_token = mapped.id_map().vocab_tokens.original_to_internal[*token_id as usize];
-                assert_ne!(internal_token, u32::MAX, "token={token_id}");
-                let expected = directly_matched_terminals(&tokenizer, state, bytes);
-                for terminal in 0..tokenizer.num_terminals() {
-                    let actual = mapped
-                        .artifact()
-                        .get(&terminal)
-                        .is_some_and(|weight| {
-                            weight
-                                .tokens_for_tsid(internal_state)
-                                .contains(internal_token)
-                        });
-                    assert_eq!(
-                        actual,
-                        expected.contains(&terminal),
-                        "state={state} token={token_id} bytes={bytes:?} terminal={terminal}",
-                    );
-                }
-            }
-        }
+        assert!(computation.complete);
+        assert!(computation.mapped_possible_matches.artifact().is_empty());
+        assert!(computation
+            .mapped_possible_matches
+            .id_map()
+            .tokenizer_states
+            .original_to_internal
+            .iter()
+            .all(|&state| state == u32::MAX));
+        assert!(computation
+            .mapped_possible_matches
+            .id_map()
+            .vocab_tokens
+            .original_to_internal
+            .iter()
+            .all(|&token| token == u32::MAX));
     }
 
     #[test]
@@ -2741,8 +3088,16 @@ mod tests {
                 relevant_bytes[byte as usize] = true;
             }
         }
-        let powerset = build_possible_match_powerset_view(&tokenizer, &relevant_bytes, None);
+        let demand = DelayedTerminalDemand {
+            terminals: BitSet::all(tokenizer.num_terminals() as usize),
+            raw_state_relevant: vec![true; tokenizer.num_states() as usize],
+            raw_query_state: vec![true; tokenizer.num_states() as usize],
+            accepting_future_states: tokenizer.num_states() as usize,
+        };
+        let powerset =
+            build_possible_match_powerset_view(&tokenizer, &relevant_bytes, None, &demand);
         let mut view_entries = powerset.raw_start_to_view.clone();
+        view_entries.retain(|&state| state != u32::MAX);
         view_entries.sort_unstable();
         view_entries.dedup();
         let (powerset_rows, _) =

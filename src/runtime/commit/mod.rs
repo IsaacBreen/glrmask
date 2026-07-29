@@ -7569,20 +7569,28 @@ nt start ::= item item? item?;
         )
         .unwrap();
 
-        let mut state = constraint.start();
-        state.commit_token(0).unwrap();
-        state.commit_token(1).unwrap();
-        state.commit_token(2).unwrap();
+        fn assert_delayed_exclusion(constraint: &Constraint) {
+            assert!(constraint.possible_matches_complete);
+            let mut state = constraint.start();
+            state.commit_token(0).unwrap();
+            state.commit_token(1).unwrap();
+            state.commit_token(2).unwrap();
 
-        let mask = state.mask();
-        let allowed = |token: u32| {
-            ((mask[token as usize / 32] >> (token % 32)) & 1) != 0
-        };
-        assert!(allowed(3), "continuing the current ID remains viable");
-        assert!(!allowed(4), "the consumed ID cannot also satisfy the next ID");
-        assert!(!allowed(5), "a prefix of %= cannot follow until a new ID is consumed");
-        assert!(state.validate_tokens(&[4]).is_empty());
-        assert!(state.validate_tokens(&[5]).is_empty());
+            let mask = state.mask();
+            let allowed = |token: u32| {
+                ((mask[token as usize / 32] >> (token % 32)) & 1) != 0
+            };
+            assert!(allowed(3), "continuing the current ID remains viable");
+            assert!(!allowed(4), "the consumed ID cannot also satisfy the next ID");
+            assert!(!allowed(5), "a prefix of %= cannot follow until a new ID is consumed");
+            assert!(state.validate_tokens(&[4]).is_empty());
+            assert!(state.validate_tokens(&[5]).is_empty());
+        }
+
+        assert_delayed_exclusion(&constraint);
+        let loaded = Constraint::load(&constraint.save())
+            .expect("demand-restricted PM artifact should survive save/load");
+        assert_delayed_exclusion(&loaded);
     }
 
     #[test]
