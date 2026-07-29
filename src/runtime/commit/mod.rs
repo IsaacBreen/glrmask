@@ -1092,15 +1092,18 @@ fn advance_terminals_disallowed_over_bytes(
     }
 
     let mut remapped = BTreeMap::new();
-    for (&remembered_state, disallowed) in terminals_disallowed.iter() {
+    for (&continuation_tokenizer_state, disallowed) in terminals_disallowed.iter() {
         let owned_execution;
         let (end_states, matches) = match reusable_execution {
-            Some((state, end_states, matches)) if state == remembered_state => {
+            Some((state, end_states, matches)) if state == continuation_tokenizer_state => {
                 (end_states, matches)
             }
             _ => {
-                owned_execution =
-                    execute_tokenizer_from_state_small(constraint, bytes, remembered_state);
+                owned_execution = execute_tokenizer_from_state_small(
+                    constraint,
+                    bytes,
+                    continuation_tokenizer_state,
+                );
                 (&owned_execution.end_state[..], &owned_execution.matches[..])
             }
         };
@@ -2223,9 +2226,9 @@ fn commit_bytes_direct_linear_fast_path(
         if !step.ignored {
             if offset == 0 {
                 if !gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty()) {
-                    // Delayed exclusions are keyed by remembered lexer states,
+                    // Delayed exclusions are keyed by continuation tokenizer states,
                     // not necessarily by the current tokenizer state. The
-                    // general/flat paths execute every remembered state over
+                    // general/flat paths execute every continuation state over
                     // the whole model token; this single-step shortcut lacks
                     // that information, so decline rather than applying the
                     // old current-state-only pruning rule.
@@ -5296,11 +5299,13 @@ mod tests {
                     }
 
                     let mut remapped = BTreeMap::new();
-                    for (&remembered_state, disallowed) in terminals_disallowed.iter() {
+                    for (&continuation_tokenizer_state, disallowed) in
+                        terminals_disallowed.iter()
+                    {
                         let execution = execute_tokenizer_from_state_small(
                             constraint,
                             bytes,
-                            remembered_state,
+                            continuation_tokenizer_state,
                         );
                         if execution
                             .matches
@@ -5354,7 +5359,7 @@ mod tests {
     }
 
     #[test]
-    fn initial_prune_advances_each_remembered_lexer_state() {
+    fn initial_prune_advances_each_continuation_tokenizer_state() {
         let vocab = Vocab::new(
             vec![
                 (0, b"a".to_vec()),

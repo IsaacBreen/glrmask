@@ -918,18 +918,19 @@ impl<'a> ConstraintState<'a> {
         }
 
         let mut missing = TerminalsDisallowed::new();
-        for (&remembered_state, terminals) in terminals_disallowed.iter() {
+        for (&continuation_tokenizer_state, terminals) in terminals_disallowed.iter() {
             for &terminal_id in terminals.iter() {
                 if let Some(mask) = self
                     .constraint
                     .seed_terminal_dense
-                    .get(&(remembered_state, terminal_id))
+                    .get(&(continuation_tokenizer_state, terminal_id))
                 {
                     for (blocked_word, mask_word) in blocked.iter_mut().zip(mask.iter()) {
                         *blocked_word |= mask_word;
                     }
                 } else {
-                    missing = missing.with_insert(remembered_state, terminal_id);
+                    missing =
+                        missing.with_insert(continuation_tokenizer_state, terminal_id);
                 }
             }
         }
