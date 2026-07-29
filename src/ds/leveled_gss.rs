@@ -1513,6 +1513,9 @@ pub(crate) struct GssSemanticKeyInterner<
     lower_memo: FxHashMap<usize, (Arc<Lower<T>>, u32)>,
     upper_memo: FxHashMap<usize, (Arc<Upper<T, A>>, u32)>,
     union_memo: FxHashMap<(u32, u32), u32>,
+    union_pending: Vec<(u32, u32)>,
+    union_unseen: FxHashSet<(u32, u32)>,
+    union_order: Vec<(u32, u32)>,
     max_nodes: usize,
     max_source_keys: usize,
     max_union_entries: usize,
@@ -1545,6 +1548,9 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
             lower_memo: FxHashMap::default(),
             upper_memo: FxHashMap::default(),
             union_memo: FxHashMap::default(),
+            union_pending: Vec::new(),
+            union_unseen: FxHashSet::default(),
+            union_order: Vec::new(),
             max_nodes: max_nodes.max(1),
             max_source_keys,
             max_union_entries,
@@ -1646,9 +1652,32 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
             return *id;
         }
 
-        let mut pending = vec![root];
-        let mut unseen = FxHashSet::default();
-        let mut order = Vec::new();
+        let mut pending = std::mem::take(&mut self.union_pending);
+        let mut unseen = std::mem::take(&mut self.union_unseen);
+        let mut order = std::mem::take(&mut self.union_order);
+        pending.clear();
+        unseen.clear();
+        order.clear();
+        pending.push(root);
+
+        let result = self.union_ids_uncached(root, &mut pending, &mut unseen, &mut order);
+
+        pending.clear();
+        unseen.clear();
+        order.clear();
+        self.union_pending = pending;
+        self.union_unseen = unseen;
+        self.union_order = order;
+        result
+    }
+
+    fn union_ids_uncached(
+        &mut self,
+        root: (u32, u32),
+        pending: &mut Vec<(u32, u32)>,
+        unseen: &mut FxHashSet<(u32, u32)>,
+        order: &mut Vec<(u32, u32)>,
+    ) -> u32 {
         while let Some(pair @ (left, right)) = pending.pop() {
             if left == right || left == 0 || right == 0 || self.union_memo.contains_key(&pair) {
                 continue;
@@ -1691,7 +1720,7 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
                 .max(self.nodes[*right as usize].max_depth)
         });
 
-        for pair @ (left, right) in order {
+        for pair @ (left, right) in order.drain(..) {
             if self.union_memo.contains_key(&pair) {
                 continue;
             }
