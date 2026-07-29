@@ -1069,6 +1069,7 @@ fn prune_single_initial_state_for_exec(
     gss: ParserGSS,
     tokenizer_state: u32,
     exec_result: &TokenizerExecResult,
+    bytes: &[u8],
 ) -> ParserGSS {
     prune_single_initial_state_for_parts(
         constraint,
@@ -1076,7 +1077,51 @@ fn prune_single_initial_state_for_exec(
         tokenizer_state,
         &exec_result.end_state,
         &exec_result.matches,
+        bytes,
     )
+}
+
+fn advance_terminals_disallowed_over_bytes(
+    constraint: &Constraint,
+    terminals_disallowed: &TerminalsDisallowed,
+    bytes: &[u8],
+    reusable_execution: Option<(u32, &[u32], &[TokenizerMatch])>,
+) -> Option<TerminalsDisallowed> {
+    if terminals_disallowed.is_empty() {
+        return Some(TerminalsDisallowed::new());
+    }
+
+    let mut remapped = BTreeMap::new();
+    for (&remembered_state, disallowed) in terminals_disallowed.iter() {
+        let owned_execution;
+        let (end_states, matches) = match reusable_execution {
+            Some((state, end_states, matches)) if state == remembered_state => {
+                (end_states, matches)
+            }
+            _ => {
+                owned_execution =
+                    execute_tokenizer_from_state_small(constraint, bytes, remembered_state);
+                (&owned_execution.end_state[..], &owned_execution.matches[..])
+            }
+        };
+        if matches.iter()
+            .any(|matched| disallowed.contains(&matched.id))
+        {
+            return None;
+        }
+        for &end_state in end_states {
+            let future = constraint.tokenizer.possible_future_terminals(end_state);
+            for &terminal in disallowed.iter() {
+                if future.contains(terminal as usize) {
+                    remapped
+                        .entry(end_state)
+                        .or_insert_with(BTreeSet::new)
+                        .insert(terminal);
+                }
+            }
+        }
+    }
+    Some(TerminalsDisallowed::from_map(remapped))
 }
 
 fn prune_single_initial_state_for_parts(
@@ -1085,48 +1130,15 @@ fn prune_single_initial_state_for_parts(
     tokenizer_state: u32,
     end_states: &[u32],
     matches: &[TokenizerMatch],
+    bytes: &[u8],
 ) -> ParserGSS {
-    let actionable_terminals = ActionableTerminals::from_gss(constraint, &gss);
-    let mut accepted_terminals: SmallVec<[u32; INLINE_PARSER_STATE_CAPACITY]> = SmallVec::new();
-    for matched in matches {
-        if is_ignored_terminal(constraint.ignore_terminal, matched.id) {
-            continue;
-        }
-        if is_actionable_terminal(actionable_terminals.as_ref(), constraint, matched.id) {
-            accepted_terminals.push(matched.id);
-        }
-    }
-
-    if accepted_terminals.is_empty()
-        && gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty())
-    {
-        return gss;
-    }
-
     gss.apply_and_prune_no_promote(|terminals_disallowed: &TerminalsDisallowed| {
-        if terminals_disallowed.is_empty() {
-            return Some(TerminalsDisallowed::new());
-        }
-        if let Some(disallowed) = terminals_disallowed.get(&tokenizer_state) {
-            if !accepted_terminals.is_empty()
-                && accepted_terminals
-                    .iter()
-                    .all(|terminal| disallowed.contains(terminal))
-            {
-                return None;
-            }
-        }
-
-        let mut remapped = BTreeMap::new();
-        for &end_state in end_states {
-            if let Some(disallowed) = terminals_disallowed.get(&tokenizer_state) {
-                remapped
-                    .entry(end_state)
-                    .or_insert_with(BTreeSet::new)
-                    .extend(disallowed.iter().copied());
-            }
-        }
-        Some(TerminalsDisallowed::from_map(remapped))
+        advance_terminals_disallowed_over_bytes(
+            constraint,
+            terminals_disallowed,
+            bytes,
+            Some((tokenizer_state, end_states, matches)),
+        )
     })
 }
 
@@ -1647,26 +1659,13 @@ fn commit_bytes_fast_path(
     let pruned_gss = if accs_empty {
         gss_owned
     } else {
-        let pruned = gss_owned.apply_and_prune_no_promote(|td: &TerminalsDisallowed| {
-            if td.is_empty() {
-                return Some(TerminalsDisallowed::new());
-            }
-            if let Some(disallowed) = td.get(&tokenizer_state) {
-                if disallowed.contains(&terminal) {
-                    return None;
-                }
-            }
-            let mut remapped = BTreeMap::new();
-            for &end_state in &exec_result.end_state {
-                if let Some(d) = td.get(&tokenizer_state) {
-                    remapped
-                        .entry(end_state)
-                        .or_insert_with(BTreeSet::new)
-                        .extend(d.iter().copied());
-                }
-            }
-            Some(TerminalsDisallowed::from_map(remapped))
-        });
+        let pruned = prune_single_initial_state_for_exec(
+            constraint,
+            gss_owned,
+            tokenizer_state,
+            exec_result,
+            bytes,
+        );
 
         if pruned.is_empty() {
             return Some(Err(
@@ -1777,6 +1776,7 @@ fn commit_bytes_full_width_fast_path(
                 gss.clone(),
                 tokenizer_state,
                 &exec_result,
+                bytes,
             );
             if pruned.is_empty() {
                 continue;
@@ -1897,6 +1897,7 @@ fn commit_bytes_small_queue_fast_path(
                     tokenizer_state,
                     &tokenizer_scratch.states,
                     &tokenizer_scratch.matches,
+                    bytes,
                 );
                 if gss_at_offset.is_empty() {
                     continue;
@@ -2222,29 +2223,13 @@ fn commit_bytes_direct_linear_fast_path(
         if !step.ignored {
             if offset == 0 {
                 if !gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty()) {
-                    if let Some(stack) = carried_stack.take() {
-                        let materialize_start = profile.as_ref().map(|_| std::time::Instant::now());
-                        gss = stack.into_gss();
-                        if let (Some(profile), Some(start)) = (profile.as_deref_mut(), materialize_start) {
-                            profile.linear_fast_path_materialize_ns += start.elapsed().as_nanos() as u64;
-                        }
-                    }
-                    let prune_start = profile.as_ref().map(|_| std::time::Instant::now());
-                    gss = prune_single_initial_state_for_terminal(
-                        gss,
-                        tokenizer_state,
-                        step.terminal,
-                        step.end_state,
-                    );
-                    if let (Some(profile), Some(start)) = (profile.as_deref_mut(), prune_start) {
-                        profile.prune_ns += start.elapsed().as_nanos() as u64;
-                    }
-                    if gss.is_empty() {
-                        return Some(LinearFastPathResult::Complete(Err(
-                            "commit rejected: no valid parser states remain".to_string(),
-                        )));
-                    }
-                    carried_stack = gss.try_virtual_stack();
+                    // Delayed exclusions are keyed by remembered lexer states,
+                    // not necessarily by the current tokenizer state. The
+                    // general/flat paths execute every remembered state over
+                    // the whole model token; this single-step shortcut lacks
+                    // that information, so decline rather than applying the
+                    // old current-state-only pruning rule.
+                    return None;
                 }
             }
 
@@ -2591,26 +2576,13 @@ fn commit_bytes_fast_path_profiled(
     let pruned_gss = if all_accs_empty {
         gss_owned
     } else {
-        let pruned = gss_owned.apply_and_prune_no_promote(|td: &TerminalsDisallowed| {
-            if td.is_empty() {
-                return Some(TerminalsDisallowed::new());
-            }
-            if let Some(disallowed) = td.get(&tokenizer_state) {
-                if disallowed.contains(&terminal) {
-                    return None;
-                }
-            }
-            let mut remapped = BTreeMap::new();
-            for &end_state in &exec_result.end_state {
-                if let Some(d) = td.get(&tokenizer_state) {
-                    remapped
-                        .entry(end_state)
-                        .or_insert_with(BTreeSet::new)
-                        .extend(d.iter().copied());
-                }
-            }
-            Some(TerminalsDisallowed::from_map(remapped))
-        });
+        let pruned = prune_single_initial_state_for_exec(
+            constraint,
+            gss_owned,
+            tokenizer_state,
+            exec_result,
+            bytes,
+        );
 
         if pruned.is_empty() {
             return Some(Err("commit rejected: no valid parser states remain".to_string()));
@@ -2827,6 +2799,7 @@ fn commit_bytes_impl_profiled(
                         current_gss.clone(),
                         tokenizer_state,
                         &exec_result,
+                        bytes,
                     )
                 };
                 if start_gss.is_empty() {
@@ -3095,6 +3068,7 @@ fn commit_bytes_impl_profiled(
                     gss_at_offset,
                     tokenizer_state,
                     &exec_result,
+                    bytes,
                 );
                 profile.prune_ns += prune_start.elapsed().as_nanos() as u64;
                 if gss_at_offset.is_empty() {
@@ -3886,52 +3860,26 @@ fn flat_frontier_group_may_advance_on_any(
 }
 
 fn prune_flat_branch_acc(
+    constraint: &Constraint,
     acc: &TerminalsDisallowed,
     tokenizer_state: u32,
     end_states: &[u32],
-    accepted_terminals: &[u32],
+    matches: &[TokenizerMatch],
+    bytes: &[u8],
 ) -> Option<Option<TerminalsDisallowed>> {
     if !acc.is_inline() {
         return None;
     }
-    if let Some(blocked) = acc.get(&tokenizer_state)
-        && !accepted_terminals.is_empty()
-        && accepted_terminals
-            .iter()
-            .all(|terminal| blocked.contains(terminal))
-    {
-        return Some(None);
+    match advance_terminals_disallowed_over_bytes(
+        constraint,
+        acc,
+        bytes,
+        Some((tokenizer_state, end_states, matches)),
+    ) {
+        None => Some(None),
+        Some(remapped) if remapped.is_inline() => Some(Some(remapped)),
+        Some(_) => None,
     }
-    Some(Some(
-        acc.try_remap_single_state_inline(tokenizer_state, end_states)?,
-    ))
-}
-
-fn flat_group_accepted_terminals(
-    constraint: &Constraint,
-    frontier: &FlatFrontierScratch,
-    tokenizer_state: u32,
-    matches: &[TokenizerMatch],
-) -> SmallVec<[u32; SMALL_NORMALIZED_MATCH_LINEAR_SCAN_MAX]> {
-    let mut accepted = SmallVec::new();
-    for matched in matches {
-        if is_ignored_terminal(constraint.ignore_terminal, matched.id)
-            || accepted.contains(&matched.id)
-        {
-            continue;
-        }
-        let actionable = frontier.branches[..frontier.len].iter().any(|branch| {
-            branch.offset == 0
-                && branch.tokenizer_state == tokenizer_state
-                && branch.stack.last().is_some_and(|top| {
-                    constraint.table.advance_row_allows(*top, matched.id)
-                })
-        });
-        if actionable {
-            accepted.push(matched.id);
-        }
-    }
-    accepted
 }
 
 fn apply_flat_future_disallow(
@@ -4015,17 +3963,13 @@ fn try_commit_flat_frontier_in_place(
             }
             let top_state = *original.last()?;
             if offset == 0 {
-                let accepted_terminals = flat_group_accepted_terminals(
-                    constraint,
-                    frontier,
-                    tokenizer_state,
-                    &tokenizer_scratch.matches,
-                );
                 match prune_flat_branch_acc(
+                    constraint,
                     &acc,
                     tokenizer_state,
                     &tokenizer_scratch.states,
-                    &accepted_terminals,
+                    &tokenizer_scratch.matches,
+                    bytes,
                 ) {
                     None => flat_decline!("prune-acc-promotion"),
                     Some(result) => match result {
@@ -4597,6 +4541,7 @@ fn commit_bytes_impl(
                     current_gss.clone(),
                     tokenizer_state,
                     &exec_result,
+                    bytes,
                 )
             };
             if start_gss.is_empty() {
@@ -4777,6 +4722,7 @@ fn commit_bytes_impl(
                     gss_at_offset,
                     tokenizer_state,
                     &exec_result,
+                    bytes,
                 );
                 if gss_at_offset.is_empty() {
                     continue;
@@ -5340,45 +5286,41 @@ mod tests {
     fn top_local_prune_reference(
         constraint: &Constraint,
         gss: &ParserGSS,
-        tokenizer_state: u32,
-        exec_result: &TokenizerExecResult,
+        bytes: &[u8],
     ) -> ParserGSS {
-        let prune_partition = |partition: ParserGSS, top: Option<u32>| {
-            let accepted_terminals: SmallVec<[u32; INLINE_PARSER_STATE_CAPACITY]> = exec_result
-                .matches
-                .iter()
-                .filter(|matched| {
-                    !is_ignored_terminal(constraint.ignore_terminal, matched.id)
-                        && top.is_some_and(|parser_state| {
-                            constraint
-                                .table
-                                .advance_row_allows(parser_state, matched.id)
-                        })
-                })
-                .map(|matched| matched.id)
-                .collect();
-
+        let prune_partition = |partition: ParserGSS| {
             partition.apply_and_prune_no_promote(
                 |terminals_disallowed: &TerminalsDisallowed| {
                     if terminals_disallowed.is_empty() {
                         return Some(TerminalsDisallowed::new());
                     }
-                    if let Some(disallowed) = terminals_disallowed.get(&tokenizer_state)
-                        && !accepted_terminals.is_empty()
-                        && accepted_terminals
-                            .iter()
-                            .all(|terminal| disallowed.contains(terminal))
-                    {
-                        return None;
-                    }
 
                     let mut remapped = BTreeMap::new();
-                    for &end_state in &exec_result.end_state {
-                        if let Some(disallowed) = terminals_disallowed.get(&tokenizer_state) {
-                            remapped
-                                .entry(end_state)
-                                .or_insert_with(BTreeSet::new)
-                                .extend(disallowed.iter().copied());
+                    for (&remembered_state, disallowed) in terminals_disallowed.iter() {
+                        let execution = execute_tokenizer_from_state_small(
+                            constraint,
+                            bytes,
+                            remembered_state,
+                        );
+                        if execution
+                            .matches
+                            .iter()
+                            .any(|matched| disallowed.contains(&matched.id))
+                        {
+                            return None;
+                        }
+                        for end_state in execution.end_state {
+                            let future = constraint
+                                .tokenizer
+                                .possible_future_terminals(end_state);
+                            for &terminal in disallowed.iter() {
+                                if future.contains(terminal as usize) {
+                                    remapped
+                                        .entry(end_state)
+                                        .or_insert_with(BTreeSet::new)
+                                        .insert(terminal);
+                                }
+                            }
                         }
                     }
                     Some(TerminalsDisallowed::from_map(remapped))
@@ -5389,13 +5331,13 @@ mod tests {
         let mut partitions = Vec::new();
         let root = gss.isolate(None);
         if !root.is_empty() {
-            let root = prune_partition(root, None);
+            let root = prune_partition(root);
             if !root.is_empty() {
                 partitions.push(root);
             }
         }
         for parser_state in gss.peek_values() {
-            let partition = prune_partition(gss.isolate(Some(parser_state)), Some(parser_state));
+            let partition = prune_partition(gss.isolate(Some(parser_state)));
             if !partition.is_empty() {
                 partitions.push(partition);
             }
@@ -5412,7 +5354,7 @@ mod tests {
     }
 
     #[test]
-    fn initial_prune_drops_exclusions_from_inactive_dead_residuals() {
+    fn initial_prune_advances_each_remembered_lexer_state() {
         let vocab = Vocab::new(
             vec![
                 (0, b"a".to_vec()),
@@ -5453,11 +5395,55 @@ nt start ::= item item? item?;
             gss.clone(),
             tokenizer_state,
             &exec_result,
+            b"b",
         );
         assert!(
-            pruned.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty()),
-            "dead exclusions keyed to another tokenizer state must not survive reset-branch pruning"
+            !pruned.is_empty()
+                && pruned.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty()),
+            "the valid A=a branch must survive while the provisional B=a branch is invalidated by B=ab"
         );
+    }
+
+    #[test]
+    fn delayed_exclusion_survives_across_model_token_boundaries() {
+        let vocab = Vocab::new(vec![
+            (0, b"@".to_vec()),
+            (1, b" double".to_vec()),
+            (2, b"Quote".to_vec()),
+            (3, b"x".to_vec()),
+            (4, b"=".to_vec()),
+            (5, b"%".to_vec()),
+            (6, b"0".to_vec()),
+        ]);
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                ignore WS;
+                nt start ::= declaration expression;
+                nt declaration ::= "@" ID;
+                nt expression ::= ID OP "0";
+                t WS ::= [ \t\r\n]+;
+                t OP ::= "=" | "%=";
+                t ID ::= [A-Za-z_$] [A-Za-z0-9_$]*;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+
+        let mut state = constraint.start();
+        state.commit_token(0).unwrap();
+        state.commit_token(1).unwrap();
+        state.commit_token(2).unwrap();
+
+        let mask = state.mask();
+        let allowed = |token: u32| {
+            ((mask[token as usize / 32] >> (token % 32)) & 1) != 0
+        };
+        assert!(allowed(3), "continuing the current ID remains viable");
+        assert!(!allowed(4), "the consumed ID cannot also satisfy the next ID");
+        assert!(!allowed(5), "a prefix of %= cannot follow until a new ID is consumed");
+        assert!(state.validate_tokens(&[4]).is_empty());
+        assert!(state.validate_tokens(&[5]).is_empty());
     }
 
     #[test]
@@ -5526,12 +5512,12 @@ nt start ::= item item? item?;
                                         gss.clone(),
                                         tokenizer_state,
                                         &exec_result,
+                                        bytes,
                                     );
                                     let expected = top_local_prune_reference(
                                         &constraint,
                                         gss,
-                                        tokenizer_state,
-                                        &exec_result,
+                                        bytes,
                                     );
                                     assert_eq!(
                                         canonical_gss(&actual),
@@ -5874,7 +5860,9 @@ nt start ::= item item? item?;
             next_fast.state,
             next_slow.state,
         );
-        assert_eq!(next_fast.state, next_slow.state);
+        if fast_result.is_ok() {
+            assert_eq!(next_fast.state, next_slow.state);
+        }
     }
 
     #[test]

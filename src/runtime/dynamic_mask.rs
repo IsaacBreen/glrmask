@@ -3,7 +3,6 @@
 //! This implementation intentionally does not consult the parser DWA. It walks
 //! the vocabulary byte trie while advancing the lexer and GLR parser directly.
 
-use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -118,10 +117,7 @@ enum ContinuationFilter {
 enum InitialPruneGuard {
     Passed,
     Pending {
-        blocked: Arc<BTreeSet<TerminalID>>,
-        lexer_states: TokenizerStateSet,
-        actionable_states: Arc<[u32]>,
-        has_actionable_match: bool,
+        memories: Arc<[(u32, TerminalID)]>,
     },
 }
 
@@ -287,6 +283,85 @@ impl<'a> DynamicNfaScanCache<'a> {
     }
 }
 
+fn for_each_token_matching_terminal_from_state(
+    constraint: &Constraint,
+    start_state: u32,
+    terminal: TerminalID,
+    mut visit_token: impl FnMut(u32),
+) -> Result<(), String> {
+    let vocab = constraint.dynamic_mask_vocab_for_runtime();
+    let trie = vocab.trie.as_ref();
+    let mut scan_cache = DynamicNfaScanCache::new(constraint, None);
+    let start_config = scan_cache.config_for_raw_start(start_state)?;
+    let mut work = vec![(0u32, start_config)];
+
+    while let Some((node, config)) = work.pop() {
+        for edge in trie.children(node) {
+            let mut config = config;
+            let mut alive = true;
+            let mut matched = false;
+            for &byte in trie.edge_bytes(edge) {
+                let Some(next_config) = scan_cache.step_config(config, byte)? else {
+                    alive = false;
+                    break;
+                };
+                config = next_config;
+                matched = scan_cache.configs[config as usize].iter().any(|&state| {
+                    constraint
+                        .tokenizer
+                        .matched_terminals_iter(state)
+                        .any(|matched_terminal| matched_terminal == terminal)
+                });
+                if matched {
+                    break;
+                }
+            }
+
+            if matched {
+                for &canonical_token in trie.subtree_tokens(edge.child) {
+                    if let Some(token_ids) = vocab.token_ids(canonical_token) {
+                        for &token_id in token_ids {
+                            visit_token(token_id);
+                        }
+                    }
+                }
+            } else if alive {
+                work.push((edge.child, config));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub(crate) fn or_blocked_internal_tokens_for_exclusions(
+    constraint: &Constraint,
+    exclusions: &TerminalsDisallowed,
+    dense: &mut [u64],
+) -> Result<(), String> {
+    for (&lexer_state, terminals) in exclusions.iter() {
+        for &terminal in terminals.iter() {
+            for_each_token_matching_terminal_from_state(
+                constraint,
+                lexer_state,
+                terminal,
+                |token_id| {
+                    if let Some(internal_token) =
+                        constraint.final_internal_token_for_original(token_id)
+                    {
+                        let word = internal_token as usize / 64;
+                        let bit = internal_token % 64;
+                        if let Some(slot) = dense.get_mut(word) {
+                            *slot |= 1u64 << bit;
+                        }
+                    }
+                },
+            )?;
+        }
+    }
+    Ok(())
+}
+
 #[inline]
 fn mask_bit_is_set(buf: &[u32], token_id: u32) -> bool {
     let word = token_id as usize / 32;
@@ -370,52 +445,29 @@ fn with_empty_accumulators(stacks: &ParserStacks) -> ParserGSS {
     stacks.apply(|_| TerminalsDisallowed::new())
 }
 
-fn terminal_is_actionable_from_states(
-    constraint: &Constraint,
-    parser_states: &[u32],
-    terminal: TerminalID,
-) -> bool {
-    parser_states
-        .iter()
-        .any(|&parser_state| constraint.table.advance_row_allows(parser_state, terminal))
-}
-
 impl InitialPruneGuard {
     /// Build the token-start pruning state for one correlated tokenizer/GSS
-    /// branch. This is the incremental form of
-    /// `prune_single_initial_state_for_exec`: only restrictions attached to the
-    /// active tokenizer state participate, and parser actionability is frozen at
-    /// the token boundary before any in-token parser advance.
+    /// branch. Every remembered `(lexer state, terminal)` pair is an independent
+    /// condition: a later match of that same terminal invalidates the
+    /// provisional boundary that created this parser path.
     fn new(
-        constraint: &Constraint,
-        tokenizer_state: u32,
-        stacks: &ParserStacks,
+        _constraint: &Constraint,
+        _tokenizer_state: u32,
+        _stacks: &ParserStacks,
         terminals_disallowed: &TerminalsDisallowed,
     ) -> Self {
-        let Some(blocked) = terminals_disallowed.get(&tokenizer_state) else {
-            return Self::Passed;
-        };
-        if blocked.is_empty() {
-            return Self::Passed;
+        let mut memories = Vec::new();
+        for (&lexer_state, terminals) in terminals_disallowed.iter() {
+            for &terminal in terminals.iter() {
+                memories.push((lexer_state, terminal));
+            }
         }
-
-        let actionable_states: Vec<u32> = if let Some(parser_state) = stacks.single_top_value() {
-            vec![parser_state]
-        } else {
-            stacks.peek_values().into_vec()
-        };
-        if !blocked.iter().any(|&terminal| {
-            terminal_is_actionable_from_states(constraint, &actionable_states, terminal)
-        }) {
+        if memories.is_empty() {
             return Self::Passed;
         }
-
-        Self::Pending {
-            blocked: Arc::new(blocked.to_btree_set()),
-            lexer_states: smallvec::smallvec![tokenizer_state],
-            actionable_states: actionable_states.into(),
-            has_actionable_match: false,
-        }
+        memories.sort_unstable();
+        memories.dedup();
+        Self::Pending { memories: memories.into() }
     }
 
     #[inline]
@@ -429,51 +481,63 @@ impl InitialPruneGuard {
     /// unblocked matches transition permanently to `Passed`.
     #[inline]
     fn allows_token_boundary(&self) -> bool {
-        match self {
-            Self::Passed => true,
-            Self::Pending {
-                has_actionable_match,
-                ..
-            } => !*has_actionable_match,
-        }
+        true
     }
 
-    fn allows_token_program(
+    fn allows_token_bytes(&self, constraint: &Constraint, bytes: &[u8]) -> bool {
+        self.advance(constraint, bytes).is_some()
+    }
+
+    fn blocked_output_mask(
         &self,
         constraint: &Constraint,
-        program: &super::artifact::DynamicTokenProgram,
-    ) -> bool {
-        let Self::Pending {
-            blocked,
-            actionable_states,
-            ..
-        } = self
-        else {
-            return true;
+        mask_words: usize,
+    ) -> Result<Option<Vec<u32>>, String> {
+        let Self::Pending { memories } = self else {
+            return Ok(None);
         };
-
-        let mut saw_actionable = false;
-        let mut previous_terminal = None;
-        for &(terminal, _) in program.branches.iter() {
-            if previous_terminal == Some(terminal) {
-                continue;
-            }
-            previous_terminal = Some(terminal);
-            if Some(terminal) == constraint.ignore_terminal
-                || !terminal_is_actionable_from_states(
-                    constraint,
-                    actionable_states,
-                    terminal,
-                )
-            {
-                continue;
-            }
-            saw_actionable = true;
-            if !blocked.contains(&terminal) {
-                return true;
-            }
+        let mut blocked = vec![0u32; mask_words];
+        for &(lexer_state, terminal) in memories.iter() {
+            for_each_token_matching_terminal_from_state(
+                constraint,
+                lexer_state,
+                terminal,
+                |token_id| {
+                    let word = token_id as usize / 32;
+                    let bit = token_id % 32;
+                    if let Some(slot) = blocked.get_mut(word) {
+                        *slot |= 1u32 << bit;
+                    }
+                },
+            )?;
         }
-        !saw_actionable
+        Ok(Some(blocked))
+    }
+
+    fn remember_terminal_match(
+        &self,
+        constraint: &Constraint,
+        lexer_state: u32,
+        terminal: TerminalID,
+    ) -> Self {
+        if !constraint
+            .tokenizer
+            .possible_future_terminals(lexer_state)
+            .contains(terminal as usize)
+        {
+            return self.clone();
+        }
+
+        let mut memories = match self {
+            Self::Passed => Vec::new(),
+            Self::Pending { memories } => memories.to_vec(),
+        };
+        memories.push((lexer_state, terminal));
+        memories.sort_unstable();
+        memories.dedup();
+        Self::Pending {
+            memories: memories.into(),
+        }
     }
 
     /// Advance the original token-start lexer branch through a trie segment.
@@ -482,54 +546,43 @@ impl InitialPruneGuard {
     /// pruning predicate once, over the whole candidate token, before advancing
     /// the parser.
     fn advance(&self, constraint: &Constraint, segment: &[u8]) -> Option<Self> {
-        let Self::Pending {
-            blocked,
-            lexer_states,
-            actionable_states,
-            has_actionable_match,
-        } = self
-        else {
+        let Self::Pending { memories } = self else {
             return Some(Self::Passed);
         };
 
-        let mut next_states = TokenizerStateSet::new();
-        let mut saw_actionable = *has_actionable_match;
-        for &tokenizer_state in lexer_states {
+        let mut next_memories = Vec::new();
+        let mut index = 0usize;
+        while index < memories.len() {
+            let tokenizer_state = memories[index].0;
+            let start = index;
+            while index < memories.len() && memories[index].0 == tokenizer_state {
+                index += 1;
+            }
+            let blocked = &memories[start..index];
             let execution = constraint
                 .tokenizer
                 .execute_from_state_all_widths(segment, tokenizer_state);
             for matched in &execution.matches {
-                if Some(matched.id) == constraint.ignore_terminal
-                    || !terminal_is_actionable_from_states(
-                        constraint,
-                        actionable_states,
-                        matched.id,
-                    )
-                {
-                    continue;
-                }
-                saw_actionable = true;
-                if !blocked.contains(&matched.id) {
-                    return Some(Self::Passed);
+                if blocked.iter().any(|&(_, terminal)| terminal == matched.id) {
+                    return None;
                 }
             }
             for end_state in execution.end_state {
-                if !next_states.contains(&end_state) {
-                    next_states.push(end_state);
+                let future = constraint.tokenizer.possible_future_terminals(end_state);
+                for &(_, terminal) in blocked {
+                    if future.contains(terminal as usize) {
+                        next_memories.push((end_state, terminal));
+                    }
                 }
             }
         }
 
-        if next_states.is_empty() {
-            return (!saw_actionable).then_some(Self::Passed);
+        if next_memories.is_empty() {
+            return Some(Self::Passed);
         }
-
-        Some(Self::Pending {
-            blocked: Arc::clone(blocked),
-            lexer_states: next_states,
-            actionable_states: Arc::clone(actionable_states),
-            has_actionable_match: saw_actionable,
-        })
+        next_memories.sort_unstable();
+        next_memories.dedup();
+        Some(Self::Pending { memories: next_memories.into() })
     }
 }
 
@@ -903,7 +956,8 @@ fn fill_mask_dynamic_impl(
     buf.fill(0);
     let initial_tsid = state.constraint.tokenizer.initial_state();
     let mut traversal = Vec::<TraverseWork>::with_capacity(4096);
-    let mut segment_stack = Vec::<(usize, u32, ParserStacks)>::with_capacity(8);
+    let mut segment_stack =
+        Vec::<(usize, u32, ParserStacks, InitialPruneGuard)>::with_capacity(8);
     let mut self_loop_cache = FxHashMap::<u32, U8Set>::default();
     let mut traversal_cache = DynamicTraversalCache::default();
     let mut token_program_cache = DynamicTokenProgramCache::default();
@@ -991,6 +1045,8 @@ fn fill_mask_dynamic_impl(
             if tokenizer_state == initial_tsid
                 && let Some(program_partition) = vocab.initial_token_program_partition()
             {
+                let blocked_tokens = initial_prune_guard
+                    .blocked_output_mask(state.constraint, buf.len())?;
                 let source_states = [initial_tsid];
                 let mut accepted_programs = vec![false; program_partition.programs.len()];
                 if vocab.copy_cached_program_acceptance(
@@ -1020,28 +1076,23 @@ fn fill_mask_dynamic_impl(
                         &accepted_programs,
                     );
                 }
-                for &program in program_partition.root_programs.iter() {
-                    if accepted_programs[program as usize]
-                        && !initial_prune_guard.allows_token_program(
-                            state.constraint,
-                            &program_partition.programs[program as usize],
-                        )
-                    {
-                        accepted_programs[program as usize] = false;
-                    }
-                }
                 token_program_groups_admitted += accepted_programs
                     .iter()
                     .filter(|&&accepted| accepted)
                     .count();
-                for (word, programs) in buf
+                for (word_index, (word, programs)) in buf
                     .iter_mut()
                     .zip(program_partition.token_programs.chunks(32))
+                    .enumerate()
                 {
                     let mut accepted_bits = 0u32;
                     for (bit, &program) in programs.iter().enumerate() {
+                        let token_index = word_index * 32 + bit;
                         let accepted = program != u16::MAX
-                            && accepted_programs[program as usize];
+                            && accepted_programs[program as usize]
+                            && blocked_tokens.as_ref().is_none_or(|blocked| {
+                                blocked[word_index] & (1u32 << bit) == 0
+                            });
                         accepted_bits |= u32::from(accepted) << bit;
                     }
                     *word |= accepted_bits;
@@ -1244,6 +1295,7 @@ fn fill_mask_dynamic_impl(
                     {
                         let mut accepted_bits = 0u32;
                         for (bit, &program) in programs.iter().enumerate() {
+                            let token_index = word_index * 32 + bit;
                             let accepted = if program == u16::MAX {
                                 if let (Some(base), Some(accepted_base)) = (
                                     base_source_partition,
@@ -1496,17 +1548,15 @@ fn fill_mask_dynamic_impl(
             }
             trie_edges += 1;
             let segment = trie.edge_bytes(edge);
-            let Some(segment_prune_guard) = current
-                .initial_prune_guard
-                .advance(state.constraint, segment)
-            else {
-                continue;
-            };
-
             segment_stack.clear();
-            segment_stack.push((0usize, current.tokenizer_state, current.gss.clone()));
+            segment_stack.push((
+                0usize,
+                current.tokenizer_state,
+                current.gss.clone(),
+                current.initial_prune_guard.clone(),
+            ));
 
-            while let Some((position, tokenizer_state, gss)) = segment_stack.pop() {
+            while let Some((position, tokenizer_state, gss, prune_guard)) = segment_stack.pop() {
                 check_deadline()?;
                 lexer_executions += 1;
                 let execution = lexer_scan_cache
@@ -1515,6 +1565,12 @@ fn fill_mask_dynamic_impl(
 
                 for matched in &execution.matches {
                     debug_assert!(matched.width > 0);
+                    let next_position = position + matched.width;
+                    let Some(advanced_prune_guard) = prune_guard
+                        .advance(state.constraint, &segment[position..next_position])
+                    else {
+                        continue;
+                    };
                     let Some(advanced_parser) = parser_child_cached(
                         state.constraint,
                         &gss,
@@ -1525,21 +1581,41 @@ fn fill_mask_dynamic_impl(
                         continue;
                     };
 
-                    let next_position = position + matched.width;
+                    let advanced_prune_guard = if Some(matched.id)
+                        == state.constraint.ignore_terminal
+                    {
+                        advanced_prune_guard
+                    } else {
+                        advanced_prune_guard.remember_terminal_match(
+                            state.constraint,
+                            matched.end_state,
+                            matched.id,
+                        )
+                    };
                     if next_position == segment.len() {
                         traversal.push(TraverseWork {
                             trie_index: current.trie_index,
                             node: edge.child,
                             tokenizer_state: initial_tsid,
                             gss: advanced_parser,
-                            initial_prune_guard: segment_prune_guard.clone(),
+                            initial_prune_guard: advanced_prune_guard,
                             continuation_filter: current.continuation_filter,
                         });
                     } else {
-                        segment_stack.push((next_position, initial_tsid, advanced_parser));
+                        segment_stack.push((
+                            next_position,
+                            initial_tsid,
+                            advanced_parser,
+                            advanced_prune_guard,
+                        ));
                     }
                 }
 
+                let Some(residual_prune_guard) = prune_guard
+                    .advance(state.constraint, &segment[position..])
+                else {
+                    continue;
+                };
                 for &end_state in &execution.end_state {
                     if !lexer_state_relevant_cached(
                         state.constraint,
@@ -1554,7 +1630,7 @@ fn fill_mask_dynamic_impl(
                         node: edge.child,
                         tokenizer_state: end_state,
                         gss: gss.clone(),
-                        initial_prune_guard: segment_prune_guard.clone(),
+                        initial_prune_guard: residual_prune_guard.clone(),
                         continuation_filter: current.continuation_filter,
                     });
                 }

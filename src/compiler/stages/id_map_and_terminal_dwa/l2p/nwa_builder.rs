@@ -360,7 +360,7 @@ pub(crate) struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     leaf_token_ids_buffer: Vec<Vec<LeafTokenIds>>,
     future_leaf_buffer: FxHashMap<(u32, TokenizerState, ColorId), BufferedLeafTransition>,
     reachable_weight_cache: HashMap<usize, Weight>,
-    pruned_weight_cache: HashMap<(usize, u32, TerminalID), Weight>,
+    pruned_weight_cache: HashMap<(usize, usize, u32, TerminalID), Weight>,
     leaf_weight_cache: HashMap<LeafTokenIds, Weight>,
     transition_buffer: FxHashMap<(u32, i32, u32), Weight>,
     epsilon_buffer: FxHashMap<(u32, u32), Weight>,
@@ -688,14 +688,15 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         leaf_token_id: u32,
         terminal_id: TerminalID,
         end_state: Option<u32>,
-        completes_segment: bool,
+        remaining_segment: &[u8],
     ) -> Option<Weight> {
-        if !(completes_segment && child_node.has_token()) {
+        if end_state.is_none() && !(remaining_segment.is_empty() && child_node.has_token()) {
             return Some(self.cached_reachable_weight(child_node.reachable_token_ids()));
         }
 
         let cache_key = (
             child_node as *const VocabPrefixTreeNode as usize,
+            remaining_segment.len(),
             end_state.unwrap_or(u32::MAX),
             terminal_id,
         );
@@ -704,12 +705,18 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         }
 
         let mut remaining = child_node.reachable_token_ids().clone();
-        remaining.remove(leaf_token_id as usize);
+        if remaining_segment.is_empty() && child_node.has_token() {
+            remaining.remove(leaf_token_id as usize);
+        }
 
         if let Some(end_state) = end_state {
             let possible_matches = self
                 .possible_matches
-                .possible_matches_for_node(child_node, end_state);
+                .possible_matches_for_suffix_and_node(
+                    remaining_segment,
+                    child_node,
+                    end_state,
+                );
             if let Some(matches_for_terminal) = possible_matches.get(&terminal_id) {
                 subtract_possible_matches(&mut remaining, matches_for_terminal);
             }
@@ -1285,7 +1292,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                         leaf_token_id,
                         matched.id,
                         Some(matched.end_state),
-                        next_offset == segment_bytes.len(),
+                        &segment_bytes[next_offset..],
                     );
                     if let Some(started_at) = continuation_weight_started_at {
                         self.profile.trie_continuation_weight_ms +=
@@ -1890,6 +1897,40 @@ mod tests {
         assert!(
             artifact_accepts(&artifact, residual_b, 3, &[1, 1]),
             "token ab from residual prefix b must emit B=ba then B=b"
+        );
+    }
+
+    #[test]
+    fn same_terminal_rematch_inside_compressed_segment_prunes_shorter_boundary() {
+        let expressions = vec![
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Seq(b"_".to_vec())),
+                min: 1,
+                max: None,
+            },
+            Expr::U8Seq(b".".to_vec()),
+        ];
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        // A singleton vocabulary keeps the whole token on one compressed trie
+        // edge. The first possible ID boundary therefore occurs inside that
+        // edge rather than at its destination node.
+        let tree = VocabPrefixTree::build(&[(0, b"__.__".to_vec())]);
+        let id_map = singleton_id_map(tokenizer.num_states(), 1);
+        let artifact = build_baseline_test_artifact(&tokenizer, &tree, &id_map);
+        let residual_identifier = tokenizer
+            .step(tokenizer.initial_state_id(), b'_')
+            .expect("underscore must enter the identifier state");
+
+        assert!(
+            artifact_accepts(&artifact, residual_identifier, 0, &[0, 1, 0]),
+            "the longest identifier match must allow ID DOT ID",
+        );
+        assert!(
+            !artifact_accepts(&artifact, residual_identifier, 0, &[0, 0, 1, 0]),
+            "a shorter ID boundary must be pruned when the same identifier can rematch later inside the compressed edge",
         );
     }
 
@@ -2881,7 +2922,7 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
                         leaf_token_id,
                         matched.id,
                         end_state,
-                        next_offset == segment_bytes.len(),
+                        &segment_bytes[next_offset..],
                     ) else {
                         continue;
                     };

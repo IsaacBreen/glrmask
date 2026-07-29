@@ -636,7 +636,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_possible_matches_falls_back_to_exact_dynamic_mask_for_disallowed_seed() {
+    fn empty_possible_matches_uses_exact_seed_exclusion_scan() {
         let mut constraint = Constraint::from_glrm_grammar(
             r#"
                 start start;
@@ -667,7 +667,6 @@ mod tests {
             ParserGSS::from_stacks(&[(vec![0u32], disallowed)]),
         );
 
-        assert!(state.requires_dynamic_possible_matches_fallback());
         let mut expected = vec![0u32; constraint.mask_len()];
         state.fill_mask_dynamic(&mut expected);
         let mut actual = vec![0u32; constraint.mask_len()];
@@ -907,6 +906,44 @@ fn enqueue_parser_state_transition(
 }
 
 impl<'a> ConstraintState<'a> {
+    fn fill_blocked_seed_dense(
+        &self,
+        terminals_disallowed: &TerminalsDisallowed,
+        blocked: &mut Vec<u64>,
+    ) {
+        blocked.clear();
+        blocked.resize(self.constraint.seed_universe_dense.len(), 0);
+        if terminals_disallowed.is_empty() {
+            return;
+        }
+
+        let mut missing = TerminalsDisallowed::new();
+        for (&remembered_state, terminals) in terminals_disallowed.iter() {
+            for &terminal_id in terminals.iter() {
+                if let Some(mask) = self
+                    .constraint
+                    .seed_terminal_dense
+                    .get(&(remembered_state, terminal_id))
+                {
+                    for (blocked_word, mask_word) in blocked.iter_mut().zip(mask.iter()) {
+                        *blocked_word |= mask_word;
+                    }
+                } else {
+                    missing = missing.with_insert(remembered_state, terminal_id);
+                }
+            }
+        }
+
+        if !missing.is_empty() {
+            super::dynamic_mask::or_blocked_internal_tokens_for_exclusions(
+                self.constraint,
+                &missing,
+                blocked,
+            )
+            .expect("unbounded seed-exclusion scan cannot fail");
+        }
+    }
+
     fn try_fill_mask_single_path_direct(&self, buf: &mut [u32]) -> bool {
         if mask_inner_profile_enabled() || mask_delta_profile_enabled() {
             return false;
@@ -1069,15 +1106,8 @@ impl<'a> ConstraintState<'a> {
             let internal_tsid = self
                 .constraint
                 .internal_tsid_for_state(original_tokenizer_state);
-            let actionable_states = stack
-                .first()
-                .copied()
-                .into_iter()
-                .collect::<SmallVec<[u32; 1]>>();
             if !self.fill_single_path_seed_dense(
                 &terminals_disallowed,
-                original_tokenizer_state,
-                &actionable_states,
                 &mut single_path_aux,
                 &mut single_path_acc,
             ) {
@@ -1214,8 +1244,6 @@ impl<'a> ConstraintState<'a> {
     fn fill_single_path_seed_dense(
         &self,
         terminals_disallowed: &TerminalsDisallowed,
-        original_tokenizer_state: u32,
-        actionable_states: &[u32],
         aux: &mut Vec<u64>,
         dense: &mut Vec<u64>,
     ) -> bool {
@@ -1228,56 +1256,14 @@ impl<'a> ConstraintState<'a> {
         dense.clear();
         dense.extend_from_slice(base);
 
-        let Some(disallowed_in_state) = terminals_disallowed.get(&original_tokenizer_state) else {
-            return true;
-        };
-        if disallowed_in_state.is_empty() {
+        if terminals_disallowed.is_empty() {
             return true;
         }
 
-        let terminal_is_actionable = |terminal_id| {
-            actionable_states.iter().any(|&parser_state| {
-                self.constraint
-                    .table
-                    .advance_row_allows(parser_state, terminal_id)
-            })
-        };
-
-        aux.clear();
-        aux.resize(base.len(), 0);
-        let terminal_masks = &self.constraint.seed_terminal_dense;
-        for &terminal_id in disallowed_in_state {
-            if Some(terminal_id) == self.constraint.ignore_terminal
-                || !terminal_is_actionable(terminal_id)
-            {
-                continue;
-            }
-            if let Some(mask) = terminal_masks.get(&(original_tokenizer_state, terminal_id)) {
-                for (blocked_word, mask_word) in aux.iter_mut().zip(mask.iter()) {
-                    *blocked_word |= mask_word;
-                }
-            }
-        }
+        self.fill_blocked_seed_dense(terminals_disallowed, aux);
 
         if aux.iter().all(|&word| word == 0) {
             return true;
-        }
-
-        for &terminal_id in self.constraint.possible_matches.keys() {
-            if Some(terminal_id) == self.constraint.ignore_terminal
-                || disallowed_in_state.contains(&terminal_id)
-                || !terminal_is_actionable(terminal_id)
-            {
-                continue;
-            }
-            if let Some(mask) = terminal_masks.get(&(original_tokenizer_state, terminal_id)) {
-                for (blocked_word, mask_word) in aux.iter_mut().zip(mask.iter()) {
-                    *blocked_word &= !mask_word;
-                }
-                if aux.iter().all(|&word| word == 0) {
-                    return true;
-                }
-            }
         }
 
         let mut any = false;
@@ -1373,78 +1359,21 @@ impl<'a> ConstraintState<'a> {
     fn terminals_disallowed_to_dense_acc(
         &self,
         terminals_disallowed: &TerminalsDisallowed,
-        original_tokenizer_state: u32,
         internal_tsid: u32,
-        actionable_states: &[u32],
     ) -> Option<DenseMaskAcc> {
         let base = &self.constraint.seed_universe_dense;
         if base.is_empty() {
             return None;
         }
-        let terminal_masks = &self.constraint.seed_terminal_dense;
-
-        let Some(disallowed_in_state) = terminals_disallowed.get(&original_tokenizer_state) else {
-            return DenseMaskAcc::from_dense_arc(internal_tsid, Arc::clone(base));
-        };
-
-        if disallowed_in_state.is_empty() {
+        if terminals_disallowed.is_empty() {
             return DenseMaskAcc::from_dense_arc(internal_tsid, Arc::clone(base));
         }
 
-        // TerminalsDisallowed remains keyed by ORIGINAL tokenizer state because
-        // it describes tokenizer futures accumulated by the GLR parser.
-        //
-        // possible_matches weights themselves are already in the final shared
-        // internal TSID/token spaces. `seed_terminal_dense` bridges back to
-        // original tokenizer states by expanding each internal TSID through
-        // `internal_tsid_to_states` during precomputation.
-        //
-        // A token can match more than one terminal from the same tokenizer
-        // state. Mirror commit pruning exactly: remove it only when it has at
-        // least one actionable matching terminal and every actionable match is
-        // disallowed. Subtracting PM[d] terminal-by-terminal is unsound because
-        // an allowed overlapping terminal may witness the same token.
-        let terminal_is_actionable = |terminal_id| {
-            actionable_states.iter().any(|&parser_state| {
-                self.constraint
-                    .table
-                    .advance_row_allows(parser_state, terminal_id)
-            })
-        };
-
-        let mut blocked_only = vec![0u64; base.len()];
-        for &terminal_id in disallowed_in_state {
-            if Some(terminal_id) == self.constraint.ignore_terminal
-                || !terminal_is_actionable(terminal_id)
-            {
-                continue;
-            }
-            if let Some(mask) = terminal_masks.get(&(original_tokenizer_state, terminal_id)) {
-                for (blocked_word, mask_word) in blocked_only.iter_mut().zip(mask.iter()) {
-                    *blocked_word |= mask_word;
-                }
-            }
-        }
+        let mut blocked_only = Vec::new();
+        self.fill_blocked_seed_dense(terminals_disallowed, &mut blocked_only);
 
         if blocked_only.iter().all(|&word| word == 0) {
             return DenseMaskAcc::from_dense_arc(internal_tsid, Arc::clone(base));
-        }
-
-        for &terminal_id in self.constraint.possible_matches.keys() {
-            if Some(terminal_id) == self.constraint.ignore_terminal
-                || disallowed_in_state.contains(&terminal_id)
-                || !terminal_is_actionable(terminal_id)
-            {
-                continue;
-            }
-            if let Some(mask) = terminal_masks.get(&(original_tokenizer_state, terminal_id)) {
-                for (blocked_word, mask_word) in blocked_only.iter_mut().zip(mask.iter()) {
-                    *blocked_word &= !mask_word;
-                }
-                if blocked_only.iter().all(|&word| word == 0) {
-                    return DenseMaskAcc::from_dense_arc(internal_tsid, Arc::clone(base));
-                }
-            }
         }
 
         let mut dense = base.to_vec();
@@ -1600,9 +1529,7 @@ impl<'a> ConstraintState<'a> {
                 let dense = popped.apply_and_prune(|terminals_disallowed| {
                     self.terminals_disallowed_to_dense_acc(
                         terminals_disallowed,
-                        original_tokenizer_state,
                         internal_tsid,
-                        std::slice::from_ref(&parser_state),
                     )
                 });
                 if !dense.is_empty() {
@@ -1617,9 +1544,7 @@ impl<'a> ConstraintState<'a> {
             gss.isolate(None).for_each_acc(|terminals_disallowed| {
                 if let Some(acc) = self.terminals_disallowed_to_dense_acc(
                     terminals_disallowed,
-                    original_tokenizer_state,
                     internal_tsid,
-                    &[],
                 ) {
                     root_accs.push(acc);
                 }
@@ -1731,32 +1656,6 @@ impl<'a> ConstraintState<'a> {
         }
     }
 
-    /// Possible matches are only needed by static masking when token-start
-    /// terminal exclusions can prune the seed universe. Deferred-PM constraints
-    /// encode that policy as an empty PM table; conservatively switch the whole
-    /// mask call to the exact dynamic implementation as soon as an active
-    /// tokenizer-state accumulator carries any exclusion.
-    fn requires_dynamic_possible_matches_fallback(&self) -> bool {
-        if !self.constraint.possible_matches.is_empty() {
-            return false;
-        }
-        for (&tokenizer_state, gss) in &self.state {
-            let mut requires_fallback = false;
-            gss.for_each_acc(|terminals_disallowed| {
-                if terminals_disallowed
-                    .get(&tokenizer_state)
-                    .is_some_and(|terminals| !terminals.is_empty())
-                {
-                    requires_fallback = true;
-                }
-            });
-            if requires_fallback {
-                return true;
-            }
-        }
-        false
-    }
-
     fn fill_mask_uncached(&self, buf: &mut [u32]) {
         let _ = self.fill_mask_uncached_maybe_profile(buf, false);
     }
@@ -1767,15 +1666,6 @@ impl<'a> ConstraintState<'a> {
         force_profile: bool,
     ) -> Option<MaskProfile> {
         let total_start = (force_profile || mask_inner_profile_enabled()).then(Instant::now);
-
-        if self.requires_dynamic_possible_matches_fallback() {
-            self.fill_mask_dynamic(buf);
-            self.store_mask_cache_reuse_dense(buf);
-            return total_start.map(|start| MaskProfile {
-                total_ns: elapsed_ns(start),
-                ..MaskProfile::default()
-            });
-        }
 
         if self.try_fill_mask_single_path_direct(buf) {
             return total_start.map(|start| MaskProfile {

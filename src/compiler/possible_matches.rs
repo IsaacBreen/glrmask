@@ -111,6 +111,69 @@ impl<'a> PossibleMatchesComputer<'a> {
         self.possible_matches_for_node_states(node, states)
     }
 
+    /// Return every terminal that can match after consuming a fixed suffix
+    /// shared by all tokens below `node`, starting from `tokenizer_state`.
+    ///
+    /// A match reached anywhere inside `suffix` invalidates the shorter
+    /// boundary for every token below `node`, because every such token shares
+    /// those bytes. After the suffix, ordinary trie-relative possible-match
+    /// analysis handles matches in the remaining descendant bytes.
+    pub(crate) fn possible_matches_for_suffix_and_node(
+        &mut self,
+        suffix: &[u8],
+        node: &VocabPrefixTreeNode,
+        tokenizer_state: u32,
+    ) -> Rc<PossibleMatchMap> {
+        if suffix.is_empty() {
+            return self.possible_matches_for_node(node, tokenizer_state);
+        }
+
+        let mut states = self
+            .tokenizer
+            .execute_from_state_end_only(&[], tokenizer_state);
+        states.sort_unstable();
+        states.dedup();
+
+        let mut result = PossibleMatchMap::default();
+        let reachable = self.reachable_for_node(node);
+
+        for &byte in suffix {
+            states = if states.len() == 1 && self.scalar_deterministic_scan {
+                match self.fast_step(states[0], byte) {
+                    Some(next) => SmallVec::from_buf([next]),
+                    None => TokenizerStateSet::new(),
+                }
+            } else {
+                self.tokenizer.step_all(&states, byte)
+            };
+            if states.is_empty() {
+                return Rc::new(result);
+            }
+
+            for &state in &states {
+                for terminal in self.tokenizer.matched_terminals_iter(state) {
+                    let existing = result.entry(terminal).or_default();
+                    merge_token_ids(existing, reachable.as_ref());
+                }
+            }
+        }
+
+        states.retain(|state| !self.tokenizer.is_end(*state));
+        if !states.is_empty() {
+            if let Some(map) = self.canonical_state {
+                for state in &mut states {
+                    *state = map.get(*state as usize).copied().unwrap_or(*state);
+                }
+                states.sort_unstable();
+                states.dedup();
+            }
+            let descendant_matches = self.possible_matches_for_node_states(node, states);
+            merge_possible_match_maps(&mut result, descendant_matches.as_ref());
+        }
+
+        Rc::new(result)
+    }
+
     fn possible_matches_for_node_states(
         &mut self,
         node: &VocabPrefixTreeNode,
