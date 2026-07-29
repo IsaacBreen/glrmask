@@ -2763,12 +2763,7 @@ impl<'a> ConstraintState<'a> {
             }
             let internal_tsid = self.constraint.internal_tsid_for_state(tokenizer_state);
             let root_dense = gss.isolate(None).apply_and_prune(|terminals_disallowed| {
-                self.terminals_disallowed_to_dense_acc(
-                    terminals_disallowed,
-                    tokenizer_state,
-                    internal_tsid,
-                    &[],
-                )
+                self.terminals_disallowed_to_dense_acc(terminals_disallowed, internal_tsid)
             });
             if let Some(final_weight) = start_final_weight {
                 root_dense.for_each_acc(|accumulator| {
@@ -2787,9 +2782,7 @@ impl<'a> ConstraintState<'a> {
                 let dense = popped.apply_and_prune(|terminals_disallowed| {
                     self.terminals_disallowed_to_dense_acc(
                         terminals_disallowed,
-                        tokenizer_state,
                         internal_tsid,
-                        std::slice::from_ref(&parser_state),
                     )
                 });
                 if dense.is_empty() {
