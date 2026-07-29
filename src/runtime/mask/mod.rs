@@ -1513,6 +1513,50 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
         *existing = combined.into();
     }
 
+    fn merge_single_intersection(
+        current: &mut Option<Arc<[u64]>>,
+        incoming: Arc<[u64]>,
+        mask: &SingleDenseTransitionMask,
+    ) {
+        match mask {
+            SingleDenseTransitionMask::Full => {
+                Self::merge_single_result(current, Some(incoming));
+            }
+            SingleDenseTransitionMask::Empty => {}
+            SingleDenseTransitionMask::Dense(mask) => {
+                let Some(existing) = current.as_mut() else {
+                    let transition_mask =
+                        SingleDenseTransitionMask::Dense(Arc::clone(mask));
+                    *current = Self::intersect_single_with_dense_mask(
+                        &incoming,
+                        &transition_mask,
+                    );
+                    return;
+                };
+                if Arc::ptr_eq(existing, &incoming) {
+                    return;
+                }
+                if existing.len() == incoming.len() {
+                    let existing = Arc::make_mut(existing);
+                    for index in 0..existing.len() {
+                        existing[index] |=
+                            incoming[index] & mask.get(index).copied().unwrap_or(0);
+                    }
+                    return;
+                }
+                let len = existing.len().max(incoming.len());
+                let mut combined = vec![0u64; len];
+                for (index, word) in existing.iter().enumerate() {
+                    combined[index] = *word;
+                }
+                for index in 0..incoming.len() {
+                    combined[index] |= incoming[index] & mask.get(index).copied().unwrap_or(0);
+                }
+                *existing = combined.into();
+            }
+        }
+    }
+
     /// Return the parser/GSS transfer mask for one internal tokenizer state,
     /// independently of the current seed accumulator.
     ///
@@ -1598,12 +1642,11 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
             if matches!(transition.mask, SingleDenseTransitionMask::Empty) {
                 continue;
             }
-            let child_result =
-                self.eval_lower_single_transfer(transition.target, child, tsid);
-            let child_result = child_result.and_then(|child_result| {
-                Self::intersect_single_with_dense_mask(&child_result, &transition.mask)
-            });
-            Self::merge_single_result(&mut out, child_result);
+            if let Some(child_result) =
+                self.eval_lower_single_transfer(transition.target, child, tsid)
+            {
+                Self::merge_single_intersection(&mut out, child_result, &transition.mask);
+            }
         }
         self.runtime.single_sources[source_slot as usize]
             .lower
@@ -1667,10 +1710,9 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
             } else {
                 self.eval_lower_single_transfer(transition.target, next, tsid)
             };
-            let child_result = child_result.and_then(|child_result| {
-                Self::intersect_single_with_dense_mask(&child_result, &transition.mask)
-            });
-            Self::merge_single_result(&mut out, child_result);
+            if let Some(child_result) = child_result {
+                Self::merge_single_intersection(&mut out, child_result, &transition.mask);
+            }
         }
         self.runtime.single_sources[source_slot as usize]
             .segments
