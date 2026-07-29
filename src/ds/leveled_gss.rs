@@ -1513,6 +1513,7 @@ pub(crate) struct GssSemanticKeyInterner<
     lower_memo: FxHashMap<usize, (Arc<Lower<T>>, u32)>,
     upper_memo: FxHashMap<usize, (Arc<Upper<T, A>>, u32)>,
     union_memo: FxHashMap<(u32, u32), u32>,
+    reconstructed: FxHashMap<u32, Arc<Lower<T>>>,
     union_pending: Vec<(u32, u32)>,
     union_unseen: FxHashSet<(u32, u32)>,
     union_order: Vec<(u32, u32)>,
@@ -1548,6 +1549,7 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
             lower_memo: FxHashMap::default(),
             upper_memo: FxHashMap::default(),
             union_memo: FxHashMap::default(),
+            reconstructed: FxHashMap::default(),
             union_pending: Vec::new(),
             union_unseen: FxHashSet::default(),
             union_order: Vec::new(),
@@ -1825,8 +1827,7 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
             lower
         }
 
-        let mut memo = FxHashMap::default();
-        let lower = build(&self.nodes, root, &mut memo);
+        let lower = build(&self.nodes, root, &mut self.reconstructed);
         let gss = LeveledGSS {
             inner: new_interface(lower, accumulator),
         };
