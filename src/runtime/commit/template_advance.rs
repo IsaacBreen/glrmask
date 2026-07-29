@@ -49,7 +49,8 @@ pub(super) fn advance_stacks_template_dfa_owned(
 
 pub(crate) struct TemplateAdvanceRuntime {
     interner: GssSemanticKeyInterner<u32, TerminalsDisallowed>,
-    memo: FxHashMap<(u32, Phase, u32, u32), u32>,
+    memo_rows: Vec<SmallVec<[TemplateMemoEntry; 2]>>,
+    memo_entries: usize,
     component_cache:
         FxHashMap<usize, (ParserGSS, Vec<(u32, TerminalsDisallowed)>)>,
     calls: u64,
@@ -73,7 +74,7 @@ impl Default for TemplateAdvanceRuntime {
 impl std::fmt::Debug for TemplateAdvanceRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TemplateAdvanceRuntime")
-            .field("memo", &self.memo.len())
+            .field("memo_entries", &self.memo_entries)
             .field("component_cache", &self.component_cache.len())
             .field("calls", &self.calls)
             .field("memo_hits", &self.memo_hits)
@@ -96,7 +97,8 @@ impl TemplateAdvanceRuntime {
                 max_source_keys,
                 max_union_entries,
             ),
-            memo: FxHashMap::default(),
+            memo_rows: Vec::with_capacity(256),
+            memo_entries: 0,
             component_cache: FxHashMap::default(),
             calls: 0,
             memo_hits: 0,
@@ -141,7 +143,7 @@ impl TemplateAdvanceRuntime {
     }
 
     pub(crate) fn memo_summary(&self) -> (u64, u64, usize) {
-        (self.calls, self.memo_hits, self.memo.len())
+        (self.calls, self.memo_hits, self.memo_entries)
     }
 
     pub(crate) fn work_summary(
@@ -152,7 +154,7 @@ impl TemplateAdvanceRuntime {
         (
             self.calls,
             self.memo_hits,
-            self.memo.len(),
+            self.memo_entries,
             self.products_started,
             semantic_nodes,
             lower_keys,
@@ -240,6 +242,52 @@ impl TemplateAdvanceRuntime {
         union
     }
 
+    #[inline]
+    fn memo_get(
+        &mut self,
+        terminal: u32,
+        phase: Phase,
+        state_id: u32,
+        language: u32,
+    ) -> Option<u32> {
+        let row = self.memo_rows.get(language as usize)?;
+        let output = row
+            .iter()
+            .find(|entry| {
+                entry.terminal == terminal
+                    && entry.phase == phase
+                    && entry.state_id == state_id
+            })?
+            .output;
+        self.memo_hits += 1;
+        Some(output)
+    }
+
+    #[inline]
+    fn memo_insert(
+        &mut self,
+        terminal: u32,
+        phase: Phase,
+        state_id: u32,
+        language: u32,
+        output: u32,
+    ) {
+        let language = language as usize;
+        if self.memo_rows.len() <= language {
+            self.memo_rows.resize_with(language + 1, SmallVec::new);
+        }
+        debug_assert!(!self.memo_rows[language].iter().any(|entry| {
+            entry.terminal == terminal && entry.phase == phase && entry.state_id == state_id
+        }));
+        self.memo_rows[language].push(TemplateMemoEntry {
+            terminal,
+            phase,
+            state_id,
+            output,
+        });
+        self.memo_entries += 1;
+    }
+
     pub(crate) fn advance_language(
         &mut self,
         constraint: &Constraint,
@@ -263,6 +311,14 @@ impl TemplateAdvanceRuntime {
         );
         (!self.is_exhausted()).then_some(advanced)
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TemplateMemoEntry {
+    terminal: u32,
+    phase: Phase,
+    state_id: u32,
+    output: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -292,9 +348,7 @@ fn evaluate_template_language(
         return 0;
     }
     runtime.calls += 1;
-    let memo_key = (terminal, phase, state_id, language);
-    if let Some(&cached) = runtime.memo.get(&memo_key) {
-        runtime.memo_hits += 1;
+    if let Some(cached) = runtime.memo_get(terminal, phase, state_id, language) {
         return cached;
     }
     if runtime.products_started >= runtime.max_template_products {
@@ -461,7 +515,7 @@ fn evaluate_template_language(
     if runtime.is_exhausted() {
         return 0;
     }
-    runtime.memo.insert(memo_key, output);
+    runtime.memo_insert(terminal, phase, state_id, language, output);
     output
 }
 
@@ -985,7 +1039,10 @@ mod tests {
         );
         assert_eq!(output, 0);
         assert!(runtime.is_exhausted());
-        assert!(runtime.memo.is_empty(), "partial products must not be published");
+        assert_eq!(
+            runtime.memo_entries, 0,
+            "partial products must not be published"
+        );
     }
 
     #[test]
