@@ -710,12 +710,14 @@ mod tests {
                 ]),
         )
         .expect("test constraint should compile");
+        assert!(constraint.possible_matches_complete);
         let terminal_a = constraint
             .terminal_display_names
             .iter()
             .position(|name| name == "A")
             .expect("A terminal should have a display name") as u32;
         constraint.possible_matches.clear();
+        constraint.possible_matches_complete = false;
 
         let tokenizer_state = constraint.tokenizer.initial_state();
         let disallowed = TerminalsDisallowed::new().with_insert(tokenizer_state, terminal_a);
@@ -733,6 +735,7 @@ mod tests {
 
         let loaded = Constraint::load(&constraint.save()).expect("empty-PM constraint should roundtrip");
         assert!(loaded.possible_matches.is_empty());
+        assert!(!loaded.possible_matches_complete);
         let mut loaded_state = loaded.start_dynamic();
         let loaded_tokenizer_state = loaded.tokenizer.initial_state();
         let loaded_disallowed =
@@ -986,7 +989,7 @@ impl<'a> ConstraintState<'a> {
                     for (blocked_word, mask_word) in blocked.iter_mut().zip(mask.iter()) {
                         *blocked_word |= mask_word;
                     }
-                } else {
+                } else if !self.constraint.possible_matches_complete {
                     missing =
                         missing.with_insert(continuation_tokenizer_state, terminal_id);
                 }

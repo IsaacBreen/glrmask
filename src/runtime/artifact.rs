@@ -2447,6 +2447,11 @@ pub struct Constraint {
     /// and possible_matches weights are reconciled into this same space during
     /// compilation.
     pub(crate) possible_matches: PossibleMatchesByTerminal,
+    /// Whether `possible_matches` is a complete table. When true, an absent
+    /// state/terminal row is a known-empty token set rather than a signal to
+    /// invoke the exact dynamic fallback.
+    #[serde(default)]
+    pub(crate) possible_matches_complete: bool,
     pub(crate) state_to_internal_tsid: Vec<u32>,
     pub(crate) internal_tsid_to_states: Vec<Vec<u32>>,
     #[serde(skip)]
