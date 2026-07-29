@@ -2015,7 +2015,16 @@ fn language_small_queue_enabled() -> bool {
     })
 }
 
-fn language_small_queue_is_profitable(
+/// Return whether one model token contains multiple parser-actionable,
+/// non-ignored terminal completion boundaries at different byte offsets.
+///
+/// This is the structural case where the ordinary byte queue must materialize
+/// and carry parser states at more than one offset inside the same token. The
+/// language queue evaluates all such offset alternatives before reconstructing
+/// a GSS once at token completion. Multiple terminals ending at the same byte
+/// offset do not qualify: the ordinary queue already merges those without an
+/// offset frontier split.
+fn has_multiple_actionable_terminal_boundaries(
     constraint: &Constraint,
     state: &ParserStateMap,
     bytes: &[u8],
@@ -2271,7 +2280,7 @@ fn commit_bytes_language_small_queue_fast_path(
         || !(2..=8).contains(&bytes.len())
         || state.len() > 2
         || (!profitability_prechecked
-            && !language_small_queue_is_profitable(
+            && !has_multiple_actionable_terminal_boundaries(
                 constraint,
                 state,
                 bytes,
@@ -5446,6 +5455,8 @@ impl<'a> ConstraintState<'a> {
         let bytes = token_bytes_for_id(constraint, token_id);
         let assertion_flags = commit_assertion_flags();
         let was_in_mask = snapshot_mask_membership(self, token_id, assertion_flags);
+        let equivalence_reference = (assertion_flags & COMMIT_ASSERT_FAST_PATH_EQUIVALENCE != 0)
+            .then(|| self.state.clone());
         let start = Instant::now();
         let result = commit_token_impl(constraint, &mut self.state, &mut self.buffers, token_id);
         let total_ns = start.elapsed().as_nanos() as u64;
@@ -5455,7 +5466,7 @@ impl<'a> ConstraintState<'a> {
             token_id,
             bytes,
             was_in_mask,
-            None,
+            equivalence_reference,
             &self.state,
             result.is_ok(),
         );
@@ -5473,6 +5484,8 @@ impl<'a> ConstraintState<'a> {
         }
         let assertion_flags = commit_assertion_flags();
         let was_in_mask = snapshot_mask_membership(self, token_id, assertion_flags);
+        let equivalence_reference = (assertion_flags & COMMIT_ASSERT_FAST_PATH_EQUIVALENCE != 0)
+            .then(|| self.state.clone());
         let total_started_at = std::time::Instant::now();
         let special = if has_special {
             advance_special_token_paths_profiled(constraint, &self.state, token_id, None)
@@ -5509,7 +5522,7 @@ impl<'a> ConstraintState<'a> {
             token_id,
             bytes,
             was_in_mask,
-            None,
+            equivalence_reference,
             &self.state,
             result.is_ok(),
         );
@@ -5530,6 +5543,8 @@ impl<'a> ConstraintState<'a> {
         }
         let assertion_flags = commit_assertion_flags();
         let was_in_mask = snapshot_mask_membership(self, token_id, assertion_flags);
+        let equivalence_reference = (assertion_flags & COMMIT_ASSERT_FAST_PATH_EQUIVALENCE != 0)
+            .then(|| self.state.clone());
         let total_started_at = std::time::Instant::now();
         let mut advances = Vec::new();
         let special = if has_special {
@@ -5574,7 +5589,7 @@ impl<'a> ConstraintState<'a> {
             token_id,
             bytes,
             was_in_mask,
-            None,
+            equivalence_reference,
             &self.state,
             result.is_ok(),
         );
@@ -5611,6 +5626,71 @@ mod tests {
         state: &ParserStateMap,
     ) -> CanonicalCommitState {
         canonical_commit_state_for_equivalence_assert(state)
+    }
+
+    #[test]
+    fn actionable_terminal_boundary_trigger_requires_distinct_offsets() {
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                t A ::= "a";
+                t AB ::= "ab";
+                nt start ::= A | AB;
+            "#,
+            &Vocab::new(vec![
+                (0, b"a".to_vec()),
+                (1, b"ab".to_vec()),
+                (2, b"b".to_vec()),
+            ]),
+        )
+        .expect("boundary-trigger grammar should compile");
+        let state = constraint.start();
+        let mut scratch = tokenizer_scan::ReusableTokenizerExecScratch::default();
+
+        assert!(
+            !has_multiple_actionable_terminal_boundaries(
+                &constraint,
+                &state.state,
+                b"a",
+                &mut scratch,
+            ),
+            "one actionable completion boundary must not select the language queue",
+        );
+        assert!(
+            has_multiple_actionable_terminal_boundaries(
+                &constraint,
+                &state.state,
+                b"ab",
+                &mut scratch,
+            ),
+            "actionable terminal completions at byte offsets one and two must select",
+        );
+    }
+
+    #[test]
+    fn actionable_terminal_boundary_trigger_ignores_same_offset_ambiguity() {
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                t A ::= "a";
+                t ALSO_A ::= "a";
+                nt start ::= A | ALSO_A;
+            "#,
+            &Vocab::new(vec![(0, b"a".to_vec())]),
+        )
+        .expect("same-offset trigger grammar should compile");
+        let state = constraint.start();
+        let mut scratch = tokenizer_scan::ReusableTokenizerExecScratch::default();
+
+        assert!(
+            !has_multiple_actionable_terminal_boundaries(
+                &constraint,
+                &state.state,
+                b"a",
+                &mut scratch,
+            ),
+            "multiple actionable terminals ending at one offset must remain on the ordinary queue",
+        );
     }
 
     #[test]
