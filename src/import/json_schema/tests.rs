@@ -3923,6 +3923,34 @@ fn pathological_pattern_max_length_high_complexity_limit_preserves_upper_bound()
 }
 
 #[test]
+fn extreme_pattern_length_product_is_rejected_without_dropping_max_length() {
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "question": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 5000,
+                "pattern": "^$|(^(?:\\S+\\s+){0,99}\\S+$)"
+            },
+            "answer": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 5000,
+                "pattern": "^$|(^(?:\\S+\\s+){0,99}\\S+$)"
+            }
+        },
+        "required": ["question", "answer"],
+        "additionalProperties": false
+    });
+
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("above the compiler structural budget"), "{error}");
+    assert!(error.contains("length constraint was not dropped"), "{error}");
+}
+
+#[test]
 fn medium_bounded_string_terminalizes_with_env_override() {
     let _env_lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
     let _terminalize_guard = EnvVarGuard::set(

@@ -544,6 +544,26 @@ impl<'a> Lowerer<'a> {
             )));
         }
 
+        if let (Some(pattern), Some(max_length)) =
+            (schema.pattern.as_deref(), schema.max_length)
+            && self.config.preserve_pattern_max_length
+        {
+            let preprocessed = preprocess_ascii_shorthand(pattern);
+            let score = pattern_max_length_complexity_score(&preprocessed, max_length);
+            let hard_limit = self.config.pattern_max_length_hard_complexity_limit;
+            if score > hard_limit
+                && pattern_requires_sibling_length_envelope(
+                    &preprocessed,
+                    schema.min_length,
+                    max_length,
+                )
+            {
+                return Err(SchemaImportError::new(format!(
+                    "pattern/maxLength requires an exact tokenizer product above the compiler structural budget (estimated complexity {score}, limit {hard_limit}); the length constraint was not dropped"
+                )));
+            }
+        }
+
         let mut expr = if let Some(pattern) = &schema.pattern {
             // Preserve the exact length envelope alongside the pattern. Static
             // complexity estimates may choose a different construction strategy,
@@ -2547,6 +2567,19 @@ fn pattern_max_length_complexity_score(pattern: &str, max_length: usize) -> usiz
     };
     let (hir, _, _) = strip_outer_anchors(hir);
     pattern_hir_length_complexity(&hir, max_length).score
+}
+
+fn pattern_requires_sibling_length_envelope(
+    pattern: &str,
+    min_length: usize,
+    max_length: usize,
+) -> bool {
+    let Ok(hir) = Parser::new().parse(pattern) else {
+        return false;
+    };
+    let (hir, _, _) = strip_outer_anchors(hir);
+    let bounds = pattern_hir_length_complexity(&hir, max_length);
+    bounds.min_chars < min_length || bounds.max_chars.is_none_or(|max| max > max_length)
 }
 
 /// Estimate the cost of repeating one constrained string inside a bounded

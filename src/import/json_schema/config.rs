@@ -13,6 +13,7 @@ pub(crate) struct JsonSchemaConfig {
     pub(crate) terminalize_bounded_string_max: usize,
     pub(crate) preserve_pattern_max_length: bool,
     pub(crate) pattern_max_length_complexity_limit: usize,
+    pub(crate) pattern_max_length_hard_complexity_limit: usize,
     pub(crate) split_complex_patterns: bool,
     pub(crate) value_merging: MergeFamily,
     pub(crate) key_merging: MergeFamily,
@@ -65,6 +66,12 @@ impl Default for JsonSchemaConfig {
             // lowering strategies. It must not decide whether maxLength is
             // semantically enforced.
             pattern_max_length_complexity_limit: 8_000,
+            // Exact pattern/maxLength intersections can have a deterministic
+            // state space proportional to the product of two large automata.
+            // Above this conservative structural budget, reject the schema
+            // explicitly instead of risking an unbounded compile or silently
+            // dropping the finite length constraint.
+            pattern_max_length_hard_complexity_limit: 1_000_000,
             split_complex_patterns: false,
             value_merging: MergeFamily {
                 generic: split_open_merge_close,
@@ -109,6 +116,10 @@ impl JsonSchemaConfig {
             "GLRMASK_JSON_SCHEMA_PATTERN_MAX_LENGTH_COMPLEXITY_LIMIT",
         )
         .unwrap_or(config.pattern_max_length_complexity_limit);
+        config.pattern_max_length_hard_complexity_limit = read_usize(
+            "GLRMASK_JSON_SCHEMA_PATTERN_MAX_LENGTH_HARD_COMPLEXITY_LIMIT",
+        )
+        .unwrap_or(config.pattern_max_length_hard_complexity_limit);
         config.split_complex_patterns = read_bool(
             "GLRMASK_JSON_SCHEMA_SPLIT_COMPLEX_PATTERNS",
         )
