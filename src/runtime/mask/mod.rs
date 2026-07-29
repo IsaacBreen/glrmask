@@ -2,6 +2,7 @@ pub(crate) mod profile;
 pub(crate) mod queue;
 
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
+use crate::grammar::flat::TerminalID;
 use crate::compiler::glr::labels::{encode_positive_label, DEFAULT_LABEL};
 use crate::ds::leveled_gss::{
     IndexedLeveledGss, IndexedLeveledGssNode, IndexedLowerIdentity, LeveledGSS, Merge,
@@ -1068,7 +1069,7 @@ struct SingleDenseTransition {
 #[derive(Clone)]
 struct SingleLowerMemoEntry {
     dwa_state: u32,
-    accumulator_id: u32,
+    tsid: u32,
     result: Option<Arc<[u64]>>,
 }
 
@@ -1076,7 +1077,7 @@ struct SingleLowerMemoEntry {
 struct SingleSegmentMemoEntry {
     offset: usize,
     dwa_state: u32,
-    accumulator_id: u32,
+    tsid: u32,
     result: Option<Arc<[u64]>>,
 }
 
@@ -1480,23 +1481,6 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
         }
     }
 
-    fn intersect_single_with_weight(
-        &self,
-        dense: &Arc<[u64]>,
-        tsid: u32,
-        weight: &Weight,
-    ) -> Option<Arc<[u64]>> {
-        if weight.is_full() {
-            return Some(Arc::clone(dense));
-        }
-        let token_set = weight.0.get(tsid)?;
-        DenseMaskAcc::intersect_dense_with_token_set_reuse(
-            dense,
-            token_set,
-            self.precomputed,
-        )
-    }
-
     fn merge_single_result(
         current: &mut Option<Arc<[u64]>>,
         incoming: Option<Arc<[u64]>>,
@@ -1522,32 +1506,42 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
         *current = Some(combined.into());
     }
 
-    fn final_for_single_accumulator(
+    /// Return the parser/GSS transfer mask for one internal tokenizer state,
+    /// independently of the current seed accumulator.
+    ///
+    /// The denotation evaluated below uses only union and intersection with
+    /// parser-DWA weights. Therefore `E(q, G, a) = a ∩ E(q, G, U)` for every
+    /// seed accumulator `a` and seed universe `U`. Caching `E(q, G, U)` by
+    /// `(q, G, tsid)` keeps the result valid when delayed lexer exclusions
+    /// produce a different `a` at the next model token.
+    fn final_for_single_transfer(
         &mut self,
         dwa_state: u32,
-        accumulator_id: u32,
         tsid: u32,
-        dense: &Arc<[u64]>,
     ) -> Option<Arc<[u64]>> {
-        let key = (dwa_state, accumulator_id);
+        let key = (dwa_state, tsid);
         if let Some(cached) = self.runtime.single_final_memo.get(&key) {
             return cached.clone();
         }
         let result = self.constraint.parser_dwa().states()[dwa_state as usize]
             .final_weight
             .as_ref()
-            .and_then(|weight| self.intersect_single_with_weight(dense, tsid, weight));
+            .and_then(|weight| match self.single_dense_mask_for_weight(weight, tsid) {
+                SingleDenseTransitionMask::Full => {
+                    Some(Arc::clone(&self.constraint.seed_universe_dense))
+                }
+                SingleDenseTransitionMask::Dense(dense) => Some(dense),
+                SingleDenseTransitionMask::Empty => None,
+            });
         self.runtime.single_final_memo.insert(key, result.clone());
         result
     }
 
-    fn eval_lower_single(
+    fn eval_lower_single_transfer(
         &mut self,
         dwa_state: u32,
         node: u32,
-        accumulator_id: u32,
         tsid: u32,
-        dense: &Arc<[u64]>,
     ) -> Option<Arc<[u64]>> {
         self.lower_calls += 1;
         let source_slot = self.source_slots[node as usize];
@@ -1558,10 +1552,7 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
         let cached = self.runtime.single_sources[source_slot as usize]
             .lower
             .iter()
-            .find(|entry| {
-                entry.dwa_state == dwa_state
-                    && entry.accumulator_id == accumulator_id
-            })
+            .find(|entry| entry.dwa_state == dwa_state && entry.tsid == tsid)
             .map(|entry| entry.result.clone());
         if let Some(cached) = cached {
             self.lower_hits += 1;
@@ -1572,19 +1563,12 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
                 empty, children, ..
             } => (*empty, children.len()),
             IndexedLeveledGssNode::LowerSegment { .. } => {
-                let out = self.eval_segment_single(
-                    dwa_state,
-                    node,
-                    0,
-                    accumulator_id,
-                    tsid,
-                    dense,
-                );
+                let out = self.eval_segment_single_transfer(dwa_state, node, 0, tsid);
                 self.runtime.single_sources[source_slot as usize]
                     .lower
                     .push(SingleLowerMemoEntry {
                         dwa_state,
-                        accumulator_id,
+                        tsid,
                         result: out.clone(),
                     });
                 return out;
@@ -1592,14 +1576,7 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
             _ => unreachable!(),
         };
         let mut out = (empty || child_count != 0)
-            .then(|| {
-                self.final_for_single_accumulator(
-                    dwa_state,
-                    accumulator_id,
-                    tsid,
-                    dense,
-                )
-            })
+            .then(|| self.final_for_single_transfer(dwa_state, tsid))
             .flatten();
         for child_index in 0..child_count {
             let (parser_state, child) = match &self.dag.nodes[node as usize] {
@@ -1608,28 +1585,16 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
                 }
                 _ => unreachable!(),
             };
-            let Some(transition) = self.single_transition(
-                dwa_state,
-                parser_state,
-                tsid,
-            ) else {
+            let Some(transition) = self.single_transition(dwa_state, parser_state, tsid) else {
                 continue;
             };
             if matches!(transition.mask, SingleDenseTransitionMask::Empty) {
                 continue;
             }
-            let child_result = self.eval_lower_single(
-                transition.target,
-                child,
-                accumulator_id,
-                tsid,
-                dense,
-            );
+            let child_result =
+                self.eval_lower_single_transfer(transition.target, child, tsid);
             let child_result = child_result.and_then(|child_result| {
-                Self::intersect_single_with_dense_mask(
-                    &child_result,
-                    &transition.mask,
-                )
+                Self::intersect_single_with_dense_mask(&child_result, &transition.mask)
             });
             Self::merge_single_result(&mut out, child_result);
         }
@@ -1637,20 +1602,18 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
             .lower
             .push(SingleLowerMemoEntry {
                 dwa_state,
-                accumulator_id,
+                tsid,
                 result: out.clone(),
             });
         out
     }
 
-    fn eval_segment_single(
+    fn eval_segment_single_transfer(
         &mut self,
         dwa_state: u32,
         node: u32,
         offset: usize,
-        accumulator_id: u32,
         tsid: u32,
-        dense: &Arc<[u64]>,
     ) -> Option<Arc<[u64]>> {
         self.segment_calls += 1;
         let source_slot = self.source_slots[node as usize];
@@ -1661,9 +1624,7 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
             .segments
             .iter()
             .find(|entry| {
-                entry.offset == offset
-                    && entry.dwa_state == dwa_state
-                    && entry.accumulator_id == accumulator_id
+                entry.offset == offset && entry.dwa_state == dwa_state && entry.tsid == tsid
             })
             .map(|entry| entry.result.clone());
         if let Some(cached) = cached {
@@ -1685,38 +1646,22 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
             }
             _ => unreachable!(),
         };
-        let mut out = self.final_for_single_accumulator(
-            dwa_state,
-            accumulator_id,
-            tsid,
-            dense,
-        );
+        let mut out = self.final_for_single_transfer(dwa_state, tsid);
         if let Some(transition) = self.single_transition(dwa_state, parser_state, tsid)
             && !matches!(transition.mask, SingleDenseTransitionMask::Empty)
         {
             let child_result = if has_more {
-                self.eval_segment_single(
+                self.eval_segment_single_transfer(
                     transition.target,
                     node,
                     offset + 1,
-                    accumulator_id,
                     tsid,
-                    dense,
                 )
             } else {
-                self.eval_lower_single(
-                    transition.target,
-                    next,
-                    accumulator_id,
-                    tsid,
-                    dense,
-                )
+                self.eval_lower_single_transfer(transition.target, next, tsid)
             };
             let child_result = child_result.and_then(|child_result| {
-                Self::intersect_single_with_dense_mask(
-                    &child_result,
-                    &transition.mask,
-                )
+                Self::intersect_single_with_dense_mask(&child_result, &transition.mask)
             });
             Self::merge_single_result(&mut out, child_result);
         }
@@ -1725,7 +1670,7 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
             .push(SingleSegmentMemoEntry {
                 offset,
                 dwa_state,
-                accumulator_id,
+                tsid,
                 result: out.clone(),
             });
         out
@@ -1743,9 +1688,12 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
             .filter(|_| self.runtime.accumulators[accumulator_id as usize].0.len() == 1)
             .map(|(tsid, dense)| (*tsid, Arc::clone(dense)))
         {
-            return self
-                .eval_lower_single(dwa_state, node, accumulator_id, tsid, &dense)
-                .and_then(|result| DenseMaskAcc::from_dense_arc(tsid, result));
+            let transfer = self.eval_lower_single_transfer(dwa_state, node, tsid)?;
+            return Self::intersect_single_with_dense_mask(
+                &dense,
+                &SingleDenseTransitionMask::Dense(transfer),
+            )
+            .and_then(|result| DenseMaskAcc::from_dense_arc(tsid, result));
         }
         self.lower_calls += 1;
         let source_ptr = match &self.dag.nodes[node as usize] {
@@ -1989,13 +1937,17 @@ impl<'a> ConstraintState<'a> {
         terminals_disallowed: &TerminalsDisallowed,
         blocked: &mut Vec<u64>,
     ) {
+        const MAX_FALLBACK_MASKS: usize = 512;
+
+        let profile = std::env::var_os("GLRMASK_PROFILE_SEED_EXCLUSIONS").is_some();
+        let started = profile.then(Instant::now);
         blocked.clear();
         blocked.resize(self.constraint.seed_universe_dense.len(), 0);
         if terminals_disallowed.is_empty() {
             return;
         }
 
-        let mut missing = TerminalsDisallowed::new();
+        let mut missing_pairs = SmallVec::<[(u32, TerminalID); 4]>::new();
         for (&continuation_tokenizer_state, terminals) in terminals_disallowed.iter() {
             for &terminal_id in terminals.iter() {
                 if let Some(mask) = self
@@ -2007,19 +1959,81 @@ impl<'a> ConstraintState<'a> {
                         *blocked_word |= mask_word;
                     }
                 } else {
-                    missing =
-                        missing.with_insert(continuation_tokenizer_state, terminal_id);
+                    missing_pairs.push((continuation_tokenizer_state, terminal_id));
                 }
             }
         }
 
-        if !missing.is_empty() {
+        let mut cache_hits = 0usize;
+        let mut uncached = SmallVec::<[(u32, TerminalID); 4]>::new();
+        if !missing_pairs.is_empty() {
+            let cache = self
+                .constraint
+                .seed_terminal_dense_fallback
+                .lock()
+                .expect("seed exclusion cache poisoned");
+            for &pair in &missing_pairs {
+                if let Some(mask) = cache.get(&pair) {
+                    cache_hits += 1;
+                    for (blocked_word, mask_word) in blocked.iter_mut().zip(mask.iter()) {
+                        *blocked_word |= mask_word;
+                    }
+                } else if !uncached.contains(&pair) {
+                    uncached.push(pair);
+                }
+            }
+        }
+
+        let dynamic_started = profile.then(Instant::now);
+        for (continuation_tokenizer_state, terminal_id) in uncached.iter().copied() {
+            let exclusions = TerminalsDisallowed::new()
+                .with_insert(continuation_tokenizer_state, terminal_id);
+            let mut computed = vec![0u64; blocked.len()];
             super::dynamic_mask::or_blocked_internal_tokens_for_exclusions(
                 self.constraint,
-                &missing,
-                blocked,
+                &exclusions,
+                &mut computed,
             )
             .expect("unbounded seed-exclusion scan cannot fail");
+            let computed: Arc<[u64]> = computed.into();
+
+            let selected = {
+                let mut cache = self
+                    .constraint
+                    .seed_terminal_dense_fallback
+                    .lock()
+                    .expect("seed exclusion cache poisoned");
+                if let Some(existing) = cache.get(&(continuation_tokenizer_state, terminal_id)) {
+                    Arc::clone(existing)
+                } else {
+                    if cache.len() < MAX_FALLBACK_MASKS {
+                        cache.insert(
+                            (continuation_tokenizer_state, terminal_id),
+                            Arc::clone(&computed),
+                        );
+                    }
+                    computed
+                }
+            };
+            for (blocked_word, mask_word) in blocked.iter_mut().zip(selected.iter()) {
+                *blocked_word |= mask_word;
+            }
+        }
+
+        if let Some(started) = started {
+            eprintln!(
+                "[glrmask/profile][seed_exclusions] total_ns={} dynamic_ns={} remembered_pairs={} fallback_pairs={} cache_hits={} computed_pairs={} missing={:?}",
+                elapsed_ns(started),
+                dynamic_started.map(elapsed_ns).unwrap_or(0),
+                terminals_disallowed
+                    .iter()
+                    .map(|(_, terminals)| terminals.len())
+                    .sum::<usize>(),
+                missing_pairs.len(),
+                cache_hits,
+                uncached.len(),
+                missing_pairs,
+            );
         }
     }
 

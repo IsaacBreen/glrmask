@@ -2570,6 +2570,11 @@ pub struct Constraint {
     /// the dense bitmap of internal tokens that terminal covers in that state.
     #[serde(skip)]
     pub(crate) seed_terminal_dense: SeedTerminalDenseMasks,
+    /// Exact masks lazily materialized for delayed-exclusion pairs that are not
+    /// represented by `possible_matches`. Shared across sequence states cloned
+    /// from this immutable constraint.
+    #[serde(skip, default)]
+    pub(crate) seed_terminal_dense_fallback: Arc<Mutex<SeedTerminalDenseMasks>>,
     /// Dense bitmap of the full internal token universe.
     #[serde(skip, default = "empty_dense_words")]
     pub(crate) seed_universe_dense: DenseWords,

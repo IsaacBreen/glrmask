@@ -2082,6 +2082,10 @@ impl Constraint {
     /// pair, plus the universe bitmap. This lets seed_weight_dense use bitwise ANDNOT
     /// instead of RangeSetBlaze subtraction.
     pub(crate) fn build_seed_dense_masks(&mut self) {
+        self.seed_terminal_dense_fallback
+            .lock()
+            .expect("seed exclusion cache poisoned")
+            .clear();
         let dw = self.internal_token_dense_words;
         if dw == 0 {
             self.seed_terminal_dense.clear();
