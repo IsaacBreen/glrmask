@@ -2537,7 +2537,7 @@ mod tests {
         reference.rebuild_guarded_shift_index();
 
         let mut lowered = raw;
-        let report = lowered.collapse_sr_unit_reductions_with_compatible_gotos();
+        let report = lowered.collapse_sr_unit_reductions_for_correctness_oracle();
         assert!(!report.aborted, "unit lowering aborted: {report:?}");
         lowered.extend_advance_rows_from_actions();
         lowered.prune_unreachable_states();
