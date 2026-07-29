@@ -22,7 +22,7 @@ use super::artifact::{
     DynamicMaskTrie,
     DynamicMaskTrieEdge,
     DynamicMaskVocab,
-    FastDwaTransitions,
+    FastDwaTransitionRow, FastDwaTransitions,
     FastTokenizerTransitions,
     InternalTokenBufMasks,
     SeedTerminalDenseMasks,
@@ -1932,12 +1932,13 @@ impl Constraint {
 
     fn compute_fast_transitions(&self) -> FastDwaTransitions {
         let build = |state: &crate::automata::weighted_u32::dwa::DWAState| {
+            FastDwaTransitionRow::from_entries(
                 state
                     .transitions
                     .iter()
-                    .map(|(&label, (target, weight))| (label, (*target, weight.clone())))
-                    .collect()
-            };
+                    .map(|(&label, (target, weight))| (label, (*target, weight.clone()))),
+            )
+        };
         if rayon::current_num_threads() == 1 {
             self.parser_dwa.states().iter().map(build).collect()
         } else {
