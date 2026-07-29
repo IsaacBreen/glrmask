@@ -152,6 +152,7 @@ struct DirectRegularClosureWorkspace {
     seen_epoch: Vec<u32>,
     epoch: u32,
     stack: Vec<u32>,
+    terminal_targets: Vec<(TerminalID, u32)>,
 }
 
 impl DirectRegularClosureWorkspace {
@@ -160,6 +161,7 @@ impl DirectRegularClosureWorkspace {
             seen_epoch: vec![0; state_count],
             epoch: 0,
             stack: Vec::new(),
+            terminal_targets: Vec::new(),
         }
     }
 
@@ -171,6 +173,7 @@ impl DirectRegularClosureWorkspace {
         }
         self.stack.clear();
         self.stack.extend(roots);
+        self.terminal_targets.clear();
     }
 
     fn mark_new(&mut self, state: u32) -> bool {
@@ -192,7 +195,6 @@ fn direct_regular_action_row_for_roots(
     let automaton = grammar.direct_regular_automaton.as_ref()?;
     workspace.begin(roots);
     let mut accepting = false;
-    let mut targets_by_terminal = BTreeMap::<TerminalID, BTreeSet<u32>>::new();
 
     while let Some(state_id) = workspace.stack.pop() {
         if state_id as usize >= automaton.states.len() {
@@ -208,26 +210,34 @@ fn direct_regular_action_row_for_roots(
             if terminal >= grammar.num_terminals {
                 return None;
             }
-            let output = targets_by_terminal.entry(terminal).or_default();
             for &target in targets {
                 if target as usize >= automaton.states.len() {
                     return None;
                 }
-                output.insert(target + 1);
+                workspace.terminal_targets.push((terminal, target + 1));
             }
         }
     }
 
-    let mut row = Vec::with_capacity(targets_by_terminal.len() + usize::from(accepting));
-    for (terminal, targets) in targets_by_terminal {
-        let targets = targets.into_iter().collect::<Vec<_>>();
-        let action = if targets.len() == 1 {
-            Action::Shift(targets[0], true)
+    workspace.terminal_targets.sort_unstable();
+    workspace.terminal_targets.dedup();
+    let mut row = Vec::with_capacity(workspace.terminal_targets.len() + usize::from(accepting));
+    let mut index = 0usize;
+    while index < workspace.terminal_targets.len() {
+        let terminal = workspace.terminal_targets[index].0;
+        let mut end = index + 1;
+        while end < workspace.terminal_targets.len()
+            && workspace.terminal_targets[end].0 == terminal
+        {
+            end += 1;
+        }
+        let action = if end == index + 1 {
+            Action::Shift(workspace.terminal_targets[index].1, true)
         } else {
             Action::StackShifts(
-                targets
-                    .into_iter()
-                    .map(|target| StackShift {
+                workspace.terminal_targets[index..end]
+                    .iter()
+                    .map(|&(_, target)| StackShift {
                         pop: 1,
                         pushes: vec![target],
                     })
@@ -235,6 +245,7 @@ fn direct_regular_action_row_for_roots(
             )
         };
         row.push((terminal, action));
+        index = end;
     }
     if accepting {
         row.push((EOF, Action::Accept));
@@ -2178,7 +2189,7 @@ mod tests {
     }
 
     fn direct_regular_grammar() -> AnalyzedGrammar {
-        AnalyzedGrammar::from_grammar_def(&GrammarDef {
+        let mut grammar = GrammarDef {
             rules: vec![
                 Rule {
                     lhs: 0,
@@ -2234,7 +2245,11 @@ mod tests {
                 start_states: vec![0],
             }),
             ..GrammarDef::default()
-        })
+        };
+        let direct_regular_automaton = grammar.direct_regular_automaton.take();
+        let mut analyzed = AnalyzedGrammar::from_grammar_def(&grammar);
+        analyzed.direct_regular_automaton = direct_regular_automaton;
+        analyzed
     }
 
     fn direct_regular_epsilon_cycle_grammar() -> AnalyzedGrammar {
