@@ -3268,6 +3268,7 @@ fn small_bounded_string_pattern_preserves_short_length_bounds() {
 
 #[test]
 fn large_simple_bounded_string_pattern_uses_exact_chunked_prefix_tail() {
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
     let schema = json!({
         "type": "string",
         "maxLength": 512,
