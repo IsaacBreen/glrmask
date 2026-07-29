@@ -1,9 +1,9 @@
 use im::{HashMap as IHashMap, OrdMap};
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use smallvec::{SmallVec, smallvec};
 use super::stack_vecs::dispatch::DynStackVec;
 use std::collections::{HashMap as StdHashMap, HashSet, VecDeque};
-use std::hash::Hash;
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, OnceLock};
 
 /// Type alias for segment values. Set `STACKVEC` before process startup:
@@ -1509,7 +1509,7 @@ pub(crate) struct GssSemanticKeyInterner<
     A: Merge + Clone + Eq + Hash,
 > {
     nodes: Vec<SemanticTrieNode<T>>,
-    interned: FxHashMap<SemanticTrieNode<T>, u32>,
+    interned: FxHashMap<u64, SmallVec<[u32; 2]>>,
     lower_memo: FxHashMap<usize, (Arc<Lower<T>>, u32)>,
     upper_memo: FxHashMap<usize, (Arc<Upper<T, A>>, u32)>,
     union_memo: FxHashMap<(u32, u32), u32>,
@@ -1536,8 +1536,9 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
             children: Vec::new(),
             max_depth: 0,
         };
+        let empty_hash = Self::semantic_node_hash(&empty_language);
         let mut interned = FxHashMap::default();
-        interned.insert(empty_language.clone(), 0);
+        interned.insert(empty_hash, smallvec![0]);
         Self {
             nodes: vec![empty_language],
             interned,
@@ -1549,6 +1550,13 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
             max_union_entries,
             exhausted: false,
         }
+    }
+
+    #[inline]
+    fn semantic_node_hash(node: &SemanticTrieNode<T>) -> u64 {
+        let mut hasher = FxHasher::default();
+        node.hash(&mut hasher);
+        hasher.finish()
     }
 
     #[inline]
@@ -1596,16 +1604,21 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
             children,
             max_depth,
         };
-        if let Some(id) = self.interned.get(&node) {
-            return *id;
+        let hash = Self::semantic_node_hash(&node);
+        if let Some(candidates) = self.interned.get(&hash)
+            && let Some(&id) = candidates
+                .iter()
+                .find(|&&id| self.nodes[id as usize] == node)
+        {
+            return id;
         }
         if self.nodes.len() >= self.max_nodes {
             self.exhausted = true;
             return 0;
         }
         let id = u32::try_from(self.nodes.len()).expect("semantic GSS trie exceeded u32 node IDs");
-        self.nodes.push(node.clone());
-        self.interned.insert(node, id);
+        self.nodes.push(node);
+        self.interned.entry(hash).or_default().push(id);
         id
     }
 
