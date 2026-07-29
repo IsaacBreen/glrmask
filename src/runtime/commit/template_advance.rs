@@ -71,18 +71,11 @@ impl std::fmt::Debug for TemplateAdvanceRuntime {
 }
 
 impl TemplateAdvanceRuntime {
-    const MAX_PERSISTENT_MEMO_ENTRIES: usize = 32_768;
-    const MAX_PERSISTENT_COMPONENT_ROOTS: usize = 256;
-
     pub(crate) fn begin_commit(&mut self) {
-        if self.memo.len() > Self::MAX_PERSISTENT_MEMO_ENTRIES
-            || self.component_cache.len() > Self::MAX_PERSISTENT_COMPONENT_ROOTS
-        {
-            *self = Self::default();
-        } else {
-            self.calls = 0;
-            self.memo_hits = 0;
-        }
+        // The canonical language representation is intentionally token-local.
+        // Rebuild it from the authoritative compact GSS for each selected token
+        // rather than carrying a second semantic view across parser states.
+        *self = Self::default();
     }
 
     pub(crate) fn reset_all(&mut self) {
@@ -183,6 +176,14 @@ enum Phase {
     Push,
 }
 
+/// Homomorphic extension of one terminal's compiled stack transducer from
+/// individual stacks to finite stack languages.
+///
+/// If `T_t(s)` is the table-equivalent template result for stack `s`, this
+/// function computes `union_{s in L} T_t(s)` for the language ID `L`. Trie
+/// branches are language union; target grouping applies the same DFA state to
+/// the union of equal-target suffixes. Exactness follows by induction on the
+/// acyclic product of template phase/state and canonical stack-trie node.
 fn evaluate_template_language(
     template: &CommitTemplateDfas,
     terminal: TerminalID,
@@ -750,7 +751,7 @@ fn advance_virtual_stack_single_path(
 
 #[cfg(test)]
 mod tests {
-    use super::advance_with_template;
+    use super::{Phase, TemplateAdvanceRuntime, advance_with_template, evaluate_template_language};
     use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
     use crate::compiler::glr::accumulator::TerminalsDisallowed;
     use crate::compiler::glr::parser::ParserGSS;
@@ -790,5 +791,52 @@ mod tests {
         expected_stacks.sort_by(|a, b| a.0.cmp(&b.0));
         actual_stacks.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(actual_stacks, expected_stacks);
+    }
+
+
+    #[test]
+    fn canonical_language_evaluation_matches_gss_template_walker() {
+        let mut pop = UnweightedDfa::new();
+        let after_common = pop.add_state();
+        let after_left = pop.add_state();
+        let after_right = pop.add_state();
+        pop.add_transition(pop.start_state, 10, after_common);
+        pop.add_transition(after_common, 1, after_left);
+        pop.add_transition(after_common, 2, after_right);
+        pop.set_accepting(after_left, true);
+        pop.set_accepting(after_right, true);
+
+        let template = CommitTemplateDfas {
+            pop,
+            read: UnweightedDfa::default(),
+            push: UnweightedDfa::default(),
+            pop_to_read: vec![None; 4],
+            pop_to_push: vec![None; 4],
+            read_to_push: Vec::new(),
+        };
+        let acc = TerminalsDisallowed::new();
+        let merged = ParserGSS::from_single_stack(vec![0, 1, 10], acc.clone()).merge(
+            &ParserGSS::from_single_stack(vec![0, 2, 10], acc.clone()),
+        );
+        let expected = advance_with_template(&template, merged.clone());
+
+        let mut runtime = TemplateAdvanceRuntime::default();
+        let (language, accumulator) = runtime
+            .language_from_uniform_gss(&merged)
+            .expect("test GSS has one uniform accumulator");
+        let output = evaluate_template_language(
+            &template,
+            0,
+            Phase::Pop,
+            template.pop.start_state,
+            language,
+            &mut runtime,
+        );
+        let actual = runtime.gss_from_language(output, accumulator);
+        assert!(
+            actual
+                .semantically_eq(&expected, 4_096)
+                .expect("test languages should remain explicitly bounded")
+        );
     }
 }

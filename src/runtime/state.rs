@@ -232,8 +232,8 @@ pub(crate) struct MaskScratch {
     pub single_path_aux_dense: Vec<u64>,
     /// Mutable single-TSID accumulator for the allocation-free direct kernel.
     pub single_path_acc_dense: Vec<u64>,
-    /// Sequence-local direct parser-DWA × lower-GSS memoization. Keys retain
-    /// their source lower nodes, preventing pointer-ABA reuse across commits.
+    /// Bounded live-state cache for indexed-DAG masking. Cached products are
+    /// exact pure-function results keyed by retained immutable GSS nodes.
     pub indexed_dag_mask: crate::runtime::mask::IndexedDagMaskRuntime,
 }
 

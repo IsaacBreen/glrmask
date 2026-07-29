@@ -377,7 +377,7 @@ static VALIDATE_TEMPLATE_ADVANCE_ENABLED: OnceLock<bool> = OnceLock::new();
 
 fn template_advance_enabled() -> bool {
     *TEMPLATE_ADVANCE_ENABLED
-        .get_or_init(|| std::env::var_os("GLRMASK_DISABLE_TEMPLATE_DFA_ADVANCE").is_none())
+        .get_or_init(|| std::env::var_os("GLRMASK_ENABLE_TEMPLATE_DFA_ADVANCE").is_some())
 }
 
 fn validate_template_advance_enabled() -> bool {
@@ -2003,18 +2003,6 @@ fn language_end_state_may_advance(
     Some(false)
 }
 
-fn dual_language_metadata_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("GLRMASK_ENABLE_DUAL_LANGUAGE_METADATA")
-            .map(|value| {
-                let normalized = value.trim().to_ascii_lowercase();
-                matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
-            })
-            .unwrap_or(false)
-    })
-}
-
 fn language_small_queue_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -2270,43 +2258,6 @@ fn simulate_language_commit(
     )))
 }
 
-fn register_language_components_for_state(
-    runtime: &mut TemplateAdvanceRuntime,
-    state: &ParserStateMap,
-    pending: SmallLanguageParserStates,
-) -> bool {
-    if state.has_duplicate_keys() {
-        return false;
-    }
-    let mut grouped = SmallVec::<[
-        (u32, Vec<(u32, TerminalsDisallowed)>);
-        INLINE_PARSER_STATE_CAPACITY
-    ]>::new();
-    for entry in pending {
-        if let Some((_, components)) = grouped
-            .iter_mut()
-            .find(|(tokenizer_state, _)| *tokenizer_state == entry.tokenizer_state)
-        {
-            components.push((entry.language, entry.accumulator));
-        } else {
-            grouped.push((
-                entry.tokenizer_state,
-                vec![(entry.language, entry.accumulator)],
-            ));
-        }
-    }
-    if grouped.len() != state.len() {
-        return false;
-    }
-    for (tokenizer_state, components) in &grouped {
-        let Some(gss) = state.get(tokenizer_state) else {
-            return false;
-        };
-        runtime.register_components(gss, components.clone());
-    }
-    true
-}
-
 fn commit_bytes_language_small_queue_fast_path(
     constraint: &Constraint,
     state: &mut ParserStateMap,
@@ -2349,7 +2300,6 @@ fn commit_bytes_language_small_queue_fast_path(
 
     let mut final_reconstruct_ns = 0u64;
     let mut new_state = ParserStateMap::default();
-    let registered = pending.clone();
     for entry in pending {
         let started = profile_enabled.then(std::time::Instant::now);
         let gss = template_runtime.gss_from_language(entry.language, entry.accumulator);
@@ -2367,7 +2317,6 @@ fn commit_bytes_language_small_queue_fast_path(
             "commit rejected: no valid parser states remain".to_string(),
         ));
     }
-    let _ = register_language_components_for_state(template_runtime, &new_state, registered);
     if profile_enabled {
         let (template_calls, template_memo_hits, template_memo_entries) =
             template_runtime.memo_summary();
@@ -4901,64 +4850,6 @@ fn commit_bytes_impl(
     bytes: &[u8],
     bufs: &mut CommitBuffers,
 ) -> Result<(), String> {
-    if !dual_language_metadata_enabled() || bytes.is_empty() {
-        return commit_bytes_impl_inner(constraint, state, bytes, bufs);
-    }
-
-    let hot_language_path = language_small_queue_enabled()
-        && (2..=8).contains(&bytes.len())
-        && state.len() <= 2
-        && language_small_queue_is_profitable(
-            constraint,
-            state,
-            bytes,
-            &mut bufs.reusable_tokenizer_exec,
-        );
-    if hot_language_path
-        && let Some(result) = commit_bytes_language_small_queue_fast_path(
-            constraint,
-            state,
-            bytes,
-            &mut bufs.reusable_tokenizer_exec,
-            &mut bufs.small_queue,
-            &mut bufs.template_advance_runtime,
-            true,
-        )
-    {
-        return result;
-    }
-
-    bufs.template_advance_runtime.begin_commit();
-    let simulated = simulate_language_commit(
-        constraint,
-        state,
-        bytes,
-        &mut bufs.reusable_tokenizer_exec,
-        &mut bufs.small_queue,
-        &mut bufs.template_advance_runtime,
-        None,
-    );
-    let result = commit_bytes_impl_inner(constraint, state, bytes, bufs);
-    match (&result, simulated) {
-        (Ok(()), Some(Ok(pending))) => {
-            let _ = register_language_components_for_state(
-                &mut bufs.template_advance_runtime,
-                state,
-                pending,
-            );
-        }
-        (Err(_), _) => bufs.template_advance_runtime.reset_all(),
-        _ => {}
-    }
-    result
-}
-
-fn commit_bytes_impl_inner(
-    constraint: &Constraint,
-    state: &mut ParserStateMap,
-    bytes: &[u8],
-    bufs: &mut CommitBuffers,
-) -> Result<(), String> {
     if bytes.is_empty() {
         return Ok(());
     }
@@ -5141,7 +5032,7 @@ fn commit_bytes_impl_inner(
                     LinearFastPathResult::Continue { gss, offset } => {
                         state.clear();
                         state.insert(constraint.tokenizer.initial_state(), gss);
-                        return commit_bytes_impl_inner(constraint, state, &bytes[offset..], bufs);
+                        return commit_bytes_impl(constraint, state, &bytes[offset..], bufs);
                     }
                     LinearFastPathResult::Restart => {}
                 }
@@ -5235,7 +5126,7 @@ fn commit_bytes_impl_inner(
                     state.insert(constraint.tokenizer.initial_state(), gss);
 
                     if bytes.len() - offset == 1 {
-                        return commit_bytes_impl_inner(constraint, state, &bytes[offset..], bufs);
+                        return commit_bytes_impl(constraint, state, &bytes[offset..], bufs);
                     }
 
                     let needed_queue_len = bytes.len() + 1;

@@ -11,7 +11,7 @@ use crate::runtime::artifact::FastDwaTransitionRow;
 use crate::runtime::constraint::{Constraint, DenseToBufProfileStats};
 use crate::runtime::state::{ConstraintState, MaskCacheData};
 use range_set_blaze::RangeSetBlaze;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
@@ -839,6 +839,133 @@ mod tests {
             1,
         ]));
     }
+
+    #[test]
+    fn indexed_dag_mask_matches_dynamic_on_all_small_reachable_states() {
+        use std::collections::BTreeSet;
+        fn allowed(mask: &[u32], token: u32) -> bool {
+            mask.get(token as usize / 32)
+                .is_some_and(|word| word & (1u32 << (token % 32)) != 0)
+        }
+
+        let vocab = Vocab::new(
+            ["a", "b", "ab", "ba", "aa", "bb"]
+                .into_iter()
+                .enumerate()
+                .map(|(id, bytes)| (id as u32, bytes.as_bytes().to_vec()))
+                .collect(),
+        );
+        let grammars = [
+            r#"
+                start start;
+                t A ::= "a" | "ab";
+                t B ::= "a" | "ba";
+                nt item ::= A | B;
+                nt start ::= item item? item?;
+            "#,
+            r#"
+                start start;
+                t A ::= "a"+;
+                t B ::= "a"+ "b"?;
+                nt start ::= A A | B B | A B | B A;
+            "#,
+        ];
+
+        let mut ambiguous_states = 0usize;
+        for grammar in grammars {
+            let constraint = Constraint::from_glrm_grammar(grammar, &vocab)
+                .expect("small indexed-DAG parity grammar should compile");
+            let mut frontier = vec![(constraint.start(), Vec::<u32>::new())];
+            let mut seen = BTreeSet::new();
+            for depth in 0..=3 {
+                let mut next = Vec::new();
+                for (state, path) in frontier {
+                    let key = state.debug_parser_stacks();
+                    if !seen.insert(format!("{key:?}")) {
+                        continue;
+                    }
+                    let mut expected = vec![0u32; constraint.mask_len()];
+                    state.fill_mask_dynamic(&mut expected);
+                    if state.has_parser_ambiguity() {
+                        ambiguous_states += 1;
+                        let mut actual = vec![0u32; constraint.mask_len()];
+                        assert!(state.fill_mask_indexed_dag(&mut actual, true));
+                        assert_eq!(
+                            actual, expected,
+                            "indexed/dynamic mask mismatch depth={depth} path={path:?} grammar={grammar}"
+                        );
+                    }
+                    if depth == 3 {
+                        continue;
+                    }
+                    for (&token, bytes) in constraint.token_bytes.iter() {
+                        if !allowed(&expected, token) {
+                            continue;
+                        }
+                        let mut advanced = state.clone();
+                        advanced
+                            .commit_bytes(bytes)
+                            .expect("dynamically admitted token must commit");
+                        let mut next_path = path.clone();
+                        next_path.push(token);
+                        next.push((advanced, next_path));
+                    }
+                }
+                frontier = next;
+            }
+        }
+        assert!(ambiguous_states > 0, "test must exercise indexed ambiguous states");
+    }
+
+    #[test]
+    fn indexed_dag_cache_stays_exact_across_commits_and_rollback() {
+        let vocab = Vocab::new(
+            ["a", "b", "ab", "ba", "aa", "bb"]
+                .into_iter()
+                .enumerate()
+                .map(|(id, bytes)| (id as u32, bytes.as_bytes().to_vec()))
+                .collect(),
+        );
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                t A ::= "a"+;
+                t B ::= "a"+ "b"?;
+                nt item ::= A | B;
+                nt start ::= item item? item? item?;
+            "#,
+            &vocab,
+        )
+        .expect("persistent indexed-DAG parity grammar should compile");
+        let mut state = constraint.start_with_rollback(8);
+        let sequence: [&[u8]; 4] = [b"a", b"a", b"a", b"b"];
+
+        for bytes in sequence {
+            let mut expected = vec![0u32; constraint.mask_len()];
+            state.fill_mask_dynamic(&mut expected);
+            if state.has_parser_ambiguity() {
+                let mut first = vec![0u32; constraint.mask_len()];
+                let mut second = vec![0u32; constraint.mask_len()];
+                assert!(state.fill_mask_indexed_dag(&mut first, true));
+                assert!(state.fill_mask_indexed_dag(&mut second, true));
+                assert_eq!(first, expected);
+                assert_eq!(second, expected, "same-state cache hit changed the mask");
+            }
+            state.record_pre_commit_snapshot();
+            state
+                .commit_bytes(bytes)
+                .expect("test sequence should remain valid");
+        }
+
+        state.rollback(2).expect("test rollback should be retained");
+        let mut expected = vec![0u32; constraint.mask_len()];
+        state.fill_mask_dynamic(&mut expected);
+        if state.has_parser_ambiguity() {
+            let mut actual = vec![0u32; constraint.mask_len()];
+            assert!(state.fill_mask_indexed_dag(&mut actual, true));
+            assert_eq!(actual, expected, "post-rollback indexed mask diverged");
+        }
+    }
 }
 
 impl Merge for DenseMaskAcc {
@@ -956,12 +1083,15 @@ struct SingleSegmentMemoEntry {
 
 struct SingleSourceMemo {
     source: IndexedLowerIdentity<u32>,
+    last_seen_epoch: u64,
     lower: SmallVec<[SingleLowerMemoEntry; 8]>,
     segments: SmallVec<[SingleSegmentMemoEntry; 8]>,
 }
 
 #[derive(Default)]
 pub(crate) struct IndexedDagMaskRuntime {
+    epoch: u64,
+    live_source_count: usize,
     lower_memo: FxHashMap<(u32, usize, u32), Option<DenseMaskAcc>>,
     segment_memo: FxHashMap<(usize, usize, u32, u32), Option<DenseMaskAcc>>,
     final_memo: FxHashMap<(u32, u32), Option<DenseMaskAcc>>,
@@ -975,6 +1105,83 @@ pub(crate) struct IndexedDagMaskRuntime {
     accumulator_ids: FxHashMap<DenseAccIdentity, u32>,
 }
 
+impl IndexedDagMaskRuntime {
+    const SOURCE_SLACK: usize = 64;
+    const MAX_ACCUMULATORS: usize = 65_536;
+    const MAX_TRANSITIONS: usize = 65_536;
+
+    fn begin_mask(&mut self) {
+        self.epoch = self.epoch.wrapping_add(1).max(1);
+        self.live_source_count = 0;
+        if self.accumulators.len() > Self::MAX_ACCUMULATORS
+            || self.single_transition_memo.len() > Self::MAX_TRANSITIONS
+        {
+            *self = Self {
+                epoch: self.epoch,
+                ..Self::default()
+            };
+        }
+    }
+
+    fn mark_source_live(&mut self, slot: u32) {
+        let source = &mut self.single_sources[slot as usize];
+        if source.last_seen_epoch != self.epoch {
+            source.last_seen_epoch = self.epoch;
+            self.live_source_count += 1;
+        }
+    }
+
+    fn prune_stale_sources_if_needed(&mut self) {
+        let threshold = self
+            .live_source_count
+            .saturating_mul(2)
+            .saturating_add(Self::SOURCE_SLACK);
+        if self.single_sources.len() <= threshold {
+            return;
+        }
+        let oldest_kept = self.epoch.saturating_sub(1);
+        self.single_sources
+            .retain(|source| source.last_seen_epoch >= oldest_kept);
+        self.single_source_ids.clear();
+        let mut retained = FxHashSet::default();
+        for (slot, source) in self.single_sources.iter().enumerate() {
+            let ptr = source.source.ptr_key();
+            retained.insert(ptr);
+            self.single_source_ids.insert(
+                ptr,
+                u32::try_from(slot).expect("indexed mask source slots exceeded u32"),
+            );
+        }
+        self.lower_sources.retain(|ptr, _| retained.contains(ptr));
+        self.lower_memo
+            .retain(|(_, ptr, _), _| retained.contains(ptr));
+        self.segment_memo
+            .retain(|(ptr, _, _, _), _| retained.contains(ptr));
+    }
+}
+
+/// Exact denotational evaluator for the parser DWA over a weighted GSS DAG.
+///
+/// For DWA state `q`, GSS node `G`, and token accumulator `a`, the result is
+///
+/// `E(q, G, a) = union_{s in [[G]]} (a intersect W(q, s))`,
+///
+/// where `[[G]]` is the stack language denoted by the GSS node and `W(q, s)`
+/// is the union of every accepting-prefix weight encountered while the parser
+/// DWA reads stack `s` from the top downward.
+///
+/// The implementation is the structural recurrence of this definition:
+///
+/// * a branch is language union, so its result is bitmap union;
+/// * an interface fixes the accumulator correlated with its lower language;
+/// * a DWA edge `(q, x) -> (q', w)` contributes
+///   `w intersect E(q', child, a)`;
+/// * the current state's final weight contributes at every readable prefix;
+/// * a segment is the unary instance of the same recurrence.
+///
+/// Exactness follows by induction on the acyclic indexed GSS DAG, using
+/// distributivity of bitmap intersection over union. Memoization changes only
+/// evaluation order; its key contains every semantic argument.
 struct IndexedDagMaskEvaluator<'a, 'r> {
     constraint: &'a Constraint,
     dag: &'a IndexedLeveledGss<u32, DenseMaskAcc>,
@@ -1009,17 +1216,20 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
                 IndexedLeveledGssNode::LowerGeneral { source, .. }
                 | IndexedLeveledGssNode::LowerSegment { source, .. } => {
                     let ptr = source.ptr_key();
-                    if let Some(slot) = runtime.single_source_ids.get(&ptr) {
-                        *slot
+                    if let Some(&slot) = runtime.single_source_ids.get(&ptr) {
+                        runtime.mark_source_live(slot);
+                        slot
                     } else {
                         let slot = u32::try_from(runtime.single_sources.len())
                             .expect("indexed mask source slots exceeded u32");
                         runtime.single_sources.push(SingleSourceMemo {
                             source: source.clone(),
+                            last_seen_epoch: runtime.epoch,
                             lower: SmallVec::new(),
                             segments: SmallVec::new(),
                         });
                         runtime.single_source_ids.insert(ptr, slot);
+                        runtime.live_source_count += 1;
                         slot
                     }
                 }
@@ -2572,8 +2782,8 @@ impl<'a> ConstraintState<'a> {
         }
     }
 
-    fn try_fill_mask_indexed_dag(&self, buf: &mut [u32]) -> bool {
-        if !indexed_dag_mask_enabled() || !self.has_parser_ambiguity() {
+    fn fill_mask_indexed_dag(&self, buf: &mut [u32], force: bool) -> bool {
+        if (!force && !indexed_dag_mask_enabled()) || !self.has_parser_ambiguity() {
             return false;
         }
         let parser_dwa = self.constraint.parser_dwa();
@@ -2592,6 +2802,7 @@ impl<'a> ConstraintState<'a> {
                 std::mem::take(&mut scratch.indexed_dag_mask),
             )
         };
+        indexed_runtime.begin_mask();
         merged.clear();
         merged.resize(dense_words, 0);
         buf.fill(0);
@@ -2769,6 +2980,7 @@ impl<'a> ConstraintState<'a> {
         self.constraint.or_internal_dense_to_buf_fast(&merged, buf, true);
         self.store_mask_cache(buf, &merged);
         let accumulator_entries_total = indexed_runtime.accumulators.len();
+        indexed_runtime.prune_stale_sources_if_needed();
         {
             let mut scratch = self.mask_scratch.lock().unwrap();
             scratch.merged_dense = merged;
@@ -2801,6 +3013,10 @@ impl<'a> ConstraintState<'a> {
             );
         }
         true
+    }
+
+    fn try_fill_mask_indexed_dag(&self, buf: &mut [u32]) -> bool {
+        self.fill_mask_indexed_dag(buf, false)
     }
 
     fn store_mask_cache_reuse_dense(&self, buf: &[u32]) {
