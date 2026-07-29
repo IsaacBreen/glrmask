@@ -532,6 +532,87 @@ impl<'tok> ContinuationNfaScanCache<'tok> {
     }
 }
 
+fn terminal_matches_in_suffix_from_state(
+    scan_cache: &mut ContinuationNfaScanCache<'_>,
+    suffix_nodes: &[(u8, u32)],
+    start_state: u32,
+    mut suffix: u32,
+    terminal: TerminalID,
+    cache: &mut FxHashMap<(u32, u32, TerminalID), bool>,
+) -> bool {
+    let key = (start_state, suffix, terminal);
+    if let Some(&cached) = cache.get(&key) {
+        return cached;
+    }
+
+    let mut config = scan_cache.config_for_raw_start(start_state);
+    let mut matched = false;
+    while suffix != 0 {
+        let (byte, rest) = suffix_nodes[suffix as usize];
+        let Some(next_config) = scan_cache.step_config(config, byte) else {
+            break;
+        };
+        config = next_config;
+        if scan_cache.configs[config as usize].iter().any(|&state| {
+            scan_cache
+                .tokenizer
+                .matched_terminals_iter(state)
+                .any(|candidate| candidate == terminal)
+        }) {
+            matched = true;
+            break;
+        }
+        suffix = rest;
+    }
+    cache.insert(key, matched);
+    matched
+}
+
+fn append_surviving_terminal_branches(
+    scan_cache: &mut ContinuationNfaScanCache<'_>,
+    suffix_nodes: &[(u8, u32)],
+    config: u32,
+    rest: u32,
+    suffix_program: u32,
+    future_match_cache: &mut FxHashMap<(u32, u32, TerminalID), bool>,
+    branches: &mut Vec<(TerminalID, u32)>,
+) {
+    let states = scan_cache.configs[config as usize].to_vec();
+    let mut terminal_states = Vec::<(TerminalID, u32)>::new();
+    for state in states {
+        terminal_states.extend(
+            scan_cache
+                .tokenizer
+                .matched_terminals_iter(state)
+                .map(|terminal| (terminal, state)),
+        );
+    }
+    terminal_states.sort_unstable();
+    terminal_states.dedup();
+
+    let mut index = 0usize;
+    while index < terminal_states.len() {
+        let terminal = terminal_states[index].0;
+        let start = index;
+        while index < terminal_states.len() && terminal_states[index].0 == terminal {
+            index += 1;
+        }
+        let survives = terminal_states[start..index].iter().any(|&(_, state)| {
+            !terminal_matches_in_suffix_from_state(
+                scan_cache,
+                suffix_nodes,
+                state,
+                rest,
+                terminal,
+                future_match_cache,
+            )
+        });
+        if survives {
+            branches.push((terminal, suffix_program));
+        }
+    }
+}
+
 struct InitialTokenProgramBuilder<'tok> {
     tokenizer: &'tok Tokenizer,
     initial_state: u32,
@@ -616,9 +697,14 @@ impl<'tok> InitialTokenProgramBuilder<'tok> {
                         let mut scan_cache = ContinuationNfaScanCache::new(self.tokenizer);
                         let initial_config =
                             scan_cache.config_for_raw_start(self.initial_state);
-                        (scan_cache, initial_config, Vec::<(u8, u32)>::new())
+                        (
+                            scan_cache,
+                            initial_config,
+                            Vec::<(u8, u32)>::new(),
+                            FxHashMap::<(u32, u32, TerminalID), bool>::default(),
+                        )
                     },
-                    |(scan_cache, initial_config, suffix_bytes), &suffix_id| {
+                    |(scan_cache, initial_config, suffix_bytes, future_match_cache), &suffix_id| {
                         suffix_bytes.clear();
                         let mut cursor = suffix_id;
                         while cursor != 0 {
@@ -638,13 +724,15 @@ impl<'tok> InitialTokenProgramBuilder<'tok> {
                             config = next_config;
                             let program = self.program_by_suffix[rest as usize];
                             debug_assert_ne!(program, u32::MAX);
-                            for &state in scan_cache.configs[config as usize].iter() {
-                                branches.extend(
-                                    self.tokenizer
-                                        .matched_terminals_iter(state)
-                                        .map(|terminal| (terminal, program)),
-                                );
-                            }
+                            append_surviving_terminal_branches(
+                                scan_cache,
+                                &self.suffix_nodes,
+                                config,
+                                rest,
+                                program,
+                                future_match_cache,
+                                &mut branches,
+                            );
                         }
                         branches.sort_unstable();
                         branches.dedup();
@@ -698,6 +786,7 @@ impl<'tok> InitialTokenProgramBuilder<'tok> {
         source_config: u32,
         suffix_id: u32,
         suffix_bytes: &mut Vec<(u8, u32)>,
+        future_match_cache: &mut FxHashMap<(u32, u32, TerminalID), bool>,
     ) -> DynamicTokenProgram {
         suffix_bytes.clear();
         let mut cursor = suffix_id;
@@ -722,13 +811,15 @@ impl<'tok> InitialTokenProgramBuilder<'tok> {
             config = next_config;
             let program = self.program_by_suffix[rest as usize];
             debug_assert_ne!(program, u32::MAX);
-            for &state in scan_cache.configs[config as usize].iter() {
-                branches.extend(
-                    self.tokenizer
-                        .matched_terminals_iter(state)
-                        .map(|terminal| (terminal, program)),
-                );
-            }
+            append_surviving_terminal_branches(
+                scan_cache,
+                &self.suffix_nodes,
+                config,
+                rest,
+                program,
+                future_match_cache,
+                &mut branches,
+            );
         }
         branches.sort_unstable();
         branches.dedup();
@@ -1711,6 +1802,8 @@ impl DynamicMaskVocab {
             }
             let source_config = scan_cache.intern_config(source_closure);
             let mut suffix_bytes = Vec::<(u8, u32)>::new();
+            let mut future_match_cache =
+                FxHashMap::<(u32, u32, TerminalID), bool>::default();
             let mut interned = FxHashMap::<DynamicTokenProgram, u16>::default();
             let mut programs = Vec::<DynamicTokenProgram>::new();
             let mut source_token_programs = vec![u16::MAX; token_programs.len()];
@@ -1721,6 +1814,7 @@ impl DynamicMaskVocab {
                     source_config,
                     suffix,
                     &mut suffix_bytes,
+                    &mut future_match_cache,
                 );
                 let program_id = if let Some(&program_id) = interned.get(&program) {
                     program_id
@@ -1817,6 +1911,8 @@ impl DynamicMaskVocab {
                 let mut scan_cache = ContinuationNfaScanCache::new(tokenizer);
                 let source_config = scan_cache.config_for_raw_start(source_state);
                 let mut suffix_bytes = Vec::<(u8, u32)>::new();
+                let mut future_match_cache =
+                    FxHashMap::<(u32, u32, TerminalID), bool>::default();
 
                 let mut patch_entry = |entry_index: usize| {
                     let (canonical_token_id, _) = &entries[entry_index];
@@ -1826,6 +1922,7 @@ impl DynamicMaskVocab {
                         source_config,
                         suffix,
                         &mut suffix_bytes,
+                        &mut future_match_cache,
                     );
                     let program_id = if let Some(&base_program) = base_program_ids.get(&program) {
                         DYNAMIC_SOURCE_BASE_PROGRAM_FLAG | base_program
