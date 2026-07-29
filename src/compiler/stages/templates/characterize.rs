@@ -1,4 +1,31 @@
 //! Terminal characterization for template construction.
+//!
+//! ## Denotational invariant
+//!
+//! Fix a terminal `t`. A [`RelationConfig`] denotes a relation between an
+//! original parser stack and the concrete stack segment obtained after zero or
+//! more non-consuming LR reductions for `t`:
+//!
+//! * `input`, read from top downward, is the exact matcher prefix consumed from
+//!   the original stack;
+//! * `segment`, stored bottom-to-top, is the concrete replacement currently
+//!   above the untouched suffix of that original stack.
+//!
+//! `identity_config` establishes this relation. Each local reduction entirely
+//! inside `segment` preserves it by ordinary pop/goto substitution. When a
+//! reduction crosses the known segment, the only dependency on the untouched
+//! suffix is the newly revealed LR state. Factoring that continuation through
+//! the reduced nonterminal is exact because `characterize_nt_continuations`
+//! unions every `(revealed_state, nonterminal, goto)` predecessor. The
+//! nonterminal re-reduction graph is required to be acyclic, so induction over
+//! that graph proves that its finite unfolding is exactly the LR reduction
+//! closure. Finally, `stack_effect_edits` applies each shift/guard to the
+//! denoted relation and emits its resulting pop/push stack edit.
+//!
+//! The compiler mechanically checks every optimization around this core
+//! relation whenever commit templates are requested: sparse-vs-dense table
+//! indexing, terminal quotienting, direct-vs-quotiented template compilation,
+//! minimization, and commit phase splitting.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -80,6 +107,8 @@ struct CharacterizationIndex {
     goto_predecessors_by_target: Vec<Vec<(u32, NonterminalID, bool)>>,
 }
 
+/// Symbolic table configuration satisfying the module-level relation
+/// invariant. `segment` is always bottom-to-top; `input` is top-to-bottom.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct RelationConfig {
     input: Vec<StackMatcher>,
@@ -183,12 +212,18 @@ fn characterization_quotient_disabled() -> bool {
     env_flag_enabled("GLRMASK_DISABLE_CHARACTERIZATION_QUOTIENT")
 }
 
+fn commit_template_validation_required() -> bool {
+    env_flag_enabled("GLRMASK_ENABLE_COMMIT_TEMPLATE_DFAS")
+}
+
 fn characterization_quotient_validation_enabled() -> bool {
-    env_flag_enabled("GLRMASK_VALIDATE_CHARACTERIZATION_QUOTIENT")
+    commit_template_validation_required()
+        || env_flag_enabled("GLRMASK_VALIDATE_CHARACTERIZATION_QUOTIENT")
 }
 
 fn sparse_action_signature_validation_enabled() -> bool {
-    env_flag_enabled("GLRMASK_VALIDATE_SPARSE_ACTION_SIGNATURES")
+    commit_template_validation_required()
+        || env_flag_enabled("GLRMASK_VALIDATE_SPARSE_ACTION_SIGNATURES")
 }
 
 fn dense_terminal_action_signature(
@@ -944,6 +979,7 @@ fn characterize_terminal(
     characterization
 }
 
+
 pub(crate) fn characterize_terminals(
     table: &GLRTable,
     grammar: &AnalyzedGrammar,
@@ -967,35 +1003,39 @@ fn characterize_terminals_unquotiented(
 fn validate_sparse_action_signatures(
     index: &CharacterizationIndex,
     table: &GLRTable,
-    grammar: &AnalyzedGrammar,
+    groups: &[Vec<TerminalID>],
 ) {
-    for terminal in 0..grammar.num_terminals {
-        let expected = dense_terminal_action_signature(table, terminal);
-        let actual = owned_terminal_action_signature_from_index(table, index, terminal);
-        assert_eq!(
-            actual,
-            expected,
-            "sparse terminal action signature mismatch for terminal {terminal}"
-        );
+    for terminals in groups.iter().filter(|terminals| terminals.len() > 1) {
+        for &terminal in terminals {
+            let expected = dense_terminal_action_signature(table, terminal);
+            let actual = owned_terminal_action_signature_from_index(table, index, terminal);
+            assert_eq!(
+                actual,
+                expected,
+                "sparse terminal action signature mismatch for quotient member terminal {terminal}"
+            );
+        }
     }
 }
 
 fn validate_characterization_quotient(
     index: &CharacterizationIndex,
     table: &GLRTable,
-    grammar: &AnalyzedGrammar,
+    groups: &[Vec<TerminalID>],
     characterizations: &BTreeMap<TerminalID, TerminalCharacterization>,
 ) {
-    for terminal in 0..grammar.num_terminals {
-        let expected = characterize_terminal(table, index, terminal);
-        let actual = characterizations
-            .get(&terminal)
-            .unwrap_or_else(|| panic!("missing characterization for terminal {terminal}"));
-        assert_eq!(
-            actual,
-            &expected,
-            "characterization quotient mismatch for terminal {terminal}"
-        );
+    for terminals in groups.iter().filter(|terminals| terminals.len() > 1) {
+        for &terminal in terminals {
+            let expected = characterize_terminal(table, index, terminal);
+            let actual = characterizations
+                .get(&terminal)
+                .unwrap_or_else(|| panic!("missing characterization for terminal {terminal}"));
+            assert_eq!(
+                actual,
+                &expected,
+                "characterization quotient mismatch for fanout member terminal {terminal}"
+            );
+        }
     }
 }
 
@@ -1032,10 +1072,13 @@ pub(crate) fn characterize_terminals_profiled(
 
     let characterize_started_at = Instant::now();
     let characterized_groups: Vec<(Vec<TerminalID>, TerminalCharacterization)> = groups
-        .into_par_iter()
+        .par_iter()
         .map(|terminals| {
             let representative = terminals[0];
-            (terminals, characterize_terminal(table, &index, representative))
+            (
+                terminals.clone(),
+                characterize_terminal(table, &index, representative),
+            )
         })
         .collect();
     let characterize_ms = elapsed_ms(characterize_started_at);
@@ -1051,10 +1094,10 @@ pub(crate) fn characterize_terminals_profiled(
 
     let validation_started_at = Instant::now();
     if sparse_action_signature_validation_enabled() {
-        validate_sparse_action_signatures(&index, table, grammar);
+        validate_sparse_action_signatures(&index, table, &groups);
     }
     if characterization_quotient_validation_enabled() {
-        validate_characterization_quotient(&index, table, grammar, &characterizations);
+        validate_characterization_quotient(&index, table, &groups, &characterizations);
     }
     let validation_ms = elapsed_ms(validation_started_at);
 
