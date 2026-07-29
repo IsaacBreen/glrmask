@@ -320,8 +320,16 @@ impl GLRTable {
     }
 
     pub(crate) fn compress_default_action_rows(&mut self) {
-        for row in &mut self.action {
-            row.compress_default(self.num_terminals);
+        use rayon::prelude::*;
+        let num_terminals = self.num_terminals;
+        if rayon::current_num_threads() == 1 || self.action.len() < 128 {
+            for row in &mut self.action {
+                row.compress_default(num_terminals);
+            }
+        } else {
+            self.action
+                .par_iter_mut()
+                .for_each(|row| row.compress_default(num_terminals));
         }
     }
 

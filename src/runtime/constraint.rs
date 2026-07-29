@@ -360,7 +360,9 @@ impl Constraint {
         let preserved_token_program_partition = self
             .dynamic_mask_vocab
             .initial_token_program_partition();
-        self.table.rebuild_guarded_shift_index();
+        if self.table.guarded_shift_index.len() != self.table.num_states as usize {
+            self.table.rebuild_guarded_shift_index();
+        }
         let guarded_shift_ms = started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let started_at = profile.then(std::time::Instant::now);
@@ -795,7 +797,9 @@ impl Constraint {
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
         let total_started_at = profile.then(std::time::Instant::now);
         let guarded_shift_started_at = profile.then(std::time::Instant::now);
-        self.table.rebuild_guarded_shift_index();
+        if self.table.guarded_shift_index.len() != self.table.num_states as usize {
+            self.table.rebuild_guarded_shift_index();
+        }
         let guarded_shift_ms = guarded_shift_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         // This mapping is a derived cache. Reset it before scheduling the
