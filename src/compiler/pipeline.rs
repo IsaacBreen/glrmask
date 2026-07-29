@@ -61,7 +61,7 @@ use crate::compiler::stages::parser_dwa::{
     build_parser_dwa_from_terminal_dwa_with_precomputed_templates,
     try_build_immediate_parser_dwa,
 };
-use crate::compiler::stages::templates::Templates;
+use crate::compiler::stages::templates::{Templates, commit_template_dfas_enabled};
 use crate::compiler::stages::templates::characterize::characterize_terminals_profiled;
 use crate::compiler::stages::templates::compile_dfa::{
     specialize_template_dfa_defaults_for_commit_split_input,
@@ -93,10 +93,6 @@ fn env_flag_enabled_by_default(name: &str) -> bool {
 
 fn compact_possible_matches_before_reconcile_enabled() -> bool {
     env_flag_enabled_by_default("GLRMASK_COMPACT_POSSIBLE_MATCHES_BEFORE_RECONCILE")
-}
-
-fn commit_template_dfas_enabled() -> bool {
-    env_flag_enabled("GLRMASK_ENABLE_COMMIT_TEMPLATE_DFAS")
 }
 
 fn terminal_coloring_enabled() -> bool {

@@ -34,6 +34,7 @@ use std::time::Instant;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use crate::compiler::glr::analysis::AnalyzedGrammar;
+use crate::compiler::stages::templates::commit_template_dfas_enabled;
 use crate::compiler::glr::table::{Action, GLRTable, GuardedStackShift, StackShiftGuard};
 use crate::grammar::flat::{NonterminalID, TerminalID};
 
@@ -212,17 +213,13 @@ fn characterization_quotient_disabled() -> bool {
     env_flag_enabled("GLRMASK_DISABLE_CHARACTERIZATION_QUOTIENT")
 }
 
-fn commit_template_validation_required() -> bool {
-    env_flag_enabled("GLRMASK_ENABLE_COMMIT_TEMPLATE_DFAS")
-}
-
 fn characterization_quotient_validation_enabled() -> bool {
-    commit_template_validation_required()
+    commit_template_dfas_enabled()
         || env_flag_enabled("GLRMASK_VALIDATE_CHARACTERIZATION_QUOTIENT")
 }
 
 fn sparse_action_signature_validation_enabled() -> bool {
-    commit_template_validation_required()
+    commit_template_dfas_enabled()
         || env_flag_enabled("GLRMASK_VALIDATE_SPARSE_ACTION_SIGNATURES")
 }
 

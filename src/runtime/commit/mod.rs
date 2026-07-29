@@ -2046,12 +2046,16 @@ fn language_queue_node_count_at_most(state: &ParserStateMap, limit: usize) -> us
 fn language_small_queue_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
-        std::env::var("GLRMASK_ENABLE_LANGUAGE_SMALL_QUEUE")
-            .map(|value| {
+        let flag = |name: &str| {
+            std::env::var(name).ok().map(|value| {
                 let normalized = value.trim().to_ascii_lowercase();
-                matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+                !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
             })
-            .unwrap_or(false)
+        };
+        if flag("GLRMASK_DISABLE_LANGUAGE_SMALL_QUEUE") == Some(true) {
+            return false;
+        }
+        flag("GLRMASK_ENABLE_LANGUAGE_SMALL_QUEUE").unwrap_or(true)
     })
 }
 

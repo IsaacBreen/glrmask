@@ -19,6 +19,7 @@ use crate::compiler::glr::labels::{
     is_negative_label,
 };
 use crate::compiler::stages::templates::characterize::{StackMatcher, TerminalCharacterization};
+use crate::compiler::stages::templates::commit_template_dfas_enabled;
 use crate::ds::weight::Weight;
 use crate::grammar::flat::TerminalID;
 use crate::runtime::CommitTemplateDfas;
@@ -145,8 +146,7 @@ fn skip_template_minimization_enabled() -> bool {
 }
 
 fn template_quotient_validation_enabled() -> bool {
-    env_flag_enabled("GLRMASK_ENABLE_COMMIT_TEMPLATE_DFAS")
-        || env_flag_enabled("GLRMASK_VALIDATE_TEMPLATE_QUOTIENT")
+    commit_template_dfas_enabled() || env_flag_enabled("GLRMASK_VALIDATE_TEMPLATE_QUOTIENT")
 }
 
 fn nfa_size(nfa: &NFA) -> (usize, usize) {
