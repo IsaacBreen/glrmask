@@ -1724,44 +1724,50 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
             if self.union_memo.contains_key(&pair) {
                 continue;
             }
-            let left_node = self.nodes[left as usize].clone();
-            let right_node = self.nodes[right as usize].clone();
-            let mut children = Vec::with_capacity(left_node.children.len() + right_node.children.len());
-            let mut li = 0;
-            let mut ri = 0;
-            while li < left_node.children.len() || ri < right_node.children.len() {
-                if ri == right_node.children.len()
-                    || (li < left_node.children.len()
-                        && left_node.children[li].0 < right_node.children[ri].0)
-                {
-                    children.push(left_node.children[li].clone());
-                    li += 1;
-                } else if li == left_node.children.len()
-                    || right_node.children[ri].0 < left_node.children[li].0
-                {
-                    children.push(right_node.children[ri].clone());
-                    ri += 1;
-                } else {
-                    let left_child = left_node.children[li].1;
-                    let right_child = right_node.children[ri].1;
-                    let child = if left_child == right_child {
-                        left_child
-                    } else if left_child == 0 {
-                        right_child
-                    } else if right_child == 0 {
-                        left_child
+            let (empty, children) = {
+                let left_node = &self.nodes[left as usize];
+                let right_node = &self.nodes[right as usize];
+                let mut children =
+                    Vec::with_capacity(left_node.children.len() + right_node.children.len());
+                let mut li = 0;
+                let mut ri = 0;
+                while li < left_node.children.len() || ri < right_node.children.len() {
+                    if ri == right_node.children.len()
+                        || (li < left_node.children.len()
+                            && left_node.children[li].0 < right_node.children[ri].0)
+                    {
+                        children.push(left_node.children[li].clone());
+                        li += 1;
+                    } else if li == left_node.children.len()
+                        || right_node.children[ri].0 < left_node.children[li].0
+                    {
+                        children.push(right_node.children[ri].clone());
+                        ri += 1;
                     } else {
-                        *self
-                            .union_memo
-                            .get(&Self::union_pair(left_child, right_child))
-                            .expect("semantic trie child union must be processed before its parent")
-                    };
-                    children.push((left_node.children[li].0.clone(), child));
-                    li += 1;
-                    ri += 1;
+                        let left_child = left_node.children[li].1;
+                        let right_child = right_node.children[ri].1;
+                        let child = if left_child == right_child {
+                            left_child
+                        } else if left_child == 0 {
+                            right_child
+                        } else if right_child == 0 {
+                            left_child
+                        } else {
+                            *self
+                                .union_memo
+                                .get(&Self::union_pair(left_child, right_child))
+                                .expect(
+                                    "semantic trie child union must be processed before its parent",
+                                )
+                        };
+                        children.push((left_node.children[li].0.clone(), child));
+                        li += 1;
+                        ri += 1;
+                    }
                 }
-            }
-            let id = self.intern_node(left_node.empty || right_node.empty, children);
+                (left_node.empty || right_node.empty, children)
+            };
+            let id = self.intern_node(empty, children);
             if self.exhausted {
                 return 0;
             }
