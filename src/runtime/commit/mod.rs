@@ -35,6 +35,7 @@ use self::profile::{
 use self::template_advance::{
     advance_stacks_template_dfa, advance_stacks_template_dfa_owned,
 };
+pub(crate) use self::template_advance::TemplateAdvanceRuntime;
 use self::tokenizer_scan::{
     execute_tokenizer_from_state_small, execute_tokenizer_reusable, InitialCommitScan,
 };
@@ -44,10 +45,27 @@ type ParserStatesByTokenizer = FxHashMap<u32, ParserGSS>;
 type SmallParserStates =
     SmallVec<[(u32, ParserGSS); INLINE_PARSER_STATE_CAPACITY]>;
 
+const SMALL_LANGUAGE_QUEUE_CAPACITY: usize = 32;
+const LANGUAGE_QUEUE_MAX_INPUT_STACK_DEPTH: u32 = 512;
+const LANGUAGE_QUEUE_MIN_TOP_VALUES: usize = 3;
+const LANGUAGE_QUEUE_MIN_PATHS: usize = 32;
+const LANGUAGE_QUEUE_MIN_NODES: usize = 48;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SmallLanguageParserState {
+    tokenizer_state: u32,
+    language: u32,
+    accumulator: TerminalsDisallowed,
+}
+
+type SmallLanguageParserStates = SmallVec<[SmallLanguageParserState; 16]>;
+
 #[derive(Debug)]
 pub(crate) struct SmallCommitQueueScratch {
     processing: [SmallParserStates; 9],
     pending: SmallParserStates,
+    language_processing: [SmallLanguageParserStates; 9],
+    language_pending: SmallLanguageParserStates,
 }
 
 impl Default for SmallCommitQueueScratch {
@@ -55,6 +73,8 @@ impl Default for SmallCommitQueueScratch {
         Self {
             processing: std::array::from_fn(|_| SmallVec::new()),
             pending: SmallVec::new(),
+            language_processing: std::array::from_fn(|_| SmallVec::new()),
+            language_pending: SmallVec::new(),
         }
     }
 }
@@ -65,6 +85,10 @@ impl SmallCommitQueueScratch {
             bucket.clear();
         }
         self.pending.clear();
+        for bucket in &mut self.language_processing {
+            bucket.clear();
+        }
+        self.language_pending.clear();
     }
 }
 
@@ -357,7 +381,7 @@ static VALIDATE_TEMPLATE_ADVANCE_ENABLED: OnceLock<bool> = OnceLock::new();
 
 fn template_advance_enabled() -> bool {
     *TEMPLATE_ADVANCE_ENABLED
-        .get_or_init(|| std::env::var_os("GLRMASK_DISABLE_TEMPLATE_DFA_ADVANCE").is_none())
+        .get_or_init(|| std::env::var_os("GLRMASK_ENABLE_TEMPLATE_DFA_ADVANCE").is_some())
 }
 
 fn validate_template_advance_enabled() -> bool {
@@ -570,7 +594,7 @@ fn canonical_commit_state_for_equivalence_assert(
     for (&tokenizer_state, gss) in state.iter() {
         let out = grouped.entry(tokenizer_state).or_default();
         out.extend(
-            gss.to_stacks(4_096)
+            gss.to_stacks(100_000)
                 .expect("stack enumeration exceeded explicit limit")
                 .into_iter()
                 .map(|(stack, terminals_disallowed)| {
@@ -840,7 +864,7 @@ fn commit_token_impl(
     if let Some(bytes) = bytes {
         if commit_bytes_impl(constraint, state, bytes, buffers).is_err() {
             state.clear();
-            buffers.clear_all();
+            buffers.reset_all();
         }
     } else {
         state.clear();
@@ -1851,6 +1875,637 @@ fn merge_small_parser_state(
         }
     }
     states.push((tokenizer_state, gss));
+}
+
+fn merge_small_language_parser_state(
+    runtime: &mut TemplateAdvanceRuntime,
+    states: &mut SmallLanguageParserStates,
+    tokenizer_state: u32,
+    language: u32,
+    accumulator: TerminalsDisallowed,
+) -> bool {
+    if language == 0 {
+        return true;
+    }
+    for existing in states.iter_mut() {
+        if existing.tokenizer_state == tokenizer_state && existing.accumulator == accumulator {
+            existing.language = runtime.union_languages(existing.language, language);
+            return !runtime.is_exhausted();
+        }
+    }
+    if states.len() == SMALL_LANGUAGE_QUEUE_CAPACITY {
+        return false;
+    }
+    states.push(SmallLanguageParserState {
+        tokenizer_state,
+        language,
+        accumulator,
+    });
+    true
+}
+
+fn actionable_terminals_from_language(
+    runtime: &TemplateAdvanceRuntime,
+    language: u32,
+) -> Option<ActionableTerminals> {
+    let states = runtime.language_top_states(language);
+    match states.as_slice() {
+        [] => None,
+        [state] => Some(ActionableTerminals::SingleState(*state)),
+        _ => Some(ActionableTerminals::ManyStates(states)),
+    }
+}
+
+fn prune_uniform_accumulator_for_parts(
+    constraint: &Constraint,
+    actionable_terminals: Option<&ActionableTerminals>,
+    accumulator: &TerminalsDisallowed,
+    tokenizer_state: u32,
+    end_states: &[u32],
+    matches: &[TokenizerMatch],
+) -> Option<TerminalsDisallowed> {
+    if accumulator.is_empty() {
+        return Some(TerminalsDisallowed::new());
+    }
+
+    let accepted_terminals = matches
+        .iter()
+        .filter(|matched| !is_ignored_terminal(constraint.ignore_terminal, matched.id))
+        .filter(|matched| {
+            is_actionable_terminal(actionable_terminals, constraint, matched.id)
+        })
+        .map(|matched| matched.id)
+        .collect::<SmallVec<[u32; INLINE_PARSER_STATE_CAPACITY]>>();
+
+    if let Some(disallowed) = accumulator.get(&tokenizer_state)
+        && !accepted_terminals.is_empty()
+        && accepted_terminals
+            .iter()
+            .all(|terminal| disallowed.contains(terminal))
+    {
+        return None;
+    }
+
+    if let Some(remapped) =
+        accumulator.try_remap_single_state_inline(tokenizer_state, end_states)
+    {
+        return Some(remapped);
+    }
+
+    let terminals = accumulator
+        .get(&tokenizer_state)
+        .map(|values| values.iter().copied().collect::<Vec<_>>())
+        .unwrap_or_default();
+    if terminals.is_empty() || end_states.is_empty() {
+        return Some(TerminalsDisallowed::new());
+    }
+    let mut remapped = BTreeMap::<u32, BTreeSet<u32>>::new();
+    for &end_state in end_states {
+        remapped
+            .entry(end_state)
+            .or_default()
+            .extend(terminals.iter().copied());
+    }
+    Some(TerminalsDisallowed::from_map(remapped))
+}
+
+fn apply_future_terminal_disallow_to_accumulator(
+    constraint: &Constraint,
+    end_states: &[u32],
+    terminal: u32,
+    mut accumulator: TerminalsDisallowed,
+) -> TerminalsDisallowed {
+    for &end_state in end_states {
+        if constraint
+            .tokenizer
+            .possible_future_terminals(end_state)
+            .contains(terminal as usize)
+        {
+            accumulator = accumulator.with_insert(end_state, terminal);
+        }
+    }
+    accumulator
+}
+
+fn language_end_state_may_advance(
+    constraint: &Constraint,
+    runtime: &mut TemplateAdvanceRuntime,
+    language: u32,
+    end_state: u32,
+) -> Option<bool> {
+    if end_state == constraint.tokenizer.initial_state() {
+        return Some(true);
+    }
+    for terminal in constraint
+        .tokenizer
+        .possible_future_terminals(end_state)
+        .iter_ones()
+    {
+        let terminal = u32::try_from(terminal).ok()?;
+        let advanced = runtime.advance_language(constraint, terminal, language)?;
+        if advanced != 0 {
+            return Some(true);
+        }
+    }
+    Some(false)
+}
+
+fn language_queue_top_value_count_at_most(
+    state: &ParserStateMap,
+    limit: usize,
+) -> usize {
+    let mut count = 0usize;
+    for (_, gss) in state.iter() {
+        count = count.saturating_add(gss.top_value_count()).min(limit);
+        if count == limit {
+            break;
+        }
+    }
+    count
+}
+
+fn language_queue_path_count_at_most(state: &ParserStateMap, limit: usize) -> usize {
+    let mut count = 0usize;
+    for (_, gss) in state.iter() {
+        count = count.saturating_add(gss.path_count_at_most(limit)).min(limit);
+        if count == limit {
+            break;
+        }
+    }
+    count
+}
+
+fn language_queue_node_count_at_most(state: &ParserStateMap, limit: usize) -> usize {
+    let mut count = 0usize;
+    for (_, gss) in state.iter() {
+        count = count.saturating_add(gss.node_count_at_most(limit)).min(limit);
+        if count == limit {
+            break;
+        }
+    }
+    count
+}
+
+fn language_small_queue_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        let flag = |name: &str| {
+            std::env::var(name).ok().map(|value| {
+                let normalized = value.trim().to_ascii_lowercase();
+                !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
+            })
+        };
+        if flag("GLRMASK_DISABLE_LANGUAGE_SMALL_QUEUE") == Some(true) {
+            return false;
+        }
+        flag("GLRMASK_ENABLE_LANGUAGE_SMALL_QUEUE").unwrap_or(true)
+    })
+}
+
+fn language_queue_input_is_bounded(state: &ParserStateMap) -> bool {
+    state
+        .iter()
+        .all(|(_, gss)| gss.max_depth() <= LANGUAGE_QUEUE_MAX_INPUT_STACK_DEPTH)
+}
+
+/// Return whether one model token contains multiple parser-actionable,
+/// non-ignored terminal completion boundaries at different byte offsets.
+///
+/// This is the structural case where the ordinary byte queue must materialize
+/// and carry parser states at more than one offset inside the same token. The
+/// language queue evaluates all such offset alternatives before reconstructing
+/// a GSS once at token completion. Multiple terminals ending at the same byte
+/// offset do not qualify: the ordinary queue already merges those without an
+/// offset frontier split.
+fn has_multiple_actionable_terminal_boundaries(
+    constraint: &Constraint,
+    state: &ParserStateMap,
+    bytes: &[u8],
+    tokenizer_scratch: &mut tokenizer_scan::ReusableTokenizerExecScratch,
+) -> bool {
+    for (&tokenizer_state, gss) in state.iter() {
+        if !execute_tokenizer_reusable(
+            constraint,
+            bytes,
+            tokenizer_state,
+            tokenizer_scratch,
+        ) {
+            return false;
+        }
+        let actionable = ActionableTerminals::from_gss(constraint, gss);
+        let matches = collect_unique_actionable_matches(
+            constraint,
+            actionable.as_ref(),
+            constraint.ignore_terminal,
+            &tokenizer_scratch.matches,
+            None,
+        );
+        let mut widths = SmallVec::<[usize; 4]>::new();
+        for matched in matches {
+            if matched.ignored || widths.contains(&matched.width) {
+                continue;
+            }
+            widths.push(matched.width);
+            if widths.len() >= 2 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[derive(Default)]
+struct LanguageCommitSimulationProfile {
+    canonicalize_ns: u64,
+    evaluate_ns: u64,
+    continuation_reconstruct_ns: u64,
+    continuation_check_ns: u64,
+}
+
+fn simulate_language_commit(
+    constraint: &Constraint,
+    state: &ParserStateMap,
+    bytes: &[u8],
+    tokenizer_scratch: &mut tokenizer_scan::ReusableTokenizerExecScratch,
+    queue_scratch: &mut SmallCommitQueueScratch,
+    template_runtime: &mut TemplateAdvanceRuntime,
+    mut profile: Option<&mut LanguageCommitSimulationProfile>,
+) -> Option<Result<SmallLanguageParserStates, String>> {
+    if bytes.is_empty() || bytes.len() > 8 || state.is_empty() || state.len() > 8 {
+        return None;
+    }
+
+    queue_scratch.clear();
+    for (&tokenizer_state, gss) in state.iter() {
+        let started = profile.is_some().then(std::time::Instant::now);
+        let components = template_runtime.language_components_from_gss(gss)?;
+        if let (Some(profile), Some(started)) = (profile.as_deref_mut(), started) {
+            profile.canonicalize_ns += started.elapsed().as_nanos() as u64;
+        }
+        if template_runtime.is_exhausted() {
+            return None;
+        }
+        for (language, accumulator) in components {
+            if !merge_small_language_parser_state(
+                template_runtime,
+                &mut queue_scratch.language_processing[0],
+                tokenizer_state,
+                language,
+                accumulator,
+            ) {
+                return None;
+            }
+        }
+    }
+
+    let initial_tokenizer_state = constraint.tokenizer.initial_state();
+    let mut offset = 0usize;
+    while offset <= bytes.len() {
+        if queue_scratch.language_processing[offset].is_empty() {
+            offset += 1;
+            continue;
+        }
+
+        let states_to_process =
+            std::mem::take(&mut queue_scratch.language_processing[offset]);
+        for mut entry in states_to_process {
+            if !execute_tokenizer_reusable(
+                constraint,
+                &bytes[offset..],
+                entry.tokenizer_state,
+                tokenizer_scratch,
+            ) {
+                return None;
+            }
+
+            let actionable_terminals =
+                actionable_terminals_from_language(template_runtime, entry.language);
+            if offset == 0 && !entry.accumulator.is_empty() {
+                entry.accumulator = prune_uniform_accumulator_for_parts(
+                    constraint,
+                    actionable_terminals.as_ref(),
+                    &entry.accumulator,
+                    entry.tokenizer_state,
+                    &tokenizer_scratch.states,
+                    &tokenizer_scratch.matches,
+                )?;
+            }
+
+            let normalized_matches = collect_unique_actionable_matches(
+                constraint,
+                actionable_terminals.as_ref(),
+                constraint.ignore_terminal,
+                &tokenizer_scratch.matches,
+                None,
+            );
+            let mut emitted = SmallVec::<[(usize, u32, TerminalsDisallowed); 4]>::new();
+
+            for matched in normalized_matches {
+                let new_offset = offset + matched.width;
+                if new_offset > bytes.len() {
+                    return None;
+                }
+
+                let (advanced_language, advanced_accumulator) = if matched.ignored {
+                    (entry.language, entry.accumulator.clone())
+                } else {
+                    let started = profile.is_some().then(std::time::Instant::now);
+                    let advanced = template_runtime.advance_language(
+                        constraint,
+                        matched.terminal_id,
+                        entry.language,
+                    )?;
+                    if let (Some(profile), Some(started)) = (profile.as_deref_mut(), started) {
+                        profile.evaluate_ns += started.elapsed().as_nanos() as u64;
+                    }
+                    if advanced == 0 {
+                        continue;
+                    }
+                    (
+                        advanced,
+                        apply_future_terminal_disallow_to_accumulator(
+                            constraint,
+                            &tokenizer_scratch.states,
+                            matched.terminal_id,
+                            entry.accumulator.clone(),
+                        ),
+                    )
+                };
+
+                if emitted.iter().any(|(emitted_offset, language, accumulator)| {
+                    *emitted_offset == new_offset
+                        && *language == advanced_language
+                        && accumulator == &advanced_accumulator
+                }) {
+                    continue;
+                }
+                emitted.push((
+                    new_offset,
+                    advanced_language,
+                    advanced_accumulator.clone(),
+                ));
+
+                let destination = if new_offset == bytes.len() {
+                    &mut queue_scratch.language_pending
+                } else {
+                    &mut queue_scratch.language_processing[new_offset]
+                };
+                if !merge_small_language_parser_state(
+                    template_runtime,
+                    destination,
+                    initial_tokenizer_state,
+                    advanced_language,
+                    advanced_accumulator,
+                ) {
+                    return None;
+                }
+            }
+
+            if !tokenizer_scratch.states.is_empty() {
+                let mut fallback_gss = None;
+                for &end_state in &tokenizer_scratch.states {
+                    let check_started = profile.is_some().then(std::time::Instant::now);
+                    let language_viable = language_end_state_may_advance(
+                        constraint,
+                        template_runtime,
+                        entry.language,
+                        end_state,
+                    );
+                    if template_runtime.is_exhausted() {
+                        return None;
+                    }
+                    let viable = match language_viable {
+                        Some(viable) => viable,
+                        None => {
+                            let reconstruct_started =
+                                profile.is_some().then(std::time::Instant::now);
+                            let gss = fallback_gss.get_or_insert_with(|| {
+                                template_runtime.gss_from_language(
+                                    entry.language,
+                                    entry.accumulator.clone(),
+                                )
+                            });
+                            if let (Some(profile), Some(started)) =
+                                (profile.as_deref_mut(), reconstruct_started)
+                            {
+                                profile.continuation_reconstruct_ns +=
+                                    started.elapsed().as_nanos() as u64;
+                            }
+                            end_state_may_advance(constraint, gss, end_state)
+                        }
+                    };
+                    if let (Some(profile), Some(started)) =
+                        (profile.as_deref_mut(), check_started)
+                    {
+                        profile.continuation_check_ns +=
+                            started.elapsed().as_nanos() as u64;
+                    }
+                    if viable
+                        && !merge_small_language_parser_state(
+                            template_runtime,
+                            &mut queue_scratch.language_pending,
+                            end_state,
+                            entry.language,
+                            entry.accumulator.clone(),
+                        )
+                    {
+                        return None;
+                    }
+                }
+            }
+        }
+        offset += 1;
+    }
+
+    if template_runtime.is_exhausted() {
+        return None;
+    }
+    if queue_scratch.language_pending.is_empty() {
+        return Some(Err(
+            "commit rejected: no valid parser states remain".to_string(),
+        ));
+    }
+    Some(Ok(std::mem::take(
+        &mut queue_scratch.language_pending,
+    )))
+}
+
+fn commit_bytes_language_small_queue_fast_path(
+    constraint: &Constraint,
+    state: &mut ParserStateMap,
+    bytes: &[u8],
+    tokenizer_scratch: &mut tokenizer_scan::ReusableTokenizerExecScratch,
+    queue_scratch: &mut SmallCommitQueueScratch,
+    template_runtime: &mut TemplateAdvanceRuntime,
+    profitability_prechecked: bool,
+) -> Option<Result<(), String>> {
+    if !language_small_queue_enabled() || !(2..=8).contains(&bytes.len()) || state.len() > 2 {
+        return None;
+    }
+
+    let profile_enabled = std::env::var_os("GLRMASK_PROFILE_LANGUAGE_SMALL_QUEUE").is_some();
+    let top_values =
+        language_queue_top_value_count_at_most(state, LANGUAGE_QUEUE_MIN_TOP_VALUES);
+    if top_values < LANGUAGE_QUEUE_MIN_TOP_VALUES {
+        if profile_enabled {
+            eprintln!(
+                "[glrmask/profile][language_small_queue_decline] reason=narrow_top_frontier bytes={} top_values={} min_top_values={}",
+                format_token_bytes(bytes),
+                top_values,
+                LANGUAGE_QUEUE_MIN_TOP_VALUES,
+            );
+        }
+        return None;
+    }
+
+    if !profitability_prechecked
+        && !has_multiple_actionable_terminal_boundaries(
+            constraint,
+            state,
+            bytes,
+            tokenizer_scratch,
+        )
+    {
+        return None;
+    }
+
+    let parser_paths = language_queue_path_count_at_most(state, LANGUAGE_QUEUE_MIN_PATHS);
+    if parser_paths < LANGUAGE_QUEUE_MIN_PATHS {
+        if profile_enabled {
+            eprintln!(
+                "[glrmask/profile][language_small_queue_decline] reason=insufficient_stack_ambiguity bytes={} parser_paths={} min_paths={}",
+                format_token_bytes(bytes),
+                parser_paths,
+                LANGUAGE_QUEUE_MIN_PATHS,
+            );
+        }
+        return None;
+    }
+    let parser_nodes = language_queue_node_count_at_most(state, LANGUAGE_QUEUE_MIN_NODES);
+    if parser_nodes < LANGUAGE_QUEUE_MIN_NODES {
+        if profile_enabled {
+            eprintln!(
+                "[glrmask/profile][language_small_queue_decline] reason=insufficient_compact_gss_work bytes={} parser_paths_at_least={} parser_nodes={} min_nodes={}",
+                format_token_bytes(bytes),
+                LANGUAGE_QUEUE_MIN_PATHS,
+                parser_nodes,
+                LANGUAGE_QUEUE_MIN_NODES,
+            );
+        }
+        return None;
+    }
+    if profile_enabled {
+        eprintln!(
+            "[glrmask/profile][language_small_queue_dispatch] selected bytes={} state_entries={} parser_paths_at_least={} parser_nodes_at_least={}",
+            format_token_bytes(bytes),
+            state.len(),
+            LANGUAGE_QUEUE_MIN_PATHS,
+            LANGUAGE_QUEUE_MIN_NODES,
+        );
+    }
+    if !language_queue_input_is_bounded(state) {
+        if profile_enabled {
+            eprintln!(
+                "[glrmask/profile][language_small_queue_decline] reason=input_depth bytes={}",
+                format_token_bytes(bytes),
+            );
+        }
+        return None;
+    }
+
+    let total_started = profile_enabled.then(std::time::Instant::now);
+    let mut profile = LanguageCommitSimulationProfile::default();
+    template_runtime.begin_commit();
+    let simulation = simulate_language_commit(
+        constraint,
+        state,
+        bytes,
+        tokenizer_scratch,
+        queue_scratch,
+        template_runtime,
+        profile_enabled.then_some(&mut profile),
+    );
+    let Some(simulation) = simulation else {
+        if profile_enabled {
+            let reason = if template_runtime.is_exhausted() {
+                "work_budget"
+            } else {
+                "simulation_bound_or_missing_template"
+            };
+            eprintln!(
+                "[glrmask/profile][language_small_queue_decline] reason={} bytes={}",
+                reason,
+                format_token_bytes(bytes),
+            );
+        }
+        return None;
+    };
+    let pending = match simulation {
+        Ok(pending) => pending,
+        Err(error) => return Some(Err(error)),
+    };
+
+    if template_runtime.is_exhausted() {
+        if profile_enabled {
+            eprintln!(
+                "[glrmask/profile][language_small_queue_decline] reason=work_budget_after_simulation bytes={}",
+                format_token_bytes(bytes),
+            );
+        }
+        return None;
+    }
+    let mut final_reconstruct_ns = 0u64;
+    let mut new_state = ParserStateMap::default();
+    for entry in pending {
+        let started = profile_enabled.then(std::time::Instant::now);
+        let gss = template_runtime.gss_from_language(entry.language, entry.accumulator);
+        if let Some(started) = started {
+            final_reconstruct_ns += started.elapsed().as_nanos() as u64;
+        }
+        new_state.merge_insert(entry.tokenizer_state, gss);
+    }
+    for parser_state in new_state.values_mut() {
+        *parser_state = parser_state.fuse(Some(1));
+    }
+    new_state.retain(|_, parser_state| !parser_state.is_empty());
+    if new_state.is_empty() {
+        return Some(Err(
+            "commit rejected: no valid parser states remain".to_string(),
+        ));
+    }
+    if profile_enabled {
+        let (
+            template_calls,
+            template_memo_hits,
+            template_memo_entries,
+            template_products_started,
+            semantic_nodes,
+            semantic_lower_keys,
+            semantic_upper_keys,
+            semantic_union_entries,
+        ) = template_runtime.work_summary();
+        eprintln!(
+            "[glrmask/profile][language_small_queue] bytes={} total_ns={} canonicalize_ns={} evaluate_ns={} continuation_reconstruct_ns={} continuation_check_ns={} final_reconstruct_ns={} template_calls={} template_memo_hits={} template_memo_entries={} template_products_started={} semantic_nodes={} semantic_lower_keys={} semantic_upper_keys={} semantic_union_entries={} final_summaries={:?}",
+            format_token_bytes(bytes),
+            total_started.expect("language queue profile start exists").elapsed().as_nanos(),
+            profile.canonicalize_ns,
+            profile.evaluate_ns,
+            profile.continuation_reconstruct_ns,
+            profile.continuation_check_ns,
+            final_reconstruct_ns,
+            template_calls,
+            template_memo_hits,
+            template_memo_entries,
+            template_products_started,
+            semantic_nodes,
+            semantic_lower_keys,
+            semantic_upper_keys,
+            semantic_union_entries,
+            new_state.values().map(ParserGSS::summary).collect::<Vec<_>>(),
+        );
+    }
+    *state = new_state;
+    Some(Ok(()))
 }
 
 fn commit_bytes_small_queue_fast_path(
@@ -4498,6 +5153,19 @@ fn commit_bytes_impl(
         }
     }
 
+    let language_small_queue_result = commit_bytes_language_small_queue_fast_path(
+        constraint,
+        state,
+        bytes,
+        &mut bufs.reusable_tokenizer_exec,
+        &mut bufs.small_queue,
+        &mut bufs.template_advance_runtime,
+        false,
+    );
+    if let Some(result) = language_small_queue_result {
+        return result;
+    }
+
     let small_queue_result = commit_bytes_small_queue_fast_path(
         constraint,
         state,
@@ -4893,6 +5561,8 @@ impl<'a> ConstraintState<'a> {
         let bytes = token_bytes_for_id(constraint, token_id);
         let assertion_flags = commit_assertion_flags();
         let was_in_mask = snapshot_mask_membership(self, token_id, assertion_flags);
+        let equivalence_reference = (assertion_flags & COMMIT_ASSERT_FAST_PATH_EQUIVALENCE != 0)
+            .then(|| self.state.clone());
         let start = Instant::now();
         let result = commit_token_impl(constraint, &mut self.state, &mut self.buffers, token_id);
         let total_ns = start.elapsed().as_nanos() as u64;
@@ -4902,7 +5572,7 @@ impl<'a> ConstraintState<'a> {
             token_id,
             bytes,
             was_in_mask,
-            None,
+            equivalence_reference,
             &self.state,
             result.is_ok(),
         );
@@ -4920,6 +5590,8 @@ impl<'a> ConstraintState<'a> {
         }
         let assertion_flags = commit_assertion_flags();
         let was_in_mask = snapshot_mask_membership(self, token_id, assertion_flags);
+        let equivalence_reference = (assertion_flags & COMMIT_ASSERT_FAST_PATH_EQUIVALENCE != 0)
+            .then(|| self.state.clone());
         let total_started_at = std::time::Instant::now();
         let special = if has_special {
             advance_special_token_paths_profiled(constraint, &self.state, token_id, None)
@@ -4938,7 +5610,7 @@ impl<'a> ConstraintState<'a> {
                 Ok(profile) => profile,
                 Err(_) => {
                     self.state.clear();
-                    self.buffers.clear_all();
+                    self.buffers.reset_all();
                     CommitProfile::default()
                 }
             }
@@ -4956,7 +5628,7 @@ impl<'a> ConstraintState<'a> {
             token_id,
             bytes,
             was_in_mask,
-            None,
+            equivalence_reference,
             &self.state,
             result.is_ok(),
         );
@@ -4977,6 +5649,8 @@ impl<'a> ConstraintState<'a> {
         }
         let assertion_flags = commit_assertion_flags();
         let was_in_mask = snapshot_mask_membership(self, token_id, assertion_flags);
+        let equivalence_reference = (assertion_flags & COMMIT_ASSERT_FAST_PATH_EQUIVALENCE != 0)
+            .then(|| self.state.clone());
         let total_started_at = std::time::Instant::now();
         let mut advances = Vec::new();
         let special = if has_special {
@@ -5021,7 +5695,7 @@ impl<'a> ConstraintState<'a> {
             token_id,
             bytes,
             was_in_mask,
-            None,
+            equivalence_reference,
             &self.state,
             result.is_ok(),
         );
@@ -5058,6 +5732,113 @@ mod tests {
         state: &ParserStateMap,
     ) -> CanonicalCommitState {
         canonical_commit_state_for_equivalence_assert(state)
+    }
+
+    #[test]
+    fn language_queue_structural_gate_rejects_tiny_and_accepts_wide_complex_gss() {
+        let mut tiny = ParserStateMap::default();
+        tiny.insert(
+            0,
+            ParserGSS::from_single_stack(
+                vec![0_u32, 1, 2],
+                TerminalsDisallowed::new(),
+            ),
+        );
+        assert!(
+            language_queue_top_value_count_at_most(&tiny, LANGUAGE_QUEUE_MIN_TOP_VALUES)
+                < LANGUAGE_QUEUE_MIN_TOP_VALUES
+        );
+
+        let stacks = (0_u32..64)
+            .map(|index| {
+                (
+                    vec![0, 1_000 + index, 2_000 + index, 10 + index % 4],
+                    TerminalsDisallowed::new(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut complex = ParserStateMap::default();
+        complex.insert(0, ParserGSS::from_stacks(&stacks));
+        assert_eq!(
+            language_queue_top_value_count_at_most(
+                &complex,
+                LANGUAGE_QUEUE_MIN_TOP_VALUES,
+            ),
+            LANGUAGE_QUEUE_MIN_TOP_VALUES,
+        );
+        assert_eq!(
+            language_queue_path_count_at_most(&complex, LANGUAGE_QUEUE_MIN_PATHS),
+            LANGUAGE_QUEUE_MIN_PATHS,
+        );
+        assert_eq!(
+            language_queue_node_count_at_most(&complex, LANGUAGE_QUEUE_MIN_NODES),
+            LANGUAGE_QUEUE_MIN_NODES,
+        );
+    }
+
+    #[test]
+    fn actionable_terminal_boundary_trigger_requires_distinct_offsets() {
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                t A ::= "a";
+                t AB ::= "ab";
+                nt start ::= A | AB;
+            "#,
+            &Vocab::new(vec![
+                (0, b"a".to_vec()),
+                (1, b"ab".to_vec()),
+                (2, b"b".to_vec()),
+            ]),
+        )
+        .expect("boundary-trigger grammar should compile");
+        let state = constraint.start();
+        let mut scratch = tokenizer_scan::ReusableTokenizerExecScratch::default();
+
+        assert!(
+            !has_multiple_actionable_terminal_boundaries(
+                &constraint,
+                &state.state,
+                b"a",
+                &mut scratch,
+            ),
+            "one actionable completion boundary must not select the language queue",
+        );
+        assert!(
+            has_multiple_actionable_terminal_boundaries(
+                &constraint,
+                &state.state,
+                b"ab",
+                &mut scratch,
+            ),
+            "actionable terminal completions at byte offsets one and two must select",
+        );
+    }
+
+    #[test]
+    fn actionable_terminal_boundary_trigger_ignores_same_offset_ambiguity() {
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                t A ::= "a";
+                t ALSO_A ::= "a";
+                nt start ::= A | ALSO_A;
+            "#,
+            &Vocab::new(vec![(0, b"a".to_vec())]),
+        )
+        .expect("same-offset trigger grammar should compile");
+        let state = constraint.start();
+        let mut scratch = tokenizer_scan::ReusableTokenizerExecScratch::default();
+
+        assert!(
+            !has_multiple_actionable_terminal_boundaries(
+                &constraint,
+                &state.state,
+                b"a",
+                &mut scratch,
+            ),
+            "multiple actionable terminals ending at one offset must remain on the ordinary queue",
+        );
     }
 
     #[test]

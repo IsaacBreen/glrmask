@@ -2,13 +2,17 @@ use std::collections::BTreeMap;
 
 pub type Label = i32;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct DFAState {
     pub is_accepting: bool,
     pub transitions: BTreeMap<Label, u32>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct DFA {
     pub states: Vec<DFAState>,
     pub start_state: u32,

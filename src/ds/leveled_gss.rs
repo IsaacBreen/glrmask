@@ -702,6 +702,14 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> Upper<T, A> {
         }
     }
 
+    #[inline(always)]
+    fn children_len(&self) -> usize {
+        match self {
+            Upper::Branch(branch) => branch.children.len(),
+            Upper::Interface(interface) => interface.inner.children_len(),
+        }
+    }
+
     fn children_keys(&self) -> SmallVec<[T; 8]> {
         match self {
             Upper::Branch(branch) => branch.children.keys().cloned().collect(),
@@ -1505,12 +1513,24 @@ pub(crate) struct GssSemanticKeyInterner<
     lower_memo: FxHashMap<usize, (Arc<Lower<T>>, u32)>,
     upper_memo: FxHashMap<usize, (Arc<Upper<T, A>>, u32)>,
     union_memo: FxHashMap<(u32, u32), u32>,
+    max_nodes: usize,
+    max_source_keys: usize,
+    max_union_entries: usize,
+    exhausted: bool,
 }
 
 impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
     GssSemanticKeyInterner<T, A>
 {
     pub(crate) fn new() -> Self {
+        Self::with_budget(usize::MAX, usize::MAX, usize::MAX)
+    }
+
+    pub(crate) fn with_budget(
+        max_nodes: usize,
+        max_source_keys: usize,
+        max_union_entries: usize,
+    ) -> Self {
         let empty_language = SemanticTrieNode {
             empty: false,
             children: Vec::new(),
@@ -1524,6 +1544,27 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
             lower_memo: FxHashMap::default(),
             upper_memo: FxHashMap::default(),
             union_memo: FxHashMap::default(),
+            max_nodes: max_nodes.max(1),
+            max_source_keys,
+            max_union_entries,
+            exhausted: false,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn is_exhausted(&self) -> bool {
+        self.exhausted
+    }
+
+    #[inline]
+    fn source_budget_available(&mut self) -> bool {
+        if self.lower_memo.len().saturating_add(self.upper_memo.len())
+            >= self.max_source_keys
+        {
+            self.exhausted = true;
+            false
+        } else {
+            true
         }
     }
 
@@ -1558,6 +1599,10 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
         if let Some(id) = self.interned.get(&node) {
             return *id;
         }
+        if self.nodes.len() >= self.max_nodes {
+            self.exhausted = true;
+            return 0;
+        }
         let id = u32::try_from(self.nodes.len()).expect("semantic GSS trie exceeded u32 node IDs");
         self.nodes.push(node.clone());
         self.interned.insert(node, id);
@@ -1574,6 +1619,9 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
     }
 
     fn union_ids(&mut self, left: u32, right: u32) -> u32 {
+        if self.exhausted {
+            return 0;
+        }
         if left == right || right == 0 {
             return left;
         }
@@ -1594,6 +1642,10 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
             }
             if !unseen.insert(pair) {
                 continue;
+            }
+            if unseen.len() > self.max_union_entries {
+                self.exhausted = true;
+                return 0;
             }
             order.push(pair);
 
@@ -1668,16 +1720,79 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
                 }
             }
             let id = self.intern_node(left_node.empty || right_node.empty, children);
+            if self.exhausted {
+                return 0;
+            }
+            if self.union_memo.len() >= self.max_union_entries {
+                self.exhausted = true;
+                return 0;
+            }
             self.union_memo.insert(pair, id);
         }
 
-        *self
-            .union_memo
-            .get(&root)
-            .expect("semantic trie root union was not constructed")
+        self.union_memo.get(&root).copied().unwrap_or(0)
+    }
+
+    pub(crate) fn union_keys(&mut self, left: u32, right: u32) -> u32 {
+        self.union_ids(left, right)
+    }
+
+    pub(crate) fn top_branches(&self, root: u32) -> &[(T, u32)] {
+        &self.nodes[root as usize].children
+    }
+
+    pub(crate) fn push_key(&mut self, root: u32, value: T) -> u32 {
+        if root == 0 {
+            return 0;
+        }
+        self.intern_node(false, vec![(value, root)])
+    }
+
+    pub(crate) fn gss_from_key(&mut self, root: u32, accumulator: A) -> LeveledGSS<T, A> {
+        if root == 0 {
+            return LeveledGSS::empty();
+        }
+
+        fn build<T: Clone + Eq + Hash + Ord>(
+            nodes: &[SemanticTrieNode<T>],
+            id: u32,
+            memo: &mut FxHashMap<u32, Arc<Lower<T>>>,
+        ) -> Arc<Lower<T>> {
+            if let Some(cached) = memo.get(&id) {
+                return cached.clone();
+            }
+            let node = &nodes[id as usize];
+            let mut children: Children<T, Lower<T>> = CompactMap::new();
+            for (value, child_id) in &node.children {
+                let child = build(nodes, *child_id, memo);
+                insert_lower_child_shared(
+                    &mut children,
+                    value.clone(),
+                    child.max_depth(),
+                    child,
+                );
+            }
+            let lower = new_lower(children, node.empty);
+            memo.insert(id, lower.clone());
+            lower
+        }
+
+        let mut memo = FxHashMap::default();
+        let lower = build(&self.nodes, root, &mut memo);
+        let gss = LeveledGSS {
+            inner: new_interface(lower, accumulator),
+        };
+        self.upper_memo.insert(
+            Arc::as_ptr(&gss.inner) as usize,
+            (gss.inner.clone(), root),
+        );
+        gss
     }
 
     pub(crate) fn key(&mut self, gss: &LeveledGSS<T, A>) -> u32 {
+        if self.exhausted {
+            return 0;
+        }
         if let Some(id) = self.upper_id(&gss.inner) {
             return id;
         }
@@ -1693,6 +1808,9 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
             let mut id = self.intern_node(true, Vec::new());
             for value in stack {
                 id = self.intern_node(false, vec![(value, id)]);
+            }
+            if self.exhausted || !self.source_budget_available() {
+                return 0;
             }
             self.upper_memo.insert(
                 Arc::as_ptr(&gss.inner) as usize,
@@ -1712,6 +1830,17 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
                     let ptr = lower_node_id(lower);
                     if self.lower_memo.contains_key(&ptr) || !seen_lower.insert(ptr) {
                         continue;
+                    }
+                    if self
+                        .lower_memo
+                        .len()
+                        .saturating_add(self.upper_memo.len())
+                        .saturating_add(seen_lower.len())
+                        .saturating_add(seen_upper.len())
+                        > self.max_source_keys
+                    {
+                        self.exhausted = true;
+                        return 0;
                     }
                     match &**lower {
                         Lower::Segment(segment) => {
@@ -1733,6 +1862,17 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
                     let ptr = Arc::as_ptr(upper) as usize;
                     if self.upper_memo.contains_key(&ptr) || !seen_upper.insert(ptr) {
                         continue;
+                    }
+                    if self
+                        .lower_memo
+                        .len()
+                        .saturating_add(self.upper_memo.len())
+                        .saturating_add(seen_lower.len())
+                        .saturating_add(seen_upper.len())
+                        > self.max_source_keys
+                    {
+                        self.exhausted = true;
+                        return 0;
                     }
                     match &**upper {
                         Upper::Interface(interface) => {
@@ -1756,6 +1896,9 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
 
         nodes.sort_unstable_by_key(SemanticPendingNode::sort_key);
         for node in nodes {
+            if self.exhausted {
+                return 0;
+            }
             match node {
                 SemanticPendingNode::Lower(lower) => {
                     let ptr = lower_node_id(&lower);
@@ -1789,6 +1932,9 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
                             self.intern_node(*empty, canonical_children)
                         }
                     };
+                    if self.exhausted || !self.source_budget_available() {
+                        return 0;
+                    }
                     self.lower_memo.insert(ptr, (lower, id));
                 }
                 SemanticPendingNode::Upper(upper) => {
@@ -1815,18 +1961,289 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
                             self.intern_node(branch.empty.is_some(), canonical_children)
                         }
                     };
+                    if self.exhausted || !self.source_budget_available() {
+                        return 0;
+                    }
                     self.upper_memo.insert(ptr, (upper, id));
                 }
             }
         }
 
-        self.upper_id(&gss.inner)
-            .expect("semantic trie root must be canonicalized")
+        self.upper_id(&gss.inner).unwrap_or(0)
+    }
+
+    pub(crate) fn work_summary(&self) -> (usize, usize, usize, usize) {
+        (
+            self.nodes.len(),
+            self.lower_memo.len(),
+            self.upper_memo.len(),
+            self.union_memo.len(),
+        )
     }
 
     #[cfg(test)]
     fn node_count(&self) -> usize {
         self.nodes.len()
+    }
+}
+
+pub(crate) struct IndexedLowerIdentity<T: Clone + Eq + Hash> {
+    ptr: usize,
+    _keepalive: Arc<Lower<T>>,
+}
+
+impl<T: Clone + Eq + Hash> IndexedLowerIdentity<T> {
+    fn new(lower: &Arc<Lower<T>>) -> Self {
+        Self {
+            ptr: lower_node_id(lower),
+            _keepalive: lower.clone(),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn ptr_key(&self) -> usize {
+        self.ptr
+    }
+}
+
+impl<T: Clone + Eq + Hash> Clone for IndexedLowerIdentity<T> {
+    fn clone(&self) -> Self {
+        Self {
+            ptr: self.ptr,
+            _keepalive: self._keepalive.clone(),
+        }
+    }
+}
+
+impl<T: Clone + Eq + Hash> PartialEq for IndexedLowerIdentity<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.ptr == other.ptr
+    }
+}
+impl<T: Clone + Eq + Hash> Eq for IndexedLowerIdentity<T> {}
+impl<T: Clone + Eq + Hash> std::hash::Hash for IndexedLowerIdentity<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.ptr.hash(state);
+    }
+}
+
+#[derive(Clone)]
+pub(crate) enum IndexedLeveledGssNode<T: Clone + Eq + Hash, A> {
+    UpperBranch {
+        empty: Option<A>,
+        children: Vec<(T, u32)>,
+    },
+    Interface {
+        accumulator: A,
+        lower: u32,
+    },
+    LowerGeneral {
+        source: IndexedLowerIdentity<T>,
+        empty: bool,
+        children: Vec<(T, u32)>,
+    },
+    LowerSegment {
+        source: IndexedLowerIdentity<T>,
+        values: Vec<T>,
+        next: u32,
+    },
+}
+
+pub(crate) struct IndexedLeveledGss<T: Clone + Eq + Hash, A> {
+    pub(crate) root: u32,
+    pub(crate) nodes: Vec<IndexedLeveledGssNode<T, A>>,
+}
+
+impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
+    /// Build a compact indexed view of the existing leveled-GSS DAG.
+    ///
+    /// Node sharing is preserved by pointer identity. This is intended for
+    /// allocation-free dynamic programs that need random access to the DAG but
+    /// must not rebuild, flatten, or enumerate the represented stack language.
+    pub(crate) fn indexed_dag(&self) -> IndexedLeveledGss<T, A> {
+        fn index_lower<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
+            lower: &Arc<Lower<T>>,
+            nodes: &mut Vec<IndexedLeveledGssNode<T, A>>,
+            lower_ids: &mut FxHashMap<usize, u32>,
+            upper_ids: &mut FxHashMap<usize, u32>,
+        ) -> u32 {
+            let ptr = lower_node_id(lower);
+            if let Some(id) = lower_ids.get(&ptr) {
+                return *id;
+            }
+            let node = match &**lower {
+                Lower::General { children, empty, .. } => {
+                    let mut indexed_children = Vec::new();
+                    for (value, kids) in children.iter() {
+                        for child in kids.values() {
+                            indexed_children.push((
+                                value.clone(),
+                                index_lower(child, nodes, lower_ids, upper_ids),
+                            ));
+                        }
+                    }
+                    IndexedLeveledGssNode::LowerGeneral {
+                        source: IndexedLowerIdentity::new(lower),
+                        empty: *empty,
+                        children: indexed_children,
+                    }
+                }
+                Lower::Segment(segment) => IndexedLeveledGssNode::LowerSegment {
+                    source: IndexedLowerIdentity::new(lower),
+                    values: segment.values.iter().cloned().collect::<Vec<_>>(),
+                    next: index_lower(&segment.next, nodes, lower_ids, upper_ids),
+                },
+            };
+            let id = u32::try_from(nodes.len()).expect("indexed GSS exceeded u32 node IDs");
+            nodes.push(node);
+            lower_ids.insert(ptr, id);
+            id
+        }
+
+        fn index_upper<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
+            upper: &Arc<Upper<T, A>>,
+            nodes: &mut Vec<IndexedLeveledGssNode<T, A>>,
+            lower_ids: &mut FxHashMap<usize, u32>,
+            upper_ids: &mut FxHashMap<usize, u32>,
+        ) -> u32 {
+            let ptr = Arc::as_ptr(upper) as usize;
+            if let Some(id) = upper_ids.get(&ptr) {
+                return *id;
+            }
+            let node = match &**upper {
+                Upper::Branch(branch) => {
+                    let mut indexed_children = Vec::new();
+                    for (value, kids) in branch.children.iter() {
+                        for child in kids.values() {
+                            indexed_children.push((
+                                value.clone(),
+                                index_upper(child, nodes, lower_ids, upper_ids),
+                            ));
+                        }
+                    }
+                    IndexedLeveledGssNode::UpperBranch {
+                        empty: branch.empty.clone(),
+                        children: indexed_children,
+                    }
+                }
+                Upper::Interface(interface) => IndexedLeveledGssNode::Interface {
+                    accumulator: interface.acc.clone(),
+                    lower: index_lower(&interface.inner, nodes, lower_ids, upper_ids),
+                },
+            };
+            let id = u32::try_from(nodes.len()).expect("indexed GSS exceeded u32 node IDs");
+            nodes.push(node);
+            upper_ids.insert(ptr, id);
+            id
+        }
+
+        let mut nodes = Vec::new();
+        let mut lower_ids = FxHashMap::default();
+        let mut upper_ids = FxHashMap::default();
+        let root = index_upper(
+            &self.inner,
+            &mut nodes,
+            &mut lower_ids,
+            &mut upper_ids,
+        );
+        IndexedLeveledGss { root, nodes }
+    }
+
+    pub(crate) fn indexed_dag_many(
+        roots: &[Self],
+    ) -> (IndexedLeveledGss<T, A>, Vec<u32>) {
+        fn index_lower<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
+            lower: &Arc<Lower<T>>,
+            nodes: &mut Vec<IndexedLeveledGssNode<T, A>>,
+            lower_ids: &mut FxHashMap<usize, u32>,
+            upper_ids: &mut FxHashMap<usize, u32>,
+        ) -> u32 {
+            let ptr = lower_node_id(lower);
+            if let Some(id) = lower_ids.get(&ptr) {
+                return *id;
+            }
+            let node = match &**lower {
+                Lower::General { children, empty, .. } => {
+                    let mut indexed_children = Vec::new();
+                    for (value, kids) in children.iter() {
+                        for child in kids.values() {
+                            indexed_children.push((
+                                value.clone(),
+                                index_lower(child, nodes, lower_ids, upper_ids),
+                            ));
+                        }
+                    }
+                    IndexedLeveledGssNode::LowerGeneral {
+                        source: IndexedLowerIdentity::new(lower),
+                        empty: *empty,
+                        children: indexed_children,
+                    }
+                }
+                Lower::Segment(segment) => IndexedLeveledGssNode::LowerSegment {
+                    source: IndexedLowerIdentity::new(lower),
+                    values: segment.values.iter().cloned().collect::<Vec<_>>(),
+                    next: index_lower(&segment.next, nodes, lower_ids, upper_ids),
+                },
+            };
+            let id = u32::try_from(nodes.len()).expect("indexed GSS exceeded u32 node IDs");
+            nodes.push(node);
+            lower_ids.insert(ptr, id);
+            id
+        }
+
+        fn index_upper<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
+            upper: &Arc<Upper<T, A>>,
+            nodes: &mut Vec<IndexedLeveledGssNode<T, A>>,
+            lower_ids: &mut FxHashMap<usize, u32>,
+            upper_ids: &mut FxHashMap<usize, u32>,
+        ) -> u32 {
+            let ptr = Arc::as_ptr(upper) as usize;
+            if let Some(id) = upper_ids.get(&ptr) {
+                return *id;
+            }
+            let node = match &**upper {
+                Upper::Branch(branch) => {
+                    let mut indexed_children = Vec::new();
+                    for (value, kids) in branch.children.iter() {
+                        for child in kids.values() {
+                            indexed_children.push((
+                                value.clone(),
+                                index_upper(child, nodes, lower_ids, upper_ids),
+                            ));
+                        }
+                    }
+                    IndexedLeveledGssNode::UpperBranch {
+                        empty: branch.empty.clone(),
+                        children: indexed_children,
+                    }
+                }
+                Upper::Interface(interface) => IndexedLeveledGssNode::Interface {
+                    accumulator: interface.acc.clone(),
+                    lower: index_lower(&interface.inner, nodes, lower_ids, upper_ids),
+                },
+            };
+            let id = u32::try_from(nodes.len()).expect("indexed GSS exceeded u32 node IDs");
+            nodes.push(node);
+            upper_ids.insert(ptr, id);
+            id
+        }
+
+        let mut nodes = Vec::new();
+        let mut lower_ids = FxHashMap::default();
+        let mut upper_ids = FxHashMap::default();
+        let root_ids = roots
+            .iter()
+            .map(|root| {
+                index_upper(
+                    &root.inner,
+                    &mut nodes,
+                    &mut lower_ids,
+                    &mut upper_ids,
+                )
+            })
+            .collect::<Vec<_>>();
+        let root = root_ids.first().copied().unwrap_or(0);
+        (IndexedLeveledGss { root, nodes }, root_ids)
     }
 }
 
@@ -2199,6 +2616,11 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
     pub fn ptr_key(&self) -> usize {
         Arc::as_ptr(&self.inner) as usize
+    }
+
+    #[inline(always)]
+    pub(crate) fn top_value_count(&self) -> usize {
+        self.inner.children_len()
     }
 
     pub(crate) fn single_interface_lower_id(&self) -> Option<usize> {
@@ -4199,21 +4621,71 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     /// users can keep the accumulator as branch-local state without losing its
     /// correlation with parser paths.
     pub fn partition_by_accumulator(&self) -> Vec<(LeveledGSS<T, ()>, A)> {
-        let mut accumulators = Vec::new();
-        self.for_each_acc(|accumulator| {
-            if !accumulators.contains(accumulator) {
-                accumulators.push(accumulator.clone());
-            }
-        });
+        self.partition_by_accumulator_at_most(usize::MAX, usize::MAX)
+            .expect("unbounded accumulator partition cannot exhaust its budget")
+    }
 
-        accumulators
-            .into_iter()
-            .map(|accumulator| {
-                let paths = self
-                    .apply_and_prune(|candidate| (candidate == &accumulator).then_some(()));
-                (paths, accumulator)
-            })
-            .collect()
+    /// Partition by accumulator while bounding the accumulator-labelled upper
+    /// structure inspected before any transformed GSSes are built.
+    ///
+    /// Lower GSS nodes carry no accumulator and are therefore irrelevant to
+    /// discovering the partition labels. Returning `None` is transactional:
+    /// `self` is immutable and no partial partition escapes.
+    pub(crate) fn partition_by_accumulator_at_most(
+        &self,
+        max_accumulators: usize,
+        max_upper_nodes: usize,
+    ) -> Option<Vec<(LeveledGSS<T, ()>, A)>> {
+        let mut accumulators = Vec::new();
+        let mut pending = vec![self.inner.clone()];
+        let mut visited = HashSet::new();
+
+        while let Some(node) = pending.pop() {
+            let ptr = Arc::as_ptr(&node) as usize;
+            if !visited.insert(ptr) {
+                continue;
+            }
+            if visited.len() > max_upper_nodes {
+                return None;
+            }
+
+            let mut record = |accumulator: &A| -> Option<()> {
+                if !accumulators.contains(accumulator) {
+                    if accumulators.len() == max_accumulators {
+                        return None;
+                    }
+                    accumulators.push(accumulator.clone());
+                }
+                Some(())
+            };
+
+            match &*node {
+                Upper::Interface(interface) => record(&interface.acc)?,
+                Upper::Branch(branch) => {
+                    if let Some(accumulator) = &branch.empty {
+                        record(accumulator)?;
+                    }
+                    pending.extend(
+                        branch
+                            .children
+                            .values()
+                            .flat_map(|kids| kids.values())
+                            .cloned(),
+                    );
+                }
+            }
+        }
+
+        Some(
+            accumulators
+                .into_iter()
+                .map(|accumulator| {
+                    let paths = self
+                        .apply_and_prune(|candidate| (candidate == &accumulator).then_some(()));
+                    (paths, accumulator)
+                })
+                .collect(),
+        )
     }
 
     pub fn apply_and_prune<B, M>(&self, mut mutator: M) -> LeveledGSS<T, B>
@@ -4839,6 +5311,66 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         self.inner.single_child_key_without_empty()
     }
 
+    /// Count unique reachable upper and lower GSS nodes, stopping at `limit`.
+    ///
+    /// This measures compact representation work rather than represented stack
+    /// count. It retains no node identities after returning and never expands
+    /// concrete paths.
+    pub(crate) fn node_count_at_most(&self, limit: usize) -> usize {
+        if limit == 0 || self.is_empty() {
+            return 0;
+        }
+
+        let mut upper_pending = vec![self.inner.clone()];
+        let mut lower_pending = Vec::new();
+        let mut upper_seen = HashSet::new();
+        let mut lower_seen = HashSet::new();
+        let mut count = 0usize;
+
+        while let Some(node) = upper_pending.pop() {
+            let ptr = Arc::as_ptr(&node) as usize;
+            if !upper_seen.insert(ptr) {
+                continue;
+            }
+            count += 1;
+            if count == limit {
+                return limit;
+            }
+            match &*node {
+                Upper::Branch(branch) => upper_pending.extend(
+                    branch
+                        .children
+                        .values()
+                        .flat_map(|kids| kids.values())
+                        .cloned(),
+                ),
+                Upper::Interface(interface) => lower_pending.push(interface.inner.clone()),
+            }
+        }
+
+        while let Some(node) = lower_pending.pop() {
+            let ptr = lower_node_id(&node);
+            if !lower_seen.insert(ptr) {
+                continue;
+            }
+            count += 1;
+            if count == limit {
+                return limit;
+            }
+            match &*node {
+                Lower::Segment(segment) => lower_pending.push(segment.next.clone()),
+                Lower::General { children, .. } => lower_pending.extend(
+                    children
+                        .values()
+                        .flat_map(|kids| kids.values())
+                        .cloned(),
+                ),
+            }
+        }
+
+        count
+    }
+
     pub fn path_count_at_most(&self, limit: usize) -> usize {
         if limit == 0 || self.is_empty() {
             return 0;
@@ -5154,6 +5686,17 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         walk(&self.inner, &mut visited, &mut f);
     }
 
+    pub(crate) fn uniform_accumulator(&self) -> Option<A> {
+        let mut value: Option<A> = None;
+        let mut uniform = true;
+        self.for_each_acc(|candidate| match &value {
+            None => value = Some(candidate.clone()),
+            Some(existing) if existing == candidate => {}
+            Some(_) => uniform = false,
+        });
+        uniform.then_some(value).flatten()
+    }
+
     /// Returns true if all accumulators in the upper tree satisfy the predicate.
     /// Short-circuits on the first accumulator that doesn't.
     /// For a single Interface node (common case), this is O(1).
@@ -5435,16 +5978,116 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        CompactMap, CompactOrdMap, GssSemanticKeyInterner, LeveledGSS, Lower, Merge,
-        new_interface,
+        CompactMap, CompactOrdMap, GssSemanticKeyInterner, IndexedLeveledGss,
+        IndexedLeveledGssNode, LeveledGSS, Lower, Merge, new_interface,
     };
 
-    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
     struct TestAcc(u32);
 
     impl Merge for TestAcc {
         fn merge(&self, other: &Self) -> Self {
             Self(self.0.max(other.0))
+        }
+    }
+
+    #[test]
+    fn indexed_dag_exactly_preserves_stack_language_and_accumulators() {
+        fn enumerate_lower(
+            dag: &IndexedLeveledGss<u32, TestAcc>,
+            node: u32,
+            top_first: &mut Vec<u32>,
+            accumulator: &TestAcc,
+            output: &mut Vec<(Vec<u32>, TestAcc)>,
+        ) {
+            match &dag.nodes[node as usize] {
+                IndexedLeveledGssNode::LowerGeneral {
+                    empty, children, ..
+                } => {
+                    if *empty {
+                        let mut stack = top_first.clone();
+                        stack.reverse();
+                        output.push((stack, accumulator.clone()));
+                    }
+                    for (value, child) in children {
+                        top_first.push(*value);
+                        enumerate_lower(dag, *child, top_first, accumulator, output);
+                        top_first.pop();
+                    }
+                }
+                IndexedLeveledGssNode::LowerSegment { values, next, .. } => {
+                    let old_len = top_first.len();
+                    top_first.extend(values.iter().rev().copied());
+                    enumerate_lower(dag, *next, top_first, accumulator, output);
+                    top_first.truncate(old_len);
+                }
+                IndexedLeveledGssNode::UpperBranch { .. }
+                | IndexedLeveledGssNode::Interface { .. } => {
+                    panic!("lower traversal reached an upper node")
+                }
+            }
+        }
+
+        fn enumerate_upper(
+            dag: &IndexedLeveledGss<u32, TestAcc>,
+            node: u32,
+            top_first: &mut Vec<u32>,
+            output: &mut Vec<(Vec<u32>, TestAcc)>,
+        ) {
+            match &dag.nodes[node as usize] {
+                IndexedLeveledGssNode::UpperBranch { empty, children } => {
+                    if let Some(accumulator) = empty {
+                        let mut stack = top_first.clone();
+                        stack.reverse();
+                        output.push((stack, accumulator.clone()));
+                    }
+                    for (value, child) in children {
+                        top_first.push(*value);
+                        enumerate_upper(dag, *child, top_first, output);
+                        top_first.pop();
+                    }
+                }
+                IndexedLeveledGssNode::Interface { accumulator, lower } => {
+                    enumerate_lower(dag, *lower, top_first, accumulator, output);
+                }
+                IndexedLeveledGssNode::LowerGeneral { .. }
+                | IndexedLeveledGssNode::LowerSegment { .. } => {
+                    panic!("upper traversal reached a lower node")
+                }
+            }
+        }
+
+        let gss = LeveledGSS::from_stacks(&[
+            (vec![0_u32, 1, 2, 7], TestAcc(1)),
+            (vec![0, 1, 3, 7], TestAcc(2)),
+            (vec![0, 4, 5, 8, 9], TestAcc(1)),
+            (vec![0, 4, 6, 8, 9], TestAcc(3)),
+            (vec![10], TestAcc(2)),
+        ]);
+        let dag = gss.indexed_dag();
+        let mut actual = Vec::new();
+        enumerate_upper(&dag, dag.root, &mut Vec::new(), &mut actual);
+        actual.sort();
+        let mut expected = gss
+            .to_stacks(4_096)
+            .expect("reference stack language exceeded explicit limit");
+        expected.sort();
+        assert_eq!(actual, expected);
+
+        let merged = gss.merge(&LeveledGSS::from_stacks(&[
+            (vec![0, 1, 2, 7], TestAcc(3)),
+            (vec![11, 12], TestAcc(4)),
+        ]));
+        let (many, roots) = LeveledGSS::indexed_dag_many(&[gss.clone(), merged.clone()]);
+        for (root, source) in roots.into_iter().zip([gss, merged]) {
+            let mut actual = Vec::new();
+            enumerate_upper(&many, root, &mut Vec::new(), &mut actual);
+            actual.sort();
+            let mut expected = source
+                .to_stacks(4_096)
+                .expect("reference stack language exceeded explicit limit");
+            expected.sort();
+            assert_eq!(actual, expected);
         }
     }
 
@@ -5599,6 +6242,53 @@ mod tests {
         assert_ne!(interner.key(&gss), 0);
         // Empty language + accepting floor + one canonical node per GSS level.
         assert_eq!(interner.node_count(), 42);
+    }
+
+    #[test]
+    fn node_count_at_most_counts_compact_nodes_without_expanding_paths() {
+        let gss = LeveledGSS::from_stacks(&[
+            (vec![0_u32, 1, 3], TestAcc(1)),
+            (vec![0, 2, 3], TestAcc(1)),
+        ]);
+        let exact = gss.summary().total_unique_nodes;
+        assert_eq!(gss.node_count_at_most(usize::MAX), exact);
+        for limit in 0..=exact + 1 {
+            assert_eq!(gss.node_count_at_most(limit), exact.min(limit));
+        }
+    }
+
+    #[test]
+    fn bounded_accumulator_partition_declines_without_partial_output() {
+        let gss = LeveledGSS::from_stacks(&[
+            (vec![0_u32, 1], TestAcc(1)),
+            (vec![0, 2], TestAcc(2)),
+            (vec![0, 3], TestAcc(3)),
+        ]);
+        assert!(gss.partition_by_accumulator_at_most(2, 64).is_none());
+        let partitions = gss
+            .partition_by_accumulator_at_most(3, 64)
+            .expect("three accumulator components fit the exact budget");
+        assert_eq!(partitions.len(), 3);
+        for (paths, accumulator) in partitions {
+            let stacks = paths
+                .to_stacks(4)
+                .expect("each bounded partition has one explicit stack");
+            assert_eq!(stacks.len(), 1);
+            assert_eq!(stacks[0].1, ());
+            assert_eq!(stacks[0].0.last().copied(), Some(accumulator.0));
+        }
+    }
+
+    #[test]
+    fn semantic_key_budget_declines_without_partial_language() {
+        let gss = LeveledGSS::from_single_stack(
+            vec![0_u32, 1, 2, 3, 4],
+            TestAcc(1),
+        );
+        let mut interner = GssSemanticKeyInterner::with_budget(3, 64, 64);
+        assert_eq!(interner.key(&gss), 0);
+        assert!(interner.is_exhausted());
+        assert!(interner.node_count() <= 3);
     }
 
     #[test]

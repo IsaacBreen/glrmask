@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use rayon::prelude::*;
 
 use rustc_hash::{FxHashMap, FxHashSet};
+use smallvec::SmallVec;
 
 use crate::automata::lexer::{Lexer, tokenizer::Tokenizer};
 use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
@@ -29,7 +30,38 @@ pub(crate) type DenseWeightBufMaskCache = FxHashMap<usize, Box<[u32]>>;
 pub(crate) type SparseWeightBufMaskCache = FxHashMap<usize, Box<[(u16, u32)]>>;
 pub(crate) type DirectSparseWeightTokenSetCache = FxHashSet<usize>;
 pub(crate) type SeedTerminalDenseMasks = FxHashMap<(u32, TerminalID), DenseWords>;
-pub(crate) type FastDwaTransitions = Vec<FxHashMap<i32, (u32, Weight)>>;
+const INLINE_DWA_TRANSITION_LIMIT: usize = 8;
+
+#[derive(Debug, Clone)]
+pub(crate) enum FastDwaTransitionRow {
+    Inline(SmallVec<[(i32, (u32, Weight)); 4]>),
+    Hash(FxHashMap<i32, (u32, Weight)>),
+}
+
+impl FastDwaTransitionRow {
+    pub(crate) fn from_entries(
+        entries: impl IntoIterator<Item = (i32, (u32, Weight))>,
+    ) -> Self {
+        let entries = entries.into_iter().collect::<SmallVec<[_; 4]>>();
+        if entries.len() <= INLINE_DWA_TRANSITION_LIMIT {
+            Self::Inline(entries)
+        } else {
+            Self::Hash(entries.into_iter().collect())
+        }
+    }
+
+    #[inline]
+    pub(crate) fn get(&self, label: &i32) -> Option<&(u32, Weight)> {
+        match self {
+            Self::Inline(entries) => entries
+                .iter()
+                .find_map(|(candidate, transition)| (candidate == label).then_some(transition)),
+            Self::Hash(entries) => entries.get(label),
+        }
+    }
+}
+
+pub(crate) type FastDwaTransitions = Vec<FastDwaTransitionRow>;
 #[derive(Debug, Clone)]
 pub(crate) enum FastTokenizerTransitions {
     Dense(Vec<Box<[u32; 256]>>),
@@ -2389,7 +2421,7 @@ impl Default for DynamicMaskVocab {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CommitTemplateDfas {
     pub(crate) pop: UnweightedDfa,
     pub(crate) read: UnweightedDfa,
@@ -2444,7 +2476,6 @@ pub struct Constraint {
     pub(crate) possible_matches: PossibleMatchesByTerminal,
     pub(crate) state_to_internal_tsid: Vec<u32>,
     pub(crate) internal_tsid_to_states: Vec<Vec<u32>>,
-    #[serde(skip)]
     pub(crate) template_dfas_by_terminal: TemplateDfasByTerminal,
     /// Original token -> final shared constraint-internal token id.
     ///

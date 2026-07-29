@@ -61,7 +61,7 @@ use crate::compiler::stages::parser_dwa::{
     build_parser_dwa_from_terminal_dwa_with_precomputed_templates,
     try_build_immediate_parser_dwa,
 };
-use crate::compiler::stages::templates::Templates;
+use crate::compiler::stages::templates::{Templates, commit_template_dfas_enabled};
 use crate::compiler::stages::templates::characterize::characterize_terminals_profiled;
 use crate::compiler::stages::templates::compile_dfa::{
     specialize_template_dfa_defaults_for_commit_split_input,
@@ -93,10 +93,6 @@ fn env_flag_enabled_by_default(name: &str) -> bool {
 
 fn compact_possible_matches_before_reconcile_enabled() -> bool {
     env_flag_enabled_by_default("GLRMASK_COMPACT_POSSIBLE_MATCHES_BEFORE_RECONCILE")
-}
-
-fn commit_template_dfas_enabled() -> bool {
-    env_flag_enabled("GLRMASK_ENABLE_COMMIT_TEMPLATE_DFAS")
 }
 
 fn terminal_coloring_enabled() -> bool {
@@ -1512,11 +1508,17 @@ fn build_templates_for_compile(
     let mut template_dfas_by_terminal = vec![None; analyzed_grammar.num_terminals as usize];
     let commit_template_dfas_enabled = commit_template_dfas_enabled();
     let mut commit_template_dfas_built = 0usize;
+    let mut commit_template_specialize_ms = 0.0;
+    let mut commit_template_split_ms = 0.0;
     if commit_template_dfas_enabled {
         for (&terminal, dfa) in &templates.by_terminal {
             if let Some(slot) = template_dfas_by_terminal.get_mut(terminal as usize) {
+                let specialize_started_at = Instant::now();
                 let commit_dfa = specialize_template_dfa_defaults_for_commit_split_input(dfa);
+                commit_template_specialize_ms += elapsed_ms(specialize_started_at);
+                let split_started_at = Instant::now();
                 let split_commit_dfas = split_commit_template_dfas(&commit_dfa);
+                commit_template_split_ms += elapsed_ms(split_started_at);
                 *slot = Some(Arc::new(split_commit_dfas));
                 commit_template_dfas_built += 1;
             }
@@ -1524,7 +1526,7 @@ fn build_templates_for_compile(
     }
     if compile_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][templates] terminals={} action_signature_classes={} action_quotient_hits={} max_action_signature_multiplicity={} characterization_signature_ms={:.3} characterization_ms={:.3} characterization_fanout_ms={:.3} characterization_validation_ms={:.3} characterization_total_ms={:.3} characterization_quotient_disabled={} unique_characterizations={} compiled_characterizations={} template_quotient_hits={} max_characterization_multiplicity={} build_nfa_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} template_fanout_ms={:.3} template_validation_ms={:.3} template_total_ms={:.3} template_wall_ms={:.3} template_minimize_skipped={} avg_nfa_states={:.2} avg_nfa_transitions={:.2} avg_premin_dfa_states={:.2} avg_premin_dfa_transitions={:.2} avg_dfa_states={:.2} avg_dfa_transitions={:.2} max_dfa_states={} max_dfa_transitions={} commit_template_dfas_enabled={} commit_template_dfas_built={}",
+            "[glrmask/profile][templates] terminals={} action_signature_classes={} action_quotient_hits={} max_action_signature_multiplicity={} characterization_signature_ms={:.3} characterization_ms={:.3} characterization_fanout_ms={:.3} characterization_validation_ms={:.3} characterization_total_ms={:.3} characterization_quotient_disabled={} unique_characterizations={} compiled_characterizations={} template_quotient_hits={} max_characterization_multiplicity={} build_nfa_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} template_fanout_ms={:.3} template_validation_ms={:.3} template_total_ms={:.3} template_wall_ms={:.3} template_minimize_skipped={} avg_nfa_states={:.2} avg_nfa_transitions={:.2} avg_premin_dfa_states={:.2} avg_premin_dfa_transitions={:.2} avg_dfa_states={:.2} avg_dfa_transitions={:.2} max_dfa_states={} max_dfa_transitions={} commit_template_dfas_enabled={} commit_template_dfas_built={} commit_template_specialize_ms={:.3} commit_template_split_ms={:.3}",
             characterization_profile.terminals,
             characterization_profile.unique_action_signatures,
             characterization_profile.quotient_hits,
@@ -1557,6 +1559,8 @@ fn build_templates_for_compile(
             template_profile.max_dfa_transitions,
             commit_template_dfas_enabled,
             commit_template_dfas_built,
+            commit_template_specialize_ms,
+            commit_template_split_ms,
         );
     }
     (

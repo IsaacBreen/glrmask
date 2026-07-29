@@ -19,6 +19,7 @@ use crate::compiler::glr::labels::{
     is_negative_label,
 };
 use crate::compiler::stages::templates::characterize::{StackMatcher, TerminalCharacterization};
+use crate::compiler::stages::templates::commit_template_dfas_enabled;
 use crate::ds::weight::Weight;
 use crate::grammar::flat::TerminalID;
 use crate::runtime::CommitTemplateDfas;
@@ -145,7 +146,7 @@ fn skip_template_minimization_enabled() -> bool {
 }
 
 fn template_quotient_validation_enabled() -> bool {
-    env_flag_enabled("GLRMASK_VALIDATE_TEMPLATE_QUOTIENT")
+    commit_template_dfas_enabled() || env_flag_enabled("GLRMASK_VALIDATE_TEMPLATE_QUOTIENT")
 }
 
 fn nfa_size(nfa: &NFA) -> (usize, usize) {
@@ -194,6 +195,201 @@ fn dfa_to_nwa_skeleton(dfa: &UnweightedDfa) -> NWA {
     )
 }
 
+
+fn nfa_epsilon_closure(nfa: &NFA, seeds: impl IntoIterator<Item = u32>) -> BTreeSet<u32> {
+    let mut closure = BTreeSet::new();
+    let mut worklist = VecDeque::new();
+    for state in seeds {
+        if closure.insert(state) {
+            worklist.push_back(state);
+        }
+    }
+    while let Some(state) = worklist.pop_front() {
+        let Some(node) = nfa.states.get(state as usize) else {
+            continue;
+        };
+        for &target in &node.epsilons {
+            if closure.insert(target) {
+                worklist.push_back(target);
+            }
+        }
+    }
+    closure
+}
+
+fn nfa_accepts_at(nfa: &NFA, states: &BTreeSet<u32>) -> bool {
+    states.iter().any(|&state| nfa.is_accepting(state))
+}
+
+fn nfa_outgoing_labels(nfa: &NFA, states: &BTreeSet<u32>, labels: &mut BTreeSet<i32>) {
+    for &state in states {
+        if let Some(node) = nfa.states.get(state as usize) {
+            labels.extend(node.transitions.keys().copied());
+        }
+    }
+}
+
+fn nfa_advance(nfa: &NFA, states: &BTreeSet<u32>, label: i32) -> BTreeSet<u32> {
+    let targets = states.iter().flat_map(|&state| {
+        nfa.states
+            .get(state as usize)
+            .and_then(|node| node.transitions.get(&label))
+            .into_iter()
+            .flatten()
+            .copied()
+    });
+    nfa_epsilon_closure(nfa, targets)
+}
+
+/// Exact NFA-vs-DFA language comparison, including epsilon closure. The
+/// product state is finite: `(epsilon-closed NFA subset, optional DFA state)`.
+fn find_nfa_dfa_language_mismatch(nfa: &NFA, dfa: &UnweightedDfa) -> Option<Vec<i32>> {
+    let nfa_start = nfa_epsilon_closure(nfa, nfa.start_states.iter().copied());
+    let dfa_start = Some(dfa.start_state);
+    let mut seen = BTreeSet::from([(nfa_start.clone(), dfa_start)]);
+    let mut worklist = VecDeque::from([(nfa_start, dfa_start, Vec::new())]);
+
+    while let Some((nfa_states, dfa_state, witness)) = worklist.pop_front() {
+        if nfa_accepts_at(nfa, &nfa_states) != dfa_accepts_at(dfa, dfa_state) {
+            return Some(witness);
+        }
+        let mut labels = BTreeSet::new();
+        nfa_outgoing_labels(nfa, &nfa_states, &mut labels);
+        add_outgoing_labels(dfa, dfa_state, &mut labels);
+        for label in labels {
+            let next = (
+                nfa_advance(nfa, &nfa_states, label),
+                dfa_target(dfa, dfa_state, label),
+            );
+            if seen.insert(next.clone()) {
+                let mut next_witness = witness.clone();
+                next_witness.push(label);
+                worklist.push_back((next.0, next.1, next_witness));
+            }
+        }
+    }
+    None
+}
+
+fn default_specialization_local_alphabet(
+    original: &UnweightedDfa,
+    original_states: &BTreeSet<u32>,
+    specialized: &UnweightedDfa,
+    specialized_state: Option<u32>,
+) -> BTreeSet<i32> {
+    let mut labels = BTreeSet::new();
+    for &state_id in original_states {
+        if let Some(state) = original.states.get(state_id as usize) {
+            labels.extend(
+                state
+                    .transitions
+                    .keys()
+                    .copied()
+                    .filter(|&label| label != DEFAULT_LABEL),
+            );
+        }
+    }
+    if let Some(state) = specialized_state
+        .and_then(|state_id| specialized.states.get(state_id as usize))
+    {
+        labels.extend(
+            state
+                .transitions
+                .keys()
+                .copied()
+                .filter(|&label| label != DEFAULT_LABEL),
+        );
+    }
+
+    // At this product state, every unmentioned nonnegative stack symbol follows
+    // exactly the same DEFAULT transitions. One fresh representative therefore
+    // completes the quotient of the infinite concrete stack alphabet.
+    let mut other = 0i32;
+    while labels.contains(&other) {
+        other = other
+            .checked_add(1)
+            .expect("finite local template alphabet must leave a stack label unused");
+    }
+    labels.insert(other);
+    labels
+}
+
+fn original_default_semantic_advance(
+    dfa: &UnweightedDfa,
+    states: &BTreeSet<u32>,
+    label: i32,
+) -> BTreeSet<u32> {
+    let mut targets = BTreeSet::new();
+    for &state_id in states {
+        let Some(state) = dfa.states.get(state_id as usize) else {
+            continue;
+        };
+        if let Some(&target) = state.transitions.get(&label) {
+            targets.insert(target);
+        }
+        if label >= 0
+            && let Some(&default_target) = state.transitions.get(&DEFAULT_LABEL)
+        {
+            targets.insert(default_target);
+        }
+    }
+    targets
+}
+
+fn specialized_default_semantic_advance(
+    dfa: &UnweightedDfa,
+    state_id: Option<u32>,
+    label: i32,
+) -> Option<u32> {
+    let state = dfa.states.get(state_id? as usize)?;
+    state
+        .transitions
+        .get(&label)
+        .copied()
+        .or_else(|| (label >= 0).then(|| state.transitions.get(&DEFAULT_LABEL).copied()).flatten())
+}
+
+/// Compare the original wildcard-DFA semantics with the deterministic commit
+/// specialization. Original DEFAULT and an explicit positive edge are both
+/// viable; specialized runtime lookup uses the determinized explicit edge and
+/// falls back to DEFAULT only when no concrete edge exists.
+fn find_default_specialization_mismatch(
+    original: &UnweightedDfa,
+    specialized: &UnweightedDfa,
+) -> Option<Vec<i32>> {
+    let original_start = BTreeSet::from([original.start_state]);
+    let specialized_start = Some(specialized.start_state);
+    let mut seen = BTreeSet::from([(original_start.clone(), specialized_start)]);
+    let mut worklist = VecDeque::from([(original_start, specialized_start, Vec::new())]);
+
+    while let Some((original_states, specialized_state, witness)) = worklist.pop_front() {
+        let original_accepts = original_states
+            .iter()
+            .any(|&state| dfa_accepts_at(original, Some(state)));
+        if original_accepts != dfa_accepts_at(specialized, specialized_state) {
+            return Some(witness);
+        }
+        let alphabet = default_specialization_local_alphabet(
+            original,
+            &original_states,
+            specialized,
+            specialized_state,
+        );
+        for label in alphabet {
+            let next = (
+                original_default_semantic_advance(original, &original_states, label),
+                specialized_default_semantic_advance(specialized, specialized_state, label),
+            );
+            if seen.insert(next.clone()) {
+                let mut next_witness = witness.clone();
+                next_witness.push(label);
+                worklist.push_back((next.0, next.1, next_witness));
+            }
+        }
+    }
+    None
+}
+
 fn specialize_template_dfa_defaults_for_commit_determinized(dfa: &UnweightedDfa) -> UnweightedDfa {
     let mut nfa = NFA::new_empty();
     nfa.states = vec![Default::default(); dfa.states.len()];
@@ -220,7 +416,15 @@ fn specialize_template_dfa_defaults_for_commit_determinized(dfa: &UnweightedDfa)
         }
     }
 
-    determinize(&nfa)
+    let specialized = determinize(&nfa);
+    if template_quotient_validation_enabled()
+        && let Some(witness) = find_default_specialization_mismatch(dfa, &specialized)
+    {
+        panic!(
+            "commit DEFAULT specialization changed concrete action semantics; witness: {witness:?}"
+        );
+    }
+    specialized
 }
 
 pub(crate) fn specialize_template_dfa_defaults_for_commit(
@@ -322,6 +526,90 @@ fn pure_same_label_push_target(dfa: &UnweightedDfa, old_state: u32, label: i32) 
     }
     let (&push_label, &target) = state.transitions.iter().next()?;
     (push_label == encode_negative_label(label as u32)).then_some(target)
+}
+
+
+/// Reconstruct the action-word language represented by a split commit
+/// transducer.
+///
+/// Pop and push transitions retain their original labels. Phase links are
+/// epsilon transitions. A read transition labelled `x` is the compressed form
+/// of the original two-symbol word `x, -x`: inspect the top stack symbol and
+/// push the same symbol back. Expanding every read edge this way gives an NFA
+/// over exactly the unsplit template alphabet.
+fn recombine_split_commit_template_language(split: &CommitTemplateDfas) -> NFA {
+    let mut nfa = NFA::new_empty();
+    let pop_offset = 0u32;
+    let read_offset = split.pop.states.len() as u32;
+    let push_offset = read_offset + split.read.states.len() as u32;
+    let fixed_states = split.pop.states.len() + split.read.states.len() + split.push.states.len();
+    for _ in 0..fixed_states {
+        nfa.add_state();
+    }
+    nfa.start_states = vec![pop_offset + split.pop.start_state];
+
+    for (state_id, state) in split.pop.states.iter().enumerate() {
+        let from = pop_offset + state_id as u32;
+        if state.is_accepting {
+            nfa.set_accepting(from);
+        }
+        for (&label, &target) in &state.transitions {
+            nfa.add_transition(from, label, pop_offset + target);
+        }
+        if let Some(Some(target)) = split.pop_to_read.get(state_id) {
+            nfa.add_epsilon(from, read_offset + *target);
+        }
+        if let Some(Some(target)) = split.pop_to_push.get(state_id) {
+            nfa.add_epsilon(from, push_offset + *target);
+        }
+    }
+
+    for (state_id, state) in split.read.states.iter().enumerate() {
+        let from = read_offset + state_id as u32;
+        if state.is_accepting {
+            nfa.set_accepting(from);
+        }
+        for (&label, &target) in &state.transitions {
+            assert!(
+                label >= 0 && label != DEFAULT_LABEL,
+                "split commit read DFA contains non-concrete read label {label}"
+            );
+            let intermediate = nfa.add_state();
+            nfa.add_transition(from, label, intermediate);
+            nfa.add_transition(
+                intermediate,
+                encode_negative_label(label as u32),
+                read_offset + target,
+            );
+        }
+        if let Some(Some(target)) = split.read_to_push.get(state_id) {
+            nfa.add_epsilon(from, push_offset + *target);
+        }
+    }
+
+    for (state_id, state) in split.push.states.iter().enumerate() {
+        let from = push_offset + state_id as u32;
+        if state.is_accepting {
+            nfa.set_accepting(from);
+        }
+        for (&label, &target) in &state.transitions {
+            assert!(
+                is_negative_label(label),
+                "split commit push DFA contains non-push label {label}"
+            );
+            nfa.add_transition(from, label, push_offset + target);
+        }
+    }
+
+    nfa
+}
+
+fn find_split_commit_language_mismatch(
+    unsplit: &UnweightedDfa,
+    split: &CommitTemplateDfas,
+) -> Option<Vec<i32>> {
+    let recombined = recombine_split_commit_template_language(split);
+    find_nfa_dfa_language_mismatch(&recombined, unsplit)
 }
 
 pub(crate) fn split_commit_template_dfas(dfa: &UnweightedDfa) -> CommitTemplateDfas {
@@ -434,15 +722,22 @@ pub(crate) fn split_commit_template_dfas(dfa: &UnweightedDfa) -> CommitTemplateD
         }
     }
 
-    CommitTemplateDfas {
+    let split = CommitTemplateDfas {
         pop,
         read,
         push,
         pop_to_read,
         pop_to_push,
         read_to_push,
+    };
+    if let Some(witness) = find_split_commit_language_mismatch(dfa, &split) {
+        panic!(
+            "commit template phase split changed the action-word language; witness: {witness:?}"
+        );
     }
+    split
 }
+
 
 fn compile_template_with_profile(
     characterization: &TerminalCharacterization,
@@ -464,15 +759,25 @@ fn compile_template_with_profile_and_minimize(
 
     let determinize_started_at = Instant::now();
     let determinized = determinize(&nfa);
+    if template_quotient_validation_enabled()
+        && let Some(witness) = find_nfa_dfa_language_mismatch(&nfa, &determinized)
+    {
+        panic!("template determinization changed the NFA language; witness: {witness:?}");
+    }
     let determinize_ms = elapsed_ms(determinize_started_at);
     let (premin_dfa_states, premin_dfa_transitions) = dfa_size(&determinized);
 
     let minimize_started_at = Instant::now();
     let dfa = if skip_minimize {
-        determinized
+        determinized.clone()
     } else {
         minimize_dfa(&determinized)
     };
+    if template_quotient_validation_enabled()
+        && let Some(witness) = find_dfa_language_mismatch(&determinized, &dfa)
+    {
+        panic!("template minimization changed the DFA language; witness: {witness:?}");
+    }
     let minimize_ms = if skip_minimize {
         0.0
     } else {
@@ -562,7 +867,7 @@ impl Templates {
 
         let validation_started_at = Instant::now();
         if template_quotient_validation_enabled() {
-            validate_template_quotient(characterizations, &by_terminal, &by_terminal_nwa);
+            validate_template_quotient(&groups, &by_terminal, &by_terminal_nwa);
         }
         profile.validation_ms = elapsed_ms(validation_started_at);
         profile.total_ms += profile.validation_ms;
@@ -638,38 +943,40 @@ fn nwa_skeleton_matches_dfa(dfa: &UnweightedDfa, skeleton: &NWA) -> bool {
 }
 
 fn validate_template_quotient(
-    characterizations: &BTreeMap<TerminalID, TerminalCharacterization>,
+    groups: &[(&TerminalCharacterization, Vec<TerminalID>)],
     by_terminal: &BTreeMap<TerminalID, UnweightedDfa>,
     by_terminal_nwa: &BTreeMap<TerminalID, NWA>,
 ) {
     let skip_minimize = skip_template_minimization_enabled();
-    for (&terminal, characterization) in characterizations {
-        let cached = by_terminal
-            .get(&terminal)
-            .unwrap_or_else(|| panic!("missing template DFA for terminal {terminal}"));
-        let cached_skeleton = by_terminal_nwa
-            .get(&terminal)
-            .unwrap_or_else(|| panic!("missing template NWA skeleton for terminal {terminal}"));
-        let (direct, _, _) = compile_template_with_profile(characterization);
+    for (characterization, terminals) in groups {
+        let representative = terminals[0];
+        let representative_dfa = by_terminal.get(&representative).unwrap_or_else(|| {
+            panic!("missing template DFA for representative terminal {representative}")
+        });
 
-        if let Some(witness) = find_dfa_language_mismatch(cached, &direct) {
-            panic!(
-                "template quotient mismatch for terminal {terminal}; witness label path: {:?}",
-                witness
+        for &terminal in terminals {
+            let cached = by_terminal
+                .get(&terminal)
+                .unwrap_or_else(|| panic!("missing template DFA for terminal {terminal}"));
+            let cached_skeleton = by_terminal_nwa.get(&terminal).unwrap_or_else(|| {
+                panic!("missing template NWA skeleton for terminal {terminal}")
+            });
+            assert_eq!(
+                cached, representative_dfa,
+                "template quotient fanout mismatch for terminal {terminal} and representative {representative}"
+            );
+            assert!(
+                nwa_skeleton_matches_dfa(cached, cached_skeleton),
+                "template NWA skeleton is not the DFA skeleton for terminal {terminal}"
             );
         }
-
-        assert!(
-            nwa_skeleton_matches_dfa(cached, cached_skeleton),
-            "template NWA skeleton is not the DFA skeleton for terminal {terminal}"
-        );
 
         if skip_minimize {
             let (old_minimized, _, _) =
                 compile_template_with_profile_and_minimize(characterization, false);
-            if let Some(witness) = find_dfa_language_mismatch(cached, &old_minimized) {
+            if let Some(witness) = find_dfa_language_mismatch(representative_dfa, &old_minimized) {
                 panic!(
-                    "template minimization-skip mismatch for terminal {terminal}; witness label path: {:?}",
+                    "template minimization-skip mismatch for representative terminal {representative}; witness label path: {:?}",
                     witness
                 );
             }
@@ -1002,4 +1309,124 @@ fn build_template_nfa(characterization: &TerminalCharacterization) -> NFA {
     }
 
     nfa
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        specialize_template_dfa_defaults_for_commit_determinized,
+        find_nfa_dfa_language_mismatch,
+        find_default_specialization_mismatch,
+        find_split_commit_language_mismatch, split_commit_template_dfas,
+    };
+    use crate::automata::unweighted_u32::determinize::determinize;
+    use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
+    use crate::automata::unweighted_u32::nfa::NFA;
+    use crate::compiler::glr::labels::{
+        DEFAULT_LABEL, encode_negative_label,
+    };
+
+    fn mixed_phase_commit_dfa() -> UnweightedDfa {
+        let mut dfa = UnweightedDfa::new();
+
+        // Read compression candidate: 7, -7, -20.
+        let after_pop_for_read = dfa.add_state();
+        let after_read = dfa.add_state();
+        let read_accept = dfa.add_state();
+        dfa.add_transition(dfa.start_state, 7, after_pop_for_read);
+        dfa.add_transition(after_pop_for_read, encode_negative_label(7), after_read);
+        dfa.add_transition(after_read, encode_negative_label(20), read_accept);
+        dfa.set_accepting(read_accept, true);
+
+        // Ordinary default-pop then push path: DEFAULT, -30.
+        let after_default_pop = dfa.add_state();
+        let default_accept = dfa.add_state();
+        dfa.add_transition(dfa.start_state, DEFAULT_LABEL, after_default_pop);
+        dfa.add_transition(
+            after_default_pop,
+            encode_negative_label(30),
+            default_accept,
+        );
+        dfa.set_accepting(default_accept, true);
+
+        // Push-entry path with no pop: -40.
+        let direct_push_accept = dfa.add_state();
+        dfa.add_transition(
+            dfa.start_state,
+            encode_negative_label(40),
+            direct_push_accept,
+        );
+        dfa.set_accepting(direct_push_accept, true);
+
+        dfa
+    }
+
+    #[test]
+    fn split_commit_transducer_preserves_mixed_phase_action_language() {
+        let dfa = mixed_phase_commit_dfa();
+        let split = split_commit_template_dfas(&dfa);
+        assert_eq!(find_split_commit_language_mismatch(&dfa, &split), None);
+    }
+
+    #[test]
+    fn split_commit_equivalence_checker_returns_a_corruption_witness() {
+        let dfa = mixed_phase_commit_dfa();
+        let mut split = split_commit_template_dfas(&dfa);
+        let link = split
+            .read_to_push
+            .iter_mut()
+            .find(|link| link.is_some())
+            .expect("test DFA must produce a read-to-push link");
+        *link = None;
+
+        let witness = find_split_commit_language_mismatch(&dfa, &split)
+            .expect("corrupt split must differ from the unsplit DFA");
+        assert_eq!(
+            witness,
+            vec![7, encode_negative_label(7), encode_negative_label(20)]
+        );
+    }
+
+    #[test]
+    fn nfa_dfa_equivalence_checker_detects_corrupted_acceptance() {
+        let mut nfa = NFA::new();
+        let branch = nfa.add_state();
+        let accepted = nfa.add_state();
+        nfa.add_epsilon(nfa.start_states[0], branch);
+        nfa.add_transition(branch, 5, accepted);
+        nfa.set_accepting(accepted);
+
+        let determinized = determinize(&nfa);
+        assert_eq!(find_nfa_dfa_language_mismatch(&nfa, &determinized), None);
+
+        let mut corrupted = determinized.clone();
+        for state in &mut corrupted.states {
+            state.is_accepting = false;
+        }
+        assert_eq!(find_nfa_dfa_language_mismatch(&nfa, &corrupted), Some(vec![5]));
+    }
+
+    #[test]
+    fn default_specialization_checker_detects_lost_default_branch() {
+        let mut original = UnweightedDfa::new();
+        let explicit_accept = original.add_state();
+        let default_accept = original.add_state();
+        original.add_transition(original.start_state, 7, explicit_accept);
+        original.add_transition(original.start_state, DEFAULT_LABEL, default_accept);
+        original.set_accepting(explicit_accept, true);
+        original.set_accepting(default_accept, true);
+
+        let specialized = specialize_template_dfa_defaults_for_commit_determinized(&original);
+        assert_eq!(
+            find_default_specialization_mismatch(&original, &specialized),
+            None
+        );
+
+        let mut corrupted = specialized.clone();
+        corrupted.states[corrupted.start_state as usize]
+            .transitions
+            .remove(&DEFAULT_LABEL);
+        assert!(find_default_specialization_mismatch(&original, &corrupted).is_some());
+    }
+
 }
