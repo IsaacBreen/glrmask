@@ -59,6 +59,39 @@ impl Constraint {
 		Some(internal)
 	}
 
+	/// Visit the original vocabulary tokens that can complete `terminal` from
+	/// `tokenizer_state`. Returns `false` only when the artifact deliberately
+	/// omitted possible matches and runtime fallback is required.
+	pub(crate) fn visit_possible_match_original_tokens(
+		&self,
+		tokenizer_state: u32,
+		terminal: TerminalID,
+		mut visit: impl FnMut(u32),
+	) -> bool {
+		if !self.possible_matches_complete {
+			return false;
+		}
+		let internal_tsid = self.internal_tsid_for_state(tokenizer_state);
+		let Some(weight) = self.possible_matches.get(&terminal) else {
+			return true;
+		};
+		let internal_tokens = weight.tokens_for_tsid(internal_tsid);
+		if self.internal_token_to_tokens.is_empty() {
+			for token in internal_tokens.iter() {
+				visit(token);
+			}
+			return true;
+		}
+		for internal_token in internal_tokens.iter() {
+			if let Some(originals) = self.internal_token_to_tokens.get(internal_token as usize) {
+				for &original in originals {
+					visit(original);
+				}
+			}
+		}
+		true
+	}
+
 	pub(crate) fn internal_token_universe(&self) -> RangeSetBlaze<u32> {
 		if self.internal_token_to_tokens.is_empty() {
 			let Some(max_token_id) = self.max_original_token_id() else {

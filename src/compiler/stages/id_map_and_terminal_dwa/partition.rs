@@ -752,7 +752,9 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
         + profile_bookkeeping_ms;
     let timing_residual_ms = (total_ms - accounted_wall_ms).max(0.0);
 
-    if compile_profile_enabled() {
+    if compile_profile_enabled()
+        || std::env::var_os("GLRMASK_PROFILE_COMPILE_TOP").is_some()
+    {
         eprintln!(
             "[glrmask/profile][partition] label={} vocab_tokens={} length0={} length1={} length2plus={} pre_classify_setup_ms={:.3} classify_ms={:.3} routing_ms={:.3} branch_build_wall_ms={:.3} l1_branch_wall_ms={:.3} l2p_branch_wall_ms={:.3} l2p_boundary_wall_ms={:.3} l2p_single_l1_wall_ms={:.3} post_branch_ms={:.3} profile_bookkeeping_ms={:.3} critical_path_id_map_ms={:.3} critical_path_terminal_dwa_ms={:.3} critical_path_compact_ms={:.3} critical_path_profile_ms={:.3} accounted_wall_ms={:.3} timing_residual_ms={:.3} total_ms={:.3}",
             partition_label,

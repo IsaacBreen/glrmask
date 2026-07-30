@@ -1,9 +1,9 @@
 use im::{HashMap as IHashMap, OrdMap};
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use smallvec::{SmallVec, smallvec};
 use super::stack_vecs::dispatch::DynStackVec;
 use std::collections::{HashMap as StdHashMap, HashSet, VecDeque};
-use std::hash::Hash;
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, OnceLock};
 
 /// Type alias for segment values. Set `STACKVEC` before process startup:
@@ -26,21 +26,12 @@ impl Merge for () {
     }
 }
 
-const COMPACT_MAP_INLINE_CAPACITY: usize = 4;
-const COMPACT_MAP_SHARED_CAPACITY: usize = 8;
-
-type CompactMapInline<K, V> = SmallVec<[(K, V); COMPACT_MAP_INLINE_CAPACITY]>;
-type CompactMapShared<K, V> = SmallVec<[(K, V); COMPACT_MAP_SHARED_CAPACITY]>;
-
-/// A map optimized for small sizes. The first four entries are stored inline.
-/// Five through eight entries use shared slice storage so persistent clones stay
-/// cheap while read-only runtime traversal remains allocation-free. Larger maps
-/// fall back to `im::HashMap`.
+/// A map optimized for small sizes (≤4 entries). Uses inline SmallVec storage
+/// for small maps and falls back to im::HashMap for larger ones.
 /// Drop-in replacement for im::HashMap in GSS children maps.
 #[derive(Clone, PartialEq, Eq)]
 enum CompactMap<K: Clone + Eq + Hash, V: Clone> {
-    Inline(CompactMapInline<K, V>),
-    Shared(Arc<CompactMapShared<K, V>>),
+    Inline(SmallVec<[(K, V); 4]>),
     Large(IHashMap<K, V>),
 }
 
@@ -61,7 +52,6 @@ impl<K: Clone + Eq + Hash, V: Clone> CompactMap<K, V> {
     fn len(&self) -> usize {
         match self {
             CompactMap::Inline(sv) => sv.len(),
-            CompactMap::Shared(sv) => sv.len(),
             CompactMap::Large(m) => m.len(),
         }
     }
@@ -70,7 +60,6 @@ impl<K: Clone + Eq + Hash, V: Clone> CompactMap<K, V> {
     fn is_empty(&self) -> bool {
         match self {
             CompactMap::Inline(sv) => sv.is_empty(),
-            CompactMap::Shared(sv) => sv.is_empty(),
             CompactMap::Large(m) => m.is_empty(),
         }
     }
@@ -79,7 +68,6 @@ impl<K: Clone + Eq + Hash, V: Clone> CompactMap<K, V> {
     fn get(&self, key: &K) -> Option<&V> {
         match self {
             CompactMap::Inline(sv) => sv.iter().find(|(k, _)| k == key).map(|(_, v)| v),
-            CompactMap::Shared(sv) => sv.iter().find(|(k, _)| k == key).map(|(_, v)| v),
             CompactMap::Large(m) => m.get(key),
         }
     }
@@ -88,10 +76,6 @@ impl<K: Clone + Eq + Hash, V: Clone> CompactMap<K, V> {
     fn get_mut(&mut self, key: &K) -> Option<&mut V> {
         match self {
             CompactMap::Inline(sv) => sv.iter_mut().find(|(k, _)| k == key).map(|(_, v)| v),
-            CompactMap::Shared(sv) => Arc::make_mut(sv)
-                .iter_mut()
-                .find(|(k, _)| k == key)
-                .map(|(_, v)| v),
             CompactMap::Large(m) => m.get_mut(key),
         }
     }
@@ -105,30 +89,13 @@ impl<K: Clone + Eq + Hash, V: Clone> CompactMap<K, V> {
                         return Some(old);
                     }
                 }
-                if sv.len() < COMPACT_MAP_INLINE_CAPACITY {
+                if sv.len() < 4 {
                     sv.push((key, value));
                     None
                 } else {
-                    let mut shared = CompactMapShared::new();
-                    shared.extend(sv.drain(..));
-                    shared.push((key, value));
-                    *self = CompactMap::Shared(Arc::new(shared));
-                    None
-                }
-            }
-            CompactMap::Shared(shared) => {
-                let shared = Arc::make_mut(shared);
-                for entry in shared.iter_mut() {
-                    if entry.0 == key {
-                        return Some(std::mem::replace(&mut entry.1, value));
-                    }
-                }
-                if shared.len() < COMPACT_MAP_SHARED_CAPACITY {
-                    shared.push((key, value));
-                    None
-                } else {
+                    // Promote to Large
                     let mut m = IHashMap::new();
-                    for (k, v) in shared.drain(..) {
+                    for (k, v) in sv.drain(..) {
                         m.insert(k, v);
                     }
                     let result = m.insert(key, value);
@@ -144,7 +111,6 @@ impl<K: Clone + Eq + Hash, V: Clone> CompactMap<K, V> {
     fn contains_key(&self, key: &K) -> bool {
         match self {
             CompactMap::Inline(sv) => sv.iter().any(|(k, _)| k == key),
-            CompactMap::Shared(sv) => sv.iter().any(|(k, _)| k == key),
             CompactMap::Large(m) => m.contains_key(key),
         }
     }
@@ -152,14 +118,12 @@ impl<K: Clone + Eq + Hash, V: Clone> CompactMap<K, V> {
     fn keys(&self) -> CompactMapKeys<'_, K, V> {
         match self {
             CompactMap::Inline(sv) => CompactMapKeys::Inline(sv.iter()),
-            CompactMap::Shared(sv) => CompactMapKeys::Shared(sv.iter()),
             CompactMap::Large(m) => CompactMapKeys::Large(m.keys()),
         }
     }
 
     fn ptr_eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (CompactMap::Shared(a), CompactMap::Shared(b)) => Arc::ptr_eq(a, b),
             (CompactMap::Large(a), CompactMap::Large(b)) => a.ptr_eq(b),
             _ => false,
         }
@@ -174,12 +138,6 @@ impl<K: Clone + Eq + Hash, V: Clone> CompactMap<K, V> {
                     None
                 }
             }
-            CompactMap::Shared(sv) => {
-                let sv = Arc::make_mut(sv);
-                sv.iter()
-                    .position(|(k, _)| k == key)
-                    .map(|pos| sv.swap_remove(pos).1)
-            }
             CompactMap::Large(m) => m.remove(key),
         }
     }
@@ -187,7 +145,6 @@ impl<K: Clone + Eq + Hash, V: Clone> CompactMap<K, V> {
     fn values(&self) -> CompactMapValues<'_, K, V> {
         match self {
             CompactMap::Inline(sv) => CompactMapValues::Inline(sv.iter()),
-            CompactMap::Shared(sv) => CompactMapValues::Shared(sv.iter()),
             CompactMap::Large(m) => CompactMapValues::Large(m.values()),
         }
     }
@@ -195,7 +152,6 @@ impl<K: Clone + Eq + Hash, V: Clone> CompactMap<K, V> {
     fn iter(&self) -> CompactMapIter<'_, K, V> {
         match self {
             CompactMap::Inline(sv) => CompactMapIter::Inline(sv.iter()),
-            CompactMap::Shared(sv) => CompactMapIter::Shared(sv.iter()),
             CompactMap::Large(m) => CompactMapIter::Large(m.iter()),
         }
     }
@@ -203,7 +159,6 @@ impl<K: Clone + Eq + Hash, V: Clone> CompactMap<K, V> {
 
 enum CompactMapKeys<'a, K, V> {
     Inline(std::slice::Iter<'a, (K, V)>),
-    Shared(std::slice::Iter<'a, (K, V)>),
     Large(im::hashmap::Keys<'a, K, V>),
 }
 
@@ -212,14 +167,12 @@ impl<'a, K: Clone, V> Iterator for CompactMapKeys<'a, K, V> {
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             CompactMapKeys::Inline(it) => it.next().map(|(k, _)| k),
-            CompactMapKeys::Shared(it) => it.next().map(|(k, _)| k),
             CompactMapKeys::Large(it) => it.next(),
         }
     }
     fn size_hint(&self) -> (usize, Option<usize>) {
         match self {
             CompactMapKeys::Inline(it) => it.size_hint(),
-            CompactMapKeys::Shared(it) => it.size_hint(),
             CompactMapKeys::Large(it) => it.size_hint(),
         }
     }
@@ -227,7 +180,6 @@ impl<'a, K: Clone, V> Iterator for CompactMapKeys<'a, K, V> {
 
 enum CompactMapValues<'a, K, V> {
     Inline(std::slice::Iter<'a, (K, V)>),
-    Shared(std::slice::Iter<'a, (K, V)>),
     Large(im::hashmap::Values<'a, K, V>),
 }
 
@@ -236,14 +188,12 @@ impl<'a, K, V> Iterator for CompactMapValues<'a, K, V> {
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             CompactMapValues::Inline(it) => it.next().map(|(_, v)| v),
-            CompactMapValues::Shared(it) => it.next().map(|(_, v)| v),
             CompactMapValues::Large(it) => it.next(),
         }
     }
     fn size_hint(&self) -> (usize, Option<usize>) {
         match self {
             CompactMapValues::Inline(it) => it.size_hint(),
-            CompactMapValues::Shared(it) => it.size_hint(),
             CompactMapValues::Large(it) => it.size_hint(),
         }
     }
@@ -251,7 +201,6 @@ impl<'a, K, V> Iterator for CompactMapValues<'a, K, V> {
 
 enum CompactMapIter<'a, K, V> {
     Inline(std::slice::Iter<'a, (K, V)>),
-    Shared(std::slice::Iter<'a, (K, V)>),
     Large(im::hashmap::Iter<'a, K, V>),
 }
 
@@ -260,14 +209,12 @@ impl<'a, K: Clone, V: Clone> Iterator for CompactMapIter<'a, K, V> {
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             CompactMapIter::Inline(it) => it.next().map(|(k, v)| (k, v)),
-            CompactMapIter::Shared(it) => it.next().map(|(k, v)| (k, v)),
             CompactMapIter::Large(it) => it.next(),
         }
     }
     fn size_hint(&self) -> (usize, Option<usize>) {
         match self {
             CompactMapIter::Inline(it) => it.size_hint(),
-            CompactMapIter::Shared(it) => it.size_hint(),
             CompactMapIter::Large(it) => it.size_hint(),
         }
     }
@@ -755,6 +702,14 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> Upper<T, A> {
         }
     }
 
+    #[inline(always)]
+    fn children_len(&self) -> usize {
+        match self {
+            Upper::Branch(branch) => branch.children.len(),
+            Upper::Interface(interface) => interface.inner.children_len(),
+        }
+    }
+
     fn children_keys(&self) -> SmallVec<[T; 8]> {
         match self {
             Upper::Branch(branch) => branch.children.keys().cloned().collect(),
@@ -986,8 +941,7 @@ fn new_lower_precanonicalized<T: Clone + Eq + Hash>(
         let (key, ord_map) = children.iter().next().unwrap();
         if ord_map.len() == 1 {
             let (_, next) = ord_map.iter().next().unwrap();
-            let values = SV::unit(key.clone());
-            return new_segment(values, next.clone());
+            return new_segment(SV::unit(key.clone()), next.clone());
         }
     }
     let max_depth = max_depth_from_children(&children, |n: &Arc<Lower<T>>| n.max_depth());
@@ -1007,7 +961,22 @@ fn new_lower<T: Clone + Eq + Hash>(mut children: Children<T, Lower<T>>, empty: b
     // This keeps common-bottom, different-top frontiers compact even when they
     // are assembled incrementally rather than via `from_stacks`.
     canonicalize_lower_children(&mut children);
-    new_lower_precanonicalized(children, empty)
+
+    // Only compress to Segment when empty is false — Segments are non-accepting.
+    if !empty && children.len() == 1 {
+        let (key, ord_map) = children.iter().next().unwrap();
+        if ord_map.len() == 1 {
+            let (_, next) = ord_map.iter().next().unwrap();
+            let values = SV::unit(key.clone());
+            return new_segment(values, next.clone());
+        }
+    }
+    let max_depth = max_depth_from_children(&children, |n: &Arc<Lower<T>>| n.max_depth());
+    Arc::new(Lower::General {
+        children,
+        empty,
+        max_depth,
+    })
 }
 
 fn new_segment<T: Clone + Eq + Hash>(values: SV<T>, next: Arc<Lower<T>>) -> Arc<Lower<T>> {
@@ -1586,10 +1555,18 @@ pub(crate) struct GssSemanticKeyInterner<
     A: Merge + Clone + Eq + Hash,
 > {
     nodes: Vec<SemanticTrieNode<T>>,
-    interned: FxHashMap<SemanticTrieNode<T>, u32>,
+    interned: FxHashMap<u64, SmallVec<[u32; 2]>>,
     lower_memo: FxHashMap<usize, (Arc<Lower<T>>, u32)>,
     upper_memo: FxHashMap<usize, (Arc<Upper<T, A>>, u32)>,
     union_memo: FxHashMap<(u32, u32), u32>,
+    reconstructed: FxHashMap<u32, Arc<Lower<T>>>,
+    union_pending: Vec<(u32, u32)>,
+    union_unseen: FxHashSet<(u32, u32)>,
+    union_order: Vec<(u32, u32)>,
+    max_nodes: usize,
+    max_source_keys: usize,
+    max_union_entries: usize,
+    exhausted: bool,
 }
 
 impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash> std::fmt::Debug
@@ -1601,6 +1578,7 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash> std::fmt::Debug
             .field("lower_memo", &self.lower_memo.len())
             .field("upper_memo", &self.upper_memo.len())
             .field("union_memo", &self.union_memo.len())
+            .field("exhausted", &self.exhausted)
             .finish()
     }
 }
@@ -1609,36 +1587,97 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
     GssSemanticKeyInterner<T, A>
 {
     pub(crate) fn new() -> Self {
-        Self::with_capacity(0)
+        Self::with_budget(usize::MAX, usize::MAX, usize::MAX)
     }
 
+    /// Compatibility constructor for reusable, effectively-unbounded
+    /// interners used by the established runtime paths.
     pub(crate) fn with_capacity(capacity: usize) -> Self {
+        let mut interner = Self::with_budget(usize::MAX, usize::MAX, usize::MAX);
+        interner.nodes.reserve(capacity);
+        interner.interned.reserve(capacity);
+        interner.lower_memo.reserve(capacity);
+        interner.upper_memo.reserve(capacity);
+        interner.union_memo.reserve(capacity);
+        interner.reconstructed.reserve(capacity);
+        interner
+    }
+
+    pub(crate) fn with_budget(
+        max_nodes: usize,
+        max_source_keys: usize,
+        max_union_entries: usize,
+    ) -> Self {
         let empty_language = SemanticTrieNode {
             empty: false,
             children: Vec::new(),
             max_depth: 0,
         };
-        let mut nodes = Vec::with_capacity(capacity.max(1));
-        nodes.push(empty_language.clone());
-        let mut interned = FxHashMap::with_capacity_and_hasher(capacity, Default::default());
-        interned.insert(empty_language, 0);
+        let empty_hash = Self::semantic_node_hash(&empty_language);
+        let mut interned = FxHashMap::default();
+        interned.insert(empty_hash, smallvec![0]);
         Self {
-            nodes,
+            nodes: vec![empty_language],
             interned,
-            lower_memo: FxHashMap::with_capacity_and_hasher(capacity, Default::default()),
-            upper_memo: FxHashMap::with_capacity_and_hasher(capacity, Default::default()),
-            union_memo: FxHashMap::with_capacity_and_hasher(capacity, Default::default()),
+            lower_memo: FxHashMap::default(),
+            upper_memo: FxHashMap::default(),
+            union_memo: FxHashMap::default(),
+            reconstructed: FxHashMap::default(),
+            union_pending: Vec::new(),
+            union_unseen: FxHashSet::default(),
+            union_order: Vec::new(),
+            max_nodes: max_nodes.max(1),
+            max_source_keys,
+            max_union_entries,
+            exhausted: false,
         }
     }
 
+    #[inline]
+    fn semantic_node_hash(node: &SemanticTrieNode<T>) -> u64 {
+        let mut hasher = FxHasher::default();
+        node.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    #[inline]
+    pub(crate) fn is_exhausted(&self) -> bool {
+        self.exhausted
+    }
+
+    /// Reset semantic contents while retaining scratch allocations and the
+    /// configured work budgets.
     pub(crate) fn clear(&mut self) {
-        let empty_language = self.nodes[0].clone();
-        self.nodes.truncate(1);
+        let empty_language = SemanticTrieNode {
+            empty: false,
+            children: Vec::new(),
+            max_depth: 0,
+        };
+        let empty_hash = Self::semantic_node_hash(&empty_language);
+        self.nodes.clear();
+        self.nodes.push(empty_language);
         self.interned.clear();
-        self.interned.insert(empty_language, 0);
+        self.interned.insert(empty_hash, smallvec![0]);
         self.lower_memo.clear();
         self.upper_memo.clear();
         self.union_memo.clear();
+        self.reconstructed.clear();
+        self.union_pending.clear();
+        self.union_unseen.clear();
+        self.union_order.clear();
+        self.exhausted = false;
+    }
+
+    #[inline]
+    fn source_budget_available(&mut self) -> bool {
+        if self.lower_memo.len().saturating_add(self.upper_memo.len())
+            >= self.max_source_keys
+        {
+            self.exhausted = true;
+            false
+        } else {
+            true
+        }
     }
 
     #[inline]
@@ -1669,12 +1708,21 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
             children,
             max_depth,
         };
-        if let Some(id) = self.interned.get(&node) {
-            return *id;
+        let hash = Self::semantic_node_hash(&node);
+        if let Some(candidates) = self.interned.get(&hash)
+            && let Some(&id) = candidates
+                .iter()
+                .find(|&&id| self.nodes[id as usize] == node)
+        {
+            return id;
+        }
+        if self.nodes.len() >= self.max_nodes {
+            self.exhausted = true;
+            return 0;
         }
         let id = u32::try_from(self.nodes.len()).expect("semantic GSS trie exceeded u32 node IDs");
-        self.nodes.push(node.clone());
-        self.interned.insert(node, id);
+        self.nodes.push(node);
+        self.interned.entry(hash).or_default().push(id);
         id
     }
 
@@ -1688,6 +1736,9 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
     }
 
     fn union_ids(&mut self, left: u32, right: u32) -> u32 {
+        if self.exhausted {
+            return 0;
+        }
         if left == right || right == 0 {
             return left;
         }
@@ -1699,15 +1750,42 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
             return *id;
         }
 
-        let mut pending = vec![root];
-        let mut unseen = FxHashSet::default();
-        let mut order = Vec::new();
+        let mut pending = std::mem::take(&mut self.union_pending);
+        let mut unseen = std::mem::take(&mut self.union_unseen);
+        let mut order = std::mem::take(&mut self.union_order);
+        pending.clear();
+        unseen.clear();
+        order.clear();
+        pending.push(root);
+
+        let result = self.union_ids_uncached(root, &mut pending, &mut unseen, &mut order);
+
+        pending.clear();
+        unseen.clear();
+        order.clear();
+        self.union_pending = pending;
+        self.union_unseen = unseen;
+        self.union_order = order;
+        result
+    }
+
+    fn union_ids_uncached(
+        &mut self,
+        root: (u32, u32),
+        pending: &mut Vec<(u32, u32)>,
+        unseen: &mut FxHashSet<(u32, u32)>,
+        order: &mut Vec<(u32, u32)>,
+    ) -> u32 {
         while let Some(pair @ (left, right)) = pending.pop() {
             if left == right || left == 0 || right == 0 || self.union_memo.contains_key(&pair) {
                 continue;
             }
             if !unseen.insert(pair) {
                 continue;
+            }
+            if unseen.len() > self.max_union_entries {
+                self.exhausted = true;
+                return 0;
             }
             order.push(pair);
 
@@ -1740,58 +1818,126 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
                 .max(self.nodes[*right as usize].max_depth)
         });
 
-        for pair @ (left, right) in order {
+        for pair @ (left, right) in order.drain(..) {
             if self.union_memo.contains_key(&pair) {
                 continue;
             }
-            let left_node = self.nodes[left as usize].clone();
-            let right_node = self.nodes[right as usize].clone();
-            let mut children = Vec::with_capacity(left_node.children.len() + right_node.children.len());
-            let mut li = 0;
-            let mut ri = 0;
-            while li < left_node.children.len() || ri < right_node.children.len() {
-                if ri == right_node.children.len()
-                    || (li < left_node.children.len()
-                        && left_node.children[li].0 < right_node.children[ri].0)
-                {
-                    children.push(left_node.children[li].clone());
-                    li += 1;
-                } else if li == left_node.children.len()
-                    || right_node.children[ri].0 < left_node.children[li].0
-                {
-                    children.push(right_node.children[ri].clone());
-                    ri += 1;
-                } else {
-                    let left_child = left_node.children[li].1;
-                    let right_child = right_node.children[ri].1;
-                    let child = if left_child == right_child {
-                        left_child
-                    } else if left_child == 0 {
-                        right_child
-                    } else if right_child == 0 {
-                        left_child
+            let (empty, children) = {
+                let left_node = &self.nodes[left as usize];
+                let right_node = &self.nodes[right as usize];
+                let mut children =
+                    Vec::with_capacity(left_node.children.len() + right_node.children.len());
+                let mut li = 0;
+                let mut ri = 0;
+                while li < left_node.children.len() || ri < right_node.children.len() {
+                    if ri == right_node.children.len()
+                        || (li < left_node.children.len()
+                            && left_node.children[li].0 < right_node.children[ri].0)
+                    {
+                        children.push(left_node.children[li].clone());
+                        li += 1;
+                    } else if li == left_node.children.len()
+                        || right_node.children[ri].0 < left_node.children[li].0
+                    {
+                        children.push(right_node.children[ri].clone());
+                        ri += 1;
                     } else {
-                        *self
-                            .union_memo
-                            .get(&Self::union_pair(left_child, right_child))
-                            .expect("semantic trie child union must be processed before its parent")
-                    };
-                    children.push((left_node.children[li].0.clone(), child));
-                    li += 1;
-                    ri += 1;
+                        let left_child = left_node.children[li].1;
+                        let right_child = right_node.children[ri].1;
+                        let child = if left_child == right_child {
+                            left_child
+                        } else if left_child == 0 {
+                            right_child
+                        } else if right_child == 0 {
+                            left_child
+                        } else {
+                            *self
+                                .union_memo
+                                .get(&Self::union_pair(left_child, right_child))
+                                .expect(
+                                    "semantic trie child union must be processed before its parent",
+                                )
+                        };
+                        children.push((left_node.children[li].0.clone(), child));
+                        li += 1;
+                        ri += 1;
+                    }
                 }
+                (left_node.empty || right_node.empty, children)
+            };
+            let id = self.intern_node(empty, children);
+            if self.exhausted {
+                return 0;
             }
-            let id = self.intern_node(left_node.empty || right_node.empty, children);
+            if self.union_memo.len() >= self.max_union_entries {
+                self.exhausted = true;
+                return 0;
+            }
             self.union_memo.insert(pair, id);
         }
 
-        *self
-            .union_memo
-            .get(&root)
-            .expect("semantic trie root union was not constructed")
+        self.union_memo.get(&root).copied().unwrap_or(0)
+    }
+
+    pub(crate) fn union_keys(&mut self, left: u32, right: u32) -> u32 {
+        self.union_ids(left, right)
+    }
+
+    pub(crate) fn top_branches(&self, root: u32) -> &[(T, u32)] {
+        &self.nodes[root as usize].children
+    }
+
+    pub(crate) fn push_key(&mut self, root: u32, value: T) -> u32 {
+        if root == 0 {
+            return 0;
+        }
+        self.intern_node(false, vec![(value, root)])
+    }
+
+    pub(crate) fn gss_from_key(&mut self, root: u32, accumulator: A) -> LeveledGSS<T, A> {
+        if root == 0 {
+            return LeveledGSS::empty();
+        }
+
+        fn build<T: Clone + Eq + Hash + Ord>(
+            nodes: &[SemanticTrieNode<T>],
+            id: u32,
+            memo: &mut FxHashMap<u32, Arc<Lower<T>>>,
+        ) -> Arc<Lower<T>> {
+            if let Some(cached) = memo.get(&id) {
+                return cached.clone();
+            }
+            let node = &nodes[id as usize];
+            let mut children: Children<T, Lower<T>> = CompactMap::new();
+            for (value, child_id) in &node.children {
+                let child = build(nodes, *child_id, memo);
+                insert_lower_child_shared(
+                    &mut children,
+                    value.clone(),
+                    child.max_depth(),
+                    child,
+                );
+            }
+            let lower = new_lower(children, node.empty);
+            memo.insert(id, lower.clone());
+            lower
+        }
+
+        let lower = build(&self.nodes, root, &mut self.reconstructed);
+        let gss = LeveledGSS {
+            inner: new_interface(lower, accumulator),
+        };
+        self.upper_memo.insert(
+            Arc::as_ptr(&gss.inner) as usize,
+            (gss.inner.clone(), root),
+        );
+        gss
     }
 
     pub(crate) fn key(&mut self, gss: &LeveledGSS<T, A>) -> u32 {
+        if self.exhausted {
+            return 0;
+        }
         if let Some(id) = self.upper_id(&gss.inner) {
             return id;
         }
@@ -1808,10 +1954,29 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
             for value in stack {
                 id = self.intern_node(false, vec![(value, id)]);
             }
+            if self.exhausted || !self.source_budget_available() {
+                return 0;
+            }
             self.upper_memo.insert(
                 Arc::as_ptr(&gss.inner) as usize,
                 (gss.inner.clone(), id),
             );
+            return id;
+        }
+
+        // Shallow ambiguous DAGs are common in token-local admission. Walk
+        // them in bounded postorder using the exact pointer memo tables rather
+        // than allocating two visited sets, a pending list, and a sortable
+        // node list. The iterative path below remains the fallback for deeper
+        // structures, so recursion depth is strictly bounded.
+        const RECURSIVE_SEMANTIC_KEY_MAX_DEPTH: usize = 64;
+        if gss.max_depth() as usize <= RECURSIVE_SEMANTIC_KEY_MAX_DEPTH
+            && let Some(id) = self.key_upper_recursive(
+                &gss.inner,
+                0,
+                RECURSIVE_SEMANTIC_KEY_MAX_DEPTH,
+            )
+        {
             return id;
         }
 
@@ -1826,6 +1991,17 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
                     let ptr = lower_node_id(lower);
                     if self.lower_memo.contains_key(&ptr) || !seen_lower.insert(ptr) {
                         continue;
+                    }
+                    if self
+                        .lower_memo
+                        .len()
+                        .saturating_add(self.upper_memo.len())
+                        .saturating_add(seen_lower.len())
+                        .saturating_add(seen_upper.len())
+                        > self.max_source_keys
+                    {
+                        self.exhausted = true;
+                        return 0;
                     }
                     match &**lower {
                         Lower::Segment(segment) => {
@@ -1847,6 +2023,17 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
                     let ptr = Arc::as_ptr(upper) as usize;
                     if self.upper_memo.contains_key(&ptr) || !seen_upper.insert(ptr) {
                         continue;
+                    }
+                    if self
+                        .lower_memo
+                        .len()
+                        .saturating_add(self.upper_memo.len())
+                        .saturating_add(seen_lower.len())
+                        .saturating_add(seen_upper.len())
+                        > self.max_source_keys
+                    {
+                        self.exhausted = true;
+                        return 0;
                     }
                     match &**upper {
                         Upper::Interface(interface) => {
@@ -1870,6 +2057,9 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
 
         nodes.sort_unstable_by_key(SemanticPendingNode::sort_key);
         for node in nodes {
+            if self.exhausted {
+                return 0;
+            }
             match node {
                 SemanticPendingNode::Lower(lower) => {
                     let ptr = lower_node_id(&lower);
@@ -1903,6 +2093,9 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
                             self.intern_node(*empty, canonical_children)
                         }
                     };
+                    if self.exhausted || !self.source_budget_available() {
+                        return 0;
+                    }
                     self.lower_memo.insert(ptr, (lower, id));
                 }
                 SemanticPendingNode::Upper(upper) => {
@@ -1929,18 +2122,403 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
                             self.intern_node(branch.empty.is_some(), canonical_children)
                         }
                     };
+                    if self.exhausted || !self.source_budget_available() {
+                        return 0;
+                    }
                     self.upper_memo.insert(ptr, (upper, id));
                 }
             }
         }
 
-        self.upper_id(&gss.inner)
-            .expect("semantic trie root must be canonicalized")
+        self.upper_id(&gss.inner).unwrap_or(0)
+    }
+
+    fn key_lower_recursive(
+        &mut self,
+        lower: &Arc<Lower<T>>,
+        depth: usize,
+        max_depth: usize,
+    ) -> Option<u32> {
+        if let Some(id) = self.lower_id(lower) {
+            return Some(id);
+        }
+        if depth > max_depth {
+            return None;
+        }
+        let id = match &**lower {
+            Lower::Segment(segment) => {
+                let mut id = self.key_lower_recursive(&segment.next, depth + 1, max_depth)?;
+                for value in segment.values.iter() {
+                    id = self.intern_node(false, vec![(value.clone(), id)]);
+                    if self.exhausted {
+                        return Some(0);
+                    }
+                }
+                id
+            }
+            Lower::General {
+                children, empty, ..
+            } => {
+                let mut canonical_children = Vec::with_capacity(children.len());
+                for (value, kids) in children.iter() {
+                    let mut child_union = 0;
+                    for child in kids.values() {
+                        let child_id = self.key_lower_recursive(child, depth + 1, max_depth)?;
+                        child_union = self.union_ids(child_union, child_id);
+                        if self.exhausted {
+                            return Some(0);
+                        }
+                    }
+                    canonical_children.push((value.clone(), child_union));
+                }
+                self.intern_node(*empty, canonical_children)
+            }
+        };
+        if self.exhausted || !self.source_budget_available() {
+            return Some(0);
+        }
+        let ptr = lower_node_id(lower);
+        self.lower_memo.insert(ptr, (lower.clone(), id));
+        Some(id)
+    }
+
+    fn key_upper_recursive(
+        &mut self,
+        upper: &Arc<Upper<T, A>>,
+        depth: usize,
+        max_depth: usize,
+    ) -> Option<u32> {
+        if let Some(id) = self.upper_id(upper) {
+            return Some(id);
+        }
+        if depth > max_depth {
+            return None;
+        }
+        let id = match &**upper {
+            Upper::Interface(interface) => {
+                self.key_lower_recursive(&interface.inner, depth + 1, max_depth)?
+            }
+            Upper::Branch(branch) => {
+                let mut canonical_children = Vec::with_capacity(branch.children.len());
+                for (value, kids) in branch.children.iter() {
+                    let mut child_union = 0;
+                    for child in kids.values() {
+                        let child_id = self.key_upper_recursive(child, depth + 1, max_depth)?;
+                        child_union = self.union_ids(child_union, child_id);
+                        if self.exhausted {
+                            return Some(0);
+                        }
+                    }
+                    canonical_children.push((value.clone(), child_union));
+                }
+                self.intern_node(branch.empty.is_some(), canonical_children)
+            }
+        };
+        if self.exhausted || !self.source_budget_available() {
+            return Some(0);
+        }
+        let ptr = Arc::as_ptr(upper) as usize;
+        self.upper_memo.insert(ptr, (upper.clone(), id));
+        Some(id)
+    }
+
+    pub(crate) fn work_summary(&self) -> (usize, usize, usize, usize) {
+        (
+            self.nodes.len(),
+            self.lower_memo.len(),
+            self.upper_memo.len(),
+            self.union_memo.len(),
+        )
     }
 
     #[cfg(test)]
     fn node_count(&self) -> usize {
         self.nodes.len()
+    }
+}
+
+pub(crate) struct IndexedLowerIdentity<T: Clone + Eq + Hash> {
+    ptr: usize,
+    _keepalive: Arc<Lower<T>>,
+}
+
+impl<T: Clone + Eq + Hash> IndexedLowerIdentity<T> {
+    fn new(lower: &Arc<Lower<T>>) -> Self {
+        Self {
+            ptr: lower_node_id(lower),
+            _keepalive: lower.clone(),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn ptr_key(&self) -> usize {
+        self.ptr
+    }
+}
+
+impl<T: Clone + Eq + Hash> Clone for IndexedLowerIdentity<T> {
+    fn clone(&self) -> Self {
+        Self {
+            ptr: self.ptr,
+            _keepalive: self._keepalive.clone(),
+        }
+    }
+}
+
+impl<T: Clone + Eq + Hash> PartialEq for IndexedLowerIdentity<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.ptr == other.ptr
+    }
+}
+impl<T: Clone + Eq + Hash> Eq for IndexedLowerIdentity<T> {}
+impl<T: Clone + Eq + Hash> std::hash::Hash for IndexedLowerIdentity<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.ptr.hash(state);
+    }
+}
+
+#[derive(Clone)]
+pub(crate) enum IndexedLeveledGssNode<T: Clone + Eq + Hash, A> {
+    UpperBranch {
+        empty: Option<A>,
+        children: Vec<(T, u32)>,
+    },
+    Interface {
+        accumulator: A,
+        lower: u32,
+    },
+    LowerGeneral {
+        source: IndexedLowerIdentity<T>,
+        empty: bool,
+        children: Vec<(T, u32)>,
+    },
+    LowerSegment {
+        source: IndexedLowerIdentity<T>,
+        values: Vec<T>,
+        next: u32,
+    },
+}
+
+pub(crate) struct IndexedLeveledGss<T: Clone + Eq + Hash, A> {
+    pub(crate) root: u32,
+    pub(crate) nodes: Vec<IndexedLeveledGssNode<T, A>>,
+}
+
+impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
+    /// Build a compact indexed view of the existing leveled-GSS DAG.
+    ///
+    /// Node sharing is preserved by pointer identity. This is intended for
+    /// allocation-free dynamic programs that need random access to the DAG but
+    /// must not rebuild, flatten, or enumerate the represented stack language.
+    pub(crate) fn indexed_dag(&self) -> IndexedLeveledGss<T, A> {
+        fn index_lower<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
+            lower: &Arc<Lower<T>>,
+            nodes: &mut Vec<IndexedLeveledGssNode<T, A>>,
+            lower_ids: &mut FxHashMap<usize, u32>,
+            upper_ids: &mut FxHashMap<usize, u32>,
+        ) -> u32 {
+            let ptr = lower_node_id(lower);
+            if let Some(id) = lower_ids.get(&ptr) {
+                return *id;
+            }
+            let node = match &**lower {
+                Lower::General { children, empty, .. } => {
+                    let mut indexed_children = Vec::new();
+                    for (value, kids) in children.iter() {
+                        for child in kids.values() {
+                            indexed_children.push((
+                                value.clone(),
+                                index_lower(child, nodes, lower_ids, upper_ids),
+                            ));
+                        }
+                    }
+                    IndexedLeveledGssNode::LowerGeneral {
+                        source: IndexedLowerIdentity::new(lower),
+                        empty: *empty,
+                        children: indexed_children,
+                    }
+                }
+                Lower::Segment(segment) => IndexedLeveledGssNode::LowerSegment {
+                    source: IndexedLowerIdentity::new(lower),
+                    values: segment.values.iter().cloned().collect::<Vec<_>>(),
+                    next: index_lower(&segment.next, nodes, lower_ids, upper_ids),
+                },
+            };
+            let id = u32::try_from(nodes.len()).expect("indexed GSS exceeded u32 node IDs");
+            nodes.push(node);
+            lower_ids.insert(ptr, id);
+            id
+        }
+
+        fn index_upper<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
+            upper: &Arc<Upper<T, A>>,
+            nodes: &mut Vec<IndexedLeveledGssNode<T, A>>,
+            lower_ids: &mut FxHashMap<usize, u32>,
+            upper_ids: &mut FxHashMap<usize, u32>,
+        ) -> u32 {
+            let ptr = Arc::as_ptr(upper) as usize;
+            if let Some(id) = upper_ids.get(&ptr) {
+                return *id;
+            }
+            let node = match &**upper {
+                Upper::Branch(branch) => {
+                    let mut indexed_children = Vec::new();
+                    for (value, kids) in branch.children.iter() {
+                        for child in kids.values() {
+                            indexed_children.push((
+                                value.clone(),
+                                index_upper(child, nodes, lower_ids, upper_ids),
+                            ));
+                        }
+                    }
+                    IndexedLeveledGssNode::UpperBranch {
+                        empty: branch.empty.clone(),
+                        children: indexed_children,
+                    }
+                }
+                Upper::Interface(interface) => IndexedLeveledGssNode::Interface {
+                    accumulator: interface.acc.clone(),
+                    lower: index_lower(&interface.inner, nodes, lower_ids, upper_ids),
+                },
+            };
+            let id = u32::try_from(nodes.len()).expect("indexed GSS exceeded u32 node IDs");
+            nodes.push(node);
+            upper_ids.insert(ptr, id);
+            id
+        }
+
+        let mut nodes = Vec::new();
+        let mut lower_ids = FxHashMap::default();
+        let mut upper_ids = FxHashMap::default();
+        let root = index_upper(
+            &self.inner,
+            &mut nodes,
+            &mut lower_ids,
+            &mut upper_ids,
+        );
+        IndexedLeveledGss { root, nodes }
+    }
+
+    pub(crate) fn indexed_dag_many(
+        roots: &[Self],
+    ) -> (IndexedLeveledGss<T, A>, Vec<u32>) {
+        let (dag, root_ids, _, _) = Self::indexed_dag_many_reusing(
+            roots,
+            Vec::new(),
+            Vec::new(),
+            FxHashMap::default(),
+            FxHashMap::default(),
+        );
+        (dag, root_ids)
+    }
+
+    pub(crate) fn indexed_dag_many_reusing(
+        roots: &[Self],
+        mut nodes: Vec<IndexedLeveledGssNode<T, A>>,
+        mut root_ids: Vec<u32>,
+        mut lower_ids: FxHashMap<usize, u32>,
+        mut upper_ids: FxHashMap<usize, u32>,
+    ) -> (
+        IndexedLeveledGss<T, A>,
+        Vec<u32>,
+        FxHashMap<usize, u32>,
+        FxHashMap<usize, u32>,
+    ) {
+        fn index_lower<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
+            lower: &Arc<Lower<T>>,
+            nodes: &mut Vec<IndexedLeveledGssNode<T, A>>,
+            lower_ids: &mut FxHashMap<usize, u32>,
+            upper_ids: &mut FxHashMap<usize, u32>,
+        ) -> u32 {
+            let ptr = lower_node_id(lower);
+            if let Some(id) = lower_ids.get(&ptr) {
+                return *id;
+            }
+            let node = match &**lower {
+                Lower::General { children, empty, .. } => {
+                    let mut indexed_children = Vec::new();
+                    for (value, kids) in children.iter() {
+                        for child in kids.values() {
+                            indexed_children.push((
+                                value.clone(),
+                                index_lower(child, nodes, lower_ids, upper_ids),
+                            ));
+                        }
+                    }
+                    IndexedLeveledGssNode::LowerGeneral {
+                        source: IndexedLowerIdentity::new(lower),
+                        empty: *empty,
+                        children: indexed_children,
+                    }
+                }
+                Lower::Segment(segment) => IndexedLeveledGssNode::LowerSegment {
+                    source: IndexedLowerIdentity::new(lower),
+                    values: segment.values.iter().cloned().collect::<Vec<_>>(),
+                    next: index_lower(&segment.next, nodes, lower_ids, upper_ids),
+                },
+            };
+            let id = u32::try_from(nodes.len()).expect("indexed GSS exceeded u32 node IDs");
+            nodes.push(node);
+            lower_ids.insert(ptr, id);
+            id
+        }
+
+        fn index_upper<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
+            upper: &Arc<Upper<T, A>>,
+            nodes: &mut Vec<IndexedLeveledGssNode<T, A>>,
+            lower_ids: &mut FxHashMap<usize, u32>,
+            upper_ids: &mut FxHashMap<usize, u32>,
+        ) -> u32 {
+            let ptr = Arc::as_ptr(upper) as usize;
+            if let Some(id) = upper_ids.get(&ptr) {
+                return *id;
+            }
+            let node = match &**upper {
+                Upper::Branch(branch) => {
+                    let mut indexed_children = Vec::new();
+                    for (value, kids) in branch.children.iter() {
+                        for child in kids.values() {
+                            indexed_children.push((
+                                value.clone(),
+                                index_upper(child, nodes, lower_ids, upper_ids),
+                            ));
+                        }
+                    }
+                    IndexedLeveledGssNode::UpperBranch {
+                        empty: branch.empty.clone(),
+                        children: indexed_children,
+                    }
+                }
+                Upper::Interface(interface) => IndexedLeveledGssNode::Interface {
+                    accumulator: interface.acc.clone(),
+                    lower: index_lower(&interface.inner, nodes, lower_ids, upper_ids),
+                },
+            };
+            let id = u32::try_from(nodes.len()).expect("indexed GSS exceeded u32 node IDs");
+            nodes.push(node);
+            upper_ids.insert(ptr, id);
+            id
+        }
+
+        nodes.clear();
+        root_ids.clear();
+        lower_ids.clear();
+        upper_ids.clear();
+        root_ids.extend(roots.iter().map(|root| {
+            index_upper(
+                &root.inner,
+                &mut nodes,
+                &mut lower_ids,
+                &mut upper_ids,
+            )
+        }));
+        let root = root_ids.first().copied().unwrap_or(0);
+        (
+            IndexedLeveledGss { root, nodes },
+            root_ids,
+            lower_ids,
+            upper_ids,
+        )
     }
 }
 
@@ -2315,6 +2893,11 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         Arc::as_ptr(&self.inner) as usize
     }
 
+    #[inline(always)]
+    pub(crate) fn top_value_count(&self) -> usize {
+        self.inner.children_len()
+    }
+
     pub(crate) fn single_interface_lower_id(&self) -> Option<usize> {
         match &*self.inner {
             Upper::Interface(i) => Some(lower_node_id(&i.inner)),
@@ -2467,172 +3050,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         LeveledGSS {
             inner: build_upper(&trie, empty_acc),
         }
-    }
-
-    /// Build a bounded same-accumulator stack language by packing each
-    /// group's common bottom prefix once, then constructing only the divergent
-    /// upper DAG. This avoids both general `from_stacks` hash-map construction
-    /// and repeated pairwise merges of full stack segments.
-    pub(crate) fn from_small_stack_slices_shared_prefix<'a>(
-        stacks: &[&'a [T]],
-        acc: A,
-    ) -> Option<Self>
-    where
-        T: 'a,
-    {
-        const MAX_STACKS: usize = 16;
-        const MAX_INTERNED_NODES: usize = 96;
-        if stacks.is_empty() || stacks.len() > MAX_STACKS {
-            return None;
-        }
-
-        fn intern<T: Clone + Eq + Hash>(
-            node: Arc<Lower<T>>,
-            nodes: &mut SmallVec<[Arc<Lower<T>>; MAX_INTERNED_NODES]>,
-        ) -> Option<Arc<Lower<T>>> {
-            if let Some(existing) = nodes.iter().find(|existing| ***existing == *node) {
-                return Some(existing.clone());
-            }
-            if nodes.len() == nodes.capacity() {
-                return None;
-            }
-            nodes.push(node.clone());
-            Some(node)
-        }
-
-        fn build<'a, T>(
-            stacks: &[&'a [T]],
-            mut base: Arc<Lower<T>>,
-            interned: &mut SmallVec<[Arc<Lower<T>>; MAX_INTERNED_NODES]>,
-        ) -> Option<Arc<Lower<T>>>
-        where
-            T: Clone + Eq + Hash + 'a,
-        {
-            let min_len = stacks.iter().map(|stack| stack.len()).min()?;
-            let mut common = 0usize;
-            while common < min_len
-                && stacks
-                    .iter()
-                    .skip(1)
-                    .all(|stack| stack[common] == stacks[0][common])
-            {
-                common += 1;
-            }
-            if common != 0 {
-                base = intern(
-                    new_segment(SV::from_vec(stacks[0][..common].to_vec()), base),
-                    interned,
-                )?;
-                let mut trimmed = SmallVec::<[&'a [T]; MAX_STACKS]>::new();
-                for &stack in stacks {
-                    trimmed.push(&stack[common..]);
-                }
-                return build(&trimmed, base, interned);
-            }
-
-            if stacks.iter().all(|stack| stack.is_empty()) {
-                return Some(base);
-            }
-            let includes_base = stacks.iter().any(|stack| stack.is_empty());
-            let mut groups = SmallVec::<
-                [(T, SmallVec<[&'a [T]; MAX_STACKS]>); MAX_STACKS],
-            >::new();
-            for &stack in stacks {
-                let Some((top, rest)) = stack.split_last() else {
-                    continue;
-                };
-                if let Some((_, grouped)) = groups.iter_mut().find(|(key, _)| key == top) {
-                    grouped.push(rest);
-                } else {
-                    if groups.len() == groups.capacity() {
-                        return None;
-                    }
-                    let mut grouped = SmallVec::new();
-                    grouped.push(rest);
-                    groups.push((top.clone(), grouped));
-                }
-            }
-
-            let mut children: Children<T, Lower<T>> = CompactMap::new();
-            for (top, grouped) in groups {
-                let child = build(&grouped, base.clone(), interned)?;
-                insert_lower_child_shared(
-                    &mut children,
-                    top,
-                    child.max_depth(),
-                    child,
-                );
-            }
-            // `insert_lower_child_shared` has already canonicalised equal
-            // suffixes, and every child came from this builder's interner. The
-            // generic `new_lower` canonicalisation would only rebuild temporary
-            // key/entry vectors here.
-            let extensions = intern(new_lower_precanonicalized(children, false), interned)?;
-            if includes_base {
-                intern(merge_lower(&base, &extensions), interned)
-            } else {
-                Some(extensions)
-            }
-        }
-
-        let floor = new_lower_precanonicalized(CompactMap::new(), true);
-        let mut interned = SmallVec::<[Arc<Lower<T>>; MAX_INTERNED_NODES]>::new();
-        interned.push(floor.clone());
-        let lower = build(stacks, floor, &mut interned)?;
-        Some(Self {
-            inner: new_interface(lower, acc),
-        })
-    }
-
-    /// Merge a bounded set of same-accumulator Interface GSSes while taking
-    /// ownership of their wrappers. The lower DAGs are merged in a balanced
-    /// tree and one existing Interface wrapper is reused for the result.
-    pub(crate) fn merge_same_acc_interfaces_owned(
-        gsses: impl IntoIterator<Item = Self>,
-    ) -> Option<Self> {
-        const MAX_GSSES: usize = 16;
-        let mut gsses = SmallVec::<[Self; MAX_GSSES]>::from_iter(gsses);
-        if gsses.is_empty() || gsses.len() > MAX_GSSES {
-            return None;
-        }
-
-        let first_acc = match &*gsses[0].inner {
-            Upper::Interface(interface) => interface.acc.clone(),
-            Upper::Branch(_) => return None,
-        };
-        let mut lowers = SmallVec::<[Arc<Lower<T>>; MAX_GSSES]>::new();
-        for gss in &gsses {
-            let Upper::Interface(interface) = &*gss.inner else {
-                return None;
-            };
-            if interface.acc != first_acc {
-                return None;
-            }
-            lowers.push(interface.inner.clone());
-        }
-
-        while lowers.len() > 1 {
-            let mut next = SmallVec::<[Arc<Lower<T>>; MAX_GSSES]>::new();
-            let mut iter = lowers.into_iter();
-            while let Some(left) = iter.next() {
-                if let Some(right) = iter.next() {
-                    next.push(merge_lower(&left, &right));
-                } else {
-                    next.push(left);
-                }
-            }
-            lowers = next;
-        }
-        let merged_lower = lowers.pop()?;
-
-        let mut result = gsses.swap_remove(0);
-        let upper = Arc::get_mut(&mut result.inner)?;
-        let Upper::Interface(interface) = upper else {
-            return None;
-        };
-        let interface = Arc::get_mut(interface)?;
-        interface.inner = merged_lower;
-        Some(result)
     }
 
     pub fn from_single_stack(values: Vec<T>, acc: A) -> Self {
@@ -3130,121 +3547,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         }
     }
 
-    /// Apply guarded stack effects to a small concrete-path frontier using
-    /// inline traversal/output buffers, then rebuild the resulting language
-    /// once with shared prefixes.
-    ///
-    /// This is deliberately bounded. It handles the common case where a
-    /// virtual stack exposes a small branched floor, but declines before heap
-    /// growth or accumulator-correlation loss. Larger or mixed-accumulator
-    /// frontiers continue through the authoritative general GSS interpreter.
-    pub fn apply_guarded_stack_effects_to_bounded_paths<'a, I, G>(
-        &self,
-        effects: I,
-        max_paths: usize,
-        max_depth: usize,
-    ) -> Option<Self>
-    where
-        I: IntoIterator<Item = (G, usize, &'a [T])>,
-        G: IntoIterator<Item = (usize, &'a [T])>,
-        T: 'a,
-    {
-        const MAX_PATHS: usize = 16;
-        const MAX_EFFECTS: usize = 32;
-        const MAX_GUARDS: usize = 8;
-        const MAX_DEPTH: usize = 64;
-
-        if max_paths == 0
-            || max_paths > MAX_PATHS
-            || max_depth == 0
-            || max_depth > MAX_DEPTH
-            || self.max_depth() as usize > max_depth
-        {
-            return None;
-        }
-
-        let mut bounded_effects = SmallVec::<
-            [(SmallVec<[(usize, &'a [T]); MAX_GUARDS]>, usize, &'a [T]); MAX_EFFECTS],
-        >::new();
-        for (guards, pop, pushes) in effects {
-            if bounded_effects.len() == bounded_effects.capacity() {
-                return None;
-            }
-            let mut bounded_guards = SmallVec::<[(usize, &'a [T]); MAX_GUARDS]>::new();
-            for guard in guards {
-                if bounded_guards.len() == bounded_guards.capacity() {
-                    return None;
-                }
-                bounded_guards.push(guard);
-            }
-            bounded_effects.push((bounded_guards, pop, pushes));
-        }
-        if bounded_effects.is_empty() {
-            return Some(Self::empty());
-        }
-
-        let mut outputs = SmallVec::<[(SmallVec<[T; MAX_DEPTH]>, A); MAX_PATHS]>::new();
-        let mut overflowed = false;
-        let complete = self.for_each_stack_top_first_bounded(max_paths, |top_first, acc| {
-            if overflowed {
-                return;
-            }
-            for (guards, pop, pushes) in &bounded_effects {
-                if *pop > top_first.len() {
-                    continue;
-                }
-                let allowed = guards.iter().all(|(guard_pop, guard_states)| {
-                    *guard_pop < top_first.len()
-                        && guard_states
-                            .iter()
-                            .any(|candidate| candidate == &top_first[*guard_pop])
-                });
-                if !allowed {
-                    continue;
-                }
-
-                let keep = top_first.len() - *pop;
-                if keep + pushes.len() > max_depth {
-                    overflowed = true;
-                    return;
-                }
-                let mut next = SmallVec::<[T; MAX_DEPTH]>::new();
-                for value in top_first[*pop..].iter().rev() {
-                    next.push(value.clone());
-                }
-                next.extend(pushes.iter().cloned());
-
-                if let Some((_, existing_acc)) =
-                    outputs.iter_mut().find(|(existing, _)| existing == &next)
-                {
-                    *existing_acc = existing_acc.merge(acc);
-                    continue;
-                }
-                if outputs.len() == max_paths || outputs.len() == outputs.capacity() {
-                    overflowed = true;
-                    return;
-                }
-                outputs.push((next, acc.clone()));
-            }
-        });
-        if !complete || overflowed {
-            return None;
-        }
-        if outputs.is_empty() {
-            return Some(Self::empty());
-        }
-
-        let common_acc = outputs[0].1.clone();
-        if outputs.iter().any(|(_, acc)| acc != &common_acc) {
-            return None;
-        }
-        let mut slices = SmallVec::<[&[T]; MAX_PATHS]>::new();
-        for (stack, _) in &outputs {
-            slices.push(stack.as_slice());
-        }
-        Self::from_small_stack_slices_shared_prefix(&slices, common_acc)
-    }
-
     pub fn push(&self, value: T) -> Self {
         if self.is_empty() {
             return self.clone();
@@ -3581,112 +3883,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
                     }
                 });
                 Self::merge_many(shifted)
-            }
-        }
-    }
-
-    /// Apply a bounded set of top-local stack effects in one pass. Each effect
-    /// is `(current_top, pop, pushes)` with `pop <= 1` and a non-empty push
-    /// sequence. The existing lower children are retained directly; only the
-    /// short replacement prefixes and the new top frontier are constructed.
-    pub(crate) fn try_apply_top_stack_effects<'a, I>(&self, effects: I) -> Option<Self>
-    where
-        I: IntoIterator<Item = (T, usize, &'a [T])>,
-        T: 'a,
-    {
-        const MAX_EFFECTS: usize = 16;
-        let effects = SmallVec::<[(T, usize, &'a [T]); MAX_EFFECTS]>::from_iter(effects);
-        if effects.is_empty()
-            || effects.len() > MAX_EFFECTS
-            || effects
-                .iter()
-                .any(|(_, pop, pushes)| *pop > 1 || pushes.is_empty())
-        {
-            return None;
-        }
-
-        match &*self.inner {
-            Upper::Interface(interface) => {
-                let Lower::General { children, .. } = &*interface.inner else {
-                    return None;
-                };
-
-                let mut shifted_children: Children<T, Lower<T>> = CompactMap::new();
-                for (from, pop, pushes) in &effects {
-                    let Some(kids) = children.get(from) else {
-                        continue;
-                    };
-                    let (target, pushed_prefix) = pushes.split_last()?;
-                    let mut prefix = SmallVec::<[T; 8]>::new();
-                    if *pop == 0 {
-                        prefix.push(from.clone());
-                    }
-                    prefix.extend(pushed_prefix.iter().cloned());
-
-                    for child in kids.values() {
-                        let below_target = if prefix.is_empty() {
-                            child.clone()
-                        } else {
-                            new_segment(SV::from_vec(prefix.to_vec()), child.clone())
-                        };
-                        insert_lower_child_shared(
-                            &mut shifted_children,
-                            target.clone(),
-                            below_target.max_depth(),
-                            below_target,
-                        );
-                    }
-                }
-
-                if shifted_children.is_empty() {
-                    return Some(Self::empty());
-                }
-                let shifted_root = new_lower_precanonicalized(shifted_children, false);
-                Some(Self {
-                    inner: new_interface(shifted_root, interface.acc.clone()),
-                })
-            }
-            Upper::Branch(branch) => {
-                fn wrap_upper<T, A>(value: T, child: Arc<Upper<T, A>>) -> Arc<Upper<T, A>>
-                where
-                    T: Clone + Eq + Hash,
-                    A: Merge + Clone + Eq + Hash,
-                {
-                    let depth = child.max_depth();
-                    new_branch(
-                        CompactMap::unit(value, CompactOrdMap::unit(depth, child)),
-                        None,
-                    )
-                }
-
-                let mut shifted_children: Children<T, Upper<T, A>> = CompactMap::new();
-                for (from, pop, pushes) in &effects {
-                    let Some(kids) = branch.children.get(from) else {
-                        continue;
-                    };
-                    let (target, pushed_prefix) = pushes.split_last()?;
-                    for child in kids.values() {
-                        let mut below_target = child.clone();
-                        if *pop == 0 {
-                            below_target = wrap_upper(from.clone(), below_target);
-                        }
-                        for value in pushed_prefix.iter().cloned() {
-                            below_target = wrap_upper(value, below_target);
-                        }
-                        insert_upper_child_shared(
-                            &mut shifted_children,
-                            target.clone(),
-                            below_target,
-                        );
-                    }
-                }
-
-                if shifted_children.is_empty() {
-                    return Some(Self::empty());
-                }
-                Some(Self {
-                    inner: new_branch(shifted_children, None),
-                })
             }
         }
     }
@@ -4041,283 +4237,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
     pub fn pop(&self) -> Self {
         self.popn(1)
-    }
-
-    /// Return the unique immediate predecessor value below `top` across every
-    /// represented path carrying that top value. Declines when the top is
-    /// absent, reaches an accepting floor, or covers multiple predecessors.
-    pub(crate) fn single_predecessor_below_top(&self, top: &T) -> Option<T> {
-        fn single_top<T: Clone + Eq + Hash>(node: &Arc<Lower<T>>) -> Option<T> {
-            match &**node {
-                Lower::Segment(_) => Some(node.segment_top_value().clone()),
-                Lower::General {
-                    children,
-                    empty: false,
-                    ..
-                } if children.len() == 1 => children.keys().next().cloned(),
-                _ => None,
-            }
-        }
-
-        let Upper::Interface(interface) = &*self.inner else {
-            return None;
-        };
-        match &*interface.inner {
-            Lower::Segment(_) => {
-                if interface.inner.segment_top_value() != top {
-                    return None;
-                }
-                single_top(&interface.inner.segment_rest_arc())
-            }
-            Lower::General { children, .. } => {
-                let kids = children.get(top)?;
-                let mut predecessor: Option<T> = None;
-                for child in kids.values() {
-                    let candidate = single_top(child)?;
-                    if predecessor
-                        .as_ref()
-                        .is_some_and(|existing| existing != &candidate)
-                    {
-                        return None;
-                    }
-                    predecessor = Some(candidate);
-                }
-                predecessor
-            }
-        }
-    }
-
-    /// Select paths whose current top is `top`, remove that top and its
-    /// predecessor, then push one replacement chosen from the predecessor.
-    ///
-    /// This is the structural form of a common parser wave:
-    ///
-    /// 1. reduce with pop one;
-    /// 2. replace the exposed predecessor with a goto state;
-    /// 3. replace that goto state with the terminal shift target.
-    ///
-    /// The lower child Arcs are retained directly. The callback returns
-    /// `Ok(Some(target))` to keep a predecessor branch, `Ok(None)` to discard a
-    /// dead branch, and `Err(())` when the caller encounters an unsupported
-    /// parser action and needs the authoritative general path.
-    pub(crate) fn try_replace_predecessors_below_top(
-        &self,
-        top: &T,
-        mut replacement: impl FnMut(&T) -> Result<Option<T>, ()>,
-    ) -> Result<Self, ()> {
-        fn append_replacements<T, A>(
-            node: &Arc<Lower<T>>,
-            replacement: &mut impl FnMut(&T) -> Result<Option<T>, ()>,
-            shifted: &mut Children<T, Lower<T>>,
-        ) -> Result<(), ()>
-        where
-            T: Clone + Eq + Hash,
-            A: Merge + Clone + Eq + Hash,
-        {
-            match &**node {
-                Lower::Segment(_) => {
-                    let predecessor = node.segment_top_value();
-                    let Some(target) = replacement(predecessor)? else {
-                        return Ok(());
-                    };
-                    let below = node.segment_rest_arc();
-                    insert_lower_child_shared(
-                        shifted,
-                        target,
-                        below.max_depth(),
-                        below,
-                    );
-                }
-                Lower::General { children, .. } => {
-                    for (predecessor, kids) in children.iter() {
-                        let Some(target) = replacement(predecessor)? else {
-                            continue;
-                        };
-                        for (depth, below) in kids.iter() {
-                            insert_lower_child_shared(
-                                shifted,
-                                target.clone(),
-                                *depth,
-                                below.clone(),
-                            );
-                        }
-                    }
-                }
-            }
-            Ok(())
-        }
-
-        let Upper::Interface(interface) = &*self.inner else {
-            return Err(());
-        };
-        let mut shifted = Children::<T, Lower<T>>::new();
-        match &*interface.inner {
-            Lower::Segment(_) => {
-                if interface.inner.segment_top_value() != top {
-                    return Ok(Self::empty());
-                }
-                let below_top = interface.inner.segment_rest_arc();
-                append_replacements::<T, A>(&below_top, &mut replacement, &mut shifted)?;
-            }
-            Lower::General { children, .. } => {
-                let Some(top_children) = children.get(top) else {
-                    return Ok(Self::empty());
-                };
-                for below_top in top_children.values() {
-                    append_replacements::<T, A>(
-                        below_top,
-                        &mut replacement,
-                        &mut shifted,
-                    )?;
-                }
-            }
-        }
-
-        if shifted.is_empty() {
-            return Ok(Self::empty());
-        }
-        let lower = new_lower_precanonicalized(shifted, false);
-        Ok(Self {
-            inner: new_interface(lower, interface.acc.clone()),
-        })
-    }
-
-    /// Replace `(top, predecessor)` pairs with short push sequences in one
-    /// structural pass. Untouched lower children are retained by `Arc`.
-    ///
-    /// `lower_prefix` is the longest unique top-first prefix visible below the
-    /// predecessor, bounded by `max_lower_prefix`. A caller that needs a deeper
-    /// guard must decline when that prefix is too short. Returning `Ok(None)`
-    /// discards the branch; returning `Err(())` declines the whole transform.
-    pub(crate) fn try_replace_top_predecessors_with_sequences(
-        &self,
-        max_lower_prefix: usize,
-        mut replacement: impl FnMut(
-            &T,
-            &T,
-            &[T],
-        ) -> Result<Option<SmallVec<[T; 4]>>, ()>,
-    ) -> Result<Self, ()> {
-        fn unique_lower_prefix<T: Clone + Eq + Hash>(
-            node: &Arc<Lower<T>>,
-            max_len: usize,
-        ) -> SmallVec<[T; 8]> {
-            let mut prefix = SmallVec::<[T; 8]>::new();
-            let mut current = node.clone();
-            while prefix.len() < max_len {
-                match &*current {
-                    Lower::Segment(_) => {
-                        prefix.push(current.segment_top_value().clone());
-                        current = current.segment_rest_arc();
-                    }
-                    Lower::General {
-                        children,
-                        empty: false,
-                        ..
-                    } if children.len() == 1 => {
-                        let (value, kids) = children.iter().next().unwrap();
-                        prefix.push(value.clone());
-                        if kids.len() != 1 {
-                            break;
-                        }
-                        current = kids.values().next().unwrap().clone();
-                    }
-                    _ => break,
-                }
-            }
-            prefix
-        }
-
-        fn append_replacements<T, A>(
-            top: &T,
-            node: &Arc<Lower<T>>,
-            max_lower_prefix: usize,
-            replacement: &mut impl FnMut(
-                &T,
-                &T,
-                &[T],
-            ) -> Result<Option<SmallVec<[T; 4]>>, ()>,
-            shifted: &mut Children<T, Lower<T>>,
-        ) -> Result<(), ()>
-        where
-            T: Clone + Eq + Hash,
-            A: Merge + Clone + Eq + Hash,
-        {
-            let mut append = |predecessor: &T, below: &Arc<Lower<T>>| -> Result<(), ()> {
-                let lower_prefix = unique_lower_prefix(below, max_lower_prefix);
-                let Some(pushes) = replacement(top, predecessor, &lower_prefix)? else {
-                    return Ok(());
-                };
-                let (target, prefix) = pushes.split_last().ok_or(())?;
-                let below_target = if prefix.is_empty() {
-                    below.clone()
-                } else {
-                    new_segment(SV::from_vec(prefix.to_vec()), below.clone())
-                };
-                insert_lower_child_shared(
-                    shifted,
-                    target.clone(),
-                    below_target.max_depth(),
-                    below_target,
-                );
-                Ok(())
-            };
-
-            match &**node {
-                Lower::Segment(_) => {
-                    let predecessor = node.segment_top_value();
-                    let below = node.segment_rest_arc();
-                    append(predecessor, &below)?;
-                }
-                Lower::General { children, .. } => {
-                    for (predecessor, kids) in children.iter() {
-                        for below in kids.values() {
-                            append(predecessor, below)?;
-                        }
-                    }
-                }
-            }
-            Ok(())
-        }
-
-        let Upper::Interface(interface) = &*self.inner else {
-            return Err(());
-        };
-        let mut shifted = Children::<T, Lower<T>>::new();
-        match &*interface.inner {
-            Lower::Segment(_) => {
-                let top = interface.inner.segment_top_value();
-                let below_top = interface.inner.segment_rest_arc();
-                append_replacements::<T, A>(
-                    top,
-                    &below_top,
-                    max_lower_prefix,
-                    &mut replacement,
-                    &mut shifted,
-                )?;
-            }
-            Lower::General { children, .. } => {
-                for (top, top_children) in children.iter() {
-                    for below_top in top_children.values() {
-                        append_replacements::<T, A>(
-                            top,
-                            below_top,
-                            max_lower_prefix,
-                            &mut replacement,
-                            &mut shifted,
-                        )?;
-                    }
-                }
-            }
-        }
-
-        if shifted.is_empty() {
-            return Ok(Self::empty());
-        }
-        let lower = new_lower_precanonicalized(shifted, false);
-        Ok(Self {
-            inner: new_interface(lower, interface.acc.clone()),
-        })
     }
 
     /// Return the stack obtained by keeping only top-level paths whose top value
@@ -4977,21 +4896,71 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     /// users can keep the accumulator as branch-local state without losing its
     /// correlation with parser paths.
     pub fn partition_by_accumulator(&self) -> Vec<(LeveledGSS<T, ()>, A)> {
-        let mut accumulators = Vec::new();
-        self.for_each_acc(|accumulator| {
-            if !accumulators.contains(accumulator) {
-                accumulators.push(accumulator.clone());
-            }
-        });
+        self.partition_by_accumulator_at_most(usize::MAX, usize::MAX)
+            .expect("unbounded accumulator partition cannot exhaust its budget")
+    }
 
-        accumulators
-            .into_iter()
-            .map(|accumulator| {
-                let paths = self
-                    .apply_and_prune(|candidate| (candidate == &accumulator).then_some(()));
-                (paths, accumulator)
-            })
-            .collect()
+    /// Partition by accumulator while bounding the accumulator-labelled upper
+    /// structure inspected before any transformed GSSes are built.
+    ///
+    /// Lower GSS nodes carry no accumulator and are therefore irrelevant to
+    /// discovering the partition labels. Returning `None` is transactional:
+    /// `self` is immutable and no partial partition escapes.
+    pub(crate) fn partition_by_accumulator_at_most(
+        &self,
+        max_accumulators: usize,
+        max_upper_nodes: usize,
+    ) -> Option<Vec<(LeveledGSS<T, ()>, A)>> {
+        let mut accumulators = Vec::new();
+        let mut pending = vec![self.inner.clone()];
+        let mut visited = HashSet::new();
+
+        while let Some(node) = pending.pop() {
+            let ptr = Arc::as_ptr(&node) as usize;
+            if !visited.insert(ptr) {
+                continue;
+            }
+            if visited.len() > max_upper_nodes {
+                return None;
+            }
+
+            let mut record = |accumulator: &A| -> Option<()> {
+                if !accumulators.contains(accumulator) {
+                    if accumulators.len() == max_accumulators {
+                        return None;
+                    }
+                    accumulators.push(accumulator.clone());
+                }
+                Some(())
+            };
+
+            match &*node {
+                Upper::Interface(interface) => record(&interface.acc)?,
+                Upper::Branch(branch) => {
+                    if let Some(accumulator) = &branch.empty {
+                        record(accumulator)?;
+                    }
+                    pending.extend(
+                        branch
+                            .children
+                            .values()
+                            .flat_map(|kids| kids.values())
+                            .cloned(),
+                    );
+                }
+            }
+        }
+
+        Some(
+            accumulators
+                .into_iter()
+                .map(|accumulator| {
+                    let paths = self
+                        .apply_and_prune(|candidate| (candidate == &accumulator).then_some(()));
+                    (paths, accumulator)
+                })
+                .collect(),
+        )
     }
 
     pub fn apply_and_prune<B, M>(&self, mut mutator: M) -> LeveledGSS<T, B>
@@ -5617,6 +5586,66 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         self.inner.single_child_key_without_empty()
     }
 
+    /// Count unique reachable upper and lower GSS nodes, stopping at `limit`.
+    ///
+    /// This measures compact representation work rather than represented stack
+    /// count. It retains no node identities after returning and never expands
+    /// concrete paths.
+    pub(crate) fn node_count_at_most(&self, limit: usize) -> usize {
+        if limit == 0 || self.is_empty() {
+            return 0;
+        }
+
+        let mut upper_pending = vec![self.inner.clone()];
+        let mut lower_pending = Vec::new();
+        let mut upper_seen = HashSet::new();
+        let mut lower_seen = HashSet::new();
+        let mut count = 0usize;
+
+        while let Some(node) = upper_pending.pop() {
+            let ptr = Arc::as_ptr(&node) as usize;
+            if !upper_seen.insert(ptr) {
+                continue;
+            }
+            count += 1;
+            if count == limit {
+                return limit;
+            }
+            match &*node {
+                Upper::Branch(branch) => upper_pending.extend(
+                    branch
+                        .children
+                        .values()
+                        .flat_map(|kids| kids.values())
+                        .cloned(),
+                ),
+                Upper::Interface(interface) => lower_pending.push(interface.inner.clone()),
+            }
+        }
+
+        while let Some(node) = lower_pending.pop() {
+            let ptr = lower_node_id(&node);
+            if !lower_seen.insert(ptr) {
+                continue;
+            }
+            count += 1;
+            if count == limit {
+                return limit;
+            }
+            match &*node {
+                Lower::Segment(segment) => lower_pending.push(segment.next.clone()),
+                Lower::General { children, .. } => lower_pending.extend(
+                    children
+                        .values()
+                        .flat_map(|kids| kids.values())
+                        .cloned(),
+                ),
+            }
+        }
+
+        count
+    }
+
     pub fn path_count_at_most(&self, limit: usize) -> usize {
         if limit == 0 || self.is_empty() {
             return 0;
@@ -5932,6 +5961,17 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         walk(&self.inner, &mut visited, &mut f);
     }
 
+    pub(crate) fn uniform_accumulator(&self) -> Option<A> {
+        let mut value: Option<A> = None;
+        let mut uniform = true;
+        self.for_each_acc(|candidate| match &value {
+            None => value = Some(candidate.clone()),
+            Some(existing) if existing == candidate => {}
+            Some(_) => uniform = false,
+        });
+        uniform.then_some(value).flatten()
+    }
+
     /// Returns true if all accumulators in the upper tree satisfy the predicate.
     /// Short-circuits on the first accumulator that doesn't.
     /// For a single Interface node (common case), this is O(1).
@@ -6208,16 +6248,593 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
 }
 
+
+impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
+    pub(crate) fn single_predecessor_below_top(&self, top: &T) -> Option<T> {
+        fn single_top<T: Clone + Eq + Hash>(node: &Arc<Lower<T>>) -> Option<T> {
+            match &**node {
+                Lower::Segment(_) => Some(node.segment_top_value().clone()),
+                Lower::General {
+                    children,
+                    empty: false,
+                    ..
+                } if children.len() == 1 => children.keys().next().cloned(),
+                _ => None,
+            }
+        }
+
+        let Upper::Interface(interface) = &*self.inner else {
+            return None;
+        };
+        match &*interface.inner {
+            Lower::Segment(_) => {
+                if interface.inner.segment_top_value() != top {
+                    return None;
+                }
+                single_top(&interface.inner.segment_rest_arc())
+            }
+            Lower::General { children, .. } => {
+                let kids = children.get(top)?;
+                let mut predecessor: Option<T> = None;
+                for child in kids.values() {
+                    let candidate = single_top(child)?;
+                    if predecessor
+                        .as_ref()
+                        .is_some_and(|existing| existing != &candidate)
+                    {
+                        return None;
+                    }
+                    predecessor = Some(candidate);
+                }
+                predecessor
+            }
+        }
+    }
+
+    pub(crate) fn from_small_stack_slices_shared_prefix<'a>(
+        stacks: &[&'a [T]],
+        acc: A,
+    ) -> Option<Self>
+    where
+        T: 'a,
+    {
+        const MAX_STACKS: usize = 16;
+        const MAX_INTERNED_NODES: usize = 96;
+        if stacks.is_empty() || stacks.len() > MAX_STACKS {
+            return None;
+        }
+
+        fn intern<T: Clone + Eq + Hash>(
+            node: Arc<Lower<T>>,
+            nodes: &mut SmallVec<[Arc<Lower<T>>; MAX_INTERNED_NODES]>,
+        ) -> Option<Arc<Lower<T>>> {
+            if let Some(existing) = nodes.iter().find(|existing| ***existing == *node) {
+                return Some(existing.clone());
+            }
+            if nodes.len() == nodes.capacity() {
+                return None;
+            }
+            nodes.push(node.clone());
+            Some(node)
+        }
+
+        fn build<'a, T>(
+            stacks: &[&'a [T]],
+            mut base: Arc<Lower<T>>,
+            interned: &mut SmallVec<[Arc<Lower<T>>; MAX_INTERNED_NODES]>,
+        ) -> Option<Arc<Lower<T>>>
+        where
+            T: Clone + Eq + Hash + 'a,
+        {
+            let min_len = stacks.iter().map(|stack| stack.len()).min()?;
+            let mut common = 0usize;
+            while common < min_len
+                && stacks
+                    .iter()
+                    .skip(1)
+                    .all(|stack| stack[common] == stacks[0][common])
+            {
+                common += 1;
+            }
+            if common != 0 {
+                base = intern(
+                    new_segment(SV::from_vec(stacks[0][..common].to_vec()), base),
+                    interned,
+                )?;
+                let mut trimmed = SmallVec::<[&'a [T]; MAX_STACKS]>::new();
+                for &stack in stacks {
+                    trimmed.push(&stack[common..]);
+                }
+                return build(&trimmed, base, interned);
+            }
+
+            if stacks.iter().all(|stack| stack.is_empty()) {
+                return Some(base);
+            }
+            let includes_base = stacks.iter().any(|stack| stack.is_empty());
+            let mut groups = SmallVec::<
+                [(T, SmallVec<[&'a [T]; MAX_STACKS]>); MAX_STACKS],
+            >::new();
+            for &stack in stacks {
+                let Some((top, rest)) = stack.split_last() else {
+                    continue;
+                };
+                if let Some((_, grouped)) = groups.iter_mut().find(|(key, _)| key == top) {
+                    grouped.push(rest);
+                } else {
+                    if groups.len() == groups.capacity() {
+                        return None;
+                    }
+                    let mut grouped = SmallVec::new();
+                    grouped.push(rest);
+                    groups.push((top.clone(), grouped));
+                }
+            }
+
+            let mut children: Children<T, Lower<T>> = CompactMap::new();
+            for (top, grouped) in groups {
+                let child = build(&grouped, base.clone(), interned)?;
+                insert_lower_child_shared(
+                    &mut children,
+                    top,
+                    child.max_depth(),
+                    child,
+                );
+            }
+            // `insert_lower_child_shared` has already canonicalised equal
+            // suffixes, and every child came from this builder's interner. The
+            // generic `new_lower` canonicalisation would only rebuild temporary
+            // key/entry vectors here.
+            let extensions = intern(new_lower_precanonicalized(children, false), interned)?;
+            if includes_base {
+                intern(merge_lower(&base, &extensions), interned)
+            } else {
+                Some(extensions)
+            }
+        }
+
+        let floor = new_lower_precanonicalized(CompactMap::new(), true);
+        let mut interned = SmallVec::<[Arc<Lower<T>>; MAX_INTERNED_NODES]>::new();
+        interned.push(floor.clone());
+        let lower = build(stacks, floor, &mut interned)?;
+        Some(Self {
+            inner: new_interface(lower, acc),
+        })
+    }
+
+    pub(crate) fn try_replace_predecessors_below_top(
+        &self,
+        top: &T,
+        mut replacement: impl FnMut(&T) -> Result<Option<T>, ()>,
+    ) -> Result<Self, ()> {
+        fn append_replacements<T, A>(
+            node: &Arc<Lower<T>>,
+            replacement: &mut impl FnMut(&T) -> Result<Option<T>, ()>,
+            shifted: &mut Children<T, Lower<T>>,
+        ) -> Result<(), ()>
+        where
+            T: Clone + Eq + Hash,
+            A: Merge + Clone + Eq + Hash,
+        {
+            match &**node {
+                Lower::Segment(_) => {
+                    let predecessor = node.segment_top_value();
+                    let Some(target) = replacement(predecessor)? else {
+                        return Ok(());
+                    };
+                    let below = node.segment_rest_arc();
+                    insert_lower_child_shared(
+                        shifted,
+                        target,
+                        below.max_depth(),
+                        below,
+                    );
+                }
+                Lower::General { children, .. } => {
+                    for (predecessor, kids) in children.iter() {
+                        let Some(target) = replacement(predecessor)? else {
+                            continue;
+                        };
+                        for (depth, below) in kids.iter() {
+                            insert_lower_child_shared(
+                                shifted,
+                                target.clone(),
+                                *depth,
+                                below.clone(),
+                            );
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        let Upper::Interface(interface) = &*self.inner else {
+            return Err(());
+        };
+        let mut shifted = Children::<T, Lower<T>>::new();
+        match &*interface.inner {
+            Lower::Segment(_) => {
+                if interface.inner.segment_top_value() != top {
+                    return Ok(Self::empty());
+                }
+                let below_top = interface.inner.segment_rest_arc();
+                append_replacements::<T, A>(&below_top, &mut replacement, &mut shifted)?;
+            }
+            Lower::General { children, .. } => {
+                let Some(top_children) = children.get(top) else {
+                    return Ok(Self::empty());
+                };
+                for below_top in top_children.values() {
+                    append_replacements::<T, A>(
+                        below_top,
+                        &mut replacement,
+                        &mut shifted,
+                    )?;
+                }
+            }
+        }
+
+        if shifted.is_empty() {
+            return Ok(Self::empty());
+        }
+        let lower = new_lower_precanonicalized(shifted, false);
+        Ok(Self {
+            inner: new_interface(lower, interface.acc.clone()),
+        })
+    }
+
+    pub(crate) fn try_replace_top_predecessors_with_sequences(
+        &self,
+        max_lower_prefix: usize,
+        mut replacement: impl FnMut(
+            &T,
+            &T,
+            &[T],
+        ) -> Result<Option<SmallVec<[T; 4]>>, ()>,
+    ) -> Result<Self, ()> {
+        fn unique_lower_prefix<T: Clone + Eq + Hash>(
+            node: &Arc<Lower<T>>,
+            max_len: usize,
+        ) -> SmallVec<[T; 8]> {
+            let mut prefix = SmallVec::<[T; 8]>::new();
+            let mut current = node.clone();
+            while prefix.len() < max_len {
+                match &*current {
+                    Lower::Segment(_) => {
+                        prefix.push(current.segment_top_value().clone());
+                        current = current.segment_rest_arc();
+                    }
+                    Lower::General {
+                        children,
+                        empty: false,
+                        ..
+                    } if children.len() == 1 => {
+                        let (value, kids) = children.iter().next().unwrap();
+                        prefix.push(value.clone());
+                        if kids.len() != 1 {
+                            break;
+                        }
+                        current = kids.values().next().unwrap().clone();
+                    }
+                    _ => break,
+                }
+            }
+            prefix
+        }
+
+        fn append_replacements<T, A>(
+            top: &T,
+            node: &Arc<Lower<T>>,
+            max_lower_prefix: usize,
+            replacement: &mut impl FnMut(
+                &T,
+                &T,
+                &[T],
+            ) -> Result<Option<SmallVec<[T; 4]>>, ()>,
+            shifted: &mut Children<T, Lower<T>>,
+        ) -> Result<(), ()>
+        where
+            T: Clone + Eq + Hash,
+            A: Merge + Clone + Eq + Hash,
+        {
+            let mut append = |predecessor: &T, below: &Arc<Lower<T>>| -> Result<(), ()> {
+                let lower_prefix = unique_lower_prefix(below, max_lower_prefix);
+                let Some(pushes) = replacement(top, predecessor, &lower_prefix)? else {
+                    return Ok(());
+                };
+                let (target, prefix) = pushes.split_last().ok_or(())?;
+                let below_target = if prefix.is_empty() {
+                    below.clone()
+                } else {
+                    new_segment(SV::from_vec(prefix.to_vec()), below.clone())
+                };
+                insert_lower_child_shared(
+                    shifted,
+                    target.clone(),
+                    below_target.max_depth(),
+                    below_target,
+                );
+                Ok(())
+            };
+
+            match &**node {
+                Lower::Segment(_) => {
+                    let predecessor = node.segment_top_value();
+                    let below = node.segment_rest_arc();
+                    append(predecessor, &below)?;
+                }
+                Lower::General { children, .. } => {
+                    for (predecessor, kids) in children.iter() {
+                        for below in kids.values() {
+                            append(predecessor, below)?;
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        let Upper::Interface(interface) = &*self.inner else {
+            return Err(());
+        };
+        let mut shifted = Children::<T, Lower<T>>::new();
+        match &*interface.inner {
+            Lower::Segment(_) => {
+                let top = interface.inner.segment_top_value();
+                let below_top = interface.inner.segment_rest_arc();
+                append_replacements::<T, A>(
+                    top,
+                    &below_top,
+                    max_lower_prefix,
+                    &mut replacement,
+                    &mut shifted,
+                )?;
+            }
+            Lower::General { children, .. } => {
+                for (top, top_children) in children.iter() {
+                    for below_top in top_children.values() {
+                        append_replacements::<T, A>(
+                            top,
+                            below_top,
+                            max_lower_prefix,
+                            &mut replacement,
+                            &mut shifted,
+                        )?;
+                    }
+                }
+            }
+        }
+
+        if shifted.is_empty() {
+            return Ok(Self::empty());
+        }
+        let lower = new_lower_precanonicalized(shifted, false);
+        Ok(Self {
+            inner: new_interface(lower, interface.acc.clone()),
+        })
+    }
+
+    pub(crate) fn try_apply_top_stack_effects<'a, I>(&self, effects: I) -> Option<Self>
+    where
+        I: IntoIterator<Item = (T, usize, &'a [T])>,
+        T: 'a,
+    {
+        const MAX_EFFECTS: usize = 16;
+        let effects = SmallVec::<[(T, usize, &'a [T]); MAX_EFFECTS]>::from_iter(effects);
+        if effects.is_empty()
+            || effects.len() > MAX_EFFECTS
+            || effects
+                .iter()
+                .any(|(_, pop, pushes)| *pop > 1 || pushes.is_empty())
+        {
+            return None;
+        }
+
+        match &*self.inner {
+            Upper::Interface(interface) => {
+                let Lower::General { children, .. } = &*interface.inner else {
+                    return None;
+                };
+
+                let mut shifted_children: Children<T, Lower<T>> = CompactMap::new();
+                for (from, pop, pushes) in &effects {
+                    let Some(kids) = children.get(from) else {
+                        continue;
+                    };
+                    let (target, pushed_prefix) = pushes.split_last()?;
+                    let mut prefix = SmallVec::<[T; 8]>::new();
+                    if *pop == 0 {
+                        prefix.push(from.clone());
+                    }
+                    prefix.extend(pushed_prefix.iter().cloned());
+
+                    for child in kids.values() {
+                        let below_target = if prefix.is_empty() {
+                            child.clone()
+                        } else {
+                            new_segment(SV::from_vec(prefix.to_vec()), child.clone())
+                        };
+                        insert_lower_child_shared(
+                            &mut shifted_children,
+                            target.clone(),
+                            below_target.max_depth(),
+                            below_target,
+                        );
+                    }
+                }
+
+                if shifted_children.is_empty() {
+                    return Some(Self::empty());
+                }
+                let shifted_root = new_lower_precanonicalized(shifted_children, false);
+                Some(Self {
+                    inner: new_interface(shifted_root, interface.acc.clone()),
+                })
+            }
+            Upper::Branch(branch) => {
+                fn wrap_upper<T, A>(value: T, child: Arc<Upper<T, A>>) -> Arc<Upper<T, A>>
+                where
+                    T: Clone + Eq + Hash,
+                    A: Merge + Clone + Eq + Hash,
+                {
+                    let depth = child.max_depth();
+                    new_branch(
+                        CompactMap::unit(value, CompactOrdMap::unit(depth, child)),
+                        None,
+                    )
+                }
+
+                let mut shifted_children: Children<T, Upper<T, A>> = CompactMap::new();
+                for (from, pop, pushes) in &effects {
+                    let Some(kids) = branch.children.get(from) else {
+                        continue;
+                    };
+                    let (target, pushed_prefix) = pushes.split_last()?;
+                    for child in kids.values() {
+                        let mut below_target = child.clone();
+                        if *pop == 0 {
+                            below_target = wrap_upper(from.clone(), below_target);
+                        }
+                        for value in pushed_prefix.iter().cloned() {
+                            below_target = wrap_upper(value, below_target);
+                        }
+                        insert_upper_child_shared(
+                            &mut shifted_children,
+                            target.clone(),
+                            below_target,
+                        );
+                    }
+                }
+
+                if shifted_children.is_empty() {
+                    return Some(Self::empty());
+                }
+                Some(Self {
+                    inner: new_branch(shifted_children, None),
+                })
+            }
+        }
+    }
+
+    pub fn apply_guarded_stack_effects_to_bounded_paths<'a, I, G>(
+        &self,
+        effects: I,
+        max_paths: usize,
+        max_depth: usize,
+    ) -> Option<Self>
+    where
+        I: IntoIterator<Item = (G, usize, &'a [T])>,
+        G: IntoIterator<Item = (usize, &'a [T])>,
+        T: 'a,
+    {
+        const MAX_PATHS: usize = 16;
+        const MAX_EFFECTS: usize = 32;
+        const MAX_GUARDS: usize = 8;
+        const MAX_DEPTH: usize = 64;
+
+        if max_paths == 0
+            || max_paths > MAX_PATHS
+            || max_depth == 0
+            || max_depth > MAX_DEPTH
+            || self.max_depth() as usize > max_depth
+        {
+            return None;
+        }
+
+        let mut bounded_effects = SmallVec::<
+            [(SmallVec<[(usize, &'a [T]); MAX_GUARDS]>, usize, &'a [T]); MAX_EFFECTS],
+        >::new();
+        for (guards, pop, pushes) in effects {
+            if bounded_effects.len() == bounded_effects.capacity() {
+                return None;
+            }
+            let mut bounded_guards = SmallVec::<[(usize, &'a [T]); MAX_GUARDS]>::new();
+            for guard in guards {
+                if bounded_guards.len() == bounded_guards.capacity() {
+                    return None;
+                }
+                bounded_guards.push(guard);
+            }
+            bounded_effects.push((bounded_guards, pop, pushes));
+        }
+        if bounded_effects.is_empty() {
+            return Some(Self::empty());
+        }
+
+        let mut outputs = SmallVec::<[(SmallVec<[T; MAX_DEPTH]>, A); MAX_PATHS]>::new();
+        let mut overflowed = false;
+        let complete = self.for_each_stack_top_first_bounded(max_paths, |top_first, acc| {
+            if overflowed {
+                return;
+            }
+            for (guards, pop, pushes) in &bounded_effects {
+                if *pop > top_first.len() {
+                    continue;
+                }
+                let allowed = guards.iter().all(|(guard_pop, guard_states)| {
+                    *guard_pop < top_first.len()
+                        && guard_states
+                            .iter()
+                            .any(|candidate| candidate == &top_first[*guard_pop])
+                });
+                if !allowed {
+                    continue;
+                }
+
+                let keep = top_first.len() - *pop;
+                if keep + pushes.len() > max_depth {
+                    overflowed = true;
+                    return;
+                }
+                let mut next = SmallVec::<[T; MAX_DEPTH]>::new();
+                for value in top_first[*pop..].iter().rev() {
+                    next.push(value.clone());
+                }
+                next.extend(pushes.iter().cloned());
+
+                if let Some((_, existing_acc)) =
+                    outputs.iter_mut().find(|(existing, _)| existing == &next)
+                {
+                    *existing_acc = existing_acc.merge(acc);
+                    continue;
+                }
+                if outputs.len() == max_paths || outputs.len() == outputs.capacity() {
+                    overflowed = true;
+                    return;
+                }
+                outputs.push((next, acc.clone()));
+            }
+        });
+        if !complete || overflowed {
+            return None;
+        }
+        if outputs.is_empty() {
+            return Some(Self::empty());
+        }
+
+        let common_acc = outputs[0].1.clone();
+        if outputs.iter().any(|(_, acc)| acc != &common_acc) {
+            return None;
+        }
+        let mut slices = SmallVec::<[&[T]; MAX_PATHS]>::new();
+        for (stack, _) in &outputs {
+            slices.push(stack.as_slice());
+        }
+        Self::from_small_stack_slices_shared_prefix(&slices, common_acc)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
     use super::{
-        CompactMap, CompactOrdMap, GssSemanticKeyInterner, LeveledGSS, Lower, Merge,
-        new_interface,
+        CompactMap, CompactOrdMap, GssSemanticKeyInterner, IndexedLeveledGss,
+        IndexedLeveledGssNode, LeveledGSS, Lower, Merge, new_interface,
     };
 
-    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
     struct TestAcc(u32);
 
     impl Merge for TestAcc {
@@ -6227,32 +6844,103 @@ mod tests {
     }
 
     #[test]
-    fn compact_map_shared_tier_preserves_copy_on_write_map_semantics() {
-        let mut map = CompactMap::new();
-        for key in 0_u32..5 {
-            assert_eq!(map.insert(key, key + 10), None);
+    fn indexed_dag_exactly_preserves_stack_language_and_accumulators() {
+        fn enumerate_lower(
+            dag: &IndexedLeveledGss<u32, TestAcc>,
+            node: u32,
+            top_first: &mut Vec<u32>,
+            accumulator: &TestAcc,
+            output: &mut Vec<(Vec<u32>, TestAcc)>,
+        ) {
+            match &dag.nodes[node as usize] {
+                IndexedLeveledGssNode::LowerGeneral {
+                    empty, children, ..
+                } => {
+                    if *empty {
+                        let mut stack = top_first.clone();
+                        stack.reverse();
+                        output.push((stack, accumulator.clone()));
+                    }
+                    for (value, child) in children {
+                        top_first.push(*value);
+                        enumerate_lower(dag, *child, top_first, accumulator, output);
+                        top_first.pop();
+                    }
+                }
+                IndexedLeveledGssNode::LowerSegment { values, next, .. } => {
+                    let old_len = top_first.len();
+                    top_first.extend(values.iter().rev().copied());
+                    enumerate_lower(dag, *next, top_first, accumulator, output);
+                    top_first.truncate(old_len);
+                }
+                IndexedLeveledGssNode::UpperBranch { .. }
+                | IndexedLeveledGssNode::Interface { .. } => {
+                    panic!("lower traversal reached an upper node")
+                }
+            }
         }
-        assert!(matches!(map, CompactMap::Shared(_)));
 
-        let mut clone = map.clone();
-        assert!(map.ptr_eq(&clone));
-        *clone.get_mut(&2).expect("shared-tier key must exist") = 99;
-        assert_eq!(map.get(&2), Some(&12));
-        assert_eq!(clone.get(&2), Some(&99));
-        assert!(!map.ptr_eq(&clone));
-
-        let mut keys = clone.keys().copied().collect::<Vec<_>>();
-        keys.sort_unstable();
-        assert_eq!(keys, vec![0, 1, 2, 3, 4]);
-
-        for key in 5_u32..8 {
-            assert_eq!(clone.insert(key, key + 10), None);
+        fn enumerate_upper(
+            dag: &IndexedLeveledGss<u32, TestAcc>,
+            node: u32,
+            top_first: &mut Vec<u32>,
+            output: &mut Vec<(Vec<u32>, TestAcc)>,
+        ) {
+            match &dag.nodes[node as usize] {
+                IndexedLeveledGssNode::UpperBranch { empty, children } => {
+                    if let Some(accumulator) = empty {
+                        let mut stack = top_first.clone();
+                        stack.reverse();
+                        output.push((stack, accumulator.clone()));
+                    }
+                    for (value, child) in children {
+                        top_first.push(*value);
+                        enumerate_upper(dag, *child, top_first, output);
+                        top_first.pop();
+                    }
+                }
+                IndexedLeveledGssNode::Interface { accumulator, lower } => {
+                    enumerate_lower(dag, *lower, top_first, accumulator, output);
+                }
+                IndexedLeveledGssNode::LowerGeneral { .. }
+                | IndexedLeveledGssNode::LowerSegment { .. } => {
+                    panic!("upper traversal reached a lower node")
+                }
+            }
         }
-        assert!(matches!(clone, CompactMap::Shared(_)));
-        assert_eq!(clone.insert(8, 18), None);
-        assert!(matches!(clone, CompactMap::Large(_)));
-        assert_eq!(clone.remove(&8), Some(18));
-        assert_eq!(clone.len(), 8);
+
+        let gss = LeveledGSS::from_stacks(&[
+            (vec![0_u32, 1, 2, 7], TestAcc(1)),
+            (vec![0, 1, 3, 7], TestAcc(2)),
+            (vec![0, 4, 5, 8, 9], TestAcc(1)),
+            (vec![0, 4, 6, 8, 9], TestAcc(3)),
+            (vec![10], TestAcc(2)),
+        ]);
+        let dag = gss.indexed_dag();
+        let mut actual = Vec::new();
+        enumerate_upper(&dag, dag.root, &mut Vec::new(), &mut actual);
+        actual.sort();
+        let mut expected = gss
+            .to_stacks(4_096)
+            .expect("reference stack language exceeded explicit limit");
+        expected.sort();
+        assert_eq!(actual, expected);
+
+        let merged = gss.merge(&LeveledGSS::from_stacks(&[
+            (vec![0, 1, 2, 7], TestAcc(3)),
+            (vec![11, 12], TestAcc(4)),
+        ]));
+        let (many, roots) = LeveledGSS::indexed_dag_many(&[gss.clone(), merged.clone()]);
+        for (root, source) in roots.into_iter().zip([gss, merged]) {
+            let mut actual = Vec::new();
+            enumerate_upper(&many, root, &mut Vec::new(), &mut actual);
+            actual.sort();
+            let mut expected = source
+                .to_stacks(4_096)
+                .expect("reference stack language exceeded explicit limit");
+            expected.sort();
+            assert_eq!(actual, expected);
+        }
     }
 
     #[test]
@@ -6341,6 +7029,22 @@ mod tests {
     }
 
     #[test]
+    fn semantic_key_deep_iterative_fallback_roundtrips() {
+        let stack = (0_u32..96).collect::<Vec<_>>();
+        let original = LeveledGSS::from_single_stack(stack.clone(), TestAcc(1));
+        let mut interner = GssSemanticKeyInterner::new();
+
+        let key = interner.key(&original);
+        assert_ne!(key, 0);
+        let rebuilt = interner.gss_from_key(key, TestAcc(9));
+        let rebuilt_stacks = rebuilt
+            .to_stacks(1)
+            .expect("deep single language should remain one explicit stack");
+        assert_eq!(rebuilt_stacks.len(), 1);
+        assert_eq!(rebuilt_stacks[0].0, stack);
+    }
+
+    #[test]
     fn semantic_key_exactly_matches_small_stack_languages() {
         let universe = [
             Vec::<u32>::new(),
@@ -6406,6 +7110,53 @@ mod tests {
         assert_ne!(interner.key(&gss), 0);
         // Empty language + accepting floor + one canonical node per GSS level.
         assert_eq!(interner.node_count(), 42);
+    }
+
+    #[test]
+    fn node_count_at_most_counts_compact_nodes_without_expanding_paths() {
+        let gss = LeveledGSS::from_stacks(&[
+            (vec![0_u32, 1, 3], TestAcc(1)),
+            (vec![0, 2, 3], TestAcc(1)),
+        ]);
+        let exact = gss.summary().total_unique_nodes;
+        assert_eq!(gss.node_count_at_most(usize::MAX), exact);
+        for limit in 0..=exact + 1 {
+            assert_eq!(gss.node_count_at_most(limit), exact.min(limit));
+        }
+    }
+
+    #[test]
+    fn bounded_accumulator_partition_declines_without_partial_output() {
+        let gss = LeveledGSS::from_stacks(&[
+            (vec![0_u32, 1], TestAcc(1)),
+            (vec![0, 2], TestAcc(2)),
+            (vec![0, 3], TestAcc(3)),
+        ]);
+        assert!(gss.partition_by_accumulator_at_most(2, 64).is_none());
+        let partitions = gss
+            .partition_by_accumulator_at_most(3, 64)
+            .expect("three accumulator components fit the exact budget");
+        assert_eq!(partitions.len(), 3);
+        for (paths, accumulator) in partitions {
+            let stacks = paths
+                .to_stacks(4)
+                .expect("each bounded partition has one explicit stack");
+            assert_eq!(stacks.len(), 1);
+            assert_eq!(stacks[0].1, ());
+            assert_eq!(stacks[0].0.last().copied(), Some(accumulator.0));
+        }
+    }
+
+    #[test]
+    fn semantic_key_budget_declines_without_partial_language() {
+        let gss = LeveledGSS::from_single_stack(
+            vec![0_u32, 1, 2, 3, 4],
+            TestAcc(1),
+        );
+        let mut interner = GssSemanticKeyInterner::with_budget(3, 64, 64);
+        assert_eq!(interner.key(&gss), 0);
+        assert!(interner.is_exhausted());
+        assert!(interner.node_count() <= 3);
     }
 
     #[test]

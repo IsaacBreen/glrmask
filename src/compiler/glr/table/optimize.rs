@@ -1157,6 +1157,36 @@ impl GLRTable {
     /// merged state whose row is the union of its constituents' rows. This
     /// keeps the parser representation unchanged: every action cell still has
     /// at most one shift slot, but that shift target may be a merged state.
+    #[cfg(test)]
+    pub(super) fn collapse_sr_unit_reductions_for_correctness_oracle(
+        &mut self,
+    ) -> UnitReductionInliningReport {
+        use std::sync::atomic::{AtomicU8, AtomicUsize};
+
+        let budget = UnitInlineBudget {
+            started_at: std::time::Instant::now(),
+            max_ms: u128::MAX,
+            max_iterations: usize::MAX,
+            max_cells: usize::MAX,
+            max_synthetic_states: usize::MAX,
+            max_stack_effect_visits: usize::MAX,
+            iterations: AtomicUsize::new(0),
+            cells: AtomicUsize::new(0),
+            synthetic_states: AtomicUsize::new(0),
+            stack_effect_visits: AtomicUsize::new(0),
+            abort_code: AtomicU8::new(ABORT_NONE),
+        };
+        let mut undo = UnitInlineUndo::new(self);
+        self.collapse_sr_unit_reductions_with_compatible_gotos_inner(&budget, &mut undo);
+        let mut report = budget.report();
+        if report.aborted {
+            undo.rollback(self);
+        } else {
+            report.changed_original_states = undo.changed_original_states();
+        }
+        report
+    }
+
     pub(super) fn collapse_sr_unit_reductions_with_compatible_gotos(
         &mut self,
     ) -> UnitReductionInliningReport {

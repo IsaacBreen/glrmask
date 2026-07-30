@@ -1128,6 +1128,19 @@ pub fn parse_lark_to_named(input: &str) -> Result<NamedGrammar, GlrMaskError> {
     let mut parser = Parser::new(tokens);
     let named = parser.parse_grammar()?;
     let mut named = normalize_lark_named(named)?;
-    crate::grammar::right_linear::compress_large_right_linear_grammar(&mut named);
+    // Large right-linear compression changes the static artifact/runtime
+    // trade-off substantially. Keep it explicit rather than silently replacing
+    // the ordinary static compiler for grammars that happen to match its shape.
+    if std::env::var("GLRMASK_ENABLE_RIGHT_LINEAR_COMPRESSION")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+    {
+        crate::grammar::right_linear::compress_large_right_linear_grammar(&mut named);
+    }
     Ok(named)
 }

@@ -84,6 +84,10 @@ pub struct AnalyzedGrammar {
 
 impl AnalyzedGrammar {
     pub fn from_grammar_def(g: &GrammarDef) -> Self {
+        if g.direct_regular_automaton.is_some() {
+            return Self::from_direct_regular_grammar_def(g);
+        }
+
         let num_terminals = g.num_terminals();
         let mut rules = Vec::with_capacity(g.rules.len() + 1);
         let augmented_start = g.num_nonterminals();
@@ -138,6 +142,26 @@ impl AnalyzedGrammar {
             first,
             follow,
             rules_by_lhs,
+        }
+    }
+
+    fn from_direct_regular_grammar_def(g: &GrammarDef) -> Self {
+        let num_terminals = g.num_terminals();
+        Self {
+            rules: Vec::new(),
+            num_terminals,
+            terminal_display_names: (0..num_terminals)
+                .map(|terminal| g.terminal_display_name(terminal))
+                .collect(),
+            num_nonterminals: 0,
+            nonterminal_display_names: Vec::new(),
+            residual_isolation_classes: g.residual_isolation_classes.clone(),
+            requires_global_terminal_observation: g.requires_global_terminal_observation,
+            direct_regular_automaton: g.direct_regular_automaton.clone(),
+            nullable: BTreeSet::new(),
+            first: Vec::new(),
+            follow: Vec::new(),
+            rules_by_lhs: Vec::new(),
         }
     }
 
