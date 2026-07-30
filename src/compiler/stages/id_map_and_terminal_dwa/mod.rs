@@ -153,12 +153,13 @@ fn automatic_branch_active_state_map_strategy(
         return AutomaticBranchActiveStateMapStrategy::None;
     }
     let work = source_reps.saturating_mul(vocab_tokens);
-    if vocab_tokens >= 50_000 && work >= 300_000_000 {
+    if active_terminals <= 512 && vocab_tokens >= 50_000 && work >= 300_000_000 {
         return AutomaticBranchActiveStateMapStrategy::VeryLargeProfile;
     }
     let dense_protected_profile = active_terminals >= 180
         && vocab_tokens >= 2_000
         && work >= 50_000_000
+        && (active_terminals <= 512 || (20_000..=30_000).contains(&vocab_tokens))
         && (source_reps >= 40_000 || vocab_tokens <= 8_000);
     if dense_protected_profile {
         AutomaticBranchActiveStateMapStrategy::DenseRequiresFastProjection
@@ -1784,9 +1785,28 @@ mod tests {
             automatic_branch_active_state_map_strategy("p5.l1", 4_261, 233, 26_624),
             DenseRequiresFastProjection,
         );
+        // Near-global active terminal families make the stable refinement
+        // expensive while preserving too many states in medium/compact vocab
+        // lanes. A larger vocabulary can still amortize the quotient.
+        assert_eq!(
+            automatic_branch_active_state_map_strategy("p1.l1", 15_518, 2_721, 89_478),
+            None,
+        );
+        assert_eq!(
+            automatic_branch_active_state_map_strategy("p5.l1", 4_261, 2_422, 89_478),
+            None,
+        );
+        assert_eq!(
+            automatic_branch_active_state_map_strategy("p4.l1", 21_310, 2_721, 89_478),
+            DenseRequiresFastProjection,
+        );
         assert_eq!(
             automatic_branch_active_state_map_strategy("p2.l1", 82_266, 229, 48_002),
             VeryLargeProfile,
+        );
+        assert_eq!(
+            automatic_branch_active_state_map_strategy("p2.l1", 82_270, 2_721, 89_478),
+            None,
         );
 
         // Medium-state/medium-vocabulary work shifts the critical path, while
