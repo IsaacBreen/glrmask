@@ -542,6 +542,22 @@ mod tests {
     }
 
     #[test]
+    fn direct_regular_static_mask_unions_mixed_token_lengths() {
+        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"aa".to_vec())]);
+        let mut grammar = String::from("start: r0\n");
+        for index in 0..63 {
+            grammar.push_str(&format!("r{index}: \"a\" r{}\n", index + 1));
+        }
+        grammar.push_str("r63: \"a\"\n");
+
+        let normal = crate::Constraint::from_lark(&grammar, &vocab).unwrap();
+        let dynamic = DynamicConstraint::from_lark(&grammar, &vocab).unwrap();
+        assert!(!normal.uses_dynamic_runtime());
+        assert_eq!(normal.start().mask(), vec![0b11]);
+        assert_eq!(normal.start().mask(), dynamic.start().mask());
+    }
+
+    #[test]
     fn compressed_right_linear_plus_loop_commits_terminal_at_token_boundary() {
         let mut grammar = String::from("start: H s0\nplus_line: PLUS_LINE\n");
         let n = 15;
