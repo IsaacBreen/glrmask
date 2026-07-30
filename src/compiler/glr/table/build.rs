@@ -191,7 +191,7 @@ fn direct_regular_action_row_for_roots(
     grammar: &AnalyzedGrammar,
     roots: impl IntoIterator<Item = u32>,
     workspace: &mut DirectRegularClosureWorkspace,
-) -> Option<ActionRow> {
+) -> Option<(ActionRow, BitSet)> {
     let automaton = grammar.direct_regular_automaton.as_ref()?;
     workspace.begin(roots);
     let mut accepting = false;
@@ -222,6 +222,7 @@ fn direct_regular_action_row_for_roots(
     workspace.terminal_targets.sort_unstable();
     workspace.terminal_targets.dedup();
     let mut row = Vec::with_capacity(workspace.terminal_targets.len() + usize::from(accepting));
+    let mut advance = BitSet::new(grammar.num_terminals as usize + 1);
     let mut index = 0usize;
     while index < workspace.terminal_targets.len() {
         let terminal = workspace.terminal_targets[index].0;
@@ -244,13 +245,19 @@ fn direct_regular_action_row_for_roots(
                     .collect(),
             )
         };
+        advance.set(terminal as usize);
         row.push((terminal, action));
         index = end;
     }
     if accepting {
+        advance.set(grammar.num_terminals as usize);
         row.push((EOF, Action::Accept));
     }
-    Some(ActionRow::from_iter(row))
+    debug_assert!(row.windows(2).all(|entries| entries[0].0 < entries[1].0));
+    Some((
+        ActionRow::Sparse(SparseRow::from_sorted_unique(row)),
+        advance,
+    ))
 }
 
 fn try_build_direct_regular_table(grammar: &AnalyzedGrammar) -> Option<GLRTable> {
@@ -264,7 +271,7 @@ fn try_build_direct_regular_table(grammar: &AnalyzedGrammar) -> Option<GLRTable>
     // closure of its corresponding root, reusing one generation-marked DFS
     // workspace rather than allocating and retaining every closure.
     let mut initial_workspace = DirectRegularClosureWorkspace::new(automaton.states.len());
-    let initial = direct_regular_action_row_for_roots(
+    let (initial_action, initial_advance) = direct_regular_action_row_for_roots(
         grammar,
         automaton.start_states.iter().copied(),
         &mut initial_workspace,
@@ -285,8 +292,13 @@ fn try_build_direct_regular_table(grammar: &AnalyzedGrammar) -> Option<GLRTable>
         .into_iter()
         .collect::<Option<Vec<_>>>()?;
     let mut action = Vec::with_capacity(rows.len() + 1);
-    action.push(initial);
-    action.extend(rows);
+    let mut advance = Vec::with_capacity(rows.len() + 1);
+    action.push(initial_action);
+    advance.push(initial_advance);
+    for (action_row, advance_row) in rows {
+        action.push(action_row);
+        advance.push(advance_row);
+    }
 
     let num_states = u32::try_from(action.len()).ok()?;
     let mut table = GLRTable {
@@ -299,12 +311,13 @@ fn try_build_direct_regular_table(grammar: &AnalyzedGrammar) -> Option<GLRTable>
         nonterminal_display_names: Vec::new(),
         construction: GlrTableConstruction::LegacyRowBisim,
         admission_policy: AdmissionPolicy::RowPresenceExact,
-        advance: Vec::new(),
+        advance,
         forwarded_shifts: FxHashSet::default(),
-        guarded_shift_index: Vec::new(),
+        // Direct-regular rows contain only shifts, stack shifts, and accept.
+        // Matching the state count prevents runtime reconstruction of an index
+        // that is necessarily empty.
+        guarded_shift_index: vec![FxHashMap::default(); num_states as usize],
     };
-    table.rebuild_advance_rows_from_actions();
-    table.rebuild_guarded_shift_index();
     table.compress_default_action_rows();
     Some(table)
 }
@@ -2739,6 +2752,11 @@ mod tests {
         assert_eq!(direct.action, reference.action);
         assert_eq!(direct.advance, reference.advance);
         assert_eq!(direct.num_states, reference.num_states);
+        assert_eq!(
+            direct.guarded_shift_index.len(),
+            direct.num_states as usize
+        );
+        assert!(direct.guarded_shift_index.iter().all(|row| row.is_empty()));
     }
 
     #[test]
