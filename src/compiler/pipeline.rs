@@ -1585,23 +1585,6 @@ fn build_templates_for_compile(
 ) {
     let templates_started_at = Instant::now();
     if analyzed_grammar.direct_regular_automaton.is_some()
-        && !commit_template_dfas_enabled()
-    {
-        let templates_ms = elapsed_ms(templates_started_at);
-        if compile_profile_enabled() {
-            eprintln!(
-                "[glrmask/profile][templates_direct_regular] terminals={} skipped=true reason=no_commit_template_dfas total_ms={:.3}",
-                analyzed_grammar.num_terminals,
-                templates_ms,
-            );
-        }
-        return (
-            Templates::default(),
-            vec![None; analyzed_grammar.num_terminals as usize],
-            templates_ms,
-        );
-    }
-    if analyzed_grammar.direct_regular_automaton.is_some()
         && let Some(templates) =
             Templates::from_direct_regular_table(table, analyzed_grammar.num_terminals)
     {

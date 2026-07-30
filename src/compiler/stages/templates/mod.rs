@@ -5,14 +5,15 @@ fn env_flag(name: &str) -> Option<bool> {
     })
 }
 
-/// Commit-template automata and their construction proofs are production
-/// defaults. The explicit disable flag wins over the legacy enable flag so an
-/// operator always has an unambiguous rollback switch.
+/// Commit-template automata remain an explicit experimental opt-in. They must
+/// not change ordinary static compilation unless the caller requests them.
+/// The disable flag wins so an operator always has an unambiguous rollback
+/// switch when testing the feature.
 pub(crate) fn commit_template_dfas_enabled() -> bool {
     if env_flag("GLRMASK_DISABLE_COMMIT_TEMPLATE_DFAS") == Some(true) {
         return false;
     }
-    env_flag("GLRMASK_ENABLE_COMMIT_TEMPLATE_DFAS").unwrap_or(true)
+    env_flag("GLRMASK_ENABLE_COMMIT_TEMPLATE_DFAS").unwrap_or(false)
 }
 
 pub mod characterize;

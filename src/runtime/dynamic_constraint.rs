@@ -462,6 +462,31 @@ impl<'a> DynamicConstraintState<'a> {
 mod tests {
     use super::*;
 
+    fn compressed_lark_grammar(source: &str) -> crate::grammar::flat::GrammarDef {
+        let mut named = crate::import::lark::parse_lark_to_named(source).unwrap();
+        assert!(crate::grammar::right_linear::compress_large_right_linear_grammar(
+            &mut named
+        ));
+        let factored = crate::grammar::factoring::factor_named_grammar(named);
+        crate::grammar::ast::lower(&factored).unwrap()
+    }
+
+    fn compile_compressed_static(source: &str, vocab: &Vocab) -> crate::Constraint {
+        crate::compiler::pipeline::compile_owned_with_table_construction(
+            compressed_lark_grammar(source),
+            vocab,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+        )
+    }
+
+    fn compile_compressed_dynamic(source: &str, vocab: &Vocab) -> DynamicConstraint {
+        crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
+            compressed_lark_grammar(source),
+            vocab,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+        )
+    }
+
     fn vocab() -> Vocab {
         Vocab::new(vec![
             (0, b"a".to_vec()),
@@ -528,8 +553,8 @@ mod tests {
         }
         grammar.push_str("r63: \"b\"\n");
 
-        let normal = crate::Constraint::from_lark(&grammar, &vocab).unwrap();
-        let dynamic = DynamicConstraint::from_lark(&grammar, &vocab).unwrap();
+        let normal = compile_compressed_static(&grammar, &vocab);
+        let dynamic = compile_compressed_dynamic(&grammar, &vocab);
         assert_eq!(dynamic.inner.table.num_rules, 0);
         assert!(
             dynamic
@@ -575,7 +600,7 @@ mod tests {
             (2, b"\n".to_vec()),
             (3, b" a0\n".to_vec()),
         ]);
-        let constraint = crate::Constraint::from_lark(&grammar, &vocab).unwrap();
+        let constraint = compile_compressed_static(&grammar, &vocab);
         assert!(!constraint.uses_dynamic_runtime());
         let mut state = constraint.start();
 
@@ -600,7 +625,7 @@ mod tests {
         let constraint = crate::Constraint::from_lark(&grammar, &vocab).unwrap();
         assert!(!constraint.uses_dynamic_runtime());
         assert!(constraint.possible_matches_complete);
-        let dynamic = DynamicConstraint::from_lark(&grammar, &vocab).unwrap();
+        let dynamic = compile_compressed_dynamic(&grammar, &vocab);
         assert!(!dynamic.inner.possible_matches_complete);
 
         let mut static_state = constraint.start_with_rollback(4);

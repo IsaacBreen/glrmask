@@ -462,7 +462,8 @@ mod tests {
             source.push_str(&format!("s{index}: A s{} | B\n", index + 1));
         }
         source.push_str("s40: B\nA: /a/\nB: /b/\n");
-        let grammar = parse_lark_to_named(&source).unwrap();
+        let mut grammar = parse_lark_to_named(&source).unwrap();
+        assert!(compress_large_right_linear_grammar(&mut grammar));
         assert_eq!(grammar.rules.iter().filter(|rule| !rule.is_terminal).count(), 1);
         assert!(matches!(
             grammar.rules.iter().find(|rule| !rule.is_terminal).unwrap().expr,
@@ -478,7 +479,8 @@ mod tests {
         }
         source.push_str("s40: B\nA: /a/\nB: /b/\n");
 
-        let named = parse_lark_to_named(&source).unwrap();
+        let mut named = parse_lark_to_named(&source).unwrap();
+        assert!(compress_large_right_linear_grammar(&mut named));
         let factored = crate::grammar::factoring::factor_named_grammar(named);
         let lowered = crate::grammar::ast::lower(&factored).unwrap();
         assert!(lowered.direct_regular_automaton.is_some(), "AST lower lost direct regular metadata");
