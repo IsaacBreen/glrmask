@@ -3712,6 +3712,67 @@ pub(crate) fn compile_dynamic_owned_with_table_construction(
     })
 }
 
+pub(crate) fn compile_adaptive_direct_regular_owned_with_table_construction(
+    grammar: GrammarDef,
+    vocab: &Vocab,
+    default_table_construction: GlrTableConstruction,
+) -> Constraint {
+    let profile = compile_profile_enabled();
+    let total_started_at = profile.then(Instant::now);
+    let prepared_grammar = prepare_grammar(grammar);
+    run_with_compile_thread_pool(|| {
+        let analyzed_grammar = AnalyzedGrammar::from_grammar_def(&prepared_grammar);
+        if let Err(message) = analyzed_grammar.check_table_build_normal_form() {
+            panic!("[glrmask] grammar precondition violations:
+{}", message);
+        }
+
+        let (((tokenizer, possible_matches), tokenizer_and_pm_ms), (table, table_ms)) = rayon::join(
+            || {
+                let started_at = Instant::now();
+                let mut tokenizer = build_dynamic_tokenizer(&prepared_grammar);
+                tokenizer.isolate_start_state_and_drain_nullable_terminals();
+                let possible_matches = cpm::compute_constraint_possible_matches_for_vocab(
+                    &tokenizer,
+                    vocab,
+                    cpm::ConstraintPossibleMatchesConfig::EAGER,
+                );
+                ((tokenizer, possible_matches), elapsed_ms(started_at))
+            },
+            || {
+                let started_at = Instant::now();
+                let table = GLRTable::build_with_default_construction(
+                    &analyzed_grammar,
+                    default_table_construction,
+                );
+                (table, elapsed_ms(started_at))
+            },
+        );
+
+        let constraint = DynamicConstraint::from_parts_with_possible_matches(
+            table,
+            analyzed_grammar.terminal_display_names.clone(),
+            tokenizer,
+            prepared_grammar.ignore_terminal,
+            collect_special_token_terminals(&prepared_grammar),
+            vocab,
+            false,
+            possible_matches,
+        )
+        .into_constraint();
+        if let Some(total_started_at) = total_started_at {
+            eprintln!(
+                "[glrmask/profile][adaptive_direct_regular_compile] tokenizer_and_pm_ms={:.3} table_ms={:.3} parallel_core_wall_ms={:.3} total_ms={:.3}",
+                tokenizer_and_pm_ms,
+                table_ms,
+                tokenizer_and_pm_ms.max(table_ms),
+                elapsed_ms(total_started_at),
+            );
+        }
+        constraint
+    })
+}
+
 pub(crate) fn compile_owned_with_table_construction(
     grammar: GrammarDef,
     vocab: &Vocab,
@@ -3720,12 +3781,11 @@ pub(crate) fn compile_owned_with_table_construction(
     if grammar.direct_regular_automaton.is_some()
         && env_flag_enabled_by_default("GLRMASK_DIRECT_REGULAR_DYNAMIC_BACKEND")
     {
-        return compile_dynamic_owned_with_table_construction(
+        return compile_adaptive_direct_regular_owned_with_table_construction(
             grammar,
             vocab,
             default_table_construction,
-        )
-        .into_constraint();
+        );
     }
     if compile_profile_summary_enabled() || compile_top_profile_enabled() {
         let (constraint, profile) =

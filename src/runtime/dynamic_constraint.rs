@@ -5,6 +5,7 @@ use crate::automata::lexer::Lexer;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::dwa::DWA;
 use crate::compiler::glr::table::GLRTable;
+use crate::compiler::constraint_possible_matches::ConstraintPossibleMatchesComputation;
 use crate::grammar::flat::TerminalID;
 use crate::Vocab;
 
@@ -97,6 +98,49 @@ impl DynamicConstraint {
             None,
             prebuild_initial_token_programs_by_default,
         )
+    }
+
+    pub(crate) fn from_parts_with_possible_matches(
+        table: GLRTable,
+        terminal_display_names: Vec<String>,
+        tokenizer: Tokenizer,
+        ignore_terminal: Option<TerminalID>,
+        special_token_terminals: Vec<SpecialTokenTerminal>,
+        vocab: &Vocab,
+        prebuild_initial_token_programs_by_default: bool,
+        computation: ConstraintPossibleMatchesComputation,
+    ) -> Self {
+        let ConstraintPossibleMatchesComputation {
+            mapped_possible_matches,
+            runtime_dynamic_vocab,
+            complete,
+            profile: _,
+        } = computation;
+        let (possible_matches, mut id_map) = mapped_possible_matches.into_parts();
+        id_map.materialize_deferred_vocab_singletons();
+
+        let mut result = Self::from_payload_v2_with_dynamic_vocab(
+            DynamicConstraintPayloadV2 {
+                v1: DynamicConstraintPayloadV1 {
+                    table,
+                    terminal_display_names,
+                    tokenizer,
+                    ignore_terminal,
+                    token_bytes: Arc::clone(&vocab.entries),
+                },
+                special_token_terminals,
+            },
+            runtime_dynamic_vocab.vocab,
+            None,
+            prebuild_initial_token_programs_by_default,
+        );
+        result.inner.possible_matches = possible_matches;
+        result.inner.possible_matches_complete = complete;
+        result.inner.state_to_internal_tsid = id_map.tokenizer_states.original_to_internal;
+        result.inner.internal_tsid_to_states = id_map.tokenizer_states.internal_to_originals;
+        result.inner.original_token_to_internal = id_map.vocab_tokens.original_to_internal;
+        result.inner.internal_token_to_tokens = id_map.vocab_tokens.internal_to_originals;
+        result
     }
 
     fn migrate_legacy_v1(
@@ -551,7 +595,9 @@ mod tests {
 
         let constraint = crate::Constraint::from_lark(&grammar, &vocab).unwrap();
         assert!(constraint.uses_dynamic_runtime());
+        assert!(constraint.possible_matches_complete);
         let dynamic = DynamicConstraint::from_lark(&grammar, &vocab).unwrap();
+        assert!(!dynamic.inner.possible_matches_complete);
 
         let mut adaptive_state = constraint.start_with_rollback(4);
         let mut dynamic_state = dynamic.start();
