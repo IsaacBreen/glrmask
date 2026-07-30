@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::constraint_possible_matches::collector::{
@@ -2219,6 +2220,12 @@ fn sparse_root_terminal_limit() -> usize {
         .unwrap_or(16)
 }
 
+fn batched_demand_collect_enabled(structured_dispatch: bool) -> bool {
+    std::env::var("GLRMASK_PM_BATCHED_DEMAND_COLLECT")
+        .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
+        .unwrap_or(structured_dispatch)
+}
+
 fn root_terminal_union_count(tokenizer: &Tokenizer, states: &[u32]) -> usize {
     let mut seen = vec![false; tokenizer.num_terminals() as usize];
     let mut count = 0usize;
@@ -2374,35 +2381,449 @@ fn collect_sparse_root_possible_matches(
     }
 }
 
-fn attach_structured_dispatch_possible_matches(
-    tokenizer: &Tokenizer,
-    root: &crate::ds::vocab_prefix_tree::VocabPrefixTreeNode,
-    result: &mut TrieClassBuildResult,
-) {
-    if !tokenizer.has_deterministic_dispatch() {
-        return;
+struct BatchedDemandView {
+    raw_state_to_index: Vec<u32>,
+    byte_transitions: Vec<Vec<u32>>,
+    matched_masks: Vec<u128>,
+    is_end: Vec<bool>,
+    self_loop_bytes: Vec<U8Set>,
+}
+
+struct BatchedDemandGroup {
+    state_index: u32,
+    remaining: u128,
+    origins: SmallVec<[u32; 4]>,
+}
+
+struct BatchedGroupIndex {
+    mask_stride: usize,
+    generation: u32,
+    stamps: Vec<u32>,
+    positions: Vec<u32>,
+    fallback: FxHashMap<(u32, u128), usize>,
+}
+
+impl BatchedGroupIndex {
+    fn new(state_count: usize, terminal_count: usize) -> Self {
+        let mask_stride = if terminal_count <= 8 {
+            1usize << terminal_count
+        } else {
+            0
+        };
+        let slots = state_count.saturating_mul(mask_stride);
+        Self {
+            mask_stride,
+            generation: 0,
+            stamps: vec![0; slots],
+            positions: vec![0; slots],
+            fallback: FxHashMap::default(),
+        }
     }
 
+    fn begin_edge(&mut self) {
+        if self.mask_stride == 0 {
+            self.fallback.clear();
+            return;
+        }
+        self.generation = self.generation.wrapping_add(1);
+        if self.generation == 0 {
+            self.stamps.fill(0);
+            self.generation = 1;
+        }
+    }
+
+    fn get(&self, state_index: u32, remaining: u128) -> Option<usize> {
+        if self.mask_stride == 0 {
+            return self.fallback.get(&(state_index, remaining)).copied();
+        }
+        let slot = state_index as usize * self.mask_stride + remaining as usize;
+        (self.stamps[slot] == self.generation).then_some(self.positions[slot] as usize)
+    }
+
+    fn insert(&mut self, state_index: u32, remaining: u128, position: usize) {
+        if self.mask_stride == 0 {
+            self.fallback.insert((state_index, remaining), position);
+            return;
+        }
+        let slot = state_index as usize * self.mask_stride + remaining as usize;
+        self.stamps[slot] = self.generation;
+        self.positions[slot] = position as u32;
+    }
+}
+
+#[derive(Default)]
+struct BatchedDemandProfile {
+    nodes: usize,
+    child_edges: usize,
+    input_groups: usize,
+    output_groups: usize,
+    group_merges: usize,
+    transition_steps: usize,
+    matched_events: usize,
+    origin_updates: usize,
+    range_inserts: usize,
+    append_ms: f64,
+}
+
+fn append_batched_demand_matches(
+    outputs: &mut [Vec<(u32, u32)>],
+    terminal_count: usize,
+    origins: &[u32],
+    matched: u128,
+    child: &VocabPrefixTreeNode,
+    profile: &mut BatchedDemandProfile,
+) {
+    if matched == 0 {
+        return;
+    }
+    let started_at = Instant::now();
+    profile.matched_events += matched.count_ones() as usize;
+    for bit in 0..terminal_count {
+        if matched & (1u128 << bit) == 0 {
+            continue;
+        }
+        for &origin in origins {
+            profile.origin_updates += 1;
+            for range in child.reachable_token_ids().ranges() {
+                profile.range_inserts += 1;
+                outputs[origin as usize * terminal_count + bit]
+                    .push((*range.start() as u32, *range.end() as u32));
+            }
+        }
+    }
+    profile.append_ms += elapsed_ms(started_at);
+}
+
+fn collect_batched_demand_node(
+    node: &VocabPrefixTreeNode,
+    groups: Vec<BatchedDemandGroup>,
+    view: &BatchedDemandView,
+    demanded_terminals: &[TerminalID],
+    outputs: &mut [Vec<(u32, u32)>],
+    profile: &mut BatchedDemandProfile,
+    group_index: &mut BatchedGroupIndex,
+) {
+    profile.nodes += 1;
+    profile.input_groups += groups.len();
+    for (segment, child) in node.iter_children() {
+        profile.child_edges += 1;
+        let mut next_groups = Vec::<BatchedDemandGroup>::new();
+        group_index.begin_edge();
+        for group in &groups {
+            let mut state_index = group.state_index;
+            let mut remaining = group.remaining;
+            let mut matched = 0u128;
+            let mut live = true;
+            for &byte in segment {
+                profile.transition_steps += 1;
+                let target_index = view.byte_transitions[byte as usize][state_index as usize];
+                if target_index == u32::MAX {
+                    live = false;
+                    break;
+                }
+                state_index = target_index;
+                let newly_matched = view.matched_masks[target_index as usize] & remaining;
+                matched |= newly_matched;
+                remaining &= !newly_matched;
+                if remaining == 0 {
+                    break;
+                }
+            }
+
+            append_batched_demand_matches(
+                outputs,
+                demanded_terminals.len(),
+                &group.origins,
+                matched,
+                child,
+                profile,
+            );
+            if !live || remaining == 0 {
+                continue;
+            }
+            if view.is_end[state_index as usize]
+                || U8Set::from_words(*child.subtree_bytes())
+                    .is_subset(&view.self_loop_bytes[state_index as usize])
+            {
+                continue;
+            }
+            if let Some(existing_group_index) = group_index.get(state_index, remaining) {
+                profile.group_merges += 1;
+                next_groups[existing_group_index]
+                    .origins
+                    .extend_from_slice(&group.origins);
+            } else {
+                let next_group_index = next_groups.len();
+                group_index.insert(state_index, remaining, next_group_index);
+                next_groups.push(BatchedDemandGroup {
+                    state_index,
+                    remaining,
+                    origins: group.origins.clone(),
+                });
+            }
+        }
+        profile.output_groups += next_groups.len();
+        if !next_groups.is_empty() {
+            collect_batched_demand_node(
+                child,
+                next_groups,
+                view,
+                demanded_terminals,
+                outputs,
+                profile,
+                group_index,
+            );
+        }
+    }
+}
+
+fn interval_map_from_batched_ranges(
+    ranges_by_terminal: &mut [Vec<(u32, u32)>],
+    demanded_terminals: &[TerminalID],
+) -> IntervalPossibleMatchMap {
+    let mut by_ranges = BTreeMap::<Vec<(u32, u32)>, Vec<TerminalID>>::new();
+    for (&terminal, ranges) in demanded_terminals.iter().zip(ranges_by_terminal) {
+        normalize_token_ranges(ranges);
+        if !ranges.is_empty() {
+            by_ranges.entry(std::mem::take(ranges)).or_default().push(terminal);
+        }
+    }
+    let mut map = by_ranges
+        .into_iter()
+        .map(|(ranges, mut terminals)| {
+            terminals.sort_unstable();
+            terminals.dedup();
+            TerminalRangeGroup {
+                terminals: terminals.into_boxed_slice(),
+                ranges,
+            }
+        })
+        .collect::<Vec<_>>();
+    map.sort_unstable_by(|left, right| {
+        left.terminals
+            .as_ref()
+            .cmp(right.terminals.as_ref())
+            .then_with(|| left.ranges.cmp(&right.ranges))
+    });
+    map
+}
+
+fn collect_batched_demand_possible_matches(
+    tokenizer: &Tokenizer,
+    root: &VocabPrefixTreeNode,
+    entries: &[u32],
+    demand: &DelayedTerminalDemand,
+) -> TrieClassBuildResult {
+    let demanded_terminals = demand
+        .terminals
+        .iter()
+        .map(|terminal| terminal as TerminalID)
+        .collect::<Vec<_>>();
+    assert!(!demanded_terminals.is_empty() && demanded_terminals.len() <= 128);
+    let full_mask = if demanded_terminals.len() == 128 {
+        u128::MAX
+    } else {
+        (1u128 << demanded_terminals.len()) - 1
+    };
+    let mut terminal_to_bit = vec![0u128; tokenizer.num_terminals() as usize];
+    for (bit, &terminal) in demanded_terminals.iter().enumerate() {
+        terminal_to_bit[terminal as usize] = 1u128 << bit;
+    }
+
+    let relevant_states = demand
+        .raw_state_relevant
+        .iter()
+        .enumerate()
+        .filter_map(|(state, &relevant)| relevant.then_some(state as u32))
+        .collect::<Vec<_>>();
+    let mut raw_state_to_index = vec![u32::MAX; tokenizer.num_states() as usize];
+    for (index, &state) in relevant_states.iter().enumerate() {
+        raw_state_to_index[state as usize] = index as u32;
+    }
+    let mut byte_transitions = vec![vec![u32::MAX; relevant_states.len()]; 256];
+    let mut matched_masks = Vec::with_capacity(relevant_states.len());
+    let mut is_end = Vec::with_capacity(relevant_states.len());
+    for (state_index, &state) in relevant_states.iter().enumerate() {
+        for (byte, target) in tokenizer.transitions_from(state) {
+            let target_index = raw_state_to_index[target as usize];
+            if target_index != u32::MAX {
+                byte_transitions[byte as usize][state_index] = target_index;
+            }
+        }
+        matched_masks.push(
+            tokenizer
+                .matched_terminals_iter(state)
+                .fold(0u128, |mask, terminal| {
+                    mask | terminal_to_bit[terminal as usize]
+                }),
+        );
+        is_end.push(tokenizer.is_end(state));
+    }
+    let self_loop_bytes = relevant_states
+        .iter()
+        .map(|&state| tokenizer.self_loop_bytes(state))
+        .collect();
+    let view = BatchedDemandView {
+        raw_state_to_index,
+        byte_transitions,
+        matched_masks,
+        is_end,
+        self_loop_bytes,
+    };
+
+    let mut outputs = (0..entries.len() * demanded_terminals.len())
+        .map(|_| Vec::new())
+        .collect::<Vec<_>>();
+    if root.has_token() {
+        let token_id = root.token_id() as u32;
+        for (origin, &state) in entries.iter().enumerate() {
+            let state_index = view.raw_state_to_index[state as usize] as usize;
+            let matched = view.matched_masks[state_index];
+            for bit in 0..demanded_terminals.len() {
+                if matched & (1u128 << bit) != 0 {
+                    outputs[origin * demanded_terminals.len() + bit].push((token_id, token_id));
+                }
+            }
+        }
+    }
+    let groups = entries
+        .iter()
+        .enumerate()
+        .map(|(origin, &state)| BatchedDemandGroup {
+            state_index: view.raw_state_to_index[state as usize],
+            remaining: full_mask,
+            origins: SmallVec::from_slice(&[origin as u32]),
+        })
+        .collect::<Vec<_>>();
+    let mut profile = BatchedDemandProfile::default();
+    let mut group_index =
+        BatchedGroupIndex::new(view.matched_masks.len(), demanded_terminals.len());
+    let walk_started_at = Instant::now();
+    collect_batched_demand_node(
+        root,
+        groups,
+        &view,
+        &demanded_terminals,
+        &mut outputs,
+        &mut profile,
+        &mut group_index,
+    );
+    let walk_ms = elapsed_ms(walk_started_at);
+
+    let class_started_at = Instant::now();
+    let mut state_classes = vec![u32::MAX; tokenizer.num_states() as usize];
+    let mut class_maps = Vec::<Arc<IntervalPossibleMatchMap>>::new();
+    let mut map_to_class = FxHashMap::<IntervalPossibleMatchMap, u32>::default();
+    for (origin, &state) in entries.iter().enumerate() {
+        let start = origin * demanded_terminals.len();
+        let end = start + demanded_terminals.len();
+        let interval_map = interval_map_from_batched_ranges(
+            &mut outputs[start..end],
+            &demanded_terminals,
+        );
+        let class_id = if let Some(&class_id) = map_to_class.get(&interval_map) {
+            class_id
+        } else {
+            let class_id = class_maps.len() as u32;
+            map_to_class.insert(interval_map.clone(), class_id);
+            class_maps.push(Arc::new(interval_map));
+            class_id
+        };
+        state_classes[state as usize] = class_id;
+    }
+    let class_ms = elapsed_ms(class_started_at);
+    if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+    {
+        eprintln!(
+            "[glrmask/profile][batched_demand_detail] nodes={} child_edges={} input_groups={} output_groups={} group_merges={} transition_steps={} matched_events={} origin_updates={} range_inserts={} append_ms={:.3} walk_ms={:.3} class_ms={:.3}",
+            profile.nodes,
+            profile.child_edges,
+            profile.input_groups,
+            profile.output_groups,
+            profile.group_merges,
+            profile.transition_steps,
+            profile.matched_events,
+            profile.origin_updates,
+            profile.range_inserts,
+            profile.append_ms,
+            walk_ms,
+            class_ms,
+        );
+    }
+    TrieClassBuildResult {
+        state_classes,
+        class_maps,
+    }
+}
+
+fn attach_structured_dispatch_possible_matches(
+    tokenizer: &Tokenizer,
+    result: &mut TrieClassBuildResult,
+    demand: &DelayedTerminalDemand,
+) {
+    let Some(roots) = tokenizer.deterministic_dispatch_roots() else {
+        return;
+    };
+
     let start = tokenizer.start_state();
-    let dispatch = collect_sparse_root_possible_matches(tokenizer, root, &[start], None);
-    let dispatch_class = dispatch
-        .state_classes
-        .get(start as usize)
-        .copied()
-        .filter(|&class| class != u32::MAX)
-        .expect("structured lexer dispatch PM row must be collected");
-    let dispatch_map = dispatch.class_maps[dispatch_class as usize].as_ref();
+    let mut seen_classes = vec![false; result.class_maps.len()];
+    let mut ranges_by_terminal = BTreeMap::<TerminalID, Vec<(u32, u32)>>::new();
+    for &root in roots {
+        let class = result.state_classes[root as usize];
+        if class == u32::MAX || seen_classes[class as usize] {
+            continue;
+        }
+        seen_classes[class as usize] = true;
+        for group in result.class_maps[class as usize].iter() {
+            for &terminal in group.terminals.iter() {
+                ranges_by_terminal
+                    .entry(terminal)
+                    .or_default()
+                    .extend_from_slice(&group.ranges);
+            }
+        }
+    }
+    let mut grouped_by_ranges = BTreeMap::<Vec<(u32, u32)>, Vec<TerminalID>>::new();
+    for (terminal, mut ranges) in ranges_by_terminal {
+        normalize_token_ranges(&mut ranges);
+        if !ranges.is_empty() {
+            grouped_by_ranges.entry(ranges).or_default().push(terminal);
+        }
+    }
+    let mut dispatch_map = grouped_by_ranges
+        .into_iter()
+        .map(|(ranges, mut terminals)| {
+            terminals.sort_unstable();
+            terminals.dedup();
+            TerminalRangeGroup {
+                terminals: terminals.into_boxed_slice(),
+                ranges,
+            }
+        })
+        .collect::<IntervalPossibleMatchMap>();
+    dispatch_map.sort_unstable_by(|left, right| {
+        left.terminals
+            .as_ref()
+            .cmp(right.terminals.as_ref())
+            .then_with(|| left.ranges.cmp(&right.ranges))
+    });
     let class = result
         .class_maps
         .iter()
-        .position(|existing| existing.as_ref() == dispatch_map)
+        .position(|existing| existing.as_ref() == &dispatch_map)
         .map(|class| class as u32)
         .unwrap_or_else(|| {
             let class = result.class_maps.len() as u32;
-            result.class_maps.push(Arc::new(dispatch_map.clone()));
+            result.class_maps.push(Arc::new(dispatch_map));
             class
         });
     result.state_classes[start as usize] = class;
+    for &root in roots {
+        if !demand.raw_query_state[root as usize] {
+            result.state_classes[root as usize] = u32::MAX;
+        }
+    }
 }
 
 pub(crate) fn compute_constraint_possible_matches(
@@ -2538,11 +2959,23 @@ fn compute_constraint_possible_matches_with_artifacts(
 
     let structured_dispatch = tokenizer.has_deterministic_dispatch();
     let dispatch_start = structured_dispatch.then(|| tokenizer.start_state());
-    let trie_build_states: Vec<u32> = (0..tokenizer.num_states())
+    let mut trie_build_states: Vec<u32> = (0..tokenizer.num_states())
         .filter(|state| {
             Some(*state) != dispatch_start && demand.raw_query_state[*state as usize]
         })
         .collect();
+    if structured_dispatch && demand.raw_query_state[tokenizer.start_state() as usize] {
+        trie_build_states.extend(
+            tokenizer
+                .deterministic_dispatch_roots()
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|&state| demand.raw_state_relevant[state as usize]),
+        );
+        trie_build_states.sort_unstable();
+        trie_build_states.dedup();
+    }
 
     if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
         || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
@@ -2566,8 +2999,30 @@ fn compute_constraint_possible_matches_with_artifacts(
         || (sparse_root_collect_enabled()
             && trie_build_states.len() <= sparse_root_state_limit()
             && root_terminal_union <= sparse_root_terminal_limit());
+    let use_batched_demand_collect = batched_demand_collect_enabled(structured_dispatch)
+        && (!tokenizer.has_epsilon_transitions() || structured_dispatch);
 
-    let mut trie_class_result = if use_nfa_powerset_collect {
+    let mut trie_class_result = if use_batched_demand_collect {
+        let started_at = Instant::now();
+        let result = collect_batched_demand_possible_matches(
+            tokenizer,
+            &trie.root,
+            &trie_build_states,
+            &demand,
+        );
+        if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+        {
+            eprintln!(
+                "[glrmask/profile][trie_build_batched_demand] states={} terminals={} classes={} ms={:.3}",
+                trie_build_states.len(),
+                root_terminal_union,
+                result.class_maps.len(),
+                elapsed_ms(started_at),
+            );
+        }
+        result
+    } else if use_nfa_powerset_collect {
         let mut relevant_bytes = [false; 256];
         for bytes in &ordered_vocab.ordered_token_bytes {
             for &byte in bytes {
@@ -2651,7 +3106,7 @@ fn compute_constraint_possible_matches_with_artifacts(
     if tokenizer.has_deterministic_dispatch()
         && demand.raw_query_state[tokenizer.start_state() as usize]
     {
-        attach_structured_dispatch_possible_matches(tokenizer, &trie.root, &mut trie_class_result);
+        attach_structured_dispatch_possible_matches(tokenizer, &mut trie_class_result, &demand);
     }
     trie_class_result =
         filter_trie_class_result_to_terminals(trie_class_result, &demand.terminals);
