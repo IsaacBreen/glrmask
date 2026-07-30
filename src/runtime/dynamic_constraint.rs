@@ -567,6 +567,30 @@ mod tests {
     }
 
     #[test]
+    fn compressed_static_unions_mixed_l1_l2p_token_lengths() {
+        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"aa".to_vec())]);
+        let mut grammar = String::from("start: r0\n");
+        for index in 0..63 {
+            grammar.push_str(&format!("r{index}: \"a\" r{}\n", index + 1));
+        }
+        grammar.push_str("r63: \"a\"\n");
+
+        let static_constraint = compile_compressed_static(&grammar, &vocab);
+        let dynamic_constraint = compile_compressed_dynamic(&grammar, &vocab);
+        assert!(!static_constraint.uses_dynamic_runtime());
+        assert_eq!(static_constraint.table.num_rules, 0);
+        assert!(
+            !static_constraint.parser_top_accept_parts.is_empty(),
+            "regression must exercise the direct parser-acceptance summaries",
+        );
+
+        let static_mask = static_constraint.start().mask();
+        assert_ne!(static_mask[0] & (1 << 0), 0, "single-byte token must be allowed");
+        assert_ne!(static_mask[0] & (1 << 1), 0, "two-byte token must be allowed");
+        assert_eq!(static_mask, dynamic_constraint.start().mask());
+    }
+
+    #[test]
     fn compressed_right_linear_plus_loop_commits_terminal_at_token_boundary() {
         let mut grammar = String::from("start: H s0\nplus_line: PLUS_LINE\n");
         let n = 15;
