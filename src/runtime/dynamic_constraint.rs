@@ -576,7 +576,7 @@ mod tests {
             (3, b" a0\n".to_vec()),
         ]);
         let constraint = crate::Constraint::from_lark(&grammar, &vocab).unwrap();
-        assert!(constraint.uses_dynamic_runtime());
+        assert!(!constraint.uses_dynamic_runtime());
         let mut state = constraint.start();
 
         state.commit_token(0).unwrap();
@@ -589,7 +589,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_regular_constraint_uses_adaptive_backend_and_roundtrips() {
+    fn direct_regular_static_constraint_roundtrips_and_matches_dynamic() {
         let vocab = vocab();
         let mut grammar = String::from("start: r0\n");
         for index in 0..63 {
@@ -598,35 +598,35 @@ mod tests {
         grammar.push_str("r63: \"b\"\n");
 
         let constraint = crate::Constraint::from_lark(&grammar, &vocab).unwrap();
-        assert!(constraint.uses_dynamic_runtime());
+        assert!(!constraint.uses_dynamic_runtime());
         assert!(constraint.possible_matches_complete);
         let dynamic = DynamicConstraint::from_lark(&grammar, &vocab).unwrap();
         assert!(!dynamic.inner.possible_matches_complete);
 
-        let mut adaptive_state = constraint.start_with_rollback(4);
+        let mut static_state = constraint.start_with_rollback(4);
         let mut dynamic_state = dynamic.start();
-        assert_eq!(adaptive_state.mask(), dynamic_state.mask());
-        assert_eq!(adaptive_state.forced(), dynamic_state.forced());
+        assert_eq!(static_state.mask(), dynamic_state.mask());
+        assert_eq!(static_state.forced(), dynamic_state.forced());
 
         for token in [3, 3] {
-            adaptive_state.commit_token(token).unwrap();
+            static_state.commit_token(token).unwrap();
             dynamic_state.commit_token(token).unwrap();
-            assert_eq!(adaptive_state.mask(), dynamic_state.mask());
-            assert_eq!(adaptive_state.is_complete(), dynamic_state.is_complete());
+            assert_eq!(static_state.mask(), dynamic_state.mask());
+            assert_eq!(static_state.is_complete(), dynamic_state.is_complete());
         }
 
-        let before_third = adaptive_state.mask();
-        adaptive_state.commit_token(0).unwrap();
+        let before_third = static_state.mask();
+        static_state.commit_token(0).unwrap();
         dynamic_state.commit_token(0).unwrap();
-        let after_third = adaptive_state.mask();
+        let after_third = static_state.mask();
         assert_eq!(after_third, dynamic_state.mask());
-        adaptive_state.rollback(1).unwrap();
-        assert_eq!(adaptive_state.mask(), before_third);
-        adaptive_state.commit_token(0).unwrap();
-        assert_eq!(adaptive_state.mask(), after_third);
+        static_state.rollback(1).unwrap();
+        assert_eq!(static_state.mask(), before_third);
+        static_state.commit_token(0).unwrap();
+        assert_eq!(static_state.mask(), after_third);
 
         let loaded = crate::Constraint::load(&constraint.save()).unwrap();
-        assert!(loaded.uses_dynamic_runtime());
+        assert!(!loaded.uses_dynamic_runtime());
         let mut loaded_state = loaded.start();
         let mut original_state = constraint.start();
         assert_eq!(loaded_state.mask(), original_state.mask());

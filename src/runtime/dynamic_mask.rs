@@ -2272,7 +2272,7 @@ nt start ::= A C | B D;
     }
 
     #[test]
-    fn adaptive_direct_regular_uses_compiled_delayed_possible_matches() {
+    fn static_and_dynamic_direct_regular_compilation_preserve_backend_contract() {
         let vocab = Vocab::new(vec![
             (0, b"a".to_vec()),
             (1, b"ab".to_vec()),
@@ -2294,19 +2294,13 @@ nt start ::= A r0;
         grammar.push_str("nt r39 ::= X;
 ");
 
-        let named = crate::grammar::glrm::from_glrm(&grammar).unwrap();
-        let factored = crate::grammar::factoring::factor_named_grammar(named);
-        let grammar_def = crate::grammar::ast::lower(&factored).unwrap();
-        let constraint = crate::compiler::pipeline::compile_adaptive_direct_regular_owned_with_table_construction(
-            grammar_def,
-            &vocab,
-            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
-        );
-        assert!(constraint.uses_dynamic_runtime());
+        let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+        assert!(!constraint.uses_dynamic_runtime());
         assert!(constraint.possible_matches_complete);
         assert!(!constraint.possible_matches.is_empty());
 
         let dynamic = DynamicConstraint::from_glrm_grammar(&grammar, &vocab).unwrap();
+        assert!(dynamic.inner.uses_dynamic_runtime());
         assert!(!dynamic.inner.possible_matches_complete);
 
         fn delayed_query(constraint: &Constraint) -> (u32, TerminalID) {
