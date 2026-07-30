@@ -2306,6 +2306,28 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     pub(crate) fn indexed_dag_many(
         roots: &[Self],
     ) -> (IndexedLeveledGss<T, A>, Vec<u32>) {
+        let (dag, root_ids, _, _) = Self::indexed_dag_many_reusing(
+            roots,
+            Vec::new(),
+            Vec::new(),
+            FxHashMap::default(),
+            FxHashMap::default(),
+        );
+        (dag, root_ids)
+    }
+
+    pub(crate) fn indexed_dag_many_reusing(
+        roots: &[Self],
+        mut nodes: Vec<IndexedLeveledGssNode<T, A>>,
+        mut root_ids: Vec<u32>,
+        mut lower_ids: FxHashMap<usize, u32>,
+        mut upper_ids: FxHashMap<usize, u32>,
+    ) -> (
+        IndexedLeveledGss<T, A>,
+        Vec<u32>,
+        FxHashMap<usize, u32>,
+        FxHashMap<usize, u32>,
+    ) {
         fn index_lower<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
             lower: &Arc<Lower<T>>,
             nodes: &mut Vec<IndexedLeveledGssNode<T, A>>,
@@ -2382,22 +2404,25 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             id
         }
 
-        let mut nodes = Vec::new();
-        let mut lower_ids = FxHashMap::default();
-        let mut upper_ids = FxHashMap::default();
-        let root_ids = roots
-            .iter()
-            .map(|root| {
-                index_upper(
-                    &root.inner,
-                    &mut nodes,
-                    &mut lower_ids,
-                    &mut upper_ids,
-                )
-            })
-            .collect::<Vec<_>>();
+        nodes.clear();
+        root_ids.clear();
+        lower_ids.clear();
+        upper_ids.clear();
+        root_ids.extend(roots.iter().map(|root| {
+            index_upper(
+                &root.inner,
+                &mut nodes,
+                &mut lower_ids,
+                &mut upper_ids,
+            )
+        }));
         let root = root_ids.first().copied().unwrap_or(0);
-        (IndexedLeveledGss { root, nodes }, root_ids)
+        (
+            IndexedLeveledGss { root, nodes },
+            root_ids,
+            lower_ids,
+            upper_ids,
+        )
     }
 }
 

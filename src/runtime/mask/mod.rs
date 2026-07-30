@@ -1086,6 +1086,10 @@ pub(crate) struct IndexedDagMaskRuntime {
     lower_sources: FxHashMap<usize, IndexedLowerIdentity<u32>>,
     accumulators: Vec<DenseMaskAcc>,
     accumulator_ids: FxHashMap<DenseAccIdentity, u32>,
+    index_nodes: Vec<IndexedLeveledGssNode<u32, DenseMaskAcc>>,
+    index_roots: Vec<u32>,
+    index_lower_ids: FxHashMap<usize, u32>,
+    index_upper_ids: FxHashMap<usize, u32>,
 }
 
 impl IndexedDagMaskRuntime {
@@ -2922,7 +2926,18 @@ impl<'a> ConstraintState<'a> {
 
         if !seed_gsses.is_empty() {
             let started = profile.then(Instant::now);
-            let (dag, roots) = DenseMaskGSS::indexed_dag_many(&seed_gsses);
+            let index_nodes = std::mem::take(&mut indexed_runtime.index_nodes);
+            let index_roots = std::mem::take(&mut indexed_runtime.index_roots);
+            let index_lower_ids = std::mem::take(&mut indexed_runtime.index_lower_ids);
+            let index_upper_ids = std::mem::take(&mut indexed_runtime.index_upper_ids);
+            let (dag, roots, index_lower_ids, index_upper_ids) =
+                DenseMaskGSS::indexed_dag_many_reusing(
+                    &seed_gsses,
+                    index_nodes,
+                    index_roots,
+                    index_lower_ids,
+                    index_upper_ids,
+                );
             if let Some(started) = started {
                 index_ns += elapsed_ns(started);
             }
@@ -2935,7 +2950,8 @@ impl<'a> ConstraintState<'a> {
                 &mut indexed_runtime,
             );
             for (((root, target), transition_weight), _) in roots
-                .into_iter()
+                .iter()
+                .copied()
                 .zip(seed_targets.into_iter())
                 .zip(seed_weights.into_iter())
                 .zip(seed_gsses.into_iter())
@@ -2966,6 +2982,10 @@ impl<'a> ConstraintState<'a> {
             memo_dense_words = evaluator.memo_dense_words;
             memo_nonzero_words = evaluator.memo_nonzero_words;
             memo_max_nonzero_words = evaluator.memo_max_nonzero_words;
+            indexed_runtime.index_nodes = dag.nodes;
+            indexed_runtime.index_roots = roots;
+            indexed_runtime.index_lower_ids = index_lower_ids;
+            indexed_runtime.index_upper_ids = index_upper_ids;
         }
 
         if let Some(accepted) = accepted {
