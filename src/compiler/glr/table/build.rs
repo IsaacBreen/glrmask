@@ -403,13 +403,8 @@ pub(super) fn build_table_with_default_construction(
     default_construction: GlrTableConstruction,
 ) -> GLRTable {
     let t1 = std::time::Instant::now();
-    // A directly lowered regular grammar has no CFG rules to feed to the LR
-    // builders. The construction override may select among LR builders when
-    // a CFG fallback exists, but it cannot replace the only representation of
-    // a direct-regular grammar.
-    let direct_regular_is_only_representation =
-        grammar.direct_regular_automaton.is_some() && grammar.rules.is_empty();
-    if (direct_regular_is_only_representation || glr_table_construction_override().is_none())
+    let construction_override = glr_table_construction_override();
+    if construction_override.is_none()
         && let Some(table) = try_build_direct_regular_table(grammar)
     {
         if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
@@ -424,6 +419,10 @@ pub(super) fn build_table_with_default_construction(
         }
         return table;
     }
+    assert!(
+        !grammar.rules.is_empty(),
+        "{GLR_TABLE_CONSTRUCTION_ENV} requested an LR table builder, but this grammar has only a direct-regular representation and no CFG rules"
+    );
     let construction = selected_glr_table_construction(grammar, default_construction);
     let mut lr1_ms = 0.0;
     let mut table = match construction {

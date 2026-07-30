@@ -14,8 +14,28 @@ use crate::grammar::expr_nfa::ExprNfaBuilder;
 const MIN_PARSER_RULES: usize = 32;
 const MAX_MACRO_NODES: usize = 64;
 const DISABLE_ENV: &str = "GLRMASK_DISABLE_RIGHT_LINEAR_COMPRESSION";
+const GLR_TABLE_CONSTRUCTION_ENV: &str = "GLRMASK_GLR_TABLE_CONSTRUCTION";
+
+fn explicit_lr_table_construction_requested(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "legacy" | "legacy-row-bisim" | "row-bisim" | "lalr" | "core-lac"
+        )
+    })
+}
 
 fn enabled() -> bool {
+    // Right-linear compression replaces the original parser-rule graph with
+    // one direct ExprNFA. An explicit LR table-construction override is a
+    // request to compile that original CFG, so it must suppress this earlier
+    // representation-changing pass.
+    if explicit_lr_table_construction_requested(
+        std::env::var(GLR_TABLE_CONSTRUCTION_ENV).ok().as_deref(),
+    ) {
+        return false;
+    }
+
     std::env::var(DISABLE_ENV)
         .map(|value| {
             !matches!(
@@ -454,6 +474,23 @@ pub fn compress_large_right_linear_grammar(grammar: &mut NamedGrammar) -> bool {
 mod tests {
     use super::*;
     use crate::import::lark::{parse_lark_to_named, parse_lark_to_named_uncompressed};
+
+    #[test]
+    fn explicit_lr_builder_values_preserve_the_cfg() {
+        for value in [
+            "legacy",
+            "LEGACY-ROW-BISIM",
+            " row-bisim ",
+            "lalr",
+            "core-lac",
+        ] {
+            assert!(explicit_lr_table_construction_requested(Some(value)));
+        }
+        for value in ["", "direct-regular", "unknown"] {
+            assert!(!explicit_lr_table_construction_requested(Some(value)));
+        }
+        assert!(!explicit_lr_table_construction_requested(None));
+    }
 
     #[test]
     fn compresses_large_tail_recursive_state_graph() {
