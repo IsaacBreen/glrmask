@@ -57,6 +57,40 @@ fn single_path_direct_stack_work_within_budget(
     true
 }
 
+fn materialize_single_path_seed_intersection(
+    base: &[u64],
+    dense: &mut Vec<u64>,
+    internal_tsid: u32,
+    weight: &Weight,
+    precomputed: &DenseTokenMaskCache,
+) -> bool {
+    debug_assert!(!weight.is_full());
+    let Some(token_set) = weight.0.get(internal_tsid) else {
+        dense.clear();
+        return false;
+    };
+
+    dense.clear();
+    dense.resize(base.len(), 0);
+    let token_set_key = Arc::as_ptr(token_set) as usize;
+    if let Some(mask) = precomputed.get(&token_set_key) {
+        let mut any = false;
+        for (idx, dense_word) in dense.iter_mut().enumerate() {
+            *dense_word = base[idx] & mask.get(idx).copied().unwrap_or(0);
+            any |= *dense_word != 0;
+        }
+        return any;
+    }
+
+    let mut any = false;
+    DenseMaskAcc::for_each_token_range_word(token_set, base.len(), |word_idx, token_mask| {
+        let word = base[word_idx] & token_mask;
+        dense[word_idx] |= word;
+        any |= word != 0;
+    });
+    any
+}
+
 pub(crate) fn indexed_dag_mask_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -2286,7 +2320,13 @@ impl<'a> ConstraintState<'a> {
             let internal_tsid = self
                 .constraint
                 .internal_tsid_for_state(original_tokenizer_state);
-            if !self.fill_single_path_seed_dense(
+            let seed_base = &self.constraint.seed_universe_dense;
+            let mut dense_is_seed = terminals_disallowed.is_empty();
+            if dense_is_seed {
+                if seed_base.is_empty() {
+                    continue;
+                }
+            } else if !self.fill_single_path_seed_dense(
                 &terminals_disallowed,
                 &mut single_path_aux,
                 &mut single_path_acc,
@@ -2301,10 +2341,15 @@ impl<'a> ConstraintState<'a> {
                 let dwa_state = &parser_dwa.states()[dwa_state_id as usize];
                 if let Some(final_weight) = &dwa_state.final_weight {
                     used_direct_final = true;
+                    let dense = if dense_is_seed {
+                        seed_base.as_ref()
+                    } else {
+                        single_path_acc.as_slice()
+                    };
                     self.merge_single_path_final_weight_to_internal(
                         final_weight,
                         internal_tsid,
-                        &single_path_acc,
+                        dense,
                         precomputed,
                         &mut merged,
                         Some(&mut *buf),
@@ -2326,10 +2371,15 @@ impl<'a> ConstraintState<'a> {
                         .or_else(|| self.constraint.parser_top_accept.get(&DEFAULT_LABEL))
                     {
                         used_direct_final = true;
+                        let dense = if dense_is_seed {
+                            seed_base.as_ref()
+                        } else {
+                            single_path_acc.as_slice()
+                        };
                         self.merge_single_path_final_weight_to_internal(
                             accept_weight,
                             internal_tsid,
-                            &single_path_acc,
+                            dense,
                             precomputed,
                             &mut merged,
                             Some(&mut *buf),
@@ -2347,11 +2397,16 @@ impl<'a> ConstraintState<'a> {
                         })
                     {
                         used_direct_final = true;
+                        let dense = if dense_is_seed {
+                            seed_base.as_ref()
+                        } else {
+                            single_path_acc.as_slice()
+                        };
                         for accept_weight in accept_parts {
                             self.merge_single_path_final_weight_to_internal(
                                 accept_weight,
                                 internal_tsid,
-                                &single_path_acc,
+                                dense,
                                 precomputed,
                                 &mut merged,
                                 Some(&mut *buf),
@@ -2368,7 +2423,20 @@ impl<'a> ConstraintState<'a> {
                     break;
                 };
 
-                if !Self::intersect_single_path_dense_with_weight_in_place(
+                if dense_is_seed {
+                    if !weight.is_full() {
+                        if !materialize_single_path_seed_intersection(
+                            seed_base,
+                            &mut single_path_acc,
+                            internal_tsid,
+                            weight,
+                            precomputed,
+                        ) {
+                            break;
+                        }
+                        dense_is_seed = false;
+                    }
+                } else if !Self::intersect_single_path_dense_with_weight_in_place(
                     &mut single_path_acc,
                     &mut single_path_aux,
                     internal_tsid,
