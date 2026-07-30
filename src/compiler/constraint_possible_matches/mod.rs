@@ -2759,71 +2759,37 @@ fn collect_batched_demand_possible_matches(
 
 fn attach_structured_dispatch_possible_matches(
     tokenizer: &Tokenizer,
+    root: &crate::ds::vocab_prefix_tree::VocabPrefixTreeNode,
     result: &mut TrieClassBuildResult,
-    demand: &DelayedTerminalDemand,
 ) {
-    let Some(roots) = tokenizer.deterministic_dispatch_roots() else {
+    if !tokenizer.has_deterministic_dispatch() {
         return;
-    };
+    }
 
+    // Keep deterministic dispatch outside the ordinary demand collector. Its
+    // roots are implementation detail states, not independent parser queries;
+    // adding all of them to trie_build_states greatly increases temporary PM
+    // state and causes allocator-retention cliffs in long-lived compilers.
     let start = tokenizer.start_state();
-    let mut seen_classes = vec![false; result.class_maps.len()];
-    let mut ranges_by_terminal = BTreeMap::<TerminalID, Vec<(u32, u32)>>::new();
-    for &root in roots {
-        let class = result.state_classes[root as usize];
-        if class == u32::MAX || seen_classes[class as usize] {
-            continue;
-        }
-        seen_classes[class as usize] = true;
-        for group in result.class_maps[class as usize].iter() {
-            for &terminal in group.terminals.iter() {
-                ranges_by_terminal
-                    .entry(terminal)
-                    .or_default()
-                    .extend_from_slice(&group.ranges);
-            }
-        }
-    }
-    let mut grouped_by_ranges = BTreeMap::<Vec<(u32, u32)>, Vec<TerminalID>>::new();
-    for (terminal, mut ranges) in ranges_by_terminal {
-        normalize_token_ranges(&mut ranges);
-        if !ranges.is_empty() {
-            grouped_by_ranges.entry(ranges).or_default().push(terminal);
-        }
-    }
-    let mut dispatch_map = grouped_by_ranges
-        .into_iter()
-        .map(|(ranges, mut terminals)| {
-            terminals.sort_unstable();
-            terminals.dedup();
-            TerminalRangeGroup {
-                terminals: terminals.into_boxed_slice(),
-                ranges,
-            }
-        })
-        .collect::<IntervalPossibleMatchMap>();
-    dispatch_map.sort_unstable_by(|left, right| {
-        left.terminals
-            .as_ref()
-            .cmp(right.terminals.as_ref())
-            .then_with(|| left.ranges.cmp(&right.ranges))
-    });
+    let dispatch = collect_sparse_root_possible_matches(tokenizer, root, &[start], None);
+    let dispatch_class = dispatch
+        .state_classes
+        .get(start as usize)
+        .copied()
+        .filter(|&class| class != u32::MAX)
+        .expect("structured lexer dispatch PM row must be collected");
+    let dispatch_map = dispatch.class_maps[dispatch_class as usize].as_ref();
     let class = result
         .class_maps
         .iter()
-        .position(|existing| existing.as_ref() == &dispatch_map)
+        .position(|existing| existing.as_ref() == dispatch_map)
         .map(|class| class as u32)
         .unwrap_or_else(|| {
             let class = result.class_maps.len() as u32;
-            result.class_maps.push(Arc::new(dispatch_map));
+            result.class_maps.push(Arc::new(dispatch_map.clone()));
             class
         });
     result.state_classes[start as usize] = class;
-    for &root in roots {
-        if !demand.raw_query_state[root as usize] {
-            result.state_classes[root as usize] = u32::MAX;
-        }
-    }
 }
 
 pub(crate) fn compute_constraint_possible_matches(
@@ -2959,23 +2925,13 @@ fn compute_constraint_possible_matches_with_artifacts(
 
     let structured_dispatch = tokenizer.has_deterministic_dispatch();
     let dispatch_start = structured_dispatch.then(|| tokenizer.start_state());
-    let mut trie_build_states: Vec<u32> = (0..tokenizer.num_states())
+    // The dispatch row is attached separately above. Do not expand its roots
+    // into this set: only actual delayed-terminal query states belong here.
+    let trie_build_states: Vec<u32> = (0..tokenizer.num_states())
         .filter(|state| {
             Some(*state) != dispatch_start && demand.raw_query_state[*state as usize]
         })
         .collect();
-    if structured_dispatch && demand.raw_query_state[tokenizer.start_state() as usize] {
-        trie_build_states.extend(
-            tokenizer
-                .deterministic_dispatch_roots()
-                .into_iter()
-                .flatten()
-                .copied()
-                .filter(|&state| demand.raw_state_relevant[state as usize]),
-        );
-        trie_build_states.sort_unstable();
-        trie_build_states.dedup();
-    }
 
     if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
         || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
@@ -3106,7 +3062,7 @@ fn compute_constraint_possible_matches_with_artifacts(
     if tokenizer.has_deterministic_dispatch()
         && demand.raw_query_state[tokenizer.start_state() as usize]
     {
-        attach_structured_dispatch_possible_matches(tokenizer, &mut trie_class_result, &demand);
+        attach_structured_dispatch_possible_matches(tokenizer, &trie.root, &mut trie_class_result);
     }
     trie_class_result =
         filter_trie_class_result_to_terminals(trie_class_result, &demand.terminals);
