@@ -1868,6 +1868,22 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
             return id;
         }
 
+        // Shallow ambiguous DAGs are common in token-local admission. Walk
+        // them in bounded postorder using the exact pointer memo tables rather
+        // than allocating two visited sets, a pending list, and a sortable
+        // node list. The iterative path below remains the fallback for deeper
+        // structures, so recursion depth is strictly bounded.
+        const RECURSIVE_SEMANTIC_KEY_MAX_DEPTH: usize = 64;
+        if gss.max_depth() as usize <= RECURSIVE_SEMANTIC_KEY_MAX_DEPTH
+            && let Some(id) = self.key_upper_recursive(
+                &gss.inner,
+                0,
+                RECURSIVE_SEMANTIC_KEY_MAX_DEPTH,
+            )
+        {
+            return id;
+        }
+
         let mut pending = vec![SemanticPendingNode::Upper(gss.inner.clone())];
         let mut seen_upper = FxHashSet::default();
         let mut seen_lower = FxHashSet::default();
@@ -2019,6 +2035,95 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
         }
 
         self.upper_id(&gss.inner).unwrap_or(0)
+    }
+
+    fn key_lower_recursive(
+        &mut self,
+        lower: &Arc<Lower<T>>,
+        depth: usize,
+        max_depth: usize,
+    ) -> Option<u32> {
+        if let Some(id) = self.lower_id(lower) {
+            return Some(id);
+        }
+        if depth > max_depth {
+            return None;
+        }
+        let id = match &**lower {
+            Lower::Segment(segment) => {
+                let mut id = self.key_lower_recursive(&segment.next, depth + 1, max_depth)?;
+                for value in segment.values.iter() {
+                    id = self.intern_node(false, vec![(value.clone(), id)]);
+                    if self.exhausted {
+                        return Some(0);
+                    }
+                }
+                id
+            }
+            Lower::General {
+                children, empty, ..
+            } => {
+                let mut canonical_children = Vec::with_capacity(children.len());
+                for (value, kids) in children.iter() {
+                    let mut child_union = 0;
+                    for child in kids.values() {
+                        let child_id = self.key_lower_recursive(child, depth + 1, max_depth)?;
+                        child_union = self.union_ids(child_union, child_id);
+                        if self.exhausted {
+                            return Some(0);
+                        }
+                    }
+                    canonical_children.push((value.clone(), child_union));
+                }
+                self.intern_node(*empty, canonical_children)
+            }
+        };
+        if self.exhausted || !self.source_budget_available() {
+            return Some(0);
+        }
+        let ptr = lower_node_id(lower);
+        self.lower_memo.insert(ptr, (lower.clone(), id));
+        Some(id)
+    }
+
+    fn key_upper_recursive(
+        &mut self,
+        upper: &Arc<Upper<T, A>>,
+        depth: usize,
+        max_depth: usize,
+    ) -> Option<u32> {
+        if let Some(id) = self.upper_id(upper) {
+            return Some(id);
+        }
+        if depth > max_depth {
+            return None;
+        }
+        let id = match &**upper {
+            Upper::Interface(interface) => {
+                self.key_lower_recursive(&interface.inner, depth + 1, max_depth)?
+            }
+            Upper::Branch(branch) => {
+                let mut canonical_children = Vec::with_capacity(branch.children.len());
+                for (value, kids) in branch.children.iter() {
+                    let mut child_union = 0;
+                    for child in kids.values() {
+                        let child_id = self.key_upper_recursive(child, depth + 1, max_depth)?;
+                        child_union = self.union_ids(child_union, child_id);
+                        if self.exhausted {
+                            return Some(0);
+                        }
+                    }
+                    canonical_children.push((value.clone(), child_union));
+                }
+                self.intern_node(branch.empty.is_some(), canonical_children)
+            }
+        };
+        if self.exhausted || !self.source_budget_available() {
+            return Some(0);
+        }
+        let ptr = Arc::as_ptr(upper) as usize;
+        self.upper_memo.insert(ptr, (upper.clone(), id));
+        Some(id)
     }
 
     pub(crate) fn work_summary(&self) -> (usize, usize, usize, usize) {
@@ -6223,6 +6328,22 @@ mod tests {
 
         let different = LeveledGSS::from_single_stack(vec![0_u32, 2], TestAcc(1));
         assert_ne!(interner.key(&segment), interner.key(&different));
+    }
+
+    #[test]
+    fn semantic_key_deep_iterative_fallback_roundtrips() {
+        let stack = (0_u32..96).collect::<Vec<_>>();
+        let original = LeveledGSS::from_single_stack(stack.clone(), TestAcc(1));
+        let mut interner = GssSemanticKeyInterner::new();
+
+        let key = interner.key(&original);
+        assert_ne!(key, 0);
+        let rebuilt = interner.gss_from_key(key, TestAcc(9));
+        let rebuilt_stacks = rebuilt
+            .to_stacks(1)
+            .expect("deep single language should remain one explicit stack");
+        assert_eq!(rebuilt_stacks.len(), 1);
+        assert_eq!(rebuilt_stacks[0].0, stack);
     }
 
     #[test]
