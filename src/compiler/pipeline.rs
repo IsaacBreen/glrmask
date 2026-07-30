@@ -92,6 +92,31 @@ fn env_flag_enabled_by_default(name: &str) -> bool {
         .unwrap_or(true)
 }
 
+fn env_flag_override(name: &str) -> Option<bool> {
+    std::env::var(name).ok().map(|value| {
+        let normalized = value.trim().to_ascii_lowercase();
+        !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
+    })
+}
+
+// Fully precomputing small regular grammars keeps their steady-state masks
+// cheap. Above this scale, adaptive construction avoids large tables and the
+// allocator retention they cause in long-lived compile processes.
+const DEFAULT_DIRECT_REGULAR_DYNAMIC_BACKEND_MIN_STATES: usize = 2_200;
+
+fn default_use_adaptive_direct_regular_backend(state_count: usize) -> bool {
+    state_count >= DEFAULT_DIRECT_REGULAR_DYNAMIC_BACKEND_MIN_STATES
+}
+
+fn use_adaptive_direct_regular_backend(grammar: &GrammarDef) -> bool {
+    let Some(automaton) = grammar.direct_regular_automaton.as_ref() else {
+        return false;
+    };
+    env_flag_override("GLRMASK_DIRECT_REGULAR_DYNAMIC_BACKEND").unwrap_or_else(|| {
+        default_use_adaptive_direct_regular_backend(automaton.states.len())
+    })
+}
+
 fn compact_possible_matches_before_reconcile_enabled() -> bool {
     env_flag_enabled_by_default("GLRMASK_COMPACT_POSSIBLE_MATCHES_BEFORE_RECONCILE")
 }
@@ -3778,9 +3803,7 @@ pub(crate) fn compile_owned_with_table_construction(
     vocab: &Vocab,
     default_table_construction: GlrTableConstruction,
 ) -> Constraint {
-    if grammar.direct_regular_automaton.is_some()
-        && env_flag_enabled_by_default("GLRMASK_DIRECT_REGULAR_DYNAMIC_BACKEND")
-    {
+    if use_adaptive_direct_regular_backend(&grammar) {
         return compile_adaptive_direct_regular_owned_with_table_construction(
             grammar,
             vocab,
@@ -3858,4 +3881,19 @@ pub(crate) fn compile_owned_profiled_with_table_construction(
     profile.prepare_ms = prepare_ms;
     profile.total_ms = elapsed_ms(total_started_at);
     (constraint, profile)
+}
+
+#[cfg(test)]
+mod routing_tests {
+    use super::{
+        DEFAULT_DIRECT_REGULAR_DYNAMIC_BACKEND_MIN_STATES,
+        default_use_adaptive_direct_regular_backend,
+    };
+
+    #[test]
+    fn adaptive_direct_regular_backend_default_has_a_size_boundary() {
+        let threshold = DEFAULT_DIRECT_REGULAR_DYNAMIC_BACKEND_MIN_STATES;
+        assert!(!default_use_adaptive_direct_regular_backend(threshold - 1));
+        assert!(default_use_adaptive_direct_regular_backend(threshold));
+    }
 }

@@ -571,7 +571,12 @@ mod tests {
             (2, b"\n".to_vec()),
             (3, b" a0\n".to_vec()),
         ]);
-        let constraint = crate::Constraint::from_lark(&grammar, &vocab).unwrap();
+        let grammar_def = crate::import::lark::parse_lark(&grammar).unwrap();
+        let constraint = crate::compiler::pipeline::compile_adaptive_direct_regular_owned_with_table_construction(
+            grammar_def,
+            &vocab,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+        );
         assert!(constraint.uses_dynamic_runtime());
         let mut state = constraint.start();
 
@@ -585,7 +590,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_regular_constraint_uses_adaptive_backend_and_roundtrips() {
+    fn adaptive_direct_regular_constraint_roundtrips() {
         let vocab = vocab();
         let mut grammar = String::from("start: r0\n");
         for index in 0..63 {
@@ -593,7 +598,12 @@ mod tests {
         }
         grammar.push_str("r63: \"b\"\n");
 
-        let constraint = crate::Constraint::from_lark(&grammar, &vocab).unwrap();
+        let grammar_def = crate::import::lark::parse_lark(&grammar).unwrap();
+        let constraint = crate::compiler::pipeline::compile_adaptive_direct_regular_owned_with_table_construction(
+            grammar_def,
+            &vocab,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+        );
         assert!(constraint.uses_dynamic_runtime());
         assert!(constraint.possible_matches_complete);
         let dynamic = DynamicConstraint::from_lark(&grammar, &vocab).unwrap();
