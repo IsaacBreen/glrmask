@@ -1083,7 +1083,6 @@ pub(crate) struct IndexedDagMaskRuntime {
     final_memo: FxHashMap<(u32, u32), Option<DenseMaskAcc>>,
     single_source_ids: FxHashMap<usize, u32>,
     single_sources: Vec<SingleSourceMemo>,
-    single_final_memo: FxHashMap<(u32, u32), Option<Arc<[u64]>>>,
     lower_sources: FxHashMap<usize, IndexedLowerIdentity<u32>>,
     accumulators: Vec<DenseMaskAcc>,
     accumulator_ids: FxHashMap<DenseAccIdentity, u32>,
@@ -1584,26 +1583,20 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
     /// `(q, G, tsid)` keeps the result valid when delayed lexer exclusions
     /// produce a different `a` at the next model token.
     fn final_for_single_transfer(
-        &mut self,
+        &self,
         dwa_state: u32,
         tsid: u32,
     ) -> Option<Arc<[u64]>> {
-        let key = (dwa_state, tsid);
-        if let Some(cached) = self.runtime.single_final_memo.get(&key) {
-            return cached.clone();
+        match self
+            .constraint
+            .indexed_dag_dense_finals
+            .get(dwa_state as usize)?
+            .get(tsid)
+        {
+            IndexedDagDenseMask::Full => Some(Arc::clone(&self.constraint.seed_universe_dense)),
+            IndexedDagDenseMask::Dense { words, .. } => Some(Arc::clone(words)),
+            IndexedDagDenseMask::Empty => None,
         }
-        let result = self.constraint.parser_dwa().states()[dwa_state as usize]
-            .final_weight
-            .as_ref()
-            .and_then(|weight| match self.single_dense_mask_for_weight(weight, tsid) {
-                IndexedDagDenseMask::Full => {
-                    Some(Arc::clone(&self.constraint.seed_universe_dense))
-                }
-                IndexedDagDenseMask::Dense { words, .. } => Some(words),
-                IndexedDagDenseMask::Empty => None,
-            });
-        self.runtime.single_final_memo.insert(key, result.clone());
-        result
     }
 
     fn eval_lower_single_transfer(

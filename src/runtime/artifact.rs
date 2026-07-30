@@ -2788,6 +2788,11 @@ pub struct Constraint {
     /// rebuilding the same dense transition record at runtime.
     #[serde(skip, default)]
     pub(crate) indexed_dag_dense_transitions: IndexedDagDenseTransitions,
+    /// Runtime-only exact dense final weights, indexed by parser-DWA state.
+    /// This is the final-weight analogue of `indexed_dag_dense_transitions`:
+    /// absent tokenizer states are empty, and full final weights stay implicit.
+    #[serde(skip, default)]
+    pub(crate) indexed_dag_dense_finals: Vec<IndexedDagDenseTransitionMasks>,
     /// Dense tokenizer transition lookup for commit-time byte scans.
     #[serde(skip)]
     pub(crate) tokenizer_fast_transitions: FastTokenizerTransitions,

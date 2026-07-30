@@ -1084,7 +1084,10 @@ impl Constraint {
         let weight_sparse_ms = 0.0;
         self.dwa_fast_transitions = fast_transitions;
         let indexed_dag_dense_started_at = profile.then(std::time::Instant::now);
-        self.indexed_dag_dense_transitions = self.compute_indexed_dag_dense_transitions();
+        let (indexed_dag_dense_transitions, indexed_dag_dense_finals) =
+            self.compute_indexed_dag_dense_tables();
+        self.indexed_dag_dense_transitions = indexed_dag_dense_transitions;
+        self.indexed_dag_dense_finals = indexed_dag_dense_finals;
         if let Some(started) = indexed_dag_dense_started_at {
             let transitions = self
                 .parser_dwa
@@ -2026,17 +2029,33 @@ impl Constraint {
         IndexedDagDenseMask::Dense { words, start, end }
     }
 
-    fn compute_indexed_dag_dense_transitions(&self) -> IndexedDagDenseTransitions {
+    fn compute_indexed_dag_dense_tables(
+        &self,
+    ) -> (
+        IndexedDagDenseTransitions,
+        Vec<IndexedDagDenseTransitionMasks>,
+    ) {
         // Narrow transition sets are intentionally absent from the general
         // dense-weight cache. Materialize every distinct token-set pointer at
         // most once here, then share the resulting Arc and span across all DWA
-        // transitions that use it.
+        // transitions and final weights that use it.
         let mut mask_by_token_set = FxHashMap::<usize, IndexedDagDenseMask>::default();
         for state in self.parser_dwa.states() {
             for (_, weight) in state.transitions.values() {
                 if weight.is_full() {
                     continue;
                 }
+                for (_, tokens) in weight.0.iter() {
+                    let key = Arc::as_ptr(tokens) as usize;
+                    if !mask_by_token_set.contains_key(&key) {
+                        let mask = self.indexed_dag_dense_mask_for_tokens(tokens);
+                        mask_by_token_set.insert(key, mask);
+                    }
+                }
+            }
+            if let Some(weight) = state.final_weight.as_ref()
+                && !weight.is_full()
+            {
                 for (_, tokens) in weight.0.iter() {
                     let key = Arc::as_ptr(tokens) as usize;
                     if !mask_by_token_set.contains_key(&key) {
@@ -2071,11 +2090,29 @@ impl Constraint {
                 },
             ))
         };
-        if rayon::current_num_threads() == 1 {
+        let transitions = if rayon::current_num_threads() == 1 {
             self.parser_dwa.states().iter().map(build).collect()
         } else {
             self.parser_dwa.states().par_iter().map(build).collect()
-        }
+        };
+        let finals = self
+            .parser_dwa
+            .states()
+            .iter()
+            .map(|state| match state.final_weight.as_ref() {
+                None => IndexedDagDenseTransitionMasks::from_entries(std::iter::empty()),
+                Some(weight) if weight.is_full() => IndexedDagDenseTransitionMasks::Full,
+                Some(weight) => IndexedDagDenseTransitionMasks::from_entries(
+                    weight.0.iter().map(|(tsid, tokens)| {
+                        (
+                            tsid,
+                            mask_by_token_set[&(Arc::as_ptr(tokens) as usize)].clone(),
+                        )
+                    }),
+                ),
+            })
+            .collect();
+        (transitions, finals)
     }
 
     // For narrow token sets, RangeSetBlaze word-span intersection is less
@@ -2202,7 +2239,10 @@ impl Constraint {
     /// Build fast transition lookup tables from the DWA's BTreeMap transitions.
     pub(crate) fn build_fast_transitions(&mut self) {
         self.dwa_fast_transitions = self.compute_fast_transitions();
-        self.indexed_dag_dense_transitions = self.compute_indexed_dag_dense_transitions();
+        let (indexed_dag_dense_transitions, indexed_dag_dense_finals) =
+            self.compute_indexed_dag_dense_tables();
+        self.indexed_dag_dense_transitions = indexed_dag_dense_transitions;
+        self.indexed_dag_dense_finals = indexed_dag_dense_finals;
     }
 
     pub(crate) fn build_dense_token_masks(&mut self) {

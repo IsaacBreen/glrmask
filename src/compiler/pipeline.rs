@@ -3185,6 +3185,7 @@ fn compile_prepared_with_profile_and_table_construction(
             seed_universe_dense: std::sync::Arc::<[u64]>::from(Vec::<u64>::new().into_boxed_slice()),
             dwa_fast_transitions: Vec::new(),
             indexed_dag_dense_transitions: Vec::new(),
+            indexed_dag_dense_finals: Vec::new(),
             tokenizer_fast_transitions: Default::default(),
             heavy_token_dense_masks: Vec::new(),
             heavy_token_indices: Vec::new(),
