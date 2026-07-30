@@ -2442,7 +2442,10 @@ fn commit_bytes_language_small_queue_fast_path(
     };
     let pending = match simulation {
         Ok(pending) => pending,
-        Err(error) => return Some(Err(error)),
+        // The language queue is an accelerator, not the authority for
+        // rejection. Fall through to the established commit path so an
+        // optimization bug cannot introduce a false negative.
+        Err(_) => return None,
     };
 
     if template_runtime.is_exhausted() {
@@ -2469,9 +2472,7 @@ fn commit_bytes_language_small_queue_fast_path(
     }
     new_state.retain(|_, parser_state| !parser_state.is_empty());
     if new_state.is_empty() {
-        return Some(Err(
-            "commit rejected: no valid parser states remain".to_string(),
-        ));
+        return None;
     }
     if profile_enabled {
         let (

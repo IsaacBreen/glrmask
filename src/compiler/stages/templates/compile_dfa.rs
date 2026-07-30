@@ -612,7 +612,9 @@ fn find_split_commit_language_mismatch(
     find_nfa_dfa_language_mismatch(&recombined, unsplit)
 }
 
-pub(crate) fn split_commit_template_dfas(dfa: &UnweightedDfa) -> CommitTemplateDfas {
+pub(crate) fn try_split_commit_template_dfas(
+    dfa: &UnweightedDfa,
+) -> Option<CommitTemplateDfas> {
     let mut pop = UnweightedDfa::default();
     let mut read = UnweightedDfa::default();
     let mut push = UnweightedDfa::default();
@@ -710,9 +712,7 @@ pub(crate) fn split_commit_template_dfas(dfa: &UnweightedDfa) -> CommitTemplateD
                         if phase == CommitTemplatePhase::PushEntry {
                             continue;
                         }
-                        panic!(
-                            "commit template split saw pop/read label {label} after push at old state {old_state}"
-                        );
+                        return None;
                     }
                     let target_state = ensure_push_state(target, dfa, &mut push, &mut push_map);
                     push.add_transition(push_state, label, target_state);
@@ -730,12 +730,10 @@ pub(crate) fn split_commit_template_dfas(dfa: &UnweightedDfa) -> CommitTemplateD
         pop_to_push,
         read_to_push,
     };
-    if let Some(witness) = find_split_commit_language_mismatch(dfa, &split) {
-        panic!(
-            "commit template phase split changed the action-word language; witness: {witness:?}"
-        );
+    if find_split_commit_language_mismatch(dfa, &split).is_some() {
+        return None;
     }
-    split
+    Some(split)
 }
 
 
@@ -1317,7 +1315,7 @@ mod tests {
         specialize_template_dfa_defaults_for_commit_determinized,
         find_nfa_dfa_language_mismatch,
         find_default_specialization_mismatch,
-        find_split_commit_language_mismatch, split_commit_template_dfas,
+        find_split_commit_language_mismatch, try_split_commit_template_dfas,
     };
     use crate::automata::unweighted_u32::determinize::determinize;
     use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
@@ -1364,14 +1362,16 @@ mod tests {
     #[test]
     fn split_commit_transducer_preserves_mixed_phase_action_language() {
         let dfa = mixed_phase_commit_dfa();
-        let split = split_commit_template_dfas(&dfa);
+        let split = try_split_commit_template_dfas(&dfa)
+            .expect("mixed-phase commit DFA should be splittable");
         assert_eq!(find_split_commit_language_mismatch(&dfa, &split), None);
     }
 
     #[test]
     fn split_commit_equivalence_checker_returns_a_corruption_witness() {
         let dfa = mixed_phase_commit_dfa();
-        let mut split = split_commit_template_dfas(&dfa);
+        let mut split = try_split_commit_template_dfas(&dfa)
+            .expect("mixed-phase commit DFA should be splittable");
         let link = split
             .read_to_push
             .iter_mut()
@@ -1385,6 +1385,22 @@ mod tests {
             witness,
             vec![7, encode_negative_label(7), encode_negative_label(20)]
         );
+    }
+
+    #[test]
+    fn unsupported_post_push_pop_declines_without_panicking() {
+        let mut dfa = UnweightedDfa::new();
+        let after_push = dfa.add_state();
+        let accepted = dfa.add_state();
+        dfa.add_transition(
+            dfa.start_state,
+            encode_negative_label(7),
+            after_push,
+        );
+        dfa.add_transition(after_push, 9, accepted);
+        dfa.set_accepting(accepted, true);
+
+        assert!(try_split_commit_template_dfas(&dfa).is_none());
     }
 
     #[test]
