@@ -87,6 +87,23 @@ impl BitSet {
         }
     }
 
+    /// Union `left ∩ right` into this set and report whether the intersection
+    /// contained any bits.
+    ///
+    /// This avoids allocating a temporary intersection and is useful when a
+    /// large collection of bitset pairs contributes to one accumulated set.
+    pub(crate) fn union_intersection_with(&mut self, left: &BitSet, right: &BitSet) -> bool {
+        self.assert_same_len(left);
+        self.assert_same_len(right);
+        let mut any = false;
+        for ((dst, lhs), rhs) in self.words.iter_mut().zip(&left.words).zip(&right.words) {
+            let intersection = *lhs & *rhs;
+            any |= intersection != 0;
+            *dst |= intersection;
+        }
+        any
+    }
+
     /// Union `other` into this set and return exactly the bits newly added.
     ///
     /// This combines the common `other.difference(self)` followed by
@@ -248,5 +265,29 @@ mod tests {
 
         assert_eq!(delta.iter_ones().collect::<Vec<_>>(), vec![63, 65]);
         assert_eq!(left.iter_ones().collect::<Vec<_>>(), vec![0, 63, 64, 65, 129]);
+    }
+
+    #[test]
+    fn union_intersection_with_accumulates_exact_intersection() {
+        let mut accumulated = BitSet::new(130);
+        accumulated.set(1);
+
+        let mut left = BitSet::new(130);
+        for bit in [0, 63, 64, 65, 129] {
+            left.set(bit);
+        }
+        let mut right = BitSet::new(130);
+        for bit in [63, 65, 66, 129] {
+            right.set(bit);
+        }
+
+        assert!(accumulated.union_intersection_with(&left, &right));
+        assert_eq!(
+            accumulated.iter_ones().collect::<Vec<_>>(),
+            vec![1, 63, 65, 129],
+        );
+
+        let empty = BitSet::new(130);
+        assert!(!accumulated.union_intersection_with(&left, &empty));
     }
 }

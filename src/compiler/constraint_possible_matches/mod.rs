@@ -1952,13 +1952,8 @@ fn delayed_terminal_demand(tokenizer: &Tokenizer) -> DelayedTerminalDemand {
     let mut accepting_future_states = 0usize;
     for state in 0..tokenizer.num_states() {
         let future = tokenizer.possible_future_terminals(state);
-        let mut state_relevant = false;
-        for terminal in tokenizer.matched_terminals_iter(state) {
-            if future.contains(terminal as usize) {
-                terminals.set(terminal as usize);
-                state_relevant = true;
-            }
-        }
+        let matched = tokenizer.matched_terminal_bitset(state);
+        let state_relevant = terminals.union_intersection_with(matched, future);
         accepting_future_states += usize::from(state_relevant);
     }
 
@@ -1966,14 +1961,12 @@ fn delayed_terminal_demand(tokenizer: &Tokenizer) -> DelayedTerminalDemand {
     let mut raw_query_state = vec![false; tokenizer.num_states() as usize];
     if !terminals.is_zero() {
         for state in 0..tokenizer.num_states() {
-            let future_relevant = terminal_iter_intersects_demand(
-                tokenizer.possible_future_terminals_iter(state),
-                &terminals,
-            );
-            let match_relevant = terminal_iter_intersects_demand(
-                tokenizer.matched_terminals_iter(state),
-                &terminals,
-            );
+            let future_relevant = !tokenizer
+                .possible_future_terminals(state)
+                .is_disjoint(&terminals);
+            let match_relevant = !tokenizer
+                .matched_terminal_bitset(state)
+                .is_disjoint(&terminals);
             raw_query_state[state as usize] = future_relevant;
             raw_state_relevant[state as usize] = future_relevant || match_relevant;
         }
@@ -2854,14 +2847,19 @@ pub(crate) fn compute_constraint_possible_matches(
 fn runtime_dynamic_vocab_artifacts(
     artifacts: &OrderedVocabTrieArtifacts,
 ) -> RuntimeDynamicMaskVocabArtifacts {
-    let runtime_trie = Arc::clone(artifacts.runtime_dynamic_trie.get_or_init(|| {
-        Arc::new(DynamicMaskTrie::from_vocab_prefix_tree(artifacts.trie.as_ref()))
-    }));
-    RuntimeDynamicMaskVocabArtifacts {
-        vocab: DynamicMaskVocab::from_materialized_ordered(
-            runtime_trie,
+    let vocab = if let Some(runtime_trie) = artifacts.runtime_dynamic_trie.get() {
+        DynamicMaskVocab::from_materialized_ordered(
+            Arc::clone(runtime_trie),
             Arc::clone(&artifacts.ordered_vocab.ordered_to_originals),
-        ),
+        )
+    } else {
+        DynamicMaskVocab::from_compiler_artifacts(
+            Arc::clone(&artifacts.trie),
+            Arc::clone(&artifacts.ordered_vocab.ordered_to_originals),
+        )
+    };
+    RuntimeDynamicMaskVocabArtifacts {
+        vocab,
     }
 }
 
@@ -3251,12 +3249,11 @@ pub(crate) fn compute_constraint_possible_matches_for_vocab_with_raw_byte_classe
 }
 
 pub(crate) fn prepare_vocab_for_possible_matches(vocab: &Vocab) {
-    let artifacts = get_ordered_vocab_trie_artifacts_for_vocab(vocab).0;
-    // Runtime dynamic-mask vocabulary structure is a pure function of token
-    // bytes. Build it during vocab preparation so grammar compilation only
-    // creates fresh, constraint-local mutable runtime caches around the shared
-    // immutable trie.
-    let _ = runtime_dynamic_vocab_artifacts(&artifacts);
+    // Cache the byte-sorted vocabulary and its prefix tree. The packed dynamic
+    // mask trie is substantially larger and is irrelevant to ordinary static
+    // constraints with complete possible-match tables, so leave that second
+    // representation lazy until a dynamic mask is actually requested.
+    let _ = get_ordered_vocab_trie_artifacts_for_vocab(vocab);
 }
 
 #[cfg(test)]
