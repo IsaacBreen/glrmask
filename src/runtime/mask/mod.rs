@@ -57,13 +57,16 @@ fn single_path_direct_stack_work_within_budget(
     true
 }
 
-fn indexed_dag_mask_enabled() -> bool {
-    std::env::var("GLRMASK_ENABLE_INDEXED_DAG_MASK")
-        .map(|value| {
-            let normalized = value.trim().to_ascii_lowercase();
-            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
-        })
-        .unwrap_or(false)
+pub(crate) fn indexed_dag_mask_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("GLRMASK_ENABLE_INDEXED_DAG_MASK")
+            .map(|value| {
+                let normalized = value.trim().to_ascii_lowercase();
+                matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(false)
+    })
 }
 
 fn indexed_dag_mask_profile_enabled() -> bool {
@@ -84,6 +87,7 @@ fn dynamic_mask_equivalence_assert_enabled() -> bool {
 
 pub(crate) fn initialize_runtime_config() {
     let _ = dynamic_mask_equivalence_assert_enabled();
+    let _ = indexed_dag_mask_enabled();
     initialize_mask_profile_config();
     let _ = mask_queue_mode();
 }
@@ -1095,6 +1099,7 @@ pub(crate) struct IndexedDagMaskRuntime {
 impl IndexedDagMaskRuntime {
     const SOURCE_SLACK: usize = 64;
     const MAX_ACCUMULATORS: usize = 65_536;
+    const MAX_RETAINED_INDEX_NODES: usize = 16_384;
 
     fn begin_mask(&mut self) {
         self.epoch = self.epoch.wrapping_add(1).max(1);
@@ -1141,6 +1146,22 @@ impl IndexedDagMaskRuntime {
             .retain(|(_, ptr, _), _| retained.contains(ptr));
         self.segment_memo
             .retain(|(ptr, _, _, _), _| retained.contains(ptr));
+    }
+
+    fn retain_index_scratch(
+        &mut self,
+        dag: IndexedLeveledGss<u32, DenseMaskAcc>,
+        roots: Vec<u32>,
+        lower_ids: FxHashMap<usize, u32>,
+        upper_ids: FxHashMap<usize, u32>,
+    ) {
+        if dag.nodes.len() > Self::MAX_RETAINED_INDEX_NODES {
+            return;
+        }
+        self.index_nodes = dag.nodes;
+        self.index_roots = roots;
+        self.index_lower_ids = lower_ids;
+        self.index_upper_ids = upper_ids;
     }
 }
 
@@ -2795,6 +2816,11 @@ impl<'a> ConstraintState<'a> {
         if self.state.is_empty() || parser_dwa.states().is_empty() {
             return false;
         }
+        if self.constraint.indexed_dag_dense_transitions.len() != parser_dwa.states().len()
+            || self.constraint.indexed_dag_dense_finals.len() != parser_dwa.states().len()
+        {
+            return false;
+        }
 
         let profile = indexed_dag_mask_profile_enabled();
         let total_started = profile.then(Instant::now);
@@ -2982,10 +3008,12 @@ impl<'a> ConstraintState<'a> {
             memo_dense_words = evaluator.memo_dense_words;
             memo_nonzero_words = evaluator.memo_nonzero_words;
             memo_max_nonzero_words = evaluator.memo_max_nonzero_words;
-            indexed_runtime.index_nodes = dag.nodes;
-            indexed_runtime.index_roots = roots;
-            indexed_runtime.index_lower_ids = index_lower_ids;
-            indexed_runtime.index_upper_ids = index_upper_ids;
+            indexed_runtime.retain_index_scratch(
+                dag,
+                roots,
+                index_lower_ids,
+                index_upper_ids,
+            );
         }
 
         if let Some(accepted) = accepted {

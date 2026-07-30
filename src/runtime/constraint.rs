@@ -2035,6 +2035,12 @@ impl Constraint {
         IndexedDagDenseTransitions,
         Vec<IndexedDagDenseTransitionMasks>,
     ) {
+        // Indexed-DAG masking is opt-in. Avoid duplicating the parser DWA into
+        // dense runtime tables for every ordinary constraint. Unit tests keep
+        // the tables available for forced exactness checks.
+        if !cfg!(test) && !crate::runtime::mask::indexed_dag_mask_enabled() {
+            return (Vec::new(), Vec::new());
+        }
         // Narrow transition sets are intentionally absent from the general
         // dense-weight cache. Materialize every distinct token-set pointer at
         // most once here, then share the resulting Arc and span across all DWA
