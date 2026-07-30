@@ -63,6 +63,92 @@ impl FastDwaTransitionRow {
 }
 
 pub(crate) type FastDwaTransitions = Vec<FastDwaTransitionRow>;
+
+#[derive(Debug, Clone)]
+pub(crate) enum IndexedDagDenseMask {
+    Full,
+    Dense {
+        words: DenseWords,
+        start: usize,
+        end: usize,
+    },
+    Empty,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct IndexedDagDenseTransition {
+    pub(crate) target: u32,
+    pub(crate) masks: IndexedDagDenseTransitionMasks,
+}
+
+const INLINE_INDEXED_DAG_TSID_LIMIT: usize = 8;
+
+#[derive(Debug, Clone)]
+pub(crate) enum IndexedDagDenseTransitionMasks {
+    Full,
+    Inline(SmallVec<[(u32, IndexedDagDenseMask); 2]>),
+    Hash(FxHashMap<u32, IndexedDagDenseMask>),
+}
+
+static INDEXED_DAG_FULL_MASK: IndexedDagDenseMask = IndexedDagDenseMask::Full;
+static INDEXED_DAG_EMPTY_MASK: IndexedDagDenseMask = IndexedDagDenseMask::Empty;
+
+impl IndexedDagDenseTransitionMasks {
+    pub(crate) fn from_entries(
+        entries: impl IntoIterator<Item = (u32, IndexedDagDenseMask)>,
+    ) -> Self {
+        let entries = entries.into_iter().collect::<SmallVec<[_; 2]>>();
+        if entries.len() <= INLINE_INDEXED_DAG_TSID_LIMIT {
+            Self::Inline(entries)
+        } else {
+            Self::Hash(entries.into_iter().collect())
+        }
+    }
+
+    #[inline]
+    pub(crate) fn get(&self, tsid: u32) -> &IndexedDagDenseMask {
+        match self {
+            Self::Full => &INDEXED_DAG_FULL_MASK,
+            Self::Inline(entries) => entries
+                .iter()
+                .find_map(|(candidate, mask)| (*candidate == tsid).then_some(mask))
+                .unwrap_or(&INDEXED_DAG_EMPTY_MASK),
+            Self::Hash(entries) => entries.get(&tsid).unwrap_or(&INDEXED_DAG_EMPTY_MASK),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum IndexedDagDenseTransitionRow {
+    Inline(SmallVec<[(i32, IndexedDagDenseTransition); 4]>),
+    Hash(FxHashMap<i32, IndexedDagDenseTransition>),
+}
+
+impl IndexedDagDenseTransitionRow {
+    pub(crate) fn from_entries(
+        entries: impl IntoIterator<Item = (i32, IndexedDagDenseTransition)>,
+    ) -> Self {
+        let entries = entries.into_iter().collect::<SmallVec<[_; 4]>>();
+        if entries.len() <= INLINE_DWA_TRANSITION_LIMIT {
+            Self::Inline(entries)
+        } else {
+            Self::Hash(entries.into_iter().collect())
+        }
+    }
+
+    #[inline]
+    pub(crate) fn get(&self, label: &i32) -> Option<&IndexedDagDenseTransition> {
+        match self {
+            Self::Inline(entries) => entries
+                .iter()
+                .find_map(|(candidate, transition)| (candidate == label).then_some(transition)),
+            Self::Hash(entries) => entries.get(label),
+        }
+    }
+}
+
+pub(crate) type IndexedDagDenseTransitions = Vec<IndexedDagDenseTransitionRow>;
+
 #[derive(Debug, Clone)]
 pub(crate) enum FastTokenizerTransitions {
     Dense(Vec<Box<[u32; 256]>>),
@@ -2695,6 +2781,13 @@ pub struct Constraint {
     /// Built from parser_dwa.states at load/build time.
     #[serde(skip)]
     pub(crate) dwa_fast_transitions: FastDwaTransitions,
+    /// Runtime-only parser-DWA transitions with exact dense masks materialized
+    /// for the final internal tokenizer states present in each transition
+    /// weight; absent states are implicitly empty. Indexed-DAG masking uses
+    /// this table directly instead of hashing a transition tuple and lazily
+    /// rebuilding the same dense transition record at runtime.
+    #[serde(skip, default)]
+    pub(crate) indexed_dag_dense_transitions: IndexedDagDenseTransitions,
     /// Dense tokenizer transition lookup for commit-time byte scans.
     #[serde(skip)]
     pub(crate) tokenizer_fast_transitions: FastTokenizerTransitions,

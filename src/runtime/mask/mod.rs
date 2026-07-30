@@ -8,7 +8,7 @@ use crate::ds::leveled_gss::{
     IndexedLeveledGss, IndexedLeveledGssNode, IndexedLowerIdentity, LeveledGSS, Merge,
 };
 use crate::ds::weight::Weight;
-use crate::runtime::artifact::FastDwaTransitionRow;
+use crate::runtime::artifact::{FastDwaTransitionRow, IndexedDagDenseMask};
 use crate::runtime::constraint::{Constraint, DenseToBufProfileStats};
 use crate::runtime::state::{ConstraintState, MaskCacheData};
 use range_set_blaze::RangeSetBlaze;
@@ -1053,24 +1053,6 @@ fn dense_acc_identity(accumulator: &DenseMaskAcc) -> DenseAccIdentity {
 }
 
 #[derive(Clone)]
-enum SingleDenseTransitionMask {
-    Full,
-    Dense {
-        words: Arc<[u64]>,
-        start: usize,
-        end: usize,
-    },
-    Empty,
-}
-
-#[derive(Clone)]
-struct SingleDenseTransition {
-    target: u32,
-    mask: SingleDenseTransitionMask,
-}
-
-
-#[derive(Clone)]
 struct SingleLowerMemoEntry {
     dwa_state: u32,
     tsid: u32,
@@ -1102,8 +1084,6 @@ pub(crate) struct IndexedDagMaskRuntime {
     single_source_ids: FxHashMap<usize, u32>,
     single_sources: Vec<SingleSourceMemo>,
     single_final_memo: FxHashMap<(u32, u32), Option<Arc<[u64]>>>,
-    single_transition_memo:
-        FxHashMap<(u32, u32, u32), Option<SingleDenseTransition>>,
     lower_sources: FxHashMap<usize, IndexedLowerIdentity<u32>>,
     accumulators: Vec<DenseMaskAcc>,
     accumulator_ids: FxHashMap<DenseAccIdentity, u32>,
@@ -1112,14 +1092,11 @@ pub(crate) struct IndexedDagMaskRuntime {
 impl IndexedDagMaskRuntime {
     const SOURCE_SLACK: usize = 64;
     const MAX_ACCUMULATORS: usize = 65_536;
-    const MAX_TRANSITIONS: usize = 65_536;
 
     fn begin_mask(&mut self) {
         self.epoch = self.epoch.wrapping_add(1).max(1);
         self.live_source_count = 0;
-        if self.accumulators.len() > Self::MAX_ACCUMULATORS
-            || self.single_transition_memo.len() > Self::MAX_TRANSITIONS
-        {
+        if self.accumulators.len() > Self::MAX_ACCUMULATORS {
             *self = Self {
                 epoch: self.epoch,
                 ..Self::default()
@@ -1405,12 +1382,12 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
         &self,
         weight: &Weight,
         tsid: u32,
-    ) -> SingleDenseTransitionMask {
+    ) -> IndexedDagDenseMask {
         if weight.is_full() {
-            return SingleDenseTransitionMask::Full;
+            return IndexedDagDenseMask::Full;
         }
         let Some(tokens) = weight.0.get(tsid) else {
-            return SingleDenseTransitionMask::Empty;
+            return IndexedDagDenseMask::Empty;
         };
         let token_key = Arc::as_ptr(tokens) as usize;
         if let Some(dense) = self.precomputed.get(&token_key) {
@@ -1423,51 +1400,48 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
         Self::single_dense_transition_mask(dense.into())
     }
 
-    fn single_dense_transition_mask(words: Arc<[u64]>) -> SingleDenseTransitionMask {
+    fn single_dense_transition_mask(words: Arc<[u64]>) -> IndexedDagDenseMask {
         let Some(start) = words.iter().position(|word| *word != 0) else {
-            return SingleDenseTransitionMask::Empty;
+            return IndexedDagDenseMask::Empty;
         };
         let end = words
             .iter()
             .rposition(|word| *word != 0)
             .expect("nonzero start implies nonzero end")
             + 1;
-        SingleDenseTransitionMask::Dense { words, start, end }
+        IndexedDagDenseMask::Dense { words, start, end }
     }
 
     fn single_transition(
-        &mut self,
+        &self,
         dwa_state: u32,
         parser_state: u32,
         tsid: u32,
-    ) -> Option<SingleDenseTransition> {
-        let key = (dwa_state, parser_state, tsid);
-        if let Some(cached) = self.runtime.single_transition_memo.get(&key) {
-            return cached.clone();
-        }
+    ) -> Option<(u32, &'a IndexedDagDenseMask)> {
         let positive_label = encode_positive_label(parser_state);
-        let result = self.constraint.dwa_fast_transitions[dwa_state as usize]
+        let transition = self
+            .constraint
+            .indexed_dag_dense_transitions
+            .get(dwa_state as usize)?
             .get(&positive_label)
             .or_else(|| {
-                self.constraint.dwa_fast_transitions[dwa_state as usize]
+                self.constraint.indexed_dag_dense_transitions[dwa_state as usize]
                     .get(&DEFAULT_LABEL)
-            })
-            .map(|(target, weight)| SingleDenseTransition {
-                target: *target,
-                mask: self.single_dense_mask_for_weight(weight, tsid),
-            });
-        self.runtime.single_transition_memo.insert(key, result.clone());
-        result
+            })?;
+        Some((
+            transition.target,
+            transition.masks.get(tsid),
+        ))
     }
 
     fn intersect_single_with_dense_mask(
         dense: &Arc<[u64]>,
-        mask: &SingleDenseTransitionMask,
+        mask: &IndexedDagDenseMask,
     ) -> Option<Arc<[u64]>> {
         match mask {
-            SingleDenseTransitionMask::Full => Some(Arc::clone(dense)),
-            SingleDenseTransitionMask::Empty => None,
-            SingleDenseTransitionMask::Dense {
+            IndexedDagDenseMask::Full => Some(Arc::clone(dense)),
+            IndexedDagDenseMask::Empty => None,
+            IndexedDagDenseMask::Dense {
                 words: mask,
                 start,
                 end,
@@ -1552,20 +1526,20 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
     fn merge_single_intersection(
         current: &mut Option<Arc<[u64]>>,
         incoming: Arc<[u64]>,
-        mask: &SingleDenseTransitionMask,
+        mask: &IndexedDagDenseMask,
     ) {
         match mask {
-            SingleDenseTransitionMask::Full => {
+            IndexedDagDenseMask::Full => {
                 Self::merge_single_result(current, Some(incoming));
             }
-            SingleDenseTransitionMask::Empty => {}
-            SingleDenseTransitionMask::Dense {
+            IndexedDagDenseMask::Empty => {}
+            IndexedDagDenseMask::Dense {
                 words: mask,
                 start,
                 end,
             } => {
                 let Some(existing) = current.as_mut() else {
-                    let transition_mask = SingleDenseTransitionMask::Dense {
+                    let transition_mask = IndexedDagDenseMask::Dense {
                         words: Arc::clone(mask),
                         start: *start,
                         end: *end,
@@ -1622,11 +1596,11 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
             .final_weight
             .as_ref()
             .and_then(|weight| match self.single_dense_mask_for_weight(weight, tsid) {
-                SingleDenseTransitionMask::Full => {
+                IndexedDagDenseMask::Full => {
                     Some(Arc::clone(&self.constraint.seed_universe_dense))
                 }
-                SingleDenseTransitionMask::Dense { words, .. } => Some(words),
-                SingleDenseTransitionMask::Empty => None,
+                IndexedDagDenseMask::Dense { words, .. } => Some(words),
+                IndexedDagDenseMask::Empty => None,
             });
         self.runtime.single_final_memo.insert(key, result.clone());
         result
@@ -1680,16 +1654,18 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
                 }
                 _ => unreachable!(),
             };
-            let Some(transition) = self.single_transition(dwa_state, parser_state, tsid) else {
+            let Some((target, transition_mask)) =
+                self.single_transition(dwa_state, parser_state, tsid)
+            else {
                 continue;
             };
-            if matches!(transition.mask, SingleDenseTransitionMask::Empty) {
+            if matches!(transition_mask, IndexedDagDenseMask::Empty) {
                 continue;
             }
             if let Some(child_result) =
-                self.eval_lower_single_transfer(transition.target, child, tsid)
+                self.eval_lower_single_transfer(target, child, tsid)
             {
-                Self::merge_single_intersection(&mut out, child_result, &transition.mask);
+                Self::merge_single_intersection(&mut out, child_result, transition_mask);
             }
         }
         self.runtime.single_sources[source_slot as usize]
@@ -1741,21 +1717,22 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
             _ => unreachable!(),
         };
         let mut out = self.final_for_single_transfer(dwa_state, tsid);
-        if let Some(transition) = self.single_transition(dwa_state, parser_state, tsid)
-            && !matches!(transition.mask, SingleDenseTransitionMask::Empty)
+        if let Some((target, transition_mask)) =
+            self.single_transition(dwa_state, parser_state, tsid)
+            && !matches!(transition_mask, IndexedDagDenseMask::Empty)
         {
             let child_result = if has_more {
                 self.eval_segment_single_transfer(
-                    transition.target,
+                    target,
                     node,
                     offset + 1,
                     tsid,
                 )
             } else {
-                self.eval_lower_single_transfer(transition.target, next, tsid)
+                self.eval_lower_single_transfer(target, next, tsid)
             };
             if let Some(child_result) = child_result {
-                Self::merge_single_intersection(&mut out, child_result, &transition.mask);
+                Self::merge_single_intersection(&mut out, child_result, transition_mask);
             }
         }
         self.runtime.single_sources[source_slot as usize]
