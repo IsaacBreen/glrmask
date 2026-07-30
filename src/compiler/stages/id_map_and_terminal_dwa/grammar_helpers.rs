@@ -2,6 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use rayon::prelude::*;
+
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::GLRTable;
 use crate::ds::bitset::BitSet;
@@ -187,11 +189,149 @@ mod tests {
         assert_row_colors_are_unique(&table, &coloring);
         assert!(coloring.num_colors <= 2);
     }
+
+    #[test]
+    fn direct_regular_follow_sets_match_generic_analysis() {
+        use crate::grammar::flat::{
+            DirectRegularAutomaton, DirectRegularState, GrammarDef, Rule, Symbol, Terminal,
+        };
+
+        let mut grammar = GrammarDef {
+            rules: vec![
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Terminal(0), Symbol::Nonterminal(1)],
+                },
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Terminal(1)],
+                },
+                Rule {
+                    lhs: 1,
+                    rhs: vec![Symbol::Terminal(2), Symbol::Nonterminal(1)],
+                },
+                Rule {
+                    lhs: 1,
+                    rhs: vec![Symbol::Terminal(3)],
+                },
+            ],
+            start: 0,
+            terminals: (0..4)
+                .map(|id| Terminal::Literal {
+                    id,
+                    bytes: vec![b'a' + id as u8],
+                })
+                .collect(),
+            direct_regular_automaton: Some(DirectRegularAutomaton {
+                states: vec![
+                    DirectRegularState {
+                        transitions: BTreeMap::from([(0, vec![1]), (1, vec![2])]),
+                        ..DirectRegularState::default()
+                    },
+                    DirectRegularState {
+                        transitions: BTreeMap::from([(2, vec![1]), (3, vec![2])]),
+                        ..DirectRegularState::default()
+                    },
+                    DirectRegularState {
+                        is_accepting: true,
+                        ..DirectRegularState::default()
+                    },
+                ],
+                start_states: vec![0],
+            }),
+            ..GrammarDef::default()
+        };
+
+        let direct = AnalyzedGrammar::from_grammar_def(&grammar);
+        let direct_ever = compute_ever_allowed_follows(&direct);
+        let direct_always = compute_always_allowed_follows(&direct);
+
+        grammar.direct_regular_automaton = None;
+        let generic = AnalyzedGrammar::from_grammar_def(&grammar);
+        assert_eq!(direct_ever, compute_ever_allowed_follows(&generic));
+        assert_eq!(direct_always, compute_always_allowed_follows(&generic));
+    }
+}
+
+fn direct_regular_follow_sets(
+    grammar: &AnalyzedGrammar,
+) -> Option<(Vec<Vec<TerminalID>>, Vec<Vec<TerminalID>>)> {
+    let automaton = grammar.direct_regular_automaton.as_ref()?;
+    let state_count = automaton.states.len();
+    let closure_labels = (0..state_count)
+        .into_par_iter()
+        .map_init(
+            || (vec![0u32; state_count], 0u32, Vec::<u32>::new()),
+            |(seen_epoch, epoch, stack), root| {
+                *epoch = epoch.wrapping_add(1);
+                if *epoch == 0 {
+                    seen_epoch.fill(0);
+                    *epoch = 1;
+                }
+                stack.clear();
+                stack.push(root as u32);
+                let mut labels = Vec::new();
+                while let Some(state_id) = stack.pop() {
+                    let state_index = state_id as usize;
+                    if state_index >= state_count || seen_epoch[state_index] == *epoch {
+                        continue;
+                    }
+                    seen_epoch[state_index] = *epoch;
+                    let state = &automaton.states[state_index];
+                    stack.extend(state.epsilons.iter().copied());
+                    labels.extend(
+                        state
+                            .transitions
+                            .keys()
+                            .copied()
+                            .filter(|terminal| *terminal < grammar.num_terminals),
+                    );
+                }
+                labels.sort_unstable();
+                labels.dedup();
+                labels
+            },
+        )
+        .collect::<Vec<_>>();
+
+    let mut ever = vec![BTreeSet::new(); grammar.num_terminals as usize];
+    let mut always = vec![None::<BTreeSet<TerminalID>>; grammar.num_terminals as usize];
+    for state in &automaton.states {
+        for (&terminal, targets) in &state.transitions {
+            if terminal >= grammar.num_terminals {
+                continue;
+            }
+            for &target in targets {
+                let Some(follows) = closure_labels.get(target as usize) else {
+                    continue;
+                };
+                ever[terminal as usize].extend(follows.iter().copied());
+                let follows = follows.iter().copied().collect::<BTreeSet<_>>();
+                match &mut always[terminal as usize] {
+                    None => always[terminal as usize] = Some(follows),
+                    Some(existing) => existing.retain(|follow| follows.contains(follow)),
+                }
+            }
+        }
+    }
+
+    Some((
+        ever.into_iter()
+            .map(|set| set.into_iter().collect())
+            .collect(),
+        always
+            .into_iter()
+            .map(|set| set.unwrap_or_default().into_iter().collect())
+            .collect(),
+    ))
 }
 
 /// For each terminal, collect the set of terminals that can ever follow it
 /// in any rule derivation.
 pub(crate) fn compute_ever_allowed_follows(grammar: &AnalyzedGrammar) -> Vec<Vec<TerminalID>> {
+    if let Some((ever, _)) = direct_regular_follow_sets(grammar) {
+        return ever;
+    }
     let mut ever_allowed = vec![BTreeSet::new(); grammar.num_terminals as usize];
 
     for rule in &grammar.rules {
@@ -215,6 +355,10 @@ pub(crate) fn compute_ever_allowed_follows(grammar: &AnalyzedGrammar) -> Vec<Vec
 
 /// For each terminal, the terminals that ALWAYS follow it in every occurrence.
 pub(crate) fn compute_always_allowed_follows(grammar: &AnalyzedGrammar) -> Vec<Vec<TerminalID>> {
+    if let Some((_, always)) = direct_regular_follow_sets(grammar) {
+        return always;
+    }
+
     let mut always_allowed = vec![None::<BTreeSet<TerminalID>>; grammar.num_terminals as usize];
 
     for rule in &grammar.rules {

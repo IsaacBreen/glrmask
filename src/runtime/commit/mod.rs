@@ -4343,7 +4343,9 @@ fn apply_flat_stack_effect(
     pushes: &[u32],
 ) -> Option<bool> {
     let pop = pop as usize;
-    if pop >= stack.len() {
+    // Stack effects are atomic: popping the final visible state is valid when
+    // the same effect pushes a replacement. Only a true underflow is invalid.
+    if pop > stack.len() {
         return Some(false);
     }
     let new_len = stack.len() - pop + pushes.len();
@@ -5840,6 +5842,15 @@ mod tests {
             ),
             "multiple actionable terminals ending at one offset must remain on the ordinary queue",
         );
+    }
+
+    #[test]
+    fn flat_stack_effect_can_replace_the_only_state() {
+        let mut stack = FlatInlineStack::new();
+        stack.push(36);
+
+        assert_eq!(apply_flat_stack_effect(&mut stack, 1, &[37]), Some(true));
+        assert_eq!(stack.as_slice(), &[37]);
     }
 
     #[test]

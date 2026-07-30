@@ -766,6 +766,47 @@ mod tests {
     }
 
     #[test]
+    fn parallel_table_compression_matches_serial_rows() {
+        let rows = (0..256)
+            .map(|state| {
+                ActionRow::from_iter([
+                    (0, Action::Accept),
+                    (1, Action::Accept),
+                    (2, Action::Accept),
+                    (4, shift(10 + state)),
+                    (5, Action::Accept),
+                ])
+            })
+            .collect::<Vec<_>>();
+        let mut parallel = GLRTable {
+            action: rows.clone(),
+            goto: vec![SparseRow::default(); rows.len()],
+            num_states: rows.len() as u32,
+            num_terminals: 6,
+            num_rules: 0,
+            rules: Vec::new(),
+            nonterminal_display_names: Vec::new(),
+            construction: GlrTableConstruction::LegacyRowBisim,
+            admission_policy: AdmissionPolicy::RowPresenceExact,
+            advance: Vec::new(),
+            forwarded_shifts: Default::default(),
+            guarded_shift_index: Vec::new(),
+        };
+        let mut serial = parallel.clone();
+        for row in &mut serial.action {
+            row.compress_default(serial.num_terminals);
+        }
+
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap()
+            .install(|| parallel.compress_default_action_rows());
+
+        assert_eq!(parallel.action, serial.action);
+    }
+
+    #[test]
     fn table_compression_preserves_lookup_equivalence() {
         let mut table = GLRTable {
             action: vec![ActionRow::from_iter([

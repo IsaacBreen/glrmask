@@ -921,6 +921,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
     let terminal_build_ms = dwa_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let profiling = compile_profile_enabled();
+    let top_profiling = std::env::var_os("GLRMASK_PROFILE_COMPILE_TOP").is_some();
     let tsids_before_compact = id_map.num_tsids();
     let tokens_before_compact = id_map.num_internal_tokens();
 
@@ -961,7 +962,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
         0.0
     };
 
-    if profiling {
+    if profiling || top_profiling {
         let stats_str = if let Some(stats) = compact_report.as_ref().and_then(|report| report.profile_stats) {
             format!(
                 " compact_tsids_before={} compact_tsids_after={} compact_tokens_before={} compact_tokens_after={} compact_tsid_shrink_pct={:.2} compact_vocab_shrink_pct={:.2} compact_token_ranges_before={} compact_token_ranges_after={}",

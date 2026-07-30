@@ -179,6 +179,10 @@ pub(crate) fn compile_profile_summary_enabled() -> bool {
     env_flag_enabled("GLRMASK_PROFILE_COMPILE_SUMMARY")
 }
 
+pub(crate) fn compile_top_profile_enabled() -> bool {
+    env_flag_enabled("GLRMASK_PROFILE_COMPILE_TOP")
+}
+
 pub(crate) fn compile_profile_enabled() -> bool {
     compile_profile_summary_enabled()
 }
@@ -289,7 +293,7 @@ pub(crate) fn emit_compile_profile_summary(
     import_ms: Option<f64>,
     profile: &CompilePhaseProfile,
 ) {
-    if !compile_profile_summary_enabled() {
+    if !compile_profile_summary_enabled() && !compile_top_profile_enabled() {
         return;
     }
 
@@ -3323,15 +3327,23 @@ fn compile_prepared_with_profile_and_table_construction(
             }
             profile.compact_ms += elapsed_ms(compact_started_at);
         }
-        let terminal_dwa_interned_ranges_before_pm_reconcile =
-            terminal_family_interned_range_count(&terminal_dwas);
-        let possible_matches_interned_ranges_before_pm_reconcile =
-            interned_range_count_for_artifact(possible_matches.artifact_mut());
-        let terminal_pm_joint_interned_ranges_before_reconcile =
-            terminal_family_joint_interned_range_count(
-                &terminal_dwas,
-                possible_matches.artifact(),
-            );
+        let collect_expensive_profile_stats = compile_profile_summary_enabled();
+        let (
+            terminal_dwa_interned_ranges_before_pm_reconcile,
+            possible_matches_interned_ranges_before_pm_reconcile,
+            terminal_pm_joint_interned_ranges_before_reconcile,
+        ) = if collect_expensive_profile_stats {
+            (
+                terminal_family_interned_range_count(&terminal_dwas),
+                interned_range_count_for_artifact(possible_matches.artifact_mut()),
+                terminal_family_joint_interned_range_count(
+                    &terminal_dwas,
+                    possible_matches.artifact(),
+                ),
+            )
+        } else {
+            (0, 0, 0)
+        };
 
         let (mut parser_dwa, parser_dwa_ms) = if let Some((
             parser_dwa,
@@ -3430,7 +3442,7 @@ fn compile_prepared_with_profile_and_table_construction(
             };
             (parser_dwa, elapsed_ms(parser_dwa_started_at))
         };
-        if compile_profile_enabled() {
+        if compile_profile_enabled() || compile_top_profile_enabled() {
             if let Some((parser_dwa_started_ms, parser_dwa_finished_ms)) = parser_dag_timing {
                 let overlap_ms = possible_matches_finished_ms.min(parser_dwa_finished_ms)
                     - possible_matches_started_ms.max(parser_dwa_started_ms);
@@ -3457,10 +3469,14 @@ fn compile_prepared_with_profile_and_table_construction(
             }
         }
 
-        let terminal_pm_joint_interned_ranges = terminal_family_joint_interned_range_count(
-            &terminal_dwas,
-            possible_matches.artifact(),
-        );
+        let terminal_pm_joint_interned_ranges = if collect_expensive_profile_stats {
+            terminal_family_joint_interned_range_count(
+                &terminal_dwas,
+                possible_matches.artifact(),
+            )
+        } else {
+            0
+        };
 
         // Parser-family union may choose a different but equivalent internal ID
         // numbering from the reconciled terminal families.  Always make the
@@ -3499,15 +3515,26 @@ fn compile_prepared_with_profile_and_table_construction(
         possible_matches =
             MappedArtifact::new(possible_matches_artifact, internal_ids.clone());
 
-        let parser_dwa_interned_ranges =
-            count_interned_ranges_for_weights(parser_dwa.artifact().weight_refs()).total_ranges();
-        let (possible_matches_interned_ranges, parser_pm_joint_interned_ranges) = {
+        let (
+            parser_dwa_interned_ranges,
+            possible_matches_interned_ranges,
+            parser_pm_joint_interned_ranges,
+        ) = if collect_expensive_profile_stats {
+            let parser_dwa_interned_ranges =
+                count_interned_ranges_for_weights(parser_dwa.artifact().weight_refs())
+                    .total_ranges();
             let (parser_dwa_artifact, _) = parser_dwa.parts_mut();
             let (possible_matches_artifact, _) = possible_matches.parts_mut();
             (
+                parser_dwa_interned_ranges,
                 interned_range_count_for_artifact(possible_matches_artifact),
-                joint_interned_range_count_for_artifacts(parser_dwa_artifact, possible_matches_artifact),
+                joint_interned_range_count_for_artifacts(
+                    parser_dwa_artifact,
+                    possible_matches_artifact,
+                ),
             )
+        } else {
+            (0, 0, 0)
         };
         let (
             parser_dwa,
@@ -3552,6 +3579,7 @@ fn compile_prepared_with_profile_and_table_construction(
         let special_token_terminals = collect_special_token_terminals(&prepared_grammar);
         let tokenizer = runtime_tokenizer.unwrap_or(tokenizer);
         let constraint = finalize_constraint(Constraint {
+            runtime_backend: crate::runtime::ConstraintRuntimeBackend::Static,
             parser_dwa,
             parser_top_accept,
             parser_top_accept_parts,
@@ -3683,6 +3711,7 @@ pub(crate) fn compile_dynamic_owned_with_table_construction(
             prepared_grammar.ignore_terminal,
             collect_special_token_terminals(&prepared_grammar),
             vocab,
+            prepared_grammar.direct_regular_automaton.is_none(),
         );
         if let Some(total_started_at) = total_started_at {
             eprintln!(
@@ -3700,12 +3729,82 @@ pub(crate) fn compile_dynamic_owned_with_table_construction(
     })
 }
 
+pub(crate) fn compile_adaptive_direct_regular_owned_with_table_construction(
+    grammar: GrammarDef,
+    vocab: &Vocab,
+    default_table_construction: GlrTableConstruction,
+) -> Constraint {
+    let profile = compile_profile_enabled();
+    let total_started_at = profile.then(Instant::now);
+    let prepared_grammar = prepare_grammar(grammar);
+    run_with_compile_thread_pool(|| {
+        let analyzed_grammar = AnalyzedGrammar::from_grammar_def(&prepared_grammar);
+        if let Err(message) = analyzed_grammar.check_table_build_normal_form() {
+            panic!("[glrmask] grammar precondition violations:
+{}", message);
+        }
+
+        let (((tokenizer, possible_matches), tokenizer_and_pm_ms), (table, table_ms)) = rayon::join(
+            || {
+                let started_at = Instant::now();
+                let mut tokenizer = build_dynamic_tokenizer(&prepared_grammar);
+                tokenizer.isolate_start_state_and_drain_nullable_terminals();
+                let possible_matches = cpm::compute_constraint_possible_matches_for_vocab(
+                    &tokenizer,
+                    vocab,
+                    cpm::ConstraintPossibleMatchesConfig::EAGER,
+                );
+                ((tokenizer, possible_matches), elapsed_ms(started_at))
+            },
+            || {
+                let started_at = Instant::now();
+                let table = GLRTable::build_with_default_construction(
+                    &analyzed_grammar,
+                    default_table_construction,
+                );
+                (table, elapsed_ms(started_at))
+            },
+        );
+
+        let constraint = DynamicConstraint::from_parts_with_possible_matches(
+            table,
+            analyzed_grammar.terminal_display_names.clone(),
+            tokenizer,
+            prepared_grammar.ignore_terminal,
+            collect_special_token_terminals(&prepared_grammar),
+            vocab,
+            false,
+            possible_matches,
+        )
+        .into_constraint();
+        if let Some(total_started_at) = total_started_at {
+            eprintln!(
+                "[glrmask/profile][adaptive_direct_regular_compile] tokenizer_and_pm_ms={:.3} table_ms={:.3} parallel_core_wall_ms={:.3} total_ms={:.3}",
+                tokenizer_and_pm_ms,
+                table_ms,
+                tokenizer_and_pm_ms.max(table_ms),
+                elapsed_ms(total_started_at),
+            );
+        }
+        constraint
+    })
+}
+
 pub(crate) fn compile_owned_with_table_construction(
     grammar: GrammarDef,
     vocab: &Vocab,
     default_table_construction: GlrTableConstruction,
 ) -> Constraint {
-    if compile_profile_summary_enabled() {
+    if grammar.direct_regular_automaton.is_some()
+        && env_flag_enabled_by_default("GLRMASK_DIRECT_REGULAR_DYNAMIC_BACKEND")
+    {
+        return compile_adaptive_direct_regular_owned_with_table_construction(
+            grammar,
+            vocab,
+            default_table_construction,
+        );
+    }
+    if compile_profile_summary_enabled() || compile_top_profile_enabled() {
         let (constraint, profile) =
             compile_owned_profiled_with_table_construction(grammar, vocab, default_table_construction);
         emit_compile_profile_summary(None, None, &profile);

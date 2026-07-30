@@ -208,6 +208,14 @@ fn initial_commit_prime_token_ids(mask: &[u32]) -> Option<Vec<u32>> {
 }
 
 impl Constraint {
+    #[inline]
+    pub(crate) fn uses_dynamic_runtime(&self) -> bool {
+        matches!(
+            self.runtime_backend,
+            super::artifact::ConstraintRuntimeBackend::Dynamic
+        )
+    }
+
     #[cold]
     fn prime_initial_commit_hot_path(&self) {
         let mut state = ConstraintState {
@@ -351,7 +359,10 @@ impl Constraint {
         DynamicMaskVocab::from_packed(Arc::new(trie), Arc::new(token_aliases))
     }
 
-    pub(crate) fn rebuild_dynamic_runtime_caches(&mut self) {
+    pub(crate) fn rebuild_dynamic_runtime_caches(
+        &mut self,
+        prebuild_initial_token_programs_by_default: bool,
+    ) {
         let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
         let total_started_at = profile.then(std::time::Instant::now);
@@ -359,7 +370,9 @@ impl Constraint {
         let preserved_token_program_partition = self
             .dynamic_mask_vocab
             .initial_token_program_partition();
-        self.table.rebuild_guarded_shift_index();
+        if self.table.guarded_shift_index.len() != self.table.num_states as usize {
+            self.table.rebuild_guarded_shift_index();
+        }
         let guarded_shift_ms = started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let started_at = profile.then(std::time::Instant::now);
@@ -378,7 +391,7 @@ impl Constraint {
                 let normalized = value.trim().to_ascii_lowercase();
                 !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
             })
-            .unwrap_or(true);
+            .unwrap_or(prebuild_initial_token_programs_by_default);
         if prebuild_dynamic_token_programs {
             self.dynamic_mask_vocab
                 .prebuild_initial_token_program_partition(&self.tokenizer, self.mask_len());
@@ -794,7 +807,9 @@ impl Constraint {
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
         let total_started_at = profile.then(std::time::Instant::now);
         let guarded_shift_started_at = profile.then(std::time::Instant::now);
-        self.table.rebuild_guarded_shift_index();
+        if self.table.guarded_shift_index.len() != self.table.num_states as usize {
+            self.table.rebuild_guarded_shift_index();
+        }
         let fast_template_dfas_by_terminal = self.compute_fast_template_dfas();
         let guarded_shift_ms = guarded_shift_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);

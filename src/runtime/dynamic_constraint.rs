@@ -5,6 +5,7 @@ use crate::automata::lexer::Lexer;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::dwa::DWA;
 use crate::compiler::glr::table::GLRTable;
+use crate::compiler::constraint_possible_matches::ConstraintPossibleMatchesComputation;
 use crate::grammar::flat::TerminalID;
 use crate::Vocab;
 
@@ -78,6 +79,7 @@ impl DynamicConstraint {
         ignore_terminal: Option<TerminalID>,
         special_token_terminals: Vec<SpecialTokenTerminal>,
         vocab: &Vocab,
+        prebuild_initial_token_programs_by_default: bool,
     ) -> Self {
         let dynamic_mask_vocab =
             crate::compiler::constraint_possible_matches::runtime_dynamic_vocab_for_vocab(vocab);
@@ -94,7 +96,51 @@ impl DynamicConstraint {
             },
             dynamic_mask_vocab,
             None,
+            prebuild_initial_token_programs_by_default,
         )
+    }
+
+    pub(crate) fn from_parts_with_possible_matches(
+        table: GLRTable,
+        terminal_display_names: Vec<String>,
+        tokenizer: Tokenizer,
+        ignore_terminal: Option<TerminalID>,
+        special_token_terminals: Vec<SpecialTokenTerminal>,
+        vocab: &Vocab,
+        prebuild_initial_token_programs_by_default: bool,
+        computation: ConstraintPossibleMatchesComputation,
+    ) -> Self {
+        let ConstraintPossibleMatchesComputation {
+            mapped_possible_matches,
+            runtime_dynamic_vocab,
+            complete,
+            profile: _,
+        } = computation;
+        let (possible_matches, mut id_map) = mapped_possible_matches.into_parts();
+        id_map.materialize_deferred_vocab_singletons();
+
+        let mut result = Self::from_payload_v2_with_dynamic_vocab(
+            DynamicConstraintPayloadV2 {
+                v1: DynamicConstraintPayloadV1 {
+                    table,
+                    terminal_display_names,
+                    tokenizer,
+                    ignore_terminal,
+                    token_bytes: Arc::clone(&vocab.entries),
+                },
+                special_token_terminals,
+            },
+            runtime_dynamic_vocab.vocab,
+            None,
+            prebuild_initial_token_programs_by_default,
+        );
+        result.inner.possible_matches = possible_matches;
+        result.inner.possible_matches_complete = complete;
+        result.inner.state_to_internal_tsid = id_map.tokenizer_states.original_to_internal;
+        result.inner.internal_tsid_to_states = id_map.tokenizer_states.internal_to_originals;
+        result.inner.original_token_to_internal = id_map.vocab_tokens.original_to_internal;
+        result.inner.internal_token_to_tokens = id_map.vocab_tokens.internal_to_originals;
+        result
     }
 
     fn migrate_legacy_v1(
@@ -130,6 +176,8 @@ impl DynamicConstraint {
     }
 
     fn from_legacy_payload_v3(payload: LegacyDynamicConstraintPayloadV3) -> crate::Result<Self> {
+        let prebuild_initial_token_programs_by_default =
+            payload.initial_token_program_partition.is_some();
         Ok(Self::from_payload_v2_with_dynamic_vocab(
             DynamicConstraintPayloadV2 {
                 v1: Self::migrate_legacy_v1(payload.v2.v1)?,
@@ -137,6 +185,7 @@ impl DynamicConstraint {
             },
             DynamicMaskVocab::default(),
             payload.initial_token_program_partition,
+            prebuild_initial_token_programs_by_default,
         ))
     }
 
@@ -145,6 +194,7 @@ impl DynamicConstraint {
             payload,
             DynamicMaskVocab::default(),
             None,
+            true,
         )
     }
 
@@ -152,6 +202,7 @@ impl DynamicConstraint {
         payload: DynamicConstraintPayloadV2,
         dynamic_mask_vocab: DynamicMaskVocab,
         initial_token_program_partition: Option<DynamicTokenProgramPartition>,
+        prebuild_initial_token_programs_by_default: bool,
     ) -> Self {
         let DynamicConstraintPayloadV2 {
             v1: payload,
@@ -171,6 +222,7 @@ impl DynamicConstraint {
                 .install_initial_token_program_partition(Arc::new(partition));
         }
         let mut inner = Constraint {
+            runtime_backend: crate::runtime::ConstraintRuntimeBackend::Dynamic,
             parser_dwa: DWA::new(payload.tokenizer.num_states(), max_token_id),
             parser_top_accept: BTreeMap::new(),
             parser_top_accept_parts: BTreeMap::new(),
@@ -232,8 +284,12 @@ impl DynamicConstraint {
             word_group_buf_op_costs: Vec::new(),
             final_mask_mapping: Default::default(),
         };
-        inner.rebuild_dynamic_runtime_caches();
+        inner.rebuild_dynamic_runtime_caches(prebuild_initial_token_programs_by_default);
         Self { inner }
+    }
+
+    pub(crate) fn into_constraint(self) -> Constraint {
+        self.inner
     }
 
     /// Serialize this dynamic constraint to a versioned binary artifact.
@@ -318,10 +374,13 @@ impl DynamicConstraint {
                 let payload: DynamicConstraintPayloadV3 =
                     bincode::deserialize(&bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..])
                         .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
+                let prebuild_initial_token_programs_by_default =
+                    payload.initial_token_program_partition.is_some();
                 Ok(Self::from_payload_v2_with_dynamic_vocab(
                     payload.v2,
                     DynamicMaskVocab::default(),
                     payload.initial_token_program_partition,
+                    prebuild_initial_token_programs_by_default,
                 ))
             }
             _ => unreachable!("version was validated above"),
@@ -458,6 +517,136 @@ mod tests {
         );
         assert_eq!(constraint.mask_len(), loaded.mask_len());
         assert_eq!(constraint.start().mask(), loaded.start().mask());
+    }
+
+    #[test]
+    fn direct_regular_dynamic_constraint_defers_initial_token_programs() {
+        let vocab = vocab();
+        let mut grammar = String::from("start: r0\n");
+        for index in 0..63 {
+            grammar.push_str(&format!("r{index}: \"a\" r{}\n", index + 1));
+        }
+        grammar.push_str("r63: \"b\"\n");
+
+        let normal = crate::Constraint::from_lark(&grammar, &vocab).unwrap();
+        let dynamic = DynamicConstraint::from_lark(&grammar, &vocab).unwrap();
+        assert_eq!(dynamic.inner.table.num_rules, 0);
+        assert!(
+            dynamic
+                .inner
+                .dynamic_mask_vocab
+                .initial_token_program_partition()
+                .is_none()
+        );
+        assert_eq!(normal.start().mask(), dynamic.start().mask());
+    }
+
+    #[test]
+    fn compressed_right_linear_plus_loop_commits_terminal_at_token_boundary() {
+        let mut grammar = String::from("start: H s0\nplus_line: PLUS_LINE\n");
+        let n = 15;
+        for i in 0..n {
+            grammar.push_str(&format!(
+                "s{i}: line{i}{}\n",
+                if i + 1 < n {
+                    format!(" | s{}", i + 1)
+                } else {
+                    String::new()
+                }
+            ));
+        }
+        for i in 0..n {
+            grammar.push_str(&format!(
+                "line{i}: plus_line* SRC_{i} plus_line* {}\n",
+                if i + 1 < n {
+                    format!("line{}?", i + 1)
+                } else {
+                    String::new()
+                }
+            ));
+        }
+        grammar.push_str("H: \"h\\n\"\nPLUS_LINE: /\\+[^\\n\\r]*\\n/\n");
+        for i in 0..n {
+            grammar.push_str(&format!("SRC_{i}: \" a{i}\\n\"\n"));
+        }
+        let vocab = Vocab::new(vec![
+            (0, b"h\n".to_vec()),
+            (1, b"+x".to_vec()),
+            (2, b"\n".to_vec()),
+            (3, b" a0\n".to_vec()),
+        ]);
+        let constraint = crate::Constraint::from_lark(&grammar, &vocab).unwrap();
+        assert!(constraint.uses_dynamic_runtime());
+        let mut state = constraint.start();
+
+        state.commit_token(0).unwrap();
+        state.commit_token(1).unwrap();
+        assert_ne!(state.mask()[0] & (1 << 2), 0);
+        state.commit_token(2).unwrap();
+        assert_ne!(state.mask()[0] & (1 << 3), 0);
+        state.commit_token(3).unwrap();
+        assert!(state.is_complete());
+    }
+
+    #[test]
+    fn direct_regular_constraint_uses_adaptive_backend_and_roundtrips() {
+        let vocab = vocab();
+        let mut grammar = String::from("start: r0\n");
+        for index in 0..63 {
+            grammar.push_str(&format!("r{index}: \"a\" r{}\n", index + 1));
+        }
+        grammar.push_str("r63: \"b\"\n");
+
+        let constraint = crate::Constraint::from_lark(&grammar, &vocab).unwrap();
+        assert!(constraint.uses_dynamic_runtime());
+        assert!(constraint.possible_matches_complete);
+        let dynamic = DynamicConstraint::from_lark(&grammar, &vocab).unwrap();
+        assert!(!dynamic.inner.possible_matches_complete);
+
+        let mut adaptive_state = constraint.start_with_rollback(4);
+        let mut dynamic_state = dynamic.start();
+        assert_eq!(adaptive_state.mask(), dynamic_state.mask());
+        assert_eq!(adaptive_state.forced(), dynamic_state.forced());
+
+        for token in [3, 3] {
+            adaptive_state.commit_token(token).unwrap();
+            dynamic_state.commit_token(token).unwrap();
+            assert_eq!(adaptive_state.mask(), dynamic_state.mask());
+            assert_eq!(adaptive_state.is_complete(), dynamic_state.is_complete());
+        }
+
+        let before_third = adaptive_state.mask();
+        adaptive_state.commit_token(0).unwrap();
+        dynamic_state.commit_token(0).unwrap();
+        let after_third = adaptive_state.mask();
+        assert_eq!(after_third, dynamic_state.mask());
+        adaptive_state.rollback(1).unwrap();
+        assert_eq!(adaptive_state.mask(), before_third);
+        adaptive_state.commit_token(0).unwrap();
+        assert_eq!(adaptive_state.mask(), after_third);
+
+        let loaded = crate::Constraint::load(&constraint.save()).unwrap();
+        assert!(loaded.uses_dynamic_runtime());
+        let mut loaded_state = loaded.start();
+        let mut original_state = constraint.start();
+        assert_eq!(loaded_state.mask(), original_state.mask());
+        for token in [3, 3, 0] {
+            loaded_state.commit_token(token).unwrap();
+            original_state.commit_token(token).unwrap();
+            assert_eq!(loaded_state.mask(), original_state.mask());
+            assert_eq!(loaded_state.is_complete(), original_state.is_complete());
+        }
+    }
+
+    #[test]
+    fn non_regular_constraint_keeps_static_backend() {
+        let vocab = vocab();
+        let constraint = crate::Constraint::from_ebnf(
+            "start ::= 'a' start 'b' | ''",
+            &vocab,
+        )
+        .unwrap();
+        assert!(!constraint.uses_dynamic_runtime());
     }
 
     #[test]
