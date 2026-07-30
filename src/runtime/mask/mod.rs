@@ -2336,6 +2336,29 @@ impl<'a> ConstraintState<'a> {
                             &mut direct_buf_dirty,
                         );
                     }
+                    if let Some(accept_parts) = self
+                        .constraint
+                        .parser_top_accept_parts
+                        .get(&positive_label)
+                        .or_else(|| {
+                            self.constraint
+                                .parser_top_accept_parts
+                                .get(&DEFAULT_LABEL)
+                        })
+                    {
+                        used_direct_final = true;
+                        for accept_weight in accept_parts {
+                            self.merge_single_path_final_weight_to_internal(
+                                accept_weight,
+                                internal_tsid,
+                                &single_path_acc,
+                                precomputed,
+                                &mut merged,
+                                Some(&mut *buf),
+                                &mut direct_buf_dirty,
+                            );
+                        }
+                    }
                 }
                 let fast_transitions = &self.constraint.dwa_fast_transitions[dwa_state_id as usize];
                 let Some((target, weight)) = fast_transitions
@@ -2794,6 +2817,36 @@ impl<'a> ConstraintState<'a> {
                         profile.token_accumulation_ns += elapsed_ns(start);
                     }
                 }
+                if let Some(accept_parts) = self
+                    .constraint
+                    .parser_top_accept_parts
+                    .get(&positive_label)
+                    .or_else(|| {
+                        self.constraint
+                            .parser_top_accept_parts
+                            .get(&DEFAULT_LABEL)
+                    })
+                {
+                    let accumulate_start = if profile.is_some() {
+                        Some(Instant::now())
+                    } else {
+                        None
+                    };
+                    *direct_buf_used = true;
+                    for accept_weight in accept_parts {
+                        *direct_buf_possible &= self.merge_final_weight_for_gss(
+                            accept_weight,
+                            popped,
+                            precomputed,
+                            merged,
+                            direct_buf,
+                            direct_buf_dirty,
+                        );
+                    }
+                    if let (Some(profile), Some(start)) = (profile.as_mut(), accumulate_start) {
+                        profile.token_accumulation_ns += elapsed_ns(start);
+                    }
+                }
                 queue.record_seed_decompose_callback();
                 enqueue_parser_state_transition(
                     queue,
@@ -2923,6 +2976,29 @@ impl<'a> ConstraintState<'a> {
                             ),
                         );
                     });
+                }
+                if let Some(top_parts) = self
+                    .constraint
+                    .parser_top_accept_parts
+                    .get(&positive_label)
+                    .or_else(|| {
+                        self.constraint
+                            .parser_top_accept_parts
+                            .get(&DEFAULT_LABEL)
+                    })
+                {
+                    for top_weight in top_parts {
+                        dense.for_each_acc(|accumulator| {
+                            merge_accepted(
+                                &mut accepted,
+                                accumulator.intersect_with_weight_small_cached(
+                                    top_weight,
+                                    precomputed,
+                                    &mut seed_intersections,
+                                ),
+                            );
+                        });
+                    }
                 }
                 let Some((target, transition_weight)) = start_transitions
                     .get(&positive_label)

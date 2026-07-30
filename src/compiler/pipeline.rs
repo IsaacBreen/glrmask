@@ -59,7 +59,8 @@ use crate::compiler::stages::mapped_artifact::{
 };
 use crate::compiler::stages::parser_dwa::{
     build_parser_dwa_from_terminal_dwa_with_precomputed_templates,
-    try_build_immediate_parser_dwa,
+    try_build_direct_regular_parser_top_accept_parts, try_build_immediate_parser_dwa,
+    try_build_immediate_parser_top_accept_parts,
 };
 use crate::compiler::stages::templates::{Templates, commit_template_dfas_enabled};
 use crate::compiler::stages::templates::characterize::characterize_terminals_profiled;
@@ -1978,6 +1979,21 @@ fn collapse_huge_parser_top_accept_parts(
     report
 }
 
+fn reconcile_parser_top_accept_parts(
+    mut inputs: Vec<MappedArtifact<ParserTopAccept>>,
+) -> Option<MappedArtifact<ParserTopAccept>> {
+    if inputs.is_empty() {
+        return None;
+    }
+    inputs.sort_unstable_by_key(|mapped| std::cmp::Reverse(mapped.id_map().num_tsids()));
+    let mut merged = inputs.remove(0);
+    for next in inputs {
+        let ((left, right), id_map) = merged.pair_forced_common(next).into_parts();
+        merged = MappedArtifact::new(merge_parser_top_accept(left, right), id_map);
+    }
+    Some(merged)
+}
+
 fn build_and_merge_parser_dwa_families(
     terminal_dwas: &TerminalDwaFamilies,
     table: &GLRTable,
@@ -1987,49 +2003,212 @@ fn build_and_merge_parser_dwa_families(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
 ) -> MappedParserDwa {
+    let total_started_at = Instant::now();
     let collapse_immediate_acceptance = !tokenizer.has_epsilon_transitions();
+    let direct_l1_parts = grammar
+        .direct_regular_automaton
+        .as_ref()
+        .and_then(|_| terminal_dwas.l1.as_ref())
+        .and_then(|family| {
+            try_build_immediate_parser_top_accept_parts(family.artifact(), grammar, table).map(
+                |parts| {
+                    MappedArtifact::new(
+                        ParserTopAccept {
+                            combined: BTreeMap::new(),
+                            parts,
+                        },
+                        family.id_map().clone(),
+                    )
+                },
+            )
+        });
+    let direct_l2p_parts = grammar
+        .direct_regular_automaton
+        .as_ref()
+        .and_then(|_| terminal_dwas.l2p.as_ref())
+        .and_then(|family| {
+            try_build_direct_regular_parser_top_accept_parts(
+                family.artifact(),
+                grammar,
+                table,
+            )
+            .map(|parts| {
+                MappedArtifact::new(
+                    ParserTopAccept {
+                        combined: BTreeMap::new(),
+                        parts,
+                    },
+                    family.id_map().clone(),
+                )
+            })
+        });
+    let direct_special_parts = grammar
+        .direct_regular_automaton
+        .as_ref()
+        .and_then(|_| terminal_dwas.special.as_ref())
+        .and_then(|family| {
+            try_build_direct_regular_parser_top_accept_parts(
+                family.artifact(),
+                grammar,
+                table,
+            )
+            .map(|parts| {
+                MappedArtifact::new(
+                    ParserTopAccept {
+                        combined: BTreeMap::new(),
+                        parts,
+                    },
+                    family.id_map().clone(),
+                )
+            })
+        });
+    let use_direct_l1_parts = direct_l1_parts.is_some();
+    let use_direct_l2p_parts = direct_l2p_parts.is_some();
+    let use_direct_special_parts = direct_special_parts.is_some();
+    if grammar.direct_regular_automaton.is_some() && templates.by_terminal.is_empty() {
+        assert_eq!(
+            terminal_dwas.l1.is_some(),
+            use_direct_l1_parts,
+            "direct-regular L1 family must have an exact direct acceptance path",
+        );
+        assert_eq!(
+            terminal_dwas.l2p.is_some(),
+            use_direct_l2p_parts,
+            "direct-regular L2P family must have an exact direct acceptance path",
+        );
+        assert_eq!(
+            terminal_dwas.special.is_some(),
+            use_direct_special_parts,
+            "direct-regular special-token family must have an exact direct acceptance path",
+        );
+    }
+
     let (l1_parser, l2p_parser) = rayon::join(
         || {
-            build_parser_dwa_for_terminal_family(
-                "l1",
-                terminal_dwas.l1.as_ref(),
-                table,
-                grammar,
-                &templates,
-                vocab,
-                collapse_immediate_acceptance,
-            )
+            (!use_direct_l1_parts)
+                .then(|| {
+                    build_parser_dwa_for_terminal_family(
+                        "l1",
+                        terminal_dwas.l1.as_ref(),
+                        table,
+                        grammar,
+                        &templates,
+                        vocab,
+                        collapse_immediate_acceptance,
+                    )
+                })
+                .flatten()
         },
         || {
+            (!use_direct_l2p_parts)
+                .then(|| {
+                    build_parser_dwa_for_terminal_family(
+                        "l2p",
+                        terminal_dwas.l2p.as_ref(),
+                        table,
+                        grammar,
+                        &templates,
+                        vocab,
+                        collapse_immediate_acceptance,
+                    )
+                })
+                .flatten()
+        },
+    );
+    let special_parser = (!use_direct_special_parts)
+        .then(|| {
             build_parser_dwa_for_terminal_family(
-                "l2p",
-                terminal_dwas.l2p.as_ref(),
+                "special",
+                terminal_dwas.special.as_ref(),
                 table,
                 grammar,
                 &templates,
                 vocab,
                 collapse_immediate_acceptance,
             )
-        },
-    );
-    let special_parser = build_parser_dwa_for_terminal_family(
-        "special",
-        terminal_dwas.special.as_ref(),
-        table,
-        grammar,
-        &templates,
-        vocab,
-        collapse_immediate_acceptance,
-    );
+        })
+        .flatten();
     let parser_dwas: Vec<MappedArtifact<DWA>> = l1_parser
         .into_iter()
         .chain(l2p_parser)
         .chain(special_parser)
         .collect();
+    let direct_parts = reconcile_parser_top_accept_parts(
+        direct_l1_parts
+            .into_iter()
+            .chain(direct_l2p_parts)
+            .chain(direct_special_parts)
+            .collect(),
+    );
     let max_token_id = terminal_dwas
         .max_original_token_id()
         .unwrap_or_else(|| vocab.max_token_id())
         .max(vocab.max_token_id());
+
+    if let Some(mapped_parts) = direct_parts {
+        let (dwa, top_accept, id_map, parts_first) = if parser_dwas.is_empty() {
+            let (top_accept, id_map) = mapped_parts.into_parts();
+            (
+                DWA::new(id_map.num_tsids(), id_map.max_internal_token_id()),
+                top_accept,
+                id_map,
+                true,
+            )
+        } else {
+            let mapped_dwa =
+                crate::compiler::stages::id_map_and_terminal_dwa::merge::merge_mapped_parser_dwas(
+                    parser_dwas,
+                    tokenizer.num_states() as usize,
+                    max_token_id,
+                );
+            let parts_first = mapped_parts.id_map().num_tsids() > mapped_dwa.id_map().num_tsids();
+            if parts_first {
+                let ((top_accept, dwa), id_map) =
+                    mapped_parts.pair_forced_common(mapped_dwa).into_parts();
+                (dwa, top_accept, id_map, true)
+            } else {
+                let ((dwa, top_accept), id_map) =
+                    mapped_dwa.pair_forced_common(mapped_parts).into_parts();
+                (dwa, top_accept, id_map, false)
+            }
+        };
+        let mut top_accept = top_accept;
+        let collapse_started_at = Instant::now();
+        let collapse_report = collapse_huge_parser_top_accept_parts(
+            &mut top_accept,
+            grammar.num_terminals as usize,
+        );
+        let collapse_ms = elapsed_ms(collapse_started_at);
+        if compile_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][parser_dwa_merge] mode=top_accept_parts l1_direct={} l2p_direct={} special_direct={} id_order={} labels={} part_refs={} unique_part_weights={} huge_collapsed_labels={} huge_part_refs_before={} huge_part_refs_after={} huge_max_parts_before={} huge_unique_unions={} huge_collapse_ms={:.3} states={} transitions={} total_ms={:.3}",
+                use_direct_l1_parts,
+                use_direct_l2p_parts,
+                use_direct_special_parts,
+                if parts_first { "parts" } else { "primary" },
+                top_accept.parts.len(),
+                top_accept.parts.values().map(Vec::len).sum::<usize>(),
+                top_accept
+                    .parts
+                    .values()
+                    .flatten()
+                    .map(Weight::ptr_key)
+                    .collect::<rustc_hash::FxHashSet<_>>()
+                    .len(),
+                collapse_report.labels_collapsed,
+                collapse_report.part_refs_before,
+                collapse_report.part_refs_after,
+                collapse_report.max_parts_before,
+                collapse_report.unique_unions_built,
+                collapse_ms,
+                dwa.num_states(),
+                dwa.num_transitions(),
+                total_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        return MappedArtifact::new((dwa, top_accept), id_map);
+    }
+
     let (mapped_dwa, combined) =
         crate::compiler::stages::id_map_and_terminal_dwa::merge::merge_mapped_parser_dwas_with_top_accept(
             parser_dwas,
