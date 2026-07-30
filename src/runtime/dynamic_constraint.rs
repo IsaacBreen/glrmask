@@ -463,7 +463,7 @@ mod tests {
     use super::*;
 
     fn compressed_lark_grammar(source: &str) -> crate::grammar::flat::GrammarDef {
-        let mut named = crate::import::lark::parse_lark_to_named(source).unwrap();
+        let mut named = crate::import::lark::parse_lark_to_named_uncompressed(source).unwrap();
         assert!(crate::grammar::right_linear::compress_large_right_linear_grammar(
             &mut named
         ));

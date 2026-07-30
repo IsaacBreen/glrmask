@@ -453,7 +453,7 @@ pub fn compress_large_right_linear_grammar(grammar: &mut NamedGrammar) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::import::lark::parse_lark_to_named;
+    use crate::import::lark::{parse_lark_to_named, parse_lark_to_named_uncompressed};
 
     #[test]
     fn compresses_large_tail_recursive_state_graph() {
@@ -462,7 +462,7 @@ mod tests {
             source.push_str(&format!("s{index}: A s{} | B\n", index + 1));
         }
         source.push_str("s40: B\nA: /a/\nB: /b/\n");
-        let mut grammar = parse_lark_to_named(&source).unwrap();
+        let mut grammar = parse_lark_to_named_uncompressed(&source).unwrap();
         assert!(compress_large_right_linear_grammar(&mut grammar));
         assert_eq!(grammar.rules.iter().filter(|rule| !rule.is_terminal).count(), 1);
         assert!(matches!(
@@ -479,7 +479,7 @@ mod tests {
         }
         source.push_str("s40: B\nA: /a/\nB: /b/\n");
 
-        let mut named = parse_lark_to_named(&source).unwrap();
+        let mut named = parse_lark_to_named_uncompressed(&source).unwrap();
         assert!(compress_large_right_linear_grammar(&mut named));
         let factored = crate::grammar::factoring::factor_named_grammar(named);
         let lowered = crate::grammar::ast::lower(&factored).unwrap();

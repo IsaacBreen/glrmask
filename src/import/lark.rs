@@ -1122,23 +1122,30 @@ pub fn parse_lark(input: &str) -> Result<GrammarDef, GlrMaskError> {
     lower(&factored)
 }
 
-pub fn parse_lark_to_named(input: &str) -> Result<NamedGrammar, GlrMaskError> {
+pub(crate) fn parse_lark_to_named_uncompressed(
+    input: &str,
+) -> Result<NamedGrammar, GlrMaskError> {
     let mut lexer = Lexer::new(input);
     let tokens = lexer.tokenize()?;
     let mut parser = Parser::new(tokens);
     let named = parser.parse_grammar()?;
-    let mut named = normalize_lark_named(named)?;
-    // Large right-linear compression changes the static artifact/runtime
-    // trade-off substantially. Keep it explicit rather than silently replacing
-    // the ordinary static compiler for grammars that happen to match its shape.
+    normalize_lark_named(named)
+}
+
+pub fn parse_lark_to_named(input: &str) -> Result<NamedGrammar, GlrMaskError> {
+    let mut named = parse_lark_to_named_uncompressed(input)?;
+    // The transformation is recognition-preserving and retains the ordinary
+    // static backend. Keep an explicit falsey escape hatch for diagnosis and
+    // rollback, but use the compressed representation by default for matching
+    // large right-linear grammars.
     if std::env::var("GLRMASK_ENABLE_RIGHT_LINEAR_COMPRESSION")
         .map(|value| {
-            matches!(
+            !matches!(
                 value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
+                "" | "0" | "false" | "no" | "off"
             )
         })
-        .unwrap_or(false)
+        .unwrap_or(true)
     {
         crate::grammar::right_linear::compress_large_right_linear_grammar(&mut named);
     }
