@@ -2154,13 +2154,24 @@ fn apply_stack_shifts(gss: ParserGSS, shifts: &[StackShift]) -> ParserGSS {
             .iter()
             .all(|shift| shift.pop == first.pop && !shift.pushes.is_empty())
     {
-        if shifts.iter().all(|shift| shift.pushes.len() == 1)
-            && let Some(shifted) = stack.clone().into_gss_after_popping_and_pushing_single_branches(
-                first.pop as usize,
-                shifts.iter().map(|shift| &shift.pushes[0]),
-            )
-        {
-            return shifted;
+        if shifts.iter().all(|shift| shift.pushes.len() == 1) {
+            let targets_are_sorted_unique = shifts
+                .windows(2)
+                .all(|pair| pair[0].pushes[0] < pair[1].pushes[0]);
+            let shifted = if targets_are_sorted_unique {
+                stack.clone().into_gss_after_popping_and_pushing_unique_single_branches(
+                    first.pop as usize,
+                    shifts.iter().map(|shift| &shift.pushes[0]),
+                )
+            } else {
+                stack.clone().into_gss_after_popping_and_pushing_single_branches(
+                    first.pop as usize,
+                    shifts.iter().map(|shift| &shift.pushes[0]),
+                )
+            };
+            if let Some(shifted) = shifted {
+                return shifted;
+            }
         }
         if let Some(shifted) = stack.into_gss_after_popping_and_pushing_branches(
             first.pop as usize,

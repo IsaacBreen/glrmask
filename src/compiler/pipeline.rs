@@ -3583,6 +3583,7 @@ fn compile_prepared_with_profile_and_table_construction(
             parser_dwa,
             parser_top_accept,
             parser_top_accept_parts,
+            direct_regular_wide_frontier_acceptance: Vec::new(),
             table,
             terminal_display_names: analyzed_grammar.terminal_display_names.clone(),
             tokenizer,

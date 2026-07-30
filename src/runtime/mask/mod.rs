@@ -4,6 +4,7 @@ pub(crate) mod queue;
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::grammar::flat::TerminalID;
 use crate::compiler::glr::labels::{encode_positive_label, DEFAULT_LABEL};
+use crate::compiler::glr::parser::ParserGSS;
 use crate::ds::leveled_gss::{
     IndexedLeveledGss, IndexedLeveledGssNode, IndexedLowerIdentity, LeveledGSS, Merge,
 };
@@ -1297,7 +1298,6 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
             memo_max_nonzero_words: 0,
         }
     }
-
 
     fn accumulator_id(&mut self, accumulator: &DenseMaskAcc) -> u32 {
         let identity = dense_acc_identity(accumulator);
@@ -2761,6 +2761,68 @@ impl<'a> ConstraintState<'a> {
         all_direct
     }
 
+    fn try_seed_direct_regular_wide_frontier(
+        &self,
+        gss: &ParserGSS,
+        original_tokenizer_state: u32,
+        start_final_weight: Option<&Weight>,
+        start_fast_transitions: &FastDwaTransitionRow,
+        precomputed: &DenseTokenMaskCache,
+        merged: &mut [u64],
+        direct_buf: &mut Option<&mut [u32]>,
+        direct_buf_possible: &mut bool,
+        direct_buf_used: &mut bool,
+        direct_buf_dirty: &mut bool,
+    ) -> bool {
+        if !start_fast_transitions.is_empty() {
+            return false;
+        }
+        let Some(summary) = self.constraint.direct_regular_wide_frontier_for_gss(gss) else {
+            return false;
+        };
+        let Some(terminals_disallowed) = gss.uniform_accumulator() else {
+            return false;
+        };
+
+        let internal_tsid = self
+            .constraint
+            .internal_tsid_for_state(original_tokenizer_state);
+        let Some(dense_acc) = self.terminals_disallowed_to_dense_acc(
+            &terminals_disallowed,
+            internal_tsid,
+        ) else {
+            return true;
+        };
+
+        *direct_buf_used = true;
+        if let Some(weight) = start_final_weight {
+            *direct_buf_possible &= self.merge_final_weight_to_internal(
+                weight,
+                &dense_acc,
+                precomputed,
+                merged,
+                direct_buf.as_deref_mut(),
+                direct_buf_dirty,
+            );
+        }
+        for (tsid, dense) in &dense_acc.0 {
+            let Some((_, accepted)) = summary
+                .dense_by_tsid
+                .binary_search_by_key(tsid, |(candidate, _)| *candidate)
+                .ok()
+                .and_then(|index| summary.dense_by_tsid.get(index))
+            else {
+                continue;
+            };
+            let n = dense.len().min(accepted.len()).min(merged.len());
+            for index in 0..n {
+                merged[index] |= dense[index] & accepted[index];
+            }
+        }
+        *direct_buf_possible = false;
+        true
+    }
+
     fn seed_mask_queue_merged(
         &self,
         start_final_weight: Option<&Weight>,
@@ -2782,6 +2844,20 @@ impl<'a> ConstraintState<'a> {
             }
 
             let original_tokenizer_state = tokenizer_state;
+            if self.try_seed_direct_regular_wide_frontier(
+                gss,
+                original_tokenizer_state,
+                start_final_weight,
+                start_fast_transitions,
+                precomputed,
+                merged,
+                direct_buf,
+                direct_buf_possible,
+                direct_buf_used,
+                direct_buf_dirty,
+            ) {
+                continue;
+            }
             let internal_tsid = self.constraint.internal_tsid_for_state(original_tokenizer_state);
 
             let seed_decompose_start = if profile.is_some() {

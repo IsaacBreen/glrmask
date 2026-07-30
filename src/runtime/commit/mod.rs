@@ -394,6 +394,9 @@ fn advance_parser_stacks(
     stack: &ParserGSS,
     terminal: u32,
 ) -> ParserGSS {
+    if let Some(cached) = constraint.direct_regular_cached_advance(stack, terminal) {
+        return cached;
+    }
     if template_advance_enabled()
         && let Some(template_advanced) = advance_stacks_template_dfa(constraint, stack, terminal)
     {
@@ -417,6 +420,9 @@ fn advance_parser_stacks_owned(
     stack: ParserGSS,
     terminal: u32,
 ) -> ParserGSS {
+    if let Some(cached) = constraint.direct_regular_cached_advance(&stack, terminal) {
+        return cached;
+    }
     if template_advance_enabled()
         && let Some(template_advanced) =
             advance_stacks_template_dfa_owned(constraint, stack.clone(), terminal)
@@ -442,6 +448,19 @@ fn advance_parser_stacks_profiled(
     terminal: u32,
 ) -> (ParserGSS, AdvanceProfile) {
     let template_start = std::time::Instant::now();
+    if let Some(cached) = constraint.direct_regular_cached_advance(stack, terminal) {
+        let elapsed = template_start.elapsed().as_nanos() as u64;
+        return (
+            cached,
+            AdvanceProfile {
+                total_ns: elapsed,
+                fast_path_ns: elapsed,
+                top_states: stack.top_value_count() as u32,
+                gss_depth: stack.max_depth(),
+                ..AdvanceProfile::default()
+            },
+        );
+    }
     if template_advance_enabled()
         && let Some(template_advanced) = advance_stacks_template_dfa(constraint, stack, terminal)
     {
@@ -959,6 +978,23 @@ fn end_state_may_advance(constraint: &Constraint, gss: &ParserGSS, end_state: u3
         )
 }
 
+#[inline]
+fn wide_frontier_end_state_may_advance(
+    constraint: &Constraint,
+    summary: &crate::runtime::artifact::DirectRegularWideFrontierAcceptance,
+    end_state: u32,
+) -> bool {
+    if end_state == constraint.tokenizer.initial_state() {
+        return true;
+    }
+    summary
+        .actionable_terminals
+        .words()
+        .iter()
+        .zip(constraint.tokenizer.possible_future_terminals(end_state).words())
+        .any(|(actionable, future)| (*actionable & *future) != 0)
+}
+
 enum ActionableTerminals {
     SingleState(u32),
     ManyStates(SmallVec<[u32; 8]>),
@@ -1326,12 +1362,16 @@ fn try_apply_single_top_action_in_place(gss: &mut ParserGSS, action: &Action) ->
 
 #[inline]
 fn apply_single_top_action_fast(
-    table: &GLRTable,
+    constraint: &Constraint,
     gss: &ParserGSS,
     state: u32,
     terminal: u32,
     action: &Action,
 ) -> Option<ParserGSS> {
+    if let Some(cached) = constraint.direct_regular_cached_advance(gss, terminal) {
+        return Some(cached);
+    }
+    let table = &constraint.table;
     match action {
         Action::Shift(target, is_replace) => {
             if let Some(mut stack) = gss.try_virtual_stack() {
@@ -1668,7 +1708,7 @@ fn commit_bytes_fast_path(
                 }
                 let gss = state.values().next().unwrap();
                 if let Some(shifted) =
-                    apply_single_top_action_fast(&constraint.table, gss, top_state, terminal, action)
+                    apply_single_top_action_fast(constraint, gss, top_state, terminal, action)
                 {
                     state.clear();
                     state.insert(constraint.tokenizer.initial_state(), shifted);
@@ -1715,7 +1755,7 @@ fn commit_bytes_fast_path(
         && let Some(top_state) = pruned_gss.single_exclusive_top_value()
         && let Some(action) = constraint.table.action(top_state, terminal)
         && let Some(advanced) = apply_single_top_action_fast(
-            &constraint.table,
+            constraint,
             &pruned_gss,
             top_state,
             terminal,
@@ -1817,7 +1857,7 @@ fn commit_bytes_full_width_fast_path(
                 && let Some(action) = constraint.table.action(top_state, terminal)
                 && let Some(advanced) =
                     apply_single_top_action_fast(
-                        &constraint.table,
+                        constraint,
                         &pruned_gss,
                         top_state,
                         terminal,
@@ -2600,7 +2640,7 @@ fn commit_bytes_small_queue_fast_path(
                     && let Some(top_state) = gss_at_offset.single_exclusive_top_value()
                     && let Some(action) = constraint.table.action(top_state, matched.terminal_id)
                     && let Some(advanced) = apply_single_top_action_fast(
-                        &constraint.table,
+                        constraint,
                         &gss_at_offset,
                         top_state,
                         matched.terminal_id,
@@ -2964,7 +3004,7 @@ fn commit_bytes_direct_linear_fast_path(
                 && let Some(action) = constraint.table.action(top_state, step.terminal)
                 && let Some(advanced) =
                     apply_single_top_action_fast(
-                        &constraint.table,
+                        constraint,
                         &gss,
                         top_state,
                         step.terminal,
@@ -4043,7 +4083,13 @@ fn commit_bytes_linear_fast_path(
                 && let Some(top_state) = gss.single_exclusive_top_value()
                 && let Some(action) = constraint.table.action(top_state, terminal)
             {
-                apply_single_top_action_fast(&constraint.table, &gss, top_state, terminal, action)
+                apply_single_top_action_fast(
+                    constraint,
+                    &gss,
+                    top_state,
+                    terminal,
+                    action,
+                )
             } else {
                 None
             };
@@ -4192,7 +4238,7 @@ fn commit_bytes_linear_fast_path_profiled(
                 && let Some(action) = constraint.table.action(top_state, terminal)
                 && let Some(advanced) =
                     apply_single_top_action_fast(
-                        &constraint.table,
+                        constraint,
                         &gss,
                         top_state,
                         terminal,
@@ -5037,6 +5083,7 @@ fn commit_bytes_impl(
     // unchanged and only the single viable tokenizer continuation remains.
     if state.len() == 1 {
         let (&start_tokenizer_state, gss) = state.iter().next().unwrap();
+        let gss = gss.clone();
         if execute_tokenizer_reusable(
             constraint,
             bytes,
@@ -5045,15 +5092,42 @@ fn commit_bytes_impl(
         ) {
             let parser_accumulators_empty =
                 gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty());
+            let wide_frontier = constraint.direct_regular_wide_frontier_for_gss(&gss);
             let no_actionable_matches = parser_accumulators_empty
                 && bufs.reusable_tokenizer_exec.matches.iter().all(|matched| {
                     !is_ignored_terminal(ignore_terminal, matched.id)
-                        && !stack_may_advance_on(&constraint.table, gss, matched.id)
+                        && wide_frontier.map_or_else(
+                            || !stack_may_advance_on(&constraint.table, &gss, matched.id),
+                            |summary| {
+                                !summary
+                                    .actionable_terminals
+                                    .contains(matched.id as usize)
+                            },
+                        )
                 });
             if no_actionable_matches {
-                bufs.reusable_tokenizer_exec
-                    .states
-                    .retain(|end_state| end_state_may_advance(constraint, gss, *end_state));
+                bufs.reusable_tokenizer_exec.states.retain(|end_state| {
+                    wide_frontier.map_or_else(
+                        || end_state_may_advance(constraint, &gss, *end_state),
+                        |summary| {
+                            wide_frontier_end_state_may_advance(
+                                constraint,
+                                summary,
+                                *end_state,
+                            )
+                        },
+                    )
+                });
+
+                // The parser frontier is unchanged. Re-key its existing Arc
+                // directly instead of decomposing, rebuilding, and fusing the
+                // represented stack language.
+                if wide_frontier.is_some()
+                    && state.replace_single_keys(&bufs.reusable_tokenizer_exec.states)
+                {
+                    return Ok(());
+                }
+
                 if let Some(acc) = gss.single_path_acc()
                     && gss.copy_single_path_stack_into(&mut bufs.linear_stack_original)
                     && bufs.flat_frontier.replace_state_with_uniform_stack_keys(

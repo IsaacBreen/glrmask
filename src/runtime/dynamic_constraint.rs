@@ -226,6 +226,7 @@ impl DynamicConstraint {
             parser_dwa: DWA::new(payload.tokenizer.num_states(), max_token_id),
             parser_top_accept: BTreeMap::new(),
             parser_top_accept_parts: BTreeMap::new(),
+            direct_regular_wide_frontier_acceptance: Vec::new(),
             table: payload.table,
             terminal_display_names: payload.terminal_display_names,
             tokenizer: payload.tokenizer,

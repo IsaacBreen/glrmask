@@ -8,12 +8,15 @@ use smallvec::SmallVec;
 use rayon::prelude::*;
 
 use crate::automata::weighted::dwa::DWA;
-use crate::compiler::glr::table::TableAmbiguity;
+use crate::compiler::glr::accumulator::TerminalsDisallowed;
+use crate::compiler::glr::labels::{encode_positive_label, DEFAULT_LABEL};
+use crate::compiler::glr::parser::ParserGSS;
+use crate::compiler::glr::table::{Action, TableAmbiguity};
 use crate::ds::weight::Weight;
 use crate::grammar::flat::TerminalID;
 
 use super::artifact::{
-    empty_dense_words,
+    empty_dense_words, DirectRegularWideFrontierAcceptance,
     DenseWeightBufMaskCache,
     DenseWeightMaskCache,
     DenseWords,
@@ -802,10 +805,212 @@ impl Constraint {
         stats
     }
 
+    fn compute_direct_regular_wide_frontier_acceptance(
+        &self,
+    ) -> Vec<DirectRegularWideFrontierAcceptance> {
+        const MIN_FRONTIER_STATES: usize = 512;
+        if self.uses_dynamic_runtime() || self.table.num_rules != 0 {
+            return Vec::new();
+        }
+
+        let max_frontier_states = self
+            .table
+            .action
+            .iter()
+            .flat_map(|row| row.values())
+            .filter_map(|action| match action {
+                Action::StackShifts(shifts)
+                    if shifts.iter().all(|shift| shift.pop == 1 && shift.pushes.len() == 1) =>
+                {
+                    Some(shifts.len())
+                }
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        if max_frontier_states < MIN_FRONTIER_STATES {
+            return Vec::new();
+        }
+
+        let mut seen_frontiers = FxHashMap::<Vec<u32>, usize>::default();
+        let mut parts_cache = FxHashMap::<Vec<usize>, Arc<[Weight]>>::default();
+        let mut summaries = Vec::<DirectRegularWideFrontierAcceptance>::new();
+        for row in &self.table.action {
+            for (_, action) in row {
+                let Action::StackShifts(shifts) = action else {
+                    continue;
+                };
+                if shifts.len() != max_frontier_states
+                    || shifts
+                        .iter()
+                        .any(|shift| shift.pop != 1 || shift.pushes.len() != 1)
+                {
+                    continue;
+                }
+
+                let mut states = shifts
+                    .iter()
+                    .map(|shift| shift.pushes[0])
+                    .collect::<Vec<_>>();
+                states.sort_unstable();
+                states.dedup();
+                if states.len() < MIN_FRONTIER_STATES {
+                    continue;
+                }
+                let action_origin = shifts.as_ptr() as usize;
+                if let Some(&summary_index) = seen_frontiers.get(&states) {
+                    summaries[summary_index].action_origins.push(action_origin);
+                    continue;
+                }
+                seen_frontiers.insert(states.clone(), summaries.len());
+
+                let mut weights = Vec::<Weight>::new();
+                for &state in &states {
+                    let label = encode_positive_label(state);
+                    if let Some(weight) = self
+                        .parser_top_accept
+                        .get(&label)
+                        .or_else(|| self.parser_top_accept.get(&DEFAULT_LABEL))
+                    {
+                        weights.push(weight.clone());
+                    }
+                    if let Some(parts) = self
+                        .parser_top_accept_parts
+                        .get(&label)
+                        .or_else(|| self.parser_top_accept_parts.get(&DEFAULT_LABEL))
+                    {
+                        weights.extend(parts.iter().cloned());
+                    }
+                }
+                weights.sort_unstable_by_key(Weight::ptr_key);
+                weights.dedup_by_key(|weight| weight.ptr_key());
+                let parts_key = weights.iter().map(Weight::ptr_key).collect::<Vec<_>>();
+                let acceptance_parts = if let Some(cached) = parts_cache.get(&parts_key) {
+                    Arc::clone(cached)
+                } else {
+                    let parts: Arc<[Weight]> = weights.into();
+                    parts_cache.insert(parts_key, Arc::clone(&parts));
+                    parts
+                };
+                let mut actionable_terminals =
+                    crate::ds::bitset::BitSet::new(self.table.num_terminals as usize + 1);
+                for &state in &states {
+                    if let Some(row) = self.table.advance.get(state as usize) {
+                        actionable_terminals.union_with(row);
+                    }
+                }
+                let empty_acc_frontier =
+                    ParserGSS::from_sorted_unique_single_value_stacks(
+                        &states,
+                        TerminalsDisallowed::new(),
+                    );
+                summaries.push(DirectRegularWideFrontierAcceptance {
+                    action_origins: vec![action_origin],
+                    state_count: states.len(),
+                    actionable_terminals,
+                    empty_acc_frontier,
+                    acceptance_parts,
+                    dense_by_tsid: Arc::from(Vec::<(u32, DenseWords)>::new()),
+                });
+            }
+        }
+        summaries
+    }
+
+    fn materialize_direct_regular_wide_frontier_dense(&mut self) {
+        let dense_word_count = self.internal_token_dense_words;
+        if dense_word_count == 0 {
+            for summary in &mut self.direct_regular_wide_frontier_acceptance {
+                summary.dense_by_tsid = Arc::from(Vec::<(u32, DenseWords)>::new());
+            }
+            return;
+        }
+
+        let full_dense = Self::dense_words_from_internal_set_with_words(
+            &self.internal_token_universe(),
+            dense_word_count,
+        );
+        let dense_cache = &self.weight_token_dense_masks;
+        let tsid_count = self.internal_tsid_to_states.len().max(1);
+        let mut materialized = FxHashMap::<usize, Arc<[(u32, DenseWords)]>>::default();
+
+        for summary in &mut self.direct_regular_wide_frontier_acceptance {
+            let parts_key = Arc::as_ptr(&summary.acceptance_parts) as *const Weight as usize;
+            if let Some(cached) = materialized.get(&parts_key) {
+                summary.dense_by_tsid = Arc::clone(cached);
+                continue;
+            }
+
+            let mut by_tsid = vec![vec![0u64; dense_word_count]; tsid_count];
+            let mut full = vec![false; tsid_count];
+            for weight in summary.acceptance_parts.iter() {
+                if weight.is_full() {
+                    full.fill(true);
+                    continue;
+                }
+                if weight.is_empty() {
+                    continue;
+                }
+                for (tsid_range, token_set) in weight.0.range_values() {
+                    let key = Arc::as_ptr(token_set) as usize;
+                    let dense = dense_cache.get(&key).cloned().unwrap_or_else(|| {
+                        Self::dense_words_from_internal_set_with_words(
+                            token_set.as_ref(),
+                            dense_word_count,
+                        )
+                    });
+                    for tsid in *tsid_range.start()..=*tsid_range.end() {
+                        let Some(dst) = by_tsid.get_mut(tsid as usize) else {
+                            continue;
+                        };
+                        for (dst_word, src_word) in dst.iter_mut().zip(dense.iter()) {
+                            *dst_word |= *src_word;
+                        }
+                    }
+                }
+            }
+
+            let entries: Arc<[(u32, DenseWords)]> = by_tsid
+                .into_iter()
+                .enumerate()
+                .filter_map(|(tsid, words)| {
+                    if full[tsid] {
+                        Some((tsid as u32, Arc::clone(&full_dense)))
+                    } else if words.iter().any(|&word| word != 0) {
+                        Some((tsid as u32, Arc::from(words.into_boxed_slice())))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+                .into();
+            materialized.insert(parts_key, Arc::clone(&entries));
+            summary.dense_by_tsid = entries;
+        }
+    }
+
     pub(crate) fn rebuild_runtime_caches_impl(&mut self) {
         let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
         let total_started_at = profile.then(std::time::Instant::now);
+        let wide_frontier_started_at = profile.then(std::time::Instant::now);
+        self.direct_regular_wide_frontier_acceptance =
+            self.compute_direct_regular_wide_frontier_acceptance();
+        let wide_frontier_ms = wide_frontier_started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        if profile && !self.direct_regular_wide_frontier_acceptance.is_empty() {
+            eprintln!(
+                "[glrmask/profile][wide_frontier_acceptance] summaries={} max_states={} ms={:.3}",
+                self.direct_regular_wide_frontier_acceptance.len(),
+                self.direct_regular_wide_frontier_acceptance
+                    .iter()
+                    .map(|summary| summary.state_count)
+                    .max()
+                    .unwrap_or(0),
+                wide_frontier_ms,
+            );
+        }
+
         let guarded_shift_started_at = profile.then(std::time::Instant::now);
         if self.table.guarded_shift_index.len() != self.table.num_states as usize {
             self.table.rebuild_guarded_shift_index();
@@ -1086,6 +1291,7 @@ impl Constraint {
         self.token_bytes_dense = Vec::new();
         self.internal_token_dense_words = dense_mask_words;
         self.weight_token_dense_masks = dense_masks;
+        self.materialize_direct_regular_wide_frontier_dense();
         let derived_piece_started_at = profile.then(std::time::Instant::now);
         let (
             weight_token_buf_masks,
@@ -2322,7 +2528,6 @@ impl Constraint {
         }
     }
 
-
     fn dense_words_from_internal_set_with_words(
         internal_tokens: &RangeSetBlaze<u32>,
         dense_word_count: usize,
@@ -2424,6 +2629,40 @@ impl Constraint {
             .unwrap_or(0)
     }
 
+    #[inline]
+    pub(crate) fn direct_regular_wide_frontier_for_gss(
+        &self,
+        gss: &ParserGSS,
+    ) -> Option<&DirectRegularWideFrontierAcceptance> {
+        let lower_id = gss.single_interface_lower_id()?;
+        self.direct_regular_wide_frontier_acceptance
+            .iter()
+            .find(|summary| {
+                summary.empty_acc_frontier.single_interface_lower_id() == Some(lower_id)
+            })
+    }
+
+    pub(crate) fn direct_regular_cached_advance(
+        &self,
+        gss: &ParserGSS,
+        terminal: TerminalID,
+    ) -> Option<ParserGSS> {
+        if gss.max_depth() != 1 {
+            return None;
+        }
+        let acc = gss.uniform_accumulator()?;
+        let state = gss.single_exclusive_top_value()?;
+        let Action::StackShifts(shifts) = self.table.action(state, terminal)? else {
+            return None;
+        };
+        let origin = shifts.as_ptr() as usize;
+        self.direct_regular_wide_frontier_acceptance
+            .iter()
+            .find(|summary| summary.action_origins.contains(&origin))?
+            .empty_acc_frontier
+            .with_uniform_accumulator(acc)
+    }
+
     pub(crate) fn num_parser_states(&self) -> u32 {
         self.table.num_states
     }
@@ -2439,7 +2678,6 @@ impl Constraint {
     pub(crate) fn parser_dwa(&self) -> &DWA {
         &self.parser_dwa
     }
-
 
     pub(crate) fn possible_matches_for_state_internal(
         &self,

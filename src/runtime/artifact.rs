@@ -9,6 +9,7 @@ use crate::automata::lexer::{Lexer, tokenizer::Tokenizer};
 use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
 use crate::automata::weighted::dwa::DWA;
 use crate::compiler::glr::labels::DEFAULT_LABEL;
+use crate::compiler::glr::parser::ParserGSS;
 use crate::compiler::glr::table::GLRTable;
 use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::ds::leveled_gss::LeveledGSS;
@@ -19,6 +20,20 @@ use crate::grammar::flat::TerminalID;
 use super::mask_mapping::FinalMaskMapping;
 
 pub(crate) type PossibleMatchesByTerminal = BTreeMap<TerminalID, Weight>;
+
+#[derive(Debug, Clone)]
+pub(crate) struct DirectRegularWideFrontierAcceptance {
+    /// Pointer identities of immutable StackShifts slices in the live table
+    /// that all produce this exact frontier. Runtime-only and rebuilt after
+    /// deserialization.
+    pub(crate) action_origins: Vec<usize>,
+    pub(crate) state_count: usize,
+    pub(crate) actionable_terminals: crate::ds::bitset::BitSet,
+    pub(crate) empty_acc_frontier: ParserGSS,
+    pub(crate) acceptance_parts: Arc<[Weight]>,
+    pub(crate) dense_by_tsid: Arc<[(u32, DenseWords)]>,
+}
+
 pub(crate) type DenseWords = Arc<[u64]>;
 
 pub(crate) fn empty_dense_words() -> DenseWords {
@@ -48,6 +63,14 @@ impl FastDwaTransitionRow {
             Self::Inline(entries)
         } else {
             Self::Hash(entries.into_iter().collect())
+        }
+    }
+
+    #[inline]
+    pub(crate) fn is_empty(&self) -> bool {
+        match self {
+            Self::Inline(entries) => entries.is_empty(),
+            Self::Hash(entries) => entries.is_empty(),
         }
     }
 
@@ -2656,6 +2679,12 @@ pub struct Constraint {
     /// large union weight per parser state at compile time.
     #[serde(default)]
     pub(crate) parser_top_accept_parts: BTreeMap<i32, Vec<Weight>>,
+    /// Runtime-derived exact acceptance summaries for wide direct-regular
+    /// replace-top frontiers. Rebuilt after compile/load from the table and
+    /// parser-top acceptance artifacts.
+    #[serde(skip, default)]
+    pub(crate) direct_regular_wide_frontier_acceptance:
+        Vec<DirectRegularWideFrontierAcceptance>,
     pub(crate) table: GLRTable,
     #[serde(default)]
     pub(crate) terminal_display_names: Vec<String>,

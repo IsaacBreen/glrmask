@@ -2825,6 +2825,49 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> VirtualStack<T, A> {
         })
     }
 
+    /// Replace one concrete stack suffix with many already-unique single-value
+    /// branches. The caller guarantees unique targets, so construction is
+    /// linear and the shared child is already canonical.
+    pub fn into_gss_after_popping_and_pushing_unique_single_branches<'a, I>(
+        mut self,
+        n: usize,
+        targets: I,
+    ) -> Option<LeveledGSS<T, A>>
+    where
+        I: IntoIterator<Item = &'a T>,
+        T: 'a,
+    {
+        self.flush_pending();
+        if self.pop(n) != 0 {
+            return None;
+        }
+
+        let base = if self.values.is_empty() {
+            self.next
+        } else {
+            new_segment(self.values, self.next)
+        };
+        let base_depth = base.max_depth();
+        let child = CompactOrdMap::unit(base_depth, base.clone());
+        let entries: SmallVec<[(T, CompactOrdMap<Arc<Lower<T>>>); 4]> = targets
+            .into_iter()
+            .map(|target| (target.clone(), child.clone()))
+            .collect();
+
+        if entries.is_empty() {
+            return Some(LeveledGSS {
+                inner: new_interface(base, self.acc),
+            });
+        }
+
+        Some(LeveledGSS {
+            inner: new_interface(
+                new_lower_precanonicalized(CompactMap::Inline(entries), false),
+                self.acc,
+            ),
+        })
+    }
+
     pub fn into_gss_after_popping_and_pushing_single_branches<'a, I>(
         mut self,
         n: usize,
@@ -2904,8 +2947,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             Upper::Branch(_) => None,
         }
     }
-
-
 
     pub fn empty() -> Self {
         empty_upper()
@@ -3060,6 +3101,36 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             new_interface(new_segment(SV::from_vec(values), floor), acc)
         };
         LeveledGSS { inner }
+    }
+
+    /// Construct a set of already-sorted, unique one-value stacks sharing one
+    /// accumulator. This is the canonical depth-one representation used by
+    /// cached direct-regular frontiers.
+    pub(crate) fn from_sorted_unique_single_value_stacks(values: &[T], acc: A) -> Self
+    where
+        T: Ord,
+    {
+        if values.is_empty() {
+            return Self::empty();
+        }
+        debug_assert!(values.windows(2).all(|pair| pair[0] < pair[1]));
+        if let [value] = values {
+            return Self::from_single_stack(vec![value.clone()], acc);
+        }
+
+        let floor = new_lower(CompactMap::new(), true);
+        let depth = floor.max_depth();
+        let child = CompactOrdMap::unit(depth, floor);
+        let entries: SmallVec<[(T, CompactOrdMap<Arc<Lower<T>>>); 4]> = values
+            .iter()
+            .map(|value| (value.clone(), child.clone()))
+            .collect();
+        Self {
+            inner: new_interface(
+                new_lower_precanonicalized(CompactMap::Inline(entries), false),
+                acc,
+            ),
+        }
     }
 
     /// Materialize at most `max_stacks` concrete stacks.
@@ -4234,7 +4305,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         }
     }
 
-
     pub fn pop(&self) -> Self {
         self.popn(1)
     }
@@ -4826,8 +4896,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         LeveledGSS { inner: new_inner }
     }
 
-
-
     pub fn apply<B, F>(&self, mut func: F) -> LeveledGSS<T, B>
     where
         B: Merge + Clone + Eq + Hash,
@@ -4887,7 +4955,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
             inner: transform::<T, A, B, F>(&self.inner, &mut acc_memo, &mut func),
         }
     }
-
 
     /// Partition this GSS by accumulator value.
     ///
@@ -5547,7 +5614,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         }
     }
 
-
     pub fn peek(&self) -> HashSet<T> {
         self.inner.children_keys().into_iter().collect()
     }
@@ -5972,6 +6038,17 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         uniform.then_some(value).flatten()
     }
 
+    /// Reuse an Interface-backed stack-language topology with a different
+    /// uniform accumulator. The lower graph is immutable and shared.
+    pub(crate) fn with_uniform_accumulator(&self, acc: A) -> Option<Self> {
+        let Upper::Interface(interface) = &*self.inner else {
+            return None;
+        };
+        Some(Self {
+            inner: new_interface(interface.inner.clone(), acc),
+        })
+    }
+
     /// Returns true if all accumulators in the upper tree satisfy the predicate.
     /// Short-circuits on the first accumulator that doesn't.
     /// For a single Interface node (common case), this is O(1).
@@ -6020,11 +6097,6 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
         new_inner.map_or_else(Self::empty, |inner| Self { inner })
     }
-
-
-
-
-
 
     fn get_node_info_lower(node: &Arc<Lower<T>>) -> String
     where
@@ -6844,6 +6916,67 @@ mod tests {
     }
 
     #[test]
+    fn sorted_unique_single_value_frontier_reuses_lower_topology() {
+        let values = [3_u32, 5, 7, 11];
+        let frontier = LeveledGSS::from_sorted_unique_single_value_stacks(
+            &values,
+            TestAcc(1),
+        );
+        let lower_id = frontier
+            .single_interface_lower_id()
+            .expect("frontier should have one interface");
+
+        let mut actual = frontier
+            .to_stacks(16)
+            .expect("small frontier should enumerate");
+        actual.sort();
+        let mut expected = values
+            .iter()
+            .map(|&value| (vec![value], TestAcc(1)))
+            .collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(actual, expected);
+
+        let updated = frontier
+            .with_uniform_accumulator(TestAcc(9))
+            .expect("interface accumulator should be replaceable");
+        assert_eq!(updated.single_interface_lower_id(), Some(lower_id));
+        let mut updated_actual = updated
+            .to_stacks(16)
+            .expect("small frontier should enumerate");
+        updated_actual.sort();
+        let mut updated_expected = values
+            .iter()
+            .map(|&value| (vec![value], TestAcc(9)))
+            .collect::<Vec<_>>();
+        updated_expected.sort();
+        assert_eq!(updated_actual, updated_expected);
+    }
+
+    #[test]
+    fn unique_single_branch_constructor_matches_checked_constructor() {
+        let base = LeveledGSS::from_single_stack(vec![1_u32, 2, 3], TestAcc(4));
+        let targets = [10_u32, 20, 30, 40];
+        let fast = base
+            .try_virtual_stack()
+            .expect("base should be a virtual stack")
+            .into_gss_after_popping_and_pushing_unique_single_branches(
+                1,
+                targets.iter(),
+            )
+            .expect("unique branch construction should succeed");
+        let checked = base
+            .try_virtual_stack()
+            .expect("base should be a virtual stack")
+            .into_gss_after_popping_and_pushing_single_branches(1, targets.iter())
+            .expect("checked branch construction should succeed");
+        assert!(
+            fast.semantically_eq(&checked, 64)
+                .expect("small frontier should compare exactly")
+        );
+    }
+
+    #[test]
     fn indexed_dag_exactly_preserves_stack_language_and_accumulators() {
         fn enumerate_lower(
             dag: &IndexedLeveledGss<u32, TestAcc>,
@@ -7389,7 +7522,6 @@ mod tests {
             assert!(actual_stacks.contains(&expected_stack));
         }
     }
-
 
     #[test]
     fn shared_suffix_single_branches_share_one_lower_segment() {
