@@ -526,6 +526,7 @@ mod tests {
 
         let normal = crate::Constraint::from_lark(&grammar, &vocab).unwrap();
         let dynamic = DynamicConstraint::from_lark(&grammar, &vocab).unwrap();
+        assert!(!normal.uses_dynamic_runtime());
         assert_eq!(dynamic.inner.table.num_rules, 0);
         assert!(
             dynamic
@@ -534,7 +535,10 @@ mod tests {
                 .initial_token_program_partition()
                 .is_none()
         );
-        assert_eq!(normal.start().mask(), dynamic.start().mask());
+        let normal_mask = normal.start().mask();
+        assert_ne!(normal_mask[0] & (1 << 0), 0, "single-byte token must be allowed");
+        assert_ne!(normal_mask[0] & (1 << 3), 0, "two-byte token must be allowed");
+        assert_eq!(normal_mask, dynamic.start().mask());
     }
 
     #[test]
