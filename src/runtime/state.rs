@@ -264,6 +264,9 @@ pub(crate) struct MaskScratch {
     pub single_path_aux_dense: Vec<u64>,
     /// Mutable single-TSID accumulator for the allocation-free direct kernel.
     pub single_path_acc_dense: Vec<u64>,
+    /// Bounded live-state cache for indexed-DAG masking. Cached products are
+    /// exact pure-function results keyed by retained immutable GSS nodes.
+    pub indexed_dag_mask: crate::runtime::mask::IndexedDagMaskRuntime,
 }
 
 impl MaskScratch {
@@ -277,6 +280,7 @@ impl MaskScratch {
             // direct kernel clears/reuses them without changing capacity.
             single_path_aux_dense: vec![0; dense_words],
             single_path_acc_dense: vec![0; dense_words],
+            indexed_dag_mask: crate::runtime::mask::IndexedDagMaskRuntime::default(),
         }
     }
 }
@@ -299,6 +303,7 @@ pub(crate) struct CommitBuffers {
     pub linear_stack_original: Vec<u32>,
     pub linear_stack_work: Vec<u32>,
     pub processing_queue: Vec<FxHashMap<u32, ParserGSS>>,
+    pub template_advance_runtime: crate::runtime::commit::TemplateAdvanceRuntime,
 }
 
 impl Default for CommitBuffers {
@@ -321,6 +326,8 @@ impl Default for CommitBuffers {
             linear_stack_original: Vec::with_capacity(LINEAR_STACK_RESERVE),
             linear_stack_work: Vec::with_capacity(LINEAR_STACK_RESERVE),
             processing_queue: Vec::new(),
+            template_advance_runtime:
+                crate::runtime::commit::TemplateAdvanceRuntime::default(),
         }
     }
 }
@@ -351,6 +358,11 @@ impl CommitBuffers {
         for bucket in &mut self.processing_queue {
             bucket.clear();
         }
+    }
+
+    pub(crate) fn reset_all(&mut self) {
+        self.clear_all();
+        self.template_advance_runtime.reset_all();
     }
 }
 
@@ -471,7 +483,7 @@ impl<'a> ConstraintState<'a> {
         self.history.truncate(target_index);
         self.state = snapshot.state;
         self.generation = snapshot.generation;
-        self.buffers.clear_all();
+        self.buffers.reset_all();
         *self.mask_cache.lock().unwrap() = None;
         *self.mask_scratch.lock().unwrap() = MaskScratch::for_constraint(self.constraint);
         Ok(())

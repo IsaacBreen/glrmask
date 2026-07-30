@@ -62,11 +62,11 @@ use crate::compiler::stages::parser_dwa::{
     try_build_direct_regular_parser_top_accept_parts, try_build_immediate_parser_dwa,
     try_build_immediate_parser_top_accept_parts,
 };
-use crate::compiler::stages::templates::Templates;
+use crate::compiler::stages::templates::{Templates, commit_template_dfas_enabled};
 use crate::compiler::stages::templates::characterize::characterize_terminals_profiled;
 use crate::compiler::stages::templates::compile_dfa::{
     specialize_template_dfa_defaults_for_commit_split_input,
-    split_commit_template_dfas,
+    try_split_commit_template_dfas,
 };
 use crate::ds::bitset::BitSet;
 use crate::ds::weight::Weight;
@@ -94,10 +94,6 @@ fn env_flag_enabled_by_default(name: &str) -> bool {
 
 fn compact_possible_matches_before_reconcile_enabled() -> bool {
     env_flag_enabled_by_default("GLRMASK_COMPACT_POSSIBLE_MATCHES_BEFORE_RECONCILE")
-}
-
-fn commit_template_dfas_enabled() -> bool {
-    env_flag_enabled("GLRMASK_ENABLE_COMMIT_TEMPLATE_DFAS")
 }
 
 fn terminal_coloring_enabled() -> bool {
@@ -1613,9 +1609,12 @@ fn build_templates_for_compile(
             for (&terminal, dfa) in &templates.by_terminal {
                 if let Some(slot) = template_dfas_by_terminal.get_mut(terminal as usize) {
                     let commit_dfa = specialize_template_dfa_defaults_for_commit_split_input(dfa);
-                    let split_commit_dfas = split_commit_template_dfas(&commit_dfa);
-                    *slot = Some(Arc::new(split_commit_dfas));
-                    commit_template_dfas_built += 1;
+                    if let Some(split_commit_dfas) =
+                        try_split_commit_template_dfas(&commit_dfa)
+                    {
+                        *slot = Some(Arc::new(split_commit_dfas));
+                        commit_template_dfas_built += 1;
+                    }
                 }
             }
         }
@@ -1652,11 +1651,22 @@ fn build_templates_for_compile(
     let mut template_dfas_by_terminal = vec![None; analyzed_grammar.num_terminals as usize];
     let commit_template_dfas_enabled = commit_template_dfas_enabled();
     let mut commit_template_dfas_built = 0usize;
+    let mut commit_template_dfas_skipped = 0usize;
+    let mut commit_template_specialize_ms = 0.0;
+    let mut commit_template_split_ms = 0.0;
     if commit_template_dfas_enabled {
         for (&terminal, dfa) in &templates.by_terminal {
             if let Some(slot) = template_dfas_by_terminal.get_mut(terminal as usize) {
+                let specialize_started_at = Instant::now();
                 let commit_dfa = specialize_template_dfa_defaults_for_commit_split_input(dfa);
-                let split_commit_dfas = split_commit_template_dfas(&commit_dfa);
+                commit_template_specialize_ms += elapsed_ms(specialize_started_at);
+                let split_started_at = Instant::now();
+                let split_commit_dfas = try_split_commit_template_dfas(&commit_dfa);
+                commit_template_split_ms += elapsed_ms(split_started_at);
+                let Some(split_commit_dfas) = split_commit_dfas else {
+                    commit_template_dfas_skipped += 1;
+                    continue;
+                };
                 *slot = Some(Arc::new(split_commit_dfas));
                 commit_template_dfas_built += 1;
             }
@@ -1664,7 +1674,7 @@ fn build_templates_for_compile(
     }
     if compile_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][templates] terminals={} action_signature_classes={} action_quotient_hits={} max_action_signature_multiplicity={} characterization_signature_ms={:.3} characterization_ms={:.3} characterization_fanout_ms={:.3} characterization_validation_ms={:.3} characterization_total_ms={:.3} characterization_quotient_disabled={} unique_characterizations={} compiled_characterizations={} template_quotient_hits={} max_characterization_multiplicity={} build_nfa_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} template_fanout_ms={:.3} template_validation_ms={:.3} template_total_ms={:.3} template_wall_ms={:.3} template_minimize_skipped={} avg_nfa_states={:.2} avg_nfa_transitions={:.2} avg_premin_dfa_states={:.2} avg_premin_dfa_transitions={:.2} avg_dfa_states={:.2} avg_dfa_transitions={:.2} max_dfa_states={} max_dfa_transitions={} commit_template_dfas_enabled={} commit_template_dfas_built={}",
+            "[glrmask/profile][templates] terminals={} action_signature_classes={} action_quotient_hits={} max_action_signature_multiplicity={} characterization_signature_ms={:.3} characterization_ms={:.3} characterization_fanout_ms={:.3} characterization_validation_ms={:.3} characterization_total_ms={:.3} characterization_quotient_disabled={} unique_characterizations={} compiled_characterizations={} template_quotient_hits={} max_characterization_multiplicity={} build_nfa_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} template_fanout_ms={:.3} template_validation_ms={:.3} template_total_ms={:.3} template_wall_ms={:.3} template_minimize_skipped={} avg_nfa_states={:.2} avg_nfa_transitions={:.2} avg_premin_dfa_states={:.2} avg_premin_dfa_transitions={:.2} avg_dfa_states={:.2} avg_dfa_transitions={:.2} max_dfa_states={} max_dfa_transitions={} commit_template_dfas_enabled={} commit_template_dfas_built={} commit_template_dfas_skipped={} commit_template_specialize_ms={:.3} commit_template_split_ms={:.3}",
             characterization_profile.terminals,
             characterization_profile.unique_action_signatures,
             characterization_profile.quotient_hits,
@@ -1697,6 +1707,9 @@ fn build_templates_for_compile(
             template_profile.max_dfa_transitions,
             commit_template_dfas_enabled,
             commit_template_dfas_built,
+            commit_template_dfas_skipped,
+            commit_template_specialize_ms,
+            commit_template_split_ms,
         );
     }
     (
@@ -3556,6 +3569,7 @@ fn compile_prepared_with_profile_and_table_construction(
             original_token_to_internal: internal_ids.vocab_tokens.original_to_internal.clone(),
             internal_token_to_tokens: internal_ids.vocab_tokens.internal_to_originals_vecs(),
             template_dfas_by_terminal,
+            fast_template_dfas_by_terminal: Vec::new(),
             token_bytes,
             internal_token_bytes,
             token_bytes_dense: Vec::new(),
@@ -3582,8 +3596,11 @@ fn compile_prepared_with_profile_and_table_construction(
             weight_token_sparse_buf_masks: rustc_hash::FxHashMap::default(),
             direct_sparse_weight_token_sets: rustc_hash::FxHashSet::default(),
             seed_terminal_dense: rustc_hash::FxHashMap::default(),
+            seed_terminal_dense_fallback: Default::default(),
             seed_universe_dense: std::sync::Arc::<[u64]>::from(Vec::<u64>::new().into_boxed_slice()),
             dwa_fast_transitions: Vec::new(),
+            indexed_dag_dense_transitions: Vec::new(),
+            indexed_dag_dense_finals: Vec::new(),
             tokenizer_fast_transitions: Default::default(),
             heavy_token_dense_masks: Vec::new(),
             heavy_token_indices: Vec::new(),

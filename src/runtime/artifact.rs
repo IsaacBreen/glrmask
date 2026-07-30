@@ -3,10 +3,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 use rayon::prelude::*;
 
 use rustc_hash::{FxHashMap, FxHashSet};
+use smallvec::SmallVec;
 
 use crate::automata::lexer::{Lexer, tokenizer::Tokenizer};
 use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
 use crate::automata::weighted::dwa::DWA;
+use crate::compiler::glr::labels::DEFAULT_LABEL;
 use crate::compiler::glr::table::GLRTable;
 use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::ds::leveled_gss::LeveledGSS;
@@ -29,7 +31,124 @@ pub(crate) type DenseWeightBufMaskCache = FxHashMap<usize, Box<[u32]>>;
 pub(crate) type SparseWeightBufMaskCache = FxHashMap<usize, Box<[(u16, u32)]>>;
 pub(crate) type DirectSparseWeightTokenSetCache = FxHashSet<usize>;
 pub(crate) type SeedTerminalDenseMasks = FxHashMap<(u32, TerminalID), DenseWords>;
-pub(crate) type FastDwaTransitions = Vec<FxHashMap<i32, (u32, Weight)>>;
+const INLINE_DWA_TRANSITION_LIMIT: usize = 8;
+
+#[derive(Debug, Clone)]
+pub(crate) enum FastDwaTransitionRow {
+    Inline(SmallVec<[(i32, (u32, Weight)); 4]>),
+    Hash(FxHashMap<i32, (u32, Weight)>),
+}
+
+impl FastDwaTransitionRow {
+    pub(crate) fn from_entries(
+        entries: impl IntoIterator<Item = (i32, (u32, Weight))>,
+    ) -> Self {
+        let entries = entries.into_iter().collect::<SmallVec<[_; 4]>>();
+        if entries.len() <= INLINE_DWA_TRANSITION_LIMIT {
+            Self::Inline(entries)
+        } else {
+            Self::Hash(entries.into_iter().collect())
+        }
+    }
+
+    #[inline]
+    pub(crate) fn get(&self, label: &i32) -> Option<&(u32, Weight)> {
+        match self {
+            Self::Inline(entries) => entries
+                .iter()
+                .find_map(|(candidate, transition)| (candidate == label).then_some(transition)),
+            Self::Hash(entries) => entries.get(label),
+        }
+    }
+}
+
+pub(crate) type FastDwaTransitions = Vec<FastDwaTransitionRow>;
+
+#[derive(Debug, Clone)]
+pub(crate) enum IndexedDagDenseMask {
+    Full,
+    Dense {
+        words: DenseWords,
+        start: usize,
+        end: usize,
+    },
+    Empty,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct IndexedDagDenseTransition {
+    pub(crate) target: u32,
+    pub(crate) masks: IndexedDagDenseTransitionMasks,
+}
+
+const INLINE_INDEXED_DAG_TSID_LIMIT: usize = 8;
+
+#[derive(Debug, Clone)]
+pub(crate) enum IndexedDagDenseTransitionMasks {
+    Full,
+    Inline(SmallVec<[(u32, IndexedDagDenseMask); 2]>),
+    Hash(FxHashMap<u32, IndexedDagDenseMask>),
+}
+
+static INDEXED_DAG_FULL_MASK: IndexedDagDenseMask = IndexedDagDenseMask::Full;
+static INDEXED_DAG_EMPTY_MASK: IndexedDagDenseMask = IndexedDagDenseMask::Empty;
+
+impl IndexedDagDenseTransitionMasks {
+    pub(crate) fn from_entries(
+        entries: impl IntoIterator<Item = (u32, IndexedDagDenseMask)>,
+    ) -> Self {
+        let entries = entries.into_iter().collect::<SmallVec<[_; 2]>>();
+        if entries.len() <= INLINE_INDEXED_DAG_TSID_LIMIT {
+            Self::Inline(entries)
+        } else {
+            Self::Hash(entries.into_iter().collect())
+        }
+    }
+
+    #[inline]
+    pub(crate) fn get(&self, tsid: u32) -> &IndexedDagDenseMask {
+        match self {
+            Self::Full => &INDEXED_DAG_FULL_MASK,
+            Self::Inline(entries) => entries
+                .iter()
+                .find_map(|(candidate, mask)| (*candidate == tsid).then_some(mask))
+                .unwrap_or(&INDEXED_DAG_EMPTY_MASK),
+            Self::Hash(entries) => entries.get(&tsid).unwrap_or(&INDEXED_DAG_EMPTY_MASK),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum IndexedDagDenseTransitionRow {
+    Inline(SmallVec<[(i32, IndexedDagDenseTransition); 4]>),
+    Hash(FxHashMap<i32, IndexedDagDenseTransition>),
+}
+
+impl IndexedDagDenseTransitionRow {
+    pub(crate) fn from_entries(
+        entries: impl IntoIterator<Item = (i32, IndexedDagDenseTransition)>,
+    ) -> Self {
+        let entries = entries.into_iter().collect::<SmallVec<[_; 4]>>();
+        if entries.len() <= INLINE_DWA_TRANSITION_LIMIT {
+            Self::Inline(entries)
+        } else {
+            Self::Hash(entries.into_iter().collect())
+        }
+    }
+
+    #[inline]
+    pub(crate) fn get(&self, label: &i32) -> Option<&IndexedDagDenseTransition> {
+        match self {
+            Self::Inline(entries) => entries
+                .iter()
+                .find_map(|(candidate, transition)| (candidate == label).then_some(transition)),
+            Self::Hash(entries) => entries.get(label),
+        }
+    }
+}
+
+pub(crate) type IndexedDagDenseTransitions = Vec<IndexedDagDenseTransitionRow>;
+
 #[derive(Debug, Clone)]
 pub(crate) enum FastTokenizerTransitions {
     Dense(Vec<Box<[u32; 256]>>),
@@ -85,6 +204,115 @@ impl FastTokenizerTransitions {
     }
 }
 pub(crate) type TemplateDfasByTerminal = Vec<Option<Arc<CommitTemplateDfas>>>;
+pub(crate) type FastTemplateDfasByTerminal = Vec<Option<Arc<FastCommitTemplateDfas>>>;
+
+const INLINE_TEMPLATE_TRANSITION_LIMIT: usize = 8;
+
+#[derive(Debug, Clone, Default)]
+pub(crate) enum FastTemplateTransitionRow {
+    #[default]
+    Empty,
+    Inline(SmallVec<[(i32, u32); 4]>),
+    Hash(FxHashMap<i32, u32>),
+}
+
+impl FastTemplateTransitionRow {
+    fn from_entries(entries: impl IntoIterator<Item = (i32, u32)>) -> Self {
+        let entries = entries.into_iter().collect::<SmallVec<[_; 4]>>();
+        match entries.len() {
+            0 => Self::Empty,
+            len if len <= INLINE_TEMPLATE_TRANSITION_LIMIT => Self::Inline(entries),
+            _ => Self::Hash(entries.into_iter().collect()),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn get(&self, label: i32) -> Option<u32> {
+        match self {
+            Self::Empty => None,
+            Self::Inline(entries) => entries
+                .iter()
+                .find_map(|(candidate, target)| (*candidate == label).then_some(*target)),
+            Self::Hash(entries) => entries.get(&label).copied(),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn for_each(&self, mut f: impl FnMut(i32, u32)) {
+        match self {
+            Self::Empty => {}
+            Self::Inline(entries) => {
+                for &(label, target) in entries {
+                    f(label, target);
+                }
+            }
+            Self::Hash(entries) => {
+                for (&label, &target) in entries {
+                    f(label, target);
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FastTemplateDfaState {
+    pub(crate) is_accepting: bool,
+    pub(crate) default_target: Option<u32>,
+    pub(crate) transitions: FastTemplateTransitionRow,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FastTemplateDfa {
+    pub(crate) states: Vec<FastTemplateDfaState>,
+    pub(crate) start_state: u32,
+}
+
+impl FastTemplateDfa {
+    fn from_dfa(dfa: &UnweightedDfa) -> Self {
+        Self {
+            states: dfa
+                .states
+                .iter()
+                .map(|state| FastTemplateDfaState {
+                    is_accepting: state.is_accepting,
+                    default_target: state.transitions.get(&DEFAULT_LABEL).copied(),
+                    transitions: FastTemplateTransitionRow::from_entries(
+                        state
+                            .transitions
+                            .iter()
+                            .filter(|(label, _)| **label != DEFAULT_LABEL)
+                            .map(|(&label, &target)| (label, target)),
+                    ),
+                })
+                .collect(),
+            start_state: dfa.start_state,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FastCommitTemplateDfas {
+    pub(crate) pop: FastTemplateDfa,
+    pub(crate) read: FastTemplateDfa,
+    pub(crate) push: FastTemplateDfa,
+    pub(crate) pop_to_read: Vec<Option<u32>>,
+    pub(crate) pop_to_push: Vec<Option<u32>>,
+    pub(crate) read_to_push: Vec<Option<u32>>,
+}
+
+impl FastCommitTemplateDfas {
+    pub(crate) fn from_template(template: &CommitTemplateDfas) -> Self {
+        Self {
+            pop: FastTemplateDfa::from_dfa(&template.pop),
+            read: FastTemplateDfa::from_dfa(&template.read),
+            push: FastTemplateDfa::from_dfa(&template.push),
+            pop_to_read: template.pop_to_read.clone(),
+            pop_to_push: template.pop_to_push.clone(),
+            read_to_push: template.read_to_push.clone(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SpecialTokenTerminal {
@@ -2389,7 +2617,7 @@ impl Default for DynamicMaskVocab {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CommitTemplateDfas {
     pub(crate) pop: UnweightedDfa,
     pub(crate) read: UnweightedDfa,
@@ -2454,8 +2682,10 @@ pub struct Constraint {
     pub(crate) possible_matches_complete: bool,
     pub(crate) state_to_internal_tsid: Vec<u32>,
     pub(crate) internal_tsid_to_states: Vec<Vec<u32>>,
-    #[serde(skip)]
     pub(crate) template_dfas_by_terminal: TemplateDfasByTerminal,
+    /// Runtime-only compact transition view for commit template products.
+    #[serde(skip, default)]
+    pub(crate) fast_template_dfas_by_terminal: FastTemplateDfasByTerminal,
     /// Original token -> final shared constraint-internal token id.
     ///
     /// This is not necessarily equal to the parser-DWA compaction vocab map
@@ -2549,6 +2779,11 @@ pub struct Constraint {
     /// the dense bitmap of internal tokens that terminal covers in that state.
     #[serde(skip)]
     pub(crate) seed_terminal_dense: SeedTerminalDenseMasks,
+    /// Exact masks lazily materialized for delayed-exclusion pairs that are not
+    /// represented by `possible_matches`. Shared across sequence states cloned
+    /// from this immutable constraint.
+    #[serde(skip, default)]
+    pub(crate) seed_terminal_dense_fallback: Arc<Mutex<SeedTerminalDenseMasks>>,
     /// Dense bitmap of the full internal token universe.
     #[serde(skip, default = "empty_dense_words")]
     pub(crate) seed_universe_dense: DenseWords,
@@ -2556,6 +2791,18 @@ pub struct Constraint {
     /// Built from parser_dwa.states at load/build time.
     #[serde(skip)]
     pub(crate) dwa_fast_transitions: FastDwaTransitions,
+    /// Runtime-only parser-DWA transitions with exact dense masks materialized
+    /// for the final internal tokenizer states present in each transition
+    /// weight; absent states are implicitly empty. Indexed-DAG masking uses
+    /// this table directly instead of hashing a transition tuple and lazily
+    /// rebuilding the same dense transition record at runtime.
+    #[serde(skip, default)]
+    pub(crate) indexed_dag_dense_transitions: IndexedDagDenseTransitions,
+    /// Runtime-only exact dense final weights, indexed by parser-DWA state.
+    /// This is the final-weight analogue of `indexed_dag_dense_transitions`:
+    /// absent tokenizer states are empty, and full final weights stay implicit.
+    #[serde(skip, default)]
+    pub(crate) indexed_dag_dense_finals: Vec<IndexedDagDenseTransitionMasks>,
     /// Dense tokenizer transition lookup for commit-time byte scans.
     #[serde(skip)]
     pub(crate) tokenizer_fast_transitions: FastTokenizerTransitions,
