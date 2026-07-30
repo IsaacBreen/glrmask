@@ -2401,7 +2401,12 @@ impl<'a> ConstraintState<'a> {
         drop(cache);
 
         let mut buf = vec![0u32; self.constraint.mask_len()];
-        self.fill_mask_uncached(&mut buf);
+        if self.constraint.uses_dynamic_runtime() {
+            self.fill_mask_dynamic(&mut buf);
+            self.store_mask_cache_reuse_dense(&buf);
+        } else {
+            self.fill_mask_uncached(&mut buf);
+        }
     }
 
     /// Fill `buf` with the allowed-token mask.
@@ -2413,6 +2418,13 @@ impl<'a> ConstraintState<'a> {
         assert!(buf.len() >= required, "mask buffer is smaller than constraint mask");
         let (mask, tail) = buf.split_at_mut(required);
         tail.fill(0);
+        if self.constraint.uses_dynamic_runtime() {
+            if !self.try_fill_mask_from_cache(mask) {
+                self.fill_mask_dynamic(mask);
+                self.store_mask_cache_reuse_dense(mask);
+            }
+            return;
+        }
         if !self.try_fill_mask_from_cache(mask) {
             self.fill_mask_uncached(mask);
         }
@@ -2435,6 +2447,14 @@ impl<'a> ConstraintState<'a> {
             return MaskProfile {
                 total_ns: elapsed_ns(total_start),
                 cache_hit: 1,
+                ..MaskProfile::default()
+            };
+        }
+        if self.constraint.uses_dynamic_runtime() {
+            self.fill_mask_dynamic(buf);
+            self.store_mask_cache_reuse_dense(buf);
+            return MaskProfile {
+                total_ns: elapsed_ns(total_start),
                 ..MaskProfile::default()
             };
         }

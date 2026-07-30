@@ -3566,6 +3566,7 @@ fn compile_prepared_with_profile_and_table_construction(
         let special_token_terminals = collect_special_token_terminals(&prepared_grammar);
         let tokenizer = runtime_tokenizer.unwrap_or(tokenizer);
         let constraint = finalize_constraint(Constraint {
+            runtime_backend: crate::runtime::ConstraintRuntimeBackend::Static,
             parser_dwa,
             parser_top_accept,
             parser_top_accept_parts,
@@ -3716,6 +3717,16 @@ pub(crate) fn compile_owned_with_table_construction(
     vocab: &Vocab,
     default_table_construction: GlrTableConstruction,
 ) -> Constraint {
+    if grammar.direct_regular_automaton.is_some()
+        && env_flag_enabled_by_default("GLRMASK_DIRECT_REGULAR_DYNAMIC_BACKEND")
+    {
+        return compile_dynamic_owned_with_table_construction(
+            grammar,
+            vocab,
+            default_table_construction,
+        )
+        .into_constraint();
+    }
     if compile_profile_summary_enabled() || compile_top_profile_enabled() {
         let (constraint, profile) =
             compile_owned_profiled_with_table_construction(grammar, vocab, default_table_construction);

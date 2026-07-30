@@ -2399,12 +2399,23 @@ pub(crate) struct CommitTemplateDfas {
     pub(crate) read_to_push: Vec<Option<u32>>,
 }
 
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
+pub(crate) enum ConstraintRuntimeBackend {
+    #[default]
+    Static,
+    Dynamic,
+}
+
 /// Fully compiled, immutable grammar constraint.
 ///
 /// A `Constraint` is intended to be reused across generated sequences. Call
 /// [`Constraint::start`] to create a mutable per-sequence state.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Constraint {
+    #[serde(default)]
+    pub(crate) runtime_backend: ConstraintRuntimeBackend,
     pub(crate) parser_dwa: DWA,
     /// Exact depth-one parser acceptance kept separate from the deeper parser
     /// DWA. Keys are encoded parser-state labels; values are already the

@@ -206,6 +206,14 @@ fn initial_commit_prime_token_ids(mask: &[u32]) -> Option<Vec<u32>> {
 }
 
 impl Constraint {
+    #[inline]
+    pub(crate) fn uses_dynamic_runtime(&self) -> bool {
+        matches!(
+            self.runtime_backend,
+            super::artifact::ConstraintRuntimeBackend::Dynamic
+        )
+    }
+
     #[cold]
     fn prime_initial_commit_hot_path(&self) {
         let mut state = ConstraintState {

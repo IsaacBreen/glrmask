@@ -32,8 +32,15 @@ type ParserStacks = LeveledGSS<u32, ()>;
 #[derive(Default)]
 struct DynamicTraversalCache {
     admissible_terminals: FxHashMap<usize, (ParserStacks, BitSet)>,
-    lexer_relevant: FxHashMap<(u32, usize), (ParserStacks, bool)>,
+    lexer_relevant: FxHashMap<(u32, usize), bool>,
     parser_children: FxHashMap<(usize, TerminalID), (ParserStacks, Option<ParserStacks>)>,
+}
+
+#[inline]
+fn parser_stacks_cache_key(stacks: &ParserStacks) -> usize {
+    stacks
+        .single_interface_lower_id()
+        .unwrap_or_else(|| stacks.ptr_key())
 }
 
 #[derive(Default)]
@@ -50,9 +57,9 @@ impl DynamicTokenProgramCache {
 
     #[inline]
     fn get(&self, program_id: u32, stacks: &ParserStacks) -> Option<bool> {
-        let row = *self.rows_by_stack.get(&stacks.ptr_key())?;
+        let row = *self.rows_by_stack.get(&parser_stacks_cache_key(stacks))?;
         let (cached_stacks, results) = &self.rows[row];
-        debug_assert!(cached_stacks.ptr_eq(stacks));
+        debug_assert!(same_parser_stack_language(cached_stacks, stacks));
         match results[program_id as usize] {
             Self::REJECTED => Some(false),
             Self::ADMITTED => Some(true),
@@ -69,9 +76,9 @@ impl DynamicTokenProgramCache {
         stacks: &ParserStacks,
         accepted: bool,
     ) {
-        let key = stacks.ptr_key();
+        let key = parser_stacks_cache_key(stacks);
         let row = if let Some(&row) = self.rows_by_stack.get(&key) {
-            debug_assert!(self.rows[row].0.ptr_eq(stacks));
+            debug_assert!(same_parser_stack_language(&self.rows[row].0, stacks));
             row
         } else {
             let row = self.rows.len();
@@ -610,9 +617,9 @@ fn parser_child_cached(
     terminal: TerminalID,
     cache: &mut DynamicTraversalCache,
 ) -> Option<ParserStacks> {
-    let key = (stacks.ptr_key(), terminal);
+    let key = (parser_stacks_cache_key(stacks), terminal);
     if let Some((cached_stacks, result)) = cache.parser_children.get(&key) {
-        debug_assert!(cached_stacks.ptr_eq(stacks));
+        debug_assert!(same_parser_stack_language(cached_stacks, stacks));
         return result.clone();
     }
     let result = parser_child(constraint, stacks, terminal);
@@ -642,6 +649,14 @@ fn token_program_accepts(
     let accepted = program.end_states.iter().any(|&end_state| {
         token_boundary_allowed_cached(constraint, end_state, stacks, traversal_cache)
     }) || program.branches.iter().any(|&(terminal, suffix)| {
+        if partition.programs[suffix as usize].accept {
+            return parser_terminal_admissible_cached(
+                constraint,
+                terminal,
+                stacks,
+                traversal_cache,
+            );
+        }
         let Some(advanced) = parser_child_cached(constraint, stacks, terminal, traversal_cache)
         else {
             return false;
@@ -676,6 +691,14 @@ fn source_token_program_accepts(
     program.end_states.iter().any(|&end_state| {
         token_boundary_allowed_cached(constraint, end_state, stacks, traversal_cache)
     }) || program.branches.iter().any(|&(terminal, suffix)| {
+        if partition.programs[suffix as usize].accept {
+            return parser_terminal_admissible_cached(
+                constraint,
+                terminal,
+                stacks,
+                traversal_cache,
+            );
+        }
         let Some(advanced) = parser_child_cached(constraint, stacks, terminal, traversal_cache)
         else {
             return false;
@@ -709,6 +732,39 @@ fn token_boundary_allowed(
     stack_may_advance_on_any(&constraint.table, &parser_gss, accessible)
 }
 
+fn admissible_terminals_cached<'a>(
+    constraint: &Constraint,
+    stacks: &ParserStacks,
+    cache: &'a mut DynamicTraversalCache,
+) -> &'a BitSet {
+    let key = parser_stacks_cache_key(stacks);
+    if !cache.admissible_terminals.contains_key(&key) {
+        let parser_gss = with_empty_accumulators(stacks);
+        let candidates = BitSet::all(constraint.table.num_terminals as usize);
+        let admitted = stack_admissible_terminals(&constraint.table, &parser_gss, &candidates);
+        cache
+            .admissible_terminals
+            .insert(key, (stacks.clone(), admitted));
+    }
+    let (cached_stacks, admitted) = cache
+        .admissible_terminals
+        .get(&key)
+        .expect("admissible terminal cache insertion must be visible");
+    debug_assert!(same_parser_stack_language(cached_stacks, stacks));
+    admitted
+}
+
+#[inline]
+fn parser_terminal_admissible_cached(
+    constraint: &Constraint,
+    terminal: TerminalID,
+    stacks: &ParserStacks,
+    cache: &mut DynamicTraversalCache,
+) -> bool {
+    Some(terminal) == constraint.ignore_terminal
+        || admissible_terminals_cached(constraint, stacks, cache).contains(terminal as usize)
+}
+
 fn token_boundary_allowed_cached(
     constraint: &Constraint,
     tokenizer_state: u32,
@@ -725,30 +781,7 @@ fn token_boundary_allowed_cached(
         return true;
     }
 
-    let key = stacks.ptr_key();
-    let admitted = if let Some((cached_stacks, admitted)) =
-        cache.admissible_terminals.get(&key)
-    {
-        debug_assert!(cached_stacks.ptr_eq(stacks));
-        admitted
-    } else {
-        let parser_gss = with_empty_accumulators(stacks);
-        let candidates = BitSet::all(accessible.len());
-        let admitted = stack_admissible_terminals(
-            &constraint.table,
-            &parser_gss,
-            &candidates,
-        );
-        cache
-            .admissible_terminals
-            .insert(key, (stacks.clone(), admitted));
-        &cache
-            .admissible_terminals
-            .get(&key)
-            .expect("admissible terminal cache insertion must be visible")
-            .1
-    };
-    !admitted.is_disjoint(accessible)
+    !admissible_terminals_cached(constraint, stacks, cache).is_disjoint(accessible)
 }
 
 fn lexer_state_relevant_cached(
@@ -757,10 +790,10 @@ fn lexer_state_relevant_cached(
     stacks: &ParserStacks,
     cache: &mut DynamicTraversalCache,
 ) -> bool {
-    let key = (tokenizer_state, stacks.ptr_key());
-    if let Some((cached_stacks, result)) = cache.lexer_relevant.get(&key) {
-        debug_assert!(cached_stacks.ptr_eq(stacks));
-        return *result;
+    let stack_key = parser_stacks_cache_key(stacks);
+    let key = (tokenizer_state, stack_key);
+    if let Some(&result) = cache.lexer_relevant.get(&key) {
+        return result;
     }
 
     let accessible = constraint
@@ -773,13 +806,10 @@ fn lexer_state_relevant_cached(
     let result = if ignore_relevant {
         true
     } else {
-        let parser_gss = with_empty_accumulators(stacks);
-        stack_may_advance_on_any(&constraint.table, &parser_gss, accessible)
-            || stack_may_advance_on_any(&constraint.table, &parser_gss, matched)
+        let admitted = admissible_terminals_cached(constraint, stacks, cache);
+        !admitted.is_disjoint(accessible) || !admitted.is_disjoint(matched)
     };
-    cache
-        .lexer_relevant
-        .insert(key, (stacks.clone(), result));
+    cache.lexer_relevant.insert(key, result);
     result
 }
 

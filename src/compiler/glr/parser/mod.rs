@@ -5837,16 +5837,33 @@ pub(crate) fn stack_admissible_terminals(
     }
 
     let mut admitted = BitSet::new(terminals.len());
-    for bit in terminals.iter_ones() {
-        let Some(terminal) = exact_admission_terminal_from_bit(table, bit) else {
-            continue;
-        };
-        if stack
-            .peek_values()
-            .into_iter()
-            .any(|state| table.advance_row_allows(state, terminal))
-        {
-            admitted.set(bit);
+    if table.advance.len() == table.num_states as usize {
+        // RowPresenceExact admission is a union of the live top-state rows.
+        // Iterate those sparse rows once instead of rescanning every top state
+        // for every candidate terminal.
+        for state in stack.peek_values() {
+            let Some(row) = table.advance.get(state as usize) else {
+                continue;
+            };
+            for bit in row.iter_ones() {
+                if bit < terminals.len() && terminals.contains(bit) {
+                    admitted.set(bit);
+                }
+            }
+        }
+    } else {
+        // Compatibility fallback for hand-built tables without admission rows.
+        let top_states = stack.peek_values();
+        for bit in terminals.iter_ones() {
+            let Some(terminal) = exact_admission_terminal_from_bit(table, bit) else {
+                continue;
+            };
+            if top_states
+                .iter()
+                .any(|&state| table.advance_row_allows(state, terminal))
+            {
+                admitted.set(bit);
+            }
         }
     }
     if assert_row_presence_exact_enabled() {

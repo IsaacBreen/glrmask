@@ -551,7 +551,7 @@ impl<'a> ConstraintState<'a> {
 
     /// Return a forced token sequence when one can be determined.
     pub fn forced(&self) -> Vec<u32> {
-        self.forced_impl(false)
+        self.forced_impl(self.constraint.uses_dynamic_runtime())
     }
 
     pub(crate) fn forced_dynamic(&self) -> Vec<u32> {

@@ -1,7 +1,7 @@
 use crate::runtime::Constraint;
 
 const CONSTRAINT_MAGIC: [u8; 8] = *b"GLRCONS\0";
-const CONSTRAINT_VERSION: u16 = 5;
+const CONSTRAINT_VERSION: u16 = 6;
 const CONSTRAINT_HEADER_LEN: usize = CONSTRAINT_MAGIC.len() + 2 + 8;
 
 impl Constraint {
@@ -47,7 +47,11 @@ impl Constraint {
         let mut constraint: Constraint =
             bincode::deserialize(&bytes[CONSTRAINT_HEADER_LEN..])
                 .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
-        constraint.rebuild_runtime_caches();
+        if constraint.uses_dynamic_runtime() {
+            constraint.rebuild_dynamic_runtime_caches(false);
+        } else {
+            constraint.rebuild_runtime_caches();
+        }
         Ok(constraint)
     }
 }
