@@ -14,22 +14,24 @@ use crate::grammar::flat::{NonterminalID, TerminalID};
 const INLINE_ROW_CAPACITY: usize = 8;
 
 #[derive(Debug, Clone)]
-pub(crate) enum SparseRow<K: Copy + Eq + Hash, V: Clone> {
+pub(crate) enum SparseRow<K: Copy + Eq + Hash + Ord, V: Clone> {
     Inline(SmallVec<[(K, V); INLINE_ROW_CAPACITY]>),
+    Sorted(Vec<(K, V)>),
     Large(FxHashMap<K, V>),
 }
 
-impl<K: Copy + Eq + Hash, V: Clone> Default for SparseRow<K, V> {
+impl<K: Copy + Eq + Hash + Ord, V: Clone> Default for SparseRow<K, V> {
     fn default() -> Self {
         Self::Inline(SmallVec::new())
     }
 }
 
-impl<K: Copy + Eq + Hash, V: Clone> SparseRow<K, V> {
+impl<K: Copy + Eq + Hash + Ord, V: Clone> SparseRow<K, V> {
     #[inline]
     pub(crate) fn len(&self) -> usize {
         match self {
             Self::Inline(entries) => entries.len(),
+            Self::Sorted(entries) => entries.len(),
             Self::Large(entries) => entries.len(),
         }
     }
@@ -46,6 +48,10 @@ impl<K: Copy + Eq + Hash, V: Clone> SparseRow<K, V> {
                 .iter()
                 .find(|(entry_key, _)| entry_key == key)
                 .map(|(_, value)| value),
+            Self::Sorted(entries) => entries
+                .binary_search_by_key(key, |(entry_key, _)| *entry_key)
+                .ok()
+                .map(|index| &entries[index].1),
             Self::Large(entries) => entries.get(key),
         }
     }
@@ -57,6 +63,10 @@ impl<K: Copy + Eq + Hash, V: Clone> SparseRow<K, V> {
                 .iter_mut()
                 .find(|(entry_key, _)| entry_key == key)
                 .map(|(_, value)| value),
+            Self::Sorted(entries) => entries
+                .binary_search_by_key(key, |(entry_key, _)| *entry_key)
+                .ok()
+                .map(|index| &mut entries[index].1),
             Self::Large(entries) => entries.get_mut(key),
         }
     }
@@ -67,10 +77,11 @@ impl<K: Copy + Eq + Hash, V: Clone> SparseRow<K, V> {
     /// `insert` would needlessly perform O(n²) inline duplicate scans and an
     /// avoidable inline-to-hash-map promotion.
     pub(crate) fn from_sorted_unique(entries: Vec<(K, V)>) -> Self {
+        debug_assert!(entries.windows(2).all(|pair| pair[0].0 < pair[1].0));
         if entries.len() <= INLINE_ROW_CAPACITY {
             Self::Inline(SmallVec::from_vec(entries))
         } else {
-            Self::Large(entries.into_iter().collect())
+            Self::Sorted(entries)
         }
     }
 
@@ -105,6 +116,13 @@ impl<K: Copy + Eq + Hash, V: Clone> SparseRow<K, V> {
                     previous
                 }
             }
+            Self::Sorted(entries) => match entries.binary_search_by_key(&key, |(entry_key, _)| *entry_key) {
+                Ok(index) => Some(std::mem::replace(&mut entries[index].1, value)),
+                Err(index) => {
+                    entries.insert(index, (key, value));
+                    None
+                }
+            },
             Self::Large(entries) => entries.insert(key, value),
         }
     }
@@ -114,6 +132,12 @@ impl<K: Copy + Eq + Hash, V: Clone> SparseRow<K, V> {
             Self::Inline(entries) => {
                 let position = entries.iter().position(|(entry_key, _)| entry_key == key)?;
                 Some(entries.swap_remove(position).1)
+            }
+            Self::Sorted(entries) => {
+                let position = entries
+                    .binary_search_by_key(key, |(entry_key, _)| *entry_key)
+                    .ok()?;
+                Some(entries.remove(position).1)
             }
             Self::Large(entries) => entries.remove(key),
         }
@@ -128,6 +152,7 @@ impl<K: Copy + Eq + Hash, V: Clone> SparseRow<K, V> {
     pub(crate) fn iter(&self) -> SparseRowIter<'_, K, V> {
         match self {
             Self::Inline(entries) => SparseRowIter::Inline(entries.iter()),
+            Self::Sorted(entries) => SparseRowIter::Sorted(entries.iter()),
             Self::Large(entries) => SparseRowIter::Large(entries.iter()),
         }
     }
@@ -136,6 +161,7 @@ impl<K: Copy + Eq + Hash, V: Clone> SparseRow<K, V> {
     pub(crate) fn keys(&self) -> SparseRowKeys<'_, K, V> {
         match self {
             Self::Inline(entries) => SparseRowKeys::Inline(entries.iter()),
+            Self::Sorted(entries) => SparseRowKeys::Sorted(entries.iter()),
             Self::Large(entries) => SparseRowKeys::Large(entries.keys()),
         }
     }
@@ -144,6 +170,7 @@ impl<K: Copy + Eq + Hash, V: Clone> SparseRow<K, V> {
     pub(crate) fn values(&self) -> SparseRowValues<'_, K, V> {
         match self {
             Self::Inline(entries) => SparseRowValues::Inline(entries.iter()),
+            Self::Sorted(entries) => SparseRowValues::Sorted(entries.iter()),
             Self::Large(entries) => SparseRowValues::Large(entries.values()),
         }
     }
@@ -152,6 +179,11 @@ impl<K: Copy + Eq + Hash, V: Clone> SparseRow<K, V> {
     pub(crate) fn for_each_value_mut(&mut self, mut f: impl FnMut(&mut V)) {
         match self {
             Self::Inline(entries) => {
+                for (_, value) in entries {
+                    f(value);
+                }
+            }
+            Self::Sorted(entries) => {
                 for (_, value) in entries {
                     f(value);
                 }
@@ -165,7 +197,7 @@ impl<K: Copy + Eq + Hash, V: Clone> SparseRow<K, V> {
     }
 }
 
-impl<K: Copy + Eq + Hash, V: Clone + PartialEq> PartialEq for SparseRow<K, V> {
+impl<K: Copy + Eq + Hash + Ord, V: Clone + PartialEq> PartialEq for SparseRow<K, V> {
     fn eq(&self, other: &Self) -> bool {
         if self.len() != other.len() {
             return false;
@@ -174,11 +206,11 @@ impl<K: Copy + Eq + Hash, V: Clone + PartialEq> PartialEq for SparseRow<K, V> {
     }
 }
 
-impl<K: Copy + Eq + Hash, V: Clone + Eq> Eq for SparseRow<K, V> {}
+impl<K: Copy + Eq + Hash + Ord, V: Clone + Eq> Eq for SparseRow<K, V> {}
 
 impl<K, V> Serialize for SparseRow<K, V>
 where
-    K: Copy + Eq + Hash + Serialize,
+    K: Copy + Eq + Hash + Ord + Serialize,
     V: Clone + Serialize,
 {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -195,7 +227,7 @@ where
 
 impl<'de, K, V> Deserialize<'de> for SparseRow<K, V>
 where
-    K: Copy + Eq + Hash + Deserialize<'de>,
+    K: Copy + Eq + Hash + Ord + Deserialize<'de>,
     V: Clone + Deserialize<'de>,
 {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -206,7 +238,7 @@ where
 
         impl<'de, K, V> Visitor<'de> for SparseRowVisitor<K, V>
         where
-            K: Copy + Eq + Hash + Deserialize<'de>,
+            K: Copy + Eq + Hash + Ord + Deserialize<'de>,
             V: Clone + Deserialize<'de>,
         {
             type Value = SparseRow<K, V>;
@@ -231,7 +263,7 @@ where
     }
 }
 
-impl<'a, K: Copy + Eq + Hash, V: Clone> IntoIterator for &'a SparseRow<K, V> {
+impl<'a, K: Copy + Eq + Hash + Ord, V: Clone> IntoIterator for &'a SparseRow<K, V> {
     type Item = (&'a K, &'a V);
     type IntoIter = SparseRowIter<'a, K, V>;
 
@@ -240,7 +272,7 @@ impl<'a, K: Copy + Eq + Hash, V: Clone> IntoIterator for &'a SparseRow<K, V> {
     }
 }
 
-impl<K: Copy + Eq + Hash, V: Clone> Index<&K> for SparseRow<K, V> {
+impl<K: Copy + Eq + Hash + Ord, V: Clone> Index<&K> for SparseRow<K, V> {
     type Output = V;
 
     fn index(&self, index: &K) -> &Self::Output {
@@ -248,7 +280,7 @@ impl<K: Copy + Eq + Hash, V: Clone> Index<&K> for SparseRow<K, V> {
     }
 }
 
-impl<K: Copy + Eq + Hash, V: Clone> FromIterator<(K, V)> for SparseRow<K, V> {
+impl<K: Copy + Eq + Hash + Ord, V: Clone> FromIterator<(K, V)> for SparseRow<K, V> {
     fn from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> Self {
         let mut row = Self::default();
         for (key, value) in iter {
@@ -258,49 +290,55 @@ impl<K: Copy + Eq + Hash, V: Clone> FromIterator<(K, V)> for SparseRow<K, V> {
     }
 }
 
-pub(crate) enum SparseRowIter<'a, K: Copy + Eq + Hash, V: Clone> {
+pub(crate) enum SparseRowIter<'a, K: Copy + Eq + Hash + Ord, V: Clone> {
     Inline(std::slice::Iter<'a, (K, V)>),
+    Sorted(std::slice::Iter<'a, (K, V)>),
     Large(std::collections::hash_map::Iter<'a, K, V>),
 }
 
-impl<'a, K: Copy + Eq + Hash, V: Clone> Iterator for SparseRowIter<'a, K, V> {
+impl<'a, K: Copy + Eq + Hash + Ord, V: Clone> Iterator for SparseRowIter<'a, K, V> {
     type Item = (&'a K, &'a V);
 
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             Self::Inline(entries) => entries.next().map(|(key, value)| (key, value)),
+            Self::Sorted(entries) => entries.next().map(|(key, value)| (key, value)),
             Self::Large(entries) => entries.next(),
         }
     }
 }
 
-pub(crate) enum SparseRowKeys<'a, K: Copy + Eq + Hash, V: Clone> {
+pub(crate) enum SparseRowKeys<'a, K: Copy + Eq + Hash + Ord, V: Clone> {
     Inline(std::slice::Iter<'a, (K, V)>),
+    Sorted(std::slice::Iter<'a, (K, V)>),
     Large(std::collections::hash_map::Keys<'a, K, V>),
 }
 
-impl<'a, K: Copy + Eq + Hash, V: Clone> Iterator for SparseRowKeys<'a, K, V> {
+impl<'a, K: Copy + Eq + Hash + Ord, V: Clone> Iterator for SparseRowKeys<'a, K, V> {
     type Item = &'a K;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             Self::Inline(entries) => entries.next().map(|(key, _)| key),
+            Self::Sorted(entries) => entries.next().map(|(key, _)| key),
             Self::Large(entries) => entries.next(),
         }
     }
 }
 
-pub(crate) enum SparseRowValues<'a, K: Copy + Eq + Hash, V: Clone> {
+pub(crate) enum SparseRowValues<'a, K: Copy + Eq + Hash + Ord, V: Clone> {
     Inline(std::slice::Iter<'a, (K, V)>),
+    Sorted(std::slice::Iter<'a, (K, V)>),
     Large(std::collections::hash_map::Values<'a, K, V>),
 }
 
-impl<'a, K: Copy + Eq + Hash, V: Clone> Iterator for SparseRowValues<'a, K, V> {
+impl<'a, K: Copy + Eq + Hash + Ord, V: Clone> Iterator for SparseRowValues<'a, K, V> {
     type Item = &'a V;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             Self::Inline(entries) => entries.next().map(|(_, value)| value),
+            Self::Sorted(entries) => entries.next().map(|(_, value)| value),
             Self::Large(entries) => entries.next(),
         }
     }

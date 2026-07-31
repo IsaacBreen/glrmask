@@ -260,7 +260,11 @@ fn direct_regular_action_row_for_roots_with_widest(
         advance.set(grammar.num_terminals as usize);
         row.push((EOF, Action::Accept));
     }
-    Some((ActionRow::from_iter(row), advance, widest))
+    Some((
+        ActionRow::Sparse(SparseRow::from_sorted_unique(row)),
+        advance,
+        widest,
+    ))
 }
 
 fn direct_regular_wide_frontier_descriptor(
@@ -309,6 +313,52 @@ fn try_build_direct_regular_table(grammar: &AnalyzedGrammar) -> Option<GLRTable>
     // workspace rather than allocating and retaining every closure.
     let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
     let total_started_at = profile.then(std::time::Instant::now);
+    if profile {
+        let mut epsilon_edges = 0usize;
+        let mut epsilon_forward = 0usize;
+        let mut epsilon_backward = 0usize;
+        let mut epsilon_self = 0usize;
+        let mut epsilon_outdegree_zero = 0usize;
+        let mut epsilon_outdegree_one = 0usize;
+        let mut epsilon_outdegree_many = 0usize;
+        let mut max_epsilon_outdegree = 0usize;
+        let mut terminal_edges = 0usize;
+        let mut terminal_targets = 0usize;
+        for (source, state) in automaton.states.iter().enumerate() {
+            epsilon_edges += state.epsilons.len();
+            max_epsilon_outdegree = max_epsilon_outdegree.max(state.epsilons.len());
+            match state.epsilons.len() {
+                0 => epsilon_outdegree_zero += 1,
+                1 => epsilon_outdegree_one += 1,
+                _ => epsilon_outdegree_many += 1,
+            }
+            for &target in &state.epsilons {
+                match (target as usize).cmp(&source) {
+                    std::cmp::Ordering::Greater => epsilon_forward += 1,
+                    std::cmp::Ordering::Less => epsilon_backward += 1,
+                    std::cmp::Ordering::Equal => epsilon_self += 1,
+                }
+            }
+            terminal_edges += state.transitions.len();
+            terminal_targets += state.transitions.values().map(Vec::len).sum::<usize>();
+        }
+        eprintln!(
+            "[glrmask/profile][direct_regular_topology] states={} start_states={} accepting={} epsilon_edges={} epsilon_forward={} epsilon_backward={} epsilon_self={} epsilon_outdegree_zero={} epsilon_outdegree_one={} epsilon_outdegree_many={} max_epsilon_outdegree={} terminal_edges={} terminal_targets={}",
+            automaton.states.len(),
+            automaton.start_states.len(),
+            automaton.states.iter().filter(|state| state.is_accepting).count(),
+            epsilon_edges,
+            epsilon_forward,
+            epsilon_backward,
+            epsilon_self,
+            epsilon_outdegree_zero,
+            epsilon_outdegree_one,
+            epsilon_outdegree_many,
+            max_epsilon_outdegree,
+            terminal_edges,
+            terminal_targets,
+        );
+    }
     let row_started_at = profile.then(std::time::Instant::now);
     let mut initial_workspace = DirectRegularClosureWorkspace::new(automaton.states.len());
     let (initial, initial_advance, initial_widest) = direct_regular_action_row_for_roots_with_widest(
@@ -373,6 +423,36 @@ fn try_build_direct_regular_table(grammar: &AnalyzedGrammar) -> Option<GLRTable>
     let mut action = Vec::with_capacity(rows.len() + 1);
     action.push(initial);
     action.extend(rows);
+
+    if profile {
+        let mut action_entries = 0usize;
+        let mut shift_targets = 0usize;
+        let mut stack_shift_actions = 0usize;
+        let mut accept_actions = 0usize;
+        for row in &action {
+            action_entries += row.len();
+            for (_, action) in row {
+                match action {
+                    Action::Shift(_, _) => shift_targets += 1,
+                    Action::StackShifts(shifts) => {
+                        stack_shift_actions += 1;
+                        shift_targets += shifts.len();
+                    }
+                    Action::Accept => accept_actions += 1,
+                    _ => {}
+                }
+            }
+        }
+        eprintln!(
+            "[glrmask/profile][direct_regular_table_shape] rows={} action_entries={} shift_targets={} stack_shift_actions={} accept_actions={} max_frontier={}",
+            action.len(),
+            action_entries,
+            shift_targets,
+            stack_shift_actions,
+            accept_actions,
+            max_frontier,
+        );
+    }
 
     let num_states = u32::try_from(action.len()).ok()?;
     let table = GLRTable {
@@ -465,7 +545,8 @@ fn try_build_direct_regular_table_reference(grammar: &AnalyzedGrammar) -> Option
         if accepting {
             row.push((EOF, Action::Accept));
         }
-        action.push(ActionRow::from_iter(row));
+        row.sort_unstable_by_key(|(terminal, _)| *terminal);
+        action.push(ActionRow::Sparse(SparseRow::from_sorted_unique(row)));
     }
     let num_states = action.len() as u32;
     let mut table = GLRTable {
