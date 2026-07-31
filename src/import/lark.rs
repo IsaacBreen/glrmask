@@ -575,51 +575,96 @@ fn externally_emitted_lark_terminals(
     roots
 }
 
-fn reachable_lark_terminal_rules(
-    grammar: &NamedGrammar,
-    root: &str,
-    terminal_names: &HashSet<String>,
-) -> HashSet<String> {
-    let bodies = grammar
-        .rules
-        .iter()
-        .filter(|rule| rule.is_terminal)
-        .map(|rule| (rule.name.as_str(), &rule.expr))
-        .collect::<HashMap<_, _>>();
-    let mut reachable = HashSet::new();
-    let mut stack = vec![root.to_owned()];
-    while let Some(name) = stack.pop() {
-        if !reachable.insert(name.clone()) {
-            continue;
-        }
-        let Some(expr) = bodies.get(name.as_str()) else {
-            continue;
-        };
-        for target in lark_ref_names(expr) {
-            if terminal_names.contains(target) && !reachable.contains(target) {
-                stack.push(target.to_owned());
-            }
+struct LarkTerminalGraphIndex<'a> {
+    rules_by_name: HashMap<&'a str, &'a NamedRule>,
+    dependencies_by_name: HashMap<&'a str, Vec<&'a str>>,
+}
+
+impl<'a> LarkTerminalGraphIndex<'a> {
+    fn new(grammar: &'a NamedGrammar, terminal_names: &HashSet<String>) -> Self {
+        let rules_by_name = grammar
+            .rules
+            .iter()
+            .filter(|rule| rule.is_terminal)
+            .map(|rule| (rule.name.as_str(), rule))
+            .collect::<HashMap<_, _>>();
+        let dependencies_by_name = rules_by_name
+            .iter()
+            .map(|(&name, rule)| {
+                let mut dependencies = lark_ref_names(&rule.expr)
+                    .into_iter()
+                    .filter(|target| terminal_names.contains(*target))
+                    .collect::<Vec<_>>();
+                dependencies.sort_unstable();
+                dependencies.dedup();
+                (name, dependencies)
+            })
+            .collect();
+        Self {
+            rules_by_name,
+            dependencies_by_name,
         }
     }
-    reachable
+
+    fn reachable(&self, root: &str) -> HashSet<String> {
+        let mut reachable = HashSet::new();
+        let mut stack = vec![root.to_owned()];
+        while let Some(name) = stack.pop() {
+            if !reachable.insert(name.clone()) {
+                continue;
+            }
+            let Some(dependencies) = self.dependencies_by_name.get(name.as_str()) else {
+                continue;
+            };
+            for &target in dependencies {
+                if !reachable.contains(target) {
+                    stack.push(target.to_owned());
+                }
+            }
+        }
+        reachable
+    }
+}
+
+fn reachable_lark_terminal_rules(
+    index: &LarkTerminalGraphIndex<'_>,
+    root: &str,
+) -> HashSet<String> {
+    index.reachable(root)
 }
 
 fn compile_lark_terminal_graph_root(
     grammar: &NamedGrammar,
+    index: &LarkTerminalGraphIndex<'_>,
     root: &str,
-    terminal_names: &HashSet<String>,
     min_graph_rules: usize,
 ) -> Result<Option<Arc<LexerDfa>>, GlrMaskError> {
-    let reachable = reachable_lark_terminal_rules(grammar, root, terminal_names);
+    let reachable = reachable_lark_terminal_rules(index, root);
+    // The shared right-linear compressor counts only dependency-bearing rules
+    // as parser states. Fewer than `min_graph_rules` reachable rules can never
+    // satisfy that threshold, so avoid cloning and compiling a temporary
+    // grammar for ordinary independent/small terminal definitions.
+    if reachable.len() < min_graph_rules {
+        return Ok(None);
+    }
+
     let mut temporary_rules = Vec::with_capacity(reachable.len());
-    for rule in grammar
-        .rules
-        .iter()
-        .filter(|rule| rule.is_terminal && reachable.contains(&rule.name))
-    {
-        let has_terminal_dependency = lark_ref_names(&rule.expr)
-            .into_iter()
-            .any(|target| reachable.contains(target));
+    let mut reachable_names = reachable.iter().map(String::as_str).collect::<Vec<_>>();
+    reachable_names.sort_unstable();
+    for name in reachable_names {
+        let rule = index
+            .rules_by_name
+            .get(name)
+            .copied()
+            .ok_or_else(|| {
+                GlrMaskError::GrammarParse(format!(
+                    "internal error resolving Lark terminal graph rule {name}"
+                ))
+            })?;
+        let has_terminal_dependency = index
+            .dependencies_by_name
+            .get(name)
+            .is_some_and(|dependencies| !dependencies.is_empty());
         temporary_rules.push(NamedRule {
             name: rule.name.clone(),
             expr: rule.expr.clone(),
@@ -668,6 +713,7 @@ fn compile_lark_terminal_graph_root(
 fn compress_lark_terminal_graphs(grammar: &mut NamedGrammar) -> Result<(), GlrMaskError> {
     let source = grammar.clone();
     let terminal_names = source.terminal_names_set();
+    let graph_index = LarkTerminalGraphIndex::new(&source, &terminal_names);
     let external = externally_emitted_lark_terminals(&source, &terminal_names);
     let mut roots = external.iter().cloned().collect::<Vec<_>>();
     roots.sort_unstable();
@@ -676,8 +722,8 @@ fn compress_lark_terminal_graphs(grammar: &mut NamedGrammar) -> Result<(), GlrMa
     for root in roots {
         if let Some(dfa) = compile_lark_terminal_graph_root(
             &source,
+            &graph_index,
             &root,
-            &terminal_names,
             MIN_LARK_TERMINAL_GRAPH_RULES,
         )? {
             compiled.insert(root, dfa);
@@ -700,11 +746,7 @@ fn compress_lark_terminal_graphs(grammar: &mut NamedGrammar) -> Result<(), GlrMa
     // deep dependency graph and can overflow its recursion stack.
     let mut needed_helpers = HashSet::new();
     for root in external.iter().filter(|root| !compiled.contains_key(*root)) {
-        needed_helpers.extend(reachable_lark_terminal_rules(
-            &source,
-            root,
-            &terminal_names,
-        ));
+        needed_helpers.extend(reachable_lark_terminal_rules(&graph_index, root));
     }
     grammar.rules.retain(|rule| {
         !rule.is_terminal
@@ -1186,8 +1228,9 @@ mod tests {
         let mut parser = Parser::new(tokens);
         let raw = parser.parse_grammar().unwrap();
         let terminal_names = raw.terminal_names_set();
+        let graph_index = LarkTerminalGraphIndex::new(&raw, &terminal_names);
 
-        let compact = compile_lark_terminal_graph_root(&raw, "ROOT", &terminal_names, 1)
+        let compact = compile_lark_terminal_graph_root(&raw, &graph_index, "ROOT", 1)
             .unwrap()
             .expect("test graph should use compact compilation");
         let direct_expr = resolve_terminal_subexpressions(

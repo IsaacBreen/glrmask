@@ -2184,23 +2184,21 @@ fn find_l1_exact_state_equivalence_by_token_signatures_with_first_target_cache(
 ) -> (Vec<usize>, Option<L1ExactProfileReuse>) {
     let terminal_signature_started_at = compile_profile_enabled().then(Instant::now);
     let all_terminals_active = active_terminals.iter().all(|&active| active);
-    let tokenizer_view = if all_terminals_active {
-        TokenizerView::new_from_flat_trans(flat_trans, tokenizer)
-    } else {
-        TokenizerView::new_filtered_from_flat_trans(flat_trans, tokenizer, active_terminals)
-    };
-    let (state_to_terminal_signature, terminal_signatures) =
-        build_l1_flat_state_to_terminal_signatures(tokenizer_view.dfa());
+    let (state_to_terminal_signature, terminal_signatures, active_language) =
+        build_l1_tokenizer_state_to_terminal_signatures(tokenizer, active_terminals);
     let terminal_signature_ms = terminal_signature_started_at.map_or(0.0, |started| {
         started.elapsed().as_secs_f64() * 1000.0
     });
     let self_loop_bytes_by_state = all_terminals_active.then(|| tokenizer.all_self_loop_bytes());
-    find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
+    find_l1_exact_state_equivalence_by_components_with_first_target_cache(
         vocab_order,
         states,
         state_to_terminal_signature,
         terminal_signatures,
-        &tokenizer_view,
+        flat_trans,
+        &active_language,
+        None,
+        Some((tokenizer, active_terminals)),
         transitions_by_byte,
         true,
         terminal_signature_ms,
