@@ -1,7 +1,12 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use super::{choice_or_single, sequence_or_single};
 use crate::GlrMaskError;
+use crate::automata::lexer::{DFA as LexerDfa, compile::compile_expression_labeled_nfa};
+use crate::grammar::ast::resolve_terminal_subexpressions;
 use crate::grammar::flat::GrammarDef;
 use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule, Quantifier, lower};
 use crate::grammar::factoring::factor_named_grammar;
@@ -412,49 +417,49 @@ fn synthesize_lark_ignore_rule(
     Some(ignore_name)
 }
 
-fn expand_lark_expr_list(
-    exprs: &[GrammarExpr],
-    in_terminal_rule: bool,
-    rule_map: &HashMap<String, GrammarExpr>,
-    terminal_names: &HashSet<String>,
-    parser_names: &HashSet<String>,
-    memo: &mut HashMap<String, GrammarExpr>,
-    visiting: &mut HashSet<String>,
-) -> Result<Vec<GrammarExpr>, GlrMaskError> {
-    exprs
-        .iter()
-        .map(|expr| {
-            expand_lark_expr(
-                expr,
-                in_terminal_rule,
-                rule_map,
-                terminal_names,
-                parser_names,
-                memo,
-                visiting,
-            )
-        })
-        .collect()
-}
+const MIN_LARK_TERMINAL_GRAPH_RULES: usize = 32;
 
-fn expand_lark_boxed_expr(
-    expr: &GrammarExpr,
-    in_terminal_rule: bool,
-    rule_map: &HashMap<String, GrammarExpr>,
-    terminal_names: &HashSet<String>,
-    parser_names: &HashSet<String>,
-    memo: &mut HashMap<String, GrammarExpr>,
-    visiting: &mut HashSet<String>,
-) -> Result<Box<GrammarExpr>, GlrMaskError> {
-    Ok(Box::new(expand_lark_expr(
-        expr,
-        in_terminal_rule,
-        rule_map,
-        terminal_names,
-        parser_names,
-        memo,
-        visiting,
-    )?))
+fn lark_ref_names(expr: &GrammarExpr) -> Vec<&str> {
+    let mut refs = Vec::new();
+    let mut stack = vec![expr];
+    while let Some(expr) = stack.pop() {
+        match expr {
+            GrammarExpr::Ref(name) => refs.push(name.as_str()),
+            GrammarExpr::Grouped(inner) | GrammarExpr::Quantified(inner, _) => {
+                stack.push(inner);
+            }
+            GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
+                stack.extend(parts.iter());
+            }
+            GrammarExpr::Exclude { expr, exclude } => {
+                stack.push(expr);
+                stack.push(exclude);
+            }
+            GrammarExpr::Intersect { expr, intersect } => {
+                stack.push(expr);
+                stack.push(intersect);
+            }
+            GrammarExpr::SeparatedSequence {
+                items, separator, ..
+            } => {
+                for (item, _) in items {
+                    stack.push(item);
+                }
+                stack.push(separator);
+            }
+            GrammarExpr::ExprNFA(expr_nfa) => {
+                stack.extend(expr_nfa.symbols.iter());
+            }
+            GrammarExpr::Epsilon
+            | GrammarExpr::Literal(_)
+            | GrammarExpr::SpecialToken(_)
+            | GrammarExpr::CharClass { .. }
+            | GrammarExpr::RawRegex(_)
+            | GrammarExpr::LexerDfa(_)
+            | GrammarExpr::AnyByte => {}
+        }
+    }
+    refs
 }
 
 fn validate_lark_terminal_refs(
@@ -463,295 +468,281 @@ fn validate_lark_terminal_refs(
     terminal_names: &HashSet<String>,
     rule_map: &HashMap<String, GrammarExpr>,
 ) -> Result<(), GlrMaskError> {
-    match expr {
-        GrammarExpr::Ref(target) => {
-            if !rule_map.contains_key(target) {
-                return Err(GlrMaskError::GrammarParse(format!(
-                    "terminal rule {rule_name} references undefined rule {target}"
-                )));
-            }
-            if !terminal_names.contains(target) {
-                return Err(GlrMaskError::GrammarParse(format!(
-                    "terminal rule {rule_name} references nonterminal {target}"
-                )));
-            }
-            Ok(())
+    for target in lark_ref_names(expr) {
+        if !rule_map.contains_key(target) {
+            return Err(GlrMaskError::GrammarParse(format!(
+                "terminal rule {rule_name} references undefined rule {target}"
+            )));
         }
-        GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
-            for part in parts {
-                validate_lark_terminal_refs(part, rule_name, terminal_names, rule_map)?;
-            }
-            Ok(())
+        if !terminal_names.contains(target) {
+            return Err(GlrMaskError::GrammarParse(format!(
+                "terminal rule {rule_name} references nonterminal {target}"
+            )));
         }
-        GrammarExpr::Exclude { expr, exclude } => {
-            validate_lark_terminal_refs(expr, rule_name, terminal_names, rule_map)?;
-            validate_lark_terminal_refs(exclude, rule_name, terminal_names, rule_map)
-        }
-        GrammarExpr::Quantified(inner, Quantifier::Optional)
-        | GrammarExpr::Quantified(inner, Quantifier::ZeroPlus)
-        | GrammarExpr::Quantified(inner, Quantifier::OnePlus)
-        | GrammarExpr::Quantified(inner, Quantifier::Range(_, _)) => {
-            validate_lark_terminal_refs(inner, rule_name, terminal_names, rule_map)
-        }
-        _ => Ok(()),
     }
+    Ok(())
 }
 
-fn expand_lark_terminal_rule(
-    name: &str,
-    rule_map: &HashMap<String, GrammarExpr>,
-    terminal_names: &HashSet<String>,
-    parser_names: &HashSet<String>,
-    memo: &mut HashMap<String, GrammarExpr>,
-    visiting: &mut HashSet<String>,
-) -> Result<GrammarExpr, GlrMaskError> {
-    if let Some(cached) = memo.get(name) {
-        return Ok(cached.clone());
-    }
-
-    if !visiting.insert(name.to_string()) {
-        return Err(GlrMaskError::GrammarParse(format!(
-            "cyclic Lark terminal definition involving {name}"
-        )));
-    }
-
-    let expr = rule_map.get(name).ok_or_else(|| {
-        GlrMaskError::GrammarParse(format!("unknown Lark terminal rule {name}"))
-    })?;
-    let expanded = expand_lark_expr(
-        expr,
-        true,
-        rule_map,
-        terminal_names,
-        parser_names,
-        memo,
-        visiting,
-    )?;
-    visiting.remove(name);
-    memo.insert(name.to_string(), expanded.clone());
-    Ok(expanded)
-}
-
-fn expand_lark_expr(
+fn validate_lark_parser_refs(
     expr: &GrammarExpr,
-    in_terminal_rule: bool,
+    rule_map: &HashMap<String, GrammarExpr>,
+) -> Result<(), GlrMaskError> {
+    for target in lark_ref_names(expr) {
+        if !rule_map.contains_key(target) {
+            return Err(GlrMaskError::GrammarParse(format!(
+                "unknown Lark rule reference {target}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_lark_terminal_acyclic(
     rule_map: &HashMap<String, GrammarExpr>,
     terminal_names: &HashSet<String>,
-    parser_names: &HashSet<String>,
-    memo: &mut HashMap<String, GrammarExpr>,
-    visiting: &mut HashSet<String>,
-) -> Result<GrammarExpr, GlrMaskError> {
-    Ok(match expr {
-        GrammarExpr::Grouped(inner) => GrammarExpr::Grouped(expand_lark_boxed_expr(
-            inner,
-            in_terminal_rule,
-            rule_map,
-            terminal_names,
-            parser_names,
-            memo,
-            visiting,
-        )?),
-        GrammarExpr::Ref(name) => {
-            if terminal_names.contains(name) {
-                if in_terminal_rule {
-                    // Inside a terminal definition, expand referenced terminal
-                    expand_lark_terminal_rule(name, rule_map, terminal_names, parser_names, memo, visiting)?
-                } else {
-                    // In a parser rule, keep the reference (resolved in lower())
-                    GrammarExpr::Ref(name.clone())
-                }
-            } else if parser_names.contains(name) {
-                if in_terminal_rule {
+) -> Result<(), GlrMaskError> {
+    let mut state = HashMap::<String, u8>::new();
+    let mut roots = terminal_names.iter().cloned().collect::<Vec<_>>();
+    roots.sort_unstable();
+
+    for root in roots {
+        if state.get(&root).copied() == Some(2) {
+            continue;
+        }
+        let mut stack = vec![(root, false)];
+        while let Some((name, exiting)) = stack.pop() {
+            if exiting {
+                state.insert(name, 2);
+                continue;
+            }
+            match state.get(&name).copied().unwrap_or(0) {
+                2 => continue,
+                1 => {
                     return Err(GlrMaskError::GrammarParse(format!(
-                        "Lark terminal rule cannot reference parser rule {name}"
+                        "cyclic Lark terminal definition involving {name}"
                     )));
                 }
-                GrammarExpr::Ref(name.clone())
-            } else {
-                return Err(GlrMaskError::GrammarParse(format!(
-                    "unknown Lark rule reference {name}"
-                )));
+                _ => {}
+            }
+
+            state.insert(name.clone(), 1);
+            stack.push((name.clone(), true));
+            let Some(expr) = rule_map.get(&name) else {
+                continue;
+            };
+            let mut dependencies = lark_ref_names(expr)
+                .into_iter()
+                .filter(|target| terminal_names.contains(*target))
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            dependencies.sort_unstable();
+            dependencies.dedup();
+            for dependency in dependencies.into_iter().rev() {
+                if state.get(&dependency).copied() == Some(1) {
+                    return Err(GlrMaskError::GrammarParse(format!(
+                        "cyclic Lark terminal definition involving {dependency}"
+                    )));
+                }
+                if state.get(&dependency).copied() != Some(2) {
+                    stack.push((dependency, false));
+                }
             }
         }
-        GrammarExpr::Sequence(parts) => GrammarExpr::Sequence(expand_lark_expr_list(
-            parts,
-            in_terminal_rule,
-            rule_map,
-            terminal_names,
-            parser_names,
-            memo,
-            visiting,
-        )?),
-        GrammarExpr::Choice(options) => GrammarExpr::Choice(expand_lark_expr_list(
-            options,
-            in_terminal_rule,
-            rule_map,
-            terminal_names,
-            parser_names,
-            memo,
-            visiting,
-        )?),
-        GrammarExpr::Exclude { expr, exclude } => GrammarExpr::Exclude {
-            expr: expand_lark_boxed_expr(
-                expr,
-                in_terminal_rule,
-                rule_map,
-                terminal_names,
-                parser_names,
-                memo,
-                visiting,
-            )?,
-            exclude: expand_lark_boxed_expr(
-                exclude,
-                in_terminal_rule,
-                rule_map,
-                terminal_names,
-                parser_names,
-                memo,
-                visiting,
-            )?,
-        },
-        GrammarExpr::Intersect { expr, intersect } => GrammarExpr::Intersect {
-            expr: expand_lark_boxed_expr(
-                expr,
-                in_terminal_rule,
-                rule_map,
-                terminal_names,
-                parser_names,
-                memo,
-                visiting,
-            )?,
-            intersect: expand_lark_boxed_expr(
-                intersect,
-                in_terminal_rule,
-                rule_map,
-                terminal_names,
-                parser_names,
-                memo,
-                visiting,
-            )?,
-        },
-        GrammarExpr::Quantified(inner, Quantifier::Optional) => GrammarExpr::Quantified(expand_lark_boxed_expr(
-            inner,
-            in_terminal_rule,
-            rule_map,
-            terminal_names,
-            parser_names,
-            memo,
-            visiting,
-        )?, Quantifier::Optional),
-        GrammarExpr::Quantified(inner, Quantifier::ZeroPlus) => GrammarExpr::Quantified(expand_lark_boxed_expr(
-            inner,
-            in_terminal_rule,
-            rule_map,
-            terminal_names,
-            parser_names,
-            memo,
-            visiting,
-        )?, Quantifier::ZeroPlus),
-        GrammarExpr::Quantified(inner, Quantifier::OnePlus) => GrammarExpr::Quantified(expand_lark_boxed_expr(
-            inner,
-            in_terminal_rule,
-            rule_map,
-            terminal_names,
-            parser_names,
-            memo,
-            visiting,
-        )?, Quantifier::OnePlus),
-        GrammarExpr::Quantified(expr, Quantifier::Range(min, max)) => GrammarExpr::Quantified(expand_lark_boxed_expr(
-                expr,
-                in_terminal_rule,
-                rule_map,
-                terminal_names,
-                parser_names,
-                memo,
-                visiting,
-            )?, Quantifier::Range(*min, *max)),
-        GrammarExpr::Literal(bytes) => GrammarExpr::Literal(bytes.clone()),
-        GrammarExpr::SpecialToken(token_id) => GrammarExpr::SpecialToken(*token_id),
-        GrammarExpr::CharClass { def, negate, utf8 } => GrammarExpr::CharClass {
-            def: def.clone(),
-            negate: *negate,
-            utf8: *utf8,
-        },
-        GrammarExpr::RawRegex(pattern) => GrammarExpr::RawRegex(pattern.clone()),
-        GrammarExpr::LexerDfa(dfa) => GrammarExpr::LexerDfa(dfa.clone()),
-        GrammarExpr::Epsilon => GrammarExpr::Epsilon,
-        GrammarExpr::AnyByte => GrammarExpr::AnyByte,
-        GrammarExpr::SeparatedSequence { items, separator, allow_empty } => {
-            let new_items = items
-                .iter()
-                .map(|(item, quantifier)| {
-                    Ok((
-                        expand_lark_expr(
-                            item,
-                            in_terminal_rule,
-                            rule_map,
-                            terminal_names,
-                            parser_names,
-                            memo,
-                            visiting,
-                        )?,
-                        quantifier.clone(),
-                    ))
-                })
-                .collect::<Result<Vec<_>, GlrMaskError>>()?;
-            let new_separator = expand_lark_expr(
-                separator,
-                in_terminal_rule,
-                rule_map,
-                terminal_names,
-                parser_names,
-                memo,
-                visiting,
-            )?;
-            GrammarExpr::SeparatedSequence {
-                items: new_items,
-                separator: Box::new(new_separator),
-                allow_empty: *allow_empty,
+    }
+    Ok(())
+}
+
+fn externally_emitted_lark_terminals(
+    grammar: &NamedGrammar,
+    terminal_names: &HashSet<String>,
+) -> HashSet<String> {
+    let mut roots = HashSet::new();
+    if terminal_names.contains(&grammar.start) {
+        roots.insert(grammar.start.clone());
+    }
+    if let Some(ignore) = &grammar.ignore {
+        roots.insert(ignore.clone());
+    }
+    roots.extend(grammar.lexer_partitions.keys().cloned());
+
+    for rule in grammar.rules.iter().filter(|rule| !rule.is_terminal) {
+        for target in lark_ref_names(&rule.expr) {
+            if terminal_names.contains(target) {
+                roots.insert(target.to_owned());
             }
-        },
-        GrammarExpr::ExprNFA(expr_nfa) => {
-            let mut expanded = expr_nfa.as_ref().clone();
-            expanded.symbols = expanded
-                .symbols
-                .iter()
-                .map(|symbol| {
-                    expand_lark_expr(
-                        symbol,
-                        in_terminal_rule,
-                        rule_map,
-                        terminal_names,
-                        parser_names,
-                        memo,
-                        visiting,
-                    )
-                })
-                .collect::<Result<Vec<_>, GlrMaskError>>()?;
-            GrammarExpr::ExprNFA(Box::new(expanded))
         }
-    })
+    }
+    roots
+}
+
+fn reachable_lark_terminal_rules(
+    grammar: &NamedGrammar,
+    root: &str,
+    terminal_names: &HashSet<String>,
+) -> HashSet<String> {
+    let bodies = grammar
+        .rules
+        .iter()
+        .filter(|rule| rule.is_terminal)
+        .map(|rule| (rule.name.as_str(), &rule.expr))
+        .collect::<HashMap<_, _>>();
+    let mut reachable = HashSet::new();
+    let mut stack = vec![root.to_owned()];
+    while let Some(name) = stack.pop() {
+        if !reachable.insert(name.clone()) {
+            continue;
+        }
+        let Some(expr) = bodies.get(name.as_str()) else {
+            continue;
+        };
+        for target in lark_ref_names(expr) {
+            if terminal_names.contains(target) && !reachable.contains(target) {
+                stack.push(target.to_owned());
+            }
+        }
+    }
+    reachable
+}
+
+fn compile_lark_terminal_graph_root(
+    grammar: &NamedGrammar,
+    root: &str,
+    terminal_names: &HashSet<String>,
+    min_graph_rules: usize,
+) -> Result<Option<Arc<LexerDfa>>, GlrMaskError> {
+    let reachable = reachable_lark_terminal_rules(grammar, root, terminal_names);
+    let mut temporary_rules = Vec::with_capacity(reachable.len());
+    for rule in grammar
+        .rules
+        .iter()
+        .filter(|rule| rule.is_terminal && reachable.contains(&rule.name))
+    {
+        let has_terminal_dependency = lark_ref_names(&rule.expr)
+            .into_iter()
+            .any(|target| reachable.contains(target));
+        temporary_rules.push(NamedRule {
+            name: rule.name.clone(),
+            expr: rule.expr.clone(),
+            // Leaf byte languages are the alphabet of the temporary regular
+            // grammar. Rules with dependencies become right-linear states;
+            // small ones are subsequently macro-expanded by the shared pass.
+            is_terminal: !has_terminal_dependency,
+            is_internal: false,
+        });
+    }
+
+    let mut temporary = NamedGrammar {
+        rules: temporary_rules,
+        start: root.to_owned(),
+        ignore: None,
+        lexer_partitions: Default::default(),
+        lexer_literal_partitions: Default::default(),
+        default_lexer_partition: None,
+    };
+    if !crate::grammar::right_linear::compress_right_linear_grammar_unchecked(
+        &mut temporary,
+        min_graph_rules,
+    ) {
+        return Ok(None);
+    }
+
+    let expr_nfa = temporary
+        .rules
+        .into_iter()
+        .find(|rule| rule.name == root && !rule.is_terminal)
+        .and_then(|rule| match rule.expr {
+            GrammarExpr::ExprNFA(expr_nfa) => Some(expr_nfa),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            GlrMaskError::GrammarParse(format!(
+                "internal error compressing Lark terminal graph rooted at {root}"
+            ))
+        })?;
+    let symbols = resolve_terminal_subexpressions(grammar, &expr_nfa.symbols)?;
+    let dfa = compile_expression_labeled_nfa(&expr_nfa.nfa, &symbols)
+        .map_err(GlrMaskError::GrammarParse)?;
+    Ok(Some(Arc::new(dfa)))
+}
+
+fn compress_lark_terminal_graphs(grammar: &mut NamedGrammar) -> Result<(), GlrMaskError> {
+    let source = grammar.clone();
+    let terminal_names = source.terminal_names_set();
+    let external = externally_emitted_lark_terminals(&source, &terminal_names);
+    let mut roots = external.iter().cloned().collect::<Vec<_>>();
+    roots.sort_unstable();
+
+    let mut compiled = HashMap::new();
+    for root in roots {
+        if let Some(dfa) = compile_lark_terminal_graph_root(
+            &source,
+            &root,
+            &terminal_names,
+            MIN_LARK_TERMINAL_GRAPH_RULES,
+        )? {
+            compiled.insert(root, dfa);
+        }
+    }
+
+    for rule in &mut grammar.rules {
+        if !rule.is_terminal {
+            continue;
+        }
+        rule.is_internal = !external.contains(&rule.name);
+        if let Some(dfa) = compiled.get(&rule.name) {
+            rule.expr = GrammarExpr::LexerDfa(dfa.clone());
+        }
+    }
+
+    // A compiled root no longer depends on its source helper rules. Keep only
+    // helpers reachable from external roots that could not use the compact
+    // right-linear path; otherwise later factoring needlessly walks the original
+    // deep dependency graph and can overflow its recursion stack.
+    let mut needed_helpers = HashSet::new();
+    for root in external.iter().filter(|root| !compiled.contains_key(*root)) {
+        needed_helpers.extend(reachable_lark_terminal_rules(
+            &source,
+            root,
+            &terminal_names,
+        ));
+    }
+    grammar.rules.retain(|rule| {
+        !rule.is_terminal
+            || external.contains(&rule.name)
+            || needed_helpers.contains(&rule.name)
+    });
+
+    if (!compiled.is_empty())
+        && (std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some())
+    {
+        let states = compiled.values().map(|dfa| dfa.num_states()).sum::<usize>();
+        eprintln!(
+            "[glrmask/profile][lark_terminal_graph] roots={} compiled={} dfa_states={}",
+            external.len(),
+            compiled.len(),
+            states,
+        );
+    }
+    Ok(())
 }
 
 fn normalize_lark_named(grammar: NamedGrammar) -> Result<NamedGrammar, GlrMaskError> {
-    let rule_map: HashMap<String, GrammarExpr> = grammar.rules.iter().map(|r| (r.name.clone(), r.expr.clone())).collect();
-    let terminal_names: HashSet<String> = grammar.terminal_names_set();
-    let parser_names: HashSet<String> = grammar
+    let rule_map: HashMap<String, GrammarExpr> = grammar
         .rules
         .iter()
-        .map(|r| r.name.clone())
-        .filter(|name| !terminal_names.contains(name))
+        .map(|rule| (rule.name.clone(), rule.expr.clone()))
         .collect();
+    let terminal_names: HashSet<String> = grammar.terminal_names_set();
 
     for rule in &grammar.rules {
         if terminal_names.contains(&rule.name) {
             validate_lark_terminal_refs(&rule.expr, &rule.name, &terminal_names, &rule_map)?;
+        } else {
+            validate_lark_parser_refs(&rule.expr, &rule_map)?;
         }
     }
-
-    let mut memo = HashMap::new();
-    let mut visiting = HashSet::new();
-    let mut rules = Vec::new();
+    validate_lark_terminal_acyclic(&rule_map, &terminal_names)?;
 
     let start_is_terminal = terminal_names.contains(&grammar.start);
     let output_start = if start_is_terminal {
@@ -760,63 +751,33 @@ fn normalize_lark_named(grammar: NamedGrammar) -> Result<NamedGrammar, GlrMaskEr
         grammar.start.clone()
     };
 
-    // Expand each Lark terminal rule and keep the lowered expression directly.
-    for rule in &grammar.rules {
-        if !terminal_names.contains(&rule.name) {
-            continue;
-        }
-        let expanded = expand_lark_terminal_rule(
-            &rule.name,
-            &rule_map,
-            &terminal_names,
-            &parser_names,
-            &mut memo,
-            &mut visiting,
-        )?;
-        rules.push(NamedRule { name: rule.name.clone(), expr: expanded, is_terminal: true, is_internal: false });
-    }
-
-    // Process parser rules while leaving terminal references as `Ref` nodes.
-    for rule in &grammar.rules {
-        if terminal_names.contains(&rule.name) {
-            continue;
-        }
-        let expanded = expand_lark_expr(
-            &rule.expr,
-            false,
-            &rule_map,
-            &terminal_names,
-            &parser_names,
-            &mut memo,
-            &mut visiting,
-        )?;
-        rules.push(NamedRule { name: rule.name.clone(), expr: expanded, is_terminal: false, is_internal: false });
-    }
-
+    // Keep terminal references as references. The common terminal resolver
+    // converts ordinary small graphs into Arc-shared lexer expressions. Large
+    // right-linear dependency graphs are recognized below and compiled from
+    // their compact state graph, avoiding eager recursive substitution.
+    let mut rules = grammar.rules;
     if start_is_terminal {
-        let start_expr = expand_lark_terminal_rule(
-            &grammar.start,
-            &rule_map,
-            &terminal_names,
-            &parser_names,
-            &mut memo,
-            &mut visiting,
-        )?;
-        if let Some(existing) = rules.iter_mut().find(|r| r.name == output_start) {
-            existing.expr = start_expr;
-        } else {
-            rules.insert(0, NamedRule { name: output_start.clone(), expr: start_expr, is_terminal: true, is_internal: false });
-        }
+        rules.insert(
+            0,
+            NamedRule {
+                name: output_start.clone(),
+                expr: GrammarExpr::Ref(grammar.start.clone()),
+                is_terminal: true,
+                is_internal: false,
+            },
+        );
     }
 
-    Ok(NamedGrammar {
+    let mut normalized = NamedGrammar {
         rules,
         start: output_start,
         ignore: grammar.ignore,
         lexer_partitions: grammar.lexer_partitions,
         lexer_literal_partitions: Default::default(),
         default_lexer_partition: None,
-    })
+    };
+    compress_lark_terminal_graphs(&mut normalized)?;
+    Ok(normalized)
 }
 
 impl Parser {
@@ -1150,4 +1111,147 @@ pub fn parse_lark_to_named(input: &str) -> Result<NamedGrammar, GlrMaskError> {
         crate::grammar::right_linear::compress_large_right_linear_grammar(&mut named);
     }
     Ok(named)
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn large_right_linear_terminal_grammar(states: usize) -> String {
+        assert!(states >= MIN_LARK_TERMINAL_GRAPH_RULES + 16);
+        let mut source = String::from("start: ROOT\nROOT: S0\n");
+        for index in 0..states - 1 {
+            source.push_str(&format!("S{index}: \"a\" S{} | \"z\"\n", index + 1));
+        }
+        source.push_str(&format!("S{}: \"z\"\n", states - 1));
+        source
+    }
+
+    fn dfa_accepts(dfa: &LexerDfa, input: &[u8]) -> bool {
+        let mut state = 0;
+        for &byte in input {
+            let Some(next) = dfa.step(state, byte) else {
+                return false;
+            };
+            state = next;
+        }
+        !dfa.finalizers(state).is_empty()
+    }
+
+    fn assert_dfa_language_equivalent(left: &LexerDfa, right: &LexerDfa) {
+        use std::collections::{HashSet, VecDeque};
+
+        let mut seen = HashSet::new();
+        let mut queue = VecDeque::from([(Some(0u32), Some(0u32))]);
+        while let Some((left_state, right_state)) = queue.pop_front() {
+            if !seen.insert((left_state, right_state)) {
+                continue;
+            }
+            let left_accepting = left_state
+                .is_some_and(|state| !left.finalizers(state).is_empty());
+            let right_accepting = right_state
+                .is_some_and(|state| !right.finalizers(state).is_empty());
+            assert_eq!(
+                left_accepting, right_accepting,
+                "acceptance differs at product state {left_state:?}/{right_state:?}"
+            );
+
+            for byte in 0u8..=255 {
+                let next = (
+                    left_state.and_then(|state| left.step(state, byte)),
+                    right_state.and_then(|state| right.step(state, byte)),
+                );
+                if next != (None, None) && !seen.contains(&next) {
+                    queue.push_back(next);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compact_terminal_graph_matches_direct_expression_compilation() {
+        let mut source = String::from("start: ROOT\nROOT: S0\n");
+        for index in 0..8 {
+            source.push_str(&format!(
+                "S{index}: \"a\" S{} | \"b\" S{}\n",
+                index + 1,
+                index + 1
+            ));
+        }
+        source.push_str("S8: \"z\"\n");
+
+        let mut lexer = Lexer::new(&source);
+        let tokens = lexer.tokenize().unwrap();
+        let mut parser = Parser::new(tokens);
+        let raw = parser.parse_grammar().unwrap();
+        let terminal_names = raw.terminal_names_set();
+
+        let compact = compile_lark_terminal_graph_root(&raw, "ROOT", &terminal_names, 1)
+            .unwrap()
+            .expect("test graph should use compact compilation");
+        let direct_expr = resolve_terminal_subexpressions(
+            &raw,
+            &[GrammarExpr::Ref("ROOT".to_owned())],
+        )
+        .unwrap()
+        .pop()
+        .unwrap();
+        let direct = crate::automata::lexer::compile::compile_terminal_expr_dfa(&direct_expr);
+
+        assert_dfa_language_equivalent(&compact, &direct);
+    }
+
+    #[test]
+    fn large_right_linear_terminal_graph_compiles_without_expansion() {
+        let named = parse_lark_to_named_uncompressed(&large_right_linear_terminal_grammar(96))
+            .expect("large terminal graph should import");
+
+        // The parser start and the externally visible root remain. The 96
+        // source helper terminals have been absorbed into the root DFA.
+        assert_eq!(named.rules.len(), 2);
+        let root = named.rules.iter().find(|rule| rule.name == "ROOT").unwrap();
+        let GrammarExpr::LexerDfa(dfa) = &root.expr else {
+            panic!("large right-linear terminal root was not compiled to a DFA");
+        };
+
+        assert!(dfa_accepts(dfa, b"z"));
+        assert!(dfa_accepts(dfa, b"az"));
+        assert!(dfa_accepts(dfa, &[b'a'; 95].into_iter().chain([b'z']).collect::<Vec<_>>()));
+        assert!(!dfa_accepts(dfa, b"a"));
+        assert!(!dfa_accepts(
+            dfa,
+            &[b'a'; 96].into_iter().chain([b'z']).collect::<Vec<_>>()
+        ));
+    }
+
+    #[test]
+    fn small_terminal_helpers_remain_shared_and_internal() {
+        let named = parse_lark_to_named_uncompressed(
+            "start: ROOT\nROOT: PREFIX SUFFIX\nPREFIX: \"a\"\nSUFFIX: \"b\"\n",
+        )
+        .unwrap();
+        let root = named.rules.iter().find(|rule| rule.name == "ROOT").unwrap();
+        assert!(!root.is_internal);
+        assert!(matches!(root.expr, GrammarExpr::Sequence(_)));
+        for helper in ["PREFIX", "SUFFIX"] {
+            assert!(
+                named
+                    .rules
+                    .iter()
+                    .find(|rule| rule.name == helper)
+                    .is_some_and(|rule| rule.is_internal),
+                "{helper} should be an internal terminal helper"
+            );
+        }
+        lower(&factor_named_grammar(named)).unwrap();
+    }
+
+    #[test]
+    fn cyclic_terminal_definitions_still_error() {
+        let error = parse_lark_to_named_uncompressed("start: A\nA: B\nB: A\n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cyclic Lark terminal definition"), "{error}");
+    }
 }
