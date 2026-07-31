@@ -809,8 +809,9 @@ fn inline_post_bound_single_use_nonterminals(
     rules: &mut Vec<Rule>,
     protected_nonterminals: &BTreeSet<NonterminalID>,
     max_rhs_len: usize,
-) {
+) -> bool {
     let inline_protected_nonterminals = env_var_enabled(INLINE_PROTECTED_NONTERMINALS_ENV, true);
+    let mut changed = false;
 
     loop {
         let indexes = SingleUseInlineIndexes::build(rules);
@@ -865,6 +866,7 @@ fn inline_post_bound_single_use_nonterminals(
         let Some((candidate_rule_index, user_index, new_rhs)) = candidate else {
             break;
         };
+        changed = true;
         let mut rewritten = Vec::with_capacity(rules.len().saturating_sub(1));
         for (index, rule) in rules.iter().enumerate() {
             if index == candidate_rule_index {
@@ -881,14 +883,15 @@ fn inline_post_bound_single_use_nonterminals(
         }
         *rules = rewritten;
     }
+    changed
 }
 
 pub(crate) fn bound_runtime_reduction_length(
     grammar: &mut GrammarDef,
     max_rhs_len: usize,
-) {
-    if max_rhs_len < 2 {
-        return;
+) -> bool {
+    if max_rhs_len < 2 || grammar.rules.iter().all(|rule| rule.rhs.len() <= max_rhs_len) {
+        return false;
     }
 
     let mut next_nt = grammar.num_nonterminals();
@@ -972,6 +975,7 @@ pub(crate) fn bound_runtime_reduction_length(
     }
 
     grammar.rules = rewritten;
+    true
 }
 
 fn collect_protected_nonterminals(grammar: &GrammarDef) -> BTreeSet<NonterminalID> {
@@ -1089,7 +1093,7 @@ fn prepare_grammar_transforms_impl(
 
     let bound_rules_before = normalized.rules.len();
     let bound_started_at = profiling.then(Instant::now);
-    bound_runtime_reduction_length(normalized, max_reduction_len);
+    let bound_changed = bound_runtime_reduction_length(normalized, max_reduction_len);
     if let Some(started_at) = bound_started_at {
         emit_grammar_transform_profile(
             "bound_runtime_reduction_length",
@@ -1102,7 +1106,7 @@ fn prepare_grammar_transforms_impl(
 
     let post_inline_rules_before = normalized.rules.len();
     let post_inline_started_at = profiling.then(Instant::now);
-    inline_post_bound_single_use_nonterminals(
+    let post_inline_changed = inline_post_bound_single_use_nonterminals(
         &mut normalized.rules,
         &protected_nonterminals,
         max_reduction_len,
@@ -1117,24 +1121,34 @@ fn prepare_grammar_transforms_impl(
         );
     }
 
-    let mut final_merge_iteration = 0usize;
-    loop {
-        final_merge_iteration += 1;
-        let prev_len = normalized.rules.len();
-        let merge_started_at = profiling.then(Instant::now);
-        normalized.rules = merge_identical_nonterminals(&normalized.rules, normalized.start);
-        if let Some(started_at) = merge_started_at {
-            emit_grammar_transform_profile(
-                "merge_identical_nonterminals",
-                elapsed_ms(started_at),
-                prev_len,
-                normalized.rules.len(),
-                &format!(" pass=post_bound iteration={final_merge_iteration}"),
-            );
+    if bound_changed || post_inline_changed {
+        let mut final_merge_iteration = 0usize;
+        loop {
+            final_merge_iteration += 1;
+            let prev_len = normalized.rules.len();
+            let merge_started_at = profiling.then(Instant::now);
+            normalized.rules = merge_identical_nonterminals(&normalized.rules, normalized.start);
+            if let Some(started_at) = merge_started_at {
+                emit_grammar_transform_profile(
+                    "merge_identical_nonterminals",
+                    elapsed_ms(started_at),
+                    prev_len,
+                    normalized.rules.len(),
+                    &format!(" pass=post_bound iteration={final_merge_iteration}"),
+                );
+            }
+            if normalized.rules.len() == prev_len {
+                break;
+            }
         }
-        if normalized.rules.len() == prev_len {
-            break;
-        }
+    } else if profiling {
+        emit_grammar_transform_profile(
+            "merge_identical_nonterminals",
+            0.0,
+            normalized.rules.len(),
+            normalized.rules.len(),
+            " pass=post_bound skipped=unchanged",
+        );
     }
 
     let post_merge_rr_rules_before = normalized.rules.len();

@@ -2467,6 +2467,37 @@ fn find_l1_exact_state_equivalence_by_components_with_first_target_cache(
         let estimated_work = token_ids.len().saturating_mul(targets.len());
         let parallel_bucket = token_ids.len() >= 10_000
             || estimated_work >= LARGE_BUCKET_WORK_PRODUCT;
+        let requested = std::env::var("GLRMASK_L1_PROFILE_BUILDER")
+            .unwrap_or_else(|_| "auto".to_owned());
+        let flat_supported = transitions_by_byte.is_none() && horizon_maps.is_none();
+        // Large vocabulary partitions already expose ample parallelism across
+        // first-byte buckets. Their flat batched walks retain contiguous
+        // transition/token locality, while nested packed-product chunking adds
+        // trie construction, allocator, and cross-chunk canonicalization work.
+        // Apply this choice before the packed large-bucket branch so both the
+        // automatic policy and the explicit `flat` diagnostic override are
+        // actually respected.
+        let large_partition_prefers_flat = sorted_entries.len() >= 20_000;
+        if flat_supported
+            && (requested == "flat"
+                || (requested == "auto" && large_partition_prefers_flat))
+        {
+            return l1_bucket_suffix_signature_profiles_batched_arc(
+                *byte,
+                targets,
+                sorted_entries,
+                token_ids,
+                suffix_lcps,
+                &token_buckets.suffix_subtree_bytes[byte_idx],
+                &token_buckets.suffix_first_bytes_by_bucket[byte_idx],
+                token_buckets.has_empty_suffix_by_bucket[byte_idx],
+                &state_to_terminal_signature,
+                flat_trans,
+                transitions_by_byte,
+                num_tokenizer_states,
+                Some(&active_language),
+            );
+        }
 
         if parallel_bucket && targets.len() >= 32 && rayon::current_num_threads() > 1 {
             let prebuilt_trie = token_buckets.packed_suffix_tries_by_first_byte[byte_idx]
@@ -2533,9 +2564,6 @@ fn find_l1_exact_state_equivalence_by_components_with_first_target_cache(
             }
             chunked_profiles
         } else {
-            let requested = std::env::var("GLRMASK_L1_PROFILE_BUILDER")
-                .unwrap_or_else(|_| "auto".to_owned());
-            let flat_supported = transitions_by_byte.is_none() && horizon_maps.is_none();
             let build_flat = || {
                 l1_bucket_suffix_signature_profiles_batched_arc(
                     *byte,
@@ -2642,7 +2670,6 @@ fn find_l1_exact_state_equivalence_by_components_with_first_target_cache(
                 // and interning traffic to dominate the partition. Reserve the
                 // packed auto choice for smaller partitions where its trie
                 // compression amortizes that setup cost.
-                let large_partition_prefers_flat = sorted_entries.len() >= 20_000;
                 let auto_prefers_packed = !large_partition_prefers_flat
                     && token_ids.len() > 500
                     && token_ids.len() <= 7_000
