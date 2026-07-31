@@ -240,6 +240,7 @@ impl<'a> ExactSubtractionResolver<'a> {
                         .iter()
                         .map(|symbol| self.canonical_exact_expr_inner(symbol, visiting, memo))
                         .collect(),
+                    state_names: expr_nfa.state_names.clone(),
                     // Rewritten labels may admit further state merges.
                     is_determinized_and_minimized: false,
                     prefer_direct_nfa_emission: false,

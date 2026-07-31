@@ -19,6 +19,10 @@ use super::ast::GrammarExpr;
 pub struct ExprNFA {
     pub nfa: NFA,
     pub symbols: Vec<GrammarExpr>,
+    /// Optional source-level state names indexed by internal state ID. This is
+    /// formatting metadata only and is deliberately ignored by equality and
+    /// hashing. Generated automata normally leave it unset.
+    pub(crate) state_names: Option<Vec<String>>,
     /// `true` only when `nfa` is the exact minimized deterministic DFA for its
     /// current label graph.  AST lowering can then avoid repeating the same
     /// minimization before emitting left-linear rules.
@@ -53,6 +57,7 @@ impl ExprNFA {
         Self {
             nfa,
             symbols,
+            state_names: None,
             is_determinized_and_minimized: false,
             prefer_direct_nfa_emission: false,
             canonical_dfa: None,
@@ -80,6 +85,7 @@ impl ExprNFA {
         Self {
             nfa,
             symbols,
+            state_names: None,
             is_determinized_and_minimized: true,
             prefer_direct_nfa_emission: false,
             canonical_dfa: Some(dfa),
@@ -89,6 +95,20 @@ impl ExprNFA {
     pub(crate) fn with_direct_nfa_emission(mut self) -> Self {
         self.prefer_direct_nfa_emission = true;
         self
+    }
+
+    pub(crate) fn with_state_names(mut self, state_names: Vec<String>) -> Self {
+        debug_assert_eq!(state_names.len(), self.nfa.states.len());
+        self.state_names = Some(state_names);
+        self
+    }
+
+    pub(crate) fn state_name(&self, state: u32) -> String {
+        self.state_names
+            .as_ref()
+            .and_then(|names| names.get(state as usize))
+            .cloned()
+            .unwrap_or_else(|| state.to_string())
     }
 
     pub fn determinize(&self) -> DFA {
@@ -531,6 +551,7 @@ mod tests {
         let unmarked = ExprNFA {
             nfa: canonical.nfa.clone(),
             symbols: canonical.symbols.clone(),
+            state_names: canonical.state_names.clone(),
             is_determinized_and_minimized: false,
             prefer_direct_nfa_emission: false,
             canonical_dfa: None,

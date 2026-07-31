@@ -1046,6 +1046,7 @@ impl<'a> Lowerer<'a> {
                 let ExprNFA {
                     nfa,
                     symbols,
+                    state_names,
                     is_determinized_and_minimized,
                     prefer_direct_nfa_emission,
                     canonical_dfa,
@@ -1061,6 +1062,7 @@ impl<'a> Lowerer<'a> {
                 GrammarExpr::ExprNFA(Box::new(ExprNFA {
                     nfa,
                     symbols,
+                    state_names,
                     is_determinized_and_minimized: preserves_canonical_dfa,
                     prefer_direct_nfa_emission,
                     canonical_dfa: preserves_canonical_dfa.then_some(canonical_dfa).flatten(),
@@ -1120,6 +1122,7 @@ impl<'a> Lowerer<'a> {
                 let ExprNFA {
                     nfa,
                     symbols,
+                    state_names,
                     is_determinized_and_minimized,
                     prefer_direct_nfa_emission,
                     canonical_dfa,
@@ -1135,6 +1138,7 @@ impl<'a> Lowerer<'a> {
                 GrammarExpr::ExprNFA(Box::new(ExprNFA {
                     nfa,
                     symbols,
+                    state_names,
                     is_determinized_and_minimized: preserves_canonical_dfa,
                     prefer_direct_nfa_emission,
                     canonical_dfa: preserves_canonical_dfa.then_some(canonical_dfa).flatten(),

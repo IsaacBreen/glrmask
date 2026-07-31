@@ -7,6 +7,7 @@ use rayon::prelude::*;
 
 use crate::GlrMaskError;
 use crate::automata::lexer::ast::Expr;
+use crate::automata::lexer::compile::compile_expression_labeled_nfa;
 use crate::automata::lexer::DFA as LexerDFA;
 use crate::automata::unweighted_u32::dfa::DFA;
 use crate::automata::unweighted_u32::minimize_acyclic::reindex_minimized_acyclic_order;
@@ -98,8 +99,9 @@ pub enum GrammarExpr {
     /// An NFA whose transition labels are indices into a side table of grammar
     /// expressions.
     ///
-    /// This is only valid as the complete expression of a nonterminal rule.
-    /// GLRM likewise serializes it as a named top-level definition.
+    /// This is only valid as the complete expression of a named rule. In a
+    /// nonterminal rule the labels denote parser terminals; in a terminal rule
+    /// they denote byte-language expressions compiled into one lexer DFA.
     ExprNFA(Box<ExprNFA>),
 }
 
@@ -902,6 +904,7 @@ impl<'a> Lowerer<'a> {
                     .iter()
                     .map(|symbol| self.canonical_exact_expr_inner(symbol, visiting, memo))
                     .collect(),
+                state_names: expr_nfa.state_names.clone(),
                 // Symbol canonicalization can merge formerly distinct labels,
                 // so conservatively re-run minimization before lowering.
                 is_determinized_and_minimized: false,
@@ -2438,7 +2441,7 @@ impl<'a> Lowerer<'a> {
             | GrammarExpr::SeparatedSequence { .. } => self.lower_expr(expr),
             GrammarExpr::ExprNFA(_) => {
                 return Err(GlrMaskError::GrammarParse(
-                    "GrammarExpr::ExprNFA must be the complete expression of a nonterminal rule"
+                    "GrammarExpr::ExprNFA must be the complete expression of a named rule"
                         .into(),
                 ));
             }
@@ -2792,10 +2795,22 @@ fn grammar_expr_to_expr(
                 "GrammarExpr::SeparatedSequence cannot appear inside a terminal rule".into(),
             ));
         }
-        GrammarExpr::ExprNFA(_) => {
-            return Err(GlrMaskError::GrammarParse(
-                "GrammarExpr::ExprNFA cannot appear inside a terminal rule".into(),
-            ));
+        GrammarExpr::ExprNFA(expr_nfa) => {
+            let symbols = expr_nfa
+                .symbols
+                .iter()
+                .map(|symbol| {
+                    grammar_expr_to_expr(
+                        symbol,
+                        terminal_bodies,
+                        terminal_expr_cache,
+                        visiting,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let dfa = compile_expression_labeled_nfa(&expr_nfa.nfa, &symbols)
+                .map_err(GlrMaskError::GrammarParse)?;
+            Expr::Dfa(Arc::new(dfa))
         }
     })
 }
@@ -2972,7 +2987,7 @@ fn validate_expr_nfa_placement(grammar: &NamedGrammar) -> Result<(), GlrMaskErro
             GrammarExpr::ExprNFA(_) => {
                 if !top_level {
                     return Err(GlrMaskError::GrammarParse(format!(
-                        "GrammarExpr::ExprNFA must be the complete expression of a nonterminal rule; found nested in {rule_name}"
+                        "GrammarExpr::ExprNFA must be the complete expression of a named rule; found nested in {rule_name}"
                     )));
                 }
             }
@@ -3017,12 +3032,6 @@ fn validate_expr_nfa_placement(grammar: &NamedGrammar) -> Result<(), GlrMaskErro
     }
 
     for rule in &grammar.rules {
-        if rule.is_terminal && matches!(rule.expr, GrammarExpr::ExprNFA(_)) {
-            return Err(GlrMaskError::GrammarParse(format!(
-                "GrammarExpr::ExprNFA cannot be used as terminal rule {}",
-                rule.name
-            )));
-        }
         walk(&rule.expr, true, &rule.name)?;
     }
     Ok(())

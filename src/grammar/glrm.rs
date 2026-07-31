@@ -16,12 +16,15 @@
 //!
 //! // Nonterminal rules
 //! nt rule_name ::= <expr>;
+//! nt regular_rule ::= fa { <states and transitions> };
 //!
 //! // Terminal rules (RHS uses the same expression syntax)
 //! t TERM_NAME ::= <expr>;
+//! t REGULAR_TERM ::= fa { <states and transitions> };
 //!
 //! // Internal terminal rules (shared between other terminals)
 //! internal t TERM_NAME ::= <expr>;
+//! internal t REGULAR_HELPER ::= fa { <states and transitions> };
 //! ```
 //!
 //! ## Expressions (used for both NT and terminal rule bodies)
@@ -132,19 +135,17 @@ pub fn to_glrm(grammar: &NamedGrammar) -> String {
     out.push('\n');
 
     for rule in &grammar.rules {
-        if !rule.is_terminal {
-            if let GrammarExpr::ExprNFA(expr_nfa) = &rule.expr {
-                out.push_str(&format!("fa {} ::= {{\n", rule.name));
-                out.push_str(&dump_expr_nfa(expr_nfa));
-                out.push_str("};\n");
-                continue;
-            }
-        }
         let prefix = match (rule.is_terminal, rule.is_internal) {
             (true, true) => "internal t",
             (true, false) => "t",
             (false, _) => "nt",
         };
+        if let GrammarExpr::ExprNFA(expr_nfa) = &rule.expr {
+            out.push_str(&format!("{} {} ::= fa {{\n", prefix, rule.name));
+            out.push_str(&dump_expr_nfa(expr_nfa));
+            out.push_str("};\n");
+            continue;
+        }
         let body = dump_nt_expr(&rule.expr, false);
         out.push_str(&format!("{} {} ::= {};\n", prefix, rule.name, body));
     }
@@ -153,12 +154,21 @@ pub fn to_glrm(grammar: &NamedGrammar) -> String {
 }
 
 fn dump_expr_nfa(expr_nfa: &ExprNFA) -> String {
+    fn is_epsilon_only(expr: &GrammarExpr) -> bool {
+        match expr {
+            GrammarExpr::Epsilon => true,
+            GrammarExpr::Sequence(parts) => parts.is_empty(),
+            GrammarExpr::Grouped(inner) => is_epsilon_only(inner),
+            _ => false,
+        }
+    }
+
     let mut out = String::new();
     let starts = expr_nfa
         .nfa
         .start_states
         .iter()
-        .map(u32::to_string)
+        .map(|&state| expr_nfa.state_name(state))
         .collect::<Vec<_>>()
         .join(", ");
     out.push_str(&format!("  start {};\n", starts));
@@ -168,22 +178,37 @@ fn dump_expr_nfa(expr_nfa: &ExprNFA) -> String {
         .states
         .iter()
         .enumerate()
-        .filter_map(|(state_id, state)| state.is_accepting.then(|| state_id.to_string()))
+        .filter_map(|(state_id, state)| {
+            if state.is_accepting {
+                Some(expr_nfa.state_name(state_id as u32))
+            } else {
+                None
+            }
+        })
         .collect::<Vec<_>>()
         .join(", ");
     out.push_str(&format!("  accept {};\n\n", accepts));
 
     for (state_id, state) in expr_nfa.nfa.states.iter().enumerate() {
+        let source = expr_nfa.state_name(state_id as u32);
         for &target in &state.epsilons {
-            out.push_str(&format!("  {state_id} --> {target};\n"));
+            out.push_str(&format!(
+                "  {source} --> {};\n",
+                expr_nfa.state_name(target)
+            ));
         }
         for (&label, targets) in &state.transitions {
-            let symbol = expr_nfa
-                .symbol_for_label(label)
-                .map(|expr| dump_nt_expr(expr, false))
-                .unwrap_or_else(|| format!("/*invalid-symbol-{label}*/ eps"));
+            let symbol_expr = expr_nfa.symbol_for_label(label);
             for &target in targets {
-                out.push_str(&format!("  {state_id} -- {symbol} --> {target};\n"));
+                let target = expr_nfa.state_name(target);
+                if symbol_expr.is_some_and(is_epsilon_only) {
+                    out.push_str(&format!("  {source} --> {target};\n"));
+                } else {
+                    let symbol = symbol_expr
+                        .map(|expr| dump_nt_expr(expr, false))
+                        .unwrap_or_else(|| format!("/*invalid-symbol-{label}*/ eps"));
+                    out.push_str(&format!("  {source} -- {symbol} --> {target};\n"));
+                }
             }
         }
     }
@@ -695,6 +720,34 @@ struct GlrmParser {
     pos: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum FaStateRef {
+    Numeric(usize),
+    Named(String),
+}
+
+#[derive(Default)]
+struct FaStateTable {
+    ids: HashMap<FaStateRef, u32>,
+    names: Vec<String>,
+}
+
+impl FaStateTable {
+    fn resolve(&mut self, state: FaStateRef, nfa: &mut NFA) -> u32 {
+        if let Some(&id) = self.ids.get(&state) {
+            return id;
+        }
+        let id = nfa.add_state();
+        let name = match &state {
+            FaStateRef::Numeric(value) => value.to_string(),
+            FaStateRef::Named(value) => value.clone(),
+        };
+        self.ids.insert(state, id);
+        self.names.push(name);
+        id
+    }
+}
+
 impl GlrmParser {
 
     fn peek(&self) -> &Tok {
@@ -728,6 +781,45 @@ impl GlrmParser {
             Tok::Int(n) => Ok(n),
             other => Err(err(&format!("expected integer, got {:?}", other))),
         }
+    }
+
+    fn token_at(&self, offset: usize) -> &Tok {
+        self.tokens.get(self.pos + offset).unwrap_or(&Tok::Eof)
+    }
+
+    fn starts_contextual_fa_body(&self) -> bool {
+        if !matches!(self.token_at(0), Tok::Ident(keyword) if keyword == "fa")
+            || !matches!(self.token_at(1), Tok::LBrace)
+        {
+            return false;
+        }
+
+        match self.token_at(2) {
+            Tok::RBrace => true,
+            Tok::Ident(keyword) if keyword == "start" || keyword == "accept" => true,
+            Tok::Int(_) | Tok::Ident(_) => {
+                matches!(self.token_at(3), Tok::Dashes | Tok::Arrow)
+            }
+            _ => false,
+        }
+    }
+
+    fn parse_fa_state(
+        &mut self,
+        states: &mut FaStateTable,
+        nfa: &mut NFA,
+    ) -> Result<u32, GlrMaskError> {
+        let state = match self.advance().clone() {
+            Tok::Int(value) => FaStateRef::Numeric(value),
+            Tok::Ident(value) => FaStateRef::Named(value),
+            other => {
+                return Err(err(&format!(
+                    "expected FA state name or integer, got {:?}",
+                    other
+                )));
+            }
+        };
+        Ok(states.resolve(state, nfa))
     }
 
     fn parse_grammar(&mut self) -> Result<NamedGrammar, GlrMaskError> {
@@ -840,7 +932,7 @@ impl GlrmParser {
                     }
                     "fa" | "nfa" => {
                         self.advance();
-                        rules.push(self.parse_expr_nfa_rule()?);
+                        rules.push(self.parse_legacy_expr_nfa_rule()?);
                     }
                     "t" => {
                         self.advance();
@@ -884,18 +976,35 @@ impl GlrmParser {
     fn parse_rule(&mut self, is_terminal: bool, is_internal: bool) -> Result<NamedRule, GlrMaskError> {
         let name = self.expect_ident()?;
         self.consume(&Tok::DeclEq)?;
-        // The expression can be empty (ε-only rule), so we don't require an atom.
-        let expr = self.parse_nt_expr(is_terminal)?;
+        let expr = if self.starts_contextual_fa_body() {
+            self.advance(); // contextual `fa`
+            GrammarExpr::ExprNFA(Box::new(self.parse_expr_nfa_body(is_terminal)?))
+        } else {
+            // The expression can be empty (ε-only rule), so we don't require an atom.
+            self.parse_nt_expr(is_terminal)?
+        };
         self.consume(&Tok::Semi)?;
         Ok(NamedRule { name, expr, is_terminal, is_internal })
     }
 
-    fn parse_expr_nfa_rule(&mut self) -> Result<NamedRule, GlrMaskError> {
+    fn parse_legacy_expr_nfa_rule(&mut self) -> Result<NamedRule, GlrMaskError> {
         let name = self.expect_ident()?;
         self.consume(&Tok::DeclEq)?;
+        let expr_nfa = self.parse_expr_nfa_body(false)?;
+        self.consume(&Tok::Semi)?;
+        Ok(NamedRule {
+            name,
+            expr: GrammarExpr::ExprNFA(Box::new(expr_nfa)),
+            is_terminal: false,
+            is_internal: false,
+        })
+    }
+
+    fn parse_expr_nfa_body(&mut self, allow_raw_regex: bool) -> Result<ExprNFA, GlrMaskError> {
         self.consume(&Tok::LBrace)?;
 
         let mut nfa = NFA::new_empty();
+        let mut states = FaStateTable::default();
         let mut symbols = Vec::<GrammarExpr>::new();
         let mut symbol_labels = HashMap::<GrammarExpr, Label>::new();
 
@@ -905,12 +1014,14 @@ impl GlrmParser {
                     self.advance();
                     break;
                 }
-                Tok::Ident(ref kw) if kw == "start" => {
+                Tok::Ident(ref kw)
+                    if kw == "start"
+                        && !matches!(self.token_at(1), Tok::Dashes | Tok::Arrow) =>
+                {
                     self.advance();
                     nfa.start_states.clear();
                     loop {
-                        let state = self.expect_int()? as u32;
-                        ensure_nfa_state(&mut nfa, state);
+                        let state = self.parse_fa_state(&mut states, &mut nfa)?;
                         nfa.start_states.push(state);
                         if matches!(self.peek(), Tok::Comma) {
                             self.advance();
@@ -920,12 +1031,14 @@ impl GlrmParser {
                     }
                     self.consume(&Tok::Semi)?;
                 }
-                Tok::Ident(ref kw) if kw == "accept" => {
+                Tok::Ident(ref kw)
+                    if kw == "accept"
+                        && !matches!(self.token_at(1), Tok::Dashes | Tok::Arrow) =>
+                {
                     self.advance();
                     if !matches!(self.peek(), Tok::Semi) {
                         loop {
-                            let state = self.expect_int()? as u32;
-                            ensure_nfa_state(&mut nfa, state);
+                            let state = self.parse_fa_state(&mut states, &mut nfa)?;
                             nfa.set_accepting(state);
                             if matches!(self.peek(), Tok::Comma) {
                                 self.advance();
@@ -936,22 +1049,24 @@ impl GlrmParser {
                     }
                     self.consume(&Tok::Semi)?;
                 }
-                Tok::Int(_) => {
-                    let from = self.expect_int()? as u32;
-                    ensure_nfa_state(&mut nfa, from);
+                Tok::Int(_) | Tok::Ident(_) => {
+                    let from = self.parse_fa_state(&mut states, &mut nfa)?;
                     match self.peek() {
                         Tok::Arrow => {
                             self.advance();
-                            let to = self.expect_int()? as u32;
-                            ensure_nfa_state(&mut nfa, to);
+                            let to = self.parse_fa_state(&mut states, &mut nfa)?;
                             nfa.add_epsilon(from, to);
                         }
                         Tok::Dashes => {
                             self.advance();
-                            let symbol = self.parse_expr_nfa_transition_expr()?;
+                            let symbol = self.parse_expr_nfa_transition_expr(allow_raw_regex)?;
+                            if matches!(symbol, GrammarExpr::Epsilon) {
+                                return Err(err(
+                                    "an epsilon FA transition is written `source --> target`, not `source -- eps --> target`",
+                                ));
+                            }
                             self.consume(&Tok::Arrow)?;
-                            let to = self.expect_int()? as u32;
-                            ensure_nfa_state(&mut nfa, to);
+                            let to = self.parse_fa_state(&mut states, &mut nfa)?;
                             let label = intern_expr_nfa_symbol(
                                 &mut symbols,
                                 &mut symbol_labels,
@@ -972,19 +1087,16 @@ impl GlrmParser {
             }
         }
 
-        self.consume(&Tok::Semi)?;
         if nfa.start_states.is_empty() {
             return Err(err("FA definition has no start state"));
         }
-        Ok(NamedRule {
-            name,
-            expr: GrammarExpr::ExprNFA(Box::new(ExprNFA::new(nfa, symbols))),
-            is_terminal: false,
-            is_internal: false,
-        })
+        Ok(ExprNFA::new(nfa, symbols).with_state_names(states.names))
     }
 
-    fn parse_expr_nfa_transition_expr(&mut self) -> Result<GrammarExpr, GlrMaskError> {
+    fn parse_expr_nfa_transition_expr(
+        &mut self,
+        allow_raw_regex: bool,
+    ) -> Result<GrammarExpr, GlrMaskError> {
         if matches!(self.peek(), Tok::Arrow) {
             return Err(err(
                 "FA transition expression cannot be empty; use epsilon transition syntax",
@@ -996,7 +1108,7 @@ impl GlrmParser {
                 self.peek()
             )));
         }
-        self.parse_nt_expr(false)
+        self.parse_nt_expr(allow_raw_regex)
     }
 
     // ---- NT expression parsing ---------------------------------------------
@@ -1310,12 +1422,6 @@ fn hex_digit(b: u8) -> Result<u8, GlrMaskError> {
     }
 }
 
-fn ensure_nfa_state(nfa: &mut NFA, state: u32) {
-    while nfa.states.len() <= state as usize {
-        nfa.add_state();
-    }
-}
-
 fn intern_expr_nfa_symbol(
     symbols: &mut Vec<GrammarExpr>,
     symbol_labels: &mut HashMap<GrammarExpr, Label>,
@@ -1341,8 +1447,20 @@ fn err(msg: &str) -> GlrMaskError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grammar::ast::lower;
+    use crate::automata::lexer::ast::Expr;
+    use crate::grammar::ast::{lower, resolved_named_terminal_exprs};
     use crate::grammar::flat::Symbol;
+
+    fn dfa_accepts(dfa: &crate::automata::lexer::DFA, input: &[u8]) -> bool {
+        let mut state = 0;
+        for &byte in input {
+            let Some(next) = dfa.step(state, byte) else {
+                return false;
+            };
+            state = next;
+        }
+        !dfa.finalizers(state).is_empty()
+    }
 
     fn single_path_terminal_names(
         lowered: &crate::grammar::flat::GrammarDef,
@@ -1406,11 +1524,167 @@ accept 1;
         )
         .unwrap();
         let dumped = to_glrm(&grammar);
-        assert!(dumped.contains("fa obj ::= {"), "{dumped}");
+        assert!(dumped.contains("nt obj ::= fa {"), "{dumped}");
         assert!(dumped.contains("  start 0;"), "{dumped}");
         assert!(dumped.contains("  accept 1;"), "{dumped}");
         assert!(dumped.contains("  0 -- \"a\" --> 1;"), "{dumped}");
         assert!(!dumped.contains("ExprNFA("), "{dumped}");
+    }
+
+    #[test]
+    fn contextual_parser_fa_preserves_named_states() {
+        let grammar = from_glrm(
+            r#"
+start machine;
+nt machine ::= fa {
+  start entry;
+  accept done;
+  entry -- "a" --> done;
+};
+"#,
+        )
+        .unwrap();
+
+        lower(&grammar).unwrap();
+        let dumped = to_glrm(&grammar);
+        assert!(dumped.contains("nt machine ::= fa {"), "{dumped}");
+        assert!(dumped.contains("start entry;"), "{dumped}");
+        assert!(dumped.contains("accept done;"), "{dumped}");
+        assert!(dumped.contains("entry -- \"a\" --> done;"), "{dumped}");
+        assert_eq!(from_glrm(&dumped).unwrap().rules, grammar.rules);
+    }
+
+    #[test]
+    fn fa_directive_words_remain_usable_as_state_names() {
+        let grammar = from_glrm(
+            r#"
+start machine;
+nt machine ::= fa {
+  start start;
+  accept accept;
+  start -- "a" --> accept;
+};
+"#,
+        )
+        .unwrap();
+
+        lower(&grammar).unwrap();
+        let dumped = to_glrm(&grammar);
+        assert!(dumped.contains("start start;"), "{dumped}");
+        assert!(dumped.contains("accept accept;"), "{dumped}");
+        assert!(dumped.contains("start -- \"a\" --> accept;"), "{dumped}");
+    }
+
+    #[test]
+    fn legacy_fa_syntax_dumps_as_contextual_nonterminal_fa() {
+        let grammar = from_glrm(
+            r#"
+start machine;
+fa machine ::= {
+  start 0;
+  accept 1;
+  0 -- "a" --> 1;
+};
+"#,
+        )
+        .unwrap();
+
+        let dumped = to_glrm(&grammar);
+        assert!(dumped.contains("nt machine ::= fa {"), "{dumped}");
+        assert!(!dumped.contains("\nfa machine ::= {"), "{dumped}");
+    }
+
+    #[test]
+    fn fa_remains_usable_as_a_rule_name_and_repetition_operand() {
+        let grammar = from_glrm(
+            r#"
+start root;
+nt fa ::= "x";
+nt root ::= fa{2};
+"#,
+        )
+        .unwrap();
+
+        let GrammarExpr::Quantified(inner, Quantifier::Range(2, Some(2))) =
+            &grammar.rules[1].expr
+        else {
+            panic!("expected repeated reference to the rule named fa");
+        };
+        assert!(matches!(inner.as_ref(), GrammarExpr::Ref(name) if name == "fa"));
+        lower(&grammar).unwrap();
+    }
+
+    #[test]
+    fn terminal_fa_compiles_to_one_byte_dfa_and_can_reference_internal_terminal_fa() {
+        let grammar = from_glrm(
+            r#"
+start root;
+
+internal t TAIL ::= fa {
+  start tail_start;
+  accept tail_end;
+  tail_start -- /b+/ --> tail_end;
+};
+
+t WORD ::= fa {
+  start word_start;
+  accept word_end;
+  word_start -- "a" --> after_a;
+  after_a -- TAIL --> word_end;
+};
+
+nt root ::= WORD;
+"#,
+        )
+        .unwrap();
+
+        lower(&grammar).unwrap();
+        let resolved = resolved_named_terminal_exprs(&grammar).unwrap();
+        let Expr::Dfa(dfa) = resolved.get("WORD").expect("WORD should resolve") else {
+            panic!("terminal FA should resolve directly to Expr::Dfa");
+        };
+        assert!(dfa_accepts(dfa, b"ab"));
+        assert!(dfa_accepts(dfa, b"abbbb"));
+        assert!(!dfa_accepts(dfa, b"a"));
+        assert!(!dfa_accepts(dfa, b"b"));
+
+        let dumped = to_glrm(&grammar);
+        assert!(dumped.contains("internal t TAIL ::= fa {"), "{dumped}");
+        assert!(dumped.contains("t WORD ::= fa {"), "{dumped}");
+        assert_eq!(from_glrm(&dumped).unwrap().rules, grammar.rules);
+    }
+
+    #[test]
+    fn fa_epsilon_edges_use_the_unlabelled_arrow_form() {
+        let grammar = from_glrm(
+            r#"
+start root;
+t MAYBE_A ::= fa {
+  start begin;
+  accept end;
+  begin --> end;
+  begin -- "a" --> end;
+};
+nt root ::= MAYBE_A;
+"#,
+        )
+        .unwrap();
+        lower(&grammar).unwrap();
+
+        let err = from_glrm(
+            r#"
+start root;
+t BAD ::= fa {
+  start begin;
+  accept end;
+  begin -- eps --> end;
+};
+nt root ::= BAD;
+"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("source --> target"), "{err}");
     }
 
     #[test]
@@ -1633,7 +1907,7 @@ accept 1;
         };
 
         let err = lower(&grammar).unwrap_err().to_string();
-        assert!(err.contains("complete expression of a nonterminal rule"), "{err}");
+        assert!(err.contains("complete expression of a named rule"), "{err}");
     }
 
     #[test]

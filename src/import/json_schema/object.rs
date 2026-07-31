@@ -2845,6 +2845,7 @@ impl<'a> Lowerer<'a> {
             let body = GrammarExpr::ExprNFA(Box::new(ExprNFA {
                 nfa: template_nfa.nfa,
                 symbols: symbols.clone(),
+                state_names: template_nfa.state_names,
                 is_determinized_and_minimized: template_nfa.is_determinized_and_minimized,
                 prefer_direct_nfa_emission: template_nfa.prefer_direct_nfa_emission,
                 canonical_dfa: template_nfa.canonical_dfa,

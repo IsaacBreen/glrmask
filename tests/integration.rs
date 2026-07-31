@@ -1224,6 +1224,36 @@ fn nullable_repeat_alternative_accepts_nonempty_branch_before_nullable_suffix() 
 }
 
 #[test]
+fn terminal_fa_compiles_as_one_byte_language_through_public_api() {
+    let grammar = r#"
+        start root;
+
+        internal t TAIL ::= fa {
+            start tail_start;
+            accept tail_end;
+            tail_start -- /b+/ --> tail_end;
+        };
+
+        t WORD ::= fa {
+            start word_start;
+            accept word_end;
+            word_start -- "a" --> after_a;
+            after_a -- TAIL --> word_end;
+        };
+
+        nt root ::= WORD;
+    "#;
+
+    let constraint = Constraint::from_glrm_grammar(grammar, &bytes_vocab()).unwrap();
+    assert_accepts_bytes(&constraint, b"ab");
+    assert_accepts_bytes(&constraint, b"abbbb");
+    let mut prefix = constraint.start();
+    prefix.commit_bytes(b"a").unwrap();
+    assert!(!prefix.is_finished());
+    assert_rejects_bytes(&constraint, b"b");
+}
+
+#[test]
 fn commit_bytes_and_commit_tokens_agree() {
     let constraint = ebnf(&["a", "b", "ab"], r#"start ::= "a" "b" | "ab""#);
 
