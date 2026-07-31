@@ -330,19 +330,8 @@ fn template_bundle_subset_union_index_enabled() -> bool {
         .unwrap_or(false)
 }
 
-fn count_unweighted_dfa_transitions(dfa: &UnweightedDfa) -> usize {
+fn compute_unweighted_dfa_transition_count(dfa: &UnweightedDfa) -> usize {
     dfa.states.iter().map(|state| state.transitions.len()).sum()
-}
-
-fn count_weighted_dwa_transitions(dwa: &DWA) -> usize {
-    dwa.states().iter().map(|state| state.transitions.len()).sum()
-}
-
-fn count_nwa_transitions(nwa: &NWA) -> usize {
-    nwa.states()
-        .iter()
-        .map(|state| state.transitions.values().map(|targets| targets.len()).sum::<usize>() + state.epsilons.len())
-        .sum()
 }
 
 impl Templates {
@@ -415,7 +404,7 @@ impl Templates {
                 profile.slowest_group_ms = group_ms;
                 profile.slowest_group_terminals = terminals.len();
                 profile.slowest_group_dfa_states = merged.states.len();
-                profile.slowest_group_dfa_transitions = count_unweighted_dfa_transitions(&merged);
+                profile.slowest_group_dfa_transitions = compute_unweighted_dfa_transition_count(&merged);
             }
 
             group_dfas.push((*weight, BundleGroupDfa::Owned(merged)));
@@ -457,7 +446,7 @@ impl Templates {
         if let Some(bundle) = self.build_single_terminal_bundle(terminal_weights) {
             profile.used_single_terminal_fast_path = true;
             profile.result_nwa_states = bundle.states().len();
-            profile.result_nwa_transitions = count_nwa_transitions(&bundle);
+            profile.result_nwa_transitions = NWA::num_transitions(&bundle);
             profile.total_ms = elapsed_ms(total_started_at);
             return (bundle, profile);
         }
@@ -508,7 +497,7 @@ impl Templates {
         profile.determinize_edge_cache_misses = determinize_profile.edge_cache_misses;
         profile.determinize_edge_cache_miss_subset_total = determinize_profile.edge_cache_miss_subset_total;
         profile.result_dwa_states = bundle_dwa.states().len();
-        profile.result_dwa_transitions = count_weighted_dwa_transitions(&bundle_dwa);
+        profile.result_dwa_transitions = DWA::num_transitions(&bundle_dwa);
 
         let minimize_started_at = Instant::now();
         profile.minimize_skipped = !minimize_template_bundles_enabled();
@@ -519,13 +508,13 @@ impl Templates {
         };
         profile.minimize_ms = elapsed_ms(minimize_started_at);
         profile.result_dwa_states = minimized.states().len();
-        profile.result_dwa_transitions = count_weighted_dwa_transitions(&minimized);
+        profile.result_dwa_transitions = DWA::num_transitions(&minimized);
 
         let to_nwa_started_at = Instant::now();
         let nwa = dwa_to_nwa(&minimized);
         profile.dwa_to_nwa_ms = elapsed_ms(to_nwa_started_at);
         profile.result_nwa_states = nwa.states().len();
-        profile.result_nwa_transitions = count_nwa_transitions(&nwa);
+        profile.result_nwa_transitions = NWA::num_transitions(&nwa);
         profile.total_ms = elapsed_ms(total_started_at);
 
         (nwa, profile)

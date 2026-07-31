@@ -63,7 +63,7 @@ fn epsilon_closure(nfa: &NFA, seeds: &[u32]) -> BTreeSet<u32> {
 ///
 /// Every DFA state corresponds to a set of NFA states (its "subset").
 pub fn determinize(nfa: &NFA) -> DFA {
-    assert!(nfa.is_acyclic(), "determinize: input NFA is cyclic");
+    assert!(nfa.compute_is_acyclic(), "determinize: input NFA is cyclic");
 
     if nfa.states.is_empty() || nfa.start_states.is_empty() {
         return DFA::new();

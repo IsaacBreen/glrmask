@@ -6,7 +6,7 @@
 //! language. This pass recognizes the safe subset and preserves the graph as an
 //! [`ExprNFA`](crate::grammar::expr_nfa::ExprNFA).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::grammar::ast::{GrammarExpr, NamedGrammar, NamedRule, Quantifier};
 use crate::grammar::expr_nfa::ExprNfaBuilder;
@@ -52,118 +52,142 @@ struct ExpandedMacro {
     nodes: usize,
 }
 
-struct MacroExpander<'a> {
-    rules: &'a HashMap<String, &'a NamedRule>,
-    terminals: &'a HashSet<String>,
-    visiting: HashSet<String>,
-    memo: HashMap<String, Option<ExpandedMacro>>,
+fn expand_with_known_macros(
+    expr: &GrammarExpr,
+    terminals: &HashSet<String>,
+    macros: &HashMap<String, ExpandedMacro>,
+) -> Option<ExpandedMacro> {
+    let result = match expr {
+        GrammarExpr::Ref(name) => {
+            if terminals.contains(name) {
+                ExpandedMacro {
+                    expr: GrammarExpr::Ref(name.to_owned()),
+                    nodes: 1,
+                }
+            } else {
+                macros.get(name)?.clone()
+            }
+        }
+        GrammarExpr::Grouped(inner) => {
+            let inner = expand_with_known_macros(inner, terminals, macros)?;
+            ExpandedMacro {
+                expr: GrammarExpr::Grouped(Box::new(inner.expr)),
+                nodes: inner.nodes.checked_add(1)?,
+            }
+        }
+        GrammarExpr::Sequence(parts) => {
+            let mut nodes = 1usize;
+            let mut expanded = Vec::with_capacity(parts.len());
+            for part in parts {
+                let part = expand_with_known_macros(part, terminals, macros)?;
+                nodes = nodes.checked_add(part.nodes)?;
+                if nodes > MAX_MACRO_NODES {
+                    return None;
+                }
+                expanded.push(part.expr);
+            }
+            ExpandedMacro {
+                expr: GrammarExpr::Sequence(expanded),
+                nodes,
+            }
+        }
+        GrammarExpr::Choice(options) => {
+            let mut nodes = 1usize;
+            let mut expanded = Vec::with_capacity(options.len());
+            for option in options {
+                let option = expand_with_known_macros(option, terminals, macros)?;
+                nodes = nodes.checked_add(option.nodes)?;
+                if nodes > MAX_MACRO_NODES {
+                    return None;
+                }
+                expanded.push(option.expr);
+            }
+            ExpandedMacro {
+                expr: GrammarExpr::Choice(expanded),
+                nodes,
+            }
+        }
+        GrammarExpr::Quantified(inner, quantifier) => {
+            let inner = expand_with_known_macros(inner, terminals, macros)?;
+            ExpandedMacro {
+                expr: GrammarExpr::Quantified(Box::new(inner.expr), quantifier.clone()),
+                nodes: inner.nodes.checked_add(1)?,
+            }
+        }
+        GrammarExpr::Exclude { expr, exclude } => {
+            let expr = expand_with_known_macros(expr, terminals, macros)?;
+            let exclude = expand_with_known_macros(exclude, terminals, macros)?;
+            ExpandedMacro {
+                expr: GrammarExpr::Exclude {
+                    expr: Box::new(expr.expr),
+                    exclude: Box::new(exclude.expr),
+                },
+                nodes: expr.nodes.checked_add(exclude.nodes)?.checked_add(1)?,
+            }
+        }
+        GrammarExpr::Intersect { expr, intersect } => {
+            let expr = expand_with_known_macros(expr, terminals, macros)?;
+            let intersect = expand_with_known_macros(intersect, terminals, macros)?;
+            ExpandedMacro {
+                expr: GrammarExpr::Intersect {
+                    expr: Box::new(expr.expr),
+                    intersect: Box::new(intersect.expr),
+                },
+                nodes: expr.nodes.checked_add(intersect.nodes)?.checked_add(1)?,
+            }
+        }
+        GrammarExpr::Epsilon
+        | GrammarExpr::Literal(_)
+        | GrammarExpr::SpecialToken(_)
+        | GrammarExpr::CharClass { .. }
+        | GrammarExpr::RawRegex(_)
+        | GrammarExpr::LexerDfa(_)
+        | GrammarExpr::AnyByte => ExpandedMacro {
+            expr: expr.clone(),
+            nodes: 1,
+        },
+        GrammarExpr::SeparatedSequence { .. } | GrammarExpr::ExprNFA(_) => return None,
+    };
+    (result.nodes <= MAX_MACRO_NODES).then_some(result)
 }
 
-impl<'a> MacroExpander<'a> {
-    fn new(
-        rules: &'a HashMap<String, &'a NamedRule>,
-        terminals: &'a HashSet<String>,
-    ) -> Self {
-        Self {
-            rules,
-            terminals,
-            visiting: HashSet::new(),
-            memo: HashMap::new(),
-        }
-    }
-
-    fn rule(&mut self, name: &str) -> Option<ExpandedMacro> {
-        if self.terminals.contains(name) {
-            return Some(ExpandedMacro {
-                expr: GrammarExpr::Ref(name.to_owned()),
-                nodes: 1,
-            });
-        }
-        if let Some(cached) = self.memo.get(name) {
-            return cached.clone();
-        }
-        if !self.visiting.insert(name.to_owned()) {
-            return None;
-        }
-        let result = self
-            .rules
-            .get(name)
-            .and_then(|rule| self.expr(&rule.expr));
-        self.visiting.remove(name);
-        self.memo.insert(name.to_owned(), result.clone());
-        result
-    }
-
-    fn expr(&mut self, expr: &GrammarExpr) -> Option<ExpandedMacro> {
-        let result = match expr {
-            GrammarExpr::Ref(name) => self.rule(name)?,
-            GrammarExpr::Grouped(inner) => {
-                let inner = self.expr(inner)?;
-                ExpandedMacro {
-                    expr: GrammarExpr::Grouped(Box::new(inner.expr)),
-                    nodes: inner.nodes + 1,
+fn nonterminal_dependencies(
+    expr: &GrammarExpr,
+    terminals: &HashSet<String>,
+) -> HashSet<String> {
+    let mut dependencies = HashSet::new();
+    let mut stack = vec![expr];
+    while let Some(expr) = stack.pop() {
+        match expr {
+            GrammarExpr::Ref(name) => {
+                if !terminals.contains(name) {
+                    dependencies.insert(name.clone());
                 }
             }
-            GrammarExpr::Sequence(parts) => {
-                let mut nodes = 1usize;
-                let mut expanded = Vec::with_capacity(parts.len());
-                for part in parts {
-                    let part = self.expr(part)?;
-                    nodes = nodes.checked_add(part.nodes)?;
-                    if nodes > MAX_MACRO_NODES {
-                        return None;
-                    }
-                    expanded.push(part.expr);
-                }
-                ExpandedMacro {
-                    expr: GrammarExpr::Sequence(expanded),
-                    nodes,
-                }
+            GrammarExpr::Grouped(inner) | GrammarExpr::Quantified(inner, _) => {
+                stack.push(inner);
             }
-            GrammarExpr::Choice(options) => {
-                let mut nodes = 1usize;
-                let mut expanded = Vec::with_capacity(options.len());
-                for option in options {
-                    let option = self.expr(option)?;
-                    nodes = nodes.checked_add(option.nodes)?;
-                    if nodes > MAX_MACRO_NODES {
-                        return None;
-                    }
-                    expanded.push(option.expr);
-                }
-                ExpandedMacro {
-                    expr: GrammarExpr::Choice(expanded),
-                    nodes,
-                }
-            }
-            GrammarExpr::Quantified(inner, quantifier) => {
-                let inner = self.expr(inner)?;
-                ExpandedMacro {
-                    expr: GrammarExpr::Quantified(Box::new(inner.expr), quantifier.clone()),
-                    nodes: inner.nodes + 1,
-                }
+            GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
+                stack.extend(parts.iter());
             }
             GrammarExpr::Exclude { expr, exclude } => {
-                let expr = self.expr(expr)?;
-                let exclude = self.expr(exclude)?;
-                ExpandedMacro {
-                    expr: GrammarExpr::Exclude {
-                        expr: Box::new(expr.expr),
-                        exclude: Box::new(exclude.expr),
-                    },
-                    nodes: expr.nodes + exclude.nodes + 1,
-                }
+                stack.push(expr);
+                stack.push(exclude);
             }
             GrammarExpr::Intersect { expr, intersect } => {
-                let expr = self.expr(expr)?;
-                let intersect = self.expr(intersect)?;
-                ExpandedMacro {
-                    expr: GrammarExpr::Intersect {
-                        expr: Box::new(expr.expr),
-                        intersect: Box::new(intersect.expr),
-                    },
-                    nodes: expr.nodes + intersect.nodes + 1,
+                stack.push(expr);
+                stack.push(intersect);
+            }
+            GrammarExpr::SeparatedSequence {
+                items, separator, ..
+            } => {
+                for (item, _) in items {
+                    stack.push(item);
                 }
+                stack.push(separator);
+            }
+            GrammarExpr::ExprNFA(expr_nfa) => {
+                stack.extend(expr_nfa.symbols.iter());
             }
             GrammarExpr::Epsilon
             | GrammarExpr::Literal(_)
@@ -171,14 +195,74 @@ impl<'a> MacroExpander<'a> {
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::LexerDfa(_)
-            | GrammarExpr::AnyByte => ExpandedMacro {
-                expr: expr.clone(),
-                nodes: 1,
-            },
-            GrammarExpr::SeparatedSequence { .. } | GrammarExpr::ExprNFA(_) => return None,
-        };
-        (result.nodes <= MAX_MACRO_NODES).then_some(result)
+            | GrammarExpr::AnyByte => {}
+        }
     }
+    dependencies
+}
+
+fn discover_macros(
+    rules: &HashMap<String, &NamedRule>,
+    terminals: &HashSet<String>,
+    parser_names: &[String],
+    start: &str,
+) -> HashMap<String, ExpandedMacro> {
+    let candidates = parser_names
+        .iter()
+        .filter(|name| name.as_str() != start)
+        .cloned()
+        .collect::<HashSet<_>>();
+    let mut remaining = HashMap::<String, usize>::new();
+    let mut dependents = HashMap::<String, Vec<String>>::new();
+
+    for name in &candidates {
+        let dependencies = rules
+            .get(name)
+            .map(|rule| nonterminal_dependencies(&rule.expr, terminals))
+            .unwrap_or_default();
+        remaining.insert(name.clone(), dependencies.len());
+        for dependency in dependencies {
+            dependents.entry(dependency).or_default().push(name.clone());
+        }
+    }
+    for names in dependents.values_mut() {
+        names.sort_unstable();
+        names.dedup();
+    }
+
+    let mut ready = remaining
+        .iter()
+        .filter_map(|(name, &count)| (count == 0).then_some(name.clone()))
+        .collect::<Vec<_>>();
+    ready.sort_unstable();
+    let mut ready = VecDeque::from(ready);
+    let mut macros = HashMap::new();
+
+    while let Some(name) = ready.pop_front() {
+        let Some(expanded) = rules
+            .get(&name)
+            .and_then(|rule| expand_with_known_macros(&rule.expr, terminals, &macros))
+        else {
+            // This rule is structurally ineligible or exceeds the node budget.
+            // Any rule depending on it is therefore ineligible as a macro too.
+            continue;
+        };
+        macros.insert(name.clone(), expanded);
+
+        if let Some(users) = dependents.get(&name) {
+            for user in users {
+                let Some(count) = remaining.get_mut(user) else {
+                    continue;
+                };
+                debug_assert!(*count > 0);
+                *count -= 1;
+                if *count == 0 {
+                    ready.push_back(user.clone());
+                }
+            }
+        }
+    }
+    macros
 }
 
 fn rewrite_macros(
@@ -368,9 +452,12 @@ impl<'a> RightLinearBuilder<'a> {
 /// Returns `true` when compression was selected. The pass is deliberately
 /// conservative: it requires no ignore rule or custom lexer partitions and
 /// rejects every parser reference that is not in tail position.
-pub fn compress_large_right_linear_grammar(grammar: &mut NamedGrammar) -> bool {
-    if !enabled()
-        || grammar.ignore.is_some()
+fn compress_right_linear_grammar_impl(
+    grammar: &mut NamedGrammar,
+    min_parser_rules: usize,
+    emit_profile: bool,
+) -> bool {
+    if grammar.ignore.is_some()
         || !grammar.lexer_partitions.is_empty()
         || !grammar.lexer_literal_partitions.is_empty()
         || grammar.default_lexer_partition.is_some()
@@ -379,7 +466,7 @@ pub fn compress_large_right_linear_grammar(grammar: &mut NamedGrammar) -> bool {
     }
 
     let parser_rule_count = grammar.rules.iter().filter(|rule| !rule.is_terminal).count();
-    if parser_rule_count < MIN_PARSER_RULES {
+    if parser_rule_count < min_parser_rules {
         return false;
     }
 
@@ -395,22 +482,13 @@ pub fn compress_large_right_linear_grammar(grammar: &mut NamedGrammar) -> bool {
         .map(|rule| rule.name.clone())
         .collect::<HashSet<_>>();
 
-    let mut expander = MacroExpander::new(&rule_map, &terminals);
     let parser_names_all = grammar
         .rules
         .iter()
         .filter(|rule| !rule.is_terminal)
         .map(|rule| rule.name.clone())
         .collect::<Vec<_>>();
-    let mut macros = HashMap::new();
-    for name in &parser_names_all {
-        if name == &grammar.start {
-            continue;
-        }
-        if let Some(expanded) = expander.rule(name) {
-            macros.insert(name.clone(), expanded);
-        }
-    }
+    let macros = discover_macros(&rule_map, &terminals, &parser_names_all, &grammar.start);
 
     let parser_names = parser_names_all
         .iter()
@@ -455,8 +533,9 @@ pub fn compress_large_right_linear_grammar(grammar: &mut NamedGrammar) -> bool {
         is_internal: false,
     });
 
-    if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-        || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+    if emit_profile
+        && (std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some())
     {
         eprintln!(
             "[glrmask/profile][right_linear_compression] selected=true input_rules={} parser_rules={} macros={} nfa_states={} nfa_transitions={}",
@@ -468,6 +547,18 @@ pub fn compress_large_right_linear_grammar(grammar: &mut NamedGrammar) -> bool {
         );
     }
     true
+}
+
+pub(crate) fn compress_right_linear_grammar_unchecked(
+    grammar: &mut NamedGrammar,
+    min_parser_rules: usize,
+) -> bool {
+    compress_right_linear_grammar_impl(grammar, min_parser_rules, false)
+}
+
+pub fn compress_large_right_linear_grammar(grammar: &mut NamedGrammar) -> bool {
+    enabled()
+        && compress_right_linear_grammar_impl(grammar, MIN_PARSER_RULES, true)
 }
 
 #[cfg(test)]

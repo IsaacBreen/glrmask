@@ -2983,8 +2983,8 @@ impl Constraint {
         self.tokenizer.num_states() as usize
     }
 
-    pub(crate) fn num_forced_minimized_tokenizer_states(&self) -> usize {
-        self.tokenizer.num_forced_minimized_states()
+    pub(crate) fn compute_forced_minimized_tokenizer_state_count(&self) -> usize {
+        self.tokenizer.compute_forced_minimized_state_count()
     }
 
     pub(crate) fn parser_dwa(&self) -> &DWA {

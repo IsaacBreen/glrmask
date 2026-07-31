@@ -55,11 +55,33 @@ impl SparseStateSet {
     #[inline]
     pub fn union_compressed(&mut self, set: &CompressedStateSet) {
         for &(word_index, bits) in &set.words {
-            let word = &mut self.words[word_index as usize];
-            if *word == 0 {
-                self.dirty_words.push(word_index as usize);
+            let word_index = word_index as usize;
+            let word = &mut self.words[word_index];
+            let updated = *word | bits;
+            if updated == *word {
+                continue;
             }
-            *word |= bits;
+            if *word == 0 {
+                self.dirty_words.push(word_index);
+            }
+            *word = updated;
+        }
+    }
+
+    #[inline]
+    pub fn union_indexed_words(&mut self, word_indices: &[u32], bits: &[u64]) {
+        debug_assert_eq!(word_indices.len(), bits.len());
+        for (&word_index, &bits) in word_indices.iter().zip(bits) {
+            let word_index = word_index as usize;
+            let word = &mut self.words[word_index];
+            let updated = *word | bits;
+            if updated == *word {
+                continue;
+            }
+            if *word == 0 {
+                self.dirty_words.push(word_index);
+            }
+            *word = updated;
         }
     }
 

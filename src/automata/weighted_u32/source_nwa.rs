@@ -8,6 +8,7 @@
 //! consumer explicitly materializes a global `Weight`.
 
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 
 use smallvec::SmallVec;
 
@@ -169,6 +170,7 @@ pub struct SourceNwaState {
 pub struct SourceNWA {
     states: Vec<SourceNwaState>,
     start_states: Vec<u32>,
+    transition_count_cache: OnceLock<usize>,
 }
 
 impl SourceNWA {
@@ -177,7 +179,11 @@ impl SourceNWA {
     }
 
     pub fn from_parts(states: Vec<SourceNwaState>, start_states: Vec<u32>) -> Self {
-        Self { states, start_states }
+        Self {
+            states,
+            start_states,
+            transition_count_cache: OnceLock::new(),
+        }
     }
 
     pub fn states(&self) -> &[SourceNwaState] {
@@ -185,6 +191,7 @@ impl SourceNWA {
     }
 
     pub fn states_mut(&mut self) -> &mut [SourceNwaState] {
+        let _ = self.transition_count_cache.take();
         &mut self.states
     }
 
@@ -208,6 +215,7 @@ impl SourceNWA {
 
     pub fn add_transition(&mut self, from: u32, label: Label, to: u32, weight: SourceWeight) {
         if !weight.is_empty() {
+            let _ = self.transition_count_cache.take();
             self.states[from as usize]
                 .transitions
                 .entry(label)
@@ -221,10 +229,12 @@ impl SourceNWA {
     }
 
     pub fn num_transitions(&self) -> usize {
-        self.states
-            .iter()
-            .map(|state| state.transitions.values().map(Vec::len).sum::<usize>())
-            .sum()
+        *self.transition_count_cache.get_or_init(|| {
+            self.states
+                .iter()
+                .map(|state| state.transitions.values().map(Vec::len).sum::<usize>())
+                .sum()
+        })
     }
 }
 
@@ -239,6 +249,29 @@ mod tests {
             0,
             RangeSetBlaze::from_iter(tokens.iter().copied().map(|token| token..=token)),
         )))
+    }
+
+    #[test]
+    fn transition_count_cache_invalidates_on_mutation() {
+        let mut nwa = SourceNWA::new();
+        let first = nwa.add_state();
+        let second = nwa.add_state();
+        nwa.add_transition(
+            first,
+            1,
+            second,
+            SourceWeight::single(0, weight(&[1])),
+        );
+        assert_eq!(nwa.num_transitions(), 1);
+        assert_eq!(nwa.transition_count_cache.get(), Some(&1));
+
+        nwa.states_mut()[second as usize]
+            .transitions
+            .entry(2)
+            .or_default()
+            .push((second, SourceWeight::single(0, weight(&[2]))));
+        assert!(nwa.transition_count_cache.get().is_none());
+        assert_eq!(nwa.num_transitions(), 2);
     }
 
     #[test]

@@ -34,6 +34,20 @@ pub struct Tokenizer {
     /// raw state.
     #[serde(default, skip)]
     pub(super) singleton_epsilon_closures: OnceLock<Arc<[Box<[u32]>]>>,
+    /// Per-state byte sets whose transitions loop to the same raw tokenizer
+    /// state. Compiler partitions reuse this table instead of rescanning every
+    /// transition row independently.
+    #[serde(default, skip)]
+    pub(super) all_self_loop_bytes_cache: OnceLock<Arc<[U8Set]>>,
+    /// Exact expanded byte-transition count, including compressed segments.
+    /// This is immutable after construction except in the two structural
+    /// tokenizer transforms, which invalidate all derived caches together.
+    #[serde(default, skip)]
+    pub(super) transition_count_cache: OnceLock<usize>,
+    /// State count after a forced full DFA minimization. Used only by explicit
+    /// diagnostics/regression tests; the expensive computation is cached.
+    #[serde(default, skip)]
+    pub(super) forced_minimized_state_count_cache: OnceLock<usize>,
 }
 
 /// Exact deterministic transition rows over a byte-equivalence-class alphabet.
@@ -166,6 +180,9 @@ pub(crate) mod artifact_serde {
             ),
             exprs: None,
             singleton_epsilon_closures: OnceLock::new(),
+            all_self_loop_bytes_cache: OnceLock::new(),
+            transition_count_cache: OnceLock::new(),
+            forced_minimized_state_count_cache: OnceLock::new(),
         })
     }
 }
@@ -395,7 +412,7 @@ pub(crate) trait Lexer {
     }
 
     fn num_states(&self) -> u32;
-    fn num_forced_minimized_states(&self) -> usize;
+    fn compute_forced_minimized_state_count(&self) -> usize;
     fn execute_from_state_all_widths(
         &self,
         input: &[u8],
@@ -449,6 +466,14 @@ fn group_matches_by_width(matches: Vec<TokenizerMatch>) -> Vec<(usize, BTreeSet<
 }
 
 impl Tokenizer {
+    #[inline]
+    fn invalidate_derived_caches(&mut self) {
+        let _ = self.singleton_epsilon_closures.take();
+        let _ = self.all_self_loop_bytes_cache.take();
+        let _ = self.transition_count_cache.take();
+        let _ = self.forced_minimized_state_count_cache.take();
+    }
+
     /// Materialize a deterministic compile-time analysis view as a tokenizer.
     /// The view may be a powerset of this tokenizers epsilon-NFA. State zero is
     /// reserved for the supplied start state, and the returned old-to-new map
@@ -527,6 +552,9 @@ impl Tokenizer {
                 compressed_transition_segments: Arc::from([]),
                 exprs: None,
                 singleton_epsilon_closures: OnceLock::new(),
+                all_self_loop_bytes_cache: OnceLock::new(),
+                transition_count_cache: OnceLock::new(),
+                forced_minimized_state_count_cache: OnceLock::new(),
             },
             old_to_new,
         ))
@@ -664,6 +692,9 @@ impl Tokenizer {
             compressed_transition_segments: Arc::from([]),
             exprs: None,
             singleton_epsilon_closures: OnceLock::new(),
+            all_self_loop_bytes_cache: OnceLock::new(),
+            transition_count_cache: OnceLock::new(),
+            forced_minimized_state_count_cache: OnceLock::new(),
         })
     }
 
@@ -749,6 +780,15 @@ impl Tokenizer {
             }
         }
 
+        for (source_state, &rebuilt_state) in source_to_rebuilt.iter().enumerate() {
+            if rebuilt_state == u32::MAX
+                && source.state_has_epsilon_transitions(source_state as u32)
+            {
+                return None;
+            }
+        }
+
+        self.invalidate_derived_caches();
         let original_self_states = self.num_states() as usize;
         let mut source_to_self = vec![u32::MAX; source.num_states() as usize];
         for (source_state, &rebuilt_state) in source_to_rebuilt.iter().enumerate() {
@@ -768,9 +808,6 @@ impl Tokenizer {
             }
             let target_state = source_to_self[source_state];
             let source_state_u32 = source_state as u32;
-            if source.state_has_epsilon_transitions(source_state_u32) {
-                return None;
-            }
             let transitions = source
                 .transitions_from(source_state_u32)
                 .map(|(byte, target)| (byte, source_to_self[target as usize]))
@@ -807,6 +844,9 @@ impl Tokenizer {
             compressed_transition_segments: Arc::from([]),
             exprs,
             singleton_epsilon_closures: OnceLock::new(),
+            all_self_loop_bytes_cache: OnceLock::new(),
+            transition_count_cache: OnceLock::new(),
+            forced_minimized_state_count_cache: OnceLock::new(),
         }
     }
 
@@ -825,6 +865,9 @@ impl Tokenizer {
             compressed_transition_segments: Arc::from(compressed_transition_segments),
             exprs,
             singleton_epsilon_closures: OnceLock::new(),
+            all_self_loop_bytes_cache: OnceLock::new(),
+            transition_count_cache: OnceLock::new(),
+            forced_minimized_state_count_cache: OnceLock::new(),
         }
     }
 
@@ -1102,22 +1145,29 @@ impl Tokenizer {
     }
 
     fn transition_count(&self) -> usize {
-        let compressed = self
-            .compressed_transition_segments
-            .iter()
-            .map(|segment| segment.expanded_transition_count)
-            .sum::<usize>();
-        let dense = self
-            .dfa
-            .states()
-            .iter()
-            .enumerate()
-            .filter(|(state, _)| {
-                self.compressed_segment_for_state(*state as u32).is_none()
-            })
-            .map(|(_, state)| state.transitions.len())
-            .sum::<usize>();
-        compressed + dense
+        *self.transition_count_cache.get_or_init(|| {
+            let compressed = self
+                .compressed_transition_segments
+                .iter()
+                .map(|segment| segment.expanded_transition_count)
+                .sum::<usize>();
+            let stored_inside_compressed_segments = self
+                .compressed_transition_segments
+                .iter()
+                .map(|segment| {
+                    let start = segment.state_offset as usize;
+                    let end = start + segment.state_count as usize;
+                    self.dfa.states()[start..end]
+                        .iter()
+                        .map(|state| state.transitions.len())
+                        .sum::<usize>()
+                })
+                .sum::<usize>();
+            self.dfa
+                .transition_count()
+                .saturating_sub(stored_inside_compressed_segments)
+                + compressed
+        })
     }
 
     /// Detect nullable terminals (those that match the empty string) by
@@ -1125,7 +1175,6 @@ impl Tokenizer {
     /// the set.  After this call the tokenizer no longer reports those
     /// terminals as matched at state 0.
     pub fn isolate_start_state_and_drain_nullable_terminals(&mut self) -> BTreeSet<TerminalID> {
-        self.singleton_epsilon_closures = OnceLock::new();
         let start = self.start_state();
         let initial_closure = self.dfa.epsilon_closure(&[start]);
         let mut nullable = BTreeSet::new();
@@ -1140,6 +1189,7 @@ impl Tokenizer {
         if nullable.is_empty() {
             return nullable;
         }
+        self.invalidate_derived_caches();
 
         // The whole initial epsilon closure represents the zero-byte scanner
         // configuration. A component root can also be reached later after a
@@ -1260,6 +1310,22 @@ impl Tokenizer {
         }))
     }
 
+    /// Return one exact self-loop byte set per raw tokenizer state.
+    ///
+    /// This is deliberately separate from `self_loop_bytes(state)`: callers
+    /// needing one state keep the local O(out-degree) query, while whole-DFA
+    /// compiler passes explicitly opt into one cached O(transitions) build.
+    pub(crate) fn all_self_loop_bytes(&self) -> Arc<[U8Set]> {
+        Arc::clone(self.all_self_loop_bytes_cache.get_or_init(|| {
+            Arc::from(
+                (0..self.num_states())
+                    .map(|state| self.self_loop_bytes(state))
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            )
+        }))
+    }
+
     pub(crate) fn singleton_epsilon_closure(&self, state: u32) -> Box<[u32]> {
         self.dfa.epsilon_closure(&[state]).into_boxed_slice()
     }
@@ -1300,8 +1366,10 @@ impl Tokenizer {
         self.dfa.num_states() as u32
     }
 
-    fn num_forced_minimized_states(&self) -> usize {
-        self.dfa.minimize().num_states()
+    fn compute_forced_minimized_state_count(&self) -> usize {
+        *self
+            .forced_minimized_state_count_cache
+            .get_or_init(|| self.dfa.minimize().num_states())
     }
 
     fn execute_from_state_all_widths(
@@ -1501,7 +1569,7 @@ impl Lexer for Tokenizer {
     fn possible_future_terminals(&self, state: u32) -> &BitSet { self.possible_future_terminals(state) }
     fn is_end(&self, state: u32) -> bool { self.is_end(state) }
     fn num_states(&self) -> u32 { self.num_states() }
-    fn num_forced_minimized_states(&self) -> usize { self.num_forced_minimized_states() }
+    fn compute_forced_minimized_state_count(&self) -> usize { self.compute_forced_minimized_state_count() }
     fn execute_from_state_all_widths(&self, input: &[u8], start: u32) -> TokenizerExecResult { self.execute_from_state_all_widths(input, start) }
     fn execute_from_state(&self, input: &[u8], start: u32) -> TokenizerExecResult { self.execute_from_state(input, start) }
     fn execute_from_state_end_only(&self, input: &[u8], start: u32) -> TokenizerStateSet { self.execute_from_state_end_only(input, start) }
@@ -1603,6 +1671,61 @@ mod tests {
 
         let x = tokenizer.execute_from_state_end_only(b"x", tokenizer.initial_state_id());
         assert_eq!(x.as_slice(), &[3]);
+    }
+
+    #[test]
+    fn whole_tokenizer_caches_are_reused_and_invalidated_after_mutation() {
+        let source = dispatch_prefix_tokenizer(true);
+        let rebuilt = dispatch_prefix_tokenizer(false);
+        let mut local = rebuilt.clone();
+
+        let loops_before = local.all_self_loop_bytes();
+        let loops_before_again = local.all_self_loop_bytes();
+        assert!(Arc::ptr_eq(&loops_before, &loops_before_again));
+        assert!(loops_before[2].contains(b'a'));
+        assert!(loops_before[3].contains(b'x'));
+        let closures_before = local.all_singleton_epsilon_closures();
+        let transition_count_before = local.transition_count();
+
+        let rebuilt_to_local = (0..rebuilt.num_states()).collect::<Vec<_>>();
+        local
+            .augment_from_verified_component_prefixes(
+                &source,
+                &rebuilt,
+                &rebuilt_to_local,
+            )
+            .expect("verified append-only component relation");
+
+        let loops_after = local.all_self_loop_bytes();
+        assert!(!Arc::ptr_eq(&loops_before, &loops_after));
+        assert!(loops_after[4].contains(b'b'));
+        assert!(!Arc::ptr_eq(
+            &closures_before,
+            &local.all_singleton_epsilon_closures(),
+        ));
+        assert!(local.transition_count() > transition_count_before);
+    }
+
+    #[test]
+    fn failed_or_noop_mutations_preserve_derived_caches() {
+        let mut tokenizer = dispatch_prefix_tokenizer(false);
+        let loops = tokenizer.all_self_loop_bytes();
+        let closures = tokenizer.all_singleton_epsilon_closures();
+
+        assert!(tokenizer
+            .isolate_start_state_and_drain_nullable_terminals()
+            .is_empty());
+        assert!(Arc::ptr_eq(&loops, &tokenizer.all_self_loop_bytes()));
+        assert!(Arc::ptr_eq(
+            &closures,
+            &tokenizer.all_singleton_epsilon_closures(),
+        ));
+
+        let incompatible = Tokenizer::from_parts(DFA::new(1), 2, None);
+        assert!(tokenizer
+            .augment_from_verified_component_prefixes(&incompatible, &tokenizer.clone(), &[])
+            .is_none());
+        assert!(Arc::ptr_eq(&loops, &tokenizer.all_self_loop_bytes()));
     }
 
     #[test]

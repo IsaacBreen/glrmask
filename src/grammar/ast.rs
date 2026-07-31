@@ -2259,7 +2259,7 @@ impl<'a> Lowerer<'a> {
         }
         if expr_nfa.is_determinized_and_minimized
             && let Some(dfa) = &expr_nfa.canonical_dfa
-            && dfa.is_acyclic()
+            && dfa.compute_is_acyclic()
         {
             return self.emit_canonical_expr_dfa_leftlinear(lhs, expr_nfa, dfa);
         }
@@ -2656,6 +2656,35 @@ impl<'a> Lowerer<'a> {
         self.terminal_expr_hash_index.entry(hash).or_default().push(id);
         id
     }
+}
+
+/// Resolve terminal-labelled subexpressions against the named terminal table.
+///
+/// The cache is shared across all inputs, so repeated helper references remain
+/// `Arc`-shared while the caller compiles a larger explicit graph.
+pub(crate) fn resolve_terminal_subexpressions(
+    grammar: &NamedGrammar,
+    exprs: &[GrammarExpr],
+) -> Result<Vec<Expr>, GlrMaskError> {
+    let terminal_bodies = grammar
+        .rules
+        .iter()
+        .filter(|rule| rule.is_terminal)
+        .map(|rule| (rule.name.clone(), &rule.expr))
+        .collect::<FxHashMap<_, _>>();
+    let mut terminal_expr_cache = FxHashMap::default();
+
+    exprs
+        .iter()
+        .map(|expr| {
+            grammar_expr_to_expr(
+                expr,
+                &terminal_bodies,
+                &mut terminal_expr_cache,
+                &mut HashSet::new(),
+            )
+        })
+        .collect()
 }
 
 /// Resolve every externally emitting named terminal to the exact lexer-level
@@ -3249,7 +3278,7 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
                     && expr_nfa
                         .canonical_dfa
                         .as_ref()
-                        .is_some_and(|dfa| dfa.is_acyclic()));
+                        .is_some_and(|dfa| dfa.compute_is_acyclic()));
             if hits_fast_path {
                 return None;
             }

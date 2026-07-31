@@ -1524,7 +1524,68 @@ const DIRECT_BOUNDED_REPEAT_THRESHOLD: usize = 32;
 fn compile_expr_to_dfa(expr: &Expr) -> DFA {
     let mut nfa = build_regex_nfa_impl(std::slice::from_ref(expr));
     nfa.condense_epsilon_sccs();
-    nfa.to_dfa().minimize()
+    nfa.to_minimized_dfa()
+}
+
+/// Compile an explicit expression-labelled graph into one byte-level lexer DFA.
+///
+/// The outer graph is retained directly. Each labelled edge is expanded only
+/// between its source and target states, so a large right-linear dependency
+/// graph does not first become a recursively duplicated expression tree.
+pub(crate) fn compile_expression_labeled_nfa(
+    graph: &crate::automata::unweighted_u32::nfa::NFA,
+    symbols: &[Expr],
+) -> Result<DFA, String> {
+    if graph.start_states.is_empty() {
+        return Err("expression-labelled NFA has no start state".to_string());
+    }
+
+    // State zero is a synthetic root so multiple starts remain representable.
+    let mut nfa = NFA::new(1);
+    let state_map = (0..graph.states.len())
+        .map(|_| nfa.add_state())
+        .collect::<Vec<_>>();
+
+    for &start in &graph.start_states {
+        let Some(&mapped) = state_map.get(start as usize) else {
+            return Err(format!("NFA start state {start} is out of range"));
+        };
+        nfa.add_epsilon(0, mapped);
+    }
+
+    for (state_id, state) in graph.states.iter().enumerate() {
+        let mapped_from = state_map[state_id];
+        if state.is_accepting {
+            nfa.add_finalizer(mapped_from, 0);
+        }
+
+        for &target in &state.epsilons {
+            let Some(&mapped_target) = state_map.get(target as usize) else {
+                return Err(format!("NFA epsilon target {target} is out of range"));
+            };
+            nfa.add_epsilon(mapped_from, mapped_target);
+        }
+
+        for (&label, targets) in &state.transitions {
+            let symbol_index = usize::try_from(label)
+                .map_err(|_| format!("NFA has invalid negative symbol label {label}"))?;
+            let symbol = symbols.get(symbol_index).ok_or_else(|| {
+                format!(
+                    "NFA symbol label {label} is out of range for {} symbols",
+                    symbols.len()
+                )
+            })?;
+            for &target in targets {
+                let Some(&mapped_target) = state_map.get(target as usize) else {
+                    return Err(format!("NFA target state {target} is out of range"));
+                };
+                append_compiled_expr(symbol, &mut nfa, mapped_from, mapped_target);
+            }
+        }
+    }
+
+    nfa.condense_epsilon_sccs();
+    Ok(nfa.to_minimized_dfa())
 }
 
 fn productive_dfa_states(dfa: &DFA) -> Vec<bool> {
@@ -2538,6 +2599,9 @@ impl Regex {
             compressed_transition_segments: Arc::from([]),
             exprs,
             singleton_epsilon_closures: std::sync::OnceLock::new(),
+            all_self_loop_bytes_cache: std::sync::OnceLock::new(),
+            transition_count_cache: std::sync::OnceLock::new(),
+            forced_minimized_state_count_cache: std::sync::OnceLock::new(),
         }
     }
 
@@ -2559,10 +2623,7 @@ impl Regex {
 }
 
 fn dfa_transition_count(dfa: &DFA) -> usize {
-    dfa.states()
-        .iter()
-        .map(|state| state.transitions.len())
-        .sum()
+    dfa.transition_count()
 }
 
 impl Expr {
@@ -8793,6 +8854,9 @@ mod tests {
             compressed_transition_segments: Arc::from([]),
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
+            all_self_loop_bytes_cache: std::sync::OnceLock::new(),
+            transition_count_cache: std::sync::OnceLock::new(),
+            forced_minimized_state_count_cache: std::sync::OnceLock::new(),
         };
         let exec = tokenizer.execute_from_state(input, tokenizer.initial_state());
         exec.matches
@@ -9724,6 +9788,9 @@ mod tests {
             compressed_transition_segments: Arc::from([]),
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
+            all_self_loop_bytes_cache: std::sync::OnceLock::new(),
+            transition_count_cache: std::sync::OnceLock::new(),
+            forced_minimized_state_count_cache: std::sync::OnceLock::new(),
         };
 
         for len in [1usize, 2, 15] {
@@ -9761,6 +9828,9 @@ mod tests {
             compressed_transition_segments: Arc::from([]),
             exprs: Some(Arc::from(vec![space, exact_repeat].into_boxed_slice())),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
+            all_self_loop_bytes_cache: std::sync::OnceLock::new(),
+            transition_count_cache: std::sync::OnceLock::new(),
+            forced_minimized_state_count_cache: std::sync::OnceLock::new(),
         };
 
         for len in [1usize, 2, 15] {
@@ -9798,6 +9868,9 @@ mod tests {
             compressed_transition_segments: Arc::from([]),
             exprs: Some(Arc::from(vec![space, exact_repeat].into_boxed_slice())),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
+            all_self_loop_bytes_cache: std::sync::OnceLock::new(),
+            transition_count_cache: std::sync::OnceLock::new(),
+            forced_minimized_state_count_cache: std::sync::OnceLock::new(),
         };
 
         for len in [1usize, 2, 31] {
@@ -9857,6 +9930,9 @@ mod tests {
             compressed_transition_segments: Arc::from([]),
             exprs: Some(Arc::from(exprs.into_boxed_slice())),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
+            all_self_loop_bytes_cache: std::sync::OnceLock::new(),
+            transition_count_cache: std::sync::OnceLock::new(),
+            forced_minimized_state_count_cache: std::sync::OnceLock::new(),
         };
 
         for len in [1usize, 2, 15] {
@@ -9903,6 +9979,9 @@ mod tests {
             compressed_transition_segments: Arc::from([]),
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
+            all_self_loop_bytes_cache: std::sync::OnceLock::new(),
+            transition_count_cache: std::sync::OnceLock::new(),
+            forced_minimized_state_count_cache: std::sync::OnceLock::new(),
         };
 
         for len in [0usize, 1, 31, 32] {
@@ -9959,6 +10038,9 @@ mod tests {
             compressed_transition_segments: Arc::from([]),
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
+            all_self_loop_bytes_cache: std::sync::OnceLock::new(),
+            transition_count_cache: std::sync::OnceLock::new(),
+            forced_minimized_state_count_cache: std::sync::OnceLock::new(),
         };
 
         for input in [b"\"a".as_slice(), b"\"aa", b"\"a a", b"\"aa  aaa"] {
@@ -10104,6 +10186,9 @@ mod tests {
             compressed_transition_segments: Arc::from([]),
             exprs: Some(Arc::from(vec![expr].into_boxed_slice())),
             singleton_epsilon_closures: std::sync::OnceLock::new(),
+            all_self_loop_bytes_cache: std::sync::OnceLock::new(),
+            transition_count_cache: std::sync::OnceLock::new(),
+            forced_minimized_state_count_cache: std::sync::OnceLock::new(),
         };
 
         for input in [b"\"".as_slice(), b"\"a", b"\"a a", b"\"a  a"] {
@@ -10737,7 +10822,7 @@ mod tests {
             let mut nfa = super::build_regex_nfa(std::slice::from_ref(&expression));
             nfa.condense_epsilon_sccs();
             let generic = super::Regex {
-                dfa: nfa.to_dfa().minimize(),
+                dfa: nfa.to_minimized_dfa(),
             }
             .into_tokenizer(
                 1,

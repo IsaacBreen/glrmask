@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::OnceLock;
 
 use crate::ds::weight::Weight;
 
@@ -15,6 +16,8 @@ pub struct NWAState {
 pub struct NWA {
     states: Vec<NWAState>,
     start_states: Vec<u32>,
+    transition_count_cache: OnceLock<usize>,
+    acyclic_cache: OnceLock<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -43,7 +46,15 @@ impl NWA {
         Self {
             states: Vec::new(),
             start_states: Vec::new(),
+            transition_count_cache: OnceLock::new(),
+            acyclic_cache: OnceLock::new(),
         }
+    }
+
+    #[inline]
+    fn invalidate_graph_caches(&mut self) {
+        let _ = self.transition_count_cache.take();
+        let _ = self.acyclic_cache.take();
     }
 
     #[inline]
@@ -53,6 +64,7 @@ impl NWA {
 
     #[inline]
     pub fn states_mut(&mut self) -> &mut Vec<NWAState> {
+        self.invalidate_graph_caches();
         &mut self.states
     }
 
@@ -62,7 +74,12 @@ impl NWA {
     }
 
     pub fn from_parts(states: Vec<NWAState>, start_states: Vec<u32>) -> Self {
-        Self { states, start_states }
+        Self {
+            states,
+            start_states,
+            transition_count_cache: OnceLock::new(),
+            acyclic_cache: OnceLock::new(),
+        }
     }
 
     pub fn set_start_states(&mut self, states: Vec<u32>) {
@@ -90,12 +107,14 @@ impl NWA {
     }
 
     pub fn add_transition(&mut self, from: u32, label: Label, to: u32, weight: Weight) {
+        self.invalidate_graph_caches();
         if let Some(entry) = self.states.get_mut(from as usize) {
             entry.transitions.entry(label).or_default().push((to, weight));
         }
     }
 
     pub fn add_epsilon(&mut self, from: u32, to: u32, weight: Weight) {
+        self.invalidate_graph_caches();
         if let Some(entry) = self.states.get_mut(from as usize) {
             entry.epsilons.push((to, weight));
         }
@@ -107,6 +126,7 @@ impl NWA {
     /// from being further processed through transitions, matching the runtime's
     /// forced-token semantics.
     pub fn subtract_final_weights_from_outgoing(&mut self) {
+        self.invalidate_graph_caches();
         for i in 0..self.states.len() {
             let Some(final_weight) = self.states[i].final_weight.clone() else {
                 continue;
@@ -128,10 +148,15 @@ impl NWA {
     }
 
     pub fn num_transitions(&self) -> usize {
-        self.states
-            .iter()
-            .map(|state| state.epsilons.len() + state.transitions.values().map(Vec::len).sum::<usize>())
-            .sum()
+        *self.transition_count_cache.get_or_init(|| {
+            self.states
+                .iter()
+                .map(|state| {
+                    state.epsilons.len()
+                        + state.transitions.values().map(Vec::len).sum::<usize>()
+                })
+                .sum()
+        })
     }
 
     pub fn body(&self) -> NwaBody {
@@ -141,6 +166,7 @@ impl NWA {
     }
 
     pub fn append_with_body(&mut self, other: &NWA) -> NwaBody {
+        self.invalidate_graph_caches();
         let offset = self.states.len() as u32;
         self.states.reserve(other.states.len());
 
@@ -188,6 +214,8 @@ impl NWA {
         let mut rev = Self {
             states: vec![NWAState::default(); self.states.len()],
             start_states: Vec::new(),
+            transition_count_cache: OnceLock::new(),
+            acyclic_cache: OnceLock::new(),
         };
 
         let super_start = rev.add_state();
@@ -223,69 +251,54 @@ impl NWA {
     }
 
     pub fn is_acyclic(&self) -> bool {
-        fn for_each_successor(state: &NWAState, mut visit: impl FnMut(u32)) {
-            for (target, _) in state.transitions.values().flatten() {
-                visit(*target);
-            }
-            for (target, _) in &state.epsilons {
-                visit(*target);
-            }
-        }
-
-        let num_states = self.states.len();
-
-        for (state_id, state) in self.states.iter().enumerate() {
-            let mut has_self_loop = false;
-            for_each_successor(state, |target| {
-                if target as usize == state_id {
-                    has_self_loop = true;
-                }
-            });
-            if has_self_loop {
-                return false;
-            }
-        }
-
-        fn visit(state_id: usize, states: &[NWAState], colors: &mut [u8]) -> bool {
-            colors[state_id] = 1;
-
-            let mut acyclic = true;
-            for_each_successor(&states[state_id], |target| {
-                if !acyclic {
-                    return;
-                }
-
-                let target = target as usize;
-                if target >= colors.len() {
-                    return;
-                }
-                match colors[target] {
-                    1 => acyclic = false,
-                    0 => {
-                        if !visit(target, states, colors) {
-                            acyclic = false;
-                        }
-                    }
-                    _ => {}
-                }
-            });
-
-            if !acyclic {
-                return false;
-            }
-
-            colors[state_id] = 2;
-            true
-        }
-
-        let mut colors = vec![0u8; num_states];
-        for state_id in 0..num_states {
-            if colors[state_id] == 0 && !visit(state_id, &self.states, &mut colors) {
-                return false;
-            }
-        }
-        true
+        *self.acyclic_cache.get_or_init(|| self.compute_is_acyclic())
     }
+
+    fn compute_is_acyclic(&self) -> bool {
+        let num_states = self.states.len();
+        let mut indegree = vec![0u32; num_states];
+        for state in &self.states {
+            for &target in state
+                .transitions
+                .values()
+                .flatten()
+                .map(|(target, _)| target)
+                .chain(state.epsilons.iter().map(|(target, _)| target))
+            {
+                if let Some(degree) = indegree.get_mut(target as usize) {
+                    *degree += 1;
+                }
+            }
+        }
+        let mut queue = std::collections::VecDeque::new();
+        for (state, &degree) in indegree.iter().enumerate() {
+            if degree == 0 {
+                queue.push_back(state);
+            }
+        }
+        let mut visited = 0usize;
+        while let Some(state_id) = queue.pop_front() {
+            visited += 1;
+            let state = &self.states[state_id];
+            for &target in state
+                .transitions
+                .values()
+                .flatten()
+                .map(|(target, _)| target)
+                .chain(state.epsilons.iter().map(|(target, _)| target))
+            {
+                let Some(degree) = indegree.get_mut(target as usize) else {
+                    continue;
+                };
+                *degree -= 1;
+                if *degree == 0 {
+                    queue.push_back(target as usize);
+                }
+            }
+        }
+        visited == num_states
+    }
+
 }
 
 fn fmt_nwa_states(
@@ -329,5 +342,46 @@ impl std::fmt::Display for NWA {
         let starts = self.start_states.iter().map(|s| format!("State {s}")).collect::<Vec<_>>().join(", ");
         writeln!(f, "NWA: {} states, start={starts}", self.states.len())?;
         fmt_nwa_states(self, f, &|l| l.to_string(), &|w| format!("{w}"))
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    #[test]
+    fn graph_property_caches_invalidate_on_labeled_and_epsilon_mutation() {
+        let mut nwa = NWA::new(1, 1);
+        let first = nwa.add_state();
+        let second = nwa.add_state();
+        nwa.set_start_states(vec![first]);
+        nwa.add_transition(first, 3, second, Weight::all());
+
+        assert_eq!(nwa.num_transitions(), 1);
+        assert!(nwa.is_acyclic());
+        assert_eq!(nwa.transition_count_cache.get(), Some(&1));
+        assert_eq!(nwa.acyclic_cache.get(), Some(&true));
+
+        nwa.add_epsilon(second, second, Weight::all());
+        assert!(nwa.transition_count_cache.get().is_none());
+        assert!(nwa.acyclic_cache.get().is_none());
+        assert_eq!(nwa.num_transitions(), 2);
+        assert!(!nwa.is_acyclic());
+    }
+
+    #[test]
+    fn mutable_state_access_invalidates_graph_property_caches() {
+        let mut nwa = NWA::new(1, 1);
+        let state = nwa.add_state();
+        assert_eq!(nwa.num_transitions(), 0);
+        assert!(nwa.is_acyclic());
+
+        nwa.states_mut()[state as usize]
+            .epsilons
+            .push((state, Weight::all()));
+        assert!(nwa.transition_count_cache.get().is_none());
+        assert!(nwa.acyclic_cache.get().is_none());
+        assert_eq!(nwa.num_transitions(), 1);
+        assert!(!nwa.is_acyclic());
     }
 }
