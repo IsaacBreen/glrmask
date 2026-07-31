@@ -156,10 +156,9 @@ fn automatic_branch_active_state_map_strategy(
     if active_terminals <= 512 && vocab_tokens >= 50_000 && work >= 300_000_000 {
         return AutomaticBranchActiveStateMapStrategy::VeryLargeProfile;
     }
-    let dense_protected_profile = active_terminals >= 180
+    let dense_protected_profile = (180..=512).contains(&active_terminals)
         && vocab_tokens >= 2_000
         && work >= 50_000_000
-        && (active_terminals <= 512 || (20_000..=30_000).contains(&vocab_tokens))
         && (source_reps >= 40_000 || vocab_tokens <= 8_000);
     if dense_protected_profile {
         AutomaticBranchActiveStateMapStrategy::DenseRequiresFastProjection
@@ -861,7 +860,11 @@ fn build_char_type_sub_vocabs(
     );
     let p2_overflow_threshold = long_token_overflow_threshold(
         "GLRMASK_P2_LONG_TOKEN_OVERFLOW_THRESHOLD",
-        automatic_bounded_synthesis_overflow.then_some(32),
+        Some(if automatic_bounded_synthesis_overflow {
+            32
+        } else {
+            20
+        }),
     );
     let p4_overflow_threshold = long_token_overflow_threshold(
         "GLRMASK_P4_LONG_TOKEN_OVERFLOW_THRESHOLD",
@@ -1104,6 +1107,7 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
     ignore_terminal: Option<TerminalID>,
     grammar: &AnalyzedGrammar,
     disallowed_follows: &BTreeMap<u32, BitSet>,
+    precomputed_always_allowed_follows: Option<&[Vec<TerminalID>]>,
     flat_trans: Arc<[u32]>,
     global_max_length_state_map: &ManyToOneIdMap,
     external_classify_cache: Option<&classify::SharedClassifyCache>,
@@ -1316,7 +1320,13 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
     // Grammar-wide and identical for every L2P vocabulary partition. Compute
     // once before parallel partition construction rather than repeating the
     // same FIRST/FOLLOW occurrence traversal in each partition.
-    let always_allowed_follows = compute_always_allowed_follows(grammar);
+    let owned_always_allowed_follows;
+    let always_allowed_follows = if let Some(precomputed) = precomputed_always_allowed_follows {
+        precomputed
+    } else {
+        owned_always_allowed_follows = compute_always_allowed_follows(grammar);
+        &owned_always_allowed_follows
+    };
     let shared_ti_output_cache = shared_classify_cache
         .get()
         .and_then(l2p::SharedTiTokenizerOutputCache::new_with_classify_bytesets)
@@ -1678,6 +1688,7 @@ pub(crate) fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
             ignore_terminal,
             grammar,
             disallowed_follows,
+            None,
             flat_trans,
             global_max_length_state_map,
             external_classify_cache,
@@ -1786,8 +1797,9 @@ mod tests {
             DenseRequiresFastProjection,
         );
         // Near-global active terminal families make the stable refinement
-        // expensive while preserving too many states in medium/compact vocab
-        // lanes. A larger vocabulary can still amortize the quotient.
+        // expensive even when the resulting quotient is tiny: exact flat
+        // suffix profiling can collapse those families directly without first
+        // paying a second whole-token refinement pass.
         assert_eq!(
             automatic_branch_active_state_map_strategy("p1.l1", 15_518, 2_721, 89_478),
             None,
@@ -1798,7 +1810,7 @@ mod tests {
         );
         assert_eq!(
             automatic_branch_active_state_map_strategy("p4.l1", 21_310, 2_721, 89_478),
-            DenseRequiresFastProjection,
+            None,
         );
         assert_eq!(
             automatic_branch_active_state_map_strategy("p2.l1", 82_266, 229, 48_002),

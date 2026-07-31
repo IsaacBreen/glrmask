@@ -1019,7 +1019,7 @@ fn fill_mask_dynamic_impl(
         eprintln!(
             "[glrmask/profile][dynamic_mask_config] tokenizer_states={} epsilon={} fast_transition_rows={}",
             state.constraint.tokenizer.num_states(),
-            state.constraint.tokenizer.has_epsilon_transitions(),
+            state.constraint.tokenizer_has_epsilon_transitions,
             state.constraint.tokenizer_fast_transitions.len(),
         );
     }

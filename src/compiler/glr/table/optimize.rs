@@ -4423,6 +4423,7 @@ mod tests {
             advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
             guarded_shift_index: Vec::new(),
+            direct_regular_wide_frontiers: Vec::new(),
         }
     }
 
@@ -4604,6 +4605,7 @@ mod tests {
                 advance: Vec::new(),
                 forwarded_shifts: FxHashSet::default(),
                 guarded_shift_index: Vec::new(),
+                direct_regular_wide_frontiers: Vec::new(),
             };
             base.merge_identical_rows();
             if base.num_states == 0 {
@@ -4674,6 +4676,7 @@ mod tests {
             advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
             guarded_shift_index: Vec::new(),
+            direct_regular_wide_frontiers: Vec::new(),
         };
 
         let mut base = table.clone();
@@ -4756,6 +4759,7 @@ mod tests {
             advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
             guarded_shift_index: Vec::new(),
+            direct_regular_wide_frontiers: Vec::new(),
         };
         let original_action = format!("{:?}", table.action);
         let original_goto = format!("{:?}", table.goto);
@@ -5132,6 +5136,7 @@ mod tests {
             advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
             guarded_shift_index: Vec::new(),
+            direct_regular_wide_frontiers: Vec::new(),
         };
         let mut predecessors = vec![PredecessorSet::new(); 6];
         predecessors[0] = smallvec![1, 2];
@@ -5184,6 +5189,7 @@ mod tests {
             advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
             guarded_shift_index: Vec::new(),
+            direct_regular_wide_frontiers: Vec::new(),
         };
         let mut predecessors = vec![PredecessorSet::new(); 4];
         predecessors[0].push(1);
@@ -5226,6 +5232,7 @@ mod tests {
             advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
             guarded_shift_index: Vec::new(),
+            direct_regular_wide_frontiers: Vec::new(),
         };
         let mut predecessors = vec![PredecessorSet::new(); 5];
         predecessors[2].push(1);
@@ -5290,6 +5297,7 @@ mod tests {
             advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
             guarded_shift_index: Vec::new(),
+            direct_regular_wide_frontiers: Vec::new(),
         };
         let mut predecessors = vec![PredecessorSet::new(); 6];
         predecessors[2].push(1);
@@ -5349,6 +5357,7 @@ mod tests {
             advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
             guarded_shift_index: Vec::new(),
+            direct_regular_wide_frontiers: Vec::new(),
         };
         let mut predecessors = vec![PredecessorSet::new(); 9];
         predecessors[2].extend_from_slice(&[1, 6]);
@@ -5407,6 +5416,7 @@ mod tests {
             advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
             guarded_shift_index: Vec::new(),
+            direct_regular_wide_frontiers: Vec::new(),
         };
         let predecessors = vec![PredecessorSet::new(); 2];
 
@@ -5432,6 +5442,7 @@ mod tests {
             advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
             guarded_shift_index: Vec::new(),
+            direct_regular_wide_frontiers: Vec::new(),
         };
         let mut predecessors = vec![PredecessorSet::new(); 4];
         predecessors[2].push(1);
@@ -5491,6 +5502,7 @@ mod tests {
             advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
             guarded_shift_index: Vec::new(),
+            direct_regular_wide_frontiers: Vec::new(),
         };
         table.rebuild_advance_rows_from_actions();
 
@@ -5539,6 +5551,7 @@ mod tests {
             advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
             guarded_shift_index: Vec::new(),
+            direct_regular_wide_frontiers: Vec::new(),
         };
         table.rebuild_advance_rows_from_actions();
 
@@ -5604,6 +5617,7 @@ mod tests {
             advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
             guarded_shift_index: Vec::new(),
+            direct_regular_wide_frontiers: Vec::new(),
         };
         table.rebuild_advance_rows_from_actions();
 
@@ -5642,6 +5656,7 @@ mod tests {
             advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
             guarded_shift_index: Vec::new(),
+            direct_regular_wide_frontiers: Vec::new(),
         };
         table.goto[1].insert(0, (3, false));
         table.goto[2].insert(0, (4, false));
@@ -5697,6 +5712,7 @@ mod tests {
             advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
             guarded_shift_index: Vec::new(),
+            direct_regular_wide_frontiers: Vec::new(),
         };
         table.goto[1].insert(0, (3, false));
         table.goto[2].insert(0, (4, false));
@@ -6236,6 +6252,24 @@ pub(super) fn merge_same_core_lr1_states(table: GLRTable, core_keys: &[Vec<Item>
         .iter()
         .map(|&(state, terminal)| (mapping[state as usize], terminal))
         .collect();
+    let direct_regular_wide_frontiers = table
+        .direct_regular_wide_frontiers
+        .iter()
+        .map(|descriptor| {
+            let mut target_states = descriptor
+                .target_states
+                .iter()
+                .map(|&state| mapping[state as usize])
+                .collect::<Vec<_>>();
+            target_states.sort_unstable();
+            target_states.dedup();
+            DirectRegularWideFrontierDescriptor {
+                source_state: mapping[descriptor.source_state as usize],
+                terminal: descriptor.terminal,
+                target_states,
+            }
+        })
+        .collect();
 
     GLRTable {
         action,
@@ -6250,5 +6284,6 @@ pub(super) fn merge_same_core_lr1_states(table: GLRTable, core_keys: &[Vec<Item>
         advance,
         forwarded_shifts,
         guarded_shift_index: Vec::new(),
+        direct_regular_wide_frontiers,
     }
 }

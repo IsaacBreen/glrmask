@@ -15,7 +15,7 @@ use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::ds::leveled_gss::LeveledGSS;
 use crate::ds::u8set::U8Set;
 use crate::ds::weight::Weight;
-use crate::grammar::flat::TerminalID;
+use crate::grammar::flat::{DirectRegularAutomaton, TerminalID};
 
 use super::mask_mapping::FinalMaskMapping;
 
@@ -29,12 +29,65 @@ pub(crate) struct DirectRegularWideFrontierAcceptance {
     pub(crate) action_origins: Vec<usize>,
     pub(crate) state_count: usize,
     pub(crate) actionable_terminals: crate::ds::bitset::BitSet,
+    pub(crate) frontier_states: Arc<[u32]>,
     pub(crate) empty_acc_frontier: ParserGSS,
     pub(crate) acceptance_parts: Arc<[Weight]>,
-    pub(crate) dense_by_tsid: Arc<[(u32, DenseWords)]>,
+    pub(crate) dense_by_tsid: Arc<DenseAcceptanceRows>,
+    pub(crate) advance_by_terminal: Arc<[(TerminalID, Arc<[u32]>)]>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DirectRegularParserStateAcceptance {
+    pub(crate) parser_state: u32,
+    pub(crate) acceptance_parts: Arc<[Weight]>,
+    pub(crate) dense_by_tsid: Arc<DenseAcceptanceRows>,
 }
 
 pub(crate) type DenseWords = Arc<[u64]>;
+
+/// Exact dense acceptance indexed directly by internal tokenizer-state ID.
+///
+/// `row_kinds` uses 0 for empty, 1 for an ordinary row in `rows`, and 2 for the
+/// shared all-token row. Keeping all ordinary rows in one flat allocation avoids
+/// tens of thousands of per-state `Arc` allocations during finalization and
+/// makes hot-path lookup a bounds check plus one slice operation.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DenseAcceptanceRows {
+    words_per_row: usize,
+    rows: Arc<[u64]>,
+    row_kinds: Arc<[u8]>,
+    full_dense: DenseWords,
+}
+
+impl DenseAcceptanceRows {
+    pub(crate) fn new(
+        words_per_row: usize,
+        rows: Vec<u64>,
+        row_kinds: Vec<u8>,
+        full_dense: DenseWords,
+    ) -> Self {
+        debug_assert_eq!(rows.len(), words_per_row.saturating_mul(row_kinds.len()));
+        Self {
+            words_per_row,
+            rows: rows.into(),
+            row_kinds: row_kinds.into(),
+            full_dense,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn get(&self, tsid: u32) -> Option<&[u64]> {
+        let tsid = tsid as usize;
+        match self.row_kinds.get(tsid).copied()? {
+            0 => None,
+            2 => Some(self.full_dense.as_ref()),
+            _ => {
+                let start = tsid.checked_mul(self.words_per_row)?;
+                self.rows.get(start..start + self.words_per_row)
+            }
+        }
+    }
+}
 
 pub(crate) fn empty_dense_words() -> DenseWords {
     Arc::<[u64]>::from(Vec::<u64>::new().into_boxed_slice())
@@ -2679,17 +2732,36 @@ pub struct Constraint {
     /// large union weight per parser state at compile time.
     #[serde(default)]
     pub(crate) parser_top_accept_parts: BTreeMap<i32, Vec<Weight>>,
+    /// Immediate-completion L1 terminal weights for direct-regular parsers.
+    /// Kept once per grammar terminal rather than duplicated across every
+    /// epsilon-closed parser row.
+    #[serde(default)]
+    pub(crate) direct_regular_l1_complete_by_terminal: BTreeMap<TerminalID, Weight>,
     /// Runtime-derived exact acceptance summaries for wide direct-regular
     /// replace-top frontiers. Rebuilt after compile/load from the table and
     /// parser-top acceptance artifacts.
     #[serde(skip, default)]
     pub(crate) direct_regular_wide_frontier_acceptance:
         Vec<DirectRegularWideFrontierAcceptance>,
+    /// Runtime-derived exact dense acceptance for the broadest direct-regular
+    /// parser row(s). This avoids replaying thousands of L1 terminal weights on
+    /// every mask while keeping the cached result source-state exact.
+    #[serde(skip, default)]
+    pub(crate) direct_regular_parser_state_acceptance:
+        Vec<DirectRegularParserStateAcceptance>,
+    /// Sparse terminal-level automaton retained for exact direct-regular
+    /// runtime indexes. Static artifact format versioning covers this field.
+    #[serde(default)]
+    pub(crate) direct_regular_automaton: Option<DirectRegularAutomaton>,
     pub(crate) table: GLRTable,
     #[serde(default)]
     pub(crate) terminal_display_names: Vec<String>,
     #[serde(with = "crate::automata::lexer::tokenizer::artifact_serde")]
     pub(crate) tokenizer: Tokenizer,
+    /// Cached tokenizer topology flag. `Tokenizer::has_epsilon_transitions()`
+    /// scans every tokenizer state, so runtime dispatch must not recompute it.
+    #[serde(skip, default)]
+    pub(crate) tokenizer_has_epsilon_transitions: bool,
     #[serde(default)]
     pub(crate) ignore_terminal: Option<TerminalID>,
     #[serde(default)]

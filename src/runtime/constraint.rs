@@ -16,7 +16,8 @@ use crate::ds::weight::Weight;
 use crate::grammar::flat::TerminalID;
 
 use super::artifact::{
-    empty_dense_words, DirectRegularWideFrontierAcceptance,
+    empty_dense_words, DenseAcceptanceRows, DirectRegularParserStateAcceptance,
+    DirectRegularWideFrontierAcceptance,
     DenseWeightBufMaskCache,
     DenseWeightMaskCache,
     DenseWords,
@@ -366,6 +367,7 @@ impl Constraint {
         &mut self,
         prebuild_initial_token_programs_by_default: bool,
     ) {
+        self.tokenizer_has_epsilon_transitions = self.tokenizer.has_epsilon_transitions();
         let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
         let total_started_at = profile.then(std::time::Instant::now);
@@ -374,7 +376,12 @@ impl Constraint {
             .dynamic_mask_vocab
             .initial_token_program_partition();
         if self.table.guarded_shift_index.len() != self.table.num_states as usize {
-            self.table.rebuild_guarded_shift_index();
+            if self.table.num_rules == 0 {
+                self.table.guarded_shift_index =
+                    vec![FxHashMap::default(); self.table.num_states as usize];
+            } else {
+                self.table.rebuild_guarded_shift_index();
+            }
         }
         let guarded_shift_ms = started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
@@ -805,197 +812,360 @@ impl Constraint {
         stats
     }
 
+    fn direct_regular_frontier_advances(
+        &self,
+        parser_states: &Arc<[u32]>,
+    ) -> Arc<[(TerminalID, Arc<[u32]>)]> {
+        let Some(automaton) = self.direct_regular_automaton.as_ref() else {
+            return Arc::from(Vec::<(TerminalID, Arc<[u32]>)>::new());
+        };
+        let mut seen = vec![false; automaton.states.len()];
+        let mut stack = Vec::with_capacity(parser_states.len());
+        for &parser_state in parser_states.iter() {
+            let Some(raw_state) = parser_state.checked_sub(1) else {
+                return Arc::from(Vec::<(TerminalID, Arc<[u32]>)>::new());
+            };
+            if raw_state as usize >= automaton.states.len() {
+                return Arc::from(Vec::<(TerminalID, Arc<[u32]>)>::new());
+            }
+            stack.push(raw_state);
+        }
+
+        let mut targets_by_terminal = BTreeMap::<TerminalID, Vec<u32>>::new();
+        while let Some(raw_state) = stack.pop() {
+            let index = raw_state as usize;
+            if seen[index] {
+                continue;
+            }
+            seen[index] = true;
+            let state = &automaton.states[index];
+            stack.extend(state.epsilons.iter().copied());
+            for (&terminal, targets) in &state.transitions {
+                let entry = targets_by_terminal.entry(terminal).or_default();
+                entry.extend(targets.iter().map(|target| target + 1));
+            }
+        }
+
+        targets_by_terminal
+            .into_iter()
+            .filter_map(|(terminal, mut targets)| {
+                targets.sort_unstable();
+                targets.dedup();
+                (!targets.is_empty()).then(|| {
+                    let targets: Arc<[u32]> = if targets.as_slice() == parser_states.as_ref() {
+                        Arc::clone(parser_states)
+                    } else {
+                        targets.into()
+                    };
+                    (terminal, targets)
+                })
+            })
+            .collect::<Vec<_>>()
+            .into()
+    }
+
     fn compute_direct_regular_wide_frontier_acceptance(
         &self,
     ) -> Vec<DirectRegularWideFrontierAcceptance> {
-        const MIN_FRONTIER_STATES: usize = 512;
+        const MIN_FRONTIER_STATES: usize = 64;
         if self.uses_dynamic_runtime() || self.table.num_rules != 0 {
-            return Vec::new();
-        }
-
-        let max_frontier_states = self
-            .table
-            .action
-            .iter()
-            .flat_map(|row| row.values())
-            .filter_map(|action| match action {
-                Action::StackShifts(shifts)
-                    if shifts.iter().all(|shift| shift.pop == 1 && shift.pushes.len() == 1) =>
-                {
-                    Some(shifts.len())
-                }
-                _ => None,
-            })
-            .max()
-            .unwrap_or(0);
-        if max_frontier_states < MIN_FRONTIER_STATES {
             return Vec::new();
         }
 
         let mut seen_frontiers = FxHashMap::<Vec<u32>, usize>::default();
         let mut parts_cache = FxHashMap::<Vec<usize>, Arc<[Weight]>>::default();
         let mut summaries = Vec::<DirectRegularWideFrontierAcceptance>::new();
-        for row in &self.table.action {
-            for (_, action) in row {
-                let Action::StackShifts(shifts) = action else {
-                    continue;
-                };
-                if shifts.len() != max_frontier_states
-                    || shifts
-                        .iter()
-                        .any(|shift| shift.pop != 1 || shift.pushes.len() != 1)
-                {
-                    continue;
-                }
-
-                let mut states = shifts
-                    .iter()
-                    .map(|shift| shift.pushes[0])
-                    .collect::<Vec<_>>();
-                states.sort_unstable();
-                states.dedup();
-                if states.len() < MIN_FRONTIER_STATES {
-                    continue;
-                }
-                let action_origin = shifts.as_ptr() as usize;
-                if let Some(&summary_index) = seen_frontiers.get(&states) {
-                    summaries[summary_index].action_origins.push(action_origin);
-                    continue;
-                }
-                seen_frontiers.insert(states.clone(), summaries.len());
-
-                let mut weights = Vec::<Weight>::new();
-                for &state in &states {
-                    let label = encode_positive_label(state);
-                    if let Some(weight) = self
-                        .parser_top_accept
-                        .get(&label)
-                        .or_else(|| self.parser_top_accept.get(&DEFAULT_LABEL))
-                    {
-                        weights.push(weight.clone());
-                    }
-                    if let Some(parts) = self
-                        .parser_top_accept_parts
-                        .get(&label)
-                        .or_else(|| self.parser_top_accept_parts.get(&DEFAULT_LABEL))
-                    {
-                        weights.extend(parts.iter().cloned());
-                    }
-                }
-                weights.sort_unstable_by_key(Weight::ptr_key);
-                weights.dedup_by_key(|weight| weight.ptr_key());
-                let parts_key = weights.iter().map(Weight::ptr_key).collect::<Vec<_>>();
-                let acceptance_parts = if let Some(cached) = parts_cache.get(&parts_key) {
-                    Arc::clone(cached)
-                } else {
-                    let parts: Arc<[Weight]> = weights.into();
-                    parts_cache.insert(parts_key, Arc::clone(&parts));
-                    parts
-                };
-                let mut actionable_terminals =
-                    crate::ds::bitset::BitSet::new(self.table.num_terminals as usize + 1);
-                for &state in &states {
-                    if let Some(row) = self.table.advance.get(state as usize) {
-                        actionable_terminals.union_with(row);
-                    }
-                }
-                let empty_acc_frontier =
-                    ParserGSS::from_sorted_unique_single_value_stacks(
-                        &states,
-                        TerminalsDisallowed::new(),
-                    );
-                summaries.push(DirectRegularWideFrontierAcceptance {
-                    action_origins: vec![action_origin],
-                    state_count: states.len(),
-                    actionable_terminals,
-                    empty_acc_frontier,
-                    acceptance_parts,
-                    dense_by_tsid: Arc::from(Vec::<(u32, DenseWords)>::new()),
-                });
+        for descriptor in &self.table.direct_regular_wide_frontiers {
+            let Some(Action::StackShifts(shifts)) = self
+                .table
+                .action(descriptor.source_state, descriptor.terminal)
+            else {
+                continue;
+            };
+            if shifts
+                .iter()
+                .any(|shift| shift.pop != 1 || shift.pushes.len() != 1)
+            {
+                continue;
             }
+
+            let mut states = descriptor.target_states.clone();
+            states.sort_unstable();
+            states.dedup();
+            if states.len() < MIN_FRONTIER_STATES {
+                continue;
+            }
+            debug_assert_eq!(
+                states,
+                {
+                    let mut action_states = shifts
+                        .iter()
+                        .map(|shift| shift.pushes[0])
+                        .collect::<Vec<_>>();
+                    action_states.sort_unstable();
+                    action_states.dedup();
+                    action_states
+                },
+                "direct-regular frontier descriptor drifted from the live table action",
+            );
+
+            let action_origin = shifts.as_ptr() as usize;
+            if let Some(&summary_index) = seen_frontiers.get(&states) {
+                summaries[summary_index].action_origins.push(action_origin);
+                continue;
+            }
+            seen_frontiers.insert(states.clone(), summaries.len());
+
+            let mut weights = Vec::<Weight>::new();
+            for &state in &states {
+                let label = encode_positive_label(state);
+                if let Some(weight) = self
+                    .parser_top_accept
+                    .get(&label)
+                    .or_else(|| self.parser_top_accept.get(&DEFAULT_LABEL))
+                {
+                    weights.push(weight.clone());
+                }
+                if let Some(parts) = self
+                    .parser_top_accept_parts
+                    .get(&label)
+                    .or_else(|| self.parser_top_accept_parts.get(&DEFAULT_LABEL))
+                {
+                    weights.extend(parts.iter().cloned());
+                }
+            }
+            let mut actionable_terminals =
+                crate::ds::bitset::BitSet::new(self.table.num_terminals as usize + 1);
+            for &state in &states {
+                if let Some(row) = self.table.advance.get(state as usize) {
+                    actionable_terminals.union_with(row);
+                }
+            }
+            for terminal in actionable_terminals.iter_ones() {
+                if let Some(weight) = self
+                    .direct_regular_l1_complete_by_terminal
+                    .get(&(terminal as TerminalID))
+                {
+                    weights.push(weight.clone());
+                }
+            }
+            weights.sort_unstable_by_key(Weight::ptr_key);
+            weights.dedup_by_key(|weight| weight.ptr_key());
+            let parts_key = weights.iter().map(Weight::ptr_key).collect::<Vec<_>>();
+            let acceptance_parts = if let Some(cached) = parts_cache.get(&parts_key) {
+                Arc::clone(cached)
+            } else {
+                let parts: Arc<[Weight]> = weights.into();
+                parts_cache.insert(parts_key, Arc::clone(&parts));
+                parts
+            };
+            let state_count = states.len();
+            let frontier_states: Arc<[u32]> = states.into();
+            let empty_acc_frontier = ParserGSS::from_sorted_unique_single_value_stacks(
+                &frontier_states,
+                TerminalsDisallowed::new(),
+            );
+            let advance_by_terminal = self.direct_regular_frontier_advances(&frontier_states);
+            summaries.push(DirectRegularWideFrontierAcceptance {
+                action_origins: vec![action_origin],
+                state_count,
+                actionable_terminals,
+                frontier_states,
+                empty_acc_frontier,
+                acceptance_parts,
+                dense_by_tsid: Arc::new(DenseAcceptanceRows::default()),
+                advance_by_terminal,
+            });
         }
         summaries
     }
 
-    fn materialize_direct_regular_wide_frontier_dense(&mut self) {
-        let dense_word_count = self.internal_token_dense_words;
-        if dense_word_count == 0 {
-            for summary in &mut self.direct_regular_wide_frontier_acceptance {
-                summary.dense_by_tsid = Arc::from(Vec::<(u32, DenseWords)>::new());
-            }
-            return;
+    fn compute_direct_regular_parser_state_acceptance(
+        &self,
+    ) -> Vec<DirectRegularParserStateAcceptance> {
+        const MIN_L1_TERMINALS: usize = 64;
+        if self.uses_dynamic_runtime()
+            || self.table.num_rules != 0
+            || self.direct_regular_l1_complete_by_terminal.is_empty()
+        {
+            return Vec::new();
         }
 
-        let full_dense = Self::dense_words_from_internal_set_with_words(
-            &self.internal_token_universe(),
-            dense_word_count,
-        );
-        let dense_cache = &self.weight_token_dense_masks;
-        let tsid_count = self.internal_tsid_to_states.len().max(1);
-        let mut materialized = FxHashMap::<usize, Arc<[(u32, DenseWords)]>>::default();
+        let mut l1_terminals =
+            crate::ds::bitset::BitSet::new(self.table.num_terminals as usize + 1);
+        for &terminal in self.direct_regular_l1_complete_by_terminal.keys() {
+            l1_terminals.set(terminal as usize);
+        }
+        let l1_count = |row: &crate::ds::bitset::BitSet| {
+            row.words()
+                .iter()
+                .zip(l1_terminals.words())
+                .map(|(left, right)| (left & right).count_ones() as usize)
+                .sum::<usize>()
+        };
+        let max_l1_terminals = self
+            .table
+            .advance
+            .iter()
+            .map(l1_count)
+            .max()
+            .unwrap_or(0);
+        if max_l1_terminals < MIN_L1_TERMINALS {
+            return Vec::new();
+        }
 
-        for summary in &mut self.direct_regular_wide_frontier_acceptance {
-            let parts_key = Arc::as_ptr(&summary.acceptance_parts) as *const Weight as usize;
-            if let Some(cached) = materialized.get(&parts_key) {
-                summary.dense_by_tsid = Arc::clone(cached);
+        let mut parts_cache = FxHashMap::<Vec<usize>, Arc<[Weight]>>::default();
+        let mut summaries = Vec::new();
+        for (parser_state, row) in self.table.advance.iter().enumerate() {
+            if l1_count(row) != max_l1_terminals {
                 continue;
             }
 
-            let mut by_tsid = vec![vec![0u64; dense_word_count]; tsid_count];
-            let mut full = vec![false; tsid_count];
-            for weight in summary.acceptance_parts.iter() {
-                if weight.is_full() {
-                    full.fill(true);
-                    continue;
-                }
-                if weight.is_empty() {
-                    continue;
-                }
-                for (tsid_range, token_set) in weight.0.range_values() {
-                    let key = Arc::as_ptr(token_set) as usize;
-                    let dense = dense_cache.get(&key).cloned().unwrap_or_else(|| {
-                        Self::dense_words_from_internal_set_with_words(
-                            token_set.as_ref(),
-                            dense_word_count,
-                        )
-                    });
-                    for tsid in *tsid_range.start()..=*tsid_range.end() {
-                        let Some(dst) = by_tsid.get_mut(tsid as usize) else {
-                            continue;
-                        };
-                        for (dst_word, src_word) in dst.iter_mut().zip(dense.iter()) {
-                            *dst_word |= *src_word;
-                        }
-                    }
+            let label = encode_positive_label(parser_state as u32);
+            let mut weights = Vec::<Weight>::with_capacity(max_l1_terminals + 4);
+            if let Some(weight) = self
+                .parser_top_accept
+                .get(&label)
+                .or_else(|| self.parser_top_accept.get(&DEFAULT_LABEL))
+            {
+                weights.push(weight.clone());
+            }
+            if let Some(parts) = self
+                .parser_top_accept_parts
+                .get(&label)
+                .or_else(|| self.parser_top_accept_parts.get(&DEFAULT_LABEL))
+            {
+                weights.extend(parts.iter().cloned());
+            }
+            for terminal in row.iter_ones() {
+                if let Some(weight) = self
+                    .direct_regular_l1_complete_by_terminal
+                    .get(&(terminal as TerminalID))
+                {
+                    weights.push(weight.clone());
                 }
             }
-
-            let entries: Arc<[(u32, DenseWords)]> = by_tsid
-                .into_iter()
-                .enumerate()
-                .filter_map(|(tsid, words)| {
-                    if full[tsid] {
-                        Some((tsid as u32, Arc::clone(&full_dense)))
-                    } else if words.iter().any(|&word| word != 0) {
-                        Some((tsid as u32, Arc::from(words.into_boxed_slice())))
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>()
-                .into();
-            materialized.insert(parts_key, Arc::clone(&entries));
-            summary.dense_by_tsid = entries;
+            weights.sort_unstable_by_key(Weight::ptr_key);
+            weights.dedup_by_key(|weight| weight.ptr_key());
+            let parts_key = weights.iter().map(Weight::ptr_key).collect::<Vec<_>>();
+            let acceptance_parts = if let Some(cached) = parts_cache.get(&parts_key) {
+                Arc::clone(cached)
+            } else {
+                let parts: Arc<[Weight]> = weights.into();
+                parts_cache.insert(parts_key, Arc::clone(&parts));
+                parts
+            };
+            summaries.push(DirectRegularParserStateAcceptance {
+                parser_state: parser_state as u32,
+                acceptance_parts,
+                dense_by_tsid: Arc::new(DenseAcceptanceRows::default()),
+            });
         }
+        summaries
+    }
+
+    fn materialize_acceptance_parts_dense(
+        acceptance_parts: &[Weight],
+        dense_word_count: usize,
+        tsid_count: usize,
+        full_dense: &DenseWords,
+        dense_cache: &DenseWeightMaskCache,
+    ) -> Arc<DenseAcceptanceRows> {
+        let dense_cells = tsid_count
+            .checked_mul(dense_word_count)
+            .expect("acceptance dense matrix size must fit usize");
+        // This used to allocate one Vec per tokenizer state. Large tokenizers
+        // therefore performed tens of thousands of small allocations merely to
+        // materialize one direct-regular acceptance summary. Keep the same
+        // exact row-major matrix in one allocation and freeze only nonempty rows
+        // into the sparse runtime representation below.
+        let mut by_tsid = vec![0u64; dense_cells];
+        let mut row_kinds = vec![0u8; tsid_count];
+        for weight in acceptance_parts {
+            if weight.is_full() {
+                row_kinds.fill(2);
+                continue;
+            }
+            if weight.is_empty() {
+                continue;
+            }
+            for (tsid_range, token_set) in weight.0.range_values() {
+                let key = Arc::as_ptr(token_set) as usize;
+                let dense = dense_cache.get(&key).cloned().unwrap_or_else(|| {
+                    Self::dense_words_from_internal_set_with_words(
+                        token_set.as_ref(),
+                        dense_word_count,
+                    )
+                });
+                for tsid in *tsid_range.start()..=*tsid_range.end() {
+                    let tsid = tsid as usize;
+                    if tsid >= tsid_count {
+                        continue;
+                    }
+                    if row_kinds[tsid] == 2 {
+                        continue;
+                    }
+                    let start = tsid * dense_word_count;
+                    let dst = &mut by_tsid[start..start + dense_word_count];
+                    for (dst_word, src_word) in dst.iter_mut().zip(dense.iter()) {
+                        *dst_word |= *src_word;
+                    }
+                    row_kinds[tsid] = 1;
+                }
+            }
+        }
+
+        Arc::new(DenseAcceptanceRows::new(
+            dense_word_count,
+            by_tsid,
+            row_kinds,
+            Arc::clone(full_dense),
+        ))
+    }
+
+    fn materialize_direct_regular_acceptance_rows(
+        acceptance_parts: &[Arc<[Weight]>],
+        dense_word_count: usize,
+        tsid_count: usize,
+        full_dense: &DenseWords,
+        dense_cache: &DenseWeightMaskCache,
+    ) -> Vec<Arc<DenseAcceptanceRows>> {
+        if dense_word_count == 0 {
+            return (0..acceptance_parts.len())
+                .map(|_| Arc::new(DenseAcceptanceRows::default()))
+                .collect();
+        }
+        let mut materialized = FxHashMap::<usize, Arc<DenseAcceptanceRows>>::default();
+        acceptance_parts
+            .iter()
+            .map(|parts| {
+            let parts_key = Arc::as_ptr(parts) as *const Weight as usize;
+            if let Some(cached) = materialized.get(&parts_key) {
+                return Arc::clone(cached);
+            }
+            let entries = Self::materialize_acceptance_parts_dense(
+                parts,
+                dense_word_count,
+                tsid_count,
+                full_dense,
+                dense_cache,
+            );
+            materialized.insert(parts_key, Arc::clone(&entries));
+            entries
+        })
+        .collect()
     }
 
     pub(crate) fn rebuild_runtime_caches_impl(&mut self) {
+        self.tokenizer_has_epsilon_transitions = self.tokenizer.has_epsilon_transitions();
         let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
         let total_started_at = profile.then(std::time::Instant::now);
         let wide_frontier_started_at = profile.then(std::time::Instant::now);
         self.direct_regular_wide_frontier_acceptance =
             self.compute_direct_regular_wide_frontier_acceptance();
+        self.direct_regular_parser_state_acceptance =
+            self.compute_direct_regular_parser_state_acceptance();
         let wide_frontier_ms = wide_frontier_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         if profile && !self.direct_regular_wide_frontier_acceptance.is_empty() {
@@ -1013,7 +1183,12 @@ impl Constraint {
 
         let guarded_shift_started_at = profile.then(std::time::Instant::now);
         if self.table.guarded_shift_index.len() != self.table.num_states as usize {
-            self.table.rebuild_guarded_shift_index();
+            if self.table.num_rules == 0 {
+                self.table.guarded_shift_index =
+                    vec![FxHashMap::default(); self.table.num_states as usize];
+            } else {
+                self.table.rebuild_guarded_shift_index();
+            }
         }
         let fast_template_dfas_by_terminal = self.compute_fast_template_dfas();
         let guarded_shift_ms = guarded_shift_started_at
@@ -1291,7 +1466,65 @@ impl Constraint {
         self.token_bytes_dense = Vec::new();
         self.internal_token_dense_words = dense_mask_words;
         self.weight_token_dense_masks = dense_masks;
-        self.materialize_direct_regular_wide_frontier_dense();
+        let full_dense = Self::dense_words_from_internal_set_with_words(
+            &self.internal_token_universe(),
+            self.internal_token_dense_words,
+        );
+        let tsid_count = self.internal_tsid_to_states.len().max(1);
+        let wide_parts = self
+            .direct_regular_wide_frontier_acceptance
+            .iter()
+            .map(|summary| Arc::clone(&summary.acceptance_parts))
+            .collect::<Vec<_>>();
+        let parser_parts = self
+            .direct_regular_parser_state_acceptance
+            .iter()
+            .map(|summary| Arc::clone(&summary.acceptance_parts))
+            .collect::<Vec<_>>();
+        let dense_cache = &self.weight_token_dense_masks;
+        let direct_wide_dense_started_at = profile.then(std::time::Instant::now);
+        let direct_parser_dense_started_at = profile.then(std::time::Instant::now);
+        let build_wide = || {
+            Self::materialize_direct_regular_acceptance_rows(
+                &wide_parts,
+                self.internal_token_dense_words,
+                tsid_count,
+                &full_dense,
+                dense_cache,
+            )
+        };
+        let build_parser = || {
+            Self::materialize_direct_regular_acceptance_rows(
+                &parser_parts,
+                self.internal_token_dense_words,
+                tsid_count,
+                &full_dense,
+                dense_cache,
+            )
+        };
+        let (wide_dense, parser_dense) = if rayon::current_num_threads() == 1 {
+            (build_wide(), build_parser())
+        } else {
+            rayon::join(build_wide, build_parser)
+        };
+        let direct_wide_dense_ms = direct_wide_dense_started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let direct_parser_dense_ms = direct_parser_dense_started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        for (summary, dense) in self
+            .direct_regular_wide_frontier_acceptance
+            .iter_mut()
+            .zip(wide_dense)
+        {
+            summary.dense_by_tsid = dense;
+        }
+        for (summary, dense) in self
+            .direct_regular_parser_state_acceptance
+            .iter_mut()
+            .zip(parser_dense)
+        {
+            summary.dense_by_tsid = dense;
+        }
         let derived_piece_started_at = profile.then(std::time::Instant::now);
         let (
             weight_token_buf_masks,
@@ -1344,7 +1577,7 @@ impl Constraint {
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         if let Some(total_started_at) = total_started_at {
             eprintln!(
-                "[glrmask/profile][runtime_finalize_derived] pair_ms={:.3} quad_ms={:.3} super_ms={:.3} mega_ms={:.3} giga_ms={:.3} all_tokens_ms={:.3} heavy_ms={:.3} flat_ms={:.3} costs_ms={:.3} prebuilt_weight_sparse_ms={:.3} weight_buf_ms={:.3} weight_sparse_ms={:.3} final_weight_sets={} final_weight_sparse_sets={} direct_sparse_weight_sets={}",
+                "[glrmask/profile][runtime_finalize_derived] pair_ms={:.3} quad_ms={:.3} super_ms={:.3} mega_ms={:.3} giga_ms={:.3} all_tokens_ms={:.3} heavy_ms={:.3} flat_ms={:.3} costs_ms={:.3} direct_wide_dense_ms={:.3} direct_parser_dense_ms={:.3} prebuilt_weight_sparse_ms={:.3} weight_buf_ms={:.3} weight_sparse_ms={:.3} final_weight_sets={} final_weight_sparse_sets={} direct_sparse_weight_sets={}",
                 pair_ms,
                 quad_ms,
                 super_ms,
@@ -1354,6 +1587,8 @@ impl Constraint {
                 heavy_ms,
                 flat_ms,
                 costs_ms,
+                direct_wide_dense_ms,
+                direct_parser_dense_ms,
                 prebuilt_weight_sparse_ms,
                 weight_buf_ms,
                 weight_sparse_ms,
@@ -1864,6 +2099,18 @@ impl Constraint {
         }
 
         for final_weight in self.parser_top_accept_parts.values().flatten() {
+            if final_weight.is_full() || final_weight.is_empty() {
+                continue;
+            }
+            for (_tsid_range, token_set) in final_weight.0.range_values() {
+                let key = Arc::as_ptr(token_set) as usize;
+                if final_keys.insert(key) {
+                    final_sets.push((key, token_set));
+                }
+            }
+        }
+
+        for final_weight in self.direct_regular_l1_complete_by_terminal.values() {
             if final_weight.is_full() || final_weight.is_empty() {
                 continue;
             }
@@ -2584,7 +2831,7 @@ impl Constraint {
     /// Create a state retaining up to `max_rollback_tokens` token snapshots.
     pub fn start_with_rollback(&self, max_rollback_tokens: usize) -> ConstraintState<'_> {
         crate::runtime::initialize_hot_path_config();
-        if self.tokenizer.has_epsilon_transitions() {
+        if self.tokenizer_has_epsilon_transitions {
             drop(self.tokenizer.all_singleton_epsilon_closures());
         }
         let state = self.initial_state_map();
@@ -2605,7 +2852,7 @@ impl Constraint {
 
     pub(crate) fn start_dynamic(&self) -> ConstraintState<'_> {
         crate::runtime::initialize_hot_path_config();
-        if self.tokenizer.has_epsilon_transitions() {
+        if self.tokenizer_has_epsilon_transitions {
             drop(self.tokenizer.all_singleton_epsilon_closures());
         }
         let mut state = ConstraintState {
@@ -2630,6 +2877,29 @@ impl Constraint {
     }
 
     #[inline]
+    pub(crate) fn direct_regular_wide_frontier_index_for_gss(
+        &self,
+        gss: &ParserGSS,
+    ) -> Option<usize> {
+        let lower_id = gss.single_interface_lower_id()?;
+        self.direct_regular_wide_frontier_acceptance
+            .iter()
+            .position(|summary| {
+                summary.empty_acc_frontier.single_interface_lower_id() == Some(lower_id)
+            })
+    }
+
+    #[inline]
+    pub(crate) fn direct_regular_wide_acceptance_for_parser_state(
+        &self,
+        parser_state: u32,
+    ) -> Option<&DirectRegularParserStateAcceptance> {
+        self.direct_regular_parser_state_acceptance
+            .iter()
+            .find(|summary| summary.parser_state == parser_state)
+    }
+
+    #[inline]
     pub(crate) fn direct_regular_wide_frontier_for_gss(
         &self,
         gss: &ParserGSS,
@@ -2642,11 +2912,53 @@ impl Constraint {
             })
     }
 
+    pub(crate) fn for_each_direct_regular_l1_acceptance(
+        &self,
+        parser_state: u32,
+        mut visit: impl FnMut(&Weight),
+    ) -> bool {
+        if self.direct_regular_l1_complete_by_terminal.is_empty() {
+            return false;
+        }
+        let Some(row) = self.table.advance.get(parser_state as usize) else {
+            return false;
+        };
+        let mut found = false;
+        for terminal in row.iter_ones() {
+            if let Some(weight) = self
+                .direct_regular_l1_complete_by_terminal
+                .get(&(terminal as TerminalID))
+            {
+                found = true;
+                visit(weight);
+            }
+        }
+        found
+    }
+
     pub(crate) fn direct_regular_cached_advance(
         &self,
         gss: &ParserGSS,
         terminal: TerminalID,
     ) -> Option<ParserGSS> {
+        if let Some(summary) = self.direct_regular_wide_frontier_for_gss(gss) {
+            let acc = gss.uniform_accumulator()?;
+            let index = summary
+                .advance_by_terminal
+                .binary_search_by_key(&terminal, |(candidate, _)| *candidate)
+                .ok()?;
+            let targets = &summary.advance_by_terminal.get(index)?.1;
+            if Arc::ptr_eq(targets, &summary.frontier_states) {
+                return summary.empty_acc_frontier.with_uniform_accumulator(acc);
+            }
+            if let [target] = targets.as_ref() {
+                return Some(ParserGSS::from_single_stack(vec![*target], acc));
+            }
+            return Some(ParserGSS::from_sorted_unique_single_value_stacks(
+                targets,
+                acc,
+            ));
+        }
         if gss.max_depth() != 1 {
             return None;
         }

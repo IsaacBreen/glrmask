@@ -2181,19 +2181,20 @@ fn find_l1_exact_state_equivalence_by_token_signatures_with_first_target_cache(
     first_target_cache_override: Option<bool>,
 ) -> (Vec<usize>, Option<L1ExactProfileReuse>) {
     let terminal_signature_started_at = compile_profile_enabled().then(Instant::now);
-    let _ = flat_trans;
-    let tokenizer_view = TokenizerView::new_filtered(tokenizer, active_terminals);
-    let (state_to_terminal_signature, terminal_signatures) =
-        build_l1_flat_state_to_terminal_signatures(tokenizer_view.dfa());
+    let (state_to_terminal_signature, terminal_signatures, active_language) =
+        build_l1_tokenizer_state_to_terminal_signatures(tokenizer, active_terminals);
     let terminal_signature_ms = terminal_signature_started_at.map_or(0.0, |started| {
         started.elapsed().as_secs_f64() * 1000.0
     });
-    find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
+    find_l1_exact_state_equivalence_by_components_with_first_target_cache(
         vocab_order,
         states,
         state_to_terminal_signature,
         terminal_signatures,
-        &tokenizer_view,
+        flat_trans,
+        &active_language,
+        None,
+        Some((tokenizer, active_terminals)),
         transitions_by_byte,
         true,
         terminal_signature_ms,
@@ -2235,6 +2236,44 @@ fn find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
     terminal_signature_ms: f64,
     first_target_cache_override: Option<bool>,
 ) -> (Vec<usize>, Option<L1ExactProfileReuse>) {
+    let dfa = tokenizer_view.dfa();
+    let active_language = dfa
+        .states
+        .iter()
+        .map(|state| {
+            !state.finalizers.is_empty() || !state.possible_future_group_ids.is_empty()
+        })
+        .collect::<Vec<_>>();
+    find_l1_exact_state_equivalence_by_components_with_first_target_cache(
+        vocab_order,
+        states,
+        state_to_terminal_signature,
+        terminal_signatures,
+        dfa.transitions.as_ref(),
+        &active_language,
+        Some(tokenizer_view),
+        None,
+        transitions_by_byte,
+        allow_remaining_horizon_quotients,
+        terminal_signature_ms,
+        first_target_cache_override,
+    )
+}
+
+fn find_l1_exact_state_equivalence_by_components_with_first_target_cache(
+    vocab_order: &L1IdentityVocabOrder,
+    states: &[usize],
+    state_to_terminal_signature: Vec<u32>,
+    terminal_signatures: Vec<Vec<u32>>,
+    flat_trans: &[u32],
+    active_language: &[bool],
+    horizon_tokenizer_view: Option<&TokenizerView>,
+    horizon_source: Option<(&Tokenizer, &[bool])>,
+    transitions_by_byte: Option<&[u32]>,
+    allow_remaining_horizon_quotients: bool,
+    terminal_signature_ms: f64,
+    first_target_cache_override: Option<bool>,
+) -> (Vec<usize>, Option<L1ExactProfileReuse>) {
     if states.len() <= 1 {
         return (states.to_vec(), None);
     }
@@ -2252,16 +2291,8 @@ fn find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
     let sorted_entries = vocab_order.token_entries_sorted.as_ref();
     let token_buckets = &vocab_order.token_buckets;
     let dead = u32::MAX;
-    let dfa = tokenizer_view.dfa();
-    let flat_trans = dfa.transitions.as_ref();
-    let active_language = dfa
-        .states
-        .iter()
-        .map(|state| {
-            !state.finalizers.is_empty() || !state.possible_future_group_ids.is_empty()
-        })
-        .collect::<Vec<_>>();
-    let num_tokenizer_states = dfa.states.len();
+    let active_language = active_language.to_vec();
+    let num_tokenizer_states = state_to_terminal_signature.len();
     debug_assert_eq!(state_to_terminal_signature.len(), num_tokenizer_states);
 
     let mut suffix_horizon_by_first_byte = [0usize; 256];
@@ -2326,7 +2357,21 @@ fn find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
             raw_unique_targets_len,
         );
     let horizon_quotient_started_at = profile_enabled.then(Instant::now);
-    let horizon_maps = use_remaining_horizon_quotients.then(|| {
+    let owned_horizon_view = if use_remaining_horizon_quotients
+        && horizon_tokenizer_view.is_none()
+    {
+        let (tokenizer, active_terminals) =
+            horizon_source.expect("an L1 horizon source is required");
+        Some(TokenizerView::new_filtered(tokenizer, active_terminals))
+    } else {
+        None
+    };
+    let horizon_view = use_remaining_horizon_quotients.then(|| {
+        horizon_tokenizer_view
+            .or(owned_horizon_view.as_ref())
+            .expect("L1 horizon tokenizer view must exist")
+    });
+    let horizon_maps = horizon_view.map(|tokenizer_view| {
         let byte_to_class = compute_byte_classes(tokenizer_view.dfa());
         super::l2p::equivalence_analysis::state::max_length::find_canonical_state_maps_by_depth_from_labels(
             tokenizer_view,
@@ -2580,7 +2625,16 @@ fn find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
                 );
                 if flat_ms <= packed_ms { flat } else { packed }
             } else {
-                let auto_prefers_packed = token_ids.len() > 500
+                // On a large vocabulary partition, flat target walks retain
+                // excellent byte/token locality across the many first-byte
+                // buckets. Building and traversing a separate packed suffix
+                // product for medium buckets instead creates enough allocator
+                // and interning traffic to dominate the partition. Reserve the
+                // packed auto choice for smaller partitions where its trie
+                // compression amortizes that setup cost.
+                let large_partition_prefers_flat = sorted_entries.len() >= 20_000;
+                let auto_prefers_packed = !large_partition_prefers_flat
+                    && token_ids.len() > 500
                     && token_ids.len() <= 7_000
                     && token_buckets.packed_suffix_tries_by_first_byte[byte_idx]
                         .get_or_init(|| {
@@ -4459,6 +4513,44 @@ fn build_l1_flat_state_to_terminal_signatures(
     (state_to_terminal_signature, terminal_signatures)
 }
 
+fn build_l1_tokenizer_state_to_terminal_signatures(
+    tokenizer: &Tokenizer,
+    active_terminals: &[bool],
+) -> (Vec<u32>, Vec<Vec<u32>>, Vec<bool>) {
+    let mut signature_to_id = FxHashMap::<Vec<u32>, u32>::default();
+    signature_to_id.insert(Vec::new(), 0);
+    let mut terminal_signatures = vec![Vec::new()];
+    let mut state_to_terminal_signature = vec![0u32; tokenizer.num_states() as usize];
+    let mut active_language = vec![false; tokenizer.num_states() as usize];
+
+    for state in 0..tokenizer.num_states() {
+        let mut signature = tokenizer
+            .matched_terminals_iter(state)
+            .chain(tokenizer.possible_future_terminals_iter(state))
+            .filter(|&terminal| {
+                active_terminals
+                    .get(terminal as usize)
+                    .copied()
+                    .unwrap_or(false)
+            })
+            .collect::<Vec<_>>();
+        signature.sort_unstable();
+        signature.dedup();
+        active_language[state as usize] = !signature.is_empty();
+        let signature_id = if let Some(&id) = signature_to_id.get(&signature) {
+            id
+        } else {
+            let id = terminal_signatures.len() as u32;
+            signature_to_id.insert(signature.clone(), id);
+            terminal_signatures.push(signature);
+            id
+        };
+        state_to_terminal_signature[state as usize] = signature_id;
+    }
+
+    (state_to_terminal_signature, terminal_signatures, active_language)
+}
+
 
 fn l1_token_signature_profile_for_state(
     start_state: u32,
@@ -5614,13 +5706,12 @@ fn build_l1_terminal_dwa(
 }
 
 pub(crate) fn build_flat_transition_table(tokenizer: &Tokenizer) -> Vec<u32> {
-    let dead = u32::MAX;
-    let mut flat_trans = vec![dead; tokenizer.num_states() as usize * 256];
-    for state_idx in 0..tokenizer.num_states() as usize {
-        let base = state_idx * 256;
-        for (byte, target) in tokenizer.transitions_from(state_idx as u32) {
-            flat_trans[base + byte as usize] = target;
-        }
+    let mut flat_trans = vec![0; tokenizer.num_states() as usize * 256];
+    for (state_idx, row) in flat_trans.chunks_exact_mut(256).enumerate() {
+        let row: &mut [u32; 256] = row
+            .try_into()
+            .expect("flat tokenizer transition rows have fixed width");
+        tokenizer.fill_transition_row(state_idx as u32, row);
     }
     flat_trans
 }

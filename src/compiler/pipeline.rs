@@ -37,6 +37,7 @@ use crate::compiler::stages::id_map_and_terminal_dwa::classify::{
     prewarm_shared_classify_cache,
 };
 use crate::compiler::stages::id_map_and_terminal_dwa::grammar_helpers::{
+    compute_allowed_follow_sets,
     compute_ever_allowed_follows,
     compute_terminal_coloring,
     ignore_transparent_disallowed_follows,
@@ -60,7 +61,7 @@ use crate::compiler::stages::mapped_artifact::{
 use crate::compiler::stages::parser_dwa::{
     build_parser_dwa_from_terminal_dwa_with_precomputed_templates,
     try_build_direct_regular_parser_top_accept_parts, try_build_immediate_parser_dwa,
-    try_build_immediate_parser_top_accept_parts,
+    try_build_immediate_terminal_completion_weights,
 };
 use crate::compiler::stages::templates::{Templates, commit_template_dfas_enabled};
 use crate::compiler::stages::templates::characterize::characterize_terminals_profiled;
@@ -70,7 +71,7 @@ use crate::compiler::stages::templates::compile_dfa::{
 };
 use crate::ds::bitset::BitSet;
 use crate::ds::weight::Weight;
-use crate::grammar::flat::{GrammarDef, Terminal};
+use crate::grammar::flat::{GrammarDef, Terminal, TerminalID};
 use crate::runtime::{Constraint, SpecialTokenTerminal};
 use crate::DynamicConstraint;
 
@@ -374,7 +375,14 @@ where
 
 pub(crate) fn compute_disallowed_follows(grammar: &AnalyzedGrammar) -> BTreeMap<u32, BitSet> {
     let ever_allowed = compute_ever_allowed_follows(grammar);
-    let num_terminals = grammar.num_terminals as usize;
+    compute_disallowed_follows_from_ever(grammar.num_terminals, &ever_allowed)
+}
+
+fn compute_disallowed_follows_from_ever(
+    num_terminals: u32,
+    ever_allowed: &[Vec<u32>],
+) -> BTreeMap<u32, BitSet> {
+    let num_terminals = num_terminals as usize;
     let mut disallowed_by_terminal = BTreeMap::new();
 
     for (terminal_id, allowed) in ever_allowed.iter().enumerate() {
@@ -619,6 +627,7 @@ mod huge_parser_top_accept_collapse_tests {
             ParserTopAccept {
                 combined: BTreeMap::new(),
                 parts: BTreeMap::from([(label, parts)]),
+                direct_l1_complete_by_terminal: BTreeMap::new(),
             },
             expected,
         )
@@ -1557,18 +1566,21 @@ fn finalize_constraint(mut constraint: Constraint) -> Constraint {
 struct ParserTopAccept {
     combined: BTreeMap<i32, Weight>,
     parts: BTreeMap<i32, Vec<Weight>>,
+    direct_l1_complete_by_terminal: BTreeMap<TerminalID, Weight>,
 }
 
 impl WeightRefs for ParserTopAccept {
     fn weight_refs(&self) -> Vec<&Weight> {
         let mut weights = self.combined.weight_refs();
         weights.extend(self.parts.weight_refs());
+        weights.extend(self.direct_l1_complete_by_terminal.weight_refs());
         weights
     }
 
     fn weight_refs_mut(&mut self) -> Vec<&mut Weight> {
         let mut weights = self.combined.weight_refs_mut();
         weights.extend(self.parts.weight_refs_mut());
+        weights.extend(self.direct_l1_complete_by_terminal.weight_refs_mut());
         weights
     }
 }
@@ -1765,6 +1777,7 @@ struct AnalysisDagLane {
     analyzed_grammar: Arc<AnalyzedGrammar>,
     analyze_grammar_ms: f64,
     disallowed_follows: Arc<BTreeMap<u32, BitSet>>,
+    always_allowed_follows: Arc<[Vec<u32>]>,
     disallowed_follows_ms: f64,
     analysis_ready_ms: f64,
 }
@@ -1937,6 +1950,12 @@ fn merge_parser_top_accept(mut left: ParserTopAccept, right: ParserTopAccept) ->
     for (label, mut parts) in right.parts {
         left.parts.entry(label).or_default().append(&mut parts);
     }
+    for (terminal, weight) in right.direct_l1_complete_by_terminal {
+        left.direct_l1_complete_by_terminal
+            .entry(terminal)
+            .and_modify(|existing| *existing = existing.union(&weight))
+            .or_insert(weight);
+    }
     left
 }
 
@@ -2027,17 +2046,21 @@ fn build_and_merge_parser_dwa_families(
         .as_ref()
         .and_then(|_| terminal_dwas.l1.as_ref())
         .and_then(|family| {
-            try_build_immediate_parser_top_accept_parts(family.artifact(), grammar, table).map(
-                |parts| {
-                    MappedArtifact::new(
-                        ParserTopAccept {
-                            combined: BTreeMap::new(),
-                            parts,
-                        },
-                        family.id_map().clone(),
-                    )
-                },
+            try_build_immediate_terminal_completion_weights(
+                family.artifact(),
+                grammar,
+                table,
             )
+            .map(|direct_l1_complete_by_terminal| {
+                MappedArtifact::new(
+                    ParserTopAccept {
+                        combined: BTreeMap::new(),
+                        parts: BTreeMap::new(),
+                        direct_l1_complete_by_terminal,
+                    },
+                    family.id_map().clone(),
+                )
+            })
         });
     let direct_l2p_parts = grammar
         .direct_regular_automaton
@@ -2054,6 +2077,7 @@ fn build_and_merge_parser_dwa_families(
                     ParserTopAccept {
                         combined: BTreeMap::new(),
                         parts,
+                        direct_l1_complete_by_terminal: BTreeMap::new(),
                     },
                     family.id_map().clone(),
                 )
@@ -2074,6 +2098,7 @@ fn build_and_merge_parser_dwa_families(
                     ParserTopAccept {
                         combined: BTreeMap::new(),
                         parts,
+                        direct_l1_complete_by_terminal: BTreeMap::new(),
                     },
                     family.id_map().clone(),
                 )
@@ -2239,6 +2264,7 @@ fn build_and_merge_parser_dwa_families(
             ParserTopAccept {
                 combined,
                 parts: BTreeMap::new(),
+                direct_l1_complete_by_terminal: BTreeMap::new(),
             },
         ),
         id_map,
@@ -2513,6 +2539,7 @@ fn launch_terminal_dag_if_ready<'scope>(
                 prepared_grammar.ignore_terminal,
                 &analysis.analyzed_grammar,
                 &analysis.disallowed_follows,
+                Some(&analysis.always_allowed_follows),
                 Arc::clone(&flat_global.flat_trans),
                 &flat_global.global_max_length_state_map,
                 Some(&classify.shared_classify_cache),
@@ -3191,11 +3218,17 @@ fn compile_prepared_with_profile_and_table_construction(
                 });
 
                 let disallowed_follows_started_at = Instant::now();
-                let disallowed_follows = Arc::new(compute_disallowed_follows(&analyzed_grammar));
+                let (ever_allowed_follows, always_allowed_follows) =
+                    compute_allowed_follow_sets(&analyzed_grammar);
+                let disallowed_follows = Arc::new(compute_disallowed_follows_from_ever(
+                    analyzed_grammar.num_terminals,
+                    &ever_allowed_follows,
+                ));
                 let analysis_lane = AnalysisDagLane {
                     analyzed_grammar,
                     analyze_grammar_ms,
                     disallowed_follows,
+                    always_allowed_follows: always_allowed_follows.into(),
                     disallowed_follows_ms: elapsed_ms(disallowed_follows_started_at),
                     analysis_ready_ms: elapsed_ms(analysis_started_for_analysis),
                 };
@@ -3541,6 +3574,7 @@ fn compile_prepared_with_profile_and_table_construction(
             ParserTopAccept {
                 combined: parser_top_accept,
                 parts: parser_top_accept_parts,
+                direct_l1_complete_by_terminal,
             },
         ) = parser_dwa.into_artifact();
 
@@ -3583,10 +3617,14 @@ fn compile_prepared_with_profile_and_table_construction(
             parser_dwa,
             parser_top_accept,
             parser_top_accept_parts,
+            direct_regular_l1_complete_by_terminal: direct_l1_complete_by_terminal,
             direct_regular_wide_frontier_acceptance: Vec::new(),
+            direct_regular_parser_state_acceptance: Vec::new(),
+            direct_regular_automaton: analyzed_grammar.direct_regular_automaton.clone(),
             table,
             terminal_display_names: analyzed_grammar.terminal_display_names.clone(),
             tokenizer,
+            tokenizer_has_epsilon_transitions: false,
             ignore_terminal: prepared_grammar.ignore_terminal,
             special_token_terminals,
             dynamic_mask_vocab: runtime_dynamic_vocab.vocab,

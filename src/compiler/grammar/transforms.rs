@@ -162,6 +162,46 @@ enum TerminalIdentity {
     SpecialToken { token_id: u32, is_ignore: bool },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum TerminalIdentityRef<'a> {
+    Literal {
+        bytes: &'a [u8],
+        is_ignore: bool,
+    },
+    Pattern {
+        pattern: &'a str,
+        utf8: bool,
+        is_ignore: bool,
+    },
+    Expr {
+        expr: &'a Expr,
+        is_ignore: bool,
+    },
+    SpecialToken {
+        token_id: u32,
+        is_ignore: bool,
+    },
+}
+
+fn terminal_identity_ref(terminal: &Terminal, is_ignore: bool) -> TerminalIdentityRef<'_> {
+    match terminal {
+        Terminal::Literal { bytes, .. } => TerminalIdentityRef::Literal {
+            bytes,
+            is_ignore,
+        },
+        Terminal::Pattern { pattern, utf8, .. } => TerminalIdentityRef::Pattern {
+            pattern,
+            utf8: *utf8,
+            is_ignore,
+        },
+        Terminal::Expr { expr, .. } => TerminalIdentityRef::Expr { expr, is_ignore },
+        Terminal::SpecialToken { token_id, .. } => TerminalIdentityRef::SpecialToken {
+            token_id: *token_id,
+            is_ignore,
+        },
+    }
+}
+
 fn terminal_identity(terminal: &Terminal, is_ignore: bool) -> TerminalIdentity {
     match terminal {
         Terminal::Literal { bytes, .. } => TerminalIdentity::Literal {
@@ -191,20 +231,77 @@ fn terminal_identity(terminal: &Terminal, is_ignore: bool) -> TerminalIdentity {
 /// preserved even when two terminals have identical languages. Mutates the
 /// grammar in place.
 pub(crate) fn compact_unused_terminals(grammar: &mut GrammarDef) {
-    let mut used = BTreeSet::<TerminalID>::new();
+    let terminal_count = grammar.terminals.len();
+    let mut used_flags = vec![false; terminal_count];
     for rule in grammar.rules.iter() {
         for symbol in &rule.rhs {
             if let Symbol::Terminal(terminal_id) = symbol {
-                used.insert(*terminal_id);
+                let index = *terminal_id as usize;
+                assert!(
+                    index < terminal_count,
+                    "terminal id {terminal_id} referenced by a rule but missing from grammar.terminals",
+                );
+                used_flags[index] = true;
             }
         }
     }
     if let Some(ignore_terminal) = grammar.ignore_terminal {
-        used.insert(ignore_terminal);
+        let index = ignore_terminal as usize;
+        assert!(
+            index < terminal_count,
+            "ignore terminal id {ignore_terminal} missing from grammar.terminals",
+        );
+        used_flags[index] = true;
     }
     if let Some(automaton) = &grammar.direct_regular_automaton {
         for state in &automaton.states {
-            used.extend(state.transitions.keys().copied());
+            for &terminal in state.transitions.keys() {
+                let index = terminal as usize;
+                assert!(
+                    index < terminal_count,
+                    "direct regular terminal id {terminal} missing from grammar.terminals",
+                );
+                used_flags[index] = true;
+            }
+        }
+    }
+
+    // The common imported-grammar case is already compact: every terminal is
+    // referenced, terminal IDs match their vector positions, and terminal
+    // languages are unique within their lexer partition/isolation class. Prove
+    // that with borrowed identities and return before cloning every terminal,
+    // rewriting every rule, and rebuilding every direct-regular transition map.
+    let already_identity_compaction = used_flags.iter().all(|used| *used)
+        && grammar
+            .terminals
+            .iter()
+            .enumerate()
+            .all(|(index, terminal)| terminal.id() as usize == index)
+        && {
+            let mut identities = HashMap::with_capacity(terminal_count);
+            grammar.terminals.iter().enumerate().all(|(index, terminal)| {
+                let terminal_id = index as TerminalID;
+                let identity = (
+                    terminal_identity_ref(terminal, grammar.ignore_terminal == Some(terminal_id)),
+                    grammar.lexer_partitions.get(&terminal_id).map(String::as_str),
+                    grammar.residual_isolation_classes.get(&terminal_id).copied(),
+                );
+                identities.insert(identity, terminal_id).is_none()
+            })
+        };
+    if already_identity_compaction {
+        return;
+    }
+
+    let used = used_flags
+        .into_iter()
+        .enumerate()
+        .filter_map(|(terminal, used)| used.then_some(terminal as TerminalID))
+        .collect::<BTreeSet<_>>();
+
+    for &terminal in &used {
+        if terminal as usize >= terminal_count {
+            unreachable!("used-terminal validation above covers every terminal source");
         }
     }
 

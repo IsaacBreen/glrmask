@@ -2364,45 +2364,33 @@ impl<'a> ConstraintState<'a> {
 
                 let positive_label = encode_positive_label(parser_state);
                 if stack_idx == 1 {
-                    if let Some(accept_weight) = self
+                    let dense = if dense_is_seed {
+                        seed_base.as_ref()
+                    } else {
+                        single_path_acc.as_slice()
+                    };
+                    let mut used_equivalent_wide_summary = false;
+                    if let Some(summary) = self
                         .constraint
-                        .parser_top_accept
-                        .get(&positive_label)
-                        .or_else(|| self.constraint.parser_top_accept.get(&DEFAULT_LABEL))
+                        .direct_regular_wide_acceptance_for_parser_state(parser_state)
+                        && let Some(accepted) = summary.dense_by_tsid.get(internal_tsid)
                     {
+                        let n = dense.len().min(accepted.len()).min(merged.len());
+                        for word in 0..n {
+                            merged[word] |= dense[word] & accepted[word];
+                        }
                         used_direct_final = true;
-                        let dense = if dense_is_seed {
-                            seed_base.as_ref()
-                        } else {
-                            single_path_acc.as_slice()
-                        };
-                        self.merge_single_path_final_weight_to_internal(
-                            accept_weight,
-                            internal_tsid,
-                            dense,
-                            precomputed,
-                            &mut merged,
-                            Some(&mut *buf),
-                            &mut direct_buf_dirty,
-                        );
+                        used_equivalent_wide_summary = true;
                     }
-                    if let Some(accept_parts) = self
-                        .constraint
-                        .parser_top_accept_parts
-                        .get(&positive_label)
-                        .or_else(|| {
-                            self.constraint
-                                .parser_top_accept_parts
-                                .get(&DEFAULT_LABEL)
-                        })
-                    {
-                        used_direct_final = true;
-                        let dense = if dense_is_seed {
-                            seed_base.as_ref()
-                        } else {
-                            single_path_acc.as_slice()
-                        };
-                        for accept_weight in accept_parts {
+
+                    if !used_equivalent_wide_summary {
+                        if let Some(accept_weight) = self
+                            .constraint
+                            .parser_top_accept
+                            .get(&positive_label)
+                            .or_else(|| self.constraint.parser_top_accept.get(&DEFAULT_LABEL))
+                        {
+                            used_direct_final = true;
                             self.merge_single_path_final_weight_to_internal(
                                 accept_weight,
                                 internal_tsid,
@@ -2413,6 +2401,44 @@ impl<'a> ConstraintState<'a> {
                                 &mut direct_buf_dirty,
                             );
                         }
+                        if let Some(accept_parts) = self
+                            .constraint
+                            .parser_top_accept_parts
+                            .get(&positive_label)
+                            .or_else(|| {
+                                self.constraint
+                                    .parser_top_accept_parts
+                                    .get(&DEFAULT_LABEL)
+                            })
+                        {
+                            used_direct_final = true;
+                            for accept_weight in accept_parts {
+                                self.merge_single_path_final_weight_to_internal(
+                                    accept_weight,
+                                    internal_tsid,
+                                    dense,
+                                    precomputed,
+                                    &mut merged,
+                                    Some(&mut *buf),
+                                    &mut direct_buf_dirty,
+                                );
+                            }
+                        }
+                        let used_l1 = self.constraint.for_each_direct_regular_l1_acceptance(
+                            parser_state,
+                            |accept_weight| {
+                                self.merge_single_path_final_weight_to_internal(
+                                    accept_weight,
+                                    internal_tsid,
+                                    dense,
+                                    precomputed,
+                                    &mut merged,
+                                    Some(&mut *buf),
+                                    &mut direct_buf_dirty,
+                                );
+                            },
+                        );
+                        used_direct_final |= used_l1;
                     }
                 }
                 let fast_transitions = &self.constraint.dwa_fast_transitions[dwa_state_id as usize];
@@ -2806,12 +2832,7 @@ impl<'a> ConstraintState<'a> {
             );
         }
         for (tsid, dense) in &dense_acc.0 {
-            let Some((_, accepted)) = summary
-                .dense_by_tsid
-                .binary_search_by_key(tsid, |(candidate, _)| *candidate)
-                .ok()
-                .and_then(|index| summary.dense_by_tsid.get(index))
-            else {
+            let Some(accepted) = summary.dense_by_tsid.get(*tsid) else {
                 continue;
             };
             let n = dense.len().min(accepted.len()).min(merged.len());
@@ -2991,6 +3012,28 @@ impl<'a> ConstraintState<'a> {
                         profile.token_accumulation_ns += elapsed_ns(start);
                     }
                 }
+                let accumulate_start = profile.as_ref().map(|_| Instant::now());
+                let mut l1_direct_possible = true;
+                let used_l1 = self.constraint.for_each_direct_regular_l1_acceptance(
+                    *parser_state,
+                    |accept_weight| {
+                        l1_direct_possible &= self.merge_final_weight_for_gss(
+                            accept_weight,
+                            popped,
+                            precomputed,
+                            merged,
+                            direct_buf,
+                            direct_buf_dirty,
+                        );
+                    },
+                );
+                if used_l1 {
+                    *direct_buf_used = true;
+                    *direct_buf_possible &= l1_direct_possible;
+                    if let (Some(profile), Some(start)) = (profile.as_mut(), accumulate_start) {
+                        profile.token_accumulation_ns += elapsed_ns(start);
+                    }
+                }
                 queue.record_seed_decompose_callback();
                 enqueue_parser_state_transition(
                     queue,
@@ -3144,6 +3187,21 @@ impl<'a> ConstraintState<'a> {
                         });
                     }
                 }
+                self.constraint.for_each_direct_regular_l1_acceptance(
+                    parser_state,
+                    |top_weight| {
+                        dense.for_each_acc(|accumulator| {
+                            merge_accepted(
+                                &mut accepted,
+                                accumulator.intersect_with_weight_small_cached(
+                                    top_weight,
+                                    precomputed,
+                                    &mut seed_intersections,
+                                ),
+                            );
+                        });
+                    },
+                );
                 let Some((target, transition_weight)) = start_transitions
                     .get(&positive_label)
                     .or_else(|| start_transitions.get(&DEFAULT_LABEL))

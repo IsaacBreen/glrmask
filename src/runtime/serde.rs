@@ -1,7 +1,7 @@
 use crate::runtime::Constraint;
 
 const CONSTRAINT_MAGIC: [u8; 8] = *b"GLRCONS\0";
-const CONSTRAINT_VERSION: u16 = 6;
+const CONSTRAINT_VERSION: u16 = 7;
 const CONSTRAINT_HEADER_LEN: usize = CONSTRAINT_MAGIC.len() + 2 + 8;
 
 impl Constraint {

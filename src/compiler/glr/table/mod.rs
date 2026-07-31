@@ -97,6 +97,17 @@ pub struct GLRTable {
     pub forwarded_shifts: FxHashSet<(u32, TerminalID)>,
     #[serde(skip)]
     pub guarded_shift_index: Vec<FxHashMap<TerminalID, GuardedShiftCellIndex>>,
+    /// Maximum-width direct-regular frontier descriptors captured while rows
+    /// are constructed, before the expanded table would need to be rescanned.
+    #[serde(default)]
+    pub direct_regular_wide_frontiers: Vec<DirectRegularWideFrontierDescriptor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct DirectRegularWideFrontierDescriptor {
+    pub source_state: u32,
+    pub terminal: TerminalID,
+    pub target_states: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -297,6 +308,13 @@ impl GLRTable {
         // artifacts that do not carry the side table. Newly compiled tables build
         // `advance` before guard-producing optimizations run.
         self.action(state, terminal).is_some()
+    }
+
+    #[inline]
+    pub(crate) fn advance_row(&self, state: u32) -> Option<&BitSet> {
+        self.has_advance_rows()
+            .then(|| self.advance.get(state as usize))
+            .flatten()
     }
 
     #[inline]
@@ -567,6 +585,7 @@ pub(crate) mod testing {
             advance,
             forwarded_shifts: Default::default(),
             guarded_shift_index: Vec::new(),
+            direct_regular_wide_frontiers: Vec::new(),
         }
     }
 }

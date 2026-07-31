@@ -997,13 +997,17 @@ fn wide_frontier_end_state_may_advance(
 
 enum ActionableTerminals {
     SingleState(u32),
+    WideFrontier(usize),
     ManyStates(SmallVec<[u32; 8]>),
 }
 
 impl ActionableTerminals {
-    fn from_gss(_constraint: &Constraint, gss: &ParserGSS) -> Option<Self> {
+    fn from_gss(constraint: &Constraint, gss: &ParserGSS) -> Option<Self> {
         if let Some(state_id) = gss.single_top_value() {
             return Some(Self::SingleState(state_id));
+        }
+        if let Some(index) = constraint.direct_regular_wide_frontier_index_for_gss(gss) {
+            return Some(Self::WideFrontier(index));
         }
 
         let states = gss.peek_values();
@@ -1014,9 +1018,24 @@ impl ActionableTerminals {
         }
     }
 
+    fn bitset<'a>(&self, constraint: &'a Constraint) -> Option<&'a crate::ds::bitset::BitSet> {
+        match self {
+            Self::SingleState(state_id) => constraint.table.advance_row(*state_id),
+            Self::WideFrontier(index) => constraint
+                .direct_regular_wide_frontier_acceptance
+                .get(*index)
+                .map(|summary| &summary.actionable_terminals),
+            Self::ManyStates(_) => None,
+        }
+    }
+
     fn contains(&self, constraint: &Constraint, terminal: u32) -> bool {
         match self {
             Self::SingleState(state_id) => constraint.table.advance_row_allows(*state_id, terminal),
+            Self::WideFrontier(index) => constraint
+                .direct_regular_wide_frontier_acceptance
+                .get(*index)
+                .is_some_and(|summary| summary.actionable_terminals.contains(terminal as usize)),
             Self::ManyStates(states) => states
                 .iter()
                 .any(|state_id| constraint.table.advance_row_allows(*state_id, terminal)),
@@ -1056,6 +1075,127 @@ fn is_actionable_terminal(
 ) -> bool {
     !actionable_terminals
         .is_some_and(|actionable| !actionable.contains(constraint, terminal))
+}
+
+
+fn for_each_relevant_matched_terminal(
+    constraint: &Constraint,
+    tokenizer_state: u32,
+    actionable_terminals: Option<&ActionableTerminals>,
+    mut visit: impl FnMut(u32, bool),
+) {
+    let matched = constraint.tokenizer.matched_terminal_bitset(tokenizer_state);
+    if let Some(actionable) = actionable_terminals.and_then(|value| value.bitset(constraint)) {
+        let ignored = constraint.ignore_terminal;
+        for (word_index, (&matched_word, &actionable_word)) in
+            matched.words().iter().zip(actionable.words()).enumerate()
+        {
+            let mut intersection = matched_word & actionable_word;
+            while intersection != 0 {
+                let bit = intersection.trailing_zeros() as usize;
+                let terminal = (word_index * 64 + bit) as u32;
+                if Some(terminal) != ignored {
+                    visit(terminal, false);
+                }
+                intersection &= intersection - 1;
+            }
+        }
+        if let Some(ignored) = ignored
+            && matched.contains(ignored as usize)
+        {
+            visit(ignored, true);
+        }
+        return;
+    }
+
+    for terminal in constraint.tokenizer.matched_terminals_iter(tokenizer_state) {
+        let ignored = is_ignored_terminal(constraint.ignore_terminal, terminal);
+        if ignored || is_actionable_terminal(actionable_terminals, constraint, terminal) {
+            visit(terminal, ignored);
+        }
+    }
+}
+
+fn scan_wide_frontier_lexer_only(
+    constraint: &Constraint,
+    bytes: &[u8],
+    start_state: u32,
+    summary: &crate::runtime::artifact::DirectRegularWideFrontierAcceptance,
+) -> Option<u32> {
+    if constraint.tokenizer_has_epsilon_transitions {
+        return None;
+    }
+    let mut state = start_state;
+    for &byte in bytes {
+        state = constraint.tokenizer_fast_transitions.transition(
+            &constraint.tokenizer,
+            state,
+            byte,
+        );
+        if state == u32::MAX {
+            return None;
+        }
+        let matched = constraint.tokenizer.matched_terminal_bitset(state);
+        if matched
+            .words()
+            .iter()
+            .zip(summary.actionable_terminals.words())
+            .any(|(left, right)| (*left & *right) != 0)
+            || constraint
+                .ignore_terminal
+                .is_some_and(|terminal| matched.contains(terminal as usize))
+        {
+            return None;
+        }
+    }
+    Some(state)
+}
+
+fn advance_uniform_disallowed_interest_only(
+    constraint: &Constraint,
+    terminals_disallowed: &TerminalsDisallowed,
+    bytes: &[u8],
+) -> Option<TerminalsDisallowed> {
+    if terminals_disallowed.is_empty() {
+        return Some(TerminalsDisallowed::new());
+    }
+    if constraint.tokenizer_has_epsilon_transitions {
+        return None;
+    }
+
+    let mut remapped = BTreeMap::<u32, BTreeSet<u32>>::new();
+    for (&continuation_state, disallowed) in terminals_disallowed.iter() {
+        let mut state = continuation_state;
+        let mut alive = true;
+        for &byte in bytes {
+            state = constraint.tokenizer_fast_transitions.transition(
+                &constraint.tokenizer,
+                state,
+                byte,
+            );
+            if state == u32::MAX {
+                alive = false;
+                break;
+            }
+            let matched = constraint.tokenizer.matched_terminal_bitset(state);
+            if disallowed
+                .iter()
+                .any(|terminal| matched.contains(*terminal as usize))
+            {
+                return None;
+            }
+        }
+        if !alive {
+            continue;
+        }
+        let future = constraint.tokenizer.possible_future_terminals(state);
+        for &terminal in disallowed {
+            if future.contains(terminal as usize) {
+                remapped.entry(state).or_default().insert(terminal);
+            }
+        }
+    }
+    Some(TerminalsDisallowed::from_map(remapped))
 }
 
 fn collect_unique_actionable_matches(
@@ -1690,7 +1830,7 @@ fn commit_bytes_fast_path(
     // to another.  With empty accumulators this routine is already fully
     // state-set aware: it advances the sole full-width terminal and preserves
     // every viable lexer continuation independently.
-    if constraint.tokenizer.has_epsilon_transitions() && !accs_empty {
+    if constraint.tokenizer_has_epsilon_transitions && !accs_empty {
         return None;
     }
     let all_accs_empty = no_end_state && accs_empty;
@@ -1802,7 +1942,7 @@ fn commit_bytes_full_width_fast_path(
     state: &mut ParserStateMap,
     bytes: &[u8],
 ) -> Option<Result<(), String>> {
-    if constraint.tokenizer.has_epsilon_transitions()
+    if constraint.tokenizer_has_epsilon_transitions
         && state_has_nonempty_accumulators(state)
     {
         return None;
@@ -2755,28 +2895,30 @@ fn choose_direct_linear_step(
         let width = index + 1;
         let mut chosen_at_width = false;
 
-        for terminal in constraint.tokenizer.matched_terminals_iter(tokenizer_state) {
-            let ignored = is_ignored_terminal(ignore_terminal, terminal);
-            if !ignored {
-                if actionable_terminals.is_none() {
-                    actionable_terminals = ActionableTerminals::from_gss(constraint, gss);
-                }
-                if !is_actionable_terminal(actionable_terminals.as_ref(), constraint, terminal) {
-                    continue;
-                }
-            }
-
-            let candidate = (width, terminal, ignored);
-            chosen_at_width = true;
-            if let Some((_, existing_terminal, _)) = chosen {
-                if existing_terminal == terminal {
-                    chosen = Some(candidate);
+        if actionable_terminals.is_none() {
+            actionable_terminals = ActionableTerminals::from_gss(constraint, gss);
+        }
+        let mut conflict = false;
+        for_each_relevant_matched_terminal(
+            constraint,
+            tokenizer_state,
+            actionable_terminals.as_ref(),
+            |terminal, ignored| {
+                let candidate = (width, terminal, ignored);
+                chosen_at_width = true;
+                if let Some((_, existing_terminal, _)) = chosen {
+                    if existing_terminal == terminal {
+                        chosen = Some(candidate);
+                    } else {
+                        conflict = true;
+                    }
                 } else {
-                    return None;
+                    chosen = Some(candidate);
                 }
-            } else {
-                chosen = Some(candidate);
-            }
+            },
+        );
+        if conflict {
+            return None;
         }
 
         if chosen_at_width && chosen.is_some_and(|(_, _, ignored)| ignored) {
@@ -3081,7 +3223,11 @@ fn commit_bytes_direct_linear_fast_path(
         }
     }
     let fuse_start = profile.as_ref().map(|_| std::time::Instant::now());
-    let fused = gss.fuse(Some(1));
+    let fused = if constraint.direct_regular_wide_frontier_for_gss(&gss).is_some() {
+        gss
+    } else {
+        gss.fuse(Some(1))
+    };
     if let (Some(profile), Some(start)) = (profile.as_deref_mut(), fuse_start) {
         let elapsed = start.elapsed().as_nanos() as u64;
         profile.linear_fast_path_fuse_ns += elapsed;
@@ -3147,7 +3293,7 @@ fn commit_bytes_fast_path_profiled(
     let total_start = Instant::now();
     let gss = state.values().next().unwrap();
     let ignore_terminal = constraint.ignore_terminal;
-    if constraint.tokenizer.has_epsilon_transitions()
+    if constraint.tokenizer_has_epsilon_transitions
         && !gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty())
     {
         profile.failed_fast_path_probe_ns += total_start.elapsed().as_nanos() as u64;
@@ -3401,7 +3547,7 @@ fn commit_bytes_impl_profiled(
     let ignore_terminal = constraint.ignore_terminal;
 
     if allow_fast_paths
-        && constraint.tokenizer.has_epsilon_transitions()
+        && constraint.tokenizer_has_epsilon_transitions
         && state.len() == 1
     {
         let (&tokenizer_state, _) = state.iter().next().unwrap();
@@ -3424,7 +3570,7 @@ fn commit_bytes_impl_profiled(
         }
     }
 
-    if allow_fast_paths && !constraint.tokenizer.has_epsilon_transitions() && state.len() == 1 {
+    if allow_fast_paths && !constraint.tokenizer_has_epsilon_transitions && state.len() == 1 {
         let (&tokenizer_state, parser_gss) = state.iter().next().unwrap();
         if parser_gss.single_exclusive_top_value().is_some() {
             let direct_start = Instant::now();
@@ -4058,7 +4204,11 @@ fn commit_bytes_linear_fast_path(
                 offset += width;
                 if offset == bytes.len() {
                     gss = carried_stack.take().unwrap().into_gss();
-                    let fused = gss.fuse(Some(1));
+                    let fused = if constraint.direct_regular_wide_frontier_for_gss(&gss).is_some() {
+                        gss
+                    } else {
+                        gss.fuse(Some(1))
+                    };
                     if fused.is_empty() {
                         return LinearFastPathResult::Complete(Err(
                             "commit rejected: no valid parser states remain".to_string(),
@@ -4125,7 +4275,11 @@ fn commit_bytes_linear_fast_path(
             if let Some(stack) = carried_stack.take() {
                 gss = stack.into_gss();
             }
-            let fused = gss.fuse(Some(1));
+            let fused = if constraint.direct_regular_wide_frontier_for_gss(&gss).is_some() {
+                gss
+            } else {
+                gss.fuse(Some(1))
+            };
             if fused.is_empty() {
                 return LinearFastPathResult::Complete(Err(
                     "commit rejected: no valid parser states remain".to_string(),
@@ -5018,6 +5172,41 @@ fn commit_bytes_impl(
 
     let ignore_terminal = constraint.ignore_terminal;
 
+    // A wide direct-regular frontier already carries its exact actionable
+    // terminal support. Scan only that support instead of materializing every
+    // tokenizer finalizer, which can be proportional to the remaining source
+    // file in project-scale diff grammars.
+    if state.len() == 1 && !constraint.tokenizer_has_epsilon_transitions {
+        let (&start_tokenizer_state, gss) = state.iter().next().unwrap();
+        if let Some(summary) = constraint.direct_regular_wide_frontier_for_gss(gss)
+            && let Some(accumulator) = gss.uniform_accumulator()
+            && let Some(end_state) = scan_wide_frontier_lexer_only(
+                constraint,
+                bytes,
+                start_tokenizer_state,
+                summary,
+            )
+        {
+            let Some(updated_accumulator) = advance_uniform_disallowed_interest_only(
+                constraint,
+                &accumulator,
+                bytes,
+            ) else {
+                state.clear();
+                return Err("commit rejected: no valid parser states remain".to_string());
+            };
+            if !wide_frontier_end_state_may_advance(constraint, summary, end_state) {
+                state.clear();
+                return Err("commit rejected: no valid parser states remain".to_string());
+            }
+            if let Some(updated) = gss.with_uniform_accumulator(updated_accumulator) {
+                state.clear();
+                state.insert(end_state, updated);
+                return Ok(());
+            }
+        }
+    }
+
     if state.len() == 1
         && let Some(result) = try_commit_direct_linear_in_place(
             constraint,
@@ -5051,7 +5240,7 @@ fn commit_bytes_impl(
 
     // Exact no-match self-loops are the simplest lexer-only case: neither the
     // tokenizer key nor the parser GSS changes.
-    if !constraint.tokenizer.has_epsilon_transitions() && state.len() == 1 {
+    if !constraint.tokenizer_has_epsilon_transitions && state.len() == 1 {
         let (&start_tokenizer_state, _) = state.iter().next().unwrap();
         let mut tokenizer_state = start_tokenizer_state;
         let mut no_matches = true;
@@ -5258,7 +5447,7 @@ fn commit_bytes_impl(
         return result;
     }
 
-    if !constraint.tokenizer.has_epsilon_transitions() && state.len() == 1 {
+    if !constraint.tokenizer_has_epsilon_transitions && state.len() == 1 {
         let (&tokenizer_state, _) = state.iter().next().unwrap();
         let exec_result = execute_tokenizer_from_state_small(constraint, bytes, tokenizer_state);
 
@@ -6776,7 +6965,7 @@ nt start ::= item item? item?;
             &vocab,
             false,
         );
-        assert!(constraint.tokenizer.has_epsilon_transitions());
+        assert!(constraint.tokenizer_has_epsilon_transitions);
 
         let mut frontier = vec![(
             constraint.start(),

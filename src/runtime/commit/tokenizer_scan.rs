@@ -129,7 +129,7 @@ pub(super) fn execute_tokenizer_from_state_small_into(
     start_state: u32,
     result: &mut TokenizerExecResult,
 ) {
-    if constraint.tokenizer.has_epsilon_transitions() {
+    if constraint.tokenizer_has_epsilon_transitions {
         *result = constraint.tokenizer.execute_from_state(bytes, start_state);
         return;
     }

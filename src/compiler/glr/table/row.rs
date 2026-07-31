@@ -791,6 +791,7 @@ mod tests {
             advance: Vec::new(),
             forwarded_shifts: Default::default(),
             guarded_shift_index: Vec::new(),
+            direct_regular_wide_frontiers: Vec::new(),
         };
         let mut serial = parallel.clone();
         for row in &mut serial.action {
@@ -827,6 +828,7 @@ mod tests {
             advance: Vec::new(),
             forwarded_shifts: Default::default(),
             guarded_shift_index: Vec::new(),
+            direct_regular_wide_frontiers: Vec::new(),
         };
 
         let before = (0..table.num_terminals)

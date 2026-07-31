@@ -187,11 +187,11 @@ impl DirectRegularClosureWorkspace {
     }
 }
 
-fn direct_regular_action_row_for_roots(
+fn direct_regular_action_row_for_roots_with_widest(
     grammar: &AnalyzedGrammar,
     roots: impl IntoIterator<Item = u32>,
     workspace: &mut DirectRegularClosureWorkspace,
-) -> Option<ActionRow> {
+) -> Option<(ActionRow, BitSet, Option<(TerminalID, usize)>)> {
     let automaton = grammar.direct_regular_automaton.as_ref()?;
     workspace.begin(roots);
     let mut accepting = false;
@@ -222,6 +222,8 @@ fn direct_regular_action_row_for_roots(
     workspace.terminal_targets.sort_unstable();
     workspace.terminal_targets.dedup();
     let mut row = Vec::with_capacity(workspace.terminal_targets.len() + usize::from(accepting));
+    let mut advance = BitSet::new(grammar.num_terminals as usize + 1);
+    let mut widest: Option<(TerminalID, usize)> = None;
     let mut index = 0usize;
     while index < workspace.terminal_targets.len() {
         let terminal = workspace.terminal_targets[index].0;
@@ -230,6 +232,12 @@ fn direct_regular_action_row_for_roots(
             && workspace.terminal_targets[end].0 == terminal
         {
             end += 1;
+        }
+        if widest
+            .as_ref()
+            .is_none_or(|(_, width)| end - index > *width)
+        {
+            widest = Some((terminal, end - index));
         }
         let action = if end == index + 1 {
             Action::Shift(workspace.terminal_targets[index].1, true)
@@ -244,13 +252,49 @@ fn direct_regular_action_row_for_roots(
                     .collect(),
             )
         };
+        advance.set(terminal as usize);
         row.push((terminal, action));
         index = end;
     }
     if accepting {
+        advance.set(grammar.num_terminals as usize);
         row.push((EOF, Action::Accept));
     }
-    Some(ActionRow::from_iter(row))
+    Some((ActionRow::from_iter(row), advance, widest))
+}
+
+fn direct_regular_wide_frontier_descriptor(
+    source_state: u32,
+    terminal: TerminalID,
+    row: &ActionRow,
+) -> Option<DirectRegularWideFrontierDescriptor> {
+    let mut target_states = match row.get(&terminal)? {
+        Action::Shift(target, _) => vec![*target],
+        Action::StackShifts(shifts)
+            if shifts
+                .iter()
+                .all(|shift| shift.pop == 1 && shift.pushes.len() == 1) =>
+        {
+            shifts.iter().map(|shift| shift.pushes[0]).collect()
+        }
+        _ => return None,
+    };
+    target_states.sort_unstable();
+    target_states.dedup();
+    Some(DirectRegularWideFrontierDescriptor {
+        source_state,
+        terminal,
+        target_states,
+    })
+}
+
+fn direct_regular_action_row_for_roots(
+    grammar: &AnalyzedGrammar,
+    roots: impl IntoIterator<Item = u32>,
+    workspace: &mut DirectRegularClosureWorkspace,
+) -> Option<ActionRow> {
+    direct_regular_action_row_for_roots_with_widest(grammar, roots, workspace)
+        .map(|(row, _, _)| row)
 }
 
 fn try_build_direct_regular_table(grammar: &AnalyzedGrammar) -> Option<GLRTable> {
@@ -263,18 +307,21 @@ fn try_build_direct_regular_table(grammar: &AnalyzedGrammar) -> Option<GLRTable>
     // maps to parser state N+1. Each row is built directly from the epsilon
     // closure of its corresponding root, reusing one generation-marked DFS
     // workspace rather than allocating and retaining every closure.
+    let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
+    let total_started_at = profile.then(std::time::Instant::now);
+    let row_started_at = profile.then(std::time::Instant::now);
     let mut initial_workspace = DirectRegularClosureWorkspace::new(automaton.states.len());
-    let initial = direct_regular_action_row_for_roots(
+    let (initial, initial_advance, initial_widest) = direct_regular_action_row_for_roots_with_widest(
         grammar,
         automaton.start_states.iter().copied(),
         &mut initial_workspace,
     )?;
-    let rows = (0..automaton.states.len() as u32)
+    let rows_with_widest = (0..automaton.states.len() as u32)
         .into_par_iter()
         .map_init(
             || DirectRegularClosureWorkspace::new(automaton.states.len()),
             |workspace, root| {
-                direct_regular_action_row_for_roots(
+                direct_regular_action_row_for_roots_with_widest(
                     grammar,
                     std::iter::once(root),
                     workspace,
@@ -284,12 +331,51 @@ fn try_build_direct_regular_table(grammar: &AnalyzedGrammar) -> Option<GLRTable>
         .collect::<Vec<_>>()
         .into_iter()
         .collect::<Option<Vec<_>>>()?;
+    let row_ms = row_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    let descriptor_started_at = profile.then(std::time::Instant::now);
+    let mut widest_candidates = Vec::<(u32, TerminalID, usize)>::new();
+    if let Some((terminal, width)) = initial_widest {
+        widest_candidates.push((0, terminal, width));
+    }
+    let mut rows = Vec::with_capacity(rows_with_widest.len());
+    let mut advance = Vec::with_capacity(rows_with_widest.len() + 1);
+    advance.push(initial_advance);
+    for (root, (row, advance_row, widest)) in rows_with_widest.into_iter().enumerate() {
+        rows.push(row);
+        advance.push(advance_row);
+        if let Some((terminal, width)) = widest {
+            widest_candidates.push((root as u32 + 1, terminal, width));
+        }
+    }
+    let max_frontier = widest_candidates
+        .iter()
+        .map(|(_, _, width)| *width)
+        .max()
+        .unwrap_or(0);
+    let direct_regular_wide_frontiers = if max_frontier >= 64 {
+        widest_candidates
+            .into_iter()
+            .filter(|(_, _, width)| *width == max_frontier)
+            .filter_map(|(source_state, terminal, _)| {
+                let row = if source_state == 0 {
+                    &initial
+                } else {
+                    rows.get(source_state as usize - 1)?
+                };
+                direct_regular_wide_frontier_descriptor(source_state, terminal, row)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let descriptor_ms = descriptor_started_at
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     let mut action = Vec::with_capacity(rows.len() + 1);
     action.push(initial);
     action.extend(rows);
 
     let num_states = u32::try_from(action.len()).ok()?;
-    let mut table = GLRTable {
+    let table = GLRTable {
         goto: vec![SparseRow::default(); action.len()],
         action,
         num_states,
@@ -299,13 +385,21 @@ fn try_build_direct_regular_table(grammar: &AnalyzedGrammar) -> Option<GLRTable>
         nonterminal_display_names: Vec::new(),
         construction: GlrTableConstruction::LegacyRowBisim,
         admission_policy: AdmissionPolicy::RowPresenceExact,
-        advance: Vec::new(),
+        advance,
         forwarded_shifts: FxHashSet::default(),
         guarded_shift_index: Vec::new(),
+        direct_regular_wide_frontiers,
     };
-    table.rebuild_advance_rows_from_actions();
-    table.rebuild_guarded_shift_index();
-    table.compress_default_action_rows();
+    if let Some(total_started_at) = total_started_at {
+        eprintln!(
+            "[glrmask/profile][direct_regular_table_detail] automaton_states={} table_states={} rows_ms={:.3} descriptor_ms={:.3} total_ms={:.3}",
+            automaton.states.len(),
+            table.num_states,
+            row_ms,
+            descriptor_ms,
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
     Some(table)
 }
 
@@ -387,6 +481,7 @@ fn try_build_direct_regular_table_reference(grammar: &AnalyzedGrammar) -> Option
         advance: Vec::new(),
         forwarded_shifts: FxHashSet::default(),
         guarded_shift_index: Vec::new(),
+        direct_regular_wide_frontiers: Vec::new(),
     };
     table.rebuild_advance_rows_from_actions();
     table.rebuild_guarded_shift_index();
@@ -758,6 +853,7 @@ fn finish_table(
         advance: Vec::new(),
         forwarded_shifts,
         guarded_shift_index: Vec::new(),
+        direct_regular_wide_frontiers: Vec::new(),
     }
 }
 
@@ -2049,6 +2145,25 @@ fn union_experimental_core_rows(table: GLRTable, partition: &[u32]) -> Option<GL
         .map(|row| row.into_iter().collect::<GotoRow>())
         .collect();
 
+    let direct_regular_wide_frontiers = table
+        .direct_regular_wide_frontiers
+        .iter()
+        .map(|descriptor| {
+            let mut target_states = descriptor
+                .target_states
+                .iter()
+                .map(|&state| partition[state as usize])
+                .collect::<Vec<_>>();
+            target_states.sort_unstable();
+            target_states.dedup();
+            DirectRegularWideFrontierDescriptor {
+                source_state: partition[descriptor.source_state as usize],
+                terminal: descriptor.terminal,
+                target_states,
+            }
+        })
+        .collect();
+
     Some(GLRTable {
         action,
         goto,
@@ -2062,6 +2177,7 @@ fn union_experimental_core_rows(table: GLRTable, partition: &[u32]) -> Option<GL
         advance: Vec::new(),
         forwarded_shifts,
         guarded_shift_index: Vec::new(),
+        direct_regular_wide_frontiers,
     })
 }
 

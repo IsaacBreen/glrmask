@@ -634,6 +634,16 @@ pub(crate) fn try_build_immediate_parser_top_accept_parts(
         .then(|| immediate_acceptance_certificate_parts(terminal_automaton, grammar, table))
 }
 
+pub(crate) fn try_build_immediate_terminal_completion_weights(
+    terminal_automaton: &TerminalAutomaton,
+    grammar: &AnalyzedGrammar,
+    table: &GLRTable,
+) -> Option<BTreeMap<TerminalID, Weight>> {
+    terminal_automaton_is_immediate_completion(terminal_automaton, grammar, table)
+        .then(|| immediate_completion_weights_by_terminal(terminal_automaton, grammar))
+}
+
+#[cfg(test)]
 fn direct_regular_action_targets(action: &Action) -> Option<SmallVec<[u32; 4]>> {
     match action {
         Action::Shift(target, true) => Some(SmallVec::from_slice(&[*target])),
@@ -658,6 +668,197 @@ fn direct_regular_action_targets(action: &Action) -> Option<SmallVec<[u32; 4]>> 
 /// states. All product edges are epsilon edges because the sole parser-stack
 /// symbol has already selected the product's parser-top coordinate.
 pub(crate) fn try_build_direct_regular_parser_top_accept_parts(
+    terminal_automaton: &TerminalAutomaton,
+    grammar: &AnalyzedGrammar,
+    table: &GLRTable,
+) -> Option<BTreeMap<i32, Vec<Weight>>> {
+    let automaton = grammar.direct_regular_automaton.as_ref()?;
+    if table.admission_policy != AdmissionPolicy::RowPresenceExact
+        || table.num_states == 0
+        || automaton.states.is_empty()
+        || automaton.start_states.is_empty()
+    {
+        return None;
+    }
+    let started_at = Instant::now();
+    let terminal_state_count = terminal_automaton.num_states();
+    if terminal_state_count == 0 {
+        return None;
+    }
+
+    // Runtime parser state 0 is synthetic. Direct-regular NFA state N maps to
+    // parser state N+1, matching direct GLR table construction. Working from
+    // the sparse NFA rather than its epsilon-closed action rows avoids copying
+    // a suffix frontier into every preceding state of skip-chain grammars.
+    let parser_state_count = automaton.states.len().checked_add(1)?;
+    if parser_state_count != table.num_states as usize {
+        return None;
+    }
+    let product_state_count = terminal_state_count.checked_mul(parser_state_count)?;
+    if product_state_count > u32::MAX as usize {
+        return None;
+    }
+    let product_state = |terminal_state: usize, parser_state: usize| -> u32 {
+        (terminal_state * parser_state_count + parser_state) as u32
+    };
+
+    let mut product = NWA::new(0, 0);
+    for _ in 0..product_state_count {
+        product.add_state();
+    }
+
+    // A final terminal-automaton state means one grammar terminal has
+    // completed. Any live direct-regular parser state is a valid post-commit
+    // continuation, exactly as in the previous table-product construction.
+    for terminal_state in 0..terminal_state_count {
+        if let Some(final_weight) = terminal_state_final_weight(terminal_automaton, terminal_state)
+            && !final_weight.is_empty()
+        {
+            for parser_state in 0..parser_state_count {
+                product.set_final_weight(
+                    product_state(terminal_state, parser_state),
+                    final_weight.clone(),
+                );
+            }
+        }
+
+        // Terminal-automaton epsilon edges do not change parser position.
+        for (target, weight) in
+            terminal_state_epsilon_branches(terminal_automaton, terminal_state)
+        {
+            if weight.is_empty() || target as usize >= terminal_state_count {
+                continue;
+            }
+            for parser_state in 0..parser_state_count {
+                product.add_epsilon(
+                    product_state(terminal_state, parser_state),
+                    product_state(target as usize, parser_state),
+                    weight.clone(),
+                );
+            }
+        }
+    }
+
+    // Parser epsilon edges do not change terminal-automaton state. State 0 has
+    // epsilon edges to every direct-regular start state; NFA state N is N+1.
+    let all = Weight::all();
+    for terminal_state in 0..terminal_state_count {
+        let terminal_product_base = terminal_state * parser_state_count;
+        for &start in &automaton.start_states {
+            if start as usize >= automaton.states.len() {
+                return None;
+            }
+            product.add_epsilon(
+                (terminal_product_base) as u32,
+                (terminal_product_base + start as usize + 1) as u32,
+                all.clone(),
+            );
+        }
+        for (source, state) in automaton.states.iter().enumerate() {
+            for &target in &state.epsilons {
+                if target as usize >= automaton.states.len() {
+                    return None;
+                }
+                product.add_epsilon(
+                    (terminal_product_base + source + 1) as u32,
+                    (terminal_product_base + target as usize + 1) as u32,
+                    all.clone(),
+                );
+            }
+        }
+    }
+
+    // Index the sparse direct-regular terminal edges by grammar terminal.
+    let mut parser_sources_by_terminal =
+        vec![Vec::<(u32, SmallVec<[u32; 4]>)>::new(); grammar.num_terminals as usize];
+    for (source, state) in automaton.states.iter().enumerate() {
+        for (&terminal, targets) in &state.transitions {
+            if terminal >= grammar.num_terminals || targets.is_empty() {
+                return None;
+            }
+            let mut mapped = SmallVec::<[u32; 4]>::new();
+            for &target in targets {
+                if target as usize >= automaton.states.len() {
+                    return None;
+                }
+                mapped.push(target + 1);
+            }
+            mapped.sort_unstable();
+            mapped.dedup();
+            parser_sources_by_terminal[terminal as usize].push((source as u32 + 1, mapped));
+        }
+    }
+
+    // Match terminal-automaton labelled edges with sparse parser-NFA edges.
+    for terminal_state in 0..terminal_state_count {
+        for (target, bundle) in
+            group_terminal_edges_by_target(terminal_automaton, grammar, terminal_state as u32)
+        {
+            if target as usize >= terminal_state_count {
+                return None;
+            }
+            for (terminal, edge_weight) in bundle {
+                if edge_weight.is_empty() {
+                    continue;
+                }
+                for (source, parser_targets) in
+                    &parser_sources_by_terminal[terminal as usize]
+                {
+                    let from = product_state(terminal_state, *source as usize);
+                    for &parser_target in parser_targets {
+                        product.add_epsilon(
+                            from,
+                            product_state(target as usize, parser_target as usize),
+                            edge_weight.clone(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    apply_finality_fixpoint(&mut product);
+    let terminal_starts = terminal_automaton.start_states();
+    let mut parts = BTreeMap::new();
+    for parser_top in 0..parser_state_count {
+        let weights = terminal_starts
+            .iter()
+            .filter_map(|&terminal_start| {
+                product
+                    .states()
+                    .get(product_state(terminal_start as usize, parser_top) as usize)
+                    .and_then(|state| state.final_weight.clone())
+                    .filter(|weight| !weight.is_empty())
+            })
+            .collect::<Vec<_>>();
+        if !weights.is_empty() {
+            parts.insert(parser_top as i32, weights);
+        }
+    }
+
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][direct_regular_parser_sparse_product] terminal_states={} parser_states={} product_states={} product_edges={} labels={} part_refs={} unique_weights={} total_ms={:.3}",
+            terminal_state_count,
+            parser_state_count,
+            product_state_count,
+            product.num_transitions(),
+            parts.len(),
+            parts.values().map(Vec::len).sum::<usize>(),
+            parts
+                .values()
+                .flatten()
+                .map(Weight::ptr_key)
+                .collect::<rustc_hash::FxHashSet<_>>()
+                .len(),
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    Some(parts)
+}
+
+#[cfg(test)]
+fn try_build_direct_regular_parser_top_accept_parts_table_product_reference(
     terminal_automaton: &TerminalAutomaton,
     grammar: &AnalyzedGrammar,
     table: &GLRTable,
@@ -3134,6 +3335,7 @@ mod tests {
         PossibleOutgoingIds, collapse_final_leaf_targets,
         determinize_parser_dwa_with_fallbacks, immediate_acceptance_certificates,
         try_build_direct_regular_parser_top_accept_parts,
+        try_build_direct_regular_parser_top_accept_parts_table_product_reference,
         try_build_immediate_parser_top_accept_parts,
         build_parser_dwa_from_terminal_dwa_with_precomputed_templates,
         subtract_final_weights_from_outgoing_dwa_impl,
@@ -3296,7 +3498,27 @@ mod tests {
                     bytes: vec![b'a' + id as u8],
                 })
                 .collect(),
-            direct_regular_automaton: Some(DirectRegularAutomaton::default()),
+            direct_regular_automaton: Some(DirectRegularAutomaton {
+                states: vec![
+                    crate::grammar::flat::DirectRegularState {
+                        is_accepting: false,
+                        transitions: [
+                            (0, vec![0]),
+                            (1, vec![1]),
+                            (2, vec![1]),
+                        ]
+                        .into_iter()
+                        .collect(),
+                        epsilons: Vec::new(),
+                    },
+                    crate::grammar::flat::DirectRegularState {
+                        is_accepting: true,
+                        transitions: Default::default(),
+                        epsilons: Vec::new(),
+                    },
+                ],
+                start_states: vec![0],
+            }),
             ..GrammarDef::default()
         });
         let table = build_test_table(
@@ -3305,11 +3527,13 @@ mod tests {
             &[
                 &[
                     (0, Action::Shift(1, true)),
+                    (1, Action::Shift(2, true)),
                     (2, Action::Shift(2, true)),
                 ],
                 &[
                     (0, Action::Shift(1, true)),
                     (1, Action::Shift(2, true)),
+                    (2, Action::Shift(2, true)),
                 ],
                 &[],
             ],
@@ -3349,13 +3573,29 @@ mod tests {
             &grammar,
             &table,
         )
-        .expect("direct product should accept the direct parser table");
+        .expect("sparse direct product should accept the direct parser metadata");
+        let table_reference =
+            try_build_direct_regular_parser_top_accept_parts_table_product_reference(
+                &terminal_automaton,
+                &grammar,
+                &table,
+            )
+            .expect("table-product reference should accept the direct parser table");
 
         for parser_top in 0..table.num_states {
             let direct_weight = direct
                 .get(&(parser_top as i32))
                 .map(|weights| Weight::union_all(weights.iter()))
                 .unwrap_or_else(Weight::empty);
+            let reference_weight = table_reference
+                .get(&(parser_top as i32))
+                .map(|weights| Weight::union_all(weights.iter()))
+                .unwrap_or_else(Weight::empty);
+            assert_eq!(
+                direct_weight,
+                reference_weight,
+                "sparse and table products differ at parser top {parser_top}",
+            );
             assert_eq!(
                 direct_weight,
                 generic.eval_word(&[parser_top as i32]),

@@ -1,8 +1,6 @@
 //! Grammar analysis helpers: terminal coloring, follow-set computations.
 
-use std::collections::{BTreeMap, BTreeSet};
-
-use rayon::prelude::*;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::GLRTable;
@@ -258,58 +256,150 @@ fn direct_regular_follow_sets(
 ) -> Option<(Vec<Vec<TerminalID>>, Vec<Vec<TerminalID>>)> {
     let automaton = grammar.direct_regular_automaton.as_ref()?;
     let state_count = automaton.states.len();
-    let closure_labels = (0..state_count)
-        .into_par_iter()
-        .map_init(
-            || (vec![0u32; state_count], 0u32, Vec::<u32>::new()),
-            |(seen_epoch, epoch, stack), root| {
-                *epoch = epoch.wrapping_add(1);
-                if *epoch == 0 {
-                    seen_epoch.fill(0);
-                    *epoch = 1;
-                }
-                stack.clear();
-                stack.push(root as u32);
-                let mut labels = Vec::new();
-                while let Some(state_id) = stack.pop() {
-                    let state_index = state_id as usize;
-                    if state_index >= state_count || seen_epoch[state_index] == *epoch {
-                        continue;
-                    }
-                    seen_epoch[state_index] = *epoch;
-                    let state = &automaton.states[state_index];
-                    stack.extend(state.epsilons.iter().copied());
-                    labels.extend(
-                        state
-                            .transitions
-                            .keys()
-                            .copied()
-                            .filter(|terminal| *terminal < grammar.num_terminals),
-                    );
-                }
-                labels.sort_unstable();
-                labels.dedup();
-                labels
-            },
-        )
-        .collect::<Vec<_>>();
+    let terminal_count = grammar.num_terminals as usize;
 
-    let mut ever = vec![BTreeSet::new(); grammar.num_terminals as usize];
-    let mut always = vec![None::<BTreeSet<TerminalID>>; grammar.num_terminals as usize];
+    // Compute epsilon-closure output labels once over the SCC condensation
+    // instead of running one whole-graph DFS per source state. The condensation
+    // is acyclic, so a reverse topological union gives every SCC the exact set
+    // of terminal labels reachable through zero or more epsilon edges.
+    let mut reverse_epsilons = vec![Vec::<u32>::new(); state_count];
+    for (source, state) in automaton.states.iter().enumerate() {
+        for &target in &state.epsilons {
+            if let Some(reverse) = reverse_epsilons.get_mut(target as usize) {
+                reverse.push(source as u32);
+            }
+        }
+    }
+
+    let mut visited = vec![false; state_count];
+    let mut postorder = Vec::with_capacity(state_count);
+    let mut dfs = Vec::<(u32, usize)>::new();
+    for root in 0..state_count as u32 {
+        if visited[root as usize] {
+            continue;
+        }
+        visited[root as usize] = true;
+        dfs.push((root, 0));
+        while let Some((state_id, next_edge)) = dfs.last_mut() {
+            let epsilons = &automaton.states[*state_id as usize].epsilons;
+            let mut descended = false;
+            while *next_edge < epsilons.len() {
+                let target = epsilons[*next_edge];
+                *next_edge += 1;
+                let target_index = target as usize;
+                if target_index < state_count && !visited[target_index] {
+                    visited[target_index] = true;
+                    dfs.push((target, 0));
+                    descended = true;
+                    break;
+                }
+            }
+            if !descended {
+                let (finished, _) = dfs.pop().expect("DFS frame must exist");
+                postorder.push(finished);
+            }
+        }
+    }
+
+    let mut scc_by_state = vec![u32::MAX; state_count];
+    let mut scc_count = 0u32;
+    let mut stack = Vec::<u32>::new();
+    for &root in postorder.iter().rev() {
+        if scc_by_state[root as usize] != u32::MAX {
+            continue;
+        }
+        scc_by_state[root as usize] = scc_count;
+        stack.push(root);
+        while let Some(state_id) = stack.pop() {
+            for &predecessor in &reverse_epsilons[state_id as usize] {
+                if scc_by_state[predecessor as usize] == u32::MAX {
+                    scc_by_state[predecessor as usize] = scc_count;
+                    stack.push(predecessor);
+                }
+            }
+        }
+        scc_count += 1;
+    }
+    let scc_count = scc_count as usize;
+
+    let mut scc_edges = vec![Vec::<u32>::new(); scc_count];
+    let mut closure_labels = vec![BitSet::new(terminal_count); scc_count];
+    for (source, state) in automaton.states.iter().enumerate() {
+        let source_scc = scc_by_state[source] as usize;
+        for &terminal in state.transitions.keys() {
+            if (terminal as usize) < terminal_count {
+                closure_labels[source_scc].set(terminal as usize);
+            }
+        }
+        for &target in &state.epsilons {
+            let Some(&target_scc) = scc_by_state.get(target as usize) else {
+                continue;
+            };
+            if target_scc as usize != source_scc {
+                scc_edges[source_scc].push(target_scc);
+            }
+        }
+    }
+    for edges in &mut scc_edges {
+        edges.sort_unstable();
+        edges.dedup();
+    }
+
+    let mut indegree = vec![0u32; scc_count];
+    for edges in &scc_edges {
+        for &target in edges {
+            indegree[target as usize] += 1;
+        }
+    }
+    let mut ready = VecDeque::new();
+    for (scc, &degree) in indegree.iter().enumerate() {
+        if degree == 0 {
+            ready.push_back(scc as u32);
+        }
+    }
+    let mut topological = Vec::with_capacity(scc_count);
+    while let Some(scc) = ready.pop_front() {
+        topological.push(scc);
+        for &target in &scc_edges[scc as usize] {
+            let degree = &mut indegree[target as usize];
+            *degree -= 1;
+            if *degree == 0 {
+                ready.push_back(target);
+            }
+        }
+    }
+    debug_assert_eq!(topological.len(), scc_count);
+
+    for &source in topological.iter().rev() {
+        for &target in &scc_edges[source as usize] {
+            let source = source as usize;
+            let target = target as usize;
+            if source < target {
+                let (left, right) = closure_labels.split_at_mut(target);
+                left[source].union_with(&right[0]);
+            } else {
+                let (left, right) = closure_labels.split_at_mut(source);
+                right[0].union_with(&left[target]);
+            }
+        }
+    }
+
+    let mut ever = vec![BitSet::new(terminal_count); terminal_count];
+    let mut always = vec![None::<BitSet>; terminal_count];
     for state in &automaton.states {
         for (&terminal, targets) in &state.transitions {
-            if terminal >= grammar.num_terminals {
+            if (terminal as usize) >= terminal_count {
                 continue;
             }
             for &target in targets {
-                let Some(follows) = closure_labels.get(target as usize) else {
+                let Some(&target_scc) = scc_by_state.get(target as usize) else {
                     continue;
                 };
-                ever[terminal as usize].extend(follows.iter().copied());
-                let follows = follows.iter().copied().collect::<BTreeSet<_>>();
+                let follows = &closure_labels[target_scc as usize];
+                ever[terminal as usize].union_with(follows);
                 match &mut always[terminal as usize] {
-                    None => always[terminal as usize] = Some(follows),
-                    Some(existing) => existing.retain(|follow| follows.contains(follow)),
+                    None => always[terminal as usize] = Some(follows.clone()),
+                    Some(existing) => existing.intersect_with(follows),
                 }
             }
         }
@@ -317,13 +407,32 @@ fn direct_regular_follow_sets(
 
     Some((
         ever.into_iter()
-            .map(|set| set.into_iter().collect())
+            .map(|set| set.iter_ones().map(|terminal| terminal as TerminalID).collect())
             .collect(),
         always
             .into_iter()
-            .map(|set| set.unwrap_or_default().into_iter().collect())
+            .map(|set| {
+                set.into_iter()
+                    .flat_map(|set| set.iter_ones().collect::<Vec<_>>())
+                    .map(|terminal| terminal as TerminalID)
+                    .collect()
+            })
             .collect(),
     ))
+}
+
+/// Compute both existential and universal terminal-follow relations together.
+/// Direct-regular grammars share one epsilon-closure traversal between the two
+/// results instead of repeating the same whole-automaton analysis.
+pub(crate) fn compute_allowed_follow_sets(
+    grammar: &AnalyzedGrammar,
+) -> (Vec<Vec<TerminalID>>, Vec<Vec<TerminalID>>) {
+    direct_regular_follow_sets(grammar).unwrap_or_else(|| {
+        (
+            compute_ever_allowed_follows(grammar),
+            compute_always_allowed_follows(grammar),
+        )
+    })
 }
 
 /// For each terminal, collect the set of terminals that can ever follow it
