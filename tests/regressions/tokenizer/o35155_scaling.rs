@@ -85,7 +85,7 @@ fn o35155_bad_family_tokenizer_states_stay_under_current_budget() {
     for n in 2..=BAD_FAMILY.len() {
         let constraint = Constraint::from_json_schema(&schema_for_n(n), &vocab).unwrap();
         tokenizer_states.push(constraint.num_tokenizer_states());
-        minimized_tokenizer_states.push(constraint.num_forced_minimized_tokenizer_states());
+        minimized_tokenizer_states.push(constraint.compute_forced_minimized_tokenizer_state_count());
     }
 
     eprintln!("o35155 tokenizer states by N=2..{}: {:?}", BAD_FAMILY.len(), tokenizer_states);
@@ -116,7 +116,7 @@ fn o35155_bad_family_just_3_and_4_tokenizer_states() {
     eprintln!(
         "o35155 tokenizer states for just branches 3 and 4: current={} minimized={}",
         constraint.num_tokenizer_states(),
-        constraint.num_forced_minimized_tokenizer_states()
+        constraint.compute_forced_minimized_tokenizer_state_count()
     );
 }
 
@@ -128,7 +128,7 @@ fn o35155_bad_family_just_2_3_and_4_tokenizer_states() {
     eprintln!(
         "o35155 tokenizer states for just branches 2, 3, and 4: current={} minimized={}",
         constraint.num_tokenizer_states(),
-        constraint.num_forced_minimized_tokenizer_states()
+        constraint.compute_forced_minimized_tokenizer_state_count()
     );
 }
 
@@ -140,7 +140,7 @@ fn o35155_bad_family_just_1_3_and_4_tokenizer_states() {
     eprintln!(
         "o35155 tokenizer states for just branches 1, 3, and 4: current={} minimized={}",
         constraint.num_tokenizer_states(),
-        constraint.num_forced_minimized_tokenizer_states()
+        constraint.compute_forced_minimized_tokenizer_state_count()
     );
 }
 
@@ -152,7 +152,7 @@ fn o35155_bad_family_just_1_2_3_and_4_tokenizer_states() {
     eprintln!(
         "o35155 tokenizer states for just branches 1, 2, 3, and 4: current={} minimized={}",
         constraint.num_tokenizer_states(),
-        constraint.num_forced_minimized_tokenizer_states()
+        constraint.compute_forced_minimized_tokenizer_state_count()
     );
 }
 
@@ -171,7 +171,7 @@ fn o35155_bad_family_requested_prefix_window_tokenizer_states() {
         eprintln!(
             "o35155 tokenizer states for just branches {label}: current={} minimized={}",
             constraint.num_tokenizer_states(),
-            constraint.num_forced_minimized_tokenizer_states()
+            constraint.compute_forced_minimized_tokenizer_state_count()
         );
     }
 }
@@ -185,7 +185,7 @@ fn o35155_branch_5_schema_is_now_lowerable() {
     eprintln!(
         "o35155 tokenizer states for just branch 5: current={} minimized={}",
         constraint.num_tokenizer_states(),
-        constraint.num_forced_minimized_tokenizer_states()
+        constraint.compute_forced_minimized_tokenizer_state_count()
     );
 }
 
@@ -204,7 +204,7 @@ fn o35155_bad_family_all_pairs_with_5_tokenizer_states() {
         eprintln!(
             "o35155 tokenizer states for just branches {label}: current={} minimized={}",
             constraint.num_tokenizer_states(),
-            constraint.num_forced_minimized_tokenizer_states()
+            constraint.compute_forced_minimized_tokenizer_state_count()
         );
     }
 }
@@ -235,7 +235,7 @@ fn o35155_bad_family_all_combinations_with_5_tokenizer_states() {
         eprintln!(
             "o35155 tokenizer states for just branches {label}: current={} minimized={}",
             constraint.num_tokenizer_states(),
-            constraint.num_forced_minimized_tokenizer_states()
+            constraint.compute_forced_minimized_tokenizer_state_count()
         );
     }
 }
@@ -262,7 +262,7 @@ fn o35155_bad_family_viaf_bound_variants_are_now_lowerable() {
                 eprintln!(
                     "o35155 tokenizer states for just branch {label} via duplicated {combiner}: current={} minimized={}",
                     constraint.num_tokenizer_states(),
-                    constraint.num_forced_minimized_tokenizer_states()
+                    constraint.compute_forced_minimized_tokenizer_state_count()
                 );
                 measured = true;
                 break;
@@ -281,7 +281,7 @@ fn o35155_bad_family_viaf_bound_variants_are_now_lowerable() {
     eprintln!(
         "o35155 standalone singleton branch 5 schema now lowers: current={} minimized={}",
         constraint.num_tokenizer_states(),
-        constraint.num_forced_minimized_tokenizer_states()
+        constraint.compute_forced_minimized_tokenizer_state_count()
     );
 
     let constraint = Constraint::from_json_schema(
@@ -292,7 +292,7 @@ fn o35155_bad_family_viaf_bound_variants_are_now_lowerable() {
     eprintln!(
         "o35155 tokenizer states for just branches 4 and modified 5(7,7): current={} minimized={}",
         constraint.num_tokenizer_states(),
-        constraint.num_forced_minimized_tokenizer_states()
+        constraint.compute_forced_minimized_tokenizer_state_count()
     );
 }
 
@@ -319,7 +319,7 @@ fn o35155_bad_family_viaf_7_7_selected_combinations() {
         eprintln!(
             "o35155 tokenizer states for just branches {label}: current={} minimized={}",
             constraint.num_tokenizer_states(),
-            constraint.num_forced_minimized_tokenizer_states()
+            constraint.compute_forced_minimized_tokenizer_state_count()
         );
     }
 }
@@ -346,7 +346,7 @@ fn o35155_bad_family_duplicate_branch_pairs() {
                 eprintln!(
                     "o35155 tokenizer states for just branches {label} via duplicated {combiner}: current={} minimized={}",
                     constraint.num_tokenizer_states(),
-                    constraint.num_forced_minimized_tokenizer_states()
+                    constraint.compute_forced_minimized_tokenizer_state_count()
                 );
                 measured = true;
                 break;
@@ -376,7 +376,7 @@ fn o35155_bad_family_with_2_and_2_3_selected_combinations() {
         eprintln!(
             "o35155 tokenizer states for just branches {label}: current={} minimized={}",
             constraint.num_tokenizer_states(),
-            constraint.num_forced_minimized_tokenizer_states()
+            constraint.compute_forced_minimized_tokenizer_state_count()
         );
     }
 }
@@ -389,7 +389,7 @@ fn o35155_bad_family_just_2_and_3_tokenizer_states() {
     eprintln!(
         "o35155 tokenizer states for just branches 2 and 3: current={} minimized={}",
         constraint.num_tokenizer_states(),
-        constraint.num_forced_minimized_tokenizer_states()
+        constraint.compute_forced_minimized_tokenizer_state_count()
     );
 }
 
@@ -409,7 +409,7 @@ fn o35155_bad_family_2_3_5_with_viaf_2_2_tokenizer_states() {
     eprintln!(
         "o35155 tokenizer states for just branches 2, 3, 5(2,2): current={} minimized={}",
         constraint.num_tokenizer_states(),
-        constraint.num_forced_minimized_tokenizer_states()
+        constraint.compute_forced_minimized_tokenizer_state_count()
     );
 }
 
@@ -440,7 +440,7 @@ fn o35155_bad_family_2_3rep2_5_variants() {
         eprintln!(
             "o35155 tokenizer states for just branches {label}: current={} minimized={}",
             constraint.num_tokenizer_states(),
-            constraint.num_forced_minimized_tokenizer_states()
+            constraint.compute_forced_minimized_tokenizer_state_count()
         );
     }
 }
@@ -470,7 +470,7 @@ fn o35155_bad_family_2_3rep2_and_2_5len2_variants() {
         eprintln!(
             "o35155 tokenizer states for just branches {label}: current={} minimized={}",
             constraint.num_tokenizer_states(),
-            constraint.num_forced_minimized_tokenizer_states()
+            constraint.compute_forced_minimized_tokenizer_state_count()
         );
     }
 }
@@ -495,7 +495,7 @@ fn o35155_bad_family_singletons_for_2_3rep2_and_5len2() {
             eprintln!(
                 "o35155 tokenizer states for just branch {label} via direct singleton: current={} minimized={}",
                 constraint.num_tokenizer_states(),
-                constraint.num_forced_minimized_tokenizer_states()
+                constraint.compute_forced_minimized_tokenizer_state_count()
             );
             continue;
         }
@@ -512,7 +512,7 @@ fn o35155_bad_family_singletons_for_2_3rep2_and_5len2() {
                 eprintln!(
                     "o35155 tokenizer states for just branch {label} via duplicated {combiner}: current={} minimized={}",
                     constraint.num_tokenizer_states(),
-                    constraint.num_forced_minimized_tokenizer_states()
+                    constraint.compute_forced_minimized_tokenizer_state_count()
                 );
                 measured = true;
                 break;
@@ -586,7 +586,7 @@ fn o35155_bad_family_viaf_fixed_length_variants_with_2_and_2_3() {
         eprintln!(
             "o35155 tokenizer states for just branches {label}: current={} minimized={}",
             constraint.num_tokenizer_states(),
-            constraint.num_forced_minimized_tokenizer_states()
+            constraint.compute_forced_minimized_tokenizer_state_count()
         );
     }
 }

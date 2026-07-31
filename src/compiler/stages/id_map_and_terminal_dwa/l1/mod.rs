@@ -12,6 +12,7 @@ use range_set_blaze::RangeSetBlaze;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
+use crate::ds::u8set::U8Set;
 use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 
 /// Exact first-byte target profiles computed for L1 state equivalence.
@@ -815,13 +816,13 @@ pub(crate) fn count_l1_equivalence_classes(
     max_length_representatives.sort_unstable();
 
     let order = l1_identity_vocab_order(vocab);
-    let flat_trans = build_flat_transition_table(tokenizer);
+    let flat_trans: Arc<[u32]> = Arc::from(build_flat_transition_table(tokenizer));
     let (exact_mapping, _) = find_l1_exact_state_equivalence_by_token_signatures(
         tokenizer,
         order.as_ref(),
         &max_length_representatives,
         active_terminals,
-        flat_trans.as_slice(),
+        &flat_trans,
         None,
     );
     exact_mapping
@@ -1292,6 +1293,7 @@ fn build_l1_generic_nfa_exact_id_map<'a>(
             None,
             true,
             terminal_signature_ms,
+            None,
         );
     let exact_state_equiv_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
     assert_eq!(exact_mapping.len(), num_states);
@@ -1875,7 +1877,7 @@ fn build_l1_id_map<'a>(
             order.as_ref(),
             &max_length_representatives,
             active_terminals,
-            flat_trans.as_ref(),
+            flat_trans,
             transitions_by_byte,
         );
     let exact_state_equiv_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -2157,7 +2159,7 @@ fn find_l1_exact_state_equivalence_by_token_signatures(
     vocab_order: &L1IdentityVocabOrder,
     states: &[usize],
     active_terminals: &[bool],
-    flat_trans: &[u32],
+    flat_trans: &Arc<[u32]>,
     transitions_by_byte: Option<&[u32]>,
 ) -> (Vec<usize>, Option<L1ExactProfileReuse>) {
     find_l1_exact_state_equivalence_by_token_signatures_with_first_target_cache(
@@ -2176,18 +2178,23 @@ fn find_l1_exact_state_equivalence_by_token_signatures_with_first_target_cache(
     vocab_order: &L1IdentityVocabOrder,
     states: &[usize],
     active_terminals: &[bool],
-    flat_trans: &[u32],
+    flat_trans: &Arc<[u32]>,
     transitions_by_byte: Option<&[u32]>,
     first_target_cache_override: Option<bool>,
 ) -> (Vec<usize>, Option<L1ExactProfileReuse>) {
     let terminal_signature_started_at = compile_profile_enabled().then(Instant::now);
-    let _ = flat_trans;
-    let tokenizer_view = TokenizerView::new_filtered(tokenizer, active_terminals);
+    let all_terminals_active = active_terminals.iter().all(|&active| active);
+    let tokenizer_view = if all_terminals_active {
+        TokenizerView::new_from_flat_trans(flat_trans, tokenizer)
+    } else {
+        TokenizerView::new_filtered_from_flat_trans(flat_trans, tokenizer, active_terminals)
+    };
     let (state_to_terminal_signature, terminal_signatures) =
         build_l1_flat_state_to_terminal_signatures(tokenizer_view.dfa());
     let terminal_signature_ms = terminal_signature_started_at.map_or(0.0, |started| {
         started.elapsed().as_secs_f64() * 1000.0
     });
+    let self_loop_bytes_by_state = all_terminals_active.then(|| tokenizer.all_self_loop_bytes());
     find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
         vocab_order,
         states,
@@ -2198,6 +2205,7 @@ fn find_l1_exact_state_equivalence_by_token_signatures_with_first_target_cache(
         true,
         terminal_signature_ms,
         first_target_cache_override,
+        self_loop_bytes_by_state.as_deref(),
     )
 }
 
@@ -2210,6 +2218,7 @@ fn find_l1_exact_state_equivalence_by_flat_signatures(
     transitions_by_byte: Option<&[u32]>,
     allow_remaining_horizon_quotients: bool,
     terminal_signature_ms: f64,
+    self_loop_bytes_by_state: Option<&[U8Set]>,
 ) -> (Vec<usize>, Option<L1ExactProfileReuse>) {
     find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
         vocab_order,
@@ -2221,6 +2230,7 @@ fn find_l1_exact_state_equivalence_by_flat_signatures(
         allow_remaining_horizon_quotients,
         terminal_signature_ms,
         None,
+        self_loop_bytes_by_state,
     )
 }
 
@@ -2234,6 +2244,7 @@ fn find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
     allow_remaining_horizon_quotients: bool,
     terminal_signature_ms: f64,
     first_target_cache_override: Option<bool>,
+    cached_self_loop_bytes_by_state: Option<&[U8Set]>,
 ) -> (Vec<usize>, Option<L1ExactProfileReuse>) {
     if states.len() <= 1 {
         return (states.to_vec(), None);
@@ -2383,18 +2394,18 @@ fn find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
     });
 
     let target_profiles_started_at = profile_enabled.then(Instant::now);
-    let self_loop_bytes_by_state = (0..num_tokenizer_states)
-        .map(|state| {
-            let mut bytes = [0u64; 4];
-            let row = &flat_trans[state * 256..state * 256 + 256];
-            for (byte, &target) in row.iter().enumerate() {
-                if target == state as u32 {
-                    bytes[byte / 64] |= 1u64 << (byte % 64);
-                }
-            }
-            bytes
-        })
-        .collect::<Vec<_>>();
+    let owned_self_loop_bytes_by_state;
+    let self_loop_bytes_by_state = if let Some(cached) = cached_self_loop_bytes_by_state {
+        cached
+    } else {
+        owned_self_loop_bytes_by_state = (0..num_tokenizer_states)
+            .map(|state| {
+                let row = &flat_trans[state * 256..state * 256 + 256];
+                U8Set::from_predicate(|byte| row[byte as usize] == state as u32)
+            })
+            .collect::<Vec<_>>();
+        owned_self_loop_bytes_by_state.as_slice()
+    };
     let mut targets_by_first_byte = vec![Vec::<u32>::new(); 256];
     for (byte, target) in unique_targets {
         targets_by_first_byte[byte as usize].push(target);
@@ -2447,7 +2458,7 @@ fn find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
                         &token_buckets.suffix_first_bytes_by_bucket[byte_idx],
                         token_buckets.has_empty_suffix_by_bucket[byte_idx],
                         &state_to_terminal_signature,
-                        &self_loop_bytes_by_state,
+                        self_loop_bytes_by_state,
                         flat_trans,
                         transitions_by_byte,
                         num_tokenizer_states,
@@ -2517,7 +2528,7 @@ fn find_l1_exact_state_equivalence_by_flat_signatures_with_first_target_cache(
                     &token_buckets.suffix_first_bytes_by_bucket[byte_idx],
                     token_buckets.has_empty_suffix_by_bucket[byte_idx],
                     &state_to_terminal_signature,
-                    &self_loop_bytes_by_state,
+                    self_loop_bytes_by_state,
                     flat_trans,
                     transitions_by_byte,
                     num_tokenizer_states,
@@ -3562,7 +3573,7 @@ fn l1_bucket_suffix_signature_profiles_packed(
     suffix_first_bytes: &[u64; 4],
     has_empty_suffix: bool,
     state_to_terminal_signature: &[u32],
-    self_loop_bytes_by_state: &[[u64; 4]],
+    self_loop_bytes_by_state: &[U8Set],
     flat_trans: &[u32],
     transitions_by_byte: Option<&[u32]>,
     num_lexer_states: usize,
@@ -3712,8 +3723,8 @@ fn l1_bucket_suffix_signature_profiles_packed(
                     return Some(L1_NONE);
                 }
                 let self_loops = &self_loop_bytes_by_state[next as usize];
-                let subtree = &subtree_bytes_by_node[child];
-                if (0..4).all(|word| subtree[word] & !self_loops[word] == 0) {
+                let subtree = U8Set::from_words(subtree_bytes_by_node[child]);
+                if subtree.is_subset(self_loops) {
                     let signature = state_to_terminal_signature[next as usize];
                     Some(if signature == 0 {
                         L1_NONE
@@ -6406,6 +6417,67 @@ mod packed_suffix_product_tests {
     }
 
     #[test]
+    fn filtered_exact_profiles_use_projected_self_loops() {
+        let expressions = vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Seq(b"b".to_vec())),
+                min: 0,
+                max: None,
+            },
+        ];
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let flat_trans: Arc<[u32]> = Arc::from(build_flat_transition_table(&tokenizer));
+        let active = [true, false];
+        let filtered = TokenizerView::new_filtered_from_flat_trans(
+            &flat_trans,
+            &tokenizer,
+            &active,
+        );
+        assert!(
+            (0..tokenizer.num_states() as usize).any(|state| {
+                tokenizer.all_self_loop_bytes()[state].contains(b'b')
+                    && filtered.dfa().trans(state, b'b' as usize) == u32::MAX
+            }),
+            "fixture must project an inactive raw self-loop to dead",
+        );
+
+        let vocab = Vocab::new(vec![
+            (0, b"a".to_vec()),
+            (1, b"b".to_vec()),
+            (2, b"bb".to_vec()),
+            (3, b"bbb".to_vec()),
+        ]);
+        let order = l1_identity_vocab_order(&vocab);
+        let states = (0..tokenizer.num_states() as usize).collect::<Vec<_>>();
+        let (actual, _) = find_l1_exact_state_equivalence_by_token_signatures(
+            &tokenizer,
+            order.as_ref(),
+            &states,
+            &active,
+            &flat_trans,
+            None,
+        );
+        let (state_to_terminal_signature, terminal_signatures) =
+            build_l1_flat_state_to_terminal_signatures(filtered.dfa());
+        let (expected, _) = find_l1_exact_state_equivalence_by_flat_signatures(
+            order.as_ref(),
+            &states,
+            state_to_terminal_signature,
+            terminal_signatures,
+            &filtered,
+            None,
+            true,
+            0.0,
+            None,
+        );
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn packed_suffix_profiles_match_batched_profiles() {
         let expressions = vec![
             Expr::U8Seq(b"a".to_vec()),
@@ -6438,19 +6510,8 @@ mod packed_suffix_product_tests {
         let active_terminals = vec![true, false, true, true];
         let (state_to_terminal_signature, _) =
             build_l1_state_to_terminal_signatures(&tokenizer, &active_terminals);
-        let flat_trans = build_flat_transition_table(&tokenizer);
-        let self_loop_bytes_by_state = (0..tokenizer.num_states() as usize)
-            .map(|state| {
-                let mut bytes = [0u64; 4];
-                let row = &flat_trans[state * 256..state * 256 + 256];
-                for (byte, &target) in row.iter().enumerate() {
-                    if target == state as u32 {
-                        bytes[byte / 64] |= 1u64 << (byte % 64);
-                    }
-                }
-                bytes
-            })
-            .collect::<Vec<_>>();
+        let flat_trans: Arc<[u32]> = Arc::from(build_flat_transition_table(&tokenizer));
+        let self_loop_bytes_by_state = tokenizer.all_self_loop_bytes();
         let targets: Vec<u32> = (0..tokenizer.num_states()).collect();
         let mut relevant_bytes = [false; 256];
         let max_token_len = sorted_entries
@@ -6508,7 +6569,7 @@ mod packed_suffix_product_tests {
                 &buckets.suffix_first_bytes_by_bucket[first_byte],
                 buckets.has_empty_suffix_by_bucket[first_byte],
                 &state_to_terminal_signature,
-                &self_loop_bytes_by_state,
+                self_loop_bytes_by_state.as_ref(),
                 &flat_trans,
                 None,
                 tokenizer.num_states() as usize,
@@ -6527,7 +6588,7 @@ mod packed_suffix_product_tests {
                 &buckets.suffix_first_bytes_by_bucket[first_byte],
                 buckets.has_empty_suffix_by_bucket[first_byte],
                 &state_to_terminal_signature,
-                &self_loop_bytes_by_state,
+                self_loop_bytes_by_state.as_ref(),
                 &flat_trans,
                 None,
                 tokenizer.num_states() as usize,
@@ -6871,7 +6932,7 @@ mod packed_suffix_product_tests {
             ]);
         let active_terminals = vec![true, false, true, true];
         let order = l1_identity_vocab_order(&vocab);
-        let flat_trans = build_flat_transition_table(&tokenizer);
+        let flat_trans: Arc<[u32]> = Arc::from(build_flat_transition_table(&tokenizer));
         let states: Vec<usize> = (0..tokenizer.num_states() as usize).collect();
         let (mapping, _) =
             find_l1_exact_state_equivalence_by_token_signatures_with_first_target_cache(

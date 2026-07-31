@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::OnceLock;
 
 use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,8 @@ pub struct DWAState {
 pub struct DWA {
     states: Vec<DWAState>,
     start_state: u32,
+    transition_count_cache: OnceLock<usize>,
+    acyclic_cache: OnceLock<bool>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -208,6 +211,8 @@ impl<'de> Deserialize<'de> for DWA {
         Ok(DWA {
             states,
             start_state: serde_repr.start_state,
+            transition_count_cache: OnceLock::new(),
+            acyclic_cache: OnceLock::new(),
         })
     }
 }
@@ -217,7 +222,15 @@ impl DWA {
         Self {
             states: vec![DWAState::default()],
             start_state: 0,
+            transition_count_cache: OnceLock::new(),
+            acyclic_cache: OnceLock::new(),
         }
+    }
+
+    #[inline]
+    fn invalidate_graph_caches(&mut self) {
+        let _ = self.transition_count_cache.take();
+        let _ = self.acyclic_cache.take();
     }
 
     #[inline]
@@ -227,6 +240,7 @@ impl DWA {
 
     #[inline]
     pub fn states_mut(&mut self) -> &mut Vec<DWAState> {
+        self.invalidate_graph_caches();
         &mut self.states
     }
 
@@ -236,7 +250,12 @@ impl DWA {
     }
 
     pub fn from_parts(states: Vec<DWAState>, start_state: u32) -> Self {
-        Self { states, start_state }
+        Self {
+            states,
+            start_state,
+            transition_count_cache: OnceLock::new(),
+            acyclic_cache: OnceLock::new(),
+        }
     }
 
     pub fn set_start_state(&mut self, state: u32) {
@@ -254,7 +273,12 @@ impl DWA {
     }
 
     pub fn num_transitions(&self) -> usize {
-        self.states.iter().map(|state| state.transitions.len()).sum()
+        *self.transition_count_cache.get_or_init(|| {
+            self.states
+                .iter()
+                .map(|state| state.transitions.len())
+                .sum()
+        })
     }
 
     pub fn stats(&self) -> DwaStats {
@@ -310,6 +334,7 @@ impl DWA {
     }
 
     pub fn add_transition(&mut self, from: u32, label: Label, to: u32, weight: Weight) {
+        self.invalidate_graph_caches();
         if let Some(entry) = self.states.get_mut(from as usize) {
             entry.transitions.insert(label, (to, weight));
         }
@@ -356,65 +381,39 @@ impl DWA {
     }
 
     pub fn is_acyclic(&self) -> bool {
-        fn for_each_successor(state: &DWAState, mut visit: impl FnMut(u32)) {
-            for (target, _) in state.transitions.values() {
-                visit(*target);
-            }
-        }
+        *self.acyclic_cache.get_or_init(|| self.compute_is_acyclic())
+    }
 
+    fn compute_is_acyclic(&self) -> bool {
         let num_states = self.states.len();
-
-        for (state_id, state) in self.states.iter().enumerate() {
-            let mut has_self_loop = false;
-            for_each_successor(state, |target| {
-                if target as usize == state_id {
-                    has_self_loop = true;
+        let mut indegree = vec![0u32; num_states];
+        for state in &self.states {
+            for &(target, _) in state.transitions.values() {
+                if let Some(degree) = indegree.get_mut(target as usize) {
+                    *degree += 1;
                 }
-            });
-            if has_self_loop {
-                return false;
             }
         }
-
-        fn visit(state_id: usize, states: &[DWAState], colors: &mut [u8]) -> bool {
-            colors[state_id] = 1;
-
-            let mut acyclic = true;
-            for_each_successor(&states[state_id], |target| {
-                if !acyclic {
-                    return;
-                }
-
-                let target = target as usize;
-                if target >= colors.len() {
-                    return;
-                }
-                match colors[target] {
-                    1 => acyclic = false,
-                    0 => {
-                        if !visit(target, states, colors) {
-                            acyclic = false;
-                        }
-                    }
-                    _ => {}
-                }
-            });
-
-            if !acyclic {
-                return false;
-            }
-
-            colors[state_id] = 2;
-            true
-        }
-
-        let mut colors = vec![0u8; num_states];
-        for state_id in 0..num_states {
-            if colors[state_id] == 0 && !visit(state_id, &self.states, &mut colors) {
-                return false;
+        let mut queue = std::collections::VecDeque::new();
+        for (state, &degree) in indegree.iter().enumerate() {
+            if degree == 0 {
+                queue.push_back(state);
             }
         }
-        true
+        let mut visited = 0usize;
+        while let Some(state) = queue.pop_front() {
+            visited += 1;
+            for &(target, _) in self.states[state].transitions.values() {
+                let Some(degree) = indegree.get_mut(target as usize) else {
+                    continue;
+                };
+                *degree -= 1;
+                if *degree == 0 {
+                    queue.push_back(target as usize);
+                }
+            }
+        }
+        visited == num_states
     }
 
     /// Convert this DWA to an NWA representation.
@@ -483,5 +482,51 @@ impl PartialEq for DWA {
 impl PartialEq for DWAState {
     fn eq(&self, other: &Self) -> bool {
         self.transitions == other.transitions && self.final_weight == other.final_weight
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    #[test]
+    fn graph_property_caches_invalidate_on_transition_mutation() {
+        let mut dwa = DWA::new(1, 1);
+        let next = dwa.add_state();
+        dwa.add_transition(0, 7, next, Weight::all());
+
+        assert_eq!(dwa.num_transitions(), 1);
+        assert!(dwa.is_acyclic());
+        assert_eq!(dwa.transition_count_cache.get(), Some(&1));
+        assert_eq!(dwa.acyclic_cache.get(), Some(&true));
+
+        dwa.add_transition(next, 8, next, Weight::all());
+        assert!(dwa.transition_count_cache.get().is_none());
+        assert!(dwa.acyclic_cache.get().is_none());
+        assert_eq!(dwa.num_transitions(), 2);
+        assert!(!dwa.is_acyclic());
+    }
+
+    #[test]
+    fn mutable_state_access_and_deserialization_reset_graph_caches() {
+        let mut dwa = DWA::new(1, 1);
+        let next = dwa.add_state();
+        dwa.add_transition(0, 1, next, Weight::all());
+        assert_eq!(dwa.num_transitions(), 1);
+        assert!(dwa.is_acyclic());
+
+        dwa.states_mut()[next as usize]
+            .transitions
+            .insert(2, (next, Weight::all()));
+        assert!(dwa.transition_count_cache.get().is_none());
+        assert!(dwa.acyclic_cache.get().is_none());
+        assert_eq!(dwa.num_transitions(), 2);
+        assert!(!dwa.is_acyclic());
+
+        let decoded: DWA = bincode::deserialize(&bincode::serialize(&dwa).unwrap()).unwrap();
+        assert!(decoded.transition_count_cache.get().is_none());
+        assert!(decoded.acyclic_cache.get().is_none());
+        assert_eq!(decoded.num_transitions(), 2);
+        assert!(!decoded.is_acyclic());
     }
 }

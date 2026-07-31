@@ -98,12 +98,12 @@ impl ExprNFA {
     pub fn determinize_and_minimize(&self) -> DFA {
         if self.is_determinized_and_minimized
             && let Some(dfa) = &self.canonical_dfa
-            && dfa.is_acyclic()
+            && dfa.compute_is_acyclic()
         {
             return reindex_minimized_acyclic_dfa(dfa);
         }
         let dfa = self.determinize();
-        if self.is_determinized_and_minimized && dfa.is_acyclic() {
+        if self.is_determinized_and_minimized && dfa.compute_is_acyclic() {
             reindex_minimized_acyclic_dfa(&dfa)
         } else {
             minimize_dfa(&dfa)
@@ -196,7 +196,7 @@ impl ExprNfaBuilder {
 }
 
 pub fn minimize_dfa(dfa: &DFA) -> DFA {
-    if dfa.is_acyclic() {
+    if dfa.compute_is_acyclic() {
         minimize_acyclic(dfa)
     } else {
         minimize_cyclic(dfa)

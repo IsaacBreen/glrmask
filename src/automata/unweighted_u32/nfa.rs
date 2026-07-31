@@ -9,17 +9,6 @@ use std::collections::BTreeMap;
 
 use super::dfa::Label;
 
-fn visit_successors(state: &NFAState, mut visit: impl FnMut(u32)) {
-    for targets in state.transitions.values() {
-        for &target in targets {
-            visit(target);
-        }
-    }
-    for &target in &state.epsilons {
-        visit(target);
-    }
-}
-
 /// A single NFA state with non-deterministic transitions and epsilon edges.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct NFAState {
@@ -93,46 +82,51 @@ impl NFA {
             .map_or(false, |s| s.is_accepting)
     }
 
-    /// Returns `true` if the NFA's transition graph (including epsilon edges)
-    /// contains no cycles.  Uses DFS 3-coloring.
-    pub fn is_acyclic(&self) -> bool {
-        let n = self.states.len();
-        let mut color = vec![0u8; n];
-
-        fn visit(s: usize, states: &[NFAState], color: &mut [u8]) -> bool {
-            color[s] = 1;
-            let mut acyclic = true;
-            visit_successors(&states[s], |target| {
-                if !acyclic {
-                    return;
+    /// Compute whether the NFA's labeled and epsilon transition graph is acyclic.
+    ///
+    /// The graph is publicly mutable, so this cannot be safely cached. The
+    /// method name deliberately exposes the O(states + transitions) cost.
+    pub fn compute_is_acyclic(&self) -> bool {
+        let num_states = self.states.len();
+        let mut indegree = vec![0u32; num_states];
+        for state in &self.states {
+            for &target in state
+                .transitions
+                .values()
+                .flatten()
+                .chain(state.epsilons.iter())
+            {
+                if let Some(degree) = indegree.get_mut(target as usize) {
+                    *degree += 1;
                 }
-                let t = target as usize;
-                if t >= color.len() {
-                    return;
-                }
-                match color[t] {
-                    1 => acyclic = false,
-                    0 => {
-                        if !visit(t, states, color) {
-                            acyclic = false;
-                        }
-                    }
-                    _ => {}
-                }
-            });
-            if !acyclic {
-                return false;
-            }
-            color[s] = 2;
-            true
-        }
-
-        for s in 0..n {
-            if color[s] == 0 && !visit(s, &self.states, &mut color) {
-                return false;
             }
         }
-        true
+        let mut queue = std::collections::VecDeque::new();
+        for (state, &degree) in indegree.iter().enumerate() {
+            if degree == 0 {
+                queue.push_back(state);
+            }
+        }
+        let mut visited = 0usize;
+        while let Some(state_id) = queue.pop_front() {
+            visited += 1;
+            let state = &self.states[state_id];
+            for &target in state
+                .transitions
+                .values()
+                .flatten()
+                .chain(state.epsilons.iter())
+            {
+                let Some(degree) = indegree.get_mut(target as usize) else {
+                    continue;
+                };
+                *degree -= 1;
+                if *degree == 0 {
+                    queue.push_back(target as usize);
+                }
+            }
+        }
+        visited == num_states
     }
 }
 
@@ -160,5 +154,24 @@ impl std::fmt::Display for NFA {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod acyclicity_tests {
+    use super::*;
+
+    #[test]
+    fn iterative_acyclicity_handles_deep_epsilon_graphs_and_cycles() {
+        let mut nfa = NFA::new();
+        let mut previous = 0u32;
+        for _ in 0..100_000 {
+            let next = nfa.add_state();
+            nfa.add_epsilon(previous, next);
+            previous = next;
+        }
+        assert!(nfa.compute_is_acyclic());
+        nfa.add_epsilon(previous, 0);
+        assert!(!nfa.compute_is_acyclic());
     }
 }

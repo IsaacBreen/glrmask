@@ -18,35 +18,6 @@ pub struct DFA {
     pub start_state: u32,
 }
 
-fn has_self_loop(state_id: usize, state: &DFAState) -> bool {
-    state.transitions.values().any(|&target| target as usize == state_id)
-}
-
-fn visit_successors(
-    state_id: usize,
-    states: &[DFAState],
-    colors: &mut [u8],
-) -> bool {
-    colors[state_id] = 1;
-    for target in states[state_id].transitions.values() {
-        let target = *target as usize;
-        if target >= colors.len() {
-            continue;
-        }
-        match colors[target] {
-            1 => return false,
-            0 => {
-                if !visit_successors(target, states, colors) {
-                    return false;
-                }
-            }
-            _ => {}
-        }
-    }
-    colors[state_id] = 2;
-    true
-}
-
 impl DFA {
     pub fn new() -> Self {
         Self {
@@ -77,23 +48,40 @@ impl DFA {
         }
     }
 
-    /// Returns `true` if the DFA's transition graph contains no cycles.
-    pub fn is_acyclic(&self) -> bool {
+    /// Compute whether the DFA's transition graph contains no cycles.
+    ///
+    /// The graph is publicly mutable, so this cannot be safely cached. The
+    /// method name deliberately exposes the O(states + transitions) cost.
+    pub fn compute_is_acyclic(&self) -> bool {
         let num_states = self.states.len();
-
-        for (state_id, state) in self.states.iter().enumerate() {
-            if has_self_loop(state_id, state) {
-                return false;
+        let mut indegree = vec![0u32; num_states];
+        for state in &self.states {
+            for &target in state.transitions.values() {
+                if let Some(degree) = indegree.get_mut(target as usize) {
+                    *degree += 1;
+                }
             }
         }
-
-        let mut colors = vec![0u8; num_states];
-        for state_id in 0..num_states {
-            if colors[state_id] == 0 && !visit_successors(state_id, &self.states, &mut colors) {
-                return false;
+        let mut queue = std::collections::VecDeque::new();
+        for (state, &degree) in indegree.iter().enumerate() {
+            if degree == 0 {
+                queue.push_back(state);
             }
         }
-        true
+        let mut visited = 0usize;
+        while let Some(state) = queue.pop_front() {
+            visited += 1;
+            for &target in self.states[state].transitions.values() {
+                let Some(degree) = indegree.get_mut(target as usize) else {
+                    continue;
+                };
+                *degree -= 1;
+                if *degree == 0 {
+                    queue.push_back(target as usize);
+                }
+            }
+        }
+        visited == num_states
     }
 }
 
@@ -113,5 +101,24 @@ impl std::fmt::Display for DFA {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod acyclicity_tests {
+    use super::*;
+
+    #[test]
+    fn iterative_acyclicity_handles_deep_graphs_and_cycles() {
+        let mut dfa = DFA::new();
+        let mut previous = 0u32;
+        for label in 0..100_000i32 {
+            let next = dfa.add_state();
+            dfa.add_transition(previous, label, next);
+            previous = next;
+        }
+        assert!(dfa.compute_is_acyclic());
+        dfa.add_transition(previous, i32::MIN, 0);
+        assert!(!dfa.compute_is_acyclic());
     }
 }

@@ -444,34 +444,60 @@ fn build_start_closure(
     closure
 }
 
+struct ClosedStateTargets {
+    offsets: Vec<u32>,
+    word_indices: Vec<u32>,
+    words: Vec<u64>,
+}
+
+impl ClosedStateTargets {
+    #[inline]
+    fn words_for_state(&self, state: u32) -> (&[u32], &[u64]) {
+        let start = self.offsets[state as usize] as usize;
+        let end = self.offsets[state as usize + 1] as usize;
+        (&self.word_indices[start..end], &self.words[start..end])
+    }
+}
+
 fn build_closed_state_targets(
     num_states: usize,
     retained_states: &[bool],
     precomputed_closures: &[Option<CompressedStateSet>],
-) -> Vec<Option<CompressedStateSet>> {
-    (0..num_states)
-        .map(|state| {
-            if let Some(closure) = &precomputed_closures[state] {
-                Some(closure.clone())
-            } else if retained_states[state] {
-                let mut closure = CompressedStateSet::new();
-                let word_index = (state / 64) as u32;
-                let word = 1u64 << (state % 64);
-                closure.words.push((word_index, word));
-                closure.hash = (word_index as u64).wrapping_mul(0x517c_c1b7_2722_0a95)
-                    ^ word.wrapping_mul(0x9e37_79b9_7f4a_7c15);
-                Some(closure)
-            } else {
-                None
-            }
+) -> ClosedStateTargets {
+    let total_words = precomputed_closures
+        .iter()
+        .enumerate()
+        .map(|(state, closure)| {
+            closure
+                .as_ref()
+                .map_or(usize::from(retained_states[state]), |closure| closure.words.len())
         })
-        .collect()
+        .sum();
+    let mut result = ClosedStateTargets {
+        offsets: Vec::with_capacity(num_states + 1),
+        word_indices: Vec::with_capacity(total_words),
+        words: Vec::with_capacity(total_words),
+    };
+    result.offsets.push(0);
+    for state in 0..num_states {
+        if let Some(closure) = &precomputed_closures[state] {
+            result
+                .word_indices
+                .extend(closure.words.iter().map(|&(word_index, _)| word_index));
+            result.words.extend(closure.words.iter().map(|&(_, bits)| bits));
+        } else if retained_states[state] {
+            result.word_indices.push((state / 64) as u32);
+            result.words.push(1u64 << (state % 64));
+        }
+        result.offsets.push(result.words.len() as u32);
+    }
+    result
 }
 
 fn collect_closed_transition_targets(
     subset: &CompressedStateSet,
     remapped_transitions: &RemappedTransitions,
-    closed_state_targets: &[Option<CompressedStateSet>],
+    closed_state_targets: &ClosedStateTargets,
     transition_targets: &mut [SparseStateSet],
     used_classes: &mut Vec<usize>,
     seen_class: &mut [bool],
@@ -488,24 +514,101 @@ fn collect_closed_transition_targets(
             for transition in start..end {
                 let class_set = remapped_transitions.class_sets[transition];
                 let next_state = remapped_transitions.targets[transition];
-                let Some(closed_targets) = &closed_state_targets[next_state as usize] else {
+                let (closed_word_indices, closed_words) =
+                    closed_state_targets.words_for_state(next_state);
+                if closed_words.is_empty() {
                     continue;
-                };
+                }
                 for class_id in class_set.iter() {
                     let class_index = class_id as usize;
                     if !seen_class[class_index] {
                         seen_class[class_index] = true;
                         used_classes.push(class_index);
                     }
-                    transition_targets[class_index].union_compressed(closed_targets);
+                    transition_targets[class_index]
+                        .union_indexed_words(closed_word_indices, closed_words);
                 }
             }
         }
     }
 }
 
+fn expand_byte_class_transitions(dfa: &mut DFA, class_members: &[Vec<u8>]) {
+    let expanded = dfa
+        .states()
+        .iter()
+        .map(|state| {
+            let capacity = state
+                .transitions
+                .iter()
+                .map(|(class, _)| class_members[class as usize].len())
+                .sum();
+            let mut entries = Vec::with_capacity(capacity);
+            for (class, &target) in state.transitions.iter() {
+                entries.extend(
+                    class_members[class as usize]
+                        .iter()
+                        .map(|&byte| (byte, target)),
+                );
+            }
+            if entries.len() > 1 {
+                entries.sort_unstable_by_key(|entry| entry.0);
+            }
+            crate::ds::char_transitions::CharTransitions::from_sorted_entries(entries)
+        })
+        .collect::<Vec<_>>();
+    for (state, transitions) in dfa.states_mut().iter_mut().zip(expanded) {
+        state.transitions = transitions;
+    }
+}
+
 impl NFA {
     pub(super) fn to_dfa(&self) -> DFA {
+        self.determinize_impl(true).0
+    }
+
+    /// Determinize and minimize over the NFA's global byte-equivalence classes,
+    /// expanding classes back to bytes only after state minimization. This is
+    /// language-equivalent to byte-level minimization while avoiding millions
+    /// of transient byte transitions for large regular graphs.
+    pub(super) fn to_minimized_dfa(&self) -> DFA {
+        let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
+        let total_started_at = profile.then(std::time::Instant::now);
+        let determinize_started_at = profile.then(std::time::Instant::now);
+        let (dfa, class_members) = self.determinize_impl(false);
+        let determinize_ms = determinize_started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let pre_minimize_states = dfa.num_states();
+        let pre_minimize_transitions = dfa.transition_count();
+        let minimize_started_at = profile.then(std::time::Instant::now);
+        let mut minimized = dfa.minimize();
+        let minimize_ms = minimize_started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let class_transition_count = minimized.transition_count();
+        let expand_started_at = profile.then(std::time::Instant::now);
+        if let Some(class_members) = class_members {
+            expand_byte_class_transitions(&mut minimized, &class_members);
+        }
+        let expand_ms = expand_started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        if let Some(total_started_at) = total_started_at {
+            eprintln!(
+                "[glrmask/profile][tokenizer] class_alphabet_minimize pre_states={} pre_class_transitions={} post_states={} post_class_transitions={} post_byte_transitions={} determinize_ms={:.3} minimize_ms={:.3} expand_ms={:.3} total_ms={:.3}",
+                pre_minimize_states,
+                pre_minimize_transitions,
+                minimized.num_states(),
+                class_transition_count,
+                minimized.transition_count(),
+                determinize_ms,
+                minimize_ms,
+                expand_ms,
+                total_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        minimized
+    }
+
+    fn determinize_impl(&self, expand_byte_classes: bool) -> (DFA, Option<Vec<Vec<u8>>>) {
         let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
         let total_started_at = profile.then(std::time::Instant::now);
         let group_count = self
@@ -523,7 +626,10 @@ impl NFA {
         let deterministic_no_epsilon = is_epsilon_free_deterministic(self);
 
         if deterministic_no_epsilon {
-            return determinize_epsilon_free_deterministic(self, group_count, &reachable_groups);
+            return (
+                determinize_epsilon_free_deterministic(self, group_count, &reachable_groups),
+                None,
+            );
         }
 
         let mut dfa = DFA::new(1);
@@ -657,7 +763,15 @@ impl NFA {
             if profile {
                 total_used_classes += used_classes.len();
             }
-            let mut dfa_transitions_vec = Vec::with_capacity(used_classes.len() * 2);
+            let transition_capacity = if expand_byte_classes {
+                used_classes
+                    .iter()
+                    .map(|&class_id| class_members[class_id].len())
+                    .sum()
+            } else {
+                used_classes.len()
+            };
+            let mut dfa_transitions_vec = Vec::with_capacity(transition_capacity);
             for &class_id in &used_classes {
                 let target_set = &transition_targets[class_id];
 
@@ -688,7 +802,10 @@ impl NFA {
                     existing
                 } else {
                     let new_state = dfa.add_state();
-                    let key = Arc::new(scratch_closure.clone());
+                    // The compressed target set is immutable once interned.
+                    // Transfer the scratch allocation into the key instead of
+                    // cloning every sparse word into a second allocation.
+                    let key = Arc::new(std::mem::take(&mut scratch_closure));
                     let metadata_started_at = profile.then(std::time::Instant::now);
                     let (finalizers, future) = compute_subset_metadata(
                         self,
@@ -712,8 +829,12 @@ impl NFA {
                 }
 
                 let transition_started_at = profile.then(std::time::Instant::now);
-                for &byte in &class_members[class_id] {
-                    dfa_transitions_vec.push((byte, next_dfa_state));
+                if expand_byte_classes {
+                    for &byte in &class_members[class_id] {
+                        dfa_transitions_vec.push((byte, next_dfa_state));
+                    }
+                } else {
+                    dfa_transitions_vec.push((class_id as u8, next_dfa_state));
                 }
                 if let Some(started) = transition_started_at {
                     transition_duration += started.elapsed();
@@ -739,14 +860,15 @@ impl NFA {
         if let Some(total_started_at) = total_started_at {
             let states = dfa.num_states();
             eprintln!(
-                "[glrmask/profile][tokenizer] nfa_determinize_detail nfa_states={} nfa_transitions={} epsilon_edges={} groups={} classes={} dfa_states={} dfa_transitions={} avg_subset_members={:.2} max_subset_members={} avg_used_classes={:.2} avg_closed_target_members={:.2} max_closed_target_members={} avg_target_words={:.2} max_target_words={} reachable_ms={:.3} classes_ms={:.3} remap_ms={:.3} compact_ms={:.3} closure_precompute_ms={:.3} collect_closed_ms={:.3} compress_ms={:.3} lookup_ms={:.3} metadata_ms={:.3} transition_ms={:.3} loop_ms={:.3} total_ms={:.3}",
+                "[glrmask/profile][tokenizer] nfa_determinize_detail alphabet={} nfa_states={} nfa_transitions={} epsilon_edges={} groups={} classes={} dfa_states={} dfa_transitions={} avg_subset_members={:.2} max_subset_members={} avg_used_classes={:.2} avg_closed_target_members={:.2} max_closed_target_members={} avg_target_words={:.2} max_target_words={} reachable_ms={:.3} classes_ms={:.3} remap_ms={:.3} compact_ms={:.3} closure_precompute_ms={:.3} collect_closed_ms={:.3} compress_ms={:.3} lookup_ms={:.3} metadata_ms={:.3} transition_ms={:.3} loop_ms={:.3} total_ms={:.3}",
+                if expand_byte_classes { "byte" } else { "class" },
                 self.states.len(),
                 self.states.iter().map(|state| state.transitions.len()).sum::<usize>(),
                 self.states.iter().map(|state| state.epsilon_transitions.len()).sum::<usize>(),
                 group_count,
                 num_classes,
                 states,
-                dfa.states().iter().map(|state| state.transitions.len()).sum::<usize>(),
+                dfa.transition_count(),
                 total_subset_members as f64 / states.max(1) as f64,
                 max_subset_members,
                 total_used_classes as f64 / states.max(1) as f64,
@@ -769,6 +891,81 @@ impl NFA {
             );
         }
 
-        dfa
+        let class_members = (!expand_byte_classes).then_some(class_members);
+        (dfa, class_members)
+    }
+}
+
+#[cfg(test)]
+mod class_minimization_tests {
+    use super::*;
+
+    fn enumerate_inputs(alphabet: &[u8], max_len: usize) -> Vec<Vec<u8>> {
+        let mut inputs = vec![Vec::new()];
+        let mut frontier = vec![Vec::new()];
+        for _ in 0..max_len {
+            let mut next = Vec::new();
+            for prefix in &frontier {
+                for &byte in alphabet {
+                    let mut input = prefix.clone();
+                    input.push(byte);
+                    inputs.push(input.clone());
+                    next.push(input);
+                }
+            }
+            frontier = next;
+        }
+        inputs
+    }
+
+    fn observation(dfa: &DFA, input: &[u8]) -> Option<(Vec<usize>, Vec<usize>)> {
+        let mut state = 0u32;
+        for &byte in input {
+            state = dfa.step(state, byte)?;
+        }
+        Some((
+            dfa.finalizers(state).iter().collect(),
+            dfa.possible_future_group_ids(state).iter().collect(),
+        ))
+    }
+
+    #[test]
+    fn class_alphabet_minimization_matches_byte_expansion() {
+        let mut nfa = NFA::new(8);
+        let mut ab = U8Set::empty();
+        ab.insert(b'a');
+        ab.insert(b'b');
+        let mut bc = U8Set::empty();
+        bc.insert(b'b');
+        bc.insert(b'c');
+
+        nfa.add_epsilon(0, 1);
+        nfa.add_epsilon(0, 2);
+        nfa.add_u8set_transition(1, ab, 3);
+        nfa.add_transition(2, b'a', 4);
+        nfa.add_u8set_transition(2, bc, 5);
+        nfa.add_epsilon(3, 4);
+        nfa.add_epsilon(4, 3);
+        nfa.add_epsilon(3, 6);
+        nfa.add_epsilon(4, 6);
+        nfa.add_transition(5, b'c', 5);
+        nfa.add_transition(5, b'b', 7);
+        nfa.add_transition(6, b'a', 6);
+        nfa.add_transition(6, b'b', 7);
+        nfa.add_finalizer(6, 0);
+        nfa.add_finalizer(7, 1);
+        nfa.condense_epsilon_sccs();
+
+        let byte_expanded = nfa.to_dfa().minimize();
+        let class_minimized = nfa.to_minimized_dfa();
+        assert_eq!(byte_expanded.num_states(), class_minimized.num_states());
+
+        for input in enumerate_inputs(b"abcx", 6) {
+            assert_eq!(
+                observation(&byte_expanded, &input),
+                observation(&class_minimized, &input),
+                "input={input:?}",
+            );
+        }
     }
 }

@@ -2259,7 +2259,7 @@ impl<'a> Lowerer<'a> {
         }
         if expr_nfa.is_determinized_and_minimized
             && let Some(dfa) = &expr_nfa.canonical_dfa
-            && dfa.is_acyclic()
+            && dfa.compute_is_acyclic()
         {
             return self.emit_canonical_expr_dfa_leftlinear(lhs, expr_nfa, dfa);
         }
@@ -3278,7 +3278,7 @@ pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
                     && expr_nfa
                         .canonical_dfa
                         .as_ref()
-                        .is_some_and(|dfa| dfa.is_acyclic()));
+                        .is_some_and(|dfa| dfa.compute_is_acyclic()));
             if hits_fast_path {
                 return None;
             }

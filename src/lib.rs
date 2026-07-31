@@ -191,7 +191,7 @@ pub mod __private {
 
         fn num_parser_states(&self) -> u32;
         fn num_tokenizer_states(&self) -> usize;
-        fn num_forced_minimized_tokenizer_states(&self) -> usize;
+        fn compute_forced_minimized_tokenizer_state_count(&self) -> usize;
         fn max_original_token_id(&self) -> Option<u32>;
         fn table_ambiguous_actions(&self) -> Vec<TableAmbiguity>;
         fn table_has_ambiguity(&self) -> bool;
@@ -241,8 +241,8 @@ pub mod __private {
             Constraint::num_tokenizer_states(self)
         }
 
-        fn num_forced_minimized_tokenizer_states(&self) -> usize {
-            Constraint::num_forced_minimized_tokenizer_states(self)
+        fn compute_forced_minimized_tokenizer_state_count(&self) -> usize {
+            Constraint::compute_forced_minimized_tokenizer_state_count(self)
         }
 
         fn max_original_token_id(&self) -> Option<u32> {

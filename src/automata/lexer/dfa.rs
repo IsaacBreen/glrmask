@@ -1,6 +1,8 @@
 //! Byte-oriented lexer DFA used by the tokenizer and lexer compiler.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::hash::{Hash, Hasher};
+use std::sync::OnceLock;
 
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -79,10 +81,34 @@ pub(super) struct DFAState {
     pub(super) epsilon_transitions: Vec<u32>,
 }
 
-#[derive(Clone, Default, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct DfaDerivedStats {
+    byte_transition_count: usize,
+    epsilon_transition_count: usize,
+    has_self_loops: bool,
+}
+
+#[derive(Clone, Default)]
 pub struct DFA {
     states: Vec<DFAState>,
     group_id_to_u8set: Vec<U8Set>,
+    derived_stats: OnceLock<DfaDerivedStats>,
+    min_match_byte_len_cache: OnceLock<Option<usize>>,
+}
+
+impl PartialEq for DFA {
+    fn eq(&self, other: &Self) -> bool {
+        self.states == other.states && self.group_id_to_u8set == other.group_id_to_u8set
+    }
+}
+
+impl Eq for DFA {}
+
+impl Hash for DFA {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.states.hash(state);
+        self.group_id_to_u8set.hash(state);
+    }
 }
 
 /// The historical persisted representation of a lexer state. Keep this exact
@@ -313,6 +339,8 @@ impl<'de> Deserialize<'de> for DFA {
         Ok(Self {
             states,
             group_id_to_u8set: wire.group_id_to_u8set,
+            derived_stats: OnceLock::new(),
+            min_match_byte_len_cache: OnceLock::new(),
         })
     }
 }
@@ -328,7 +356,52 @@ impl DFA {
         Self {
             states: vec![DFAState::default(); num_states],
             group_id_to_u8set: Vec::new(),
+            derived_stats: OnceLock::new(),
+            min_match_byte_len_cache: OnceLock::new(),
         }
+    }
+
+    #[inline]
+    fn invalidate_min_match_byte_len(&mut self) {
+        let _ = self.min_match_byte_len_cache.take();
+    }
+
+    #[inline]
+    fn invalidate_structural_caches(&mut self) {
+        let _ = self.derived_stats.take();
+        self.invalidate_min_match_byte_len();
+    }
+
+    fn compute_derived_stats(&self) -> DfaDerivedStats {
+        let mut stats = DfaDerivedStats::default();
+        for (state_id, state) in self.states.iter().enumerate() {
+            stats.byte_transition_count += state.transitions.len();
+            stats.epsilon_transition_count += state.epsilon_transitions.len();
+            stats.has_self_loops |= state
+                .transitions
+                .iter()
+                .any(|(_, &target)| target as usize == state_id);
+        }
+        stats
+    }
+
+    #[inline]
+    fn derived_stats(&self) -> DfaDerivedStats {
+        *self
+            .derived_stats
+            .get_or_init(|| self.compute_derived_stats())
+    }
+
+    pub(crate) fn transition_count(&self) -> usize {
+        self.derived_stats().byte_transition_count
+    }
+
+    pub(crate) fn epsilon_transition_count(&self) -> usize {
+        self.derived_stats().epsilon_transition_count
+    }
+
+    pub(crate) fn has_self_loops(&self) -> bool {
+        self.derived_stats().has_self_loops
     }
 
     pub(crate) fn num_states(&self) -> usize {
@@ -336,6 +409,7 @@ impl DFA {
     }
 
     pub(super) fn add_state(&mut self) -> u32 {
+        self.invalidate_structural_caches();
         let id = self.states.len() as u32;
         let groups = self.group_id_to_u8set.len();
         self.states.push(DFAState {
@@ -357,12 +431,14 @@ impl DFA {
     }
 
     pub(super) fn add_transition(&mut self, from: u32, byte: u8, to: u32) {
+        self.invalidate_structural_caches();
         if let Some(state) = self.states.get_mut(from as usize) {
             state.transitions.insert(byte, to);
         }
     }
 
     pub(super) fn add_epsilon_transition(&mut self, from: u32, to: u32) {
+        self.invalidate_structural_caches();
         if let Some(state) = self.states.get_mut(from as usize) {
             if !state.epsilon_transitions.contains(&to) {
                 state.epsilon_transitions.push(to);
@@ -379,6 +455,7 @@ impl DFA {
         mut component: DFA,
         global_group_ids: &[usize],
     ) -> u32 {
+        self.invalidate_structural_caches();
         assert_eq!(
             component.group_id_to_u8set.len(),
             global_group_ids.len(),
@@ -424,14 +501,18 @@ impl DFA {
     }
 
     pub(crate) fn has_epsilon_transitions(&self) -> bool {
-        self.states
-            .iter()
-            .any(|state| !state.epsilon_transitions.is_empty())
+        self.epsilon_transition_count() != 0
     }
 
     /// Minimum number of consumed bytes needed to reach any accepting state.
     /// Epsilon transitions have zero cost and byte transitions have unit cost.
     pub(crate) fn min_match_byte_len(&self) -> Option<usize> {
+        *self
+            .min_match_byte_len_cache
+            .get_or_init(|| self.compute_min_match_byte_len())
+    }
+
+    fn compute_min_match_byte_len(&self) -> Option<usize> {
         let mut distance = vec![usize::MAX; self.states.len()];
         let mut queue = std::collections::VecDeque::new();
         if self.states.is_empty() {
@@ -606,12 +687,14 @@ impl DFA {
         state: u32,
         entries: Vec<(u8, u32)>,
     ) {
+        self.invalidate_structural_caches();
         if let Some(entry) = self.states.get_mut(state as usize) {
             entry.transitions = CharTransitions::from_sorted_entries(entries);
         }
     }
 
     pub(super) fn clear_finalizers_for_state(&mut self, state: u32) -> BitSet {
+        self.invalidate_min_match_byte_len();
         let num_groups = self.group_id_to_u8set.len();
         if let Some(entry) = self.state_mut(state) {
             std::mem::replace(&mut entry.finalizers, BitSet::new(num_groups))
@@ -626,6 +709,7 @@ impl DFA {
         finalizers: BitSet,
         possible_future_group_ids: BitSet,
     ) {
+        self.invalidate_min_match_byte_len();
         if let Some(entry) = self.state_mut(state) {
             entry.finalizers = finalizers;
             entry.possible_future_group_ids = possible_future_group_ids;
@@ -682,6 +766,7 @@ impl DFA {
     }
 
     pub(super) fn states_mut(&mut self) -> &mut Vec<DFAState> {
+        self.invalidate_structural_caches();
         &mut self.states
     }
 
@@ -703,6 +788,7 @@ impl DFA {
     /// Create a clone of an existing state (transitions, finalizers,
     /// possible_future_group_ids) and return the new state's id.
     pub(super) fn clone_state(&mut self, source: u32) -> u32 {
+        self.invalidate_structural_caches();
         let cloned = self.states[source as usize].clone();
         let id = self.states.len() as u32;
         self.states.push(cloned);
@@ -715,6 +801,7 @@ impl DFA {
     /// edge changed. The caller may use this to speculatively clone a state
     /// and discard the clone when no incoming edge exists.
     pub(super) fn redirect_transitions(&mut self, old_target: u32, new_target: u32) -> bool {
+        self.invalidate_structural_caches();
         let mut changed = false;
         for state in &mut self.states {
             for (_, target) in state.transitions.iter_mut() {
@@ -735,6 +822,7 @@ impl DFA {
 
     /// Remove the final state when it is the expected freshly-created ID.
     pub(super) fn discard_last_state(&mut self, expected: u32) {
+        self.invalidate_structural_caches();
         debug_assert_eq!(self.states.len(), expected as usize + 1);
         self.states.pop();
     }
@@ -835,6 +923,60 @@ mod tests {
     struct LegacyDfa {
         states: Vec<LegacyDfaState>,
         group_id_to_u8set: Vec<U8Set>,
+    }
+
+    #[test]
+    fn structural_property_caches_invalidate_on_mutation() {
+        let mut dfa = DFA::new(2);
+        dfa.ensure_group_capacity(1);
+        dfa.add_transition(0, b'a', 1);
+        let mut finalizers = BitSet::new(1);
+        finalizers.set(0);
+        dfa.overwrite_state_metadata(1, finalizers, BitSet::new(1));
+
+        assert_eq!(dfa.transition_count(), 1);
+        assert!(!dfa.has_epsilon_transitions());
+        assert!(!dfa.has_self_loops());
+        assert_eq!(dfa.min_match_byte_len(), Some(1));
+        assert!(dfa.derived_stats.get().is_some());
+        assert!(dfa.min_match_byte_len_cache.get().is_some());
+
+        let old_finalizers = dfa.clear_finalizers_for_state(1);
+        assert!(dfa.min_match_byte_len_cache.get().is_none());
+        assert_eq!(dfa.min_match_byte_len(), None);
+        dfa.overwrite_state_metadata(1, old_finalizers, BitSet::new(1));
+        assert_eq!(dfa.min_match_byte_len(), Some(1));
+
+        dfa.add_transition(1, b'b', 1);
+        assert!(dfa.derived_stats.get().is_none());
+        assert!(dfa.min_match_byte_len_cache.get().is_none());
+        assert_eq!(dfa.transition_count(), 2);
+        assert!(dfa.has_self_loops());
+        assert_eq!(dfa.min_match_byte_len(), Some(1));
+
+        dfa.add_epsilon_transition(0, 1);
+        assert!(dfa.has_epsilon_transitions());
+        assert_eq!(dfa.epsilon_transition_count(), 1);
+    }
+
+    #[test]
+    fn derived_caches_do_not_affect_equality_or_hashing() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut left = DFA::new(2);
+        left.add_transition(0, b'a', 1);
+        let right = left.clone();
+        let _ = left.transition_count();
+        let _ = left.min_match_byte_len();
+        assert_eq!(left, right);
+
+        let hash = |dfa: &DFA| {
+            let mut hasher = DefaultHasher::new();
+            dfa.hash(&mut hasher);
+            hasher.finish()
+        };
+        assert_eq!(hash(&left), hash(&right));
     }
 
     #[test]

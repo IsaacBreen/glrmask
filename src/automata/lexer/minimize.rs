@@ -143,15 +143,6 @@ fn build_blocks_from_labels(labels: &[u32], num_labels: u32) -> (Vec<u32>, Vec<V
     (partition, blocks)
 }
 
-fn has_self_loops(dfa: &DFA) -> bool {
-    dfa.states().iter().enumerate().any(|(state_idx, state)| {
-        state
-            .transitions
-            .iter()
-            .any(|(_, &target)| target as usize == state_idx)
-    })
-}
-
 /// Fast iterative partition refinement.
 ///
 /// Starting from an initial partition (e.g. by finalizers), iteratively refine
@@ -257,7 +248,7 @@ fn topology_prerefine_partition(dfa: &DFA, partition: &[u32]) -> TopologyPrerefi
 
     let (partition, blocks) = build_blocks_from_labels(&labels, next_label);
     if next_label as usize == dfa.states().len() {
-        if has_self_loops(dfa) {
+        if dfa.has_self_loops() {
             TopologyPrerefine::Skip
         } else {
             TopologyPrerefine::AlreadyMinimal(blocks)
