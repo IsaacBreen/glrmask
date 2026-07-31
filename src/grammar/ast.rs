@@ -2658,6 +2658,35 @@ impl<'a> Lowerer<'a> {
     }
 }
 
+/// Resolve terminal-labelled subexpressions against the named terminal table.
+///
+/// The cache is shared across all inputs, so repeated helper references remain
+/// `Arc`-shared while the caller compiles a larger explicit graph.
+pub(crate) fn resolve_terminal_subexpressions(
+    grammar: &NamedGrammar,
+    exprs: &[GrammarExpr],
+) -> Result<Vec<Expr>, GlrMaskError> {
+    let terminal_bodies = grammar
+        .rules
+        .iter()
+        .filter(|rule| rule.is_terminal)
+        .map(|rule| (rule.name.clone(), &rule.expr))
+        .collect::<FxHashMap<_, _>>();
+    let mut terminal_expr_cache = FxHashMap::default();
+
+    exprs
+        .iter()
+        .map(|expr| {
+            grammar_expr_to_expr(
+                expr,
+                &terminal_bodies,
+                &mut terminal_expr_cache,
+                &mut HashSet::new(),
+            )
+        })
+        .collect()
+}
+
 /// Resolve every externally emitting named terminal to the exact lexer-level
 /// expression used by [`lower`]. Equal values here are precisely the terminal
 /// expressions that `register_terminal_expr` deduplicates to one `TerminalID`.

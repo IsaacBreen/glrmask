@@ -1527,6 +1527,67 @@ fn compile_expr_to_dfa(expr: &Expr) -> DFA {
     nfa.to_dfa().minimize()
 }
 
+/// Compile an explicit expression-labelled graph into one byte-level lexer DFA.
+///
+/// The outer graph is retained directly. Each labelled edge is expanded only
+/// between its source and target states, so a large right-linear dependency
+/// graph does not first become a recursively duplicated expression tree.
+pub(crate) fn compile_expression_labeled_nfa(
+    graph: &crate::automata::unweighted_u32::nfa::NFA,
+    symbols: &[Expr],
+) -> Result<DFA, String> {
+    if graph.start_states.is_empty() {
+        return Err("expression-labelled NFA has no start state".to_string());
+    }
+
+    // State zero is a synthetic root so multiple starts remain representable.
+    let mut nfa = NFA::new(1);
+    let state_map = (0..graph.states.len())
+        .map(|_| nfa.add_state())
+        .collect::<Vec<_>>();
+
+    for &start in &graph.start_states {
+        let Some(&mapped) = state_map.get(start as usize) else {
+            return Err(format!("NFA start state {start} is out of range"));
+        };
+        nfa.add_epsilon(0, mapped);
+    }
+
+    for (state_id, state) in graph.states.iter().enumerate() {
+        let mapped_from = state_map[state_id];
+        if state.is_accepting {
+            nfa.add_finalizer(mapped_from, 0);
+        }
+
+        for &target in &state.epsilons {
+            let Some(&mapped_target) = state_map.get(target as usize) else {
+                return Err(format!("NFA epsilon target {target} is out of range"));
+            };
+            nfa.add_epsilon(mapped_from, mapped_target);
+        }
+
+        for (&label, targets) in &state.transitions {
+            let symbol_index = usize::try_from(label)
+                .map_err(|_| format!("NFA has invalid negative symbol label {label}"))?;
+            let symbol = symbols.get(symbol_index).ok_or_else(|| {
+                format!(
+                    "NFA symbol label {label} is out of range for {} symbols",
+                    symbols.len()
+                )
+            })?;
+            for &target in targets {
+                let Some(&mapped_target) = state_map.get(target as usize) else {
+                    return Err(format!("NFA target state {target} is out of range"));
+                };
+                append_compiled_expr(symbol, &mut nfa, mapped_from, mapped_target);
+            }
+        }
+    }
+
+    nfa.condense_epsilon_sccs();
+    Ok(nfa.to_dfa().minimize())
+}
+
 fn productive_dfa_states(dfa: &DFA) -> Vec<bool> {
     let mut reverse_edges = vec![Vec::new(); dfa.num_states()];
     for (state_id, state) in dfa.states().iter().enumerate() {
