@@ -3332,12 +3332,12 @@ mod tests {
     use range_set_blaze::RangeSetBlaze;
 
     use super::{
-        PossibleOutgoingIds, collapse_final_leaf_targets,
-        determinize_parser_dwa_with_fallbacks, immediate_acceptance_certificates,
+        PossibleOutgoingIds, build_parser_nwa_from_terminal_dwa,
+        collapse_final_leaf_targets, determinize_parser_dwa_with_fallbacks,
+        determinize_with_supports, immediate_acceptance_certificates,
         try_build_direct_regular_parser_top_accept_parts,
         try_build_direct_regular_parser_top_accept_parts_table_product_reference,
         try_build_immediate_parser_top_accept_parts,
-        build_parser_dwa_from_terminal_dwa_with_precomputed_templates,
         subtract_final_weights_from_outgoing_dwa_impl,
     };
     use crate::automata::weighted::dwa::DWA;
@@ -3346,13 +3346,12 @@ mod tests {
     use crate::compiler::glr::labels::DEFAULT_LABEL;
     use crate::compiler::glr::table::testing::build_test_table;
     use crate::compiler::glr::table::Action;
-    use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
+    use crate::compiler::stages::resolve_negatives::resolve_negative_codes_in_nwa;
     use crate::compiler::stages::templates::Templates;
     use crate::ds::weight::Weight;
     use crate::grammar::flat::{
         DirectRegularAutomaton, GrammarDef, Rule, Symbol, Terminal,
     };
-    use crate::Vocab;
 
     fn weight(tokens: std::ops::RangeInclusive<u32>) -> Weight {
         Weight::from_token_set_for_tsid(0, RangeSetBlaze::from_iter([tokens]))
@@ -3541,33 +3540,14 @@ mod tests {
         );
         let templates = Templates::from_direct_regular_table(&table, grammar.num_terminals)
             .expect("test table has direct-regular actions");
-        let vocab = Vocab::new(
-            (0..32)
-                .map(|token| (token, vec![token as u8]))
-                .collect(),
-        );
-        let id_map = InternalIdMap {
-            tokenizer_states: ManyToOneIdMap::from_original_to_internal_with_representatives(
-                vec![0],
-                1,
-                vec![0],
-            ),
-            vocab_tokens: ManyToOneIdMap::from_original_to_internal_with_representatives(
-                (0..32).collect(),
-                32,
-                (0..32).collect(),
-            ),
-            deferred_vocab_singleton_original_ids: None,
-        };
-        let generic = build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
-            &table,
-            &grammar,
+        let (mut generic_nwa, _) = build_parser_nwa_from_terminal_dwa(
             &terminal_automaton,
+            &grammar,
             &templates,
-            &vocab,
-            &id_map,
-            false,
-        );
+        )
+        .expect("generic parser NWA should build for direct templates");
+        resolve_negative_codes_in_nwa(&mut generic_nwa, false);
+        let generic = determinize_with_supports(&generic_nwa, Some(table.num_states)).dwa;
         let direct = try_build_direct_regular_parser_top_accept_parts(
             &terminal_automaton,
             &grammar,
@@ -3596,9 +3576,17 @@ mod tests {
                 reference_weight,
                 "sparse and table products differ at parser top {parser_top}",
             );
+            let mut generic_prefix_weight = generic
+                .states()
+                .get(generic.start_state() as usize)
+                .and_then(|state| state.final_weight.clone())
+                .unwrap_or_else(Weight::empty);
+            generic_prefix_weight = generic_prefix_weight.union(
+                &generic.eval_word(&[parser_top as i32]),
+            );
             assert_eq!(
                 direct_weight,
-                generic.eval_word(&[parser_top as i32]),
+                generic_prefix_weight,
                 "direct product mismatch at parser top {parser_top}",
             );
         }
