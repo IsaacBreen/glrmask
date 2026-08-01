@@ -2786,22 +2786,19 @@ fn find_l1_exact_state_equivalence_by_components_with_first_target_cache(
     let row_width = num_slots + sig_cols;
     let num_states_in = states.len();
     let mut keys = vec![0u32; num_states_in.saturating_mul(row_width).max(1)];
-    if has_empty_tokens {
-        for (i, &state) in states.iter().enumerate() {
-            keys[i * row_width] = state_to_terminal_signature[state];
-        }
-    }
-    let mut profile_col = vec![0u32; num_tokenizer_states];
     // Tile over states so a block of rows stays cache-resident while all of its
-    // first-byte columns are filled (the key matrix is written once per tile
-    // rather than re-swept once per first byte). The reused per-byte profile
-    // column is re-interned per tile from the small per-byte target list, which
-    // is far cheaper than either a num_slots*num_states dense table or a full
-    // matrix re-sweep.
+    // first-byte columns are filled. Very wide key matrices can optionally fill
+    // independent tiles in parallel; each worker owns one reusable profile
+    // column, so there is no shared mutation or per-cell synchronization.
     const FILL_TILE: usize = 512;
-    let mut tile_start = 0;
-    while tile_start < num_states_in {
-        let tile_end = (tile_start + FILL_TILE).min(num_states_in);
+    let fill_tile = |tile_start: usize, tile: &mut [u32], profile_col: &mut [u32]| {
+        let tile_rows = tile.len() / row_width;
+        if has_empty_tokens {
+            for local_i in 0..tile_rows {
+                let state = states[tile_start + local_i];
+                tile[local_i * row_width] = state_to_terminal_signature[state];
+            }
+        }
         for (slot, &byte) in nonempty_first_bytes.iter().enumerate() {
             let col = sig_cols + slot;
             let canonical_state = horizon_maps
@@ -2810,7 +2807,8 @@ fn find_l1_exact_state_equivalence_by_components_with_first_target_cache(
             for &(target, profile_id) in &slot_targets[slot] {
                 profile_col[target as usize] = profile_id;
             }
-            for i in tile_start..tile_end {
+            for local_i in 0..tile_rows {
+                let i = tile_start + local_i;
                 let target = if let Some(first_targets) = first_targets.as_ref() {
                     first_targets[slot * num_states_in + i]
                 } else {
@@ -2824,7 +2822,7 @@ fn find_l1_exact_state_equivalence_by_components_with_first_target_cache(
                         canonical_state,
                     )
                 };
-                keys[i * row_width + col] = if target == dead {
+                tile[local_i * row_width + col] = if target == dead {
                     0
                 } else {
                     profile_col[target as usize]
@@ -2834,7 +2832,30 @@ fn find_l1_exact_state_equivalence_by_components_with_first_target_cache(
                 profile_col[target as usize] = 0;
             }
         }
-        tile_start = tile_end;
+    };
+    let parallel_key_fill = std::env::var_os("GLRMASK_DISABLE_PARALLEL_L1_STATE_KEYS")
+        .is_none()
+        && rayon::current_num_threads() > 1
+        && row_width > 0
+        && num_states_in.saturating_mul(row_width) >= 1_000_000;
+    if parallel_key_fill {
+        keys[..num_states_in * row_width]
+            .par_chunks_mut(FILL_TILE * row_width)
+            .enumerate()
+            .for_each_init(
+                || vec![0u32; num_tokenizer_states],
+                |profile_col, (tile_index, tile)| {
+                    fill_tile(tile_index * FILL_TILE, tile, profile_col);
+                },
+            );
+    } else {
+        let mut profile_col = vec![0u32; num_tokenizer_states];
+        for (tile_index, tile) in keys[..num_states_in * row_width]
+            .chunks_mut(FILL_TILE * row_width)
+            .enumerate()
+        {
+            fill_tile(tile_index * FILL_TILE, tile, &mut profile_col);
+        }
     }
     let row_hash = |row: &[u32]| -> u64 {
         let mut hash = 0x9e37_79b9_7f4a_7c15u64;
