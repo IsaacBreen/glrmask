@@ -194,7 +194,7 @@ impl DynamicConstraint {
             payload,
             DynamicMaskVocab::default(),
             None,
-            true,
+            false,
         )
     }
 
@@ -542,7 +542,7 @@ mod tests {
                 .inner
                 .dynamic_mask_vocab
                 .initial_token_program_partition()
-                .is_some()
+                .is_none()
         );
         let loaded = DynamicConstraint::load(&constraint.save()).unwrap();
         assert!(
@@ -550,7 +550,7 @@ mod tests {
                 .inner
                 .dynamic_mask_vocab
                 .initial_token_program_partition()
-                .is_some()
+                .is_none()
         );
         assert_eq!(constraint.mask_len(), loaded.mask_len());
         assert_eq!(constraint.start().mask(), loaded.start().mask());
