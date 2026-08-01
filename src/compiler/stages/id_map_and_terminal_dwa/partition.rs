@@ -117,6 +117,20 @@ fn automatic_branch_active_state_map_selected(
     active_terminals: usize,
     source_states: usize,
 ) -> bool {
+    // Small-vocabulary, long-horizon L1 families otherwise repeat exact token
+    // profiling over the complete synthetic lexer. A stable active-language
+    // quotient is cheaper even when it remains above the fast-projected cutoff:
+    // its construction directly replaces a larger whole-token state scan.
+    // Keep the gate structural and deliberately below the large-vocabulary
+    // lanes whose quotient competes with useful token canonicalization.
+    if branch_label.ends_with(".l1")
+        && source_states >= 60_000
+        && (2..=1_500).contains(&vocab_tokens)
+        && (2..=256).contains(&active_terminals)
+    {
+        return true;
+    }
+
     match branch_label {
         // This medium L2P regime benefits strongly from the exact active-language
         // quotient, but its epsilon powerset tokenizer expands well beyond that
@@ -126,17 +140,6 @@ fn automatic_branch_active_state_map_selected(
             (48..=128).contains(&active_terminals)
                 && (8_000..=30_000).contains(&vocab_tokens)
                 && (10_000..=24_000).contains(&source_states)
-        }
-        // A long-horizon binary-token L1 family otherwise rescans the complete
-        // ~97k-state lexer to discover fewer than 1k exact profiles. Its stable
-        // active-language quotient is cheaper and is consumed directly by the
-        // generic L1 path; deterministic tokenizer materialization is not.
-        // Keep the active-terminal band narrow: the adjacent 168- and 223-
-        // terminal families do not share the same cost balance.
-        "p6.l1" => {
-            (180..=200).contains(&active_terminals)
-                && (512..=1_024).contains(&vocab_tokens)
-                && source_states >= 60_000
         }
         _ => false,
     }
@@ -866,20 +869,29 @@ mod tests {
     }
 
     #[test]
-    fn long_horizon_p6_uses_map_without_materialization() {
+    fn long_horizon_small_vocab_l1_uses_map_without_materialization() {
         use super::automatic_branch_active_state_map_selected;
 
         assert!(automatic_branch_active_state_map_selected(
+            "p3.l1", 1_209, 30, 97_046,
+        ));
+        assert!(automatic_branch_active_state_map_selected(
             "p6.l1", 630, 189, 97_046,
         ));
-        assert!(!automatic_branch_active_state_map_selected(
-            "p6.l1", 630, 168, 97_046,
+        assert!(automatic_branch_active_state_map_selected(
+            "p12.l1", 4, 232, 97_046,
         ));
         assert!(!automatic_branch_active_state_map_selected(
-            "p6.l1", 630, 223, 97_046,
+            "p3.l1", 2_000, 30, 97_046,
+        ));
+        assert!(!automatic_branch_active_state_map_selected(
+            "p3.l1", 1_209, 300, 97_046,
         ));
         assert!(!automatic_branch_active_state_map_selected(
             "p6.l1", 630, 189, 40_000,
+        ));
+        assert!(!automatic_branch_active_state_map_selected(
+            "p6.l2p", 630, 189, 97_046,
         ));
     }
 }
