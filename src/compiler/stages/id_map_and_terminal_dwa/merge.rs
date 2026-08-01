@@ -1781,8 +1781,9 @@ fn try_merge_immediate_terminal_dwas(
     let remap_started_at = Instant::now();
     let mut weights_by_label = BTreeMap::<i32, Vec<Weight>>::new();
     for (input_index, input) in inputs.iter().enumerate() {
-        let mut dwa = input.dwa.clone();
+        let accepting = immediate_dwa_accepting_edges(&input.dwa)?;
         let tsid_map = &local_to_global_tsid_maps[input_index];
+        let tsid_runs = build_local_to_global_tsid_runs(tsid_map);
         let direct_token_map_storage;
         let token_map = match &token_maps {
             FastGlobalTokenMaps::Direct(maps) => {
@@ -1792,14 +1793,22 @@ fn try_merge_immediate_terminal_dwas(
             }
             FastGlobalTokenMaps::General(maps) => maps[input_index].as_slice(),
         };
-        remap_dwa_with_maps(
-            &mut dwa,
-            tsid_map,
-            token_map,
-            global_id_map.num_tsids() as usize,
-        );
-        for (label, weight) in immediate_dwa_accepting_edges(&dwa)? {
-            weights_by_label.entry(label).or_default().push(weight);
+        let token_remap = TokenRemap::Explicit(token_map);
+        let mut weight_cache = RemapCache::<Weight>::default();
+        let mut token_cache = RemapCache::<Arc<RangeSetBlaze<u32>>>::default();
+        for (label, weight) in accepting {
+            let weight = remap_weight_cached_with_tsid_runs(
+                &weight,
+                tsid_map,
+                &tsid_runs,
+                &token_remap,
+                global_id_map.num_tsids() as usize,
+                &mut weight_cache,
+                &mut token_cache,
+            );
+            if !weight.is_empty() {
+                weights_by_label.entry(label).or_default().push(weight);
+            }
         }
     }
     let remap_ms = remap_started_at.elapsed().as_secs_f64() * 1000.0;
