@@ -5825,6 +5825,15 @@ impl ZeroMinRepeatSuffixStateMap {
         else {
             return false;
         };
+        let maximum_completed = state
+            .body_min_counts
+            .iter()
+            .copied()
+            .filter(|&count| count != u32::MAX)
+            .max()
+            .unwrap_or(minimum_completed);
+        let live_count_span = maximum_completed.saturating_sub(minimum_completed);
+        let live_count_headroom = live_count_span.max(1);
         let Some(distance_to_upper) = self.full_max.checked_sub(minimum_completed) else {
             return false;
         };
@@ -5836,6 +5845,13 @@ impl ZeroMinRepeatSuffixStateMap {
         let mut seen = SmallVec::<[u32; 8]>::from_slice(&[primary]);
         for alternative_minimum in 0..=self.synthesized_max {
             if alternative_minimum == mapped_minimum {
+                continue;
+            }
+            if alternative_minimum
+                .checked_add(live_count_headroom)
+                .and_then(|count| count.checked_add(self.crossed_boundaries))
+                .is_none_or(|required| required > self.synthesized_max)
+            {
                 continue;
             }
             let Some(alternative) = zero_min_repeat_suffix_candidate(
@@ -6002,9 +6018,49 @@ fn zero_min_repeat_suffix_state_map(
         }
         return None;
     }
+    // A dominance state can keep several body residuals alive at different
+    // completed-copy counts.  Translating only the minimum count preserves the
+    // current state, but a following token can expose the upper-bound
+    // difference through the largest live count.  Reserve room for the widest
+    // live count spread in addition to the vocabulary displacement horizon.
+    // A span of zero still needs one layer for the endpoint future observation;
+    // this is the `max(1)` below and matches the historical `+ 1` interior
+    // representative formula without double-counting it in the horizon.
+    let max_live_count_span = full_trace
+        .tail_states
+        .iter()
+        .filter_map(|state| {
+            let mut counts = state
+                .body_min_counts
+                .iter()
+                .copied()
+                .filter(|&count| count != u32::MAX);
+            let first = counts.next()?;
+            let (minimum, maximum) =
+                counts.fold((first, first), |(minimum, maximum), count| {
+                    (minimum.min(count), maximum.max(count))
+                });
+            Some(maximum.saturating_sub(minimum) as usize)
+        })
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    let interior_headroom = crossed_boundaries.checked_add(max_live_count_span)?;
+    if synthesized_trace.max < interior_headroom {
+        if profile {
+            eprintln!(
+                "[glrmask/profile][tokenizer] dominance_state_map_rejected stage=count_span full_max={} synthesized_max={} crossed_boundaries={} max_live_count_span={}",
+                full_trace.max,
+                synthesized_trace.max,
+                crossed_boundaries,
+                max_live_count_span,
+            );
+        }
+        return None;
+    }
     let interior_representative = synthesized_trace
         .max
-        .checked_sub(crossed_boundaries.saturating_add(1))? as u32;
+        .checked_sub(interior_headroom)? as u32;
     let full_max = full_trace.max as u32;
     let synthesized_max = synthesized_trace.max as u32;
 
@@ -8983,6 +9039,73 @@ mod tests {
         assert_eq!(
             super::vocabulary_repeat_boundary_horizon(&body, &vocab),
             Some(0),
+        );
+    }
+
+    #[test]
+    fn zero_min_repeat_transport_reserves_live_count_spread() {
+        let ambiguous_body = Expr::Choice(vec![
+            byte_expr(b'a'),
+            Expr::U8Seq(b"aaaaaaaa".to_vec()),
+        ]);
+        let body_dfa = super::compile_expr_to_dfa(&ambiguous_body);
+        let suffix_dfa = super::compile_expr_to_dfa(&byte_expr(b'b'));
+        let trace = |max| {
+            let built = super::build_zero_min_repeat_suffix_dominance_dfa_internal(
+                &body_dfa,
+                &suffix_dfa,
+                max,
+                true,
+            )
+            .expect("dominance trace");
+            Arc::new(super::ZeroMinRepeatSuffixComponentTrace {
+                dfa: Arc::new(built.dfa),
+                prefix_len: 0,
+                body_dfa: body_dfa.clone(),
+                suffix_dfa: suffix_dfa.clone(),
+                max,
+                tail_states: built.states,
+                tail_state_by_key: built.state_by_key,
+            })
+        };
+        let full_trace = trace(40);
+        let synthesized_trace = trace(10);
+        let max_live_count_span = full_trace
+            .tail_states
+            .iter()
+            .filter_map(|state| {
+                let mut counts = state
+                    .body_min_counts
+                    .iter()
+                    .copied()
+                    .filter(|&count| count != u32::MAX);
+                let first = counts.next()?;
+                let (minimum, maximum) =
+                    counts.fold((first, first), |(minimum, maximum), count| {
+                        (minimum.min(count), maximum.max(count))
+                    });
+                Some(maximum - minimum)
+            })
+            .max()
+            .unwrap_or(0);
+        assert!(max_live_count_span > 1);
+
+        let vocab = Vocab::new(vec![(0, b"aaaaaaaa".to_vec())]);
+        let horizons = super::VocabularyRepeatHorizonCache::new();
+        assert!(
+            super::zero_min_repeat_suffix_state_map(
+                &Expr::Epsilon,
+                &Expr::Epsilon,
+                full_trace.dfa.as_ref(),
+                synthesized_trace.dfa.as_ref(),
+                Some(Arc::clone(&full_trace)),
+                Some(Arc::clone(&synthesized_trace)),
+                vocab.max_token_byte_len(),
+                Some(&vocab),
+                Some(&horizons),
+            )
+            .is_none(),
+            "the shortened repeat must fail closed when live count spread and one-token displacement exceed its upper-bound headroom",
         );
     }
 

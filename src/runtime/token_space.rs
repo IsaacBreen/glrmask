@@ -10,15 +10,57 @@ use crate::grammar::flat::TerminalID;
 use super::artifact::Constraint;
 
 impl Constraint {
+	pub(crate) fn runtime_source_state_offset(&self) -> Option<u32> {
+		self.runtime_source_state_offset
+	}
+
+	/// Scanner reset coordinate used while committing one model token.
+	/// Hybrid runtime determinization is a boundary-only compression: commit
+	/// itself must reset into the appended historical tokenizer, never into the
+	/// provenance-free product start state.
+	pub(crate) fn runtime_commit_initial_state(&self) -> u32 {
+		let product_initial = self.tokenizer.initial_state();
+		self.runtime_source_state_offset
+			.and_then(|offset| {
+				self.runtime_product_exact_source_state(product_initial)
+					.map(|source| offset + source)
+			})
+			.unwrap_or(product_initial)
+	}
+
+	pub(crate) fn runtime_product_source_states(&self, product_state: u32) -> Option<&[u32]> {
+		let source_offset = self.runtime_source_state_offset?;
+		if product_state >= source_offset {
+			return None;
+		}
+		let state = product_state as usize;
+		let start = *self.runtime_product_source_offsets.get(state)? as usize;
+		let end = *self.runtime_product_source_offsets.get(state + 1)? as usize;
+		self.runtime_product_source_states.get(start..end)
+	}
+
+	pub(crate) fn runtime_product_exact_source_state(&self, product_state: u32) -> Option<u32> {
+		let source_state = *self
+			.runtime_product_exact_source_states
+			.get(product_state as usize)?;
+		(source_state != u32::MAX).then_some(source_state)
+	}
+
+	pub(crate) fn runtime_product_state_for_source_subset(&self, states: &[u32]) -> Option<u32> {
+		self.runtime_product_state_by_source_subset.get(states).copied()
+	}
+
 	pub(crate) fn possible_matches_for_state(
 		&self,
 		tokenizer_state: u32,
 	) -> BTreeMap<TerminalID, RangeSetBlaze<u32>> {
-		let internal_tsid = self.internal_tsid_for_state(tokenizer_state);
 		self.possible_matches
 			.iter()
 			.filter_map(|(&terminal, weight)| {
-				let tokens = weight.tokens_for_tsid(internal_tsid);
+				let mut tokens = RangeSetBlaze::new();
+				for &internal_tsid in self.internal_tsids_for_state(tokenizer_state) {
+					tokens |= weight.tokens_for_tsid(internal_tsid);
+				}
 				if tokens.is_empty() {
 					None
 				} else {
@@ -33,6 +75,25 @@ impl Constraint {
 			.get(tokenizer_state as usize)
 			.copied()
 			.unwrap_or(tokenizer_state)
+	}
+
+	pub(crate) fn internal_tsids_for_state(&self, tokenizer_state: u32) -> &[u32] {
+		let state = tokenizer_state as usize;
+		if let (Some(&start), Some(&end)) = (
+			self.state_internal_tsid_offsets.get(state),
+			self.state_internal_tsid_offsets.get(state + 1),
+		) {
+			if let Some(tsids) = self
+				.state_internal_tsids
+				.get(start as usize..end as usize)
+			{
+				return tsids;
+			}
+		}
+		self.state_to_internal_tsid
+			.get(state)
+			.map(std::slice::from_ref)
+			.unwrap_or(&[])
 	}
 
 	pub(crate) fn internal_token_for_original(&self, token_id: u32) -> u32 {
@@ -71,11 +132,13 @@ impl Constraint {
 		if !self.possible_matches_complete {
 			return false;
 		}
-		let internal_tsid = self.internal_tsid_for_state(tokenizer_state);
 		let Some(weight) = self.possible_matches.get(&terminal) else {
 			return true;
 		};
-		let internal_tokens = weight.tokens_for_tsid(internal_tsid);
+		let mut internal_tokens = RangeSetBlaze::new();
+		for &internal_tsid in self.internal_tsids_for_state(tokenizer_state) {
+			internal_tokens |= weight.tokens_for_tsid(internal_tsid);
+		}
 		if self.internal_token_to_tokens.is_empty() {
 			for token in internal_tokens.iter() {
 				visit(token);

@@ -810,6 +810,8 @@ impl Constraint {
         if self.table.guarded_shift_index.len() != self.table.num_states as usize {
             self.table.rebuild_guarded_shift_index();
         }
+        self.rebuild_state_internal_tsid_relation();
+        self.rebuild_runtime_product_state_lookup();
         let fast_template_dfas_by_terminal = self.compute_fast_template_dfas();
         let guarded_shift_ms = guarded_shift_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
@@ -2269,6 +2271,70 @@ impl Constraint {
         self.token_bytes_dense = self.compute_dense_token_bytes();
     }
 
+    fn rebuild_state_internal_tsid_relation(&mut self) {
+        let state_count = self.tokenizer.num_states() as usize;
+        let mut relation = (0..state_count)
+            .map(|_| SmallVec::<[u32; 2]>::new())
+            .collect::<Vec<_>>();
+        for (internal_tsid, states) in self.internal_tsid_to_states.iter().enumerate() {
+            for &state in states {
+                if let Some(tsids) = relation.get_mut(state as usize) {
+                    tsids.push(internal_tsid as u32);
+                }
+            }
+        }
+        for (state, tsids) in relation.iter_mut().enumerate() {
+            if let Some(&primary) = self.state_to_internal_tsid.get(state)
+                && !tsids.contains(&primary)
+            {
+                tsids.push(primary);
+            }
+            tsids.sort_unstable();
+            tsids.dedup();
+        }
+
+        self.state_internal_tsid_offsets.clear();
+        self.state_internal_tsid_offsets.reserve(state_count + 1);
+        self.state_internal_tsids.clear();
+        self.state_internal_tsid_offsets.push(0);
+        for tsids in relation {
+            self.state_internal_tsids.extend_from_slice(&tsids);
+            self.state_internal_tsid_offsets
+                .push(self.state_internal_tsids.len() as u32);
+        }
+    }
+
+    fn rebuild_runtime_product_state_lookup(&mut self) {
+        self.runtime_product_state_by_source_subset.clear();
+        let Some(source_offset) = self.runtime_source_state_offset else {
+            return;
+        };
+        let product_states = source_offset as usize;
+        if self.runtime_product_source_offsets.len() != product_states + 1
+            || self.runtime_product_exact_source_states.len() != product_states
+        {
+            self.runtime_source_state_offset = None;
+            self.runtime_product_source_offsets.clear();
+            self.runtime_product_source_states.clear();
+            self.runtime_product_exact_source_states.clear();
+            return;
+        }
+
+        self.runtime_product_state_by_source_subset
+            .reserve(product_states);
+        for product_state in 0..product_states {
+            let start = self.runtime_product_source_offsets[product_state] as usize;
+            let end = self.runtime_product_source_offsets[product_state + 1] as usize;
+            let Some(states) = self.runtime_product_source_states.get(start..end) else {
+                self.runtime_product_state_by_source_subset.clear();
+                self.runtime_source_state_offset = None;
+                return;
+            };
+            self.runtime_product_state_by_source_subset
+                .insert(states.into(), product_state as u32);
+        }
+    }
+
     /// Build fast transition lookup tables from the DWA's BTreeMap transitions.
     pub(crate) fn build_fast_transitions(&mut self) {
         self.dwa_fast_transitions = self.compute_fast_transitions();
@@ -2447,10 +2513,12 @@ impl Constraint {
     ) -> Option<BTreeMap<TerminalID, RangeSetBlaze<u32>>> {
         // Return possible_matches in the final shared constraint-internal vocab
         // space. These ids match parser-DWA weight token ids after reconciliation.
-        let internal_tsid = self.internal_tsid_for_state(tokenizer_state);
         let mut result = BTreeMap::new();
         for (&terminal, weight) in &self.possible_matches {
-            let tokens = weight.tokens_for_tsid(internal_tsid);
+            let mut tokens = RangeSetBlaze::new();
+            for &internal_tsid in self.internal_tsids_for_state(tokenizer_state) {
+                tokens |= weight.tokens_for_tsid(internal_tsid);
+            }
             if !tokens.is_empty() {
                 result.insert(terminal, tokens);
             }
@@ -2524,29 +2592,32 @@ impl Constraint {
     }
 
     fn build_seed_terminal_dense_masks(&self) -> SeedTerminalDenseMasks {
-        self.possible_matches
-            .iter()
-            .flat_map(|(&terminal_id, weight)| {
-                weight
-                    .compact_entries()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .flat_map(move |(start, end, token_set)| {
-                        let dense = self.dense_words_from_internal_set(token_set.as_ref());
-                        let mut entries = Vec::new();
-                        for internal_tsid in start..=end {
-                            if let Some(states) = self.internal_tsid_to_states.get(internal_tsid as usize) {
-                                for &tokenizer_state in states {
-                                    entries.push(((tokenizer_state, terminal_id), dense.clone()));
-                                }
-                            } else {
-                                entries.push(((internal_tsid, terminal_id), dense.clone()));
+        let mut result = SeedTerminalDenseMasks::default();
+        for (&terminal_id, weight) in &self.possible_matches {
+            for (start, end, token_set) in weight.compact_entries().unwrap_or_default() {
+                let dense = self.dense_words_from_internal_set(token_set.as_ref());
+                for internal_tsid in start..=end {
+                    if let Some(states) = self.internal_tsid_to_states.get(internal_tsid as usize) {
+                        for &tokenizer_state in states {
+                            let entry = result
+                                .entry((tokenizer_state, terminal_id))
+                                .or_insert_with(empty_dense_words);
+                            let mut merged = entry.to_vec();
+                            if merged.len() < dense.len() {
+                                merged.resize(dense.len(), 0);
                             }
+                            for (index, &word) in dense.iter().enumerate() {
+                                merged[index] |= word;
+                            }
+                            *entry = merged.into();
                         }
-                        entries.into_iter()
-                    })
-            })
-            .collect()
+                    } else {
+                        result.insert((internal_tsid, terminal_id), dense.clone());
+                    }
+                }
+            }
+        }
+        result
     }
 
     fn or_internal_token_masks_to_buf(&self, internal_token: usize, buf: &mut [u32]) {

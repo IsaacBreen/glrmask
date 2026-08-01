@@ -2956,6 +2956,7 @@ fn compute_constraint_possible_matches_with_artifacts(
     }
 
     let structured_dispatch = tokenizer.has_deterministic_dispatch();
+    let scalar_dispatch = tokenizer.has_scalar_deterministic_dispatch();
     let dispatch_start = structured_dispatch.then(|| tokenizer.start_state());
     let mut trie_build_states: Vec<u32> = (0..tokenizer.num_states())
         .filter(|state| {
@@ -2991,14 +2992,14 @@ fn compute_constraint_possible_matches_with_artifacts(
 
     let root_terminal_union = demand.terminals.count_ones();
     let use_nfa_powerset_collect = tokenizer.has_epsilon_transitions()
-        && !structured_dispatch
+        && !scalar_dispatch
         && nfa_powerset_collect_enabled(tokenizer.num_states() as usize, root_terminal_union);
-    let use_sparse_root_collect = (tokenizer.has_epsilon_transitions() && !structured_dispatch)
+    let use_sparse_root_collect = (tokenizer.has_epsilon_transitions() && !scalar_dispatch)
         || (sparse_root_collect_enabled()
             && trie_build_states.len() <= sparse_root_state_limit()
             && root_terminal_union <= sparse_root_terminal_limit());
-    let use_batched_demand_collect = batched_demand_collect_enabled(structured_dispatch)
-        && (!tokenizer.has_epsilon_transitions() || structured_dispatch);
+    let use_batched_demand_collect = batched_demand_collect_enabled(scalar_dispatch)
+        && (!tokenizer.has_epsilon_transitions() || scalar_dispatch);
 
     let mut trie_class_result = if use_batched_demand_collect {
         let started_at = Instant::now();

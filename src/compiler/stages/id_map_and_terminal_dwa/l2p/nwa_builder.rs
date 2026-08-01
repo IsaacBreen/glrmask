@@ -760,7 +760,8 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         node: &VocabPrefixTreeNode,
         tokenizer_state: TokenizerState,
     ) -> bool {
-        if self.has_epsilon_transitions && !self.tokenizer.has_deterministic_dispatch()
+        if self.has_epsilon_transitions
+            && !self.tokenizer.has_scalar_deterministic_dispatch()
         {
             return false;
         }
@@ -983,7 +984,8 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         id_map: &InternalIdMap,
     ) {
         assert!(
-            !self.has_epsilon_transitions || self.tokenizer.has_deterministic_dispatch(),
+            !self.has_epsilon_transitions
+                || self.tokenizer.has_scalar_deterministic_dispatch(),
             "L1 flat-state construction requires scalar deterministic scan roots",
         );
         // Pre-populate flat transition tables for ALL tokenizer states.
@@ -1262,7 +1264,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                     if next_offset == segment_bytes.len()
                         && child_node.has_token()
                         && ((self.has_epsilon_transitions
-                            && !self.tokenizer.has_deterministic_dispatch())
+                            && !self.tokenizer.has_scalar_deterministic_dispatch())
                             || !end_states.iter().copied().any(|s| {
                                 self.possible_future_terminals_for_state(s)
                                     .contains(&matched.id)

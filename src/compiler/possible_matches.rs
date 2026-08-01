@@ -60,7 +60,7 @@ impl<'a> PossibleMatchesComputer<'a> {
             self_loop_bytes: FxHashMap::default(),
             flat_transitions: vec![None; tokenizer.num_states() as usize],
             scalar_deterministic_scan: !tokenizer.has_epsilon_transitions()
-                || tokenizer.has_deterministic_dispatch(),
+                || tokenizer.has_scalar_deterministic_dispatch(),
         }
     }
 
