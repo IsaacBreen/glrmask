@@ -1,4 +1,5 @@
 use crate::runtime::Constraint;
+use std::io::{BufWriter, Read, Write};
 
 const CONSTRAINT_MAGIC: [u8; 8] = *b"GLRCONS\0";
 const LEGACY_CONSTRAINT_VERSION: u16 = 7;
@@ -6,6 +7,33 @@ const CONSTRAINT_VERSION: u16 = 8;
 const CONSTRAINT_HEADER_LEN: usize = CONSTRAINT_MAGIC.len() + 2 + 8;
 const COMPRESSED_PAYLOAD_HEADER_LEN: usize = 8;
 const CONSTRAINT_COMPRESSION_LEVEL: i32 = 1;
+const CONSTRAINT_SERIALIZATION_BUFFER_LEN: usize = 128 * 1024;
+
+struct CountingWriter<W> {
+    inner: W,
+    written: u64,
+}
+
+impl<W> CountingWriter<W> {
+    fn new(inner: W) -> Self {
+        Self { inner, written: 0 }
+    }
+}
+
+impl<W: Write> Write for CountingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        self.written = self
+            .written
+            .checked_add(written as u64)
+            .expect("Constraint serialized size should fit in u64");
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
 
 fn envelope(version: u16, payload: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(CONSTRAINT_HEADER_LEN + payload.len());
@@ -19,13 +47,46 @@ fn envelope(version: u16, payload: &[u8]) -> Vec<u8> {
 impl Constraint {
     /// Serialize this compiled constraint to a compressed, versioned binary artifact.
     pub fn save(&self) -> Vec<u8> {
-        let raw = bincode::serialize(self).expect("Constraint serialization should succeed");
-        let compressed = zstd::bulk::compress(&raw, CONSTRAINT_COMPRESSION_LEVEL)
-            .expect("Constraint compression should succeed");
-        let mut payload = Vec::with_capacity(COMPRESSED_PAYLOAD_HEADER_LEN + compressed.len());
-        payload.extend_from_slice(&(raw.len() as u64).to_le_bytes());
-        payload.extend_from_slice(&compressed);
-        envelope(CONSTRAINT_VERSION, &payload)
+        // Write the compressed frame directly into the final artifact. The
+        // previous bulk path first materialized the complete raw bincode
+        // payload, which can be hundreds of MiB for large static constraints,
+        // and then held it alongside the compressed output.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&CONSTRAINT_MAGIC);
+        bytes.extend_from_slice(&CONSTRAINT_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+
+        let raw_len = {
+            let mut encoder = zstd::stream::write::Encoder::new(
+                &mut bytes,
+                CONSTRAINT_COMPRESSION_LEVEL,
+            )
+            .expect("Constraint compression should initialize");
+            let mut writer = CountingWriter::new(&mut encoder);
+            {
+                let mut buffered = BufWriter::with_capacity(
+                    CONSTRAINT_SERIALIZATION_BUFFER_LEN,
+                    &mut writer,
+                );
+                bincode::serialize_into(&mut buffered, self)
+                    .expect("Constraint serialization should succeed");
+                buffered
+                    .flush()
+                    .expect("Constraint serialization should flush");
+            }
+            let raw_len = writer.written;
+            drop(writer);
+            encoder
+                .finish()
+                .expect("Constraint compression should finish");
+            raw_len
+        };
+
+        let payload_len = (bytes.len() - CONSTRAINT_HEADER_LEN) as u64;
+        bytes[10..18].copy_from_slice(&payload_len.to_le_bytes());
+        bytes[18..26].copy_from_slice(&raw_len.to_le_bytes());
+        bytes
     }
 
     /// Load a compiled constraint from an artifact produced by [`Constraint::save`].
@@ -57,7 +118,7 @@ impl Constraint {
             ));
         }
         let payload = &bytes[CONSTRAINT_HEADER_LEN..];
-        let raw;
+        let mut raw;
         let serialized = if version == CONSTRAINT_VERSION {
             if payload.len() < COMPRESSED_PAYLOAD_HEADER_LEN {
                 return Err(crate::GlrMaskError::Serialization(
@@ -76,18 +137,28 @@ impl Constraint {
             })?;
             let compressed = &payload[COMPRESSED_PAYLOAD_HEADER_LEN..];
             let frame_len = zstd::zstd_safe::get_frame_content_size(compressed)
-                .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?
-                .ok_or_else(|| {
-                    crate::GlrMaskError::Serialization(
-                        "compressed constraint artifact has no content size".to_owned(),
-                    )
-                })?;
-            if frame_len != raw_len as u64 {
+                .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
+            if frame_len.is_some_and(|frame_len| frame_len != raw_len as u64) {
                 return Err(crate::GlrMaskError::Serialization(
                     "invalid uncompressed constraint artifact length".to_owned(),
                 ));
             }
-            raw = zstd::bulk::decompress(compressed, raw_len)
+
+            // Do not reserve the untrusted declared size up front. Stream into
+            // a growing buffer and stop after one byte beyond the declared
+            // length, so malformed artifacts cannot trigger an immediate huge
+            // allocation merely by forging the envelope.
+            let output_limit = raw_len.checked_add(1).ok_or_else(|| {
+                crate::GlrMaskError::Serialization(
+                    "uncompressed constraint artifact length is too large".to_owned(),
+                )
+            })?;
+            let decoder = zstd::stream::read::Decoder::with_buffer(compressed)
+                .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
+            raw = Vec::new();
+            decoder
+                .take(output_limit as u64)
+                .read_to_end(&mut raw)
                 .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
             if raw.len() != raw_len {
                 return Err(crate::GlrMaskError::Serialization(

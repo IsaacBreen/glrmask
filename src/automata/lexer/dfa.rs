@@ -5,6 +5,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::OnceLock;
 
 use rustc_hash::FxHashSet;
+use serde::ser::SerializeSeq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use smallvec::SmallVec;
 
@@ -129,6 +130,82 @@ struct DfaStateWire {
 struct DfaWire {
     states: Vec<DfaStateWire>,
     group_id_to_u8set: Vec<U8Set>,
+}
+
+#[derive(Serialize)]
+struct DfaStateWireRef<'a> {
+    transitions: &'a CharTransitions<u32>,
+    finalizers: &'a BitSet,
+    possible_future_group_ids: &'a BitSet,
+}
+
+struct DfaStatesWireRef<'a> {
+    dfa: &'a DFA,
+    metadata_state_count: usize,
+}
+
+impl Serialize for DfaStatesWireRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let trailer_count = usize::from(self.metadata_state_count != 0);
+        let total_states = self
+            .dfa
+            .states
+            .len()
+            .checked_add(self.metadata_state_count)
+            .and_then(|count| count.checked_add(trailer_count))
+            .expect("serialized DFA state count should fit in usize");
+        let mut sequence = serializer.serialize_seq(Some(total_states))?;
+
+        for state in &self.dfa.states {
+            sequence.serialize_element(&DfaStateWireRef {
+                transitions: &state.transitions,
+                finalizers: &state.finalizers,
+                possible_future_group_ids: &state.possible_future_group_ids,
+            })?;
+        }
+
+        for (source, state) in self.dfa.states.iter().enumerate() {
+            for targets in state
+                .epsilon_transitions
+                .chunks(EPSILON_TARGETS_PER_WIRE_STATE)
+            {
+                if targets.is_empty() {
+                    continue;
+                }
+                let mut entries = Vec::with_capacity(targets.len() + 3);
+                entries.push((0, EPSILON_WIRE_MARKER));
+                entries.push((1, EPSILON_WIRE_EDGE));
+                entries.push((2, source as u32));
+                entries.extend(
+                    targets
+                        .iter()
+                        .enumerate()
+                        .map(|(index, &target)| ((index + 3) as u8, target)),
+                );
+                sequence.serialize_element(&epsilon_wire_state(entries))?;
+            }
+        }
+
+        if self.metadata_state_count != 0 {
+            sequence.serialize_element(&epsilon_wire_state(vec![
+                (0, EPSILON_WIRE_MARKER),
+                (1, EPSILON_WIRE_TRAILER),
+                (2, self.dfa.states.len() as u32),
+                (3, self.metadata_state_count as u32),
+            ]))?;
+        }
+
+        sequence.end()
+    }
+}
+
+#[derive(Serialize)]
+struct DfaWireRef<'a> {
+    states: DfaStatesWireRef<'a>,
+    group_id_to_u8set: &'a [U8Set],
 }
 
 const EPSILON_WIRE_MARKER: u32 = u32::MAX;
@@ -274,43 +351,23 @@ impl Serialize for DFA {
             ));
         }
 
-        let mut states = self.states.iter().map(DfaStateWire::from).collect::<Vec<_>>();
-        let real_state_count = states.len();
-        let mut metadata_state_count = 0usize;
-        for (source, state) in self.states.iter().enumerate() {
-            for targets in state
-                .epsilon_transitions
-                .chunks(EPSILON_TARGETS_PER_WIRE_STATE)
-            {
-                if targets.is_empty() {
-                    continue;
-                }
-                let mut entries = Vec::with_capacity(targets.len() + 3);
-                entries.push((0, EPSILON_WIRE_MARKER));
-                entries.push((1, EPSILON_WIRE_EDGE));
-                entries.push((2, source as u32));
-                entries.extend(
-                    targets
-                        .iter()
-                        .enumerate()
-                        .map(|(index, &target)| ((index + 3) as u8, target)),
-                );
-                states.push(epsilon_wire_state(entries));
-                metadata_state_count += 1;
-            }
-        }
-        if metadata_state_count != 0 {
-            states.push(epsilon_wire_state(vec![
-                (0, EPSILON_WIRE_MARKER),
-                (1, EPSILON_WIRE_TRAILER),
-                (2, real_state_count as u32),
-                (3, metadata_state_count as u32),
-            ]));
-        }
+        let metadata_state_count = self
+            .states
+            .iter()
+            .map(|state| {
+                state
+                    .epsilon_transitions
+                    .len()
+                    .div_ceil(EPSILON_TARGETS_PER_WIRE_STATE)
+            })
+            .sum();
 
-        DfaWire {
-            states,
-            group_id_to_u8set: self.group_id_to_u8set.clone(),
+        DfaWireRef {
+            states: DfaStatesWireRef {
+                dfa: self,
+                metadata_state_count,
+            },
+            group_id_to_u8set: &self.group_id_to_u8set,
         }
         .serialize(serializer)
     }
@@ -907,10 +964,7 @@ impl DFA {
 mod tests {
     use serde::Serialize;
 
-    use super::DFA;
-    use crate::ds::char_transitions::CharTransitions;
-    use crate::ds::bitset::BitSet;
-    use crate::ds::u8set::U8Set;
+    use super::*;
 
     #[derive(Serialize)]
     struct LegacyDfaState {
@@ -923,6 +977,47 @@ mod tests {
     struct LegacyDfa {
         states: Vec<LegacyDfaState>,
         group_id_to_u8set: Vec<U8Set>,
+    }
+
+    fn owned_wire_bytes(dfa: &DFA) -> Vec<u8> {
+        let mut states = dfa.states.iter().map(DfaStateWire::from).collect::<Vec<_>>();
+        let real_state_count = states.len();
+        let mut metadata_state_count = 0usize;
+        for (source, state) in dfa.states.iter().enumerate() {
+            for targets in state
+                .epsilon_transitions
+                .chunks(EPSILON_TARGETS_PER_WIRE_STATE)
+            {
+                if targets.is_empty() {
+                    continue;
+                }
+                let mut entries = Vec::with_capacity(targets.len() + 3);
+                entries.push((0, EPSILON_WIRE_MARKER));
+                entries.push((1, EPSILON_WIRE_EDGE));
+                entries.push((2, source as u32));
+                entries.extend(
+                    targets
+                        .iter()
+                        .enumerate()
+                        .map(|(index, &target)| ((index + 3) as u8, target)),
+                );
+                states.push(epsilon_wire_state(entries));
+                metadata_state_count += 1;
+            }
+        }
+        if metadata_state_count != 0 {
+            states.push(epsilon_wire_state(vec![
+                (0, EPSILON_WIRE_MARKER),
+                (1, EPSILON_WIRE_TRAILER),
+                (2, real_state_count as u32),
+                (3, metadata_state_count as u32),
+            ]));
+        }
+        bincode::serialize(&DfaWire {
+            states,
+            group_id_to_u8set: dfa.group_id_to_u8set.clone(),
+        })
+        .unwrap()
     }
 
     #[test]
@@ -1044,6 +1139,7 @@ mod tests {
         automaton.add_epsilon_transition(301, 0);
 
         let bytes = bincode::serialize(&automaton).unwrap();
+        assert_eq!(bytes, owned_wire_bytes(&automaton));
         let decoded: DFA = bincode::deserialize(&bytes).unwrap();
         assert_eq!(decoded, automaton);
         assert_eq!(decoded.states[0].epsilon_transitions.len(), 300);

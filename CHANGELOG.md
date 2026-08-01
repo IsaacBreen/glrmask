@@ -4,6 +4,11 @@
 
 ### Improved
 
+- Static constraint saving now serializes directly into the compressed
+  artifact and borrows tokenizer DFA storage instead of materializing a full
+  raw bincode payload and cloned wire automaton. Large compile-once artifacts
+  therefore avoid the previous hundreds-of-megabytes serialization spike;
+  loading also bounds decompression by the declared raw length before parsing.
 - Runtime mask and commit paths now reuse bounded parser, tokenizer, accumulator, and bitmap storage for common deterministic and small-frontier states, avoiding allocator activity during ordinary decoding. Tokenizer epsilon-closure data is finalized during compile/load rather than on the first commit. The Python extension keeps delayed automatic mimalloc purging enabled but defaults purges to reset (`MADV_FREE`/`MEM_RESET`) rather than synchronous decommit. Pages remain OS-reclaimable without requiring caller-managed trimming; `MIMALLOC_PURGE_DECOMMITS=1` restores immediate RSS-oriented decommit behaviour.
 - Constraints with at most 16 initially admissible tokens now exercise those initial commit transitions during runtime-cache finalization. This moves a bounded amount of cold parser/tokenizer execution into compile or load, reducing first-token TBM without adding work to `Constraint::start()` or displacing it to the second token; larger initial masks skip the step entirely.
 - Large bounded JSON Schema string patterns now retain exact `maxLength`

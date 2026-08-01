@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, OnceLock};
 
 use rustc_hash::FxHashMap;
-use serde::ser::SerializeStruct;
+use serde::ser::{SerializeSeq, SerializeStruct};
 use serde::{Deserialize, Serialize, Serializer};
 use smallvec::SmallVec;
 
@@ -112,12 +112,16 @@ impl Serialize for CompressedTransitionEntries {
     where
         S: Serializer,
     {
-        self.classes
+        let mut sequence = serializer.serialize_seq(Some(self.len()))?;
+        for entry in self
+            .classes
             .iter()
             .copied()
             .zip(self.targets.iter().copied())
-            .collect::<Vec<_>>()
-            .serialize(serializer)
+        {
+            sequence.serialize_element(&entry)?;
+        }
+        sequence.end()
     }
 }
 
