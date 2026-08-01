@@ -876,6 +876,7 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
                 vocab,
                 active_terminals,
                 flat_trans.as_ref(),
+                initial_state_map,
                 shared_generic_nfa_topology,
                 shared_generic_nfa_trie,
                 subset_parent_order,
@@ -1108,10 +1109,9 @@ fn build_l1_generic_nfa_analysis_view(
         ) {
             Ok(powerset_view) => {
                 let state_count = powerset_view.configurations.len();
-                let view_states = powerset_view
-                    .raw_start_to_view
+                let view_states = raw_states
                     .iter()
-                    .map(|&state| state as usize)
+                    .map(|&raw_state| powerset_view.raw_start_to_view[raw_state] as usize)
                     .collect::<Vec<_>>();
                 if compile_profile_enabled() {
                     eprintln!(
@@ -1215,10 +1215,9 @@ fn build_l1_generic_nfa_analysis_view(
         Some(active_terminals),
         None,
     );
-    let view_states = powerset_view
-        .raw_start_to_view
+    let view_states = raw_states
         .iter()
-        .map(|&state| state as usize)
+        .map(|&raw_state| powerset_view.raw_start_to_view[raw_state] as usize)
         .collect::<Vec<_>>();
     (
         view_states,
@@ -1232,6 +1231,7 @@ fn build_l1_generic_nfa_exact_id_map<'a>(
     vocab: &'a Vocab,
     active_terminals: &[bool],
     flat_trans: &[u32],
+    initial_state_map: Option<&ManyToOneIdMap>,
     shared_topology: Option<
         &super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTopology,
     >,
@@ -1260,7 +1260,20 @@ fn build_l1_generic_nfa_exact_id_map<'a>(
         .map(|(_, bytes)| bytes.len())
         .max()
         .unwrap_or(0);
-    let raw_states = (0..num_states).collect::<Vec<_>>();
+    let raw_states = initial_state_map.map_or_else(
+        || (0..num_states).collect::<Vec<_>>(),
+        |map| {
+            assert_eq!(
+                map.original_to_internal.len(),
+                num_states,
+                "generic epsilon L1 seed map must cover the raw tokenizer domain",
+            );
+            map.representative_original_ids
+                .iter()
+                .map(|&state| state as usize)
+                .collect::<Vec<_>>()
+        },
+    );
 
     let state_equiv_started_at = Instant::now();
     let view_started_at = Instant::now();
@@ -1296,20 +1309,50 @@ fn build_l1_generic_nfa_exact_id_map<'a>(
             None,
         );
     let exact_state_equiv_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
-    assert_eq!(exact_mapping.len(), num_states);
+    assert_eq!(exact_mapping.len(), raw_states.len());
     let mut exact_profile_reuse =
         exact_profile_reuse.expect("generic epsilon L1 exact analysis must retain profiles");
 
+    // Exact classification runs only on representatives from the previously
+    // proved seed partition. Compose its result back over the full raw-state
+    // domain rather than re-analyzing every member of every seed class.
     let mut exact_rep_to_internal = FxHashMap::<usize, u32>::default();
-    let mut original_to_internal = vec![u32::MAX; num_states];
+    let mut seed_rep_to_internal = FxHashMap::<usize, u32>::default();
+    let mut seed_rep_to_exact_rep = FxHashMap::<usize, usize>::default();
+    let mut seed_rep_to_view_state = FxHashMap::<usize, usize>::default();
     let mut raw_representatives = Vec::<u32>::new();
-    for (raw_state, &exact_rep) in exact_mapping.iter().enumerate() {
+    for ((&seed_rep, &view_state), &exact_rep) in raw_states
+        .iter()
+        .zip(&view_states)
+        .zip(&exact_mapping)
+    {
         let internal = *exact_rep_to_internal.entry(exact_rep).or_insert_with(|| {
             let internal = raw_representatives.len() as u32;
-            raw_representatives.push(raw_state as u32);
+            raw_representatives.push(seed_rep as u32);
             internal
         });
-        original_to_internal[raw_state] = internal;
+        seed_rep_to_internal.insert(seed_rep, internal);
+        seed_rep_to_exact_rep.insert(seed_rep, exact_rep);
+        seed_rep_to_view_state.insert(seed_rep, view_state);
+    }
+
+    let seed_representative_for_raw = |raw_state: usize| -> usize {
+        initial_state_map.map_or(raw_state, |map| {
+            let internal = map.original_to_internal[raw_state];
+            assert_ne!(
+                internal,
+                u32::MAX,
+                "generic epsilon L1 seed map omitted raw state {raw_state}",
+            );
+            map.representative_original_ids[internal as usize] as usize
+        })
+    };
+    let mut original_to_internal = vec![u32::MAX; num_states];
+    for (raw_state, internal) in original_to_internal.iter_mut().enumerate() {
+        let seed_rep = seed_representative_for_raw(raw_state);
+        *internal = *seed_rep_to_internal
+            .get(&seed_rep)
+            .expect("generic epsilon L1 seed representative missing exact class");
     }
     let mut tokenizer_states = ManyToOneIdMap::from_original_to_internal_with_representatives(
         original_to_internal,
@@ -1322,16 +1365,19 @@ fn build_l1_generic_nfa_exact_id_map<'a>(
     let view_direct_signatures = Arc::clone(&exact_profile_reuse.direct_state_to_terminal_signature);
     let mut raw_profile_ids = FxHashMap::<u32, Arc<[u32]>>::default();
     for raw_representative in tokenizer_states.iter_representative_ids() {
-        let exact_rep = exact_mapping[raw_representative as usize] as u32;
+        let seed_rep = seed_representative_for_raw(raw_representative as usize);
+        let exact_rep = *seed_rep_to_exact_rep
+            .get(&seed_rep)
+            .expect("generic epsilon L1 representative missing exact profile") as u32;
         let profile_ids = view_profile_ids
             .get(&exact_rep)
             .unwrap_or_else(|| panic!("missing generic L1 exact profile for view state {exact_rep}"));
         raw_profile_ids.insert(raw_representative, Arc::clone(profile_ids));
     }
-    let raw_direct_signatures = raw_states
-        .iter()
-        .map(|&raw_state| {
-            let view_state = view_states[raw_state];
+    let raw_direct_signatures = (0..num_states)
+        .map(|raw_state| {
+            let seed_rep = seed_representative_for_raw(raw_state);
+            let view_state = seed_rep_to_view_state[&seed_rep];
             view_direct_signatures[view_state]
         })
         .collect::<Vec<_>>();
@@ -1346,7 +1392,7 @@ fn build_l1_generic_nfa_exact_id_map<'a>(
         eprintln!(
             "[glrmask/profile][l1_generic_nfa_exact] analysis_view={} raw_states={} view_states={} view_build_ms={:.3} exact_ms={:.3} exact_reps={} total_ms={:.3}",
             analysis_view,
-            num_states,
+            raw_states.len(),
             tokenizer_view.dfa().states.len(),
             view_build_ms,
             exact_state_equiv_ms,
@@ -1364,7 +1410,7 @@ fn build_l1_generic_nfa_exact_id_map<'a>(
         vocab_order,
         state_to_rep,
         L1IdMapProfile {
-            initial_states_considered: num_states,
+            initial_states_considered: raw_states.len(),
             max_length_skipped: true,
             max_token_len,
             token_len_gt_4: token_len_stats.gt_4,
@@ -1375,7 +1421,7 @@ fn build_l1_generic_nfa_exact_id_map<'a>(
             state_equiv_ms,
             max_length_state_equiv_ms: 0.0,
             exact_state_equiv_ms,
-            max_length_reps: num_states,
+            max_length_reps: raw_states.len(),
             exact_reps,
             token_identity_map_ms,
         },
@@ -6377,6 +6423,7 @@ mod generic_nfa_tests {
                 &subset_vocab,
                 &active,
                 &flat_trans,
+                None,
                 Some(&topology),
                 None,
                 None,
@@ -6387,6 +6434,7 @@ mod generic_nfa_tests {
                 &subset_vocab,
                 &active,
                 &flat_trans,
+                None,
                 None,
                 None,
                 None,
@@ -6450,6 +6498,108 @@ mod generic_nfa_tests {
     }
 
     #[test]
+    fn generic_epsilon_l1_exact_composes_a_proved_seed_partition() {
+        let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
+        let vocab = Vocab::new(vec![
+            (0, b"".to_vec()),
+            (1, b"a".to_vec()),
+            (2, b"aa".to_vec()),
+            (3, b"ab".to_vec()),
+            (4, b"b".to_vec()),
+            (5, b"ba".to_vec()),
+            (6, b"bb".to_vec()),
+        ]);
+        let active = [true, true];
+        let flat_trans = build_flat_transition_table(&tokenizer);
+
+        let (mut baseline_map, baseline_order, _, _, baseline_reuse) =
+            build_l1_generic_nfa_exact_id_map(
+                &tokenizer,
+                &vocab,
+                &active,
+                &flat_trans,
+                None,
+                None,
+                None,
+                None,
+            );
+        let seed_map = baseline_map.tokenizer_states.clone();
+        let (mut projected_map, projected_order, _, projected_profile, projected_reuse) =
+            build_l1_generic_nfa_exact_id_map(
+                &tokenizer,
+                &vocab,
+                &active,
+                &flat_trans,
+                Some(&seed_map),
+                None,
+                None,
+                None,
+            );
+        assert_eq!(
+            projected_profile.initial_states_considered,
+            seed_map.num_internal_ids() as usize,
+        );
+
+        let baseline_classes = &baseline_map.tokenizer_states.original_to_internal;
+        let projected_classes = &projected_map.tokenizer_states.original_to_internal;
+        for left in 0..baseline_classes.len() {
+            for right in 0..baseline_classes.len() {
+                assert_eq!(
+                    baseline_classes[left] == baseline_classes[right],
+                    projected_classes[left] == projected_classes[right],
+                    "seeded exact L1 composition changed the partition for {left} <> {right}",
+                );
+            }
+        }
+
+        let (baseline_dwa, _) = build_l1_terminal_dwa(
+            &tokenizer,
+            baseline_order.as_ref(),
+            &mut baseline_map,
+            2,
+            &active,
+            flat_trans.as_ref(),
+            baseline_reuse.as_ref(),
+        )
+        .expect("baseline exact generic epsilon L1 DWA");
+        let (projected_dwa, _) = build_l1_terminal_dwa(
+            &tokenizer,
+            projected_order.as_ref(),
+            &mut projected_map,
+            2,
+            &active,
+            flat_trans.as_ref(),
+            projected_reuse.as_ref(),
+        )
+        .expect("projected exact generic epsilon L1 DWA");
+        for raw_state in 0..tokenizer.num_states() as usize {
+            let baseline_tsid = baseline_map.tokenizer_states.original_to_internal[raw_state];
+            let projected_tsid = projected_map.tokenizer_states.original_to_internal[raw_state];
+            for (&token_id, bytes) in vocab.entries.iter() {
+                let baseline_token = baseline_map
+                    .internal_token_for_original(token_id)
+                    .expect("baseline token");
+                let projected_token = projected_map
+                    .internal_token_for_original(token_id)
+                    .expect("projected token");
+                for terminal in 0..2u32 {
+                    assert_eq!(
+                        baseline_dwa
+                            .eval_word(&[terminal as i32])
+                            .tokens_for_tsid(baseline_tsid)
+                            .contains(baseline_token),
+                        projected_dwa
+                            .eval_word(&[terminal as i32])
+                            .tokens_for_tsid(projected_tsid)
+                            .contains(projected_token),
+                        "raw_state={raw_state} token={token_id} bytes={bytes:?} terminal={terminal}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn generic_epsilon_l1_weights_match_exact_active_state_set_signatures() {
         let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
         let vocab = Vocab::new(
@@ -6479,6 +6629,7 @@ mod generic_nfa_tests {
                 &vocab,
                 &active,
                 &flat_trans,
+                None,
                 None,
                 None,
                 None,
