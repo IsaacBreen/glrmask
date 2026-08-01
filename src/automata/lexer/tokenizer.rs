@@ -48,6 +48,12 @@ pub struct Tokenizer {
     /// diagnostics/regression tests; the expensive computation is cached.
     #[serde(default, skip)]
     pub(super) forced_minimized_state_count_cache: OnceLock<usize>,
+    /// Whether reset dispatch is followed only by scalar byte transitions.
+    /// Several compiler paths query this structural invariant repeatedly; cache
+    /// the full reachable-graph proof rather than walking the tokenizer per
+    /// vocabulary node or build stage.
+    #[serde(default, skip)]
+    pub(super) scalar_deterministic_dispatch_cache: OnceLock<bool>,
 }
 
 pub(crate) struct FullTokenizerDeterminization {
@@ -200,6 +206,7 @@ pub(crate) mod artifact_serde {
             all_self_loop_bytes_cache: OnceLock::new(),
             transition_count_cache: OnceLock::new(),
             forced_minimized_state_count_cache: OnceLock::new(),
+            scalar_deterministic_dispatch_cache: OnceLock::new(),
         })
     }
 }
@@ -489,6 +496,7 @@ impl Tokenizer {
         let _ = self.all_self_loop_bytes_cache.take();
         let _ = self.transition_count_cache.take();
         let _ = self.forced_minimized_state_count_cache.take();
+        let _ = self.scalar_deterministic_dispatch_cache.take();
     }
 
     /// Fully determinize the current runtime tokenizer by exact subset
@@ -611,6 +619,7 @@ impl Tokenizer {
                 all_self_loop_bytes_cache: OnceLock::new(),
                 transition_count_cache: OnceLock::new(),
                 forced_minimized_state_count_cache: OnceLock::new(),
+                scalar_deterministic_dispatch_cache: OnceLock::new(),
             },
             source_subsets,
             source_state_offset: u32::MAX,
@@ -741,6 +750,7 @@ impl Tokenizer {
                 all_self_loop_bytes_cache: OnceLock::new(),
                 transition_count_cache: OnceLock::new(),
                 forced_minimized_state_count_cache: OnceLock::new(),
+                scalar_deterministic_dispatch_cache: OnceLock::new(),
             },
             old_to_new,
         ))
@@ -881,6 +891,7 @@ impl Tokenizer {
             all_self_loop_bytes_cache: OnceLock::new(),
             transition_count_cache: OnceLock::new(),
             forced_minimized_state_count_cache: OnceLock::new(),
+            scalar_deterministic_dispatch_cache: OnceLock::new(),
         })
     }
 
@@ -1033,6 +1044,7 @@ impl Tokenizer {
             all_self_loop_bytes_cache: OnceLock::new(),
             transition_count_cache: OnceLock::new(),
             forced_minimized_state_count_cache: OnceLock::new(),
+            scalar_deterministic_dispatch_cache: OnceLock::new(),
         }
     }
 
@@ -1054,6 +1066,7 @@ impl Tokenizer {
             all_self_loop_bytes_cache: OnceLock::new(),
             transition_count_cache: OnceLock::new(),
             forced_minimized_state_count_cache: OnceLock::new(),
+            scalar_deterministic_dispatch_cache: OnceLock::new(),
         }
     }
 
@@ -1230,29 +1243,31 @@ impl Tokenizer {
     /// condition checked here: no state byte-reachable from a dispatch root has
     /// an epsilon transition.
     pub(crate) fn has_scalar_deterministic_dispatch(&self) -> bool {
-        let Some(roots) = self.deterministic_dispatch_roots() else {
-            return false;
-        };
-        let states = self.dfa.states();
-        let mut seen = vec![false; states.len()];
-        let mut pending = roots.to_vec();
-        while let Some(state) = pending.pop() {
-            let Some(slot) = seen.get_mut(state as usize) else {
+        *self.scalar_deterministic_dispatch_cache.get_or_init(|| {
+            let Some(roots) = self.deterministic_dispatch_roots() else {
                 return false;
             };
-            if *slot {
-                continue;
+            let states = self.dfa.states();
+            let mut seen = vec![false; states.len()];
+            let mut pending = roots.to_vec();
+            while let Some(state) = pending.pop() {
+                let Some(slot) = seen.get_mut(state as usize) else {
+                    return false;
+                };
+                if *slot {
+                    continue;
+                }
+                *slot = true;
+                let Some(dfa_state) = states.get(state as usize) else {
+                    return false;
+                };
+                if !dfa_state.epsilon_transitions.is_empty() {
+                    return false;
+                }
+                pending.extend(dfa_state.transitions.iter().map(|(_, &target)| target));
             }
-            *slot = true;
-            let Some(dfa_state) = states.get(state as usize) else {
-                return false;
-            };
-            if !dfa_state.epsilon_transitions.is_empty() {
-                return false;
-            }
-            pending.extend(dfa_state.transitions.iter().map(|(_, &target)| target));
-        }
-        true
+            true
+        })
     }
 
     /// Return the closed, pairwise-disjoint state sets below the global
@@ -1909,6 +1924,12 @@ mod tests {
         assert!(loops_before[3].contains(b'x'));
         let closures_before = local.all_singleton_epsilon_closures();
         let transition_count_before = local.transition_count();
+        assert!(local.scalar_deterministic_dispatch_cache.get().is_none());
+        let scalar_dispatch_before = local.has_scalar_deterministic_dispatch();
+        assert_eq!(
+            local.scalar_deterministic_dispatch_cache.get(),
+            Some(&scalar_dispatch_before),
+        );
 
         let rebuilt_to_local = (0..rebuilt.num_states()).collect::<Vec<_>>();
         local
@@ -1919,6 +1940,12 @@ mod tests {
             )
             .expect("verified append-only component relation");
 
+        assert!(local.scalar_deterministic_dispatch_cache.get().is_none());
+        let scalar_dispatch_after = local.has_scalar_deterministic_dispatch();
+        assert_eq!(
+            local.scalar_deterministic_dispatch_cache.get(),
+            Some(&scalar_dispatch_after),
+        );
         let loops_after = local.all_self_loop_bytes();
         assert!(!Arc::ptr_eq(&loops_before, &loops_after));
         assert!(loops_after[4].contains(b'b'));
