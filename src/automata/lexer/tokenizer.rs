@@ -1,6 +1,6 @@
 //! Runtime-facing tokenizer API built on top of the lexer DFA.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, OnceLock};
 
 use rustc_hash::FxHashMap;
@@ -48,6 +48,19 @@ pub struct Tokenizer {
     /// diagnostics/regression tests; the expensive computation is cached.
     #[serde(default, skip)]
     pub(super) forced_minimized_state_count_cache: OnceLock<usize>,
+}
+
+pub(crate) struct FullTokenizerDeterminization {
+    pub(crate) tokenizer: Tokenizer,
+    /// Exact epsilon-closed source-state subset represented by each new state.
+    pub(crate) source_subsets: Vec<Box<[u32]>>,
+    /// First state of an appended exact copy of the source tokenizer.  The
+    /// copy is a correctness fallback for parser histories that cease to be
+    /// uniform across one determinized subset.
+    pub(crate) source_state_offset: u32,
+    /// A source state whose singleton epsilon closure is exactly the product
+    /// subset, or `u32::MAX` when no such scalar representative exists.
+    pub(crate) exact_source_states: Vec<u32>,
 }
 
 /// Exact deterministic transition rows over a byte-equivalence-class alphabet.
@@ -476,6 +489,175 @@ impl Tokenizer {
         let _ = self.all_self_loop_bytes_cache.take();
         let _ = self.transition_count_cache.take();
         let _ = self.forced_minimized_state_count_cache.take();
+    }
+
+    /// Fully determinize the current runtime tokenizer by exact subset
+    /// construction.  Each returned DFA state carries the epsilon-closed set of
+    /// source states it represents so callers can transport the already-final
+    /// tokenizer-state ID map without rebuilding compiler analyses.
+    pub(crate) fn try_full_determinization(
+        &self,
+        state_limit: usize,
+        transition_limit: usize,
+    ) -> Option<FullTokenizerDeterminization> {
+        if state_limit == 0 || transition_limit == 0 || !self.has_epsilon_transitions() {
+            return None;
+        }
+
+        let mut start = self.dfa.epsilon_closure(&[self.initial_state_id()]);
+        start.sort_unstable();
+        start.dedup();
+        if start.is_empty() {
+            return None;
+        }
+
+        let mut dfa = DFA::new(1);
+        dfa.ensure_group_capacity(self.num_terminals as usize);
+        for terminal in 0..self.num_terminals {
+            dfa.set_group_u8set(
+                terminal,
+                *self.dfa.group_id_to_u8set(terminal),
+            );
+        }
+
+        let metadata = |subset: &[u32]| {
+            let mut finalizers = BitSet::new(self.num_terminals as usize);
+            let mut futures = BitSet::new(self.num_terminals as usize);
+            for &state in subset {
+                finalizers.union_with(self.dfa.finalizers(state));
+                futures.union_with(self.dfa.possible_future_group_ids(state));
+            }
+            (finalizers, futures)
+        };
+        let (start_finalizers, start_futures) = metadata(&start);
+        dfa.overwrite_state_metadata(0, start_finalizers, start_futures);
+
+        let start: Box<[u32]> = start.into_vec().into_boxed_slice();
+        let mut source_subsets = vec![start.clone()];
+        let mut state_by_subset = FxHashMap::<Box<[u32]>, u32>::default();
+        state_by_subset.insert(start, 0);
+        let mut worklist = VecDeque::from([0u32]);
+        let mut transitions_built = 0usize;
+
+        while let Some(determinized_state) = worklist.pop_front() {
+            let subset = source_subsets[determinized_state as usize].clone();
+            let mut transitions = Vec::<(u8, u32)>::new();
+            for byte in 0u16..=255 {
+                let mut targets = SmallVec::<[u32; 8]>::new();
+                for &source_state in subset.iter() {
+                    if let Some(target) = self.step(source_state, byte as u8) {
+                        targets.push(target);
+                    }
+                }
+                if targets.is_empty() {
+                    continue;
+                }
+                targets.sort_unstable();
+                targets.dedup();
+                let mut closed = self.dfa.epsilon_closure(&targets);
+                closed.sort_unstable();
+                closed.dedup();
+                if closed.is_empty() {
+                    continue;
+                }
+                transitions_built = transitions_built.saturating_add(1);
+                if transitions_built > transition_limit {
+                    return None;
+                }
+                let closed: Box<[u32]> = closed.into_vec().into_boxed_slice();
+                let target = if let Some(&existing) = state_by_subset.get(&closed) {
+                    existing
+                } else {
+                    if source_subsets.len() >= state_limit {
+                        return None;
+                    }
+                    let new_state = dfa.add_state();
+                    debug_assert_eq!(new_state as usize, source_subsets.len());
+                    let (finalizers, futures) = metadata(&closed);
+                    dfa.overwrite_state_metadata(new_state, finalizers, futures);
+                    state_by_subset.insert(closed.clone(), new_state);
+                    source_subsets.push(closed);
+                    worklist.push_back(new_state);
+                    new_state
+                };
+                transitions.push((byte as u8, target));
+            }
+            dfa.set_transitions_from_sorted_entries(determinized_state, transitions);
+        }
+
+        let closures = self.all_singleton_epsilon_closures();
+        let mut source_by_closure = FxHashMap::<Box<[u32]>, u32>::default();
+        // Prefer the true initial state when another raw state happens to have
+        // the same closure: accumulator state keys are observable at commit.
+        let initial = self.initial_state_id();
+        source_by_closure.insert(closures[initial as usize].clone(), initial);
+        for (state, closure) in closures.iter().enumerate() {
+            source_by_closure
+                .entry(closure.clone())
+                .or_insert(state as u32);
+        }
+        let exact_source_states = source_subsets
+            .iter()
+            .map(|subset| source_by_closure.get(subset).copied().unwrap_or(u32::MAX))
+            .collect();
+
+        Some(FullTokenizerDeterminization {
+            tokenizer: Tokenizer {
+                dfa,
+                num_terminals: self.num_terminals,
+                compressed_transition_segments: Arc::from([]),
+                exprs: self.exprs.clone(),
+                singleton_epsilon_closures: OnceLock::new(),
+                all_self_loop_bytes_cache: OnceLock::new(),
+                transition_count_cache: OnceLock::new(),
+                forced_minimized_state_count_cache: OnceLock::new(),
+            },
+            source_subsets,
+            source_state_offset: u32::MAX,
+            exact_source_states,
+        })
+    }
+
+    /// Move the exact source tokenizer behind a completed subset tokenizer.
+    ///
+    /// Product states are safe only while one parser language is uniformly
+    /// associated with every source state in their subset. Runtime commit can
+    /// expand such a state into this appended source coordinate, execute the
+    /// historical NFA semantics unchanged, and re-coalesce only exact uniform
+    /// subsets afterward. The product start state remains state zero.
+    pub(crate) fn finish_full_determinization_with_source_fallback(
+        &mut self,
+        mut built: FullTokenizerDeterminization,
+    ) -> FullTokenizerDeterminization {
+        debug_assert_eq!(built.source_subsets.len(), built.tokenizer.num_states() as usize);
+        debug_assert_eq!(built.exact_source_states.len(), built.source_subsets.len());
+
+        let source_dfa = std::mem::replace(&mut self.dfa, DFA::new(0));
+        let global_groups = (0..self.num_terminals as usize).collect::<Vec<_>>();
+        built.source_state_offset = built
+            .tokenizer
+            .dfa
+            .append_rebased_component(source_dfa, &global_groups);
+        let mut compressed_segments = built
+            .tokenizer
+            .compressed_transition_segments
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        compressed_segments.extend(self.compressed_transition_segments.iter().cloned().map(
+            |mut segment| {
+                segment.state_offset = segment
+                    .state_offset
+                    .checked_add(built.source_state_offset)
+                    .expect("runtime tokenizer compressed state offset overflow");
+                segment
+            },
+        ));
+        built.tokenizer.compressed_transition_segments = Arc::from(compressed_segments);
+        self.compressed_transition_segments = Arc::from([]);
+        self.invalidate_derived_caches();
+        built.tokenizer.invalidate_derived_caches();
+        built
     }
 
     /// Materialize a deterministic compile-time analysis view as a tokenizer.
@@ -1035,6 +1217,42 @@ impl Tokenizer {
     #[inline]
     pub(crate) fn has_deterministic_dispatch(&self) -> bool {
         self.deterministic_dispatch_roots().is_some()
+    }
+
+    /// Return whether selecting one reset-dispatch root leaves a genuinely
+    /// scalar scanner for the rest of the byte stream.
+    ///
+    /// `deterministic_dispatch_roots()` only certifies the shape at reset: a
+    /// zero-byte fan-out whose immediate roots have no epsilon edges.  A
+    /// depth-limited adaptive product can have that same reset shape while
+    /// introducing epsilon fan-out later, at its determinization frontier.
+    /// Whole-token flat-transition walkers are sound only under the stronger
+    /// condition checked here: no state byte-reachable from a dispatch root has
+    /// an epsilon transition.
+    pub(crate) fn has_scalar_deterministic_dispatch(&self) -> bool {
+        let Some(roots) = self.deterministic_dispatch_roots() else {
+            return false;
+        };
+        let states = self.dfa.states();
+        let mut seen = vec![false; states.len()];
+        let mut pending = roots.to_vec();
+        while let Some(state) = pending.pop() {
+            let Some(slot) = seen.get_mut(state as usize) else {
+                return false;
+            };
+            if *slot {
+                continue;
+            }
+            *slot = true;
+            let Some(dfa_state) = states.get(state as usize) else {
+                return false;
+            };
+            if !dfa_state.epsilon_transitions.is_empty() {
+                return false;
+            }
+            pending.extend(dfa_state.transitions.iter().map(|(_, &target)| target));
+        }
+        true
     }
 
     /// Return the closed, pairwise-disjoint state sets below the global
@@ -1665,6 +1883,7 @@ mod tests {
     fn deterministic_dispatch_execution_enters_roots_without_retaining_dispatcher() {
         let tokenizer = dispatch_prefix_tokenizer(false);
         assert_eq!(tokenizer.deterministic_dispatch_roots(), Some(&[1, 3][..]));
+        assert!(tokenizer.has_scalar_deterministic_dispatch());
 
         let empty = tokenizer.execute_from_state_end_only(b"", tokenizer.initial_state_id());
         assert_eq!(empty.as_slice(), &[0, 1, 3]);
@@ -1730,6 +1949,31 @@ mod tests {
             .augment_from_verified_component_prefixes(&incompatible, &tokenizer.clone(), &[])
             .is_none());
         assert!(Arc::ptr_eq(&loops, &tokenizer.all_self_loop_bytes()));
+    }
+
+    #[test]
+    fn deterministic_reset_dispatch_does_not_certify_a_later_epsilon_frontier() {
+        let mut dfa = DFA::new(6);
+        dfa.ensure_group_capacity(1);
+        dfa.add_epsilon_transition(0, 1);
+        dfa.add_epsilon_transition(0, 4);
+        dfa.add_transition(1, b'a', 2);
+        dfa.add_epsilon_transition(2, 3);
+        dfa.add_transition(3, b'b', 3);
+        dfa.add_transition(4, b'x', 5);
+        let mut accepting = BitSet::new(1);
+        accepting.set(0);
+        dfa.overwrite_state_metadata(3, accepting.clone(), BitSet::new(1));
+        dfa.overwrite_state_metadata(5, accepting, BitSet::new(1));
+        dfa.recompute_possible_futures();
+
+        let tokenizer = Tokenizer::from_parts(dfa, 1, None);
+        assert_eq!(tokenizer.deterministic_dispatch_roots(), Some(&[1, 4][..]));
+        assert!(tokenizer.has_deterministic_dispatch());
+        assert!(!tokenizer.has_scalar_deterministic_dispatch());
+
+        let result = tokenizer.execute_from_state_end_only(b"ab", tokenizer.initial_state_id());
+        assert_eq!(result.as_slice(), &[3]);
     }
 
     #[test]
@@ -1847,5 +2091,98 @@ mod tests {
             .collect::<Vec<_>>();
         end_states.sort_unstable();
         assert_eq!(end_states, vec![3, 4]);
+    }
+
+    #[test]
+    fn full_determinization_is_exact_subset_construction() {
+        let source = arbitrary_epsilon_l1_test_tokenizer();
+        let built = source
+            .try_full_determinization(128, 4_096)
+            .expect("small epsilon tokenizer must fully determinize");
+        let deterministic = &built.tokenizer;
+
+        assert!(!deterministic.has_epsilon_transitions());
+        assert_eq!(
+            built.source_subsets.len(),
+            deterministic.num_states() as usize,
+        );
+
+        for state in 0..deterministic.num_states() {
+            let subset = &built.source_subsets[state as usize];
+            let mut finalizers = BitSet::new(source.num_terminals() as usize);
+            let mut futures = BitSet::new(source.num_terminals() as usize);
+            for &source_state in subset.iter() {
+                finalizers.union_with(source.dfa.finalizers(source_state));
+                futures.union_with(source.dfa.possible_future_group_ids(source_state));
+            }
+            assert_eq!(deterministic.dfa.finalizers(state), &finalizers);
+            assert_eq!(
+                deterministic.dfa.possible_future_group_ids(state),
+                &futures,
+            );
+
+            for byte in 0u16..=255 {
+                let mut expected = SmallVec::<[u32; 8]>::new();
+                for &source_state in subset.iter() {
+                    if let Some(target) = source.step(source_state, byte as u8) {
+                        expected.push(target);
+                    }
+                }
+                expected.sort_unstable();
+                expected.dedup();
+                let mut expected = source.dfa.epsilon_closure(&expected);
+                expected.sort_unstable();
+                expected.dedup();
+
+                match deterministic.step(state, byte as u8) {
+                    Some(target) => assert_eq!(
+                        built.source_subsets[target as usize].as_ref(),
+                        expected.as_slice(),
+                        "state={state} byte={byte}",
+                    ),
+                    None => assert!(expected.is_empty(), "state={state} byte={byte}"),
+                }
+            }
+        }
+
+        for input in [
+            b"".as_slice(),
+            b"a",
+            b"b",
+            b"aa",
+            b"ab",
+            b"ba",
+            b"aaa",
+        ] {
+            let source_result = source.execute_from_state(input, source.initial_state_id());
+            let deterministic_result = deterministic
+                .execute_from_state(input, deterministic.initial_state_id());
+            let mut source_matches = source_result
+                .matches
+                .iter()
+                .map(|matched| (matched.id, matched.width))
+                .collect::<Vec<_>>();
+            source_matches.sort_unstable();
+            source_matches.dedup();
+            let mut deterministic_matches = deterministic_result
+                .matches
+                .iter()
+                .map(|matched| (matched.id, matched.width))
+                .collect::<Vec<_>>();
+            deterministic_matches.sort_unstable();
+            deterministic_matches.dedup();
+            assert_eq!(source_matches, deterministic_matches, "input={input:?}");
+
+            let represented_end_states = deterministic_result
+                .end_state
+                .iter()
+                .flat_map(|&state| built.source_subsets[state as usize].iter().copied())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                represented_end_states,
+                source_result.end_state.iter().copied().collect(),
+                "input={input:?}",
+            );
+        }
     }
 }

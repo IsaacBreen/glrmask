@@ -11,7 +11,7 @@ use smallvec::SmallVec;
 use super::constraint::Constraint;
 
 pub(crate) const LINEAR_STACK_RESERVE: usize = 64;
-pub(crate) const INLINE_PARSER_STATE_CAPACITY: usize = 16;
+pub(crate) const INLINE_PARSER_STATE_CAPACITY: usize = 64;
 
 /// Parser paths grouped by tokenizer state, stored inline for the common small
 /// frontier. Entries remain sorted by tokenizer-state ID. The bounded flat
@@ -141,6 +141,16 @@ impl ParserStateMap {
             value = value.merge(&existing);
         }
         self.entries.insert(range.start, (key, value));
+    }
+
+    /// Insert one correlated flat alternative without merging equal keys.
+    ///
+    /// This is the relation-preserving counterpart to `merge_insert`: callers
+    /// use it when the same tokenizer state is paired with distinct parser
+    /// languages that must remain separate for a later lexer transition.
+    pub(crate) fn insert_flat_alternative(&mut self, key: u32, value: ParserGSS) {
+        let index = self.entries.partition_point(|(entry_key, _)| *entry_key <= key);
+        self.entries.insert(index, (key, value));
     }
 
     pub(crate) fn retain(&mut self, mut keep: impl FnMut(&u32, &mut ParserGSS) -> bool) {
@@ -509,10 +519,17 @@ impl<'a> ConstraintState<'a> {
 
     /// Return whether the committed prefix completes the grammar.
     pub fn is_complete(&self) -> bool {
-        let initial_tsid = self.constraint.tokenizer.initial_state();
-        self.state.values_for_key(initial_tsid).any(|stack| {
-            !stack.is_empty() && stacks_finished(&self.constraint.table, stack)
-        })
+        let product_initial = self.constraint.tokenizer.initial_state();
+        let commit_initial = self.constraint.runtime_commit_initial_state();
+        self.state
+            .values_for_key(product_initial)
+            .chain(
+                (commit_initial != product_initial)
+                    .then(|| self.state.values_for_key(commit_initial))
+                    .into_iter()
+                    .flatten(),
+            )
+            .any(|stack| !stack.is_empty() && stacks_finished(&self.constraint.table, stack))
     }
 
     /// Return whether generation has finished.

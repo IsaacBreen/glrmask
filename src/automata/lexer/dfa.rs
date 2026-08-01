@@ -529,6 +529,11 @@ impl DFA {
         }
 
         let total_groups = self.group_id_to_u8set.len();
+        let identity_groups = component.group_id_to_u8set.len() == total_groups
+            && global_group_ids
+                .iter()
+                .copied()
+                .eq(0..total_groups);
         for state in &mut component.states {
             for (_, target) in state.transitions.iter_mut() {
                 *target = target
@@ -541,16 +546,18 @@ impl DFA {
                     .expect("lexer DFA epsilon target overflow");
             }
 
-            let mut finalizers = BitSet::new(total_groups);
-            for local_group in state.finalizers.iter() {
-                finalizers.set(global_group_ids[local_group]);
+            if !identity_groups {
+                let mut finalizers = BitSet::new(total_groups);
+                for local_group in state.finalizers.iter() {
+                    finalizers.set(global_group_ids[local_group]);
+                }
+                let mut futures = BitSet::new(total_groups);
+                for local_group in state.possible_future_group_ids.iter() {
+                    futures.set(global_group_ids[local_group]);
+                }
+                state.finalizers = finalizers;
+                state.possible_future_group_ids = futures;
             }
-            let mut futures = BitSet::new(total_groups);
-            for local_group in state.possible_future_group_ids.iter() {
-                futures.set(global_group_ids[local_group]);
-            }
-            state.finalizers = finalizers;
-            state.possible_future_group_ids = futures;
         }
 
         self.states.append(&mut component.states);

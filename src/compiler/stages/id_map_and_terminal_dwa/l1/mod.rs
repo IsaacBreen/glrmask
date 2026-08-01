@@ -864,8 +864,8 @@ pub(crate) fn build_l1_id_map_and_terminal_dwa(
         return None;
     }
 
-    let generic_epsilon_nfa =
-        tokenizer.has_epsilon_transitions() && !tokenizer.has_deterministic_dispatch();
+    let generic_epsilon_nfa = tokenizer.has_epsilon_transitions()
+        && !tokenizer.has_scalar_deterministic_dispatch();
 
     let total_started_at = Instant::now();
     let id_map_started_at = Instant::now();
@@ -1776,7 +1776,7 @@ fn build_l1_id_map<'a>(
         let mut tokenizer_states = initial_state_map
             .expect("checked by should_use_fast_projected_l1_id_map")
             .clone();
-        if tokenizer.has_deterministic_dispatch() {
+        if tokenizer.has_scalar_deterministic_dispatch() {
             tokenizer_states.isolate_original(tokenizer.initial_state_id());
         }
         let state_to_rep = state_to_representative_vector(&tokenizer_states, num_dfa_states);
@@ -1929,7 +1929,7 @@ fn build_l1_id_map<'a>(
     let deferred_vocab_singleton_original_ids = Arc::clone(&order.token_ids_sorted);
     let token_identity_map_ms =
         token_sort_ms + token_map_started_at.elapsed().as_secs_f64() * 1000.0;
-    if tokenizer.has_deterministic_dispatch()
+    if tokenizer.has_scalar_deterministic_dispatch()
         && let Some(reuse) = exact_profile_reuse.as_mut()
     {
         reuse.profile_representatives_by_internal = Arc::from(state_representatives.clone());
@@ -1939,7 +1939,7 @@ fn build_l1_id_map<'a>(
         state_representatives.len() as u32,
         state_representatives,
     );
-    if tokenizer.has_deterministic_dispatch() {
+    if tokenizer.has_scalar_deterministic_dispatch() {
         tokenizer_states.isolate_original(tokenizer.initial_state_id());
     }
     let state_to_rep = state_to_representative_vector(&tokenizer_states, num_dfa_states);
@@ -4718,8 +4718,11 @@ fn build_l1_terminal_dwa(
 
     let state_seed_started_at = Instant::now();
     let mut states_to_initial_tsids = FxHashMap::<u32, Vec<u32>>::default();
-    let dispatch_profile_reuse = exact_profile_reuse
-        .filter(|_| tokenizer.has_deterministic_dispatch());
+    let scalar_dispatch_roots = tokenizer
+        .has_scalar_deterministic_dispatch()
+        .then(|| tokenizer.deterministic_dispatch_roots())
+        .flatten();
+    let dispatch_profile_reuse = exact_profile_reuse.filter(|_| scalar_dispatch_roots.is_some());
     for (internal_tsid, representative_state) in id_map
         .tokenizer_states
         .iter_representative_ids()
@@ -4727,7 +4730,7 @@ fn build_l1_terminal_dwa(
     {
         if id_map.tokenizer_states.internal_to_originals[internal_tsid]
             .contains(&tokenizer.initial_state_id())
-            && let Some(dispatch_roots) = tokenizer.deterministic_dispatch_roots()
+            && let Some(dispatch_roots) = scalar_dispatch_roots
         {
             for &dispatch_root in dispatch_roots {
                 let start_state = if let Some(reuse) = dispatch_profile_reuse {
@@ -5279,7 +5282,7 @@ fn build_l1_terminal_dwa(
     // parallel and fallback paths unchanged.
     let serial_exact_profile_collection = exact_profile_reuse.is_some()
         && rayon::current_num_threads() == 1
-        && !tokenizer.has_deterministic_dispatch();
+        && !tokenizer.has_scalar_deterministic_dispatch();
     let mut all_entries: Vec<(u32, u32, LazyRanges<'_>)> = if serial_exact_profile_collection {
         let reuse = exact_profile_reuse.expect("missing exact L1 profile reuse");
         let profiles = indexed_reuse_profiles
