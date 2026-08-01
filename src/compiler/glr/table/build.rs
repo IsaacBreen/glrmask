@@ -11,6 +11,7 @@ const DISABLE_UNIT_REDUCTION_INLINING_ENV: &str = "GLRMASK_DISABLE_UNIT_REDUCTIO
 const GLR_TABLE_CONSTRUCTION_ENV: &str = "GLRMASK_GLR_TABLE_CONSTRUCTION";
 const UNIT_REDUCTION_INLINING_MAX_PRE_MERGE_STATES_ENV: &str =
     "GLRMASK_UNIT_REDUCTION_INLINE_MAX_PRE_MERGE_STATES";
+const DEFAULT_UNIT_REDUCTION_INLINING_MAX_PRE_MERGE_STATES: u32 = 8_192;
 const ROW_BISIM_MAX_PRE_MERGE_STATES_ENV: &str =
     "GLRMASK_ROW_BISIM_MAX_PRE_MERGE_STATES";
 const SAME_CORE_MAX_PRE_MERGE_STATES_ENV: &str =
@@ -108,9 +109,9 @@ fn unit_reduction_inlining_max_pre_merge_states() -> Option<u32> {
         Ok(value) => match value.trim().parse::<u32>() {
             Ok(0) => None,
             Ok(parsed) => Some(parsed),
-            Err(_) => None,
+            Err(_) => Some(DEFAULT_UNIT_REDUCTION_INLINING_MAX_PRE_MERGE_STATES),
         },
-        Err(_) => None,
+        Err(_) => Some(DEFAULT_UNIT_REDUCTION_INLINING_MAX_PRE_MERGE_STATES),
     }
 }
 
