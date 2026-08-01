@@ -1659,10 +1659,33 @@ impl TokenBoundedAnalysisTopology {
         )
     }
 
-    pub(crate) fn materialize(
+    /// Filter observations while retaining the shared superset topology.
+    ///
+    /// Raw states outside the active language cannot transition back into it.
+    /// Consequently, inactive members in a superset configuration contribute
+    /// neither a current observation nor any future active observation. Keeping
+    /// those members in the topology can therefore only retain duplicate DFA
+    /// coordinates; the exact downstream observation refinement merges them.
+    fn materialize_filtered_unprojected(
+        &self,
+        tokenizer: &Tokenizer,
+        active_groups: &[bool],
+    ) -> BoundedAnalysisView {
+        materialize_bounded_analysis_view(
+            tokenizer,
+            Some(active_groups),
+            &self.configurations,
+            self.start_state,
+            Arc::clone(&self.transitions),
+            self.raw_start_to_view.to_vec(),
+        )
+    }
+
+    fn materialize_with_projection_policy(
         &self,
         tokenizer: &Tokenizer,
         active_groups: Option<&[bool]>,
+        allow_unprojected_crossover: bool,
     ) -> BoundedAnalysisView {
         let Some(active_language) = raw_active_language_states(tokenizer, active_groups) else {
             return materialize_bounded_analysis_view(
@@ -1695,6 +1718,30 @@ impl TokenBoundedAnalysisTopology {
                 intern_config(projected, &mut projected_ids, &mut projected_configs)
             })
             .collect::<Vec<_>>();
+
+        // Rebuilding a dense `projected_states × 256` transition table is only
+        // worthwhile when projection removes a material fraction of the shared
+        // topology. Above this 80% retention crossover, keep the shared table
+        // and filter observations instead. This preserves exact traces while
+        // avoiding repeated 20M+-slot table construction in large L1 branches.
+        let retain_unprojected = allow_unprojected_crossover
+            && projected_configs.len().saturating_mul(5)
+                >= self.configurations.len().saturating_mul(4);
+        if retain_unprojected {
+            if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some() {
+                eprintln!(
+                    "[glrmask/profile][token_bounded_materialize] mode=filtered_unprojected topology_states={} projected_states={} retention_pct={:.2}",
+                    self.configurations.len(),
+                    projected_configs.len(),
+                    100.0 * projected_configs.len() as f64
+                        / self.configurations.len().max(1) as f64,
+                );
+            }
+            return self.materialize_filtered_unprojected(
+                tokenizer,
+                active_groups.expect("active-language projection requires active groups"),
+            );
+        }
 
         let mut projected_transitions =
             vec![u32::MAX; projected_configs.len().saturating_mul(256)];
@@ -1733,6 +1780,15 @@ impl TokenBoundedAnalysisTopology {
             })
             .collect::<Vec<_>>();
         let start_state = projected_state_by_topology_state[self.start_state] as usize;
+        if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some() {
+            eprintln!(
+                "[glrmask/profile][token_bounded_materialize] mode=projected topology_states={} projected_states={} retention_pct={:.2}",
+                self.configurations.len(),
+                projected_configs.len(),
+                100.0 * projected_configs.len() as f64
+                    / self.configurations.len().max(1) as f64,
+            );
+        }
         materialize_bounded_analysis_view(
             tokenizer,
             active_groups,
@@ -1741,6 +1797,23 @@ impl TokenBoundedAnalysisTopology {
             Arc::from(projected_transitions),
             raw_start_to_view,
         )
+    }
+
+    pub(crate) fn materialize(
+        &self,
+        tokenizer: &Tokenizer,
+        active_groups: Option<&[bool]>,
+    ) -> BoundedAnalysisView {
+        self.materialize_with_projection_policy(tokenizer, active_groups, true)
+    }
+
+    #[cfg(test)]
+    fn materialize_force_projected(
+        &self,
+        tokenizer: &Tokenizer,
+        active_groups: &[bool],
+    ) -> BoundedAnalysisView {
+        self.materialize_with_projection_policy(tokenizer, Some(active_groups), false)
     }
 }
 
@@ -3899,6 +3972,76 @@ mod tests {
         assert_ne!(dfa.trans(dfa.start_state, b'a' as usize), u32::MAX);
         assert_eq!(dfa.trans(dfa.start_state, b'x' as usize), u32::MAX);
         assert_eq!(dfa.trans(dfa.start_state, b'y' as usize), u32::MAX);
+    }
+
+    #[test]
+    fn filtered_unprojected_topology_preserves_projected_token_traces() {
+        let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
+        let raw_start_states = (0..tokenizer.num_states() as usize).collect::<Vec<_>>();
+        let tokens = [
+            b"a".as_slice(),
+            b"aa".as_slice(),
+            b"ab".as_slice(),
+            b"aba".as_slice(),
+            b"b".as_slice(),
+            b"ba".as_slice(),
+            b"x".as_slice(),
+            b"xyz".as_slice(),
+        ];
+        let active_groups = [true, false];
+        let topology =
+            build_token_bounded_analysis_topology(&tokenizer, &raw_start_states, &tokens);
+        let projected = topology.materialize_force_projected(&tokenizer, &active_groups);
+        let unprojected =
+            topology.materialize_filtered_unprojected(&tokenizer, &active_groups);
+
+        let observable_trace = |view: &TokenizerView, start_state: usize, token: &[u8]| {
+            let dfa = view.dfa();
+            let mut state = start_state;
+            let mut trace = Vec::<(Vec<usize>, Vec<usize>, bool)>::new();
+            let initial = &dfa.states[state];
+            trace.push((
+                initial.finalizers.clone(),
+                initial.possible_future_group_ids.clone(),
+                initial.finalizers.is_empty()
+                    && initial.possible_future_group_ids.is_empty(),
+            ));
+            if trace.last().is_some_and(|entry| entry.2) {
+                return trace;
+            }
+            for &byte in token {
+                let target = dfa.trans(state, byte as usize);
+                if target == u32::MAX {
+                    trace.push((Vec::new(), Vec::new(), true));
+                    break;
+                }
+                state = target as usize;
+                let output = &dfa.states[state];
+                let dead = output.finalizers.is_empty()
+                    && output.possible_future_group_ids.is_empty();
+                trace.push((
+                    output.finalizers.clone(),
+                    output.possible_future_group_ids.clone(),
+                    dead,
+                ));
+                if dead {
+                    break;
+                }
+            }
+            trace
+        };
+
+        for &raw_state in &raw_start_states {
+            let projected_start = projected.view_state_for_raw_start(raw_state);
+            let unprojected_start = unprojected.view_state_for_raw_start(raw_state);
+            for token in tokens {
+                assert_eq!(
+                    observable_trace(&projected.tokenizer_view, projected_start, token),
+                    observable_trace(&unprojected.tokenizer_view, unprojected_start, token),
+                    "raw_state={raw_state} token={token:?}",
+                );
+            }
+        }
     }
 
     #[test]
