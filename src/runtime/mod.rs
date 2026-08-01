@@ -10,8 +10,7 @@ mod state;
 mod token_space;
 pub(crate) use artifact::{
     CommitTemplateDfas, ConstraintRuntimeBackend, DynamicMaskTrie, DynamicMaskVocab,
-    FastCommitTemplateDfas,
-    DynamicTokenProgramPartition, SpecialTokenTerminal,
+    FastCommitTemplateDfas, SpecialTokenTerminal,
 };
 #[allow(unused_imports)]
 pub use crate::compiler::glr::parser::{AdvanceTrace, AdvanceTraceStep};

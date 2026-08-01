@@ -363,18 +363,12 @@ impl Constraint {
         DynamicMaskVocab::from_packed(Arc::new(trie), Arc::new(token_aliases))
     }
 
-    pub(crate) fn rebuild_dynamic_runtime_caches(
-        &mut self,
-        prebuild_initial_token_programs_by_default: bool,
-    ) {
+    pub(crate) fn rebuild_dynamic_runtime_caches(&mut self) {
         self.tokenizer_has_epsilon_transitions = self.tokenizer.has_epsilon_transitions();
         let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
         let total_started_at = profile.then(std::time::Instant::now);
         let started_at = profile.then(std::time::Instant::now);
-        let preserved_token_program_partition = self
-            .dynamic_mask_vocab
-            .initial_token_program_partition();
         if self.table.guarded_shift_index.len() != self.table.num_states as usize {
             if self.table.num_rules == 0 {
                 self.table.guarded_shift_index =
@@ -388,38 +382,8 @@ impl Constraint {
         let started_at = profile.then(std::time::Instant::now);
         if !self.dynamic_mask_vocab.is_initialized() {
             self.dynamic_mask_vocab = self.build_dynamic_mask_vocab();
-            if let Some(partition) = preserved_token_program_partition {
-                self.dynamic_mask_vocab
-                    .install_initial_token_program_partition(partition);
-            }
         }
         let dynamic_vocab_ms = started_at
-            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-        let started_at = profile.then(std::time::Instant::now);
-        let prebuild_dynamic_token_programs = std::env::var("GLRMASK_PREBUILD_DYNAMIC_TOKEN_PROGRAMS")
-            .map(|value| {
-                let normalized = value.trim().to_ascii_lowercase();
-                !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
-            })
-            .unwrap_or(prebuild_initial_token_programs_by_default);
-        if prebuild_dynamic_token_programs {
-            self.dynamic_mask_vocab
-                .prebuild_initial_token_program_partition(&self.tokenizer, self.mask_len());
-        }
-        let token_program_ms = started_at
-            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-        let started_at = profile.then(std::time::Instant::now);
-        let prebuild_dynamic_continuations = std::env::var("GLRMASK_PREBUILD_DYNAMIC_CONTINUATION_PARTITIONS")
-            .map(|value| {
-                let normalized = value.trim().to_ascii_lowercase();
-                !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
-            })
-            .unwrap_or(false);
-        if prebuild_dynamic_continuations {
-            self.dynamic_mask_vocab_for_runtime()
-                .prebuild_continuation_partitions(&self.tokenizer, self.mask_len());
-        }
-        let continuation_ms = started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let started_at = profile.then(std::time::Instant::now);
         self.tokenizer_fast_transitions = self.compute_tokenizer_fast_transitions();
@@ -427,11 +391,9 @@ impl Constraint {
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         if let Some(total_started_at) = total_started_at {
             eprintln!(
-                "[glrmask/profile][dynamic_runtime_finalize] guarded_shift_ms={:.3} dynamic_vocab_ms={:.3} token_program_ms={:.3} continuation_ms={:.3} tokenizer_fast_ms={:.3} total_ms={:.3}",
+                "[glrmask/profile][dynamic_runtime_finalize] guarded_shift_ms={:.3} dynamic_vocab_ms={:.3} tokenizer_fast_ms={:.3} total_ms={:.3}",
                 guarded_shift_ms,
                 dynamic_vocab_ms,
-                token_program_ms,
-                continuation_ms,
                 tokenizer_fast_ms,
                 total_started_at.elapsed().as_secs_f64() * 1000.0,
             );
@@ -1323,19 +1285,6 @@ impl Constraint {
         };
         let primary_ms = primary_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-        let continuation_partitions_started_at = profile.then(std::time::Instant::now);
-        let prebuild_dynamic_continuations = std::env::var("GLRMASK_PREBUILD_DYNAMIC_CONTINUATION_PARTITIONS")
-            .map(|value| {
-                let normalized = value.trim().to_ascii_lowercase();
-                !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
-            })
-            .unwrap_or(false);
-        if prebuild_dynamic_continuations {
-            self.dynamic_mask_vocab
-                .prebuild_continuation_partitions(&self.tokenizer, self.mask_len());
-        }
-        let continuation_partitions_ms = continuation_partitions_started_at
-            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         self.internal_token_buf_masks = internal_token_buf_masks;
         self.word_group_buf_masks = Vec::new();
         let block_started_at = profile.then(std::time::Instant::now);
@@ -1602,11 +1551,10 @@ impl Constraint {
                 self.direct_sparse_weight_token_sets.len(),
             );
             eprintln!(
-                "[glrmask/profile][runtime_finalize] guarded_shift_ms={:.3} dynamic_mask_vocab_ms={:.3} dynamic_mask_vocab_reused={} continuation_partitions_ms={:.3} internal_token_buf_masks_ms={:.3} tokenizer_fast_transitions_ms={:.3} dense_token_masks_ms={:.3} dwa_fast_transitions_ms={:.3} primary_ms={:.3} word_block_masks_ms={:.3} quad_word_block_masks_ms={:.3} byte_block_masks_ms={:.3} block_masks_ms={:.3} derived_masks_ms={:.3} seed_dense_ms={:.3} tokenizer_closures_ms={:.3} initial_commit_prime_ms={:.3} total_ms={:.3}",
+                "[glrmask/profile][runtime_finalize] guarded_shift_ms={:.3} dynamic_mask_vocab_ms={:.3} dynamic_mask_vocab_reused={} internal_token_buf_masks_ms={:.3} tokenizer_fast_transitions_ms={:.3} dense_token_masks_ms={:.3} dwa_fast_transitions_ms={:.3} primary_ms={:.3} word_block_masks_ms={:.3} quad_word_block_masks_ms={:.3} byte_block_masks_ms={:.3} block_masks_ms={:.3} derived_masks_ms={:.3} seed_dense_ms={:.3} tokenizer_closures_ms={:.3} initial_commit_prime_ms={:.3} total_ms={:.3}",
                 guarded_shift_ms,
                 dynamic_vocab_ms,
                 dynamic_vocab_reused,
-                continuation_partitions_ms,
                 internal_token_buf_masks_ms,
                 tokenizer_fast_transitions_ms,
                 dense_token_masks_ms,

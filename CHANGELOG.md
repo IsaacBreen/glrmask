@@ -34,6 +34,11 @@
 
 ### Changed
 
+- `DynamicConstraint` once again performs vocabulary/lexer/parser analysis in
+  the decoding path instead of compiling whole-vocabulary token programs or
+  continuation partitions. Dynamic artifact format version 9 no longer stores
+  those precomputed structures; version-7 and version-8 dynamic artifacts must
+  be rebuilt rather than silently restoring the removed backend.
 - Static `Constraint` artifacts now use compressed format version 8. Current
   code continues to load uncompressed version-7 artifacts; newly saved
   artifacts require a version-8-capable loader.

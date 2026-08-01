@@ -172,7 +172,7 @@ impl Constraint {
         let mut constraint: Constraint = bincode::deserialize(serialized)
             .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
         if constraint.uses_dynamic_runtime() {
-            constraint.rebuild_dynamic_runtime_caches(false);
+            constraint.rebuild_dynamic_runtime_caches();
         } else {
             constraint.rebuild_runtime_caches();
         }
