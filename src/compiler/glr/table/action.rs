@@ -120,7 +120,7 @@ impl Action {
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, GuardedStackShift, StackShiftGuard};
+    use super::{Action, GuardedStackShift, StackShift, StackShiftGuard};
 
     #[test]
     fn guarded_stack_shifts_bincode_roundtrip_preserves_empty_guards() {
@@ -144,5 +144,33 @@ mod tests {
         let decoded: Action = bincode::deserialize(&bytes).expect("deserialization should succeed");
 
         assert_eq!(decoded, action);
+    }
+
+    #[test]
+    fn action_bincode_discriminants_remain_stable() {
+        let actions = [
+            Action::Shift(1, true),
+            Action::StackShifts(vec![StackShift {
+                pop: 1,
+                pushes: vec![2],
+            }]),
+            Action::GuardedStackShifts(Vec::new()),
+            Action::Reduce(3, 1),
+            Action::Split {
+                shift: None,
+                reduces: Vec::new(),
+                accept: true,
+            },
+            Action::Accept,
+            Action::ReplaceShifts(vec![1, 3, 5, 8]),
+        ];
+
+        for (discriminant, action) in actions.into_iter().enumerate() {
+            let bytes = bincode::serialize(&action).expect("serialization should succeed");
+            assert_eq!(&bytes[..4], &(discriminant as u32).to_le_bytes());
+            let decoded: Action =
+                bincode::deserialize(&bytes).expect("deserialization should succeed");
+            assert_eq!(decoded, action);
+        }
     }
 }

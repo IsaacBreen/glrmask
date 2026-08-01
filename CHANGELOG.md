@@ -29,6 +29,9 @@
 
 ### Changed
 
+- Static `Constraint` artifacts now use compressed format version 8. Current
+  code continues to load uncompressed version-7 artifacts; newly saved
+  artifacts require a version-8-capable loader.
 - Finite `maxLength` constraints on patterned JSON Schema strings are preserved
   by default even when their estimated pattern/length product is large. The
   complexity budget now selects lowering strategy only; it no longer permits a

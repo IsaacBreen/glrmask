@@ -1,19 +1,31 @@
 use crate::runtime::Constraint;
 
 const CONSTRAINT_MAGIC: [u8; 8] = *b"GLRCONS\0";
-const CONSTRAINT_VERSION: u16 = 7;
+const LEGACY_CONSTRAINT_VERSION: u16 = 7;
+const CONSTRAINT_VERSION: u16 = 8;
 const CONSTRAINT_HEADER_LEN: usize = CONSTRAINT_MAGIC.len() + 2 + 8;
+const COMPRESSED_PAYLOAD_HEADER_LEN: usize = 8;
+const CONSTRAINT_COMPRESSION_LEVEL: i32 = 1;
+
+fn envelope(version: u16, payload: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(CONSTRAINT_HEADER_LEN + payload.len());
+    bytes.extend_from_slice(&CONSTRAINT_MAGIC);
+    bytes.extend_from_slice(&version.to_le_bytes());
+    bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(payload);
+    bytes
+}
 
 impl Constraint {
-    /// Serialize this compiled constraint to a versioned binary artifact.
+    /// Serialize this compiled constraint to a compressed, versioned binary artifact.
     pub fn save(&self) -> Vec<u8> {
-        let payload = bincode::serialize(self).expect("Constraint serialization should succeed");
-        let mut bytes = Vec::with_capacity(CONSTRAINT_HEADER_LEN + payload.len());
-        bytes.extend_from_slice(&CONSTRAINT_MAGIC);
-        bytes.extend_from_slice(&CONSTRAINT_VERSION.to_le_bytes());
-        bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(&payload);
-        bytes
+        let raw = bincode::serialize(self).expect("Constraint serialization should succeed");
+        let compressed = zstd::bulk::compress(&raw, CONSTRAINT_COMPRESSION_LEVEL)
+            .expect("Constraint compression should succeed");
+        let mut payload = Vec::with_capacity(COMPRESSED_PAYLOAD_HEADER_LEN + compressed.len());
+        payload.extend_from_slice(&(raw.len() as u64).to_le_bytes());
+        payload.extend_from_slice(&compressed);
+        envelope(CONSTRAINT_VERSION, &payload)
     }
 
     /// Load a compiled constraint from an artifact produced by [`Constraint::save`].
@@ -24,7 +36,7 @@ impl Constraint {
             ));
         }
         let version = u16::from_le_bytes([bytes[8], bytes[9]]);
-        if version != CONSTRAINT_VERSION {
+        if !matches!(version, LEGACY_CONSTRAINT_VERSION | CONSTRAINT_VERSION) {
             return Err(crate::GlrMaskError::Serialization(format!(
                 "unsupported constraint artifact version {version}"
             )));
@@ -44,9 +56,50 @@ impl Constraint {
                 "invalid constraint artifact payload length".to_owned(),
             ));
         }
-        let mut constraint: Constraint =
-            bincode::deserialize(&bytes[CONSTRAINT_HEADER_LEN..])
+        let payload = &bytes[CONSTRAINT_HEADER_LEN..];
+        let raw;
+        let serialized = if version == CONSTRAINT_VERSION {
+            if payload.len() < COMPRESSED_PAYLOAD_HEADER_LEN {
+                return Err(crate::GlrMaskError::Serialization(
+                    "invalid compressed constraint artifact payload".to_owned(),
+                ));
+            }
+            let raw_len = usize::try_from(u64::from_le_bytes(
+                payload[..COMPRESSED_PAYLOAD_HEADER_LEN]
+                    .try_into()
+                    .expect("compressed constraint payload header has fixed width"),
+            ))
+            .map_err(|_| {
+                crate::GlrMaskError::Serialization(
+                    "uncompressed constraint artifact length does not fit this platform".to_owned(),
+                )
+            })?;
+            let compressed = &payload[COMPRESSED_PAYLOAD_HEADER_LEN..];
+            let frame_len = zstd::zstd_safe::get_frame_content_size(compressed)
+                .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?
+                .ok_or_else(|| {
+                    crate::GlrMaskError::Serialization(
+                        "compressed constraint artifact has no content size".to_owned(),
+                    )
+                })?;
+            if frame_len != raw_len as u64 {
+                return Err(crate::GlrMaskError::Serialization(
+                    "invalid uncompressed constraint artifact length".to_owned(),
+                ));
+            }
+            raw = zstd::bulk::decompress(compressed, raw_len)
                 .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
+            if raw.len() != raw_len {
+                return Err(crate::GlrMaskError::Serialization(
+                    "invalid uncompressed constraint artifact length".to_owned(),
+                ));
+            }
+            raw.as_slice()
+        } else {
+            payload
+        };
+        let mut constraint: Constraint = bincode::deserialize(serialized)
+            .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
         if constraint.uses_dynamic_runtime() {
             constraint.rebuild_dynamic_runtime_caches(false);
         } else {
@@ -102,6 +155,39 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("unsupported"));
+    }
+
+    #[test]
+    fn constraint_envelope_loads_legacy_payloads() {
+        let constraint = tiny_constraint();
+        let saved = constraint.save();
+        assert_eq!(
+            u16::from_le_bytes([saved[8], saved[9]]),
+            CONSTRAINT_VERSION
+        );
+        let raw = bincode::serialize(&constraint).unwrap();
+
+        let loaded = Constraint::load(&envelope(LEGACY_CONSTRAINT_VERSION, &raw))
+            .expect("legacy artifact should remain loadable");
+
+        assert_eq!(loaded.start().mask(), constraint.start().mask());
+    }
+
+    #[test]
+    fn constraint_envelope_rejects_invalid_compressed_payloads() {
+        let constraint = tiny_constraint();
+        let raw = bincode::serialize(&constraint).unwrap();
+        let compressed = zstd::bulk::compress(&raw, CONSTRAINT_COMPRESSION_LEVEL).unwrap();
+
+        let mut wrong_raw_len = Vec::with_capacity(8 + compressed.len());
+        wrong_raw_len.extend_from_slice(&((raw.len() + 1) as u64).to_le_bytes());
+        wrong_raw_len.extend_from_slice(&compressed);
+        assert!(Constraint::load(&envelope(CONSTRAINT_VERSION, &wrong_raw_len))
+            .unwrap_err()
+            .to_string()
+            .contains("uncompressed"));
+
+        assert!(Constraint::load(&envelope(CONSTRAINT_VERSION, &[0; 8])).is_err());
     }
 
     #[test]
