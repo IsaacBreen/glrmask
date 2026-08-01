@@ -1579,6 +1579,7 @@ pub(crate) struct TokenBoundedAnalysisTopology {
     start_state: usize,
     transitions: Arc<[u32]>,
     sparse_edges: Arc<OnceLock<TokenBoundedSparseEdges>>,
+    reuse_sparse_projection: bool,
     raw_start_to_view: Arc<[u32]>,
 }
 
@@ -1725,26 +1726,53 @@ impl TokenBoundedAnalysisTopology {
 
         let mut projected_transitions =
             vec![u32::MAX; projected_configs.len().saturating_mul(256)];
-        let sparse = self.sparse_edges();
-        for topology_source in 0..self.configurations.len() {
-            let source = projected_state_by_topology_state[topology_source] as usize;
-            if projected_configs[source].is_empty() {
-                continue;
-            }
-            let edge_start = sparse.edge_offsets[topology_source] as usize;
-            let edge_end = sparse.edge_offsets[topology_source + 1] as usize;
-            for &(byte, topology_target) in &sparse.edges[edge_start..edge_end] {
-                let target = projected_state_by_topology_state[topology_target as usize];
-                if projected_configs[target as usize].is_empty() {
+        if self.reuse_sparse_projection {
+            let sparse = self.sparse_edges();
+            for topology_source in 0..self.configurations.len() {
+                let source = projected_state_by_topology_state[topology_source] as usize;
+                if projected_configs[source].is_empty() {
                     continue;
                 }
-                let slot = source * 256 + byte as usize;
-                let previous = projected_transitions[slot];
-                debug_assert!(
-                    previous == u32::MAX || previous == target,
-                    "equal projected NFA configs had different projected byte successors",
-                );
-                projected_transitions[slot] = target;
+                let edge_start = sparse.edge_offsets[topology_source] as usize;
+                let edge_end = sparse.edge_offsets[topology_source + 1] as usize;
+                for &(byte, topology_target) in &sparse.edges[edge_start..edge_end] {
+                    let target = projected_state_by_topology_state[topology_target as usize];
+                    if projected_configs[target as usize].is_empty() {
+                        continue;
+                    }
+                    let slot = source * 256 + byte as usize;
+                    let previous = projected_transitions[slot];
+                    debug_assert!(
+                        previous == u32::MAX || previous == target,
+                        "equal projected NFA configs had different projected byte successors",
+                    );
+                    projected_transitions[slot] = target;
+                }
+            }
+        } else {
+            for topology_source in 0..self.configurations.len() {
+                let source = projected_state_by_topology_state[topology_source] as usize;
+                if projected_configs[source].is_empty() {
+                    continue;
+                }
+                let topology_row = topology_source * 256;
+                for byte in 0..256 {
+                    let topology_target = self.transitions[topology_row + byte];
+                    if topology_target == u32::MAX {
+                        continue;
+                    }
+                    let target = projected_state_by_topology_state[topology_target as usize];
+                    if projected_configs[target as usize].is_empty() {
+                        continue;
+                    }
+                    let slot = source * 256 + byte;
+                    let previous = projected_transitions[slot];
+                    debug_assert!(
+                        previous == u32::MAX || previous == target,
+                        "equal projected NFA configs had different projected byte successors",
+                    );
+                    projected_transitions[slot] = target;
+                }
             }
         }
 
@@ -2107,6 +2135,7 @@ fn build_bounded_analysis_topology_impl_with_expansion(
             start_state: start_state as usize,
             transitions: Arc::from(transitions),
             sparse_edges: Arc::new(OnceLock::new()),
+            reuse_sparse_projection: false,
             raw_start_to_view: Arc::from(raw_start_to_view),
         },
         work,
@@ -2250,7 +2279,7 @@ pub(crate) fn build_token_bounded_analysis_topology(
     raw_start_states: &[usize],
     tokens: &[&[u8]],
 ) -> TokenBoundedAnalysisTopology {
-    build_bounded_analysis_topology_impl(
+    let mut topology = build_bounded_analysis_topology_impl(
         tokenizer,
         None,
         raw_start_states,
@@ -2264,7 +2293,9 @@ pub(crate) fn build_token_bounded_analysis_topology(
         None,
     )
     .expect("unbounded token analysis topology build")
-    .0
+    .0;
+    topology.reuse_sparse_projection = true;
+    topology
 }
 
 pub(crate) fn build_token_bounded_analysis_view_projected(
@@ -2477,8 +2508,22 @@ pub(crate) fn build_token_bounded_analysis_view(
     tokens: &[&[u8]],
     active_groups: Option<&[bool]>,
 ) -> BoundedAnalysisView {
-    build_token_bounded_analysis_topology(tokenizer, raw_start_states, tokens)
-        .materialize(tokenizer, active_groups)
+    build_bounded_analysis_topology_impl(
+        tokenizer,
+        None,
+        raw_start_states,
+        tokens,
+        false,
+        true,
+        false,
+        false,
+        None,
+        None,
+        None,
+    )
+    .expect("unbounded token analysis topology build")
+    .0
+    .materialize(tokenizer, active_groups)
 }
 
 pub(crate) fn build_token_bounded_analysis_view_from_combined_starts(
