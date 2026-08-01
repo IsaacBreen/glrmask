@@ -92,6 +92,7 @@ fn trace_action_kind(action: Option<&Action>) -> &'static str {
     match action {
         Some(Action::Shift(..)) => "shift",
         Some(Action::StackShifts(..)) => "stack-shifts",
+        Some(Action::ReplaceShifts(..)) => "replace-shifts",
         Some(Action::GuardedStackShifts(..)) => "guarded-stack-shifts",
         Some(Action::Reduce(..)) => "reduce",
         Some(Action::Split { accept: true, .. }) => "split-accept",
@@ -150,7 +151,11 @@ fn trace_action_summary(
             shift_replace: Some(*replace),
             reduces: Vec::new(),
         },
-        Some(Action::StackShifts(..)) | Some(Action::GuardedStackShifts(..)) | Some(Action::Accept) | None => {
+        Some(Action::StackShifts(..))
+        | Some(Action::ReplaceShifts(..))
+        | Some(Action::GuardedStackShifts(..))
+        | Some(Action::Accept)
+        | None => {
             AdvanceTraceStep {
                 source_state,
                 action_kind: trace_action_kind(action).to_string(),
@@ -342,6 +347,13 @@ fn advance_concrete_stacks_reference(
                 let pop = usize::from(*is_replace);
                 if let Some(next) = apply_concrete_stack_effect(&stack, pop, &[*target]) {
                     merge_concrete_path_accumulator(&mut shifted, next, acc);
+                }
+            }
+            Action::ReplaceShifts(targets) => {
+                for target in targets {
+                    if let Some(next) = apply_concrete_stack_effect(&stack, 1, &[*target]) {
+                        merge_concrete_path_accumulator(&mut shifted, next, acc.clone());
+                    }
                 }
             }
             Action::StackShifts(shifts) => {
@@ -702,6 +714,9 @@ fn advance_stacks_core(table: &GLRTable, mut gss: ParserGSS, token: TerminalID) 
                 gss.push(*target)
             };
         }
+        if let Some(Action::ReplaceShifts(targets)) = table.action(state, token) {
+            return apply_replace_shifts(gss, targets);
+        }
         if let Some(Action::StackShifts(shifts)) = table.action(state, token) {
             return apply_stack_shifts(gss, shifts);
         }
@@ -821,6 +836,7 @@ fn try_collapse_small_reduce_fanout(
 fn pure_frontier_shift(action: &Action) -> Option<(u32, bool)> {
     match action {
         Action::Shift(target, is_replace) => Some((*target, *is_replace)),
+        Action::ReplaceShifts(targets) if targets.len() == 1 => Some((targets[0], true)),
         Action::StackShifts(shifts)
             if shifts.len() == 1 && shifts[0].pushes.len() == 1 && shifts[0].pop <= 1 =>
         {
@@ -841,6 +857,7 @@ fn effective_pure_frontier_shift(
             *target,
             *is_replace && !table.forwarded_shifts.contains(&(state, token)),
         )),
+        Action::ReplaceShifts(targets) if targets.len() == 1 => Some((targets[0], true)),
         Action::StackShifts(shifts)
             if shifts.len() == 1 && shifts[0].pushes.len() == 1 && shifts[0].pop <= 1 =>
         {
@@ -993,6 +1010,9 @@ fn try_advance_uniform_deterministic_frontier(
                     frontier.push(*target)
                 });
             }
+            Some(Action::ReplaceShifts(targets)) if targets.len() == 1 => {
+                return Some(apply_replace_shifts(frontier, targets));
+            }
             Some(Action::StackShifts(shifts)) if shifts.len() == 1 => {
                 return Some(apply_stack_shifts(frontier, shifts));
             }
@@ -1023,6 +1043,7 @@ fn try_advance_bounded_concrete_paths(
             Some(Action::Reduce(..)) | Some(Action::GuardedStackShifts(..)) => {
                 saw_complex_action = true;
             }
+            Some(Action::ReplaceShifts(targets)) if targets.len() == 1 => {}
             Some(Action::StackShifts(shifts)) if shifts.len() == 1 => {}
             _ => return None,
         }
@@ -2146,6 +2167,30 @@ fn apply_push_sequences(base: ParserGSS, pushes: &[&[u32]]) -> ParserGSS {
     }
 }
 
+fn apply_replace_shifts(gss: ParserGSS, targets: &[u32]) -> ParserGSS {
+    if targets.is_empty() {
+        return ParserGSS::empty();
+    }
+    if let Some(stack) = gss.try_virtual_stack() {
+        let sorted_unique = targets.windows(2).all(|pair| pair[0] < pair[1]);
+        let shifted = if sorted_unique {
+            stack.into_gss_after_popping_and_pushing_unique_single_branches(1, targets.iter())
+        } else {
+            stack.into_gss_after_popping_and_pushing_single_branches(1, targets.iter())
+        };
+        if let Some(shifted) = shifted {
+            return shifted;
+        }
+    }
+
+    let base = gss.popn(1);
+    let mut out = ParserGSS::empty();
+    for &target in targets {
+        merge_into(&mut out, base.clone().push(target));
+    }
+    out
+}
+
 fn apply_stack_shifts(gss: ParserGSS, shifts: &[StackShift]) -> ParserGSS {
     if let Some(stack) = gss.try_virtual_stack()
         && let Some(first) = shifts.first()
@@ -2768,6 +2813,9 @@ fn advance_deterministically_from_vstack_raw(
                 }
                 return (AdvancedBranch::Stack(stack), true);
             }
+            Some(Action::ReplaceShifts(targets)) => {
+                return (AdvancedBranch::Gss(apply_replace_shifts(stack.into_gss(), targets)), true);
+            }
             Some(Action::StackShifts(shifts)) => {
                 return (AdvancedBranch::Gss(apply_stack_shifts(stack.into_gss(), shifts)), true);
             }
@@ -2975,6 +3023,11 @@ fn advance_deterministically_profiled(
                     stack.push(*target);
                 }
                 *gss = stack.into_gss();
+                profile.det_exit_reason = 1;
+                return true;
+            }
+            Some(Action::ReplaceShifts(targets)) => {
+                *gss = apply_replace_shifts(stack.into_gss(), targets);
                 profile.det_exit_reason = 1;
                 return true;
             }
@@ -3235,6 +3288,11 @@ fn advance_nondeterministically_profiled(
                     }
                     continue;
                 }
+                Action::ReplaceShifts(targets) => {
+                    profile.n_nondet_merges += 1;
+                    merge_into(&mut shifted, apply_replace_shifts(isolated, targets));
+                    continue;
+                }
                 Action::StackShifts(shifts) => {
                     profile.n_nondet_merges += 1;
                     merge_into(&mut shifted, apply_stack_shifts(isolated, shifts));
@@ -3282,6 +3340,10 @@ fn advance_nondeterministically_profiled(
                 }
             }
 
+            if let Action::ReplaceShifts(targets) = action {
+                profile.n_nondet_merges += 1;
+                merge_into(&mut shifted, apply_replace_shifts(isolated.clone(), targets));
+            }
             if let Action::StackShifts(shifts) = action {
                 profile.n_nondet_merges += 1;
                 merge_into(&mut shifted, apply_stack_shifts(isolated.clone(), shifts));
@@ -3394,6 +3456,10 @@ fn advance_nondeterministically(
                     }
                     continue;
                 }
+                Action::ReplaceShifts(targets) => {
+                    merge_into(&mut shifted, apply_replace_shifts(isolated, targets));
+                    continue;
+                }
                 Action::StackShifts(shifts) => {
                     merge_into(&mut shifted, apply_stack_shifts(isolated, shifts));
                     continue;
@@ -3432,6 +3498,9 @@ fn advance_nondeterministically(
                 }
             }
 
+            if let Action::ReplaceShifts(targets) = action {
+                merge_into(&mut shifted, apply_replace_shifts(isolated.clone(), targets));
+            }
             if let Action::StackShifts(shifts) = action {
                 merge_into(&mut shifted, apply_stack_shifts(isolated.clone(), shifts));
             }
@@ -3554,6 +3623,10 @@ fn advance_deterministically(
                 }
                 return true;
             }
+            Some(Action::ReplaceShifts(targets)) => {
+                *gss = apply_replace_shifts(stack.into_gss(), targets);
+                return true;
+            }
             Some(Action::StackShifts(shifts)) => {
                 *gss = apply_stack_shifts(stack.into_gss(), shifts);
                 return true;
@@ -3649,7 +3722,7 @@ fn exact_admission_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: Te
                 continue;
             };
             match action {
-                Action::Shift(..) => return true,
+                Action::Shift(..) | Action::ReplaceShifts(_) => return true,
                 Action::StackShifts(shifts) => {
                     if !apply_stack_shifts(isolated.clone(), shifts).is_empty() {
                         return true;
@@ -3907,7 +3980,7 @@ fn exact_admission_process_action_any(
     pending_reduces: &mut SmallVec<[(u32, u32, BitSet); 8]>,
 ) -> bool {
     match action {
-        Action::Shift(..) => true,
+        Action::Shift(..) | Action::ReplaceShifts(_) => true,
         Action::StackShifts(shifts) => {
             !apply_stack_shifts(isolated.clone(), shifts).is_empty()
         }

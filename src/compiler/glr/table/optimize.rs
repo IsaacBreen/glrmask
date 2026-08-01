@@ -2616,6 +2616,15 @@ fn collect_suffix_effects_from_frame(
                 effects.push(frame_to_guarded_shift(frame));
                 Ok(())
             }
+            Action::ReplaceShifts(targets) => {
+                for &target in targets {
+                    let mut frame = frame.clone();
+                    pop_frame(&mut frame, 1);
+                    frame.pushes.push(target);
+                    effects.push(frame_to_guarded_shift(frame));
+                }
+                Ok(())
+            }
             Action::StackShifts(shifts) => {
                 for shift in shifts {
                     let mut frame = frame.clone();
@@ -2849,7 +2858,7 @@ fn remapped_action_hash(action: &Action, mapping: &[u32]) -> u64 {
         }
         Action::Accept => 3u8.hash(&mut h),
         Action::StackShifts(shifts) => return remapped_stack_shifts_hash(shifts, mapping),
-        Action::GuardedStackShifts(_) => {
+        Action::ReplaceShifts(_) | Action::GuardedStackShifts(_) => {
             return unordered_entry_hash(&remap_action_targets(action, mapping));
         }
     }
@@ -2868,7 +2877,8 @@ fn actions_equal_after_remap(left: &Action, right: &Action, mapping: &[u32]) -> 
         (Action::StackShifts(left), Action::StackShifts(right)) => {
             remapped_stack_shifts_equal(left, right, mapping)
         }
-        (Action::GuardedStackShifts(_), Action::GuardedStackShifts(_)) => {
+        (Action::ReplaceShifts(_), Action::ReplaceShifts(_))
+        | (Action::GuardedStackShifts(_), Action::GuardedStackShifts(_)) => {
             remap_action_targets(left, mapping) == remap_action_targets(right, mapping)
         }
         _ => false,
@@ -2989,6 +2999,7 @@ fn push_reachable_state(state: u32, reachable: &mut [bool], stack: &mut Vec<u32>
 fn collect_action_targets(action: &Action, out: &mut Vec<u32>) {
     match action {
         Action::Shift(target, _) => out.push(*target),
+        Action::ReplaceShifts(targets) => out.extend(targets.iter().copied()),
         Action::StackShifts(shifts) => {
             for shift in shifts {
                 out.extend(shift.pushes.iter().copied());
@@ -3014,6 +3025,11 @@ fn collect_action_targets(action: &Action, out: &mut Vec<u32>) {
 fn push_action_targets(action: &Action, reachable: &mut [bool], stack: &mut Vec<u32>) {
     match action {
         Action::Shift(target, _) => push_reachable_state(*target, reachable, stack),
+        Action::ReplaceShifts(targets) => {
+            for &state in targets {
+                push_reachable_state(state, reachable, stack);
+            }
+        }
         Action::StackShifts(shifts) => {
             for shift in shifts {
                 for &state in &shift.pushes {
@@ -3351,7 +3367,7 @@ fn merge_action_into_pending(
             failed_subsets,
             budget,
         ),
-        Action::StackShifts(_) => Err(()),
+        Action::StackShifts(_) | Action::ReplaceShifts(_) => Err(()),
         Action::GuardedStackShifts(_) => Err(()),
         Action::Reduce(nt, len) => {
             pending.push_reduce(*nt, *len);
@@ -3801,6 +3817,7 @@ fn stack_effect_action_tag(action: &Action) -> u8 {
         Action::Reduce(..) => 3,
         Action::Split { .. } => 4,
         Action::Accept => 5,
+        Action::ReplaceShifts(_) => 6,
     }
 }
 
@@ -3957,6 +3974,14 @@ fn stack_effects_for_action(
                 let effective_replace = *replace && !table.forwarded_shifts.contains(&(state, tid));
                 push_transition_to_frame(&mut frame, *target, effective_replace);
                 out.push(frame_to_guarded_shift(frame));
+            }
+            Action::ReplaceShifts(targets) => {
+                for &target in targets {
+                    let mut frame = frame.clone();
+                    pop_frame(&mut frame, 1);
+                    frame.pushes.push(target);
+                    out.push(frame_to_guarded_shift(frame));
+                }
             }
             Action::StackShifts(shifts) => {
                 for shift in shifts {
@@ -5781,7 +5806,7 @@ fn try_inline_unit_reductions_for_cell_inner(
 
     match action {
         Action::Shift(target, replace) => pending.push_shift(*target, *replace),
-        Action::StackShifts(_) => return Ok(None),
+        Action::StackShifts(_) | Action::ReplaceShifts(_) => return Ok(None),
         Action::GuardedStackShifts(_) => return Ok(None),
         Action::Reduce(nt, len) => reduces.push((*nt, *len)),
         Action::Split {
@@ -5881,6 +5906,13 @@ fn remap_action_targets_in_place(action: &mut Action, mapping: &[u32]) {
         Action::Shift(target, _) => {
             *target = mapping[*target as usize];
         }
+        Action::ReplaceShifts(targets) => {
+            for target in targets.iter_mut() {
+                *target = mapping[*target as usize];
+            }
+            targets.sort_unstable();
+            targets.dedup();
+        }
         Action::StackShifts(shifts) => {
             for shift in shifts.iter_mut() {
                 for target in &mut shift.pushes {
@@ -5921,6 +5953,15 @@ fn remap_goto_row_targets_in_place(goto_row: &mut GotoRow, mapping: &[u32]) {
 fn remap_action_targets(action: &Action, mapping: &[u32]) -> Action {
     match action {
         Action::Shift(target, replace) => Action::Shift(mapping[*target as usize], *replace),
+        Action::ReplaceShifts(targets) => {
+            let mut targets = targets
+                .iter()
+                .map(|&target| mapping[target as usize])
+                .collect::<Vec<_>>();
+            targets.sort_unstable();
+            targets.dedup();
+            Action::ReplaceShifts(targets)
+        }
         Action::StackShifts(shifts) => {
             let mut remapped = shifts
                 .iter()
@@ -5975,6 +6016,7 @@ fn remap_action_targets(action: &Action, mapping: &[u32]) -> Action {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum ActionSig {
     Shift(u32, bool),
+    ReplaceShifts(Vec<u32>),
     StackShifts(Vec<(u32, Vec<u32>)>),
     GuardedStackShifts(Vec<(Vec<(u32, Vec<u32>)>, u32, Vec<u32>)>),
     Reduce(NonterminalID, u32),
@@ -5996,6 +6038,15 @@ struct RowSignature {
 fn remap_action_to_partition(action: &Action, partition: &[u32]) -> ActionSig {
     match action {
         Action::Shift(target, replace) => ActionSig::Shift(partition[*target as usize], *replace),
+        Action::ReplaceShifts(targets) => {
+            let mut targets = targets
+                .iter()
+                .map(|&target| partition[target as usize])
+                .collect::<Vec<_>>();
+            targets.sort_unstable();
+            targets.dedup();
+            ActionSig::ReplaceShifts(targets)
+        }
         Action::StackShifts(shifts) => ActionSig::StackShifts(
             shifts
                 .iter()

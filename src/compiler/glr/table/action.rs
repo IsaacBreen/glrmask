@@ -34,6 +34,8 @@ pub enum Action {
         accept: bool,
     },
     Accept,
+    /// Alternative pop-one/push-one replacements, stored compactly as targets.
+    ReplaceShifts(Vec<u32>),
 }
 
 impl Action {
@@ -47,7 +49,8 @@ impl Action {
             {
                 Some(shifts[0].pushes[0])
             }
-            Action::GuardedStackShifts(_) => None,
+            Action::ReplaceShifts(targets) if targets.len() == 1 => Some(targets[0]),
+            Action::GuardedStackShifts(_) | Action::ReplaceShifts(_) => None,
             _ => None,
         }
     }
@@ -60,6 +63,7 @@ impl Action {
             Action::StackShifts(shifts) if shifts.len() == 1 => {
                 shifts[0].pop == 1 && shifts[0].pushes.len() == 1
             }
+            Action::ReplaceShifts(targets) => targets.len() == 1,
             Action::GuardedStackShifts(_) => false,
             _ => false,
         }
@@ -73,6 +77,11 @@ impl Action {
             Action::StackShifts(shifts) => {
                 for shift in shifts {
                     f(shift.pop, &shift.pushes);
+                }
+            }
+            Action::ReplaceShifts(targets) => {
+                for target in targets {
+                    f(1, std::slice::from_ref(target));
                 }
             }
             Action::GuardedStackShifts(_) => {}

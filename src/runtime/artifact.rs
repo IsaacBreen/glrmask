@@ -23,7 +23,7 @@ pub(crate) type PossibleMatchesByTerminal = BTreeMap<TerminalID, Weight>;
 
 #[derive(Debug, Clone)]
 pub(crate) struct DirectRegularWideFrontierAcceptance {
-    /// Pointer identities of immutable StackShifts slices in the live table
+    /// Pointer identities of immutable replace-target or StackShifts slices in the live table
     /// that all produce this exact frontier. Runtime-only and rebuilt after
     /// deserialization.
     pub(crate) action_origins: Vec<usize>,

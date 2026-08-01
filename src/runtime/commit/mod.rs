@@ -1487,6 +1487,9 @@ fn try_apply_single_top_action_in_place(gss: &mut ParserGSS, action: &Action) ->
             let pushes = [*target];
             gss.try_apply_single_segment_stack_effect_in_place(usize::from(*replace), &pushes)
         }
+        Action::ReplaceShifts(targets) if targets.len() == 1 => {
+            gss.try_apply_single_segment_stack_effect_in_place(1, targets)
+        }
         Action::StackShifts(shifts) => {
             let [shift] = shifts.as_slice() else {
                 return false;
@@ -1527,6 +1530,13 @@ fn apply_single_top_action_fast(
                     gss.push(*target)
                 })
             }
+        }
+        Action::ReplaceShifts(targets) => {
+            let stack = gss.try_virtual_stack()?;
+            stack.into_gss_after_popping_and_pushing_unique_single_branches(
+                1,
+                targets.iter(),
+            )
         }
         Action::StackShifts(shifts) => {
             if let [shift] = shifts.as_slice() {
@@ -4599,6 +4609,16 @@ fn apply_terminal_to_flat_stacks(
                     && !scratch.push_complete(stack)
                 {
                     return None;
+                }
+            }
+            Action::ReplaceShifts(targets) => {
+                for &target in targets {
+                    let mut candidate = stack.clone();
+                    if apply_flat_stack_effect(&mut candidate, 1, &[target])?
+                        && !scratch.push_complete(candidate)
+                    {
+                        return None;
+                    }
                 }
             }
             Action::StackShifts(shifts) => {

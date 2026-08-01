@@ -438,6 +438,17 @@ impl GLRTable {
                     Action::Shift(target, _) => {
                         validate_target(source_state, "terminal", terminal, "Action::Shift", *target);
                     }
+                    Action::ReplaceShifts(targets) => {
+                        for (target_idx, &target) in targets.iter().enumerate() {
+                            validate_target(
+                                source_state,
+                                "terminal",
+                                terminal,
+                                &format!("Action::ReplaceShifts[{target_idx}]"),
+                                target,
+                            );
+                        }
+                    }
                     Action::StackShifts(shifts) => {
                         for (shift_idx, shift) in shifts.iter().enumerate() {
                             for (push_idx, &target) in shift.pushes.iter().enumerate() {

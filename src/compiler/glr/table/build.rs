@@ -242,13 +242,10 @@ fn direct_regular_action_row_for_roots_with_widest(
         let action = if end == index + 1 {
             Action::Shift(workspace.terminal_targets[index].1, true)
         } else {
-            Action::StackShifts(
+            Action::ReplaceShifts(
                 workspace.terminal_targets[index..end]
                     .iter()
-                    .map(|&(_, target)| StackShift {
-                        pop: 1,
-                        pushes: vec![target],
-                    })
+                    .map(|&(_, target)| target)
                     .collect(),
             )
         };
@@ -274,6 +271,7 @@ fn direct_regular_wide_frontier_descriptor(
 ) -> Option<DirectRegularWideFrontierDescriptor> {
     let mut target_states = match row.get(&terminal)? {
         Action::Shift(target, _) => vec![*target],
+        Action::ReplaceShifts(targets) => targets.clone(),
         Action::StackShifts(shifts)
             if shifts
                 .iter()
@@ -530,15 +528,7 @@ fn try_build_direct_regular_table_reference(grammar: &AnalyzedGrammar) -> Option
             let action = if targets.len() == 1 {
                 Action::Shift(targets[0], true)
             } else {
-                Action::StackShifts(
-                    targets
-                        .into_iter()
-                        .map(|target| StackShift {
-                            pop: 1,
-                            pushes: vec![target],
-                        })
-                        .collect(),
-                )
+                Action::ReplaceShifts(targets)
             };
             row.push((terminal, action));
         }
@@ -2286,7 +2276,7 @@ fn add_remapped_action_to_pending(
                 pending.push_accept();
             }
         }
-        Action::StackShifts(_) | Action::GuardedStackShifts(_) => return None,
+        Action::StackShifts(_) | Action::ReplaceShifts(_) | Action::GuardedStackShifts(_) => return None,
     }
     Some(())
 }

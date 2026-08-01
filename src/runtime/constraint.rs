@@ -876,18 +876,30 @@ impl Constraint {
         let mut parts_cache = FxHashMap::<Vec<usize>, Arc<[Weight]>>::default();
         let mut summaries = Vec::<DirectRegularWideFrontierAcceptance>::new();
         for descriptor in &self.table.direct_regular_wide_frontiers {
-            let Some(Action::StackShifts(shifts)) = self
+            let Some(action) = self
                 .table
                 .action(descriptor.source_state, descriptor.terminal)
             else {
                 continue;
             };
-            if shifts
-                .iter()
-                .any(|shift| shift.pop != 1 || shift.pushes.len() != 1)
-            {
-                continue;
-            }
+            let (action_origin, mut action_states) = match action {
+                Action::ReplaceShifts(targets) => {
+                    (targets.as_ptr() as usize, targets.clone())
+                }
+                Action::StackShifts(shifts)
+                    if shifts
+                        .iter()
+                        .all(|shift| shift.pop == 1 && shift.pushes.len() == 1) =>
+                {
+                    (
+                        shifts.as_ptr() as usize,
+                        shifts.iter().map(|shift| shift.pushes[0]).collect(),
+                    )
+                }
+                _ => continue,
+            };
+            action_states.sort_unstable();
+            action_states.dedup();
 
             let mut states = descriptor.target_states.clone();
             states.sort_unstable();
@@ -897,19 +909,10 @@ impl Constraint {
             }
             debug_assert_eq!(
                 states,
-                {
-                    let mut action_states = shifts
-                        .iter()
-                        .map(|shift| shift.pushes[0])
-                        .collect::<Vec<_>>();
-                    action_states.sort_unstable();
-                    action_states.dedup();
-                    action_states
-                },
+                action_states,
                 "direct-regular frontier descriptor drifted from the live table action",
             );
 
-            let action_origin = shifts.as_ptr() as usize;
             if let Some(&summary_index) = seen_frontiers.get(&states) {
                 summaries[summary_index].action_origins.push(action_origin);
                 continue;
@@ -2964,10 +2967,17 @@ impl Constraint {
         }
         let acc = gss.uniform_accumulator()?;
         let state = gss.single_exclusive_top_value()?;
-        let Action::StackShifts(shifts) = self.table.action(state, terminal)? else {
-            return None;
+        let origin = match self.table.action(state, terminal)? {
+            Action::ReplaceShifts(targets) => targets.as_ptr() as usize,
+            Action::StackShifts(shifts)
+                if shifts
+                    .iter()
+                    .all(|shift| shift.pop == 1 && shift.pushes.len() == 1) =>
+            {
+                shifts.as_ptr() as usize
+            }
+            _ => return None,
         };
-        let origin = shifts.as_ptr() as usize;
         self.direct_regular_wide_frontier_acceptance
             .iter()
             .find(|summary| summary.action_origins.contains(&origin))?

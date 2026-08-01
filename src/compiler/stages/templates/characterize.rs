@@ -741,6 +741,11 @@ fn process_action_from_config(
                 emit_stack_effect_from_config(source, config, 0, &[*shift_state], &[], output);
             }
         }
+        Action::ReplaceShifts(targets) => {
+            for &target in targets {
+                emit_stack_effect_from_config(source, config, 1, &[target], &[], output);
+            }
+        }
         Action::StackShifts(shifts) => {
             for shift in shifts {
                 emit_stack_effect_from_config(
