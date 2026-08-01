@@ -47,15 +47,38 @@ fn structural_branch_tokenizer_selected(
             .unwrap_or(true);
     }
 
+    automatic_structural_branch_tokenizer_selected(
+        branch_label,
+        vocab_tokens,
+        active_terminals,
+        source_states,
+    )
+}
+
+fn automatic_structural_branch_tokenizer_selected(
+    branch_label: &str,
+    vocab_tokens: usize,
+    active_terminals: usize,
+    source_states: usize,
+) -> bool {
     // Automatic strategy gate, based on branch structure rather than schema
     // identity. The structural-token partition's tiny L1 family becomes almost
-    // free after projection. The mixed-token partition's L2P family benefits
-    // only in the medium active-terminal / medium tokenizer regime; very small
-    // active families retain stronger token canonicalization on the raw path,
-    // while very large tokenizers make active refinement itself dominant.
+    // free after projection. Larger L1 families are selected only where the
+    // active-language quotient is known to remain compact after deterministic
+    // materialization; otherwise quotient construction merely moves work.
     match branch_label {
         "p0.l1" => {
             active_terminals <= 4 && vocab_tokens >= 2_000 && source_states >= 5_000
+        }
+        // The wide textual-token family can enter with a 30k-60k inherited
+        // source domain, then collapse to roughly 10k-20k exact active states.
+        // Materializing that proved quotient avoids rebuilding a larger epsilon
+        // powerset view for every whole-token profile. On the 97k-state hard
+        // cohort this cuts the dominant branch from about 1.0s to about 0.22s.
+        "p4.l1" => {
+            (160..=208).contains(&active_terminals)
+                && (15_000..=30_000).contains(&vocab_tokens)
+                && (30_000..=60_000).contains(&source_states)
         }
         // A medium mixed-token L1 family with a substantial active terminal
         // set is dominated by repeated whole-token analysis on the raw lexer.
@@ -790,4 +813,26 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     };
     debug_assert!(!result.is_empty());
     Some(result)
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::automatic_structural_branch_tokenizer_selected;
+
+    #[test]
+    fn wide_text_l1_materialization_is_structurally_bounded() {
+        assert!(automatic_structural_branch_tokenizer_selected(
+            "p4.l1", 21_308, 187, 45_202,
+        ));
+        assert!(!automatic_structural_branch_tokenizer_selected(
+            "p4.l1", 21_308, 159, 45_202,
+        ));
+        assert!(!automatic_structural_branch_tokenizer_selected(
+            "p4.l1", 21_308, 187, 70_000,
+        ));
+        assert!(!automatic_structural_branch_tokenizer_selected(
+            "p6.l1", 630, 189, 97_046,
+        ));
+    }
 }
