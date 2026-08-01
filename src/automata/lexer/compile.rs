@@ -2602,6 +2602,7 @@ impl Regex {
             all_self_loop_bytes_cache: std::sync::OnceLock::new(),
             transition_count_cache: std::sync::OnceLock::new(),
             forced_minimized_state_count_cache: std::sync::OnceLock::new(),
+            scalar_deterministic_dispatch_cache: std::sync::OnceLock::new(),
         }
     }
 
@@ -8913,6 +8914,7 @@ mod tests {
             all_self_loop_bytes_cache: std::sync::OnceLock::new(),
             transition_count_cache: std::sync::OnceLock::new(),
             forced_minimized_state_count_cache: std::sync::OnceLock::new(),
+            scalar_deterministic_dispatch_cache: std::sync::OnceLock::new(),
         };
         let exec = tokenizer.execute_from_state(input, tokenizer.initial_state());
         exec.matches
@@ -9914,6 +9916,7 @@ mod tests {
             all_self_loop_bytes_cache: std::sync::OnceLock::new(),
             transition_count_cache: std::sync::OnceLock::new(),
             forced_minimized_state_count_cache: std::sync::OnceLock::new(),
+            scalar_deterministic_dispatch_cache: std::sync::OnceLock::new(),
         };
 
         for len in [1usize, 2, 15] {
@@ -9954,6 +9957,7 @@ mod tests {
             all_self_loop_bytes_cache: std::sync::OnceLock::new(),
             transition_count_cache: std::sync::OnceLock::new(),
             forced_minimized_state_count_cache: std::sync::OnceLock::new(),
+            scalar_deterministic_dispatch_cache: std::sync::OnceLock::new(),
         };
 
         for len in [1usize, 2, 15] {
@@ -9994,6 +9998,7 @@ mod tests {
             all_self_loop_bytes_cache: std::sync::OnceLock::new(),
             transition_count_cache: std::sync::OnceLock::new(),
             forced_minimized_state_count_cache: std::sync::OnceLock::new(),
+            scalar_deterministic_dispatch_cache: std::sync::OnceLock::new(),
         };
 
         for len in [1usize, 2, 31] {
@@ -10056,6 +10061,7 @@ mod tests {
             all_self_loop_bytes_cache: std::sync::OnceLock::new(),
             transition_count_cache: std::sync::OnceLock::new(),
             forced_minimized_state_count_cache: std::sync::OnceLock::new(),
+            scalar_deterministic_dispatch_cache: std::sync::OnceLock::new(),
         };
 
         for len in [1usize, 2, 15] {
@@ -10105,6 +10111,7 @@ mod tests {
             all_self_loop_bytes_cache: std::sync::OnceLock::new(),
             transition_count_cache: std::sync::OnceLock::new(),
             forced_minimized_state_count_cache: std::sync::OnceLock::new(),
+            scalar_deterministic_dispatch_cache: std::sync::OnceLock::new(),
         };
 
         for len in [0usize, 1, 31, 32] {
@@ -10164,6 +10171,7 @@ mod tests {
             all_self_loop_bytes_cache: std::sync::OnceLock::new(),
             transition_count_cache: std::sync::OnceLock::new(),
             forced_minimized_state_count_cache: std::sync::OnceLock::new(),
+            scalar_deterministic_dispatch_cache: std::sync::OnceLock::new(),
         };
 
         for input in [b"\"a".as_slice(), b"\"aa", b"\"a a", b"\"aa  aaa"] {
@@ -10312,6 +10320,7 @@ mod tests {
             all_self_loop_bytes_cache: std::sync::OnceLock::new(),
             transition_count_cache: std::sync::OnceLock::new(),
             forced_minimized_state_count_cache: std::sync::OnceLock::new(),
+            scalar_deterministic_dispatch_cache: std::sync::OnceLock::new(),
         };
 
         for input in [b"\"".as_slice(), b"\"a", b"\"a a", b"\"a  a"] {

@@ -39,11 +39,13 @@ type DenseMaskGSS = LeveledGSS<u32, DenseMaskAcc>;
 
 const DELTA_SEED_MIN_SAVINGS: u64 = 2048;
 const MASK_SINGLE_PATH_DIRECT_MAX_DEPTH: u32 = 64;
-const MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_PATHS: usize = 64;
+const MASK_SINGLE_PATH_DIRECT_INLINE_PATH_CAPACITY: usize = 64;
+const MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_PATHS: usize = 128;
 const MASK_SINGLE_PATH_DIRECT_INLINE_STACK_DEPTH: usize = 64;
-const MASK_SINGLE_PATH_DIRECT_MAX_STACK_PLANS: usize =
-    MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_PATHS;
 const MASK_SINGLE_PATH_DIRECT_MAX_PLAN_OPS: usize = 1024;
+// Below this much parser-stack work, grouping and compiling plans costs more
+// than replaying the stacks directly even when a duplicate exists.
+const MASK_SINGLE_PATH_DIRECT_MIN_PLAN_STACK_VALUES: usize = 128;
 // Count concrete stack values only after the path-count gate. Ambiguous lexer
 // frontiers commonly carry the same small parser language under several
 // tokenizer states; 1,024 still bounds the direct walk tightly while admitting
@@ -54,17 +56,29 @@ const MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_STACK_VALUES: usize = 1024;
 const MASK_SINGLE_PATH_DIRECT_TWO_PASS_MIN_STATE_COUNT: usize =
     MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_PATHS / 2;
 
-fn single_path_direct_stack_work_within_budget(
+fn single_path_direct_stack_work(
     stack_lengths: impl IntoIterator<Item = usize>,
-) -> bool {
+) -> Option<usize> {
     let mut total = 0usize;
     for len in stack_lengths {
         total = total.saturating_add(len);
         if total > MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_STACK_VALUES {
-            return false;
+            return None;
         }
     }
-    true
+    Some(total)
+}
+
+#[inline]
+fn single_path_direct_plan_reuse_dominates(
+    path_count: usize,
+    total_stack_values: usize,
+    repeated_stack_values: usize,
+) -> bool {
+    path_count >= 3
+        && total_stack_values >= MASK_SINGLE_PATH_DIRECT_MIN_PLAN_STACK_VALUES
+        && repeated_stack_values
+            > total_stack_values.saturating_sub(repeated_stack_values)
 }
 
 #[derive(Clone, Copy)]
@@ -769,10 +783,12 @@ impl DenseMaskAcc {
 #[cfg(test)]
 mod tests {
     use super::{
-        single_path_direct_stack_work_within_budget,
+        single_path_direct_plan_reuse_dominates,
+        single_path_direct_stack_work,
         DenseMaskAcc,
         DenseTokenMaskCache,
         DenseTokenSetIntersectionSmallCache,
+        MASK_SINGLE_PATH_DIRECT_INLINE_PATH_CAPACITY,
         MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_STACK_VALUES,
     };
     use crate::automata::lexer::Lexer;
@@ -965,15 +981,68 @@ mod tests {
     }
 
     #[test]
+    fn direct_mask_spills_past_the_inline_path_capacity() {
+        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                t A ::= "a";
+                nt start ::= A;
+            "#,
+            &vocab,
+        )
+        .expect("single-terminal grammar should compile");
+        let mut state = constraint.start();
+        let (tokenizer_state, parser_gss) = state.state.entries[0].clone();
+        state.state.entries.clear();
+        for _ in 0..=MASK_SINGLE_PATH_DIRECT_INLINE_PATH_CAPACITY {
+            state
+                .state
+                .insert_flat_alternative(tokenizer_state, parser_gss.clone());
+        }
+        assert_eq!(
+            state.state.len(),
+            MASK_SINGLE_PATH_DIRECT_INLINE_PATH_CAPACITY + 1,
+        );
+
+        let mut direct = vec![0u32; constraint.mask_len()];
+        assert!(state.try_fill_mask_single_path_direct(&mut direct));
+        let mut dynamic = vec![0u32; constraint.mask_len()];
+        state.fill_mask_dynamic(&mut dynamic);
+        assert_eq!(direct, dynamic);
+        assert!(mask_contains(&direct, 0));
+        assert!(!mask_contains(&direct, 1));
+    }
+
+    #[test]
+    fn stack_plan_admission_depends_on_reuse_not_the_old_path_boundary() {
+        for path_count in [31, 32, 33, 64] {
+            assert!(!single_path_direct_plan_reuse_dominates(
+                path_count,
+                path_count * 8,
+                0,
+            ));
+        }
+        assert!(!single_path_direct_plan_reuse_dominates(2, 16, 8));
+        assert!(!single_path_direct_plan_reuse_dominates(3, 24, 16));
+        assert!(!single_path_direct_plan_reuse_dominates(9, 72, 56));
+        assert!(single_path_direct_plan_reuse_dominates(9, 144, 112));
+    }
+
+    #[test]
     fn single_path_direct_stack_work_budget_accepts_shallow_ambiguity() {
-        assert!(single_path_direct_stack_work_within_budget([8; 10]));
-        assert!(single_path_direct_stack_work_within_budget([
-            MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_STACK_VALUES
-        ]));
-        assert!(!single_path_direct_stack_work_within_budget([
-            MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_STACK_VALUES,
-            1,
-        ]));
+        assert_eq!(single_path_direct_stack_work([8; 10]), Some(80));
+        assert_eq!(
+            single_path_direct_stack_work([MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_STACK_VALUES]),
+            Some(MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_STACK_VALUES),
+        );
+        assert_eq!(
+            single_path_direct_stack_work([
+                MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_STACK_VALUES,
+                1,
+            ]),
+            None,
+        );
     }
 
     #[test]
@@ -2265,7 +2334,7 @@ impl<'a> ConstraintState<'a> {
             return false;
         }
 
-        let mut paths = SmallVec::<[(u32, TerminalsDisallowed, SmallVec<[u32; MASK_SINGLE_PATH_DIRECT_INLINE_STACK_DEPTH]>); MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_PATHS]>::new();
+        let mut paths = SmallVec::<[(u32, TerminalsDisallowed, SmallVec<[u32; MASK_SINGLE_PATH_DIRECT_INLINE_STACK_DEPTH]>); MASK_SINGLE_PATH_DIRECT_INLINE_PATH_CAPACITY]>::new();
         if self.state.len() < MASK_SINGLE_PATH_DIRECT_TWO_PASS_MIN_STATE_COUNT {
             // Below half the path budget, accepted multipath states are common
             // and a separate counting traversal costs more than it saves. Keep
@@ -2378,11 +2447,11 @@ impl<'a> ConstraintState<'a> {
         }) {
             return false;
         }
-        if !single_path_direct_stack_work_within_budget(
-            paths.iter().map(|(_, _, stack)| stack.len()),
-        ) {
+        let Some(total_stack_values) =
+            single_path_direct_stack_work(paths.iter().map(|(_, _, stack)| stack.len()))
+        else {
             return false;
-        }
+        };
         let parser_dwa = self.constraint.parser_dwa();
         if parser_dwa.states().is_empty() {
             return false;
@@ -2391,118 +2460,138 @@ impl<'a> ConstraintState<'a> {
         let mut plan_ops =
             SmallVec::<[SinglePathDirectPlanOp<'_>; MASK_SINGLE_PATH_DIRECT_MAX_PLAN_OPS]>::new();
         let mut stack_plans = SmallVec::<
-            [SinglePathDirectStackPlan; MASK_SINGLE_PATH_DIRECT_MAX_STACK_PLANS],
+            [SinglePathDirectStackPlan; MASK_SINGLE_PATH_DIRECT_INLINE_PATH_CAPACITY],
         >::new();
         let mut path_plan_indices =
-            SmallVec::<[u8; MASK_SINGLE_PATH_DIRECT_MAX_TOTAL_PATHS]>::new();
-        let mut plans_complete = paths.len() >= MASK_SINGLE_PATH_DIRECT_TWO_PASS_MIN_STATE_COUNT;
-        if plans_complete {
-            'build_plans: for path_index in 0..paths.len() {
-                let stack = &paths[path_index].2;
+            SmallVec::<[u8; MASK_SINGLE_PATH_DIRECT_INLINE_PATH_CAPACITY]>::new();
+        let mut repeated_stack_values = 0usize;
+
+        // Planning pays only when repeated parser-stack traversal dominates the
+        // unique work.  This replaces the old 32-path switch with a direct cost
+        // comparison: three copies of one deep stack can qualify, while 64
+        // unrelated stacks do not build programs merely because the frontier is
+        // wide.  First group stacks without touching the parser DWA; compile
+        // programs only after the reuse test succeeds.
+        if paths.len() >= 3 {
+            for (path_index, (_, _, stack)) in paths.iter().enumerate() {
                 let stack_fingerprint = single_path_direct_stack_fingerprint(stack);
                 let existing = stack_plans.iter().position(|plan| {
                     plan.stack_fingerprint == stack_fingerprint
                         && paths[plan.representative_path].2.as_slice() == stack.as_slice()
                 });
                 let plan_index = if let Some(existing) = existing {
+                    repeated_stack_values = repeated_stack_values.saturating_add(stack.len());
                     existing
                 } else {
-                    debug_assert!(stack_plans.len() < MASK_SINGLE_PATH_DIRECT_MAX_STACK_PLANS);
-                    let ops_start = plan_ops.len();
-                    let mut dwa_state_id = parser_dwa.start_state();
-                    let mut stack_idx = 0usize;
-
-                    loop {
-                        let dwa_state = &parser_dwa.states()[dwa_state_id as usize];
-                        if let Some(final_weight) = &dwa_state.final_weight {
-                            if plan_ops.len() == MASK_SINGLE_PATH_DIRECT_MAX_PLAN_OPS {
-                                plans_complete = false;
-                                break 'build_plans;
-                            }
-                            plan_ops.push(SinglePathDirectPlanOp::Merge(final_weight));
-                        }
-
-                        let Some(&parser_state) = stack.get(stack_idx) else {
-                            break;
-                        };
-                        stack_idx += 1;
-
-                        let positive_label = encode_positive_label(parser_state);
-                        if stack_idx == 1 {
-                            let has_direct_regular_acceptance = self
-                                .constraint
-                                .direct_regular_wide_acceptance_for_parser_state(parser_state)
-                                .is_some()
-                                || self
-                                    .constraint
-                                    .for_each_direct_regular_l1_acceptance(parser_state, |_| {});
-                            if has_direct_regular_acceptance {
-                                plans_complete = false;
-                                break 'build_plans;
-                            }
-                            if let Some(accept_weight) = self
-                                .constraint
-                                .parser_top_accept
-                                .get(&positive_label)
-                                .or_else(|| self.constraint.parser_top_accept.get(&DEFAULT_LABEL))
-                            {
-                                if plan_ops.len() == MASK_SINGLE_PATH_DIRECT_MAX_PLAN_OPS {
-                                    plans_complete = false;
-                                    break 'build_plans;
-                                }
-                                plan_ops.push(SinglePathDirectPlanOp::Merge(accept_weight));
-                            }
-                            if let Some(accept_parts) = self
-                                .constraint
-                                .parser_top_accept_parts
-                                .get(&positive_label)
-                                .or_else(|| {
-                                    self.constraint
-                                        .parser_top_accept_parts
-                                        .get(&DEFAULT_LABEL)
-                                })
-                            {
-                                for accept_weight in accept_parts {
-                                    if plan_ops.len() == MASK_SINGLE_PATH_DIRECT_MAX_PLAN_OPS {
-                                        plans_complete = false;
-                                        break 'build_plans;
-                                    }
-                                    plan_ops.push(SinglePathDirectPlanOp::Merge(accept_weight));
-                                }
-                            }
-                        }
-
-                        let fast_transitions =
-                            &self.constraint.dwa_fast_transitions[dwa_state_id as usize];
-                        let Some((target, weight)) = fast_transitions
-                            .get(&positive_label)
-                            .or_else(|| fast_transitions.get(&DEFAULT_LABEL))
-                        else {
-                            break;
-                        };
-                        if plan_ops.len() == MASK_SINGLE_PATH_DIRECT_MAX_PLAN_OPS {
-                            plans_complete = false;
-                            break 'build_plans;
-                        }
-                        plan_ops.push(SinglePathDirectPlanOp::Intersect(weight));
-                        dwa_state_id = *target;
-                    }
-
                     let plan_index = stack_plans.len();
                     stack_plans.push(SinglePathDirectStackPlan {
                         representative_path: path_index,
                         stack_fingerprint,
-                        ops_start,
-                        ops_end: plan_ops.len(),
+                        ops_start: 0,
+                        ops_end: 0,
                     });
                     plan_index
                 };
                 path_plan_indices.push(plan_index as u8);
             }
         }
-        let use_stack_plans = plans_complete
-            && path_plan_indices.len() == paths.len()
-            && stack_plans.len().saturating_mul(2) <= paths.len();
+
+        let should_build_stack_plans = path_plan_indices.len() == paths.len()
+            && single_path_direct_plan_reuse_dominates(
+                paths.len(),
+                total_stack_values,
+                repeated_stack_values,
+            );
+        let mut plans_complete = should_build_stack_plans;
+        if should_build_stack_plans {
+            'build_plans: for plan_index in 0..stack_plans.len() {
+                let representative_path = stack_plans[plan_index].representative_path;
+                let stack = &paths[representative_path].2;
+                let ops_start = plan_ops.len();
+                let mut dwa_state_id = parser_dwa.start_state();
+                let mut stack_idx = 0usize;
+
+                loop {
+                    let dwa_state = &parser_dwa.states()[dwa_state_id as usize];
+                    if let Some(final_weight) = &dwa_state.final_weight {
+                        if plan_ops.len() == MASK_SINGLE_PATH_DIRECT_MAX_PLAN_OPS {
+                            plans_complete = false;
+                            break 'build_plans;
+                        }
+                        plan_ops.push(SinglePathDirectPlanOp::Merge(final_weight));
+                    }
+
+                    let Some(&parser_state) = stack.get(stack_idx) else {
+                        break;
+                    };
+                    stack_idx += 1;
+
+                    let positive_label = encode_positive_label(parser_state);
+                    if stack_idx == 1 {
+                        let has_direct_regular_acceptance = self
+                            .constraint
+                            .direct_regular_wide_acceptance_for_parser_state(parser_state)
+                            .is_some()
+                            || self
+                                .constraint
+                                .for_each_direct_regular_l1_acceptance(parser_state, |_| {});
+                        if has_direct_regular_acceptance {
+                            plans_complete = false;
+                            break 'build_plans;
+                        }
+                        if let Some(accept_weight) = self
+                            .constraint
+                            .parser_top_accept
+                            .get(&positive_label)
+                            .or_else(|| self.constraint.parser_top_accept.get(&DEFAULT_LABEL))
+                        {
+                            if plan_ops.len() == MASK_SINGLE_PATH_DIRECT_MAX_PLAN_OPS {
+                                plans_complete = false;
+                                break 'build_plans;
+                            }
+                            plan_ops.push(SinglePathDirectPlanOp::Merge(accept_weight));
+                        }
+                        if let Some(accept_parts) = self
+                            .constraint
+                            .parser_top_accept_parts
+                            .get(&positive_label)
+                            .or_else(|| {
+                                self.constraint
+                                    .parser_top_accept_parts
+                                    .get(&DEFAULT_LABEL)
+                            })
+                        {
+                            for accept_weight in accept_parts {
+                                if plan_ops.len() == MASK_SINGLE_PATH_DIRECT_MAX_PLAN_OPS {
+                                    plans_complete = false;
+                                    break 'build_plans;
+                                }
+                                plan_ops.push(SinglePathDirectPlanOp::Merge(accept_weight));
+                            }
+                        }
+                    }
+
+                    let fast_transitions =
+                        &self.constraint.dwa_fast_transitions[dwa_state_id as usize];
+                    let Some((target, weight)) = fast_transitions
+                        .get(&positive_label)
+                        .or_else(|| fast_transitions.get(&DEFAULT_LABEL))
+                    else {
+                        break;
+                    };
+                    if plan_ops.len() == MASK_SINGLE_PATH_DIRECT_MAX_PLAN_OPS {
+                        plans_complete = false;
+                        break 'build_plans;
+                    }
+                    plan_ops.push(SinglePathDirectPlanOp::Intersect(weight));
+                    dwa_state_id = *target;
+                }
+
+                stack_plans[plan_index].ops_start = ops_start;
+                stack_plans[plan_index].ops_end = plan_ops.len();
+            }
+        }
+        let use_stack_plans = plans_complete && should_build_stack_plans;
         buf.fill(0);
 
         let precomputed = &self.constraint.weight_token_dense_masks;
