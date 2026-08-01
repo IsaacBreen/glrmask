@@ -94,9 +94,7 @@ impl RepeatBodyLanguageKey {
 
 #[derive(Default)]
 pub(crate) struct VocabularyRepeatHorizonCache {
-    horizons: Mutex<
-        FxHashMap<RepeatBodyLanguageKey, Arc<OnceLock<Option<usize>>>>,
-    >,
+    horizons: Mutex<FxHashMap<RepeatBodyLanguageKey, Option<usize>>>,
 }
 
 impl VocabularyRepeatHorizonCache {
@@ -106,18 +104,25 @@ impl VocabularyRepeatHorizonCache {
 
     pub(crate) fn horizon_for_dfa(&self, body: &DFA, vocab: &Vocab) -> Option<usize> {
         let key = RepeatBodyLanguageKey::from_dfa(body);
-        let cell = self
+        if let Some(cached) = self
             .horizons
             .lock()
             .ok()
-            .map(|mut horizons| {
-                Arc::clone(
-                    horizons
-                        .entry(key)
-                        .or_insert_with(|| Arc::new(OnceLock::new())),
-                )
-            })?;
-        *cell.get_or_init(|| vocabulary_repeat_boundary_horizon_for_dfa_uncached(body, vocab))
+            .and_then(|horizons| horizons.get(&key).copied())
+        {
+            return cached;
+        }
+
+        // Compute outside the cache lock and never block a Rayon worker on an
+        // in-progress value. The horizon computation itself uses nested Rayon
+        // work; an OnceLock per key lets sibling terminal jobs occupy every
+        // worker while waiting for the initializer, starving that initializer's
+        // children and deadlocking a cold build. Concurrent misses may duplicate
+        // this bounded computation, then race to publish the same deterministic
+        // result.
+        let computed = vocabulary_repeat_boundary_horizon_for_dfa_uncached(body, vocab);
+        let mut horizons = self.horizons.lock().ok()?;
+        *horizons.entry(key).or_insert(computed)
     }
 
     pub(crate) fn horizon_for_expr(&self, body: &Expr, vocab: &Vocab) -> Option<usize> {
@@ -2602,6 +2607,7 @@ impl Regex {
             all_self_loop_bytes_cache: std::sync::OnceLock::new(),
             transition_count_cache: std::sync::OnceLock::new(),
             forced_minimized_state_count_cache: std::sync::OnceLock::new(),
+            scalar_deterministic_dispatch_cache: std::sync::OnceLock::new(),
         }
     }
 
@@ -8913,6 +8919,7 @@ mod tests {
             all_self_loop_bytes_cache: std::sync::OnceLock::new(),
             transition_count_cache: std::sync::OnceLock::new(),
             forced_minimized_state_count_cache: std::sync::OnceLock::new(),
+            scalar_deterministic_dispatch_cache: std::sync::OnceLock::new(),
         };
         let exec = tokenizer.execute_from_state(input, tokenizer.initial_state());
         exec.matches
@@ -9056,6 +9063,36 @@ mod tests {
         .expect("generic certification");
 
         assert_eq!(structural_map, generic.full_to_synthesized);
+    }
+
+    #[test]
+    fn vocabulary_repeat_horizon_cache_allows_nested_parallel_misses() {
+        use rayon::prelude::*;
+
+        let body = Arc::new(super::compile_expr_to_dfa(&Expr::Choice(vec![
+            Expr::U8Seq(b"ab".to_vec()),
+            Expr::U8Seq(b"aba".to_vec()),
+        ])));
+        let vocab = Arc::new(Vocab::new(
+            (0..256)
+                .map(|token| {
+                    let length = token as usize % 32 + 1;
+                    (token, b"ab".repeat(length))
+                })
+                .collect(),
+        ));
+        let cache = Arc::new(super::VocabularyRepeatHorizonCache::new());
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .expect("test thread pool");
+        let results = pool.install(|| {
+            (0..16)
+                .into_par_iter()
+                .map(|_| cache.horizon_for_dfa(&body, &vocab))
+                .collect::<Vec<_>>()
+        });
+        assert!(results.iter().all(|result| *result == results[0]));
     }
 
     #[test]
@@ -9914,6 +9951,7 @@ mod tests {
             all_self_loop_bytes_cache: std::sync::OnceLock::new(),
             transition_count_cache: std::sync::OnceLock::new(),
             forced_minimized_state_count_cache: std::sync::OnceLock::new(),
+            scalar_deterministic_dispatch_cache: std::sync::OnceLock::new(),
         };
 
         for len in [1usize, 2, 15] {
@@ -9954,6 +9992,7 @@ mod tests {
             all_self_loop_bytes_cache: std::sync::OnceLock::new(),
             transition_count_cache: std::sync::OnceLock::new(),
             forced_minimized_state_count_cache: std::sync::OnceLock::new(),
+            scalar_deterministic_dispatch_cache: std::sync::OnceLock::new(),
         };
 
         for len in [1usize, 2, 15] {
@@ -9994,6 +10033,7 @@ mod tests {
             all_self_loop_bytes_cache: std::sync::OnceLock::new(),
             transition_count_cache: std::sync::OnceLock::new(),
             forced_minimized_state_count_cache: std::sync::OnceLock::new(),
+            scalar_deterministic_dispatch_cache: std::sync::OnceLock::new(),
         };
 
         for len in [1usize, 2, 31] {
@@ -10056,6 +10096,7 @@ mod tests {
             all_self_loop_bytes_cache: std::sync::OnceLock::new(),
             transition_count_cache: std::sync::OnceLock::new(),
             forced_minimized_state_count_cache: std::sync::OnceLock::new(),
+            scalar_deterministic_dispatch_cache: std::sync::OnceLock::new(),
         };
 
         for len in [1usize, 2, 15] {
@@ -10105,6 +10146,7 @@ mod tests {
             all_self_loop_bytes_cache: std::sync::OnceLock::new(),
             transition_count_cache: std::sync::OnceLock::new(),
             forced_minimized_state_count_cache: std::sync::OnceLock::new(),
+            scalar_deterministic_dispatch_cache: std::sync::OnceLock::new(),
         };
 
         for len in [0usize, 1, 31, 32] {
@@ -10164,6 +10206,7 @@ mod tests {
             all_self_loop_bytes_cache: std::sync::OnceLock::new(),
             transition_count_cache: std::sync::OnceLock::new(),
             forced_minimized_state_count_cache: std::sync::OnceLock::new(),
+            scalar_deterministic_dispatch_cache: std::sync::OnceLock::new(),
         };
 
         for input in [b"\"a".as_slice(), b"\"aa", b"\"a a", b"\"aa  aaa"] {
@@ -10312,6 +10355,7 @@ mod tests {
             all_self_loop_bytes_cache: std::sync::OnceLock::new(),
             transition_count_cache: std::sync::OnceLock::new(),
             forced_minimized_state_count_cache: std::sync::OnceLock::new(),
+            scalar_deterministic_dispatch_cache: std::sync::OnceLock::new(),
         };
 
         for input in [b"\"".as_slice(), b"\"a", b"\"a a", b"\"a  a"] {
