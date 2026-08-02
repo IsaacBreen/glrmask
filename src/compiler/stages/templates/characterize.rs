@@ -742,7 +742,7 @@ fn process_action_from_config(
             }
         }
         Action::ReplaceShifts(targets) => {
-            for &target in targets {
+            for &target in targets.iter() {
                 emit_stack_effect_from_config(source, config, 1, &[target], &[], output);
             }
         }
