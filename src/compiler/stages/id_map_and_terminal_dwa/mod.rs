@@ -34,7 +34,9 @@ use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap, MappedArtifact};
 use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
-use crate::grammar::flat::{DirectRegularAutomaton, Symbol, TerminalID};
+use crate::grammar::flat::{
+    DirectRegularAutomaton, GrammarDef, Rule, Symbol, Terminal, TerminalID,
+};
 use crate::Vocab;
 
 use classify::classify_vocab_char_type;
@@ -125,11 +127,12 @@ fn direct_regular_language_uses_at_most_one_terminal(
     true
 }
 
-fn parser_language_uses_at_most_one_terminal(grammar: &AnalyzedGrammar) -> bool {
-    if let Some(automaton) = grammar.direct_regular_automaton.as_ref() {
-        return direct_regular_language_uses_at_most_one_terminal(automaton);
-    }
-    if grammar.num_nonterminals == 0 {
+fn cfg_language_uses_at_most_one_terminal(
+    rules: &[Rule],
+    num_nonterminals: usize,
+    start: usize,
+) -> bool {
+    if num_nonterminals == 0 || start >= num_nonterminals {
         return false;
     }
 
@@ -138,9 +141,9 @@ fn parser_language_uses_at_most_one_terminal(grammar: &AnalyzedGrammar) -> bool 
     // rescanning the complete grammar for every propagated increase. The
     // analysis is deliberately conservative around cycles: any recursion that
     // can cross a terminal boundary reaches two.
-    let mut max_terminal_yield = vec![0u8; grammar.num_nonterminals as usize];
-    let mut dependent_rules = vec![Vec::<usize>::new(); grammar.num_nonterminals as usize];
-    for (rule_index, rule) in grammar.rules.iter().enumerate() {
+    let mut max_terminal_yield = vec![0u8; num_nonterminals];
+    let mut dependent_rules = vec![Vec::<usize>::new(); num_nonterminals];
+    for (rule_index, rule) in rules.iter().enumerate() {
         if rule.lhs as usize >= max_terminal_yield.len() {
             return false;
         }
@@ -153,12 +156,11 @@ fn parser_language_uses_at_most_one_terminal(grammar: &AnalyzedGrammar) -> bool 
             }
         }
     }
-    let mut queued = vec![true; grammar.rules.len()];
-    let mut queue = (0..grammar.rules.len()).collect::<VecDeque<_>>();
-    let augmented_start = grammar.num_nonterminals as usize - 1;
+    let mut queued = vec![true; rules.len()];
+    let mut queue = (0..rules.len()).collect::<VecDeque<_>>();
     while let Some(rule_index) = queue.pop_front() {
         queued[rule_index] = false;
-        let rule = &grammar.rules[rule_index];
+        let rule = &rules[rule_index];
         let mut yield_count = 0u8;
         for symbol in &rule.rhs {
             let contribution = match symbol {
@@ -177,7 +179,7 @@ fn parser_language_uses_at_most_one_terminal(grammar: &AnalyzedGrammar) -> bool 
             continue;
         }
         max_terminal_yield[lhs] = yield_count;
-        if lhs == augmented_start && yield_count == 2 {
+        if lhs == start && yield_count == 2 {
             return false;
         }
         for &dependent_rule in &dependent_rules[lhs] {
@@ -188,7 +190,21 @@ fn parser_language_uses_at_most_one_terminal(grammar: &AnalyzedGrammar) -> bool 
         }
     }
 
-    max_terminal_yield[augmented_start] <= 1
+    max_terminal_yield[start] <= 1
+}
+
+fn parser_language_uses_at_most_one_terminal(grammar: &AnalyzedGrammar) -> bool {
+    if let Some(automaton) = grammar.direct_regular_automaton.as_ref() {
+        return direct_regular_language_uses_at_most_one_terminal(automaton);
+    }
+    let Some(augmented_start) = grammar.num_nonterminals.checked_sub(1) else {
+        return false;
+    };
+    cfg_language_uses_at_most_one_terminal(
+        &grammar.rules,
+        grammar.num_nonterminals as usize,
+        augmented_start as usize,
+    )
 }
 
 fn use_global_single_terminal_l1(
@@ -198,6 +214,27 @@ fn use_global_single_terminal_l1(
     grammar.num_terminals == 1
         && ignore_terminal.is_none()
         && parser_language_uses_at_most_one_terminal(grammar)
+}
+
+/// Whether the prepared grammar will use the exact global L1 construction and
+/// can therefore derive its one delayed-terminal possible-match table from the
+/// same token relation. This mirrors [`use_global_single_terminal_l1`] before
+/// GLR analysis adds the augmented start rule.
+pub(crate) fn grammar_def_uses_global_single_terminal_l1(grammar: &GrammarDef) -> bool {
+    if grammar.num_terminals() != 1
+        || grammar.ignore_terminal.is_some()
+        || matches!(grammar.terminals.first(), Some(Terminal::SpecialToken { .. }))
+    {
+        return false;
+    }
+    if let Some(automaton) = grammar.direct_regular_automaton.as_ref() {
+        return direct_regular_language_uses_at_most_one_terminal(automaton);
+    }
+    cfg_language_uses_at_most_one_terminal(
+        &grammar.rules,
+        grammar.num_nonterminals() as usize,
+        grammar.start as usize,
+    )
 }
 
 impl PreparedPartitionLocalTokenizers {
