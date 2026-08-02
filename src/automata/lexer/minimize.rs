@@ -482,6 +482,34 @@ impl DFA {
         self.minimize_impl(true).0
     }
 
+    /// Minimize a freshly constructed, fully reachable DFA in place.
+    ///
+    /// This avoids cloning the source and moves representative states out of
+    /// their partition blocks, rewriting transition targets in place. Callers
+    /// must guarantee that every state is reachable from state zero.
+    pub(super) fn minimize_owned_reachable(mut self) -> DFA {
+        if self.has_epsilon_transitions() || self.states().len() <= 1 {
+            self.recompute_possible_futures();
+            return self;
+        }
+
+        clear_possible_futures_for_minimization(&mut self);
+        let (partition, blocks) = partition_by_finalizers(&self);
+        let blocks = if self.has_self_loops() {
+            hopcroft_refine_partition(&self, partition, blocks)
+        } else {
+            match topology_prerefine_partition(&self, &partition) {
+                TopologyPrerefine::AlreadyMinimal(blocks) => blocks,
+                TopologyPrerefine::Refined { blocks: refined, .. }
+                    if refined.iter().all(|block| block.len() <= 1) => refined,
+                TopologyPrerefine::Refined { .. } | TopologyPrerefine::Skip => {
+                    hopcroft_refine_partition(&self, partition, blocks)
+                }
+            }
+        };
+        self.rebuild_owned_from_blocks(blocks)
+    }
+
     /// Minimize this DFA and return the mapping from original states to
     /// minimized states.  `mapping[old_state] = new_state`.
     /// Unreachable original states map to `u32::MAX`.
@@ -515,7 +543,16 @@ impl DFA {
         let (partition, blocks) = partition_by_finalizers(&working);
         let mut minimality_check_blocks = blocks.clone();
 
-        match topology_prerefine_partition(&working, &partition) {
+        // Topology pre-refinement is only an early minimality certificate.
+        // Its classes are not fed to Hopcroft because the one-pass topology
+        // signature can over-split cyclic/product states. A DFA with a self-loop
+        // can never be certified by this pass, so scanning it is dead work.
+        let prerefine = if working.has_self_loops() {
+            TopologyPrerefine::Skip
+        } else {
+            topology_prerefine_partition(&working, &partition)
+        };
+        match prerefine {
             TopologyPrerefine::AlreadyMinimal(blocks) => {
                 let (result, block_map) = working.rebuild_from_blocks_with_mapping(blocks);
                 let composed = compose_mappings(&old_to_working, &block_map);
@@ -622,6 +659,73 @@ impl DFA {
         state_mapping
     }
 
+    /// Recompute the strict one-group future predicate in linear time.
+    ///
+    /// With one terminal group, the future bit is set exactly when one byte
+    /// transition can reach a state from which acceptance remains possible.
+    fn recompute_single_group_possible_futures(&mut self) {
+        let n = self.states().len();
+        let mut predecessor_counts = vec![0usize; n];
+        for state in self.states() {
+            for (_, &target) in state.transitions.iter() {
+                predecessor_counts[target as usize] += 1;
+            }
+        }
+
+        let mut offsets = Vec::with_capacity(n + 1);
+        offsets.push(0usize);
+        for &count in &predecessor_counts {
+            offsets.push(offsets.last().copied().unwrap() + count);
+        }
+        let mut cursors = offsets[..n].to_vec();
+        let mut predecessors = vec![0u32; offsets[n]];
+        for (source, state) in self.states().iter().enumerate() {
+            for (_, &target) in state.transitions.iter() {
+                let target = target as usize;
+                let cursor = &mut cursors[target];
+                predecessors[*cursor] = source as u32;
+                *cursor += 1;
+            }
+        }
+
+        let mut can_reach_accepting = vec![false; n];
+        let mut queue = VecDeque::new();
+        for state in 0..n {
+            if !self.finalizers(state as u32).is_empty() {
+                can_reach_accepting[state] = true;
+                queue.push_back(state as u32);
+            }
+        }
+        while let Some(target) = queue.pop_front() {
+            let target = target as usize;
+            for &source in &predecessors[offsets[target]..offsets[target + 1]] {
+                let source = source as usize;
+                if !can_reach_accepting[source] {
+                    can_reach_accepting[source] = true;
+                    queue.push_back(source as u32);
+                }
+            }
+        }
+
+        let strict_future = self
+            .states()
+            .iter()
+            .map(|state| {
+                state
+                    .transitions
+                    .iter()
+                    .any(|(_, &target)| can_reach_accepting[target as usize])
+            })
+            .collect::<Vec<_>>();
+        for (state, has_future) in strict_future.into_iter().enumerate() {
+            let mut future = BitSet::new(1);
+            if has_future {
+                future.set(0);
+            }
+            self.set_possible_future_group_ids(state as u32, future);
+        }
+    }
+
     /// Recompute `possible_future_group_ids` for all states via fixpoint.
     pub(super) fn recompute_possible_futures(&mut self) {
         let n = self.states().len();
@@ -632,6 +736,10 @@ impl DFA {
 
         if self.has_epsilon_transitions() {
             self.recompute_possible_futures_with_epsilon();
+            return;
+        }
+        if num_groups == 1 {
+            self.recompute_single_group_possible_futures();
             return;
         }
 
@@ -777,6 +885,50 @@ impl DFA {
         for (state, future) in futures.into_iter().enumerate() {
             self.set_possible_future_group_ids(state as u32, future);
         }
+    }
+
+    fn rebuild_owned_from_blocks(mut self, mut partition_blocks: Vec<Vec<u32>>) -> DFA {
+        let n = self.states().len();
+        partition_blocks.retain(|block| !block.is_empty());
+        if let Some(start_part_idx) = partition_blocks
+            .iter()
+            .position(|block| block.iter().any(|&state| state == 0))
+        {
+            partition_blocks.swap(0, start_part_idx);
+        }
+
+        let mut state_mapping = vec![0u32; n];
+        let mut representative_to_new = vec![u32::MAX; n];
+        for (new_idx, block) in partition_blocks.iter().enumerate() {
+            representative_to_new[block[0] as usize] = new_idx as u32;
+            for &old_idx in block {
+                state_mapping[old_idx as usize] = new_idx as u32;
+            }
+        }
+
+        let old_states = std::mem::take(self.states_mut());
+        let mut representatives = std::iter::repeat_with(|| None)
+            .take(partition_blocks.len())
+            .collect::<Vec<_>>();
+        for (old_idx, mut state) in old_states.into_iter().enumerate() {
+            let new_idx = representative_to_new[old_idx];
+            if new_idx == u32::MAX {
+                continue;
+            }
+            for (_, target) in state.transitions.iter_mut() {
+                *target = state_mapping[*target as usize];
+            }
+            for target in &mut state.epsilon_transitions {
+                *target = state_mapping[*target as usize];
+            }
+            representatives[new_idx as usize] = Some(state);
+        }
+        *self.states_mut() = representatives
+            .into_iter()
+            .map(|state| state.expect("partition representative missing"))
+            .collect();
+        self.recompute_possible_futures();
+        self
     }
 
     /// Rebuild DFA from partition blocks.

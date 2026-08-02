@@ -22,7 +22,7 @@ pub(crate) mod merge;
 pub(crate) mod partition;
 pub(crate) mod types;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
@@ -34,7 +34,9 @@ use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap, MappedArtifact};
 use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
-use crate::grammar::flat::TerminalID;
+use crate::grammar::flat::{
+    DirectRegularAutomaton, GrammarDef, Rule, Symbol, Terminal, TerminalID,
+};
 use crate::Vocab;
 
 use classify::classify_vocab_char_type;
@@ -77,6 +79,162 @@ struct PreparedPartitionLocalTokenizer {
 
 pub(crate) struct PreparedPartitionLocalTokenizers {
     entries: Vec<Mutex<Option<PreparedPartitionLocalTokenizer>>>,
+}
+
+fn direct_regular_language_uses_at_most_one_terminal(
+    automaton: &DirectRegularAutomaton,
+) -> bool {
+    let num_states = automaton.states.len();
+    let mut seen = vec![[false; 3]; num_states];
+    let mut queue = VecDeque::<(u32, usize)>::new();
+    for &start in &automaton.start_states {
+        let Some(state_seen) = seen.get_mut(start as usize) else {
+            return false;
+        };
+        if !state_seen[0] {
+            state_seen[0] = true;
+            queue.push_back((start, 0));
+        }
+    }
+
+    while let Some((state, terminal_count)) = queue.pop_front() {
+        let Some(node) = automaton.states.get(state as usize) else {
+            return false;
+        };
+        if node.is_accepting && terminal_count >= 2 {
+            return false;
+        }
+        for &next in &node.epsilons {
+            let Some(next_seen) = seen.get_mut(next as usize) else {
+                return false;
+            };
+            if !next_seen[terminal_count] {
+                next_seen[terminal_count] = true;
+                queue.push_back((next, terminal_count));
+            }
+        }
+        let next_count = (terminal_count + 1).min(2);
+        for &next in node.transitions.values().flatten() {
+            let Some(next_seen) = seen.get_mut(next as usize) else {
+                return false;
+            };
+            if !next_seen[next_count] {
+                next_seen[next_count] = true;
+                queue.push_back((next, next_count));
+            }
+        }
+    }
+    true
+}
+
+fn cfg_language_uses_at_most_one_terminal(
+    rules: &[Rule],
+    num_nonterminals: usize,
+    start: usize,
+) -> bool {
+    if num_nonterminals == 0 || start >= num_nonterminals {
+        return false;
+    }
+
+    // Compute the maximum terminal yield of each nonterminal, capped at two.
+    // A dependency work queue keeps long unit-rule chains linear rather than
+    // rescanning the complete grammar for every propagated increase. The
+    // analysis is deliberately conservative around cycles: any recursion that
+    // can cross a terminal boundary reaches two.
+    let mut max_terminal_yield = vec![0u8; num_nonterminals];
+    let mut dependent_rules = vec![Vec::<usize>::new(); num_nonterminals];
+    for (rule_index, rule) in rules.iter().enumerate() {
+        if rule.lhs as usize >= max_terminal_yield.len() {
+            return false;
+        }
+        for symbol in &rule.rhs {
+            if let Symbol::Nonterminal(nonterminal) = symbol {
+                let Some(dependents) = dependent_rules.get_mut(*nonterminal as usize) else {
+                    return false;
+                };
+                dependents.push(rule_index);
+            }
+        }
+    }
+    let mut queued = vec![true; rules.len()];
+    let mut queue = (0..rules.len()).collect::<VecDeque<_>>();
+    while let Some(rule_index) = queue.pop_front() {
+        queued[rule_index] = false;
+        let rule = &rules[rule_index];
+        let mut yield_count = 0u8;
+        for symbol in &rule.rhs {
+            let contribution = match symbol {
+                Symbol::Terminal(_) => 1,
+                Symbol::Nonterminal(nonterminal) => {
+                    max_terminal_yield[*nonterminal as usize]
+                }
+            };
+            yield_count = yield_count.saturating_add(contribution).min(2);
+            if yield_count == 2 {
+                break;
+            }
+        }
+        let lhs = rule.lhs as usize;
+        if yield_count <= max_terminal_yield[lhs] {
+            continue;
+        }
+        max_terminal_yield[lhs] = yield_count;
+        if lhs == start && yield_count == 2 {
+            return false;
+        }
+        for &dependent_rule in &dependent_rules[lhs] {
+            if !queued[dependent_rule] {
+                queued[dependent_rule] = true;
+                queue.push_back(dependent_rule);
+            }
+        }
+    }
+
+    max_terminal_yield[start] <= 1
+}
+
+fn parser_language_uses_at_most_one_terminal(grammar: &AnalyzedGrammar) -> bool {
+    if let Some(automaton) = grammar.direct_regular_automaton.as_ref() {
+        return direct_regular_language_uses_at_most_one_terminal(automaton);
+    }
+    let Some(augmented_start) = grammar.num_nonterminals.checked_sub(1) else {
+        return false;
+    };
+    cfg_language_uses_at_most_one_terminal(
+        &grammar.rules,
+        grammar.num_nonterminals as usize,
+        augmented_start as usize,
+    )
+}
+
+fn use_global_single_terminal_l1(
+    grammar: &AnalyzedGrammar,
+    ignore_terminal: Option<TerminalID>,
+) -> bool {
+    grammar.num_terminals == 1
+        && ignore_terminal.is_none()
+        && parser_language_uses_at_most_one_terminal(grammar)
+}
+
+/// Whether the prepared grammar will use the exact global L1 construction and
+/// can therefore derive its one delayed-terminal possible-match table from the
+/// same token relation. This mirrors [`use_global_single_terminal_l1`] before
+/// GLR analysis adds the augmented start rule.
+pub(crate) fn grammar_def_uses_global_single_terminal_l1(grammar: &GrammarDef) -> bool {
+    if grammar.num_terminals() != 1
+        || grammar.ignore_terminal.is_some()
+        || matches!(grammar.terminals.first(), Some(Terminal::SpecialToken { .. }))
+    {
+        return false;
+    }
+    if let Some(automaton) = grammar.direct_regular_automaton.as_ref() {
+        return direct_regular_language_uses_at_most_one_terminal(automaton);
+    }
+    cfg_language_uses_at_most_one_terminal(
+        &grammar.rules,
+        grammar.num_nonterminals() as usize,
+        grammar.start as usize,
+    )
 }
 
 impl PreparedPartitionLocalTokenizers {
@@ -1153,6 +1311,57 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
     );
     let stage_setup_ms = total_started_at.elapsed().as_secs_f64() * 1000.0;
 
+    // A grammar with one ordinary byte terminal has a two-state, one-transition
+    // terminal DWA. Vocabulary partitioning cannot simplify its topology; it
+    // only repeats tokenizer-state equivalence discovery for each partition.
+    // Build the exact full-vocabulary relation once and compact it globally.
+    let direct_single_terminal = use_global_single_terminal_l1(grammar, ignore_terminal);
+    if direct_single_terminal {
+        let active_terminals = vec![true];
+        if let Some(result) = l1::build_l1_id_map_and_terminal_dwa(
+            "single_terminal_global",
+            tokenizer,
+            vocab,
+            terminal_coloring,
+            use_terminal_coloring,
+            ignore_terminal,
+            grammar,
+            &active_terminals,
+            &flat_trans,
+            None,
+            Some(global_max_length_state_map),
+            None,
+            None,
+            None,
+        ) {
+            let total_ms = total_started_at.elapsed().as_secs_f64() * 1000.0;
+            let mut profile = result.profile;
+            profile.split_terminal_dwa_total_ms = total_ms;
+            if compile_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][single_terminal_global_l1] states={} transitions={} tsids={} tokens={} stage_setup_ms={:.3} total_ms={:.3}",
+                    result.dwa.num_states(),
+                    result.dwa.stats().transitions,
+                    result.id_map.num_tsids(),
+                    result.id_map.num_internal_tokens(),
+                    stage_setup_ms,
+                    total_ms,
+                );
+            }
+            return (
+                TerminalDwaFamilies {
+                    l1: Some(MappedArtifact::new(
+                        TerminalAutomaton::Dwa(result.dwa),
+                        result.id_map,
+                    )),
+                    l2p: None,
+                    special: None,
+                },
+                profile,
+            );
+        }
+    }
+
     let partition_vocab_started_at = Instant::now();
     let requested_partition_scheme =
         std::env::var("GLRMASK_PARTITION_SCHEME").unwrap_or_else(|_| "char_type".to_string());
@@ -1793,7 +2002,101 @@ mod tests {
         AutomaticBranchActiveStateMapStrategy,
         DEFAULT_GLOBAL_MAX_LENGTH_STABLE_SIGNATURE_CELL_LIMIT,
         automatic_branch_active_state_map_strategy, should_auto_use_global_max_length,
+        use_global_single_terminal_l1,
     };
+    use crate::compiler::glr::analysis::AnalyzedGrammar;
+    use crate::grammar::flat::{
+        DirectRegularAutomaton, DirectRegularState, GrammarDef, Rule, Symbol, Terminal,
+    };
+
+    fn analyzed_single_terminal(rules: Vec<Rule>, start: u32) -> AnalyzedGrammar {
+        AnalyzedGrammar::from_grammar_def(&GrammarDef {
+            rules,
+            start,
+            terminals: vec![Terminal::Literal {
+                id: 0,
+                bytes: b"a".to_vec(),
+            }],
+            ..GrammarDef::default()
+        })
+    }
+
+    fn analyzed_direct_single_terminal(transition_count: usize) -> AnalyzedGrammar {
+        let mut states = (0..=transition_count)
+            .map(|index| DirectRegularState {
+                is_accepting: index == transition_count,
+                ..DirectRegularState::default()
+            })
+            .collect::<Vec<_>>();
+        for index in 0..transition_count {
+            states[index]
+                .transitions
+                .insert(0, vec![(index + 1) as u32]);
+        }
+        AnalyzedGrammar::from_grammar_def(&GrammarDef {
+            terminals: vec![Terminal::Literal {
+                id: 0,
+                bytes: b"a".to_vec(),
+            }],
+            direct_regular_automaton: Some(DirectRegularAutomaton {
+                states,
+                start_states: vec![0],
+            }),
+            ..GrammarDef::default()
+        })
+    }
+
+    #[test]
+    fn one_terminal_without_ignore_uses_global_l1_by_default() {
+        let one_use = analyzed_single_terminal(
+            vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0)],
+            }],
+            0,
+        );
+        assert!(use_global_single_terminal_l1(&one_use, None));
+        assert!(!use_global_single_terminal_l1(&one_use, Some(0)));
+
+        let two_uses = analyzed_single_terminal(
+            vec![
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Terminal(0), Symbol::Nonterminal(1)],
+                },
+                Rule {
+                    lhs: 1,
+                    rhs: vec![Symbol::Terminal(0)],
+                },
+            ],
+            0,
+        );
+        assert!(!use_global_single_terminal_l1(&two_uses, None));
+
+        let repeated = analyzed_single_terminal(
+            vec![
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Terminal(0)],
+                },
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Terminal(0), Symbol::Nonterminal(0)],
+                },
+            ],
+            0,
+        );
+        assert!(!use_global_single_terminal_l1(&repeated, None));
+
+        assert!(use_global_single_terminal_l1(
+            &analyzed_direct_single_terminal(1),
+            None,
+        ));
+        assert!(!use_global_single_terminal_l1(
+            &analyzed_direct_single_terminal(2),
+            None,
+        ));
+    }
 
     #[test]
     fn branch_active_state_map_auto_gate_selects_only_amortized_l1_regimes() {

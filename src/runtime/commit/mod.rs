@@ -4873,7 +4873,7 @@ fn apply_terminal_to_flat_stacks(
                 }
             }
             Action::ReplaceShifts(targets) => {
-                for &target in targets {
+                for &target in targets.iter() {
                     let mut candidate = stack.clone();
                     if apply_flat_stack_effect(&mut candidate, 1, &[target])?
                         && !scratch.push_complete(candidate)
@@ -5259,7 +5259,7 @@ fn try_commit_flat_frontier_in_place(
             return None;
         }};
     }
-    if state.is_empty() || state.len() > INLINE_PARSER_STATE_CAPACITY || bytes.is_empty() {
+    if state.is_empty() || state.len() > FLAT_FRONTIER_MAX_BRANCHES || bytes.is_empty() {
         flat_decline!("input-shape");
     }
     frontier.clear();
@@ -5487,9 +5487,9 @@ fn try_commit_flat_frontier_in_place(
     let mut outputs = SmallVec::<[usize; INLINE_PARSER_STATE_CAPACITY]>::new();
     for index in 0..frontier.len {
         if frontier.branches[index].offset == bytes.len() {
-            if outputs.len() == outputs.capacity() {
-                flat_decline!("output-capacity");
-            }
+            // The inline capacity is a performance tier, not a semantic limit.
+            // SmallVec spills once for 65-128 outputs while retaining the exact
+            // flat algorithm instead of restarting through the general queue.
             outputs.push(index);
         }
     }
@@ -5547,7 +5547,7 @@ fn try_commit_flat_frontier_in_place(
         });
 
         let mut used =
-            [false; FLAT_FRONTIER_GSS_POOL_CAPACITY + INLINE_PARSER_STATE_CAPACITY];
+            [false; FLAT_FRONTIER_GSS_POOL_CAPACITY + FLAT_FRONTIER_MAX_BRANCHES];
         let mut assignments = SmallVec::<[usize; INLINE_PARSER_STATE_CAPACITY]>::new();
         assignments.resize(outputs.len(), usize::MAX);
         for output_index in output_order {
@@ -5834,7 +5834,7 @@ fn commit_bytes_impl_inner(
         }
         return result;
     }
-    if state.len() <= INLINE_PARSER_STATE_CAPACITY
+    if state.len() <= FLAT_FRONTIER_MAX_BRANCHES
         && let Some(result) = try_commit_flat_frontier_in_place(
             constraint,
             state,
@@ -7350,6 +7350,43 @@ nt start ::= item item? item?;
         );
 
         Some(fast)
+    }
+
+    #[test]
+    fn flat_frontier_accepts_input_past_the_inline_state_capacity() {
+        let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                t A ::= "a";
+                nt start ::= A;
+            "#,
+            &vocab,
+        )
+        .expect("single-terminal grammar should compile");
+        let start = constraint.start();
+        let (tokenizer_state, parser_gss) = start.state.entries[0].clone();
+        let mut state = ParserStateMap::default();
+        for _ in 0..=INLINE_PARSER_STATE_CAPACITY {
+            state.insert_flat_alternative(tokenizer_state, parser_gss.clone());
+        }
+        assert_eq!(state.len(), INLINE_PARSER_STATE_CAPACITY + 1);
+
+        let mut original = Vec::with_capacity(LINEAR_STACK_RESERVE);
+        let mut work = Vec::with_capacity(LINEAR_STACK_RESERVE);
+        let mut tokenizer_scratch = tokenizer_scan::ReusableTokenizerExecScratch::default();
+        let mut frontier = FlatFrontierScratch::default();
+        let result = try_commit_flat_frontier_in_place(
+            &constraint,
+            &mut state,
+            b"a",
+            &mut original,
+            &mut work,
+            &mut tokenizer_scratch,
+            &mut frontier,
+        );
+        assert!(matches!(result, Some(Ok(()))));
+        assert!(!state.is_empty());
     }
 
     #[test]

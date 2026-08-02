@@ -11,6 +11,7 @@ use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
+use crate::automata::weighted::terminal_automaton::TerminalAutomaton;
 use crate::compiler::constraint_possible_matches::collector::{
     IntervalPossibleMatchMap, TerminalRangeGroup, TrieClassBuildResult,
 };
@@ -20,6 +21,7 @@ use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap, Mapped
 use crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::compat::{
     FlatDfa, FlatDfaState, TokenizerView,
 };
+use crate::compiler::stages::id_map_and_terminal_dwa::types::TerminalDwaFamilies;
 use crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::vocab::fast as vocab_equivalence_analysis;
 use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
@@ -86,6 +88,44 @@ pub(crate) struct ConstraintPossibleMatchesComputation {
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeDynamicMaskVocabArtifacts {
     pub(crate) vocab: DynamicMaskVocab,
+}
+
+/// Complete the possible-match artifact from the sole global-L1 transition.
+///
+/// This is intentionally much narrower than reusing terminal-DWA equivalence
+/// for possible matches in general, which is unsound. The caller proves that
+/// the parser language consumes one terminal at most once and that there is no
+/// ignore terminal. In that shape, the one-terminal lexer keeps acceptance
+/// monotone while the terminal remains live, so a token matches the delayed
+/// terminal at some prefix exactly when the global L1 scan ends in that
+/// terminal's accepting signature. The L1 transition weight is therefore the
+/// exact possible-match relation, already expressed in its compact TSID/token
+/// coordinates.
+pub(crate) fn complete_single_use_terminal_possible_matches_from_l1(
+    families: &TerminalDwaFamilies,
+    mut deferred: ConstraintPossibleMatchesComputation,
+) -> Option<ConstraintPossibleMatchesComputation> {
+    if deferred.complete || families.l2p.is_some() || families.special.is_some() {
+        return None;
+    }
+    let l1 = families.l1.as_ref()?;
+    let TerminalAutomaton::Dwa(dwa) = l1.artifact() else {
+        return None;
+    };
+    let start = dwa.states().get(dwa.start_state() as usize)?;
+    if start.transitions.len() != 1 {
+        return None;
+    }
+    let (&label, (_, weight)) = start.transitions.first_key_value()?;
+    let terminal = TerminalID::try_from(label).ok()?;
+
+    let mut possible_matches = RuntimePossibleMatchesByTerminal::new();
+    possible_matches.insert(terminal, weight.clone());
+    deferred.mapped_possible_matches =
+        MappedArtifact::new(possible_matches, l1.id_map().clone());
+    deferred.complete = true;
+    deferred.profile = ConstraintPossibleMatchesProfile::default();
+    Some(deferred)
 }
 
 #[derive(Debug, Clone)]

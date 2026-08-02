@@ -2717,6 +2717,10 @@ fn compile_prepared_with_profile_and_table_construction(
     let result = run_with_compile_thread_pool(|| {
         let compile_started_at = Instant::now();
         let mut profile = CompilePhaseProfile::default();
+        let derive_single_use_terminal_possible_matches =
+            crate::compiler::stages::id_map_and_terminal_dwa::grammar_def_uses_global_single_terminal_l1(
+                &prepared_grammar,
+            );
 
         let analysis_started_at = Instant::now();
         let dwa_pm_mode = dwa_possible_matches_mode();
@@ -2977,7 +2981,8 @@ fn compile_prepared_with_profile_and_table_construction(
                 };
 
                 let eager_possible_matches =
-                    env_flag_enabled_by_default("GLRMASK_EAGER_POSSIBLE_MATCHES");
+                    env_flag_enabled_by_default("GLRMASK_EAGER_POSSIBLE_MATCHES")
+                        && !derive_single_use_terminal_possible_matches;
                 if !eager_possible_matches {
                     let possible_matches_tokenizer = Arc::clone(&tokenizer_lane.tokenizer);
                     let compile_started_for_cpm = compile_started_for_tokenizer.clone();
@@ -3261,7 +3266,11 @@ fn compile_prepared_with_profile_and_table_construction(
             });
         });
 
-        let (cpm_result, possible_matches_started_ms, possible_matches_finished_ms) = cpm_result
+        let (
+            mut cpm_result,
+            mut possible_matches_started_ms,
+            mut possible_matches_finished_ms,
+        ) = cpm_result
             .into_inner()
             .expect("possible-matches result slot poisoned")
             .expect("possible-matches task did not complete");
@@ -3311,6 +3320,28 @@ fn compile_prepared_with_profile_and_table_construction(
             .into_inner()
             .expect("compile DAG result slot poisoned")
             .expect("compile DAG did not produce a result");
+        if derive_single_use_terminal_possible_matches {
+            match cpm::complete_single_use_terminal_possible_matches_from_l1(
+                &terminal_dwas,
+                cpm_result,
+            ) {
+                Some(derived) => cpm_result = derived,
+                None => {
+                    // The pre-analysis gate is deliberately cheap and can be
+                    // invalidated by later terminal-family construction (for
+                    // example, a projected terminal can disappear). Fail
+                    // closed by running the ordinary eager computation rather
+                    // than leaving an incomplete runtime fallback table.
+                    possible_matches_started_ms = elapsed_ms(compile_started_at.clone());
+                    cpm_result = cpm::compute_constraint_possible_matches_for_vocab(
+                        tokenizer.as_ref(),
+                        vocab,
+                        cpm::ConstraintPossibleMatchesConfig::EAGER,
+                    );
+                    possible_matches_finished_ms = elapsed_ms(compile_started_at.clone());
+                }
+            }
+        }
         let mut tokenizer = Arc::try_unwrap(tokenizer)
             .unwrap_or_else(|_| panic!("tokenizer references outlived compile DAG"));
         let analyzed_grammar = Arc::try_unwrap(analyzed_grammar)

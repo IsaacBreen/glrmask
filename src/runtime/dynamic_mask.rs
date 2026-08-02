@@ -1663,6 +1663,52 @@ nt start ::= A r0;
     }
 
     #[test]
+    fn derived_single_use_terminal_possible_matches_match_dynamic_fallback() {
+        let vocab = Vocab::new(vec![
+            (0, b"a".to_vec()),
+            (1, b"aa".to_vec()),
+            (2, b"aaa".to_vec()),
+            (3, b"ab".to_vec()),
+            (4, b"b".to_vec()),
+            (5, b"ba".to_vec()),
+        ]);
+        let grammar = r#"
+start start;
+t A ::= 'a'+;
+nt start ::= A;
+"#;
+        let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
+        assert!(!constraint.uses_dynamic_runtime());
+        assert!(constraint.possible_matches_complete);
+        assert_eq!(constraint.possible_matches.len(), 1);
+
+        // Committing one accepting prefix leaves the same terminal live, so
+        // the next mask exercises the delayed-terminal exclusion table that is
+        // derived from the sole global-L1 transition.
+        let mut after_a = constraint.start();
+        after_a.commit_token(0).unwrap();
+        assert!(after_a.is_complete());
+        assert!(after_a.state.values().any(|gss| {
+            !gss.all_accs_satisfy(|excluded: &TerminalsDisallowed| excluded.is_empty())
+        }));
+        assert_dynamic_parity(&after_a);
+
+        assert_dynamic_parity_on_reachable_states(
+            &constraint,
+            3,
+            "derived single-use terminal possible matches",
+        );
+        assert!(
+            constraint
+                .seed_terminal_dense_fallback
+                .lock()
+                .expect("fallback cache poisoned")
+                .is_empty(),
+            "complete derived possible matches must not invoke runtime fallback",
+        );
+    }
+
+    #[test]
     fn dynamic_mask_handles_overlapping_live_terminal_paths() {
         let vocab = Vocab::new(
             vec![
