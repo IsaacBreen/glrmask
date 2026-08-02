@@ -63,6 +63,24 @@ fn first_byte_vocab_factor_strict_reference_enabled(partition_label: &str) -> bo
     )
 }
 
+fn staged_vocab_state_refinement_enabled(partition_label: &str) -> bool {
+    std::env::var("GLRMASK_STAGED_VOCAB_STATE_REFINEMENT")
+        .ok()
+        .is_some_and(|value| {
+            let value = value.trim();
+            value == "1" || value == partition_label
+        })
+}
+
+fn staged_vocab_state_refinement_strict_reference_enabled(partition_label: &str) -> bool {
+    std::env::var("GLRMASK_STAGED_VOCAB_STATE_REFINEMENT_STRICT_REFERENCE")
+        .ok()
+        .is_some_and(|value| {
+            let value = value.trim();
+            value == "1" || value == partition_label
+        })
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct FirstByteVocabFactorProfile {
     buckets: usize,
@@ -2257,7 +2275,98 @@ fn analyze_equivalences_impl(
                 vocab_first,
             );
         }
-        let (precomputed_vocab, state_tokens, vocab_equiv_ms) = if vocab_first {
+        let mut staged_query_representatives = None::<Vec<usize>>;
+        let mut staged_exact_state_equiv_ms = 0.0f64;
+        let mut staged_exact_rep_confirmation_used = false;
+        let staged_requested = vocab_first && staged_vocab_state_refinement_enabled(partition_label);
+        let (precomputed_vocab, state_tokens, vocab_equiv_ms) = if staged_requested {
+            let vocab_equiv_started_at = Instant::now();
+            let precomputed_vocab =
+                vocab_equivalence_analysis::find_vocab_equivalence_classes_with_factor_state_refinement_profiled(
+                    analysis_view,
+                    &dedup.representative_token_bytes,
+                    &query_view_states,
+                    effective_disallowed,
+                    Some(&byte_to_class),
+                    None,
+                    None,
+                    None,
+                    |preliminary_token_indices| {
+                        let state_tokens = preliminary_token_indices
+                            .iter()
+                            .map(|&token| dedup.representative_token_bytes[token])
+                            .collect::<Vec<_>>();
+                        staged_exact_rep_confirmation_used = query_view_states.len()
+                            >= EXACT_REP_CONFIRMATION_MIN_STATES
+                            && state_tokens.len() >= EXACT_REP_CONFIRMATION_MIN_TOKENS;
+                        let exact_started_at = Instant::now();
+                        let query_representatives = if staged_exact_rep_confirmation_used {
+                            state_equivalence_analysis::find_state_equivalence_classes_ex_with_rep_confirmation_and_disallowed_and_shared_base(
+                                analysis_view,
+                                &state_tokens,
+                                &query_view_states,
+                                &normalized_disallowed_follows,
+                                None,
+                                None,
+                                Some(true),
+                                None,
+                            )
+                        } else {
+                            state_equivalence_analysis::find_state_equivalence_classes_with_disallowed_and_shared_base(
+                                analysis_view,
+                                &state_tokens,
+                                &query_view_states,
+                                &normalized_disallowed_follows,
+                                None,
+                            )
+                        };
+                        staged_exact_state_equiv_ms =
+                            exact_started_at.elapsed().as_secs_f64() * 1000.0;
+                        let mut first_position_for_representative =
+                            BTreeMap::<usize, usize>::new();
+                        for (position, &representative) in
+                            query_representatives.iter().enumerate()
+                        {
+                            first_position_for_representative
+                                .entry(representative)
+                                .or_insert(position);
+                        }
+                        staged_query_representatives = Some(query_representatives);
+                        first_position_for_representative.into_values().collect()
+                    },
+                );
+            let total_ms = vocab_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
+            let state_tokens = if staged_query_representatives.is_some() {
+                Vec::new()
+            } else {
+                representative_tokens_for_vocab_classes(
+                    &precomputed_vocab.0,
+                    &dedup.representative_token_bytes,
+                )
+            };
+            if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some()
+                || std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+                || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+            {
+                eprintln!(
+                    "[glrmask/profile][staged_vocab_state_refinement] partition={} selected={} input_states={} authority_states={} exact_classes={} exact_state_ms={:.3} vocab_ms={:.3}",
+                    partition_label,
+                    staged_query_representatives.is_some(),
+                    query_view_states.len(),
+                    staged_query_representatives.as_ref().map_or(query_view_states.len(), |mapping| {
+                        mapping.iter().copied().collect::<BTreeSet<_>>().len()
+                    }),
+                    precomputed_vocab.0.len(),
+                    staged_exact_state_equiv_ms,
+                    (total_ms - staged_exact_state_equiv_ms).max(0.0),
+                );
+            }
+            (
+                Some(precomputed_vocab),
+                state_tokens,
+                (total_ms - staged_exact_state_equiv_ms).max(0.0),
+            )
+        } else if vocab_first {
             let vocab_equiv_started_at = Instant::now();
             let first_byte_factored = first_byte_vocab_factor_enabled(partition_label)
                 .then(|| {
@@ -2405,30 +2514,44 @@ fn analyze_equivalences_impl(
         } else {
             (None, dedup.representative_token_bytes.clone(), 0.0)
         };
-        let exact_rep_confirmation_used = query_view_states.len() >= EXACT_REP_CONFIRMATION_MIN_STATES
-            && state_tokens.len() >= EXACT_REP_CONFIRMATION_MIN_TOKENS;
-        let exact_started_at = Instant::now();
-        let query_representatives = if exact_rep_confirmation_used {
-            state_equivalence_analysis::find_state_equivalence_classes_ex_with_rep_confirmation_and_disallowed_and_shared_base(
-                analysis_view,
-                &state_tokens,
-                &query_view_states,
-                &normalized_disallowed_follows,
-                None,
-                None,
-                Some(true),
-                None,
-            )
-        } else {
-            state_equivalence_analysis::find_state_equivalence_classes_with_disallowed_and_shared_base(
-                analysis_view,
-                &state_tokens,
-                &query_view_states,
-                &normalized_disallowed_follows,
-                None,
-            )
-        };
-        let exact_state_equiv_ms = exact_started_at.elapsed().as_secs_f64() * 1000.0;
+        let (query_representatives, exact_state_equiv_ms, exact_rep_confirmation_used) =
+            if let Some(query_representatives) = staged_query_representatives {
+                (
+                    query_representatives,
+                    staged_exact_state_equiv_ms,
+                    staged_exact_rep_confirmation_used,
+                )
+            } else {
+                let exact_rep_confirmation_used = query_view_states.len()
+                    >= EXACT_REP_CONFIRMATION_MIN_STATES
+                    && state_tokens.len() >= EXACT_REP_CONFIRMATION_MIN_TOKENS;
+                let exact_started_at = Instant::now();
+                let query_representatives = if exact_rep_confirmation_used {
+                    state_equivalence_analysis::find_state_equivalence_classes_ex_with_rep_confirmation_and_disallowed_and_shared_base(
+                        analysis_view,
+                        &state_tokens,
+                        &query_view_states,
+                        &normalized_disallowed_follows,
+                        None,
+                        None,
+                        Some(true),
+                        None,
+                    )
+                } else {
+                    state_equivalence_analysis::find_state_equivalence_classes_with_disallowed_and_shared_base(
+                        analysis_view,
+                        &state_tokens,
+                        &query_view_states,
+                        &normalized_disallowed_follows,
+                        None,
+                    )
+                };
+                (
+                    query_representatives,
+                    exact_started_at.elapsed().as_secs_f64() * 1000.0,
+                    exact_rep_confirmation_used,
+                )
+            };
 
         let view_to_exact_view = query_view_states
             .iter()
@@ -2483,6 +2606,33 @@ fn analyze_equivalences_impl(
                     vocab_equiv_started_at.elapsed().as_secs_f64() * 1000.0,
                 )
             };
+
+        if staged_requested
+            && staged_vocab_state_refinement_strict_reference_enabled(partition_label)
+        {
+            let strict_started_at = Instant::now();
+            let (strict_classes, _) =
+                vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter_profiled(
+                    analysis_view,
+                    &dedup.representative_token_bytes,
+                    &query_view_states,
+                    effective_disallowed,
+                    Some(&byte_to_class),
+                    None,
+                    None,
+                    None,
+                );
+            assert_eq!(
+                dedup_vocab_classes, strict_classes,
+                "staged vocabulary/state refinement changed exact classes in {partition_label}",
+            );
+            eprintln!(
+                "[glrmask/profile][staged_vocab_state_refinement_strict_reference] partition={} exact_classes={} compare_ms={:.3} differs=false",
+                partition_label,
+                strict_classes.len(),
+                strict_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
 
         let id_map_finalize_started_at = Instant::now();
         let vocab_classes = expand_vocab_classes(

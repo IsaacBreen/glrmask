@@ -3907,6 +3907,41 @@ pub(crate) fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef
         shared_cache,
         shared_analysis_dfa_cache,
         FirstTransitionFactorMode::Environment,
+        None,
+    )
+}
+
+/// Run the exact first-transition token prepartition, let the caller refine the
+/// source-state coordinate using those token representatives, then resume the
+/// ordinary exact token authority pass on one source position per returned
+/// class. Returned positions index `initial_states`; the engine remaps them into
+/// any internal compact-DFA coordinate without exposing that implementation
+/// detail to the caller.
+pub(crate) fn find_vocab_equivalence_classes_with_factor_state_refinement_profiled<
+    S: AsRef<[u8]> + Sync,
+    F: FnMut(&[usize]) -> Vec<usize>,
+>(
+    tokenizer: &TokenizerView,
+    strings: &[S],
+    initial_states: &[usize],
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    byte_to_class: Option<&[u8; 256]>,
+    active_groups: Option<&[bool]>,
+    shared_cache: Option<&SharedVocabDfaCache>,
+    shared_analysis_dfa_cache: Option<&SharedVocabAnalysisDfaCache>,
+    mut refine_states: F,
+) -> (VocabEquivalenceResult, f64) {
+    find_vocab_equivalence_classes_with_group_filter_profiled_impl(
+        tokenizer,
+        strings,
+        initial_states,
+        disallowed_follows,
+        byte_to_class,
+        active_groups,
+        shared_cache,
+        shared_analysis_dfa_cache,
+        FirstTransitionFactorMode::Environment,
+        Some(&mut refine_states),
     )
 }
 
@@ -3920,6 +3955,7 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
     shared_cache: Option<&SharedVocabDfaCache>,
     shared_analysis_dfa_cache: Option<&SharedVocabAnalysisDfaCache>,
     first_transition_factor_mode: FirstTransitionFactorMode,
+    mut factor_state_refiner: Option<&mut dyn FnMut(&[usize]) -> Vec<usize>>,
 ) -> (VocabEquivalenceResult, f64) {
     let input_state_count = tokenizer.dfa().states.len();
     if let Some((position, &state)) = initial_states
@@ -4125,14 +4161,48 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
         }
     }
 
+    let factor_authority_states = factor_plan.as_ref().and_then(|plan| {
+        factor_state_refiner.as_mut().map(|refine_states| {
+            let positions = refine_states(&plan.representative_tokens);
+            assert!(!positions.is_empty(), "factor state refinement returned no authority states");
+            let mut seen = vec![false; initial_states_ref.len()];
+            let mut states = Vec::with_capacity(positions.len());
+            for position in positions {
+                assert!(
+                    position < initial_states_ref.len(),
+                    "factor state authority position {position} exceeds input state count {}",
+                    initial_states_ref.len(),
+                );
+                if !seen[position] {
+                    seen[position] = true;
+                    states.push(initial_states_ref[position]);
+                }
+            }
+            states
+        })
+    });
+    let authority_states = factor_authority_states
+        .as_deref()
+        .unwrap_or(initial_states_ref);
+    if profiling && factor_plan.is_some() && factor_state_refiner.is_some() {
+        eprintln!(
+            "[glrmask/profile][vocab_factor_state_refinement] selected={} input_states={} authority_states={} preliminary_tokens={}",
+            factor_authority_states.is_some(),
+            num_initial_states,
+            authority_states.len(),
+            factor_plan.as_ref().map_or(num_tokens, |plan| plan.representative_tokens.len()),
+        );
+    }
+
     let analysis_token_count = factor_plan
         .as_ref()
         .map_or(num_tokens, |plan| plan.representative_tokens.len());
+    let num_authority_states = authority_states.len();
     let state_order_started_at = profiling.then(Instant::now);
     let ordered_states = if diversity_state_order_enabled() {
-        states_by_transition_diversity(dfa_ref, initial_states_ref)
+        states_by_transition_diversity(dfa_ref, authority_states)
     } else {
-        initial_states_ref.to_vec()
+        authority_states.to_vec()
     };
     let state_order_ms = elapsed_ms(state_order_started_at);
     let ordered_original_states = if let Some(compact_to_original) = compact_to_original {
@@ -4160,14 +4230,14 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
     // `match_positions` allocation so unusually wide terminal-group axes do
     // not inherit an unbounded memory increase. Keep the env override for A/B.
     let default_batch_size =
-        default_vocab_batch_size(num_initial_states, num_groups, analysis_token_count);
+        default_vocab_batch_size(num_authority_states, num_groups, analysis_token_count);
     let factor_final_single_batch = factor_plan.is_some()
         && first_transition_factor_final_single_batch_enabled()
-        && analysis_token_count.saturating_mul(num_initial_states)
+        && analysis_token_count.saturating_mul(num_authority_states)
             <= vocab_sequential_trie_work_max();
     let batch_size = vocab_batch_size_override().unwrap_or_else(|| {
         if factor_final_single_batch {
-            num_initial_states
+            num_authority_states
         } else {
             default_batch_size
         }
@@ -4208,11 +4278,11 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
     // refinement, so reaching `active_indices.is_empty()` is an exact identity
     // certificate, not a heuristic early exit.
     let use_singleton_probe = analysis_token_count <= SINGLETON_PROBE_MAX_TOKENS
-        && num_initial_states > SINGLETON_PROBE_STATES
+        && num_authority_states > SINGLETON_PROBE_STATES
         && batch_size > SINGLETON_PROBE_STATES;
     let mut batch_start = 0usize;
     let mut batch_index = 0usize;
-    while batch_start < num_initial_states {
+    while batch_start < num_authority_states {
         if active_indices.is_empty() {
             break;
         }
@@ -4223,13 +4293,13 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
         } else {
             batch_size
         };
-        let batch_end = (batch_start + current_batch_size).min(num_initial_states);
+        let batch_end = (batch_start + current_batch_size).min(num_authority_states);
         let batch = &ordered_states[batch_start..batch_end];
         let state_group_size = vocab_state_group_size(batch.len(), num_groups);
         let use_trie_walk = active_indices.len() >= TRIE_WALK_MIN_TOKENS
             && !*TRIE_WALK_DISABLED;
         let use_sequential_trie = use_trie_walk
-            && num_initial_states <= batch_size
+            && num_authority_states <= batch_size
             && vocab_sequential_trie_work_max() > 0
             && active_indices
                 .len()
@@ -4551,6 +4621,7 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
             shared_cache,
             shared_analysis_dfa_cache,
             FirstTransitionFactorMode::Disabled,
+            None,
         );
         assert_eq!(
             result, reference,
@@ -5022,6 +5093,7 @@ mod shared_base_tests {
             None,
             None,
             FirstTransitionFactorMode::Disabled,
+            None,
         );
         let (factored, _) = find_vocab_equivalence_classes_with_group_filter_profiled_impl(
             &view,
@@ -5033,13 +5105,38 @@ mod shared_base_tests {
             None,
             None,
             FirstTransitionFactorMode::Force,
+            None,
         );
         let analysis_dfa =
             build_dfa_with_group_filter(&view, &disallowed, Some(&byte_classes), None, None);
         let direct = exact_vocab_partition(&analysis_dfa, &tokens, &states);
+        let mut refine_states = |preliminary_tokens: &[usize]| {
+            let mut class_positions = BTreeMap::<Vec<ExactStateObservation>, usize>::new();
+            for (position, &state) in states.iter().enumerate() {
+                let key = preliminary_tokens
+                    .iter()
+                    .map(|&token| exact_state_observation(&analysis_dfa, tokens[token], state))
+                    .collect::<Vec<_>>();
+                class_positions.entry(key).or_insert(position);
+            }
+            class_positions.into_values().collect::<Vec<_>>()
+        };
+        let (staged, _) = find_vocab_equivalence_classes_with_group_filter_profiled_impl(
+            &view,
+            &tokens,
+            &states,
+            &disallowed,
+            Some(&byte_classes),
+            None,
+            None,
+            None,
+            FirstTransitionFactorMode::Force,
+            Some(&mut refine_states),
+        );
 
         assert_eq!(ordinary, direct, "ordinary hash partition must match direct observations");
         assert_eq!(factored, direct, "factored partition must match direct observations");
+        assert_eq!(staged, direct, "staged factor/state refinement must remain exact");
         assert!(
             factored
                 .iter()
@@ -5149,6 +5246,7 @@ mod shared_base_tests {
                 None,
                 None,
                 FirstTransitionFactorMode::Disabled,
+                None,
             );
             let (factored, _) = find_vocab_equivalence_classes_with_group_filter_profiled_impl(
                 &view,
@@ -5160,6 +5258,7 @@ mod shared_base_tests {
                 None,
                 None,
                 FirstTransitionFactorMode::Force,
+                None,
             );
             let analysis_dfa = build_dfa_with_group_filter(
                 &view,
@@ -5233,6 +5332,7 @@ mod shared_base_tests {
             None,
             None,
             FirstTransitionFactorMode::Disabled,
+            None,
         );
         let (forced, _) = find_vocab_equivalence_classes_with_group_filter_profiled_impl(
             &view,
@@ -5244,6 +5344,7 @@ mod shared_base_tests {
             None,
             None,
             FirstTransitionFactorMode::Force,
+            None,
         );
         assert_eq!(forced, ordinary);
     }

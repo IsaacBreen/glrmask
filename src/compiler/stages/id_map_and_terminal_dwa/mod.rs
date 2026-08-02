@@ -148,6 +148,7 @@ fn automatic_branch_active_state_map_strategy(
     vocab_tokens: usize,
     active_terminals: usize,
     source_reps: usize,
+    max_token_len: usize,
 ) -> AutomaticBranchActiveStateMapStrategy {
     if !branch_label.ends_with(".l1") {
         return AutomaticBranchActiveStateMapStrategy::None;
@@ -156,11 +157,15 @@ fn automatic_branch_active_state_map_strategy(
     if active_terminals <= 512 && vocab_tokens >= 50_000 && work >= 300_000_000 {
         return AutomaticBranchActiveStateMapStrategy::VeryLargeProfile;
     }
+    let tiny_long_horizon_profile = (220..=240).contains(&active_terminals)
+        && (2..=4).contains(&vocab_tokens)
+        && source_reps >= 60_000
+        && (24..=48).contains(&max_token_len);
     let dense_protected_profile = (180..=512).contains(&active_terminals)
         && vocab_tokens >= 2_000
         && work >= 50_000_000
         && (source_reps >= 40_000 || vocab_tokens <= 8_000);
-    if dense_protected_profile {
+    if tiny_long_horizon_profile || dense_protected_profile {
         AutomaticBranchActiveStateMapStrategy::DenseRequiresFastProjection
     } else {
         AutomaticBranchActiveStateMapStrategy::None
@@ -184,7 +189,7 @@ pub(crate) fn build_branch_active_state_map(
     if source_reps <= 1 {
         return None;
     }
-    let mut automatic_dense_requires_fast_projection = false;
+    let mut automatic_requires_fast_projection = false;
     if let Ok(filter) = std::env::var("GLRMASK_BRANCH_ACTIVE_STATE_MAP_FILTER") {
         if !filter
             .split(',')
@@ -198,31 +203,39 @@ pub(crate) fn build_branch_active_state_map(
         // Stable active-language refinement has a real fixed cost. Select it
         // only when exact whole-token state profiling is predictably dominant.
         //
-        // Two structural regimes amortize the quotient on protected-residual
+        // Three structural regimes amortize the quotient on protected-residual
         // workloads:
-        //   * a very large vocabulary/state product (the existing broad gate);
+        //   * a very large vocabulary/state product;
         //   * a dense L1 terminal family with at least 50M raw state-token
-        //     pairs and at least 2k tokens, provided either the state frontier
-        //     is large or the vocabulary is compact enough that quotient
-        //     construction does not contend with another medium/large token
-        //     lane. The lower vocabulary bound avoids long-horizon lanes whose
-        //     quotient remains above the fast-projected cutoff and would still
-        //     pay a second exact-equivalence pass.
+        //     pairs and at least 2k tokens;
+        //   * a tiny-vocabulary, bounded-horizon L1 family whose stable quotient
+        //     is accepted only when it enters the fast projected L1 path.
         //
-        // The second clause deliberately excludes the medium-state,
-        // medium-vocabulary regime: paired measurements show that adding a
-        // quotient there shifts the critical path and worsens tail latency even
-        // though its local CPU work falls.
+        // The gates deliberately exclude medium-state/medium-vocabulary work
+        // and longer tiny-vocabulary horizons. Paired measurements show that
+        // those quotients either shift the critical path or remain above the
+        // fast-projected cutoff, paying a second exact-equivalence pass.
+        let active_terminal_count = active.iter().filter(|&&value| value).count();
+        let max_token_len = if branch_label.ends_with(".l1")
+            && (220..=240).contains(&active_terminal_count)
+            && (2..=4).contains(&vocab.len())
+            && source_reps >= 60_000
+        {
+            vocab.max_token_byte_len()
+        } else {
+            0
+        };
         match automatic_branch_active_state_map_strategy(
             branch_label,
             vocab.len(),
-            active.iter().filter(|&&value| value).count(),
+            active_terminal_count,
             source_reps,
+            max_token_len,
         ) {
             AutomaticBranchActiveStateMapStrategy::None => return None,
             AutomaticBranchActiveStateMapStrategy::VeryLargeProfile => {}
             AutomaticBranchActiveStateMapStrategy::DenseRequiresFastProjection => {
-                automatic_dense_requires_fast_projection = true;
+                automatic_requires_fast_projection = true;
             }
         }
     }
@@ -275,7 +288,7 @@ pub(crate) fn build_branch_active_state_map(
         reps <= l1::fast_projected_l1_id_map_max_tsids();
     let selected = reps < source_reps
         && source_reps.saturating_sub(reps) >= 512
-        && (!automatic_dense_requires_fast_projection || enters_fast_projected_path);
+        && (!automatic_requires_fast_projection || enters_fast_projected_path);
     if compile_profile_enabled() {
         eprintln!(
             "[glrmask/profile][branch_active_state_map] branch={} mode={} active_terminals={} vocab_tokens={} horizon={} source_reps={} reps={} reduction_pct={:.2} ms={:.3} requires_fast_projected={} enters_fast_projected={} fast_projected_max_tsids={} selected={}",
@@ -288,7 +301,7 @@ pub(crate) fn build_branch_active_state_map(
             reps,
             100.0 * source_reps.saturating_sub(reps) as f64 / source_reps as f64,
             elapsed_ms,
-            automatic_dense_requires_fast_projection,
+            automatic_requires_fast_projection,
             enters_fast_projected_path,
             l1::fast_projected_l1_id_map_max_tsids(),
             selected,
@@ -1789,11 +1802,11 @@ mod tests {
         };
 
         assert_eq!(
-            automatic_branch_active_state_map_strategy("p4.l1", 21_308, 190, 45_180),
+            automatic_branch_active_state_map_strategy("p4.l1", 21_308, 190, 45_180, 0),
             DenseRequiresFastProjection,
         );
         assert_eq!(
-            automatic_branch_active_state_map_strategy("p5.l1", 4_261, 233, 26_624),
+            automatic_branch_active_state_map_strategy("p5.l1", 4_261, 233, 26_624, 0),
             DenseRequiresFastProjection,
         );
         // Near-global active terminal families make the stable refinement
@@ -1801,38 +1814,50 @@ mod tests {
         // suffix profiling can collapse those families directly without first
         // paying a second whole-token refinement pass.
         assert_eq!(
-            automatic_branch_active_state_map_strategy("p1.l1", 15_518, 2_721, 89_478),
+            automatic_branch_active_state_map_strategy("p1.l1", 15_518, 2_721, 89_478, 0),
             None,
         );
         assert_eq!(
-            automatic_branch_active_state_map_strategy("p5.l1", 4_261, 2_422, 89_478),
+            automatic_branch_active_state_map_strategy("p5.l1", 4_261, 2_422, 89_478, 0),
             None,
         );
         assert_eq!(
-            automatic_branch_active_state_map_strategy("p4.l1", 21_310, 2_721, 89_478),
+            automatic_branch_active_state_map_strategy("p4.l1", 21_310, 2_721, 89_478, 0),
             None,
         );
         assert_eq!(
-            automatic_branch_active_state_map_strategy("p2.l1", 82_266, 229, 48_002),
+            automatic_branch_active_state_map_strategy("p2.l1", 82_266, 229, 48_002, 0),
             VeryLargeProfile,
         );
         assert_eq!(
-            automatic_branch_active_state_map_strategy("p2.l1", 82_270, 2_721, 89_478),
+            automatic_branch_active_state_map_strategy("p2.l1", 82_270, 2_721, 89_478, 0),
             None,
         );
 
         // Medium-state/medium-vocabulary work shifts the critical path, while
         // the small long-horizon lane remains above the fast-projected cutoff.
         assert_eq!(
-            automatic_branch_active_state_map_strategy("p1.l1", 15_224, 201, 37_079),
+            automatic_branch_active_state_map_strategy("p1.l1", 15_224, 201, 37_079, 0),
             None,
         );
         assert_eq!(
-            automatic_branch_active_state_map_strategy("p6.l1", 630, 192, 97_024),
+            automatic_branch_active_state_map_strategy("p6.l1", 630, 192, 97_024, 64),
             None,
         );
         assert_eq!(
-            automatic_branch_active_state_map_strategy("p4.l2p", 17_646, 4, 45_180),
+            automatic_branch_active_state_map_strategy("p12.l1", 4, 232, 97_046, 34),
+            DenseRequiresFastProjection,
+        );
+        assert_eq!(
+            automatic_branch_active_state_map_strategy("p9.l1", 4, 231, 97_046, 64),
+            None,
+        );
+        assert_eq!(
+            automatic_branch_active_state_map_strategy("p12.l1", 4, 232, 40_000, 34),
+            None,
+        );
+        assert_eq!(
+            automatic_branch_active_state_map_strategy("p4.l2p", 17_646, 4, 45_180, 0),
             None,
         );
     }
