@@ -26,6 +26,10 @@ const MIN_PARALLEL_FINALITY_EDGES_PER_WORKER: usize = 512;
 /// Grouping identical cancellation queries pays for a wave/group build. Large
 /// parser NWAs amortize it heavily; small NWAs are faster with the direct FIFO.
 const GROUPED_CANCELLATION_MIN_STATES: usize = 4_096;
+/// Checking for structurally dead cancellation tasks avoids weight cloning and
+/// inspection on the large parser-NWA tail, but the extra transition probes do
+/// not amortize on small graphs.
+const DEAD_CANCELLATION_FAST_PATH_MIN_STATES: usize = 65_536;
 /// Direct reverse-topological accumulation avoids one pending buffer per state
 /// and wins on the large parser-NWA tail. Smaller graphs benefit more from
 /// batching their few multi-edge contributions before unioning them.
@@ -105,6 +109,10 @@ impl SmallTargetWeights {
             }
             Self::Many(entries) => entries.get(&target),
         }
+    }
+
+    fn is_empty(&self) -> bool {
+        matches!(self, Self::Empty)
     }
 
     fn for_each(&self, mut f: impl FnMut(u32, &Weight)) {
@@ -868,6 +876,8 @@ fn compute_cancellations_range_serial_inner(
     let mut derived_epsilons: DerivedEpsilons =
         vec![SmallTargetWeights::Empty; state_count as usize];
     let mut subset_memo = SubsetMemo::default();
+    let use_dead_task_fast_path =
+        state_count as usize >= DEAD_CANCELLATION_FAST_PATH_MIN_STATES;
 
     for source_state in range {
         if source_state >= state_count {
@@ -895,6 +905,23 @@ fn compute_cancellations_range_serial_inner(
     }
 
     while let Some((current_state, source_state, positive_label)) = worklist.pop_front() {
+        let state = &nwa.states()[current_state as usize];
+        let local_derived = &derived_epsilons[current_state as usize];
+        let foreign_derived_at_state =
+            foreign_derived.map(|derived| &derived[current_state as usize]);
+        let positive_targets = state.transitions.get(&positive_label);
+        let default_targets = state.transitions.get(&DEFAULT_LABEL);
+
+        if use_dead_task_fast_path
+            && local_derived.is_empty()
+            && foreign_derived_at_state.is_none_or(SmallTargetWeights::is_empty)
+            && positive_targets.is_none()
+            && default_targets.is_none()
+            && state.epsilons.is_empty()
+        {
+            continue;
+        }
+
         let Some(query_weight_to_current) = query_weights[current_state as usize]
             .get(&(source_state, positive_label))
             .cloned()
@@ -915,10 +942,7 @@ fn compute_cancellations_range_serial_inner(
             foreign_derived,
         );
 
-        if let Some(positive_targets) = nwa.states()[current_state as usize]
-            .transitions
-            .get(&positive_label)
-        {
+        if let Some(positive_targets) = positive_targets {
             for (target_state, edge_weight) in positive_targets {
                 if *target_state < state_count {
                     extend_derived_epsilons(
@@ -936,10 +960,7 @@ fn compute_cancellations_range_serial_inner(
             }
         }
 
-        if let Some(default_targets) = nwa.states()[current_state as usize]
-            .transitions
-            .get(&DEFAULT_LABEL)
-        {
+        if let Some(default_targets) = default_targets {
             for (target_state, edge_weight) in default_targets {
                 if *target_state < state_count {
                     extend_derived_epsilons(
@@ -957,7 +978,7 @@ fn compute_cancellations_range_serial_inner(
             }
         }
 
-        for (target_state, epsilon_weight) in &nwa.states()[current_state as usize].epsilons {
+        for (target_state, epsilon_weight) in &state.epsilons {
             if *target_state >= state_count {
                 continue;
             }
