@@ -26,6 +26,10 @@ const MIN_PARALLEL_FINALITY_EDGES_PER_WORKER: usize = 512;
 /// Grouping identical cancellation queries pays for a wave/group build. Large
 /// parser NWAs amortize it heavily; small NWAs are faster with the direct FIFO.
 const GROUPED_CANCELLATION_MIN_STATES: usize = 4_096;
+/// Direct reverse-topological accumulation avoids one pending buffer per state
+/// and wins on the large parser-NWA tail. Smaller graphs benefit more from
+/// batching their few multi-edge contributions before unioning them.
+const DIRECT_ACYCLIC_FINALITY_MIN_STATES: usize = 65_536;
 
 #[derive(Clone, Default)]
 enum SmallQueryWeights {
@@ -1068,6 +1072,36 @@ fn apply_finality_fixpoint_worklist(
     }
 }
 
+fn apply_finality_fixpoint_acyclic_direct(
+    preds: &[Vec<PredEdge<'_>>],
+    reachable_final_weights: &mut [Option<GuardedFinalWeight>],
+    reverse_topo_order: &[usize],
+    weight_ops: &mut ScopedWeightOpCache,
+) {
+    // In reverse topological order, every successor of `state_id` has already
+    // contributed its complete final weight. Merge each propagated contribution
+    // directly into the predecessor's single accumulator instead of allocating
+    // one pending SmallVec per graph state and batching those contributions later.
+    for &state_id in reverse_topo_order {
+        let Some(reachable_final) = reachable_final_weights[state_id].clone() else {
+            continue;
+        };
+
+        for edge in &preds[state_id] {
+            let Some(propagated) =
+                reachable_final.intersection_with_edge_cached(edge.weight, weight_ops)
+            else {
+                continue;
+            };
+            merge_guarded_final_weight(
+                &mut reachable_final_weights[edge.from],
+                propagated,
+                weight_ops,
+            );
+        }
+    }
+}
+
 fn apply_finality_fixpoint_acyclic(
     preds: &[Vec<PredEdge<'_>>],
     reachable_final_weights: &mut [Option<GuardedFinalWeight>],
@@ -1344,6 +1378,13 @@ pub(crate) fn apply_finality_fixpoint(nwa: &mut NWA) {
         && acyclic
         && rayon_workers > 1
         && finality_edge_count >= MIN_PARALLEL_FINALITY_EDGES_PER_WORKER * rayon_workers;
+    let direct_acyclic_finality_disabled =
+        std::env::var_os("GLRMASK_DISABLE_DIRECT_ACYCLIC_FINALITY").is_some();
+    let use_direct_acyclic_finality = !use_chunked_parallel_waves
+        && acyclic
+        && !direct_acyclic_finality_disabled
+        && (n >= DIRECT_ACYCLIC_FINALITY_MIN_STATES
+            || std::env::var_os("GLRMASK_FORCE_DIRECT_ACYCLIC_FINALITY").is_some());
 
     let solve_started_at = profile_enabled.then(std::time::Instant::now);
     if let Some(reverse_topo_order) = reverse_topo_order.as_deref() {
@@ -1352,6 +1393,13 @@ pub(crate) fn apply_finality_fixpoint(nwa: &mut NWA) {
                 &preds,
                 &mut reachable_final_weights,
                 reverse_topo_order,
+            );
+        } else if use_direct_acyclic_finality {
+            apply_finality_fixpoint_acyclic_direct(
+                &preds,
+                &mut reachable_final_weights,
+                reverse_topo_order,
+                &mut weight_ops,
             );
         } else {
             apply_finality_fixpoint_acyclic(
@@ -1398,7 +1446,7 @@ pub(crate) fn apply_finality_fixpoint(nwa: &mut NWA) {
     )
     {
         eprintln!(
-            "[glrmask/profile][finality_fixpoint] states={} edges={} unique_edge_weights={} full_weights={} single_entry_weights={} total_weight_ranges={} wide_edges={} unique_wide_edge_weights={} acyclic={} rayon_workers={} chunked_parallel_waves={} preds_ms={:.3} topo_ms={:.3} initial_ms={:.3} solve_ms={:.3} write_ms={:.3}",
+            "[glrmask/profile][finality_fixpoint] states={} edges={} unique_edge_weights={} full_weights={} single_entry_weights={} total_weight_ranges={} wide_edges={} unique_wide_edge_weights={} acyclic={} rayon_workers={} chunked_parallel_waves={} direct_acyclic={} preds_ms={:.3} topo_ms={:.3} initial_ms={:.3} solve_ms={:.3} write_ms={:.3}",
             n,
             edge_count,
             unique_edge_weights,
@@ -1410,6 +1458,7 @@ pub(crate) fn apply_finality_fixpoint(nwa: &mut NWA) {
             acyclic,
             rayon_workers,
             use_chunked_parallel_waves,
+            use_direct_acyclic_finality,
             preds_ms,
             topo_ms,
             initial_ms,
@@ -1797,6 +1846,7 @@ mod terminal_default_tests {
         let reverse_topo_order =
             build_finality_reverse_topo_order(&preds, outdegree).expect("test graph is acyclic");
         let mut serial = collect_initial_final_weights(&nwa);
+        let mut direct = serial.clone();
         let mut chunked_parallel = serial.clone();
         let mut weight_ops = ScopedWeightOpCache::default();
 
@@ -1806,14 +1856,27 @@ mod terminal_default_tests {
             &reverse_topo_order,
             &mut weight_ops,
         );
+        let mut direct_weight_ops = ScopedWeightOpCache::default();
+        apply_finality_fixpoint_acyclic_direct(
+            &preds,
+            &mut direct,
+            &reverse_topo_order,
+            &mut direct_weight_ops,
+        );
         apply_finality_fixpoint_acyclic_parallel_waves_chunked(
             &preds,
             &mut chunked_parallel,
             &reverse_topo_order,
         );
 
-        for (serial_weight, chunked_weight) in serial.iter().zip(&chunked_parallel) {
+        for ((serial_weight, direct_weight), chunked_weight) in
+            serial.iter().zip(&direct).zip(&chunked_parallel)
+        {
             let serial_weight = serial_weight
+                .as_ref()
+                .map(|weight| weight.weight.clone())
+                .unwrap_or_else(Weight::empty);
+            let direct_weight = direct_weight
                 .as_ref()
                 .map(|weight| weight.weight.clone())
                 .unwrap_or_else(Weight::empty);
@@ -1822,6 +1885,10 @@ mod terminal_default_tests {
                 .map(|weight| weight.weight.clone())
                 .unwrap_or_else(Weight::empty);
             for tsid in 0..=7 {
+                assert_eq!(
+                    serial_weight.tokens_for_tsid(tsid),
+                    direct_weight.tokens_for_tsid(tsid),
+                );
                 assert_eq!(
                     serial_weight.tokens_for_tsid(tsid),
                     chunked_weight.tokens_for_tsid(tsid),
