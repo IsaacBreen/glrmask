@@ -25,6 +25,11 @@ use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 /// direct-builder view stores that shifted numbering explicitly.
 type L1WalkProfile = Arc<[(u32, Arc<[(u32, u32)]>)]>;
 
+/// Dense per-worker assembly amortizes its scratch/output reduction only for
+/// very large exact L1 quotients. Below this size the established per-state
+/// allocation path is cheaper.
+const LARGE_EXACT_L1_ASSEMBLY_MIN_STATES: usize = 50_000;
+
 fn freeze_l1_walk_profile(runs: &[(u32, u32, u32)]) -> L1WalkProfile {
     let mut grouped = Vec::<(u32, Vec<(u32, u32)>)>::new();
     // Most exact target profiles touch only a handful of terminal signatures.
@@ -696,6 +701,81 @@ fn append_l1_profile_entry_dense<'a>(
     refs.push(ranges);
     *hash_accum = hash_accum.wrapping_add(entry_hash);
     *len_accum += entry_range_count;
+}
+
+#[inline]
+fn append_l1_exact_start_entries<'a>(
+    start_state: u32,
+    initial_tsids: &[u32],
+    empty_token_ranges: &'a [(u32, u32)],
+    empty_token_hash: u64,
+    state_to_terminal_signature: &[u32],
+    reuse: &L1ExactProfileReuse,
+    profiles: &[Vec<(usize, &'a [(u32, u32)], u64, usize)>],
+    touched_positions: &mut [usize],
+    touched_signature_ids: &mut Vec<usize>,
+    touched_signatures: &mut Vec<(usize, Vec<&'a [(u32, u32)]>, u64, usize)>,
+    entries: &mut Vec<(u32, u32, LazyRanges<'a>)>,
+) {
+    for &sig_idx in touched_signature_ids.iter() {
+        touched_positions[sig_idx] = usize::MAX;
+    }
+    touched_signature_ids.clear();
+    touched_signatures.clear();
+
+    if !empty_token_ranges.is_empty() {
+        let sig_id = state_to_terminal_signature[start_state as usize];
+        if sig_id != u32::MAX {
+            append_l1_profile_entry_dense(
+                touched_positions,
+                touched_signature_ids,
+                touched_signatures,
+                sig_id as usize,
+                empty_token_ranges,
+                empty_token_hash,
+                empty_token_ranges.len(),
+            );
+        }
+    }
+
+    let profile_ids = reuse
+        .representative_profile_ids
+        .get(&start_state)
+        .expect("exact L1 profile reuse missing id-map representative");
+    for &profile_id in profile_ids.iter() {
+        if profile_id == 0 {
+            continue;
+        }
+        for &(sig_idx, ranges, entry_hash, entry_range_count) in &profiles[profile_id as usize] {
+            append_l1_profile_entry_dense(
+                touched_positions,
+                touched_signature_ids,
+                touched_signatures,
+                sig_idx,
+                ranges,
+                entry_hash,
+                entry_range_count,
+            );
+        }
+    }
+
+    for (sig_idx, refs, hash, total_len) in touched_signatures.drain(..) {
+        let lazy = LazyRanges {
+            refs,
+            hash,
+            total_len,
+        };
+        if initial_tsids.len() > 1 {
+            for &tsid in &initial_tsids[..initial_tsids.len() - 1] {
+                entries.push((sig_idx as u32, tsid, lazy.clone()));
+            }
+        }
+        entries.push((
+            sig_idx as u32,
+            *initial_tsids.last().expect("start state has an internal TSID"),
+            lazy,
+        ));
+    }
 }
 
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -2183,13 +2263,17 @@ fn find_l1_exact_state_equivalence_by_token_signatures_with_first_target_cache(
     first_target_cache_override: Option<bool>,
 ) -> (Vec<usize>, Option<L1ExactProfileReuse>) {
     let terminal_signature_started_at = compile_profile_enabled().then(Instant::now);
-    let all_terminals_active = active_terminals.iter().all(|&active| active);
     let (state_to_terminal_signature, terminal_signatures, active_language) =
         build_l1_tokenizer_state_to_terminal_signatures(tokenizer, active_terminals);
     let terminal_signature_ms = terminal_signature_started_at.map_or(0.0, |started| {
         started.elapsed().as_secs_f64() * 1000.0
     });
-    let self_loop_bytes_by_state = all_terminals_active.then(|| tokenizer.all_self_loop_bytes());
+    // `l1_transition` maps inactive sources and targets to dead before the
+    // packed builder consults this table. Therefore every non-dead state whose
+    // self-loops are queried is active, and its raw self-loop bytes remain
+    // exact under terminal projection. Reuse the tokenizer-wide cached table
+    // instead of rescanning all 256 bytes for every state in every partition.
+    let self_loop_bytes_by_state = tokenizer.all_self_loop_bytes();
     find_l1_exact_state_equivalence_by_components_with_first_target_cache(
         vocab_order,
         states,
@@ -2203,7 +2287,7 @@ fn find_l1_exact_state_equivalence_by_token_signatures_with_first_target_cache(
         true,
         terminal_signature_ms,
         first_target_cache_override,
-        self_loop_bytes_by_state.as_deref(),
+        Some(self_loop_bytes_by_state.as_ref()),
     )
 }
 
@@ -2330,7 +2414,12 @@ fn find_l1_exact_state_equivalence_by_components_with_first_target_cache(
         .enumerate()
         .filter_map(|(byte, token_ids)| (!token_ids.is_empty()).then_some(byte))
         .collect();
-    const FIRST_TARGET_CACHE_MAX_BYTES: usize = 8 * 1024 * 1024;
+    // The raw-frontier probe has already paid for every state × first-byte
+    // transition. Retaining that compact u32 matrix avoids repeating the same
+    // multi-million-cell scan while assembling exact state keys. The large p2
+    // diff workloads need roughly 21–26 MiB, which is modest relative to their
+    // tokenizer and terminal-DWA working sets.
+    const FIRST_TARGET_CACHE_MAX_BYTES: usize = 32 * 1024 * 1024;
     let first_target_cache_bytes = states
         .len()
         .checked_mul(nonempty_first_bytes.len())
@@ -3053,6 +3142,76 @@ fn l1_bucket_compression_estimate(
     estimate
 }
 
+/// Group first-step-equivalent suffix targets without allocating a temporary
+/// fingerprint vector for every target.
+///
+/// Only one owned fingerprint is retained per distinct group. The common case
+/// reuses `scratch` and appends the target to an existing group after an exact
+/// collision check.
+fn l1_group_targets_by_first_suffix_fingerprint(
+    targets: &[u32],
+    first_suffix_bytes: &[u8],
+    flat_trans: &[u32],
+    transitions_by_byte: Option<&[u32]>,
+    num_tokenizer_states: usize,
+    active_language: Option<&[bool]>,
+    canonical_state: Option<&[u32]>,
+) -> (Vec<u32>, Vec<Vec<u32>>, Vec<u32>) {
+    let dead = u32::MAX;
+    let mut representatives = Vec::<u32>::new();
+    let mut others = Vec::<Vec<u32>>::new();
+    let mut fingerprints = Vec::<Vec<u32>>::new();
+    let mut group_indices_by_hash = FxHashMap::<u64, Vec<usize>>::default();
+    let mut dead_targets = Vec::<u32>::new();
+    let mut scratch = Vec::<u32>::with_capacity(first_suffix_bytes.len());
+
+    for &target in targets {
+        scratch.clear();
+        let mut all_dead = true;
+        for &byte in first_suffix_bytes {
+            let next = l1_transition(
+                flat_trans,
+                transitions_by_byte,
+                num_tokenizer_states,
+                active_language,
+                target,
+                byte as usize,
+                canonical_state,
+            );
+            all_dead &= next == dead;
+            scratch.push(next);
+        }
+        if all_dead {
+            dead_targets.push(target);
+            continue;
+        }
+
+        let mut hasher = rustc_hash::FxHasher::default();
+        scratch.hash(&mut hasher);
+        let hash = hasher.finish();
+        let candidates = group_indices_by_hash.entry(hash).or_default();
+        if let Some(group_index) = candidates
+            .iter()
+            .copied()
+            .find(|&group_index| fingerprints[group_index] == scratch)
+        {
+            others[group_index].push(target);
+            continue;
+        }
+
+        let group_index = representatives.len();
+        representatives.push(target);
+        others.push(Vec::new());
+        fingerprints.push(std::mem::replace(
+            &mut scratch,
+            Vec::with_capacity(first_suffix_bytes.len()),
+        ));
+        candidates.push(group_index);
+    }
+
+    (representatives, others, dead_targets)
+}
+
 fn l1_bucket_suffix_signature_profiles_batched_arc(
     first_byte: u8,
     targets: &[u32],
@@ -3159,36 +3318,18 @@ fn l1_bucket_suffix_signature_profiles_batched(
         }
 
         if !first_suffix_bytes.is_empty() {
-            let mut fp_groups = FxHashMap::<Vec<u32>, Vec<u32>>::default();
-            for &target in &walk_targets {
-                let fp: Vec<u32> = first_suffix_bytes
-                    .iter()
-                    .map(|&byte| {
-                        l1_transition(
-                            flat_trans,
-                            transitions_by_byte,
-                            num_tokenizer_states,
-                            active_language,
-                            target,
-                            byte as usize,
-                            None,
-                        )
-                    })
-                    .collect();
-                fp_groups.entry(fp).or_default().push(target);
-            }
-
-            let mut deduped_targets = Vec::<u32>::new();
-            let mut others = Vec::<Vec<u32>>::new();
-            for (fp, group) in fp_groups {
-                if fp.iter().all(|&state| state == dead) {
-                    for target in group {
-                        results.push(((first_byte, target), Vec::new()));
-                    }
-                    continue;
-                }
-                deduped_targets.push(group[0]);
-                others.push(group[1..].to_vec());
+            let (deduped_targets, others, dead_targets) =
+                l1_group_targets_by_first_suffix_fingerprint(
+                    &walk_targets,
+                    &first_suffix_bytes,
+                    flat_trans,
+                    transitions_by_byte,
+                    num_tokenizer_states,
+                    active_language,
+                    None,
+                );
+            for target in dead_targets {
+                results.push(((first_byte, target), Vec::new()));
             }
             if deduped_targets.len() < walk_targets.len() {
                 walk_targets = deduped_targets;
@@ -3573,84 +3714,6 @@ fn l1_packed_append_behavior_reference(
 }
 
 
-fn l1_packed_materialize_behavior(
-    trie: &L1PackedSuffixTrie,
-    node_index: usize,
-    behavior_id: u32,
-    data: &[L1PackedProductNodeData],
-    records: &[L1PackedProductBehaviorRecord],
-    record_child_behaviors: &[u32],
-    materialized_records: &mut [Option<Arc<[(u32, u32, u32)]>>],
-    empty_profile: &Arc<[(u32, u32, u32)]>,
-) -> Arc<[(u32, u32, u32)]> {
-    if behavior_id == 0 {
-        return Arc::clone(empty_profile);
-    }
-    let node = trie.nodes[node_index];
-    if let Some(signature) = l1_uniform_behavior_signature(behavior_id) {
-        return Arc::from([(signature, node.subtree_start, node.subtree_end)]);
-    }
-    if node.edge_len == 0 {
-        return Arc::from([(behavior_id, node.subtree_start, node.subtree_end)]);
-    }
-    if node.terminal_token == L1_NONE && node.edge_len == 1 {
-        let child = trie.edges[node.first_edge as usize].child as usize;
-        return l1_packed_materialize_behavior(
-            trie,
-            child,
-            behavior_id,
-            data,
-            records,
-            record_child_behaviors,
-            materialized_records,
-            empty_profile,
-        );
-    }
-
-    let record_index = data[node_index].records_start as usize + behavior_id as usize - 1;
-    if let Some(profile) = materialized_records[record_index].as_ref() {
-        return Arc::clone(profile);
-    }
-    let record = records[record_index];
-    let profile: Arc<[(u32, u32, u32)]> = if record.uniform_signature != 0 {
-        Arc::from([(
-            record.uniform_signature,
-            node.subtree_start,
-            node.subtree_end,
-        )])
-    } else {
-        let mut profile = Vec::<(u32, u32, u32)>::new();
-        if record.terminal_signature != 0 {
-            append_l1_signature_profile_range(
-                &mut profile,
-                record.terminal_signature,
-                node.terminal_token,
-                node.terminal_token_end,
-            );
-        }
-        let children_start = record.child_behaviors_start as usize;
-        for edge_offset in 0..node.edge_len as usize {
-            let edge = trie.edges[node.first_edge as usize + edge_offset];
-            let child_profile = l1_packed_materialize_behavior(
-                trie,
-                edge.child as usize,
-                record_child_behaviors[children_start + edge_offset],
-                data,
-                records,
-                record_child_behaviors,
-                materialized_records,
-                empty_profile,
-            );
-            for &(signature, start, end) in child_profile.iter() {
-                append_l1_signature_profile_range(&mut profile, signature, start, end);
-            }
-        }
-        Arc::from(profile)
-    };
-    materialized_records[record_index] = Some(Arc::clone(&profile));
-    profile
-}
-
 fn l1_uniform_bucket_profile(
     profiles_by_signature: &mut FxHashMap<u32, Arc<[(u32, u32, u32)]>>,
     signature_id: u32,
@@ -3735,35 +3798,18 @@ fn l1_bucket_suffix_signature_profiles_packed(
         if !first_suffix_bytes.is_empty() {
             let canonical_state = horizon_maps
                 .map(|maps| maps[suffix_horizon.saturating_sub(1)].as_ref());
-            let mut fp_groups = FxHashMap::<Vec<u32>, Vec<u32>>::default();
-            for &target in &walk_targets {
-                let fp: Vec<u32> = first_suffix_bytes
-                    .iter()
-                    .map(|&byte| {
-                        l1_transition(
-                            flat_trans,
-                            transitions_by_byte,
-                            num_lexer_states,
-                            active_language,
-                            target,
-                            byte as usize,
-                            canonical_state,
-                        )
-                    })
-                    .collect();
-                fp_groups.entry(fp).or_default().push(target);
-            }
-            let mut deduped_targets = Vec::<u32>::new();
-            let mut others = Vec::<Vec<u32>>::new();
-            for (fp, group) in fp_groups {
-                if fp.iter().all(|&state| state == dead) {
-                    for target in group {
-                        results.push(((first_byte, target), Arc::from([])));
-                    }
-                    continue;
-                }
-                deduped_targets.push(group[0]);
-                others.push(group[1..].to_vec());
+            let (deduped_targets, others, dead_targets) =
+                l1_group_targets_by_first_suffix_fingerprint(
+                    &walk_targets,
+                    &first_suffix_bytes,
+                    flat_trans,
+                    transitions_by_byte,
+                    num_lexer_states,
+                    active_language,
+                    canonical_state,
+                );
+            for target in dead_targets {
+                results.push(((first_byte, target), Arc::from([])));
             }
             if deduped_targets.len() < walk_targets.len() {
                 walk_targets = deduped_targets;
@@ -4291,10 +4337,6 @@ fn l1_bucket_suffix_signature_profiles_packed(
     let materialize_started_at = profiling.then(Instant::now);
     let root_behavior_start = data[0].behaviors_start as usize;
     let mut profiles_by_behavior = FxHashMap::<u32, Arc<[(u32, u32, u32)]>>::default();
-    let empty_profile: Arc<[(u32, u32, u32)]> = Arc::from([]);
-    let memoize_materialization =
-        std::env::var_os("GLRMASK_DISABLE_L1_MATERIALIZE_MEMO").is_none();
-    let mut materialized_records = vec![None; records.len()];
     for (target_index, &target) in walk_targets.iter().enumerate() {
         let behavior_id = behavior_ids[root_behavior_start + target_index];
         let profile = if let Some(profile) = profiles_by_behavior.get(&behavior_id) {
@@ -4313,17 +4355,6 @@ fn l1_bucket_suffix_signature_profiles_packed(
                     uniform_signature,
                     token_start,
                     token_end,
-                )
-            } else if memoize_materialization {
-                l1_packed_materialize_behavior(
-                    &trie,
-                    0,
-                    behavior_id,
-                    &data,
-                    &records,
-                    &record_child_behaviors,
-                    &mut materialized_records,
-                    &empty_profile,
                 )
             } else {
                 let mut profile = Vec::new();
@@ -5272,87 +5303,88 @@ fn build_l1_terminal_dwa(
             }
             result
         };
-    // In the normal exact L1 path every TSID already has a representative
-    // profile. On one worker, collect its entries directly into the eventual
-    // interning vector. This avoids one FxHashMap allocation per TSID and the
-    // intermediate Vec<Vec<_>>/flatten pass, while retaining the established
-    // parallel and fallback paths unchanged.
-    let serial_exact_profile_collection = exact_profile_reuse.is_some()
-        && rayon::current_num_threads() == 1
-        && !tokenizer.has_deterministic_dispatch();
-    let mut all_entries: Vec<(u32, u32, LazyRanges<'_>)> = if serial_exact_profile_collection {
+    // Large exact L1 quotients amortize dense reusable worker scratch: it avoids
+    // one FxHashMap and one result Vec allocation per representative state. On
+    // smaller quotients the fold/reduce setup costs more than those allocations,
+    // so retain the established per-state path. The single-worker case always
+    // benefits from the dense scratch.
+    let dense_exact_collection = exact_profile_reuse.is_some()
+        && (rayon::current_num_threads() == 1
+            || start_states_list.len() >= LARGE_EXACT_L1_ASSEMBLY_MIN_STATES);
+    let mut all_entries: Vec<(u32, u32, LazyRanges<'_>)> = if dense_exact_collection {
         let reuse = exact_profile_reuse.expect("missing exact L1 profile reuse");
         let profiles = indexed_reuse_profiles
             .as_ref()
             .expect("missing indexed exact L1 profiles");
-        let mut touched_positions = vec![usize::MAX; terminal_signatures.len()];
-        let mut touched_signature_ids = Vec::<usize>::new();
-        let mut touched_signatures: Vec<(usize, Vec<&[(u32, u32)]>, u64, usize)> =
-            Vec::new();
-        let mut entries = Vec::new();
-
-        for (internal_tsid, start_state) in id_map
-            .tokenizer_states
-            .iter_representative_ids()
-            .enumerate()
-        {
-            for &sig_idx in &touched_signature_ids {
-                touched_positions[sig_idx] = usize::MAX;
+        if rayon::current_num_threads() == 1 {
+            let mut touched_positions = vec![usize::MAX; terminal_signatures.len()];
+            let mut touched_signature_ids = Vec::<usize>::new();
+            let mut touched_signatures =
+                Vec::<(usize, Vec<&[(u32, u32)]>, u64, usize)>::new();
+            let mut entries = Vec::new();
+            for &(&start_state, initial_tsids) in &start_states_list {
+                append_l1_exact_start_entries(
+                    start_state,
+                    initial_tsids,
+                    empty_token_ranges.as_slice(),
+                    empty_token_hash,
+                    state_to_terminal_signature,
+                    reuse,
+                    profiles,
+                    &mut touched_positions,
+                    &mut touched_signature_ids,
+                    &mut touched_signatures,
+                    &mut entries,
+                );
             }
-            touched_signature_ids.clear();
-            touched_signatures.clear();
-
-            if !empty_token_ranges.is_empty() {
-                let sig_id = state_to_terminal_signature[start_state as usize];
-                if sig_id != u32::MAX {
-                    append_l1_profile_entry_dense(
-                        &mut touched_positions,
-                        &mut touched_signature_ids,
-                        &mut touched_signatures,
-                        sig_id as usize,
-                        empty_token_ranges.as_slice(),
-                        empty_token_hash,
-                        empty_token_ranges.len(),
-                    );
-                }
-            }
-
-            let profile_ids = reuse
-                .representative_profile_ids
-                .get(&start_state)
-                .expect("exact L1 profile reuse missing id-map representative");
-            for &profile_id in profile_ids.iter() {
-                if profile_id == 0 {
-                    continue;
-                }
-                for &(sig_idx, ranges, entry_hash, entry_range_count) in
-                    &profiles[profile_id as usize]
-                {
-                    append_l1_profile_entry_dense(
-                        &mut touched_positions,
-                        &mut touched_signature_ids,
-                        &mut touched_signatures,
-                        sig_idx,
-                        ranges,
-                        entry_hash,
-                        entry_range_count,
-                    );
-                }
-            }
-
-            for (sig_idx, refs, hash, total_len) in touched_signatures.drain(..) {
-                entries.push((
-                    sig_idx as u32,
-                    internal_tsid as u32,
-                    LazyRanges {
-                        refs,
-                        hash,
-                        total_len,
+            entries
+        } else {
+            start_states_list
+                .par_iter()
+                .fold(
+                    || {
+                        (
+                            vec![usize::MAX; terminal_signatures.len()],
+                            Vec::<usize>::new(),
+                            Vec::<(usize, Vec<&[(u32, u32)]>, u64, usize)>::new(),
+                            Vec::<(u32, u32, LazyRanges<'_>)>::new(),
+                        )
                     },
-                ));
-            }
+                    |(
+                        mut touched_positions,
+                        mut touched_signature_ids,
+                        mut touched_signatures,
+                        mut entries,
+                    ),
+                     item| {
+                        let &(&start_state, initial_tsids) = item;
+                        append_l1_exact_start_entries(
+                            start_state,
+                            initial_tsids,
+                            empty_token_ranges.as_slice(),
+                            empty_token_hash,
+                            state_to_terminal_signature,
+                            reuse,
+                            profiles,
+                            &mut touched_positions,
+                            &mut touched_signature_ids,
+                            &mut touched_signatures,
+                            &mut entries,
+                        );
+                        (
+                            touched_positions,
+                            touched_signature_ids,
+                            touched_signatures,
+                            entries,
+                        )
+                    },
+                )
+                .map(|(_, _, _, entries)| entries)
+                .reduce(Vec::new, |mut left, mut right| {
+                    left.append(&mut right);
+                    left
+                })
         }
-        entries
     } else {
         let per_thread_results: Vec<Vec<(u32, u32, LazyRanges<'_>)>> =
             if rayon::current_num_threads() == 1 {
@@ -5617,6 +5649,126 @@ fn build_l1_terminal_dwa(
                 }
             }
 
+            group_weight_entries
+        } else if exact_profile_reuse.is_some()
+            && num_tsids >= LARGE_EXACT_L1_ASSEMBLY_MIN_STATES
+        {
+            // Reuse one sparse group-assembly scratch per Rayon worker and
+            // accumulate directly into per-group outputs. The previous path
+            // allocated `num_groups` counters/range vectors plus one result
+            // vector for every TSID, even though each TSID touches only a
+            // small subset of groups.
+            let mut group_weight_entries = tsid_group_contributions
+                .par_iter()
+                .enumerate()
+                .fold(
+                    || {
+                        (
+                            vec![0usize; num_groups],
+                            (0..num_groups)
+                                .map(|_| Vec::<(u32, u32)>::new())
+                                .collect::<Vec<_>>(),
+                            (0..num_groups)
+                                .map(|_| None::<Arc<RangeSetBlaze<u32>>>)
+                                .collect::<Vec<_>>(),
+                            Vec::<usize>::new(),
+                            (0..num_groups)
+                                .map(|_| Vec::<(u32, Arc<RangeSetBlaze<u32>>)>::new())
+                                .collect::<Vec<_>>(),
+                        )
+                    },
+                    |(
+                        mut group_counts,
+                        mut group_ranges,
+                        mut group_single_arc,
+                        mut touched_groups,
+                        mut output,
+                    ),
+                     (tsid, contributions)| {
+                        for &group_idx in &touched_groups {
+                            group_counts[group_idx] = 0;
+                            group_ranges[group_idx].clear();
+                            group_single_arc[group_idx] = None;
+                        }
+                        touched_groups.clear();
+
+                        for &(sig_id, ref arc) in contributions {
+                            for &group_idx in &signature_groups[sig_id] {
+                                if group_counts[group_idx] == 0 {
+                                    touched_groups.push(group_idx);
+                                    group_counts[group_idx] = 1;
+                                    group_single_arc[group_idx] = Some(Arc::clone(arc));
+                                    continue;
+                                }
+
+                                if group_counts[group_idx] == 1 {
+                                    group_ranges[group_idx].extend(
+                                        group_single_arc[group_idx]
+                                            .as_ref()
+                                            .expect("single group contribution")
+                                            .ranges()
+                                            .map(|range| (*range.start(), *range.end())),
+                                    );
+                                    group_single_arc[group_idx] = None;
+                                }
+                                group_counts[group_idx] += 1;
+                                group_ranges[group_idx].extend(
+                                    arc.ranges().map(|range| (*range.start(), *range.end())),
+                                );
+                            }
+                        }
+
+                        for &group_idx in &touched_groups {
+                            let shared = if group_counts[group_idx] == 1 {
+                                Some(Arc::clone(
+                                    group_single_arc[group_idx]
+                                        .as_ref()
+                                        .expect("single group contribution"),
+                                ))
+                            } else if group_counts[group_idx] == tsid_total_rep_counts[tsid] {
+                                tsid_full_arc_cache[tsid]
+                                    .get_or_init(|| {
+                                        shared_rangeset_from_unsorted_pairs(
+                                            tsid_full_ranges[tsid].as_slice(),
+                                        )
+                                    })
+                                    .clone()
+                            } else {
+                                shared_rangeset_from_unsorted_pairs(
+                                    group_ranges[group_idx].as_slice(),
+                                )
+                            };
+                            if let Some(tokens) = shared {
+                                output[group_idx].push((tsid as u32, tokens));
+                            }
+                        }
+
+                        (
+                            group_counts,
+                            group_ranges,
+                            group_single_arc,
+                            touched_groups,
+                            output,
+                        )
+                    },
+                )
+                .map(|(_, _, _, _, output)| output)
+                .reduce(
+                    || {
+                        (0..num_groups)
+                            .map(|_| Vec::<(u32, Arc<RangeSetBlaze<u32>>)>::new())
+                            .collect::<Vec<_>>()
+                    },
+                    |mut left, right| {
+                        for (left_group, mut right_group) in left.iter_mut().zip(right) {
+                            left_group.append(&mut right_group);
+                        }
+                        left
+                    },
+                );
+            for entries in &mut group_weight_entries {
+                entries.sort_unstable_by_key(|&(tsid, _)| tsid);
+            }
             group_weight_entries
         } else {
             let per_tsid_group_entries: Vec<Vec<(usize, u32, Arc<RangeSetBlaze<u32>>)>> =
