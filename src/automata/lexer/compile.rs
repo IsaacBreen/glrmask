@@ -3027,6 +3027,7 @@ fn compile_with_plan_internal(
             &plan.exclusions,
             &plan.intersections,
             capture_product_trace,
+            true,
         )
     } else {
         (compile_single_expr_dfa(&plan.compiled_exprs[0]), false, None)
@@ -5321,6 +5322,20 @@ fn product_state_metadata(
                     future.set(group_id);
                 }
             }
+            ProductComponent::VirtualFixedSequence {
+                byte_sets,
+                suffix_live,
+            } => {
+                let position = state as usize;
+                if position == byte_sets.len() {
+                    finalizers.set(group_id);
+                }
+                if position < byte_sets.len()
+                    && suffix_live.get(position).copied().unwrap_or(false)
+                {
+                    future.set(group_id);
+                }
+            }
             ProductComponent::VirtualBoundedRepeat { base_dfa, min, max } => {
                 let base_state_count = base_dfa.num_states() as u32;
                 let copy_count = state / base_state_count;
@@ -5351,6 +5366,9 @@ fn product_state_single_visible_finalizer(
             ProductComponent::Materialized(dfa)
             | ProductComponent::MaterializedZeroMinRepeatSuffix { dfa, .. } => {
                 dfa.finalizers(state).contains(0)
+            }
+            ProductComponent::VirtualFixedSequence { byte_sets, .. } => {
+                state as usize == byte_sets.len()
             }
             ProductComponent::VirtualBoundedRepeat { base_dfa, min, .. } => {
                 let base_state_count = base_dfa.num_states() as u32;
@@ -5611,6 +5629,51 @@ fn mark_state_accepting(dfa: &mut DFA, state_id: u32) {
     dfa.overwrite_state_metadata(state_id, finalizers, future);
 }
 
+fn collect_fixed_sequence_byte_sets(expr: &Expr, byte_sets: &mut Vec<U8Set>) -> bool {
+    match expr {
+        Expr::U8Seq(bytes) => {
+            byte_sets.extend(bytes.iter().copied().map(U8Set::from_byte));
+            true
+        }
+        Expr::U8Class(bytes) => {
+            byte_sets.push(*bytes);
+            true
+        }
+        Expr::Seq(parts) => parts
+            .iter()
+            .all(|part| collect_fixed_sequence_byte_sets(part, byte_sets)),
+        Expr::Shared(inner) => collect_fixed_sequence_byte_sets(inner, byte_sets),
+        Expr::Epsilon => true,
+        Expr::Dfa(_)
+        | Expr::Choice(_)
+        | Expr::Exclude { .. }
+        | Expr::Intersect { .. }
+        | Expr::Repeat { .. } => false,
+    }
+}
+
+fn build_fixed_sequence_dfa(expr: &Expr) -> Option<DFA> {
+    let mut byte_sets = Vec::new();
+    collect_fixed_sequence_byte_sets(expr, &mut byte_sets).then(|| {
+        let mut dfa = DFA::new(byte_sets.len() + 1);
+        dfa.ensure_group_capacity(1);
+        dfa.set_group_u8set(0, expr_u8set(expr));
+        for (state, bytes) in byte_sets.into_iter().enumerate() {
+            dfa.set_transitions_from_sorted_entries(
+                state as u32,
+                bytes
+                    .iter()
+                    .map(|byte| (byte, state as u32 + 1))
+                    .collect(),
+            );
+        }
+        let final_state = (dfa.num_states() - 1) as u32;
+        mark_state_accepting(&mut dfa, final_state);
+        dfa.recompute_possible_futures();
+        dfa
+    })
+}
+
 fn compile_product_component_dfa_direct_with_options(
     expr: &Expr,
     preserve_coordinates: bool,
@@ -5666,7 +5729,9 @@ fn compile_product_component_dfa_direct_with_options(
             min,
             max: Some(max),
         } => build_bounded_repeat_dfa(expr, *min, *max).map(|dfa| (dfa, false)),
-        Expr::Seq(parts) => build_bounded_repeat_with_suffix_dfa(parts)
+        Expr::Seq(parts) => build_fixed_sequence_dfa(expr)
+            .map(|dfa| (dfa, false))
+            .or_else(|| build_bounded_repeat_with_suffix_dfa(parts))
             .or_else(|| {
                 build_bounded_repeat_with_regex_suffix_with_options(
                     parts,
@@ -5757,6 +5822,10 @@ enum ProductComponent {
         dfa: Arc<DFA>,
         trace: Arc<ZeroMinRepeatSuffixComponentTrace>,
     },
+    VirtualFixedSequence {
+        byte_sets: Arc<[U8Set]>,
+        suffix_live: Arc<[bool]>,
+    },
     VirtualBoundedRepeat {
         base_dfa: Arc<DFA>,
         min: u32,
@@ -5770,7 +5839,7 @@ impl ProductComponent {
             Self::Materialized(dfa) | Self::MaterializedZeroMinRepeatSuffix { dfa, .. } => {
                 Some(dfa)
             }
-            Self::VirtualBoundedRepeat { .. } => None,
+            Self::VirtualFixedSequence { .. } | Self::VirtualBoundedRepeat { .. } => None,
         }
     }
 
@@ -5899,6 +5968,7 @@ fn product_component_mapping_dfa(component: &ProductComponent) -> Option<DFA> {
         | ProductComponent::MaterializedZeroMinRepeatSuffix { dfa, .. } => {
             Some(dfa.as_ref().clone())
         }
+        ProductComponent::VirtualFixedSequence { .. } => None,
         ProductComponent::VirtualBoundedRepeat {
             base_dfa,
             min,
@@ -6943,6 +7013,19 @@ fn augment_product_dfa_from_seed_tuples(
                     }
                 }
                 (
+                    ProductComponent::VirtualFixedSequence { .. },
+                    ProductComponentClassTransitions::VirtualFixedSequence(transitions),
+                ) => {
+                    for &(class, target) in &transitions[component_state as usize] {
+                        let class = class as usize;
+                        if !class_active[class] {
+                            class_active[class] = true;
+                            used_classes.push(class);
+                        }
+                        class_buffers[class].push((component_id, target));
+                    }
+                }
+                (
                     ProductComponent::VirtualBoundedRepeat { base_dfa, max, .. },
                     ProductComponentClassTransitions::VirtualBoundedRepeat(transitions),
                 ) => {
@@ -7442,6 +7525,7 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
                 let kind = |component: &ProductComponent| match component {
                     ProductComponent::Materialized(_)
                     | ProductComponent::MaterializedZeroMinRepeatSuffix { .. } => "materialized",
+                    ProductComponent::VirtualFixedSequence { .. } => "virtual_fixed_sequence",
                     ProductComponent::VirtualBoundedRepeat { .. } => "virtual_bounded_repeat",
                 };
                 eprintln!(
@@ -7828,6 +7912,7 @@ pub(crate) fn compile_terminal_expression_pair_with_structural_map(
 
 enum ProductComponentClassTransitions {
     Materialized(Vec<Vec<(u8, u32)>>),
+    VirtualFixedSequence(Vec<Vec<(u8, u32)>>),
     VirtualBoundedRepeat(Vec<Vec<(u8, u32)>>),
 }
 
@@ -7836,7 +7921,34 @@ impl ProductComponent {
         match self {
             ProductComponent::Materialized(dfa)
             | ProductComponent::MaterializedZeroMinRepeatSuffix { dfa, .. } => dfa,
+            ProductComponent::VirtualFixedSequence { .. } => {
+                panic!("virtual fixed sequences do not materialize a partition DFA")
+            }
             ProductComponent::VirtualBoundedRepeat { base_dfa, .. } => base_dfa,
+        }
+    }
+
+    fn profile_state_count(&self) -> usize {
+        match self {
+            ProductComponent::Materialized(dfa)
+            | ProductComponent::MaterializedZeroMinRepeatSuffix { dfa, .. } => dfa.num_states(),
+            ProductComponent::VirtualFixedSequence { byte_sets, .. } => byte_sets.len() + 1,
+            ProductComponent::VirtualBoundedRepeat { base_dfa, .. } => base_dfa.num_states(),
+        }
+    }
+
+    fn profile_transition_count(&self) -> usize {
+        match self {
+            ProductComponent::Materialized(dfa)
+            | ProductComponent::MaterializedZeroMinRepeatSuffix { dfa, .. } => {
+                dfa_transition_count(dfa)
+            }
+            ProductComponent::VirtualFixedSequence { byte_sets, .. } => {
+                byte_sets.iter().map(U8Set::len).sum()
+            }
+            ProductComponent::VirtualBoundedRepeat { base_dfa, .. } => {
+                dfa_transition_count(base_dfa)
+            }
         }
     }
 
@@ -7846,6 +7958,7 @@ impl ProductComponent {
             | ProductComponent::MaterializedZeroMinRepeatSuffix { dfa, .. } => {
                 explicit_dead_sink_state(dfa)
             }
+            ProductComponent::VirtualFixedSequence { .. } => None,
             ProductComponent::VirtualBoundedRepeat { base_dfa, .. } => explicit_dead_sink_state(base_dfa),
         }
     }
@@ -7854,6 +7967,7 @@ impl ProductComponent {
 fn compile_product_component_with_options(
     expr: &Expr,
     preserve_coordinates: bool,
+    virtual_fixed_sequences: bool,
 ) -> ProductComponent {
     if preserve_coordinates
         && let Some(trace) = zero_min_repeat_suffix_component_trace(expr)
@@ -7864,10 +7978,26 @@ fn compile_product_component_with_options(
             trace: Arc::new(trace),
         };
     }
-    match expr {
-        Expr::Shared(inner) => {
-            compile_product_component_with_options(inner, preserve_coordinates)
+    if !preserve_coordinates && virtual_fixed_sequences {
+        let mut byte_sets = Vec::new();
+        if collect_fixed_sequence_byte_sets(expr, &mut byte_sets) {
+            let mut suffix_live = vec![false; byte_sets.len() + 1];
+            suffix_live[byte_sets.len()] = true;
+            for position in (0..byte_sets.len()).rev() {
+                suffix_live[position] = !byte_sets[position].is_empty() && suffix_live[position + 1];
+            }
+            return ProductComponent::VirtualFixedSequence {
+                byte_sets: Arc::from(byte_sets.into_boxed_slice()),
+                suffix_live: Arc::from(suffix_live.into_boxed_slice()),
+            };
         }
+    }
+    match expr {
+        Expr::Shared(inner) => compile_product_component_with_options(
+            inner,
+            preserve_coordinates,
+            virtual_fixed_sequences,
+        ),
         Expr::Repeat {
             expr: repeat_expr,
             min,
@@ -7898,7 +8028,7 @@ fn compile_product_component_with_options(
 }
 
 fn compile_product_component(expr: &Expr) -> ProductComponent {
-    compile_product_component_with_options(expr, false)
+    compile_product_component_with_options(expr, false, true)
 }
 
 fn deterministic_component_homomorphism_state_map(
@@ -7953,6 +8083,7 @@ fn compile_product_components_profiled(
     exprs: &[Expr],
     profile_detail: bool,
     preserve_coordinates: bool,
+    virtual_fixed_sequences: bool,
 ) -> (
     Vec<ProductComponent>,
     usize,
@@ -7982,15 +8113,22 @@ fn compile_product_components_profiled(
         .map(|expr| {
             if profile_detail {
                 let started_at = Instant::now();
-                let component =
-                    compile_product_component_with_options(expr, preserve_coordinates);
+                let component = compile_product_component_with_options(
+                    expr,
+                    preserve_coordinates,
+                    virtual_fixed_sequences,
+                );
                 (
                     component,
                     Some(started_at.elapsed().as_secs_f64() * 1000.0),
                 )
             } else {
                 (
-                    compile_product_component_with_options(expr, preserve_coordinates),
+                    compile_product_component_with_options(
+                        expr,
+                        preserve_coordinates,
+                        virtual_fixed_sequences,
+                    ),
                     None,
                 )
             }
@@ -8011,8 +8149,8 @@ fn compile_product_components_profiled(
                 first_group_index: unique_first_group_indices[index],
                 uses: uses[index],
                 compile_ms: compile_ms.unwrap_or_default(),
-                states: component.partition_dfa().num_states(),
-                transitions: dfa_transition_count(component.partition_dfa()),
+                states: component.profile_state_count(),
+                transitions: component.profile_transition_count(),
             })
             .collect::<Vec<_>>()
     });
@@ -8025,7 +8163,7 @@ fn compile_product_components_profiled(
 
 fn compile_product_components(exprs: &[Expr]) -> (Vec<ProductComponent>, usize) {
     let (components, cache_hits, _) =
-        compile_product_components_profiled(exprs, false, false);
+        compile_product_components_profiled(exprs, false, false, true);
     (components, cache_hits)
 }
 
@@ -8036,6 +8174,7 @@ fn build_product_dfa(
     exclusions: &BTreeMap<u32, BTreeSet<u32>>,
     intersections: &BTreeMap<u32, BTreeSet<u32>>,
     capture_trace: bool,
+    virtual_fixed_sequences: bool,
 ) -> (DFA, bool, Option<ProductBuildTrace>) {
     let profile_trace = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TRACE").is_some();
     let profile_detail = profile_trace
@@ -8045,7 +8184,12 @@ fn build_product_dfa(
     let profile_started_at = Instant::now();
     let component_compile_started_at = Instant::now();
     let (components, component_cache_hits, component_profiles) =
-        compile_product_components_profiled(exprs, profile_detail, capture_trace);
+        compile_product_components_profiled(
+            exprs,
+            profile_detail,
+            capture_trace,
+            virtual_fixed_sequences,
+        );
     let component_compile_ms = profile_timing
         .then(|| component_compile_started_at.elapsed().as_secs_f64() * 1000.0);
     if profile_timing {
@@ -8207,6 +8351,19 @@ fn build_product_dfa(
                             continue;
                         }
 
+                        class_buffers[class_index].push((group_id, target));
+                    }
+                }
+                (
+                    ProductComponent::VirtualFixedSequence { .. },
+                    ProductComponentClassTransitions::VirtualFixedSequence(class_transitions),
+                ) => {
+                    for &(class_id, target) in &class_transitions[component_state as usize] {
+                        let class_index = class_id as usize;
+                        if !class_active[class_index] {
+                            class_active[class_index] = true;
+                            used_classes.push(class_index);
+                        }
                         class_buffers[class_index].push((group_id, target));
                     }
                 }
@@ -8411,21 +8568,33 @@ fn compute_product_equivalence_classes(components: &[ProductComponent]) -> (Vec<
     let mut seen_sets = FxHashSet::default();
 
     for component in components {
-        let dfa = component.partition_dfa();
-        for state in dfa.states() {
-            let mut bytes_by_target = FxHashMap::<u32, U8Set>::default();
-            for (byte, &target) in state.transitions.iter() {
-                bytes_by_target
-                    .entry(target)
-                    .and_modify(|set| {
-                        set.insert(byte);
-                    })
-                    .or_insert_with(|| U8Set::single(byte));
-            }
+        match component {
+            ProductComponent::Materialized(dfa)
+            | ProductComponent::MaterializedZeroMinRepeatSuffix { dfa, .. }
+            | ProductComponent::VirtualBoundedRepeat { base_dfa: dfa, .. } => {
+                for state in dfa.states() {
+                    let mut bytes_by_target = FxHashMap::<u32, U8Set>::default();
+                    for (byte, &target) in state.transitions.iter() {
+                        bytes_by_target
+                            .entry(target)
+                            .and_modify(|set| {
+                                set.insert(byte);
+                            })
+                            .or_insert_with(|| U8Set::single(byte));
+                    }
 
-            for byte_set in bytes_by_target.into_values() {
-                if seen_sets.insert(byte_set) {
-                    partitions = refine_u8_partitions(partitions, byte_set);
+                    for byte_set in bytes_by_target.into_values() {
+                        if seen_sets.insert(byte_set) {
+                            partitions = refine_u8_partitions(partitions, byte_set);
+                        }
+                    }
+                }
+            }
+            ProductComponent::VirtualFixedSequence { byte_sets, .. } => {
+                for &byte_set in byte_sets.iter() {
+                    if seen_sets.insert(byte_set) {
+                        partitions = refine_u8_partitions(partitions, byte_set);
+                    }
                 }
             }
         }
@@ -8470,6 +8639,25 @@ fn build_product_class_transitions(
                 ProductComponentClassTransitions::Materialized(build_product_class_transitions_for_dfa(
                     dfa, class_map,
                 ))
+            }
+            ProductComponent::VirtualFixedSequence { byte_sets, .. } => {
+                let mut transitions = Vec::with_capacity(byte_sets.len() + 1);
+                for (position, bytes) in byte_sets.iter().enumerate() {
+                    let mut classes = bytes
+                        .iter()
+                        .map(|byte| class_map[byte as usize])
+                        .collect::<Vec<_>>();
+                    classes.sort_unstable();
+                    classes.dedup();
+                    transitions.push(
+                        classes
+                            .into_iter()
+                            .map(|class| (class, position as u32 + 1))
+                            .collect(),
+                    );
+                }
+                transitions.push(Vec::new());
+                ProductComponentClassTransitions::VirtualFixedSequence(transitions)
             }
             ProductComponent::VirtualBoundedRepeat { base_dfa, .. } => {
                 ProductComponentClassTransitions::VirtualBoundedRepeat(
@@ -9094,7 +9282,7 @@ fn try_compile_lazy_zero_min_repeat_intersection(
         })?;
     let other_index = 1 - lazy_index;
     let other_component =
-        compile_product_component_with_options(&plan.compiled_exprs[other_index], true);
+        compile_product_component_with_options(&plan.compiled_exprs[other_index], true, true);
     let other_dfa = other_component.materialized_dfa()?;
     let other_dead = other_component.dead_state();
 
@@ -9293,7 +9481,7 @@ fn try_compile_with_plan_deferred_dense(
         return Ok((DeferredDfa::Ready(dfa), Some(trace)));
     }
     let (components, component_cache_hits, _) =
-        compile_product_components_profiled(&plan.compiled_exprs, profile_detail, true);
+        compile_product_components_profiled(&plan.compiled_exprs, profile_detail, true, true);
     if profile_timing {
         eprintln!(
             "[glrmask/profile][tokenizer] deferred_product_component_cache groups={} unique_components={} cache_hits={}",
@@ -11494,6 +11682,75 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn direct_fixed_sequence_component_matches_generic_compilation() {
+        let expression = Expr::Seq(vec![
+            Expr::U8Class(U8Set::from_bytes(b"+-")),
+            Expr::Shared(Arc::new(Expr::U8Seq(b"ab".to_vec()))),
+            Expr::Epsilon,
+            Expr::U8Class(U8Set::from_bytes(b"xy")),
+        ]);
+        let direct = super::compile_product_component_dfa_direct(&expression)
+            .expect("fixed sequence should compile directly")
+            .0;
+        let generic = super::compile_product_component_dfa(&expression);
+        let direct = super::Regex { dfa: direct }.into_tokenizer(1, None);
+        let generic = super::Regex { dfa: generic }.into_tokenizer(1, None);
+
+        for input in enumerate_inputs(b"+-abxyz", 4) {
+            assert_eq!(
+                tokenizer_observation(&direct, &input),
+                tokenizer_observation(&generic, &input),
+                "direct fixed sequence differed for input {input:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn virtual_fixed_sequence_components_preserve_exact_product_layout() {
+        let expressions = vec![
+            Expr::Seq(vec![
+                Expr::U8Class(U8Set::from_bytes(b"+-")),
+                Expr::U8Seq(b"alpha".to_vec()),
+            ]),
+            Expr::U8Seq(b" beta".to_vec()),
+            Expr::Seq(vec![
+                Expr::U8Class(U8Set::from_bytes(b"xy")),
+                Expr::U8Class(U8Set::from_bytes(b"12")),
+            ]),
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"ab"))),
+                min: 1,
+                max: Some(3),
+            },
+        ];
+        let exclusions = BTreeMap::new();
+        let intersections = BTreeMap::new();
+
+        let baseline = super::build_product_dfa(
+            &expressions,
+            None,
+            expressions.len(),
+            &exclusions,
+            &intersections,
+            false,
+            false,
+        )
+        .0;
+        let virtualized = super::build_product_dfa(
+            &expressions,
+            None,
+            expressions.len(),
+            &exclusions,
+            &intersections,
+            false,
+            true,
+        )
+        .0;
+
+        assert_eq!(virtualized, baseline);
     }
 
     #[test]

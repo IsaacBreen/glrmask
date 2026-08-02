@@ -350,7 +350,7 @@ fn advance_concrete_stacks_reference(
                 }
             }
             Action::ReplaceShifts(targets) => {
-                for target in targets {
+                for target in targets.iter() {
                     if let Some(next) = apply_concrete_stack_effect(&stack, 1, &[*target]) {
                         merge_concrete_path_accumulator(&mut shifted, next, acc.clone());
                     }

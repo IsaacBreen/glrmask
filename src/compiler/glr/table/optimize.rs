@@ -2617,7 +2617,7 @@ fn collect_suffix_effects_from_frame(
                 Ok(())
             }
             Action::ReplaceShifts(targets) => {
-                for &target in targets {
+                for &target in targets.iter() {
                     let mut frame = frame.clone();
                     pop_frame(&mut frame, 1);
                     frame.pushes.push(target);
@@ -3026,7 +3026,7 @@ fn push_action_targets(action: &Action, reachable: &mut [bool], stack: &mut Vec<
     match action {
         Action::Shift(target, _) => push_reachable_state(*target, reachable, stack),
         Action::ReplaceShifts(targets) => {
-            for &state in targets {
+            for &state in targets.iter() {
                 push_reachable_state(state, reachable, stack);
             }
         }
@@ -3976,7 +3976,7 @@ fn stack_effects_for_action(
                 out.push(frame_to_guarded_shift(frame));
             }
             Action::ReplaceShifts(targets) => {
-                for &target in targets {
+                for &target in targets.iter() {
                     let mut frame = frame.clone();
                     pop_frame(&mut frame, 1);
                     frame.pushes.push(target);
@@ -5907,11 +5907,13 @@ fn remap_action_targets_in_place(action: &mut Action, mapping: &[u32]) {
             *target = mapping[*target as usize];
         }
         Action::ReplaceShifts(targets) => {
-            for target in targets.iter_mut() {
-                *target = mapping[*target as usize];
-            }
-            targets.sort_unstable();
-            targets.dedup();
+            let mut remapped = targets
+                .iter()
+                .map(|&target| mapping[target as usize])
+                .collect::<Vec<_>>();
+            remapped.sort_unstable();
+            remapped.dedup();
+            *targets = remapped.into();
         }
         Action::StackShifts(shifts) => {
             for shift in shifts.iter_mut() {
@@ -5960,7 +5962,7 @@ fn remap_action_targets(action: &Action, mapping: &[u32]) -> Action {
                 .collect::<Vec<_>>();
             targets.sort_unstable();
             targets.dedup();
-            Action::ReplaceShifts(targets)
+            Action::ReplaceShifts(targets.into())
         }
         Action::StackShifts(shifts) => {
             let mut remapped = shifts

@@ -846,7 +846,7 @@ impl Constraint {
             };
             let (action_origin, mut action_states) = match action {
                 Action::ReplaceShifts(targets) => {
-                    (targets.as_ptr() as usize, targets.clone())
+                    (targets.as_ptr() as usize, targets.to_vec())
                 }
                 Action::StackShifts(shifts)
                     if shifts

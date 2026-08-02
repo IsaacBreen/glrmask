@@ -4873,7 +4873,7 @@ fn apply_terminal_to_flat_stacks(
                 }
             }
             Action::ReplaceShifts(targets) => {
-                for &target in targets {
+                for &target in targets.iter() {
                     let mut candidate = stack.clone();
                     if apply_flat_stack_effect(&mut candidate, 1, &[target])?
                         && !scratch.push_complete(candidate)
