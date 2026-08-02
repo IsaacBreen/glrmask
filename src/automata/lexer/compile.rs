@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::hash::Hash;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
@@ -94,9 +95,7 @@ impl RepeatBodyLanguageKey {
 
 #[derive(Default)]
 pub(crate) struct VocabularyRepeatHorizonCache {
-    horizons: Mutex<
-        FxHashMap<RepeatBodyLanguageKey, Arc<OnceLock<Option<usize>>>>,
-    >,
+    horizons: Mutex<FxHashMap<RepeatBodyLanguageKey, Option<usize>>>,
 }
 
 impl VocabularyRepeatHorizonCache {
@@ -106,18 +105,25 @@ impl VocabularyRepeatHorizonCache {
 
     pub(crate) fn horizon_for_dfa(&self, body: &DFA, vocab: &Vocab) -> Option<usize> {
         let key = RepeatBodyLanguageKey::from_dfa(body);
-        let cell = self
+        if let Some(cached) = self
             .horizons
             .lock()
             .ok()
-            .map(|mut horizons| {
-                Arc::clone(
-                    horizons
-                        .entry(key)
-                        .or_insert_with(|| Arc::new(OnceLock::new())),
-                )
-            })?;
-        *cell.get_or_init(|| vocabulary_repeat_boundary_horizon_for_dfa_uncached(body, vocab))
+            .and_then(|horizons| horizons.get(&key).copied())
+        {
+            return cached;
+        }
+
+        // Compute outside the cache lock and never block a Rayon worker on an
+        // in-progress value. The horizon computation itself uses nested Rayon
+        // work; an OnceLock per key lets sibling terminal jobs occupy every
+        // worker while waiting for the initializer, starving that initializer's
+        // children and deadlocking a cold build. Concurrent misses may duplicate
+        // this bounded computation, then race to publish the same deterministic
+        // result.
+        let computed = vocabulary_repeat_boundary_horizon_for_dfa_uncached(body, vocab);
+        let mut horizons = self.horizons.lock().ok()?;
+        *horizons.entry(key).or_insert(computed)
     }
 
     pub(crate) fn horizon_for_expr(&self, body: &Expr, vocab: &Vocab) -> Option<usize> {
@@ -1527,19 +1533,780 @@ fn compile_expr_to_dfa(expr: &Expr) -> DFA {
     nfa.to_minimized_dfa()
 }
 
-/// Compile an explicit expression-labelled graph into one byte-level lexer DFA.
-///
-/// The outer graph is retained directly. Each labelled edge is expanded only
-/// between its source and target states, so a large right-linear dependency
-/// graph does not first become a recursively duplicated expression tree.
-pub(crate) fn compile_expression_labeled_nfa(
+fn direct_expression_graph_byte_classes(local_dfas: &[DFA]) -> (Vec<u8>, Vec<Vec<u8>>) {
+    let mut classes = vec![0u8; 256];
+    let mut num_classes = 1usize;
+    for dfa in local_dfas {
+        for state in 0..dfa.num_states() as u32 {
+            if num_classes == 256 {
+                break;
+            }
+            let mut keys = FxHashMap::<(u8, u32), u8>::default();
+            let mut refined = vec![0u8; 256];
+            let mut next_class = 0u16;
+            for byte in 0u8..=255 {
+                let key = (classes[byte as usize], dfa.step(state, byte).unwrap_or(u32::MAX));
+                let class = *keys.entry(key).or_insert_with(|| {
+                    let class = next_class as u8;
+                    next_class += 1;
+                    class
+                });
+                refined[byte as usize] = class;
+            }
+            if refined != classes {
+                classes = refined;
+                num_classes = next_class as usize;
+            }
+        }
+    }
+    let mut members = vec![Vec::<u8>::new(); num_classes];
+    for byte in 0u8..=255 {
+        members[classes[byte as usize] as usize].push(byte);
+    }
+    (classes, members)
+}
+
+fn direct_expression_graph_class_transitions(
+    local_dfas: &[DFA],
+    class_members: &[Vec<u8>],
+) -> Vec<Vec<Box<[(u8, u32)]>>> {
+    local_dfas
+        .iter()
+        .map(|dfa| {
+            (0..dfa.num_states() as u32)
+                .map(|state| {
+                    let mut transitions = Vec::new();
+                    for (class, members) in class_members.iter().enumerate() {
+                        let target = dfa.step(state, members[0]);
+                        debug_assert!(members
+                            .iter()
+                            .all(|&byte| dfa.step(state, byte) == target));
+                        if let Some(target) = target {
+                            transitions.push((class as u8, target));
+                        }
+                    }
+                    transitions.into_boxed_slice()
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn expand_direct_expression_graph_classes(dfa: &mut DFA, class_members: &[Vec<u8>]) {
+    let expanded = dfa
+        .states()
+        .iter()
+        .map(|state| {
+            let capacity = state
+                .transitions
+                .iter()
+                .map(|(class, _)| class_members[class as usize].len())
+                .sum();
+            let mut entries = Vec::with_capacity(capacity);
+            for (class, &target) in state.transitions.iter() {
+                entries.extend(
+                    class_members[class as usize]
+                        .iter()
+                        .map(|&byte| (byte, target)),
+                );
+            }
+            entries.sort_unstable_by_key(|entry| entry.0);
+            crate::ds::char_transitions::CharTransitions::from_sorted_entries(entries)
+        })
+        .collect::<Vec<_>>();
+    for (state, transitions) in dfa.states_mut().iter_mut().zip(expanded) {
+        state.transitions = transitions;
+    }
+}
+
+struct DirectExpressionGraphEdge {
+    symbol: usize,
+    targets: Box<[u32]>,
+    config_base: u32,
+}
+
+struct DirectReadyExpansion {
+    configs: Box<[u32]>,
+    accepting: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct DirectGroupedConfig {
+    symbol: u32,
+    local_state: u32,
+    edge_set: u32,
+}
+
+#[derive(Clone, Debug)]
+struct DirectGroupedState {
+    accepting: bool,
+    groups: Box<[DirectGroupedConfig]>,
+    hash: u64,
+}
+
+impl DirectGroupedState {
+    fn new(accepting: bool, groups: Box<[DirectGroupedConfig]>) -> Self {
+        let mut hasher = rustc_hash::FxHasher::default();
+        std::hash::Hash::hash(&accepting, &mut hasher);
+        std::hash::Hash::hash(&groups, &mut hasher);
+        let hash = std::hash::Hasher::finish(&hasher);
+        Self {
+            accepting,
+            groups,
+            hash,
+        }
+    }
+}
+
+impl PartialEq for DirectGroupedState {
+    fn eq(&self, other: &Self) -> bool {
+        self.hash == other.hash
+            && self.accepting == other.accepting
+            && self.groups == other.groups
+    }
+}
+
+impl Eq for DirectGroupedState {}
+
+impl std::hash::Hash for DirectGroupedState {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write_u64(self.hash);
+    }
+}
+
+#[derive(Clone)]
+struct DirectGroupedContinuation {
+    accepting: bool,
+    groups: Box<[DirectGroupedConfig]>,
+}
+
+struct DirectEdgeSetInterner {
+    sets: Vec<Arc<[u32]>>,
+    map: FxHashMap<Arc<[u32]>, u32>,
+    union_cache: FxHashMap<Arc<[u32]>, u32>,
+    merge_buffer: Vec<u32>,
+    union_cache_hits: usize,
+    union_cache_misses: usize,
+}
+
+impl DirectEdgeSetInterner {
+    fn new() -> Self {
+        Self {
+            sets: Vec::new(),
+            map: FxHashMap::default(),
+            union_cache: FxHashMap::default(),
+            merge_buffer: Vec::new(),
+            union_cache_hits: 0,
+            union_cache_misses: 0,
+        }
+    }
+
+    fn intern_sorted(&mut self, edges: &[u32]) -> u32 {
+        debug_assert!(!edges.is_empty());
+        debug_assert!(edges.windows(2).all(|pair| pair[0] < pair[1]));
+        if let Some(&existing) = self.map.get(edges) {
+            return existing;
+        }
+        let id = self.sets.len() as u32;
+        let edges: Arc<[u32]> = Arc::from(edges);
+        self.map.insert(Arc::clone(&edges), id);
+        self.sets.push(edges);
+        id
+    }
+
+    fn get(&self, id: u32) -> &[u32] {
+        &self.sets[id as usize]
+    }
+
+    fn union(&mut self, ids: &[u32]) -> u32 {
+        debug_assert!(!ids.is_empty());
+        debug_assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
+        if ids.len() == 1 {
+            return ids[0];
+        }
+        if let Some(&existing) = self.union_cache.get(ids) {
+            self.union_cache_hits += 1;
+            return existing;
+        }
+        self.union_cache_misses += 1;
+        self.merge_buffer.clear();
+        for &id in ids {
+            self.merge_buffer
+                .extend_from_slice(&self.sets[id as usize]);
+        }
+        self.merge_buffer.sort_unstable();
+        self.merge_buffer.dedup();
+        let result = if let Some(&existing) = self.map.get(self.merge_buffer.as_slice()) {
+            existing
+        } else {
+            let id = self.sets.len() as u32;
+            let edges: Arc<[u32]> = Arc::from(self.merge_buffer.as_slice());
+            self.map.insert(Arc::clone(&edges), id);
+            self.sets.push(edges);
+            id
+        };
+        self.union_cache.insert(Arc::from(ids), result);
+        result
+    }
+}
+
+fn group_direct_configs(
+    configs: &[u32],
+    config_edge: &[u32],
+    config_local_state: &[u32],
+    edges: &[DirectExpressionGraphEdge],
+    edge_sets: &mut DirectEdgeSetInterner,
+) -> Box<[DirectGroupedConfig]> {
+    let mut entries = configs
+        .iter()
+        .map(|&config| {
+            let edge = config_edge[config as usize];
+            let edge_data = &edges[edge as usize];
+            (
+                edge_data.symbol as u32,
+                config_local_state[config as usize],
+                edge,
+            )
+        })
+        .collect::<Vec<_>>();
+    entries.sort_unstable();
+    entries.dedup();
+    let mut groups = Vec::new();
+    let mut position = 0usize;
+    while position < entries.len() {
+        let (symbol, local_state, _) = entries[position];
+        let start = position;
+        position += 1;
+        while position < entries.len()
+            && entries[position].0 == symbol
+            && entries[position].1 == local_state
+        {
+            position += 1;
+        }
+        let edge_ids = entries[start..position]
+            .iter()
+            .map(|entry| entry.2)
+            .collect::<Vec<_>>();
+        let edge_set = edge_sets.intern_sorted(&edge_ids);
+        groups.push(DirectGroupedConfig {
+            symbol,
+            local_state,
+            edge_set,
+        });
+    }
+    groups.into_boxed_slice()
+}
+
+fn canonicalize_direct_group_fragments(
+    fragments: &mut Vec<DirectGroupedConfig>,
+    edge_sets: &mut DirectEdgeSetInterner,
+    edge_set_ids: &mut Vec<u32>,
+    output: &mut Vec<DirectGroupedConfig>,
+) {
+    fragments.sort_unstable();
+    output.clear();
+    let mut position = 0usize;
+    while position < fragments.len() {
+        let symbol = fragments[position].symbol;
+        let local_state = fragments[position].local_state;
+        edge_set_ids.clear();
+        while position < fragments.len()
+            && fragments[position].symbol == symbol
+            && fragments[position].local_state == local_state
+        {
+            edge_set_ids.push(fragments[position].edge_set);
+            position += 1;
+        }
+        edge_set_ids.sort_unstable();
+        edge_set_ids.dedup();
+        output.push(DirectGroupedConfig {
+            symbol,
+            local_state,
+            edge_set: edge_sets.union(edge_set_ids),
+        });
+    }
+}
+
+fn compile_direct_expression_graph_grouped(
+    graph: &crate::automata::unweighted_u32::nfa::NFA,
+    edges: &[DirectExpressionGraphEdge],
+    config_edge: &[u32],
+    config_local_state: &[u32],
+    ready_expansions: &[DirectReadyExpansion],
+    initial_accepting: bool,
+    initial_configs: &[u32],
+    local_dfas: &[DFA],
+    local_class_transitions: &[Vec<Box<[(u8, u32)]>>],
+    class_members: &[Vec<u8>],
+    profile: bool,
+) -> DFA {
+    let setup_started = profile.then(Instant::now);
+    let mut edge_sets = DirectEdgeSetInterner::new();
+    let ready_groups = ready_expansions
+        .iter()
+        .map(|expansion| {
+            group_direct_configs(
+                &expansion.configs,
+                config_edge,
+                config_local_state,
+                edges,
+                &mut edge_sets,
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut fragments = Vec::<DirectGroupedConfig>::new();
+    let mut edge_set_ids = Vec::<u32>::new();
+    let mut canonical_groups = Vec::<DirectGroupedConfig>::new();
+    let grouped_continuations = edges
+        .iter()
+        .map(|edge| {
+            fragments.clear();
+            let mut accepting = false;
+            for &target in edge.targets.iter() {
+                accepting |= ready_expansions[target as usize].accepting;
+                fragments.extend_from_slice(&ready_groups[target as usize]);
+            }
+            canonicalize_direct_group_fragments(
+                &mut fragments,
+                &mut edge_sets,
+                &mut edge_set_ids,
+                &mut canonical_groups,
+            );
+            DirectGroupedContinuation {
+                accepting,
+                groups: canonical_groups.clone().into_boxed_slice(),
+            }
+        })
+        .collect::<Vec<_>>();
+    let initial_groups = group_direct_configs(
+        initial_configs,
+        config_edge,
+        config_local_state,
+        edges,
+        &mut edge_sets,
+    );
+    let setup_ms = setup_started.map_or(0.0, |started| {
+        started.elapsed().as_secs_f64() * 1000.0
+    });
+
+    let determinize_started = profile.then(Instant::now);
+    let initial = Arc::new(DirectGroupedState::new(initial_accepting, initial_groups));
+    let mut dfa = DFA::new(1);
+    dfa.ensure_group_capacity(1);
+    let state_capacity = config_edge.len().max(edges.len() * 8);
+    let mut state_map = FxHashMap::<Arc<DirectGroupedState>, u32>::default();
+    state_map.reserve(state_capacity);
+    state_map.insert(Arc::clone(&initial), 0);
+    let mut states = Vec::<Arc<DirectGroupedState>>::with_capacity(state_capacity);
+    states.push(initial);
+    let mut accepting_states = Vec::with_capacity(state_capacity);
+    accepting_states.push(initial_accepting);
+    let mut worklist = Vec::with_capacity(state_capacity);
+    worklist.push(0u32);
+
+    let num_classes = class_members.len();
+    let mut class_fragments = (0..num_classes)
+        .map(|_| Vec::<DirectGroupedConfig>::new())
+        .collect::<Vec<_>>();
+    let mut class_accepting = vec![false; num_classes];
+    let mut class_used = vec![false; num_classes];
+    let mut used_classes = Vec::<u8>::with_capacity(num_classes);
+    let mut target_groups = Vec::<DirectGroupedConfig>::new();
+    let mut state_hits = 0usize;
+    let mut state_misses = 0usize;
+    let mut source_groups = 0usize;
+    let mut direct_group_contributions = 0usize;
+    let mut continuation_group_contributions = 0usize;
+    let mut scan_duration = std::time::Duration::ZERO;
+    let mut canonicalize_duration = std::time::Duration::ZERO;
+    let mut lookup_duration = std::time::Duration::ZERO;
+
+    while let Some(source_state) = worklist.pop() {
+        let source = Arc::clone(&states[source_state as usize]);
+        if profile {
+            source_groups += source.groups.len();
+        }
+        let scan_started = profile.then(Instant::now);
+        for group in source.groups.iter().copied() {
+            let symbol = group.symbol as usize;
+            let local_dfa = &local_dfas[symbol];
+            for &(class, next_local) in
+                local_class_transitions[symbol][group.local_state as usize].iter()
+            {
+                let class_index = class as usize;
+                if !class_used[class_index] {
+                    class_used[class_index] = true;
+                    used_classes.push(class);
+                }
+                if !local_class_transitions[symbol][next_local as usize].is_empty() {
+                    class_fragments[class_index].push(DirectGroupedConfig {
+                        symbol: group.symbol,
+                        local_state: next_local,
+                        edge_set: group.edge_set,
+                    });
+                    if profile {
+                        direct_group_contributions += 1;
+                    }
+                }
+                if !local_dfa.finalizers(next_local).is_empty() {
+                    for &edge in edge_sets.get(group.edge_set) {
+                        let continuation = &grouped_continuations[edge as usize];
+                        class_accepting[class_index] |= continuation.accepting;
+                        class_fragments[class_index].extend_from_slice(&continuation.groups);
+                        if profile {
+                            continuation_group_contributions += continuation.groups.len();
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(started) = scan_started {
+            scan_duration += started.elapsed();
+        }
+
+        used_classes.sort_unstable();
+        let mut transitions = Vec::with_capacity(used_classes.len());
+        for &class in &used_classes {
+            let class_index = class as usize;
+            let canonicalize_started = profile.then(Instant::now);
+            canonicalize_direct_group_fragments(
+                &mut class_fragments[class_index],
+                &mut edge_sets,
+                &mut edge_set_ids,
+                &mut target_groups,
+            );
+            if let Some(started) = canonicalize_started {
+                canonicalize_duration += started.elapsed();
+            }
+            let accepting = class_accepting[class_index];
+            class_fragments[class_index].clear();
+            class_accepting[class_index] = false;
+            class_used[class_index] = false;
+            if target_groups.is_empty() && !accepting {
+                continue;
+            }
+
+            let lookup_started = profile.then(Instant::now);
+            let key = DirectGroupedState::new(
+                accepting,
+                std::mem::take(&mut target_groups).into_boxed_slice(),
+            );
+            let target = if let Some(&existing) = state_map.get(&key) {
+                if profile {
+                    state_hits += 1;
+                }
+                target_groups = key.groups.into_vec();
+                existing
+            } else {
+                if profile {
+                    state_misses += 1;
+                }
+                let target = dfa.add_state();
+                let key = Arc::new(key);
+                state_map.insert(Arc::clone(&key), target);
+                states.push(key);
+                accepting_states.push(accepting);
+                worklist.push(target);
+                target_groups = Vec::new();
+                target
+            };
+            if let Some(started) = lookup_started {
+                lookup_duration += started.elapsed();
+            }
+            transitions.push((class, target));
+        }
+        used_classes.clear();
+        dfa.set_transitions_from_sorted_entries(source_state, transitions);
+    }
+    set_direct_expression_graph_finalizers(&mut dfa, &accepting_states);
+    let determinize_ms = determinize_started.map_or(0.0, |started| {
+        started.elapsed().as_secs_f64() * 1000.0
+    });
+    let pre_states = dfa.num_states();
+    let pre_transitions = dfa.transition_count();
+    let minimize_started = profile.then(Instant::now);
+    let mut minimized = dfa.minimize_owned_reachable();
+    let minimize_ms = minimize_started.map_or(0.0, |started| {
+        started.elapsed().as_secs_f64() * 1000.0
+    });
+    let post_class_transitions = minimized.transition_count();
+    let expand_started = profile.then(Instant::now);
+    expand_direct_expression_graph_classes(&mut minimized, class_members);
+    let expand_ms = expand_started.map_or(0.0, |started| {
+        started.elapsed().as_secs_f64() * 1000.0
+    });
+    if profile {
+        eprintln!(
+            "[glrmask/profile][tokenizer] grouped_expression_graph edge_sets={} union_cache_hits={} union_cache_misses={} pre_states={} pre_class_transitions={} post_states={} post_class_transitions={} post_byte_transitions={} avg_source_groups={:.2} direct_group_contributions={} continuation_group_contributions={} state_hits={} state_misses={} setup_ms={:.3} scan_ms={:.3} canonicalize_ms={:.3} lookup_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} expand_ms={:.3}",
+            edge_sets.sets.len(),
+            edge_sets.union_cache_hits,
+            edge_sets.union_cache_misses,
+            pre_states,
+            pre_transitions,
+            minimized.num_states(),
+            post_class_transitions,
+            minimized.transition_count(),
+            source_groups as f64 / pre_states.max(1) as f64,
+            direct_group_contributions,
+            continuation_group_contributions,
+            state_hits,
+            state_misses,
+            setup_ms,
+            scan_duration.as_secs_f64() * 1000.0,
+            canonicalize_duration.as_secs_f64() * 1000.0,
+            lookup_duration.as_secs_f64() * 1000.0,
+            determinize_ms,
+            minimize_ms,
+            expand_ms,
+        );
+    }
+    minimized
+}
+
+fn direct_expression_graph_ready_expansions(
+    graph: &crate::automata::unweighted_u32::nfa::NFA,
+    outgoing_edges: &[Vec<u32>],
+    edges: &[DirectExpressionGraphEdge],
+    local_dfas: &[DFA],
+    local_class_transitions: &[Vec<Box<[(u8, u32)]>>],
+) -> Vec<DirectReadyExpansion> {
+    let num_states = graph.states.len();
+    let mut marks = vec![0u32; num_states];
+    let mut generation = 0u32;
+    let mut stack = Vec::<u32>::new();
+    let mut configs = Vec::<u32>::new();
+    let mut result = Vec::with_capacity(num_states);
+
+    for root in 0..num_states {
+        generation = generation.wrapping_add(1);
+        if generation == 0 {
+            marks.fill(0);
+            generation = 1;
+        }
+        stack.clear();
+        configs.clear();
+        stack.push(root as u32);
+        marks[root] = generation;
+        let mut accepting = false;
+        while let Some(state) = stack.pop() {
+            let graph_state = &graph.states[state as usize];
+            accepting |= graph_state.is_accepting;
+            for &edge_id in &outgoing_edges[state as usize] {
+                let edge = &edges[edge_id as usize];
+                let local_dfa = &local_dfas[edge.symbol];
+                if !local_class_transitions[edge.symbol][0].is_empty() {
+                    configs.push(edge.config_base);
+                }
+                if !local_dfa.finalizers(0).is_empty() {
+                    for &target in edge.targets.iter() {
+                        let mark = &mut marks[target as usize];
+                        if *mark != generation {
+                            *mark = generation;
+                            stack.push(target);
+                        }
+                    }
+                }
+            }
+            for &target in &graph_state.epsilons {
+                let mark = &mut marks[target as usize];
+                if *mark != generation {
+                    *mark = generation;
+                    stack.push(target);
+                }
+            }
+        }
+        configs.sort_unstable();
+        configs.dedup();
+        result.push(DirectReadyExpansion {
+            configs: configs.clone().into_boxed_slice(),
+            accepting,
+        });
+    }
+    result
+}
+
+fn union_direct_ready_expansions(
+    targets: impl IntoIterator<Item = u32>,
+    expansions: &[DirectReadyExpansion],
+    config_marks: &mut [u32],
+    generation: &mut u32,
+    configs: &mut Vec<u32>,
+) -> bool {
+    *generation = generation.wrapping_add(1);
+    if *generation == 0 {
+        config_marks.fill(0);
+        *generation = 1;
+    }
+    configs.clear();
+    let mut accepting = false;
+    for target in targets {
+        let expansion = &expansions[target as usize];
+        accepting |= expansion.accepting;
+        for &config in expansion.configs.iter() {
+            let mark = &mut config_marks[config as usize];
+            if *mark != *generation {
+                *mark = *generation;
+                configs.push(config);
+            }
+        }
+    }
+    configs.sort_unstable();
+    accepting
+}
+
+fn set_direct_expression_graph_finalizers(dfa: &mut DFA, accepting: &[bool]) {
+    for (state, &is_accepting) in accepting.iter().enumerate() {
+        let mut finalizers = BitSet::new(1);
+        if is_accepting {
+            finalizers.set(0);
+        }
+        // The owned minimizer recomputes strict possible-future metadata after
+        // quotienting. Computing it on the pre-minimized graph would be a full
+        // redundant graph traversal.
+        dfa.overwrite_state_metadata(state as u32, finalizers, BitSet::new(1));
+    }
+}
+
+fn try_compile_expression_labeled_nfa_direct(
+    graph: &crate::automata::unweighted_u32::nfa::NFA,
+    symbols: &[Expr],
+    force: bool,
+) -> Result<Option<DFA>, String> {
+    let edge_group_count = graph
+        .states
+        .iter()
+        .map(|state| state.transitions.len())
+        .sum::<usize>();
+    if !force && (graph.states.len() < 128 || edge_group_count < 64) {
+        return Ok(None);
+    }
+
+    let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
+    let total_started = profile.then(Instant::now);
+    let local_started = profile.then(Instant::now);
+    let local_dfas = symbols
+        .par_iter()
+        .map(compile_terminal_expr_dfa)
+        .collect::<Vec<_>>();
+    let local_ms = local_started.map_or(0.0, |started| {
+        started.elapsed().as_secs_f64() * 1000.0
+    });
+    if local_dfas
+        .iter()
+        .any(|dfa| dfa.num_states() == 0 || dfa.epsilon_transition_count() != 0)
+    {
+        return Ok(None);
+    }
+
+    let (_byte_class_map, class_members) = direct_expression_graph_byte_classes(&local_dfas);
+    let local_class_transitions =
+        direct_expression_graph_class_transitions(&local_dfas, &class_members);
+
+    let setup_started = profile.then(Instant::now);
+    let mut outgoing_edges = vec![Vec::<u32>::new(); graph.states.len()];
+    let mut edges = Vec::<DirectExpressionGraphEdge>::with_capacity(edge_group_count);
+    let mut config_edge = Vec::<u32>::new();
+    let mut config_local_state = Vec::<u32>::new();
+    for (source, state) in graph.states.iter().enumerate() {
+        for (&label, targets) in &state.transitions {
+            let symbol = usize::try_from(label)
+                .map_err(|_| format!("NFA has invalid negative symbol label {label}"))?;
+            let local_dfa = local_dfas.get(symbol).ok_or_else(|| {
+                format!(
+                    "NFA symbol label {label} is out of range for {} symbols",
+                    symbols.len()
+                )
+            })?;
+            let config_base = u32::try_from(config_edge.len())
+                .map_err(|_| "direct expression graph configuration overflow".to_string())?;
+            let edge_id = u32::try_from(edges.len())
+                .map_err(|_| "direct expression graph edge overflow".to_string())?;
+            let mut checked_targets = Vec::with_capacity(targets.len());
+            for &target in targets {
+                if target as usize >= graph.states.len() {
+                    return Err(format!("NFA target state {target} is out of range"));
+                }
+                checked_targets.push(target);
+            }
+            checked_targets.sort_unstable();
+            checked_targets.dedup();
+            for local_state in 0..local_dfa.num_states() {
+                config_edge.push(edge_id);
+                config_local_state.push(local_state as u32);
+            }
+            edges.push(DirectExpressionGraphEdge {
+                symbol,
+                targets: checked_targets.into_boxed_slice(),
+                config_base,
+            });
+            outgoing_edges[source].push(edge_id);
+        }
+    }
+    if config_edge.is_empty() {
+        return Ok(None);
+    }
+
+    for &start in &graph.start_states {
+        if start as usize >= graph.states.len() {
+            return Err(format!("NFA start state {start} is out of range"));
+        }
+    }
+
+    let ready_expansions = direct_expression_graph_ready_expansions(
+        graph,
+        &outgoing_edges,
+        &edges,
+        &local_dfas,
+        &local_class_transitions,
+    );
+    let mut config_marks = vec![0u32; config_edge.len()];
+    let mut generation = 0u32;
+    let mut initial_configs = Vec::<u32>::new();
+    let initial_accepting = union_direct_ready_expansions(
+        graph.start_states.iter().copied(),
+        &ready_expansions,
+        &mut config_marks,
+        &mut generation,
+        &mut initial_configs,
+    );
+    let setup_ms = setup_started.map_or(0.0, |started| {
+        started.elapsed().as_secs_f64() * 1000.0
+    });
+
+    let result = compile_direct_expression_graph_grouped(
+        graph,
+        &edges,
+        &config_edge,
+        &config_local_state,
+        &ready_expansions,
+        initial_accepting,
+        &initial_configs,
+        &local_dfas,
+        &local_class_transitions,
+        &class_members,
+        profile,
+    );
+    if let Some(started) = total_started {
+        eprintln!(
+            "[glrmask/profile][tokenizer] grouped_expression_graph_total graph_states={} graph_edges={} symbols={} classes={} local_states={} configs={} local_ms={:.3} outer_setup_ms={:.3} total_ms={:.3}",
+            graph.states.len(),
+            edge_group_count,
+            symbols.len(),
+            class_members.len(),
+            local_dfas.iter().map(DFA::num_states).sum::<usize>(),
+            config_edge.len(),
+            local_ms,
+            setup_ms,
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    Ok(Some(result))
+}
+
+fn compile_expression_labeled_nfa_via_byte_nfa(
     graph: &crate::automata::unweighted_u32::nfa::NFA,
     symbols: &[Expr],
 ) -> Result<DFA, String> {
-    if graph.start_states.is_empty() {
-        return Err("expression-labelled NFA has no start state".to_string());
-    }
-
     // State zero is a synthetic root so multiple starts remain representable.
     let mut nfa = NFA::new(1);
     let state_map = (0..graph.states.len())
@@ -1586,6 +2353,25 @@ pub(crate) fn compile_expression_labeled_nfa(
 
     nfa.condense_epsilon_sccs();
     Ok(nfa.to_minimized_dfa())
+}
+
+/// Compile an explicit expression-labelled graph into one byte-level lexer DFA.
+///
+/// Large graphs are composed directly from independently compiled edge DFAs,
+/// including nullable edge languages. This preserves the graph's factorization
+/// and avoids constructing
+/// a global epsilon NFA whose powerset immediately has to rediscover it.
+pub(crate) fn compile_expression_labeled_nfa(
+    graph: &crate::automata::unweighted_u32::nfa::NFA,
+    symbols: &[Expr],
+) -> Result<DFA, String> {
+    if graph.start_states.is_empty() {
+        return Err("expression-labelled NFA has no start state".to_string());
+    }
+    if let Some(dfa) = try_compile_expression_labeled_nfa_direct(graph, symbols, false)? {
+        return Ok(dfa);
+    }
+    compile_expression_labeled_nfa_via_byte_nfa(graph, symbols)
 }
 
 fn productive_dfa_states(dfa: &DFA) -> Vec<bool> {
@@ -1948,6 +2734,270 @@ struct ZeroMinRepeatSuffixBuild {
     state_by_key: FxHashMap<ZeroMinRepeatSuffixState, u32>,
 }
 
+/// Lazily interns the exact dominance states for a zero-minimum bounded
+/// repeat followed by a non-nullable suffix. Product construction can then
+/// visit only component residuals that survive the other intersection
+/// coordinate instead of materializing every repeat-count layer first.
+struct LazyZeroMinRepeatSuffixComponent {
+    prefix: Vec<u8>,
+    body_dfa: DFA,
+    suffix_dfa: DFA,
+    max: usize,
+    group_u8set: U8Set,
+    tail_states: Vec<ZeroMinRepeatSuffixState>,
+    tail_state_by_key: FxHashMap<ZeroMinRepeatSuffixState, u32>,
+    class_count: usize,
+    class_targets: Vec<u32>,
+}
+
+impl LazyZeroMinRepeatSuffixComponent {
+    fn from_expr(expr: &Expr) -> Option<Self> {
+        let unwrapped = unwrap_shared(expr);
+        let Expr::Seq(parts) = unwrapped else {
+            return None;
+        };
+        let mut flat_parts = Vec::<Expr>::new();
+        for part in parts {
+            match unwrap_shared(part) {
+                Expr::Seq(inner) => flat_parts.extend(inner.iter().cloned()),
+                _ => flat_parts.push(part.clone()),
+            }
+        }
+
+        for repeat_index in 0..flat_parts.len().saturating_sub(1) {
+            let Expr::Repeat {
+                expr: body,
+                min: 0,
+                max: Some(max),
+            } = unwrap_shared(&flat_parts[repeat_index])
+            else {
+                continue;
+            };
+            // The lazy product is intended for very large bounded residuals
+            // whose eager constituent DFA would dominate compilation. Smaller
+            // repeats are already cheap to materialize and preserve better
+            // downstream state locality through the ordinary product path.
+            if *max < 1_024 {
+                continue;
+            }
+            let prefix = collect_suffix_bytes(&flat_parts[..repeat_index])?;
+            let suffix_expr = seq_from_parts(flat_parts[repeat_index + 1..].to_vec());
+            let body_dfa = compile_expr_to_dfa(body);
+            let suffix_dfa = compile_expr_to_dfa(&suffix_expr);
+            if body_dfa.num_states() == 0
+                || body_dfa.num_states() > 256
+                || body_dfa.finalizers(0).contains(0)
+                || suffix_dfa.num_states() == 0
+                || suffix_dfa.finalizers(0).contains(0)
+            {
+                continue;
+            }
+
+            let mut start_body = vec![u32::MAX; body_dfa.num_states()];
+            start_body[0] = 0;
+            let mut start_suffix = vec![0u32];
+            close_zero_min_repeat_suffix_state(
+                &mut start_body,
+                &mut start_suffix,
+                &body_dfa,
+                &suffix_dfa,
+                *max,
+            );
+            let start = ZeroMinRepeatSuffixState {
+                body_min_counts: start_body.into_boxed_slice(),
+                suffix_states: start_suffix.into_boxed_slice(),
+            };
+            let mut tail_state_by_key = FxHashMap::default();
+            tail_state_by_key.insert(start.clone(), 0);
+            return Some(Self {
+                prefix,
+                body_dfa,
+                suffix_dfa,
+                max: *max,
+                group_u8set: expr_u8set(expr),
+                tail_states: vec![start],
+                tail_state_by_key,
+                class_count: 0,
+                class_targets: Vec::new(),
+            });
+        }
+        None
+    }
+
+    fn prefix_len(&self) -> usize {
+        self.prefix.len()
+    }
+
+    fn num_states(&self) -> usize {
+        self.prefix.len() + self.tail_states.len()
+    }
+
+    fn start_state(&self) -> u32 {
+        0
+    }
+
+    fn prepare_classes(&mut self, class_count: usize) {
+        debug_assert_eq!(self.class_count, 0);
+        debug_assert!(self.class_targets.is_empty());
+        self.class_count = class_count;
+        self.class_targets = vec![u32::MAX; self.num_states().saturating_mul(class_count)];
+    }
+
+    fn is_accepting(&self, state: u32) -> bool {
+        let Some(tail) = (state as usize)
+            .checked_sub(self.prefix.len())
+            .and_then(|index| self.tail_states.get(index))
+        else {
+            return false;
+        };
+        tail.suffix_states
+            .iter()
+            .any(|&suffix_state| self.suffix_dfa.finalizers(suffix_state).contains(0))
+    }
+
+    fn has_future(&self, state: u32) -> bool {
+        if (state as usize) < self.prefix.len() {
+            return true;
+        }
+        let tail = &self.tail_states[state as usize - self.prefix.len()];
+        tail.body_min_counts.iter().any(|&count| count != u32::MAX)
+            || tail.suffix_states.iter().any(|&suffix_state| {
+                self.suffix_dfa
+                    .possible_future_group_ids(suffix_state)
+                    .contains(0)
+            })
+    }
+
+    fn step_class(&mut self, state: u32, class: u8, byte: u8) -> Option<u32> {
+        let cache_index = (state as usize)
+            .checked_mul(self.class_count)?
+            .checked_add(class as usize)?;
+        let cached = *self.class_targets.get(cache_index)?;
+        // `u32::MAX - 1` is the cached dead-transition sentinel. The real DFA
+        // state space is bounded far below it by the surrounding product.
+        const DEAD: u32 = u32::MAX - 1;
+        if cached == DEAD {
+            return None;
+        }
+        if cached != u32::MAX {
+            return Some(cached);
+        }
+        let target = self.step_uncached(state, byte).unwrap_or(DEAD);
+        self.class_targets[cache_index] = target;
+        if target == DEAD {
+            None
+        } else {
+            Some(target)
+        }
+    }
+
+    fn step_uncached(&mut self, state: u32, byte: u8) -> Option<u32> {
+        let state = state as usize;
+        if state < self.prefix.len() {
+            if self.prefix[state] != byte {
+                return None;
+            }
+            return Some((state + 1) as u32);
+        }
+
+        let tail_index = state - self.prefix.len();
+        let next = {
+            let current = self.tail_states.get(tail_index)?;
+            let mut next_body = vec![u32::MAX; self.body_dfa.num_states()];
+            for (body_state, &completed) in current.body_min_counts.iter().enumerate() {
+                if completed == u32::MAX {
+                    continue;
+                }
+                if let Some(target) = self.body_dfa.step(body_state as u32, byte) {
+                    let target_count = &mut next_body[target as usize];
+                    *target_count = (*target_count).min(completed);
+                }
+            }
+            let mut next_suffix = Vec::with_capacity(current.suffix_states.len());
+            for &suffix_state in current.suffix_states.iter() {
+                if let Some(target) = self.suffix_dfa.step(suffix_state, byte) {
+                    next_suffix.push(target);
+                }
+            }
+            close_zero_min_repeat_suffix_state(
+                &mut next_body,
+                &mut next_suffix,
+                &self.body_dfa,
+                &self.suffix_dfa,
+                self.max,
+            );
+            if next_body.iter().all(|&count| count == u32::MAX) && next_suffix.is_empty() {
+                return None;
+            }
+            ZeroMinRepeatSuffixState {
+                body_min_counts: next_body.into_boxed_slice(),
+                suffix_states: next_suffix.into_boxed_slice(),
+            }
+        };
+        let local = if let Some(&local) = self.tail_state_by_key.get(&next) {
+            local
+        } else {
+            let local = u32::try_from(self.tail_states.len()).ok()?;
+            self.tail_state_by_key.insert(next.clone(), local);
+            self.tail_states.push(next);
+            self.class_targets
+                .extend(std::iter::repeat_n(u32::MAX, self.class_count));
+            local
+        };
+        Some(self.prefix.len() as u32 + local)
+    }
+
+    fn into_product_component(
+        self,
+        class_members: &[Vec<u8>],
+    ) -> ProductComponent {
+        let mut dfa = DFA::new(self.num_states());
+        dfa.ensure_group_capacity(1);
+        dfa.set_group_u8set(0, self.group_u8set);
+        for state in 0..self.num_states() {
+            let mut finalizers = BitSet::new(1);
+            if self.is_accepting(state as u32) {
+                finalizers.set(0);
+            }
+            let mut future = BitSet::new(1);
+            if self.has_future(state as u32) {
+                future.set(0);
+            }
+            dfa.overwrite_state_metadata(state as u32, finalizers, future);
+            let mut transitions = Vec::new();
+            let row_start = state * self.class_count;
+            for class in 0..self.class_count {
+                let target = self.class_targets[row_start + class];
+                if target >= u32::MAX - 1 {
+                    continue;
+                }
+                transitions.extend(
+                    class_members[class]
+                        .iter()
+                        .copied()
+                        .map(|byte| (byte, target)),
+                );
+            }
+            transitions.sort_unstable_by_key(|entry| entry.0);
+            dfa.set_transitions_from_sorted_entries(state as u32, transitions);
+        }
+        let dfa = Arc::new(dfa);
+        let trace = ZeroMinRepeatSuffixComponentTrace {
+            dfa: Arc::clone(&dfa),
+            prefix_len: self.prefix.len(),
+            body_dfa: self.body_dfa,
+            suffix_dfa: self.suffix_dfa,
+            max: self.max,
+            tail_states: self.tail_states,
+            tail_state_by_key: self.tail_state_by_key,
+        };
+        ProductComponent::MaterializedZeroMinRepeatSuffix {
+            dfa,
+            trace: Arc::new(trace),
+        }
+    }
+}
+
 fn compute_dfa_byte_equivalence_classes(dfas: &[&DFA]) -> (Vec<u8>, Vec<Vec<u8>>) {
     let mut partitions = vec![U8Set::all()];
     let mut seen_sets = FxHashSet::default();
@@ -1969,6 +3019,40 @@ fn compute_dfa_byte_equivalence_classes(dfas: &[&DFA]) -> (Vec<u8>, Vec<Vec<u8>>
                 }
             }
         }
+    }
+
+    let mut class_map = vec![0u8; 256];
+    let mut class_members = vec![Vec::new(); partitions.len()];
+    for (class_id, partition) in partitions.iter().enumerate() {
+        for byte in partition.iter() {
+            class_map[byte as usize] = class_id as u8;
+            class_members[class_id].push(byte);
+        }
+    }
+    (class_map, class_members)
+}
+
+fn compute_lazy_zero_min_repeat_product_equivalence_classes(
+    lazy: &LazyZeroMinRepeatSuffixComponent,
+    other: &DFA,
+) -> (Vec<u8>, Vec<Vec<u8>>) {
+    let (_, class_members) = compute_dfa_byte_equivalence_classes(&[
+        &lazy.body_dfa,
+        &lazy.suffix_dfa,
+        other,
+    ]);
+    let mut partitions = class_members
+        .into_iter()
+        .map(|bytes| {
+            let mut set = U8Set::empty();
+            for byte in bytes {
+                set.insert(byte);
+            }
+            set
+        })
+        .collect::<Vec<_>>();
+    for &byte in &lazy.prefix {
+        partitions = refine_u8_partitions(partitions, U8Set::single(byte));
     }
 
     let mut class_map = vec![0u8; 256];
@@ -2724,6 +3808,7 @@ fn compile_with_plan_internal(
             &plan.exclusions,
             &plan.intersections,
             capture_product_trace,
+            true,
         )
     } else {
         (compile_single_expr_dfa(&plan.compiled_exprs[0]), false, None)
@@ -5018,6 +6103,20 @@ fn product_state_metadata(
                     future.set(group_id);
                 }
             }
+            ProductComponent::VirtualFixedSequence {
+                byte_sets,
+                suffix_live,
+            } => {
+                let position = state as usize;
+                if position == byte_sets.len() {
+                    finalizers.set(group_id);
+                }
+                if position < byte_sets.len()
+                    && suffix_live.get(position).copied().unwrap_or(false)
+                {
+                    future.set(group_id);
+                }
+            }
             ProductComponent::VirtualBoundedRepeat { base_dfa, min, max } => {
                 let base_state_count = base_dfa.num_states() as u32;
                 let copy_count = state / base_state_count;
@@ -5048,6 +6147,9 @@ fn product_state_single_visible_finalizer(
             ProductComponent::Materialized(dfa)
             | ProductComponent::MaterializedZeroMinRepeatSuffix { dfa, .. } => {
                 dfa.finalizers(state).contains(0)
+            }
+            ProductComponent::VirtualFixedSequence { byte_sets, .. } => {
+                state as usize == byte_sets.len()
             }
             ProductComponent::VirtualBoundedRepeat { base_dfa, min, .. } => {
                 let base_state_count = base_dfa.num_states() as u32;
@@ -5308,6 +6410,51 @@ fn mark_state_accepting(dfa: &mut DFA, state_id: u32) {
     dfa.overwrite_state_metadata(state_id, finalizers, future);
 }
 
+fn collect_fixed_sequence_byte_sets(expr: &Expr, byte_sets: &mut Vec<U8Set>) -> bool {
+    match expr {
+        Expr::U8Seq(bytes) => {
+            byte_sets.extend(bytes.iter().copied().map(U8Set::from_byte));
+            true
+        }
+        Expr::U8Class(bytes) => {
+            byte_sets.push(*bytes);
+            true
+        }
+        Expr::Seq(parts) => parts
+            .iter()
+            .all(|part| collect_fixed_sequence_byte_sets(part, byte_sets)),
+        Expr::Shared(inner) => collect_fixed_sequence_byte_sets(inner, byte_sets),
+        Expr::Epsilon => true,
+        Expr::Dfa(_)
+        | Expr::Choice(_)
+        | Expr::Exclude { .. }
+        | Expr::Intersect { .. }
+        | Expr::Repeat { .. } => false,
+    }
+}
+
+fn build_fixed_sequence_dfa(expr: &Expr) -> Option<DFA> {
+    let mut byte_sets = Vec::new();
+    collect_fixed_sequence_byte_sets(expr, &mut byte_sets).then(|| {
+        let mut dfa = DFA::new(byte_sets.len() + 1);
+        dfa.ensure_group_capacity(1);
+        dfa.set_group_u8set(0, expr_u8set(expr));
+        for (state, bytes) in byte_sets.into_iter().enumerate() {
+            dfa.set_transitions_from_sorted_entries(
+                state as u32,
+                bytes
+                    .iter()
+                    .map(|byte| (byte, state as u32 + 1))
+                    .collect(),
+            );
+        }
+        let final_state = (dfa.num_states() - 1) as u32;
+        mark_state_accepting(&mut dfa, final_state);
+        dfa.recompute_possible_futures();
+        dfa
+    })
+}
+
 fn compile_product_component_dfa_direct_with_options(
     expr: &Expr,
     preserve_coordinates: bool,
@@ -5363,7 +6510,9 @@ fn compile_product_component_dfa_direct_with_options(
             min,
             max: Some(max),
         } => build_bounded_repeat_dfa(expr, *min, *max).map(|dfa| (dfa, false)),
-        Expr::Seq(parts) => build_bounded_repeat_with_suffix_dfa(parts)
+        Expr::Seq(parts) => build_fixed_sequence_dfa(expr)
+            .map(|dfa| (dfa, false))
+            .or_else(|| build_bounded_repeat_with_suffix_dfa(parts))
             .or_else(|| {
                 build_bounded_repeat_with_regex_suffix_with_options(
                     parts,
@@ -5454,6 +6603,10 @@ enum ProductComponent {
         dfa: Arc<DFA>,
         trace: Arc<ZeroMinRepeatSuffixComponentTrace>,
     },
+    VirtualFixedSequence {
+        byte_sets: Arc<[U8Set]>,
+        suffix_live: Arc<[bool]>,
+    },
     VirtualBoundedRepeat {
         base_dfa: Arc<DFA>,
         min: u32,
@@ -5467,7 +6620,7 @@ impl ProductComponent {
             Self::Materialized(dfa) | Self::MaterializedZeroMinRepeatSuffix { dfa, .. } => {
                 Some(dfa)
             }
-            Self::VirtualBoundedRepeat { .. } => None,
+            Self::VirtualFixedSequence { .. } | Self::VirtualBoundedRepeat { .. } => None,
         }
     }
 
@@ -5596,6 +6749,7 @@ fn product_component_mapping_dfa(component: &ProductComponent) -> Option<DFA> {
         | ProductComponent::MaterializedZeroMinRepeatSuffix { dfa, .. } => {
             Some(dfa.as_ref().clone())
         }
+        ProductComponent::VirtualFixedSequence { .. } => None,
         ProductComponent::VirtualBoundedRepeat {
             base_dfa,
             min,
@@ -5974,7 +7128,7 @@ fn zero_min_repeat_suffix_candidate(
         .suffix_states
         .iter()
         .map(|&state| suffix_state_map[state as usize])
-        .collect::<Vec<_>>();
+        .collect::<Vec<u32>>();
     close_zero_min_repeat_suffix_state(
         &mut body_min_counts,
         &mut suffix_states,
@@ -6640,6 +7794,19 @@ fn augment_product_dfa_from_seed_tuples(
                     }
                 }
                 (
+                    ProductComponent::VirtualFixedSequence { .. },
+                    ProductComponentClassTransitions::VirtualFixedSequence(transitions),
+                ) => {
+                    for &(class, target) in &transitions[component_state as usize] {
+                        let class = class as usize;
+                        if !class_active[class] {
+                            class_active[class] = true;
+                            used_classes.push(class);
+                        }
+                        class_buffers[class].push((component_id, target));
+                    }
+                }
+                (
                     ProductComponent::VirtualBoundedRepeat { base_dfa, max, .. },
                     ProductComponentClassTransitions::VirtualBoundedRepeat(transitions),
                 ) => {
@@ -7139,6 +8306,7 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
                 let kind = |component: &ProductComponent| match component {
                     ProductComponent::Materialized(_)
                     | ProductComponent::MaterializedZeroMinRepeatSuffix { .. } => "materialized",
+                    ProductComponent::VirtualFixedSequence { .. } => "virtual_fixed_sequence",
                     ProductComponent::VirtualBoundedRepeat { .. } => "virtual_bounded_repeat",
                 };
                 eprintln!(
@@ -7525,6 +8693,7 @@ pub(crate) fn compile_terminal_expression_pair_with_structural_map(
 
 enum ProductComponentClassTransitions {
     Materialized(Vec<Vec<(u8, u32)>>),
+    VirtualFixedSequence(Vec<Vec<(u8, u32)>>),
     VirtualBoundedRepeat(Vec<Vec<(u8, u32)>>),
 }
 
@@ -7533,7 +8702,34 @@ impl ProductComponent {
         match self {
             ProductComponent::Materialized(dfa)
             | ProductComponent::MaterializedZeroMinRepeatSuffix { dfa, .. } => dfa,
+            ProductComponent::VirtualFixedSequence { .. } => {
+                panic!("virtual fixed sequences do not materialize a partition DFA")
+            }
             ProductComponent::VirtualBoundedRepeat { base_dfa, .. } => base_dfa,
+        }
+    }
+
+    fn profile_state_count(&self) -> usize {
+        match self {
+            ProductComponent::Materialized(dfa)
+            | ProductComponent::MaterializedZeroMinRepeatSuffix { dfa, .. } => dfa.num_states(),
+            ProductComponent::VirtualFixedSequence { byte_sets, .. } => byte_sets.len() + 1,
+            ProductComponent::VirtualBoundedRepeat { base_dfa, .. } => base_dfa.num_states(),
+        }
+    }
+
+    fn profile_transition_count(&self) -> usize {
+        match self {
+            ProductComponent::Materialized(dfa)
+            | ProductComponent::MaterializedZeroMinRepeatSuffix { dfa, .. } => {
+                dfa_transition_count(dfa)
+            }
+            ProductComponent::VirtualFixedSequence { byte_sets, .. } => {
+                byte_sets.iter().map(U8Set::len).sum()
+            }
+            ProductComponent::VirtualBoundedRepeat { base_dfa, .. } => {
+                dfa_transition_count(base_dfa)
+            }
         }
     }
 
@@ -7543,6 +8739,7 @@ impl ProductComponent {
             | ProductComponent::MaterializedZeroMinRepeatSuffix { dfa, .. } => {
                 explicit_dead_sink_state(dfa)
             }
+            ProductComponent::VirtualFixedSequence { .. } => None,
             ProductComponent::VirtualBoundedRepeat { base_dfa, .. } => explicit_dead_sink_state(base_dfa),
         }
     }
@@ -7551,6 +8748,7 @@ impl ProductComponent {
 fn compile_product_component_with_options(
     expr: &Expr,
     preserve_coordinates: bool,
+    virtual_fixed_sequences: bool,
 ) -> ProductComponent {
     if preserve_coordinates
         && let Some(trace) = zero_min_repeat_suffix_component_trace(expr)
@@ -7561,10 +8759,26 @@ fn compile_product_component_with_options(
             trace: Arc::new(trace),
         };
     }
-    match expr {
-        Expr::Shared(inner) => {
-            compile_product_component_with_options(inner, preserve_coordinates)
+    if !preserve_coordinates && virtual_fixed_sequences {
+        let mut byte_sets = Vec::new();
+        if collect_fixed_sequence_byte_sets(expr, &mut byte_sets) {
+            let mut suffix_live = vec![false; byte_sets.len() + 1];
+            suffix_live[byte_sets.len()] = true;
+            for position in (0..byte_sets.len()).rev() {
+                suffix_live[position] = !byte_sets[position].is_empty() && suffix_live[position + 1];
+            }
+            return ProductComponent::VirtualFixedSequence {
+                byte_sets: Arc::from(byte_sets.into_boxed_slice()),
+                suffix_live: Arc::from(suffix_live.into_boxed_slice()),
+            };
         }
+    }
+    match expr {
+        Expr::Shared(inner) => compile_product_component_with_options(
+            inner,
+            preserve_coordinates,
+            virtual_fixed_sequences,
+        ),
         Expr::Repeat {
             expr: repeat_expr,
             min,
@@ -7595,7 +8809,7 @@ fn compile_product_component_with_options(
 }
 
 fn compile_product_component(expr: &Expr) -> ProductComponent {
-    compile_product_component_with_options(expr, false)
+    compile_product_component_with_options(expr, false, true)
 }
 
 fn deterministic_component_homomorphism_state_map(
@@ -7650,6 +8864,7 @@ fn compile_product_components_profiled(
     exprs: &[Expr],
     profile_detail: bool,
     preserve_coordinates: bool,
+    virtual_fixed_sequences: bool,
 ) -> (
     Vec<ProductComponent>,
     usize,
@@ -7679,15 +8894,22 @@ fn compile_product_components_profiled(
         .map(|expr| {
             if profile_detail {
                 let started_at = Instant::now();
-                let component =
-                    compile_product_component_with_options(expr, preserve_coordinates);
+                let component = compile_product_component_with_options(
+                    expr,
+                    preserve_coordinates,
+                    virtual_fixed_sequences,
+                );
                 (
                     component,
                     Some(started_at.elapsed().as_secs_f64() * 1000.0),
                 )
             } else {
                 (
-                    compile_product_component_with_options(expr, preserve_coordinates),
+                    compile_product_component_with_options(
+                        expr,
+                        preserve_coordinates,
+                        virtual_fixed_sequences,
+                    ),
                     None,
                 )
             }
@@ -7708,8 +8930,8 @@ fn compile_product_components_profiled(
                 first_group_index: unique_first_group_indices[index],
                 uses: uses[index],
                 compile_ms: compile_ms.unwrap_or_default(),
-                states: component.partition_dfa().num_states(),
-                transitions: dfa_transition_count(component.partition_dfa()),
+                states: component.profile_state_count(),
+                transitions: component.profile_transition_count(),
             })
             .collect::<Vec<_>>()
     });
@@ -7722,7 +8944,7 @@ fn compile_product_components_profiled(
 
 fn compile_product_components(exprs: &[Expr]) -> (Vec<ProductComponent>, usize) {
     let (components, cache_hits, _) =
-        compile_product_components_profiled(exprs, false, false);
+        compile_product_components_profiled(exprs, false, false, true);
     (components, cache_hits)
 }
 
@@ -7733,6 +8955,7 @@ fn build_product_dfa(
     exclusions: &BTreeMap<u32, BTreeSet<u32>>,
     intersections: &BTreeMap<u32, BTreeSet<u32>>,
     capture_trace: bool,
+    virtual_fixed_sequences: bool,
 ) -> (DFA, bool, Option<ProductBuildTrace>) {
     let profile_trace = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TRACE").is_some();
     let profile_detail = profile_trace
@@ -7742,7 +8965,12 @@ fn build_product_dfa(
     let profile_started_at = Instant::now();
     let component_compile_started_at = Instant::now();
     let (components, component_cache_hits, component_profiles) =
-        compile_product_components_profiled(exprs, profile_detail, capture_trace);
+        compile_product_components_profiled(
+            exprs,
+            profile_detail,
+            capture_trace,
+            virtual_fixed_sequences,
+        );
     let component_compile_ms = profile_timing
         .then(|| component_compile_started_at.elapsed().as_secs_f64() * 1000.0);
     if profile_timing {
@@ -7904,6 +9132,19 @@ fn build_product_dfa(
                             continue;
                         }
 
+                        class_buffers[class_index].push((group_id, target));
+                    }
+                }
+                (
+                    ProductComponent::VirtualFixedSequence { .. },
+                    ProductComponentClassTransitions::VirtualFixedSequence(class_transitions),
+                ) => {
+                    for &(class_id, target) in &class_transitions[component_state as usize] {
+                        let class_index = class_id as usize;
+                        if !class_active[class_index] {
+                            class_active[class_index] = true;
+                            used_classes.push(class_index);
+                        }
                         class_buffers[class_index].push((group_id, target));
                     }
                 }
@@ -8108,21 +9349,33 @@ fn compute_product_equivalence_classes(components: &[ProductComponent]) -> (Vec<
     let mut seen_sets = FxHashSet::default();
 
     for component in components {
-        let dfa = component.partition_dfa();
-        for state in dfa.states() {
-            let mut bytes_by_target = FxHashMap::<u32, U8Set>::default();
-            for (byte, &target) in state.transitions.iter() {
-                bytes_by_target
-                    .entry(target)
-                    .and_modify(|set| {
-                        set.insert(byte);
-                    })
-                    .or_insert_with(|| U8Set::single(byte));
-            }
+        match component {
+            ProductComponent::Materialized(dfa)
+            | ProductComponent::MaterializedZeroMinRepeatSuffix { dfa, .. }
+            | ProductComponent::VirtualBoundedRepeat { base_dfa: dfa, .. } => {
+                for state in dfa.states() {
+                    let mut bytes_by_target = FxHashMap::<u32, U8Set>::default();
+                    for (byte, &target) in state.transitions.iter() {
+                        bytes_by_target
+                            .entry(target)
+                            .and_modify(|set| {
+                                set.insert(byte);
+                            })
+                            .or_insert_with(|| U8Set::single(byte));
+                    }
 
-            for byte_set in bytes_by_target.into_values() {
-                if seen_sets.insert(byte_set) {
-                    partitions = refine_u8_partitions(partitions, byte_set);
+                    for byte_set in bytes_by_target.into_values() {
+                        if seen_sets.insert(byte_set) {
+                            partitions = refine_u8_partitions(partitions, byte_set);
+                        }
+                    }
+                }
+            }
+            ProductComponent::VirtualFixedSequence { byte_sets, .. } => {
+                for &byte_set in byte_sets.iter() {
+                    if seen_sets.insert(byte_set) {
+                        partitions = refine_u8_partitions(partitions, byte_set);
+                    }
                 }
             }
         }
@@ -8167,6 +9420,25 @@ fn build_product_class_transitions(
                 ProductComponentClassTransitions::Materialized(build_product_class_transitions_for_dfa(
                     dfa, class_map,
                 ))
+            }
+            ProductComponent::VirtualFixedSequence { byte_sets, .. } => {
+                let mut transitions = Vec::with_capacity(byte_sets.len() + 1);
+                for (position, bytes) in byte_sets.iter().enumerate() {
+                    let mut classes = bytes
+                        .iter()
+                        .map(|byte| class_map[byte as usize])
+                        .collect::<Vec<_>>();
+                    classes.sort_unstable();
+                    classes.dedup();
+                    transitions.push(
+                        classes
+                            .into_iter()
+                            .map(|class| (class, position as u32 + 1))
+                            .collect(),
+                    );
+                }
+                transitions.push(Vec::new());
+                ProductComponentClassTransitions::VirtualFixedSequence(transitions)
             }
             ProductComponent::VirtualBoundedRepeat { base_dfa, .. } => {
                 ProductComponentClassTransitions::VirtualBoundedRepeat(
@@ -8770,6 +10042,203 @@ fn try_build_dense_binary_intersection_product(
     Some((deferred.finish(), true, trace))
 }
 
+fn try_compile_lazy_zero_min_repeat_intersection(
+    plan: &ExclusionCompilePlan,
+    profile_timing: bool,
+) -> Option<(DFA, ProductBuildTrace)> {
+    if plan.visible_groups != 1
+        || plan.compiled_exprs.len() != 2
+        || !pure_binary_intersection(&plan.exclusions, &plan.intersections)
+    {
+        return None;
+    }
+
+    let started_at = profile_timing.then(Instant::now);
+    let (lazy_index, mut lazy) = plan
+        .compiled_exprs
+        .iter()
+        .enumerate()
+        .find_map(|(index, expr)| {
+            LazyZeroMinRepeatSuffixComponent::from_expr(expr).map(|lazy| (index, lazy))
+        })?;
+    let other_index = 1 - lazy_index;
+    let other_component =
+        compile_product_component_with_options(&plan.compiled_exprs[other_index], true, true);
+    let other_dfa = other_component.materialized_dfa()?;
+    let other_dead = other_component.dead_state();
+
+    let (class_map, class_members) =
+        compute_lazy_zero_min_repeat_product_equivalence_classes(&lazy, other_dfa);
+    lazy.prepare_classes(class_members.len());
+    let other_transitions = build_product_class_transitions_for_dfa(other_dfa, &class_map);
+
+    let mut dfa = DFA::new(1);
+    dfa.ensure_group_capacity(1);
+    dfa.set_group_u8set(0, expr_u8set(&plan.compiled_exprs[0]));
+    let start_accepting = lazy.is_accepting(0) && other_dfa.finalizers(0).contains(0);
+    if start_accepting {
+        let mut finalizers = BitSet::new(1);
+        finalizers.set(0);
+        dfa.overwrite_state_metadata(0, finalizers, BitSet::new(1));
+    }
+
+    let mut pairs = vec![(0u32, 0u32)];
+    let other_state_count = other_dfa.num_states();
+    let mut state_by_lazy_other = vec![u32::MAX; lazy.num_states() * other_state_count];
+    state_by_lazy_other[0] = 0;
+    let mut pending_class_transitions = vec![Vec::<(u8, u32)>::new()];
+    let discovery_started_at = profile_timing.then(Instant::now);
+    let mut cursor = 0usize;
+    while cursor < pairs.len() {
+        let pair = pairs[cursor];
+        let (lazy_state, other_state) = if lazy_index == 0 {
+            (pair.0, pair.1)
+        } else {
+            (pair.1, pair.0)
+        };
+        let mut row = Vec::with_capacity(other_transitions[other_state as usize].len());
+        for &(class, other_target) in &other_transitions[other_state as usize] {
+            if other_dead == Some(other_target) {
+                continue;
+            }
+            let representative = *class_members[class as usize].first()?;
+            let Some(lazy_target) = lazy.step_class(lazy_state, class, representative) else {
+                continue;
+            };
+            let target_pair = if lazy_index == 0 {
+                (lazy_target, other_target)
+            } else {
+                (other_target, lazy_target)
+            };
+            let required_cells = lazy.num_states().checked_mul(other_state_count)?;
+            if state_by_lazy_other.len() < required_cells {
+                state_by_lazy_other.resize(required_cells, u32::MAX);
+            }
+            let lookup_index = (lazy_target as usize)
+                .checked_mul(other_state_count)?
+                .checked_add(other_target as usize)?;
+            let existing = state_by_lazy_other[lookup_index];
+            let target = if existing != u32::MAX {
+                existing
+            } else {
+                let target = u32::try_from(pairs.len()).ok()?;
+                state_by_lazy_other[lookup_index] = target;
+                pairs.push(target_pair);
+                pending_class_transitions.push(Vec::new());
+                let added = dfa.add_state();
+                debug_assert_eq!(added, target);
+                let accepting = lazy.is_accepting(lazy_target)
+                    && other_dfa.finalizers(other_target).contains(0);
+                if accepting {
+                    let mut finalizers = BitSet::new(1);
+                    finalizers.set(0);
+                    dfa.overwrite_state_metadata(target, finalizers, BitSet::new(1));
+                }
+                target
+            };
+            row.push((class, target));
+        }
+        pending_class_transitions[cursor] = row;
+        cursor += 1;
+    }
+    let discovery_ms = discovery_started_at
+        .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+
+    let future_started_at = profile_timing.then(Instant::now);
+    set_single_group_futures_from_class_graph(&mut dfa, &pending_class_transitions);
+    let future_ms = future_started_at
+        .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+    let expansion_started_at = profile_timing.then(Instant::now);
+    let expanded_transitions = pending_class_transitions
+        .into_par_iter()
+        .map(|class_transitions| {
+            let byte_capacity = class_transitions
+                .iter()
+                .map(|(class, _)| class_members[*class as usize].len())
+                .sum();
+            let mut transitions = Vec::with_capacity(byte_capacity);
+            for (class, target) in class_transitions {
+                for &byte in &class_members[class as usize] {
+                    transitions.push((byte, target));
+                }
+            }
+            if transitions.len() > 1 {
+                transitions.sort_unstable_by_key(|entry| entry.0);
+            }
+            crate::ds::char_transitions::CharTransitions::from_sorted_entries(transitions)
+        })
+        .collect::<Vec<_>>();
+    for (state, transitions) in dfa.states_mut().iter_mut().zip(expanded_transitions) {
+        state.transitions = transitions;
+    }
+    let expansion_ms = expansion_started_at
+        .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+
+    let component_started_at = profile_timing.then(Instant::now);
+    let body_states = lazy.body_dfa.num_states();
+    let suffix_states = lazy.suffix_dfa.num_states();
+    let repeat_max = lazy.max;
+    let lazy_component = lazy.into_product_component(&class_members);
+    let lazy_states = lazy_component
+        .materialized_dfa()
+        .map(DFA::num_states)?;
+    let other_states = other_dfa.num_states();
+    let (components, left_states, right_states) = if lazy_index == 0 {
+        (vec![lazy_component, other_component], lazy_states, other_states)
+    } else {
+        (vec![other_component, lazy_component], other_states, lazy_states)
+    };
+    let component_ms = component_started_at
+        .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+    let lookup_started_at = profile_timing.then(Instant::now);
+    let pair_cells = left_states.checked_mul(right_states)?;
+    let mut dense_lookup = vec![u32::MAX; pair_cells];
+    for (state, &(left, right)) in pairs.iter().enumerate() {
+        let index = (left as usize)
+            .checked_mul(right_states)?
+            .checked_add(right as usize)?;
+        dense_lookup[index] = state as u32;
+    }
+    let trace = ProductBuildTrace {
+        components,
+        state_tuples: ProductStateTuples::DenseBinary(pairs),
+        state_lookup: ProductStateLookup::DenseBinary {
+            right_states,
+            state_by_pair: dense_lookup,
+            overflow: FxHashMap::default(),
+        },
+        direct_single_visible_group: true,
+    };
+    let lookup_ms = lookup_started_at
+        .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+
+    if let Some(started_at) = started_at {
+        eprintln!(
+            "[glrmask/profile][tokenizer] lazy_zero_min_repeat_intersection lazy_component={} lazy_states={} other_states={} product_states={} classes={} body_states={} suffix_states={} repeat_max={} discovery_ms={:.3} future_ms={:.3} expansion_ms={:.3} component_ms={:.3} lookup_ms={:.3} total_ms={:.3}",
+            lazy_index,
+            lazy_states,
+            other_states,
+            dfa.num_states(),
+            class_members.len(),
+            body_states,
+            suffix_states,
+            repeat_max,
+            discovery_ms,
+            future_ms,
+            expansion_ms,
+            component_ms,
+            lookup_ms,
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    Some((dfa, trace))
+}
+
 fn try_compile_with_plan_deferred_dense(
     plan: ExclusionCompilePlan,
 ) -> Result<(DeferredDfa, Option<ProductBuildTrace>), ExclusionCompilePlan> {
@@ -8784,8 +10253,16 @@ fn try_compile_with_plan_deferred_dense(
         || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some();
     let profile_timing = profile_detail
         || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
+    let lazy_zero_min_repeat_product =
+        std::env::var_os("GLRMASK_DISABLE_LAZY_ZERO_MIN_REPEAT_PRODUCT").is_none();
+    if lazy_zero_min_repeat_product
+        && let Some((dfa, trace)) =
+            try_compile_lazy_zero_min_repeat_intersection(&plan, profile_timing)
+    {
+        return Ok((DeferredDfa::Ready(dfa), Some(trace)));
+    }
     let (components, component_cache_hits, _) =
-        compile_product_components_profiled(&plan.compiled_exprs, profile_detail, true);
+        compile_product_components_profiled(&plan.compiled_exprs, profile_detail, true, true);
     if profile_timing {
         eprintln!(
             "[glrmask/profile][tokenizer] deferred_product_component_cache groups={} unique_components={} cache_hits={}",
@@ -8892,7 +10369,7 @@ mod tests {
     use crate::Vocab;
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
     use std::sync::Arc;
 
     fn byte_expr(byte: u8) -> Expr {
@@ -8949,6 +10426,136 @@ mod tests {
         let mut out = Vec::new();
         extend(&mut out, &mut Vec::new(), alphabet, max_len);
         out
+    }
+
+    fn assert_dfa_observation_equivalent(left: &DFA, right: &DFA) {
+        let mut seen = HashSet::new();
+        let mut queue = VecDeque::from([(Some(0u32), Some(0u32))]);
+        while let Some((left_state, right_state)) = queue.pop_front() {
+            if !seen.insert((left_state, right_state)) {
+                continue;
+            }
+            let left_accepting = left_state
+                .is_some_and(|state| !left.finalizers(state).is_empty());
+            let right_accepting = right_state
+                .is_some_and(|state| !right.finalizers(state).is_empty());
+            assert_eq!(left_accepting, right_accepting, "acceptance mismatch at {left_state:?}/{right_state:?}");
+
+            let left_future = left_state
+                .is_some_and(|state| left.possible_future_group_ids(state).contains(0));
+            let right_future = right_state
+                .is_some_and(|state| right.possible_future_group_ids(state).contains(0));
+            assert_eq!(left_future, right_future, "future mismatch at {left_state:?}/{right_state:?}");
+
+            for byte in 0u8..=255 {
+                let next = (
+                    left_state.and_then(|state| left.step(state, byte)),
+                    right_state.and_then(|state| right.step(state, byte)),
+                );
+                if next != (None, None) && !seen.contains(&next) {
+                    queue.push_back(next);
+                }
+            }
+        }
+    }
+
+    fn expression_graph_symbols() -> Vec<Expr> {
+        vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"b".to_vec()),
+            Expr::Choice(vec![Expr::Epsilon, Expr::U8Seq(b"c".to_vec())]),
+            Expr::Choice(vec![Expr::U8Seq(b"a".to_vec()), Expr::U8Seq(b"ab".to_vec())]),
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Seq(b"d".to_vec())),
+                min: 0,
+                max: Some(2),
+            },
+        ]
+    }
+
+    #[test]
+    fn grouped_expression_graph_matches_byte_nfa_with_nullable_overlap_and_cycles() {
+        use crate::automata::unweighted_u32::nfa::NFA as GraphNfa;
+
+        let mut graph = GraphNfa::new_empty();
+        for _ in 0..7 {
+            graph.add_state();
+        }
+        graph.start_states = vec![0, 1];
+        graph.add_epsilon(0, 2);
+        graph.add_epsilon(2, 0);
+        graph.add_transition(0, 0, 3);
+        graph.add_transition(1, 3, 3);
+        graph.add_transition(2, 2, 4);
+        graph.add_transition(3, 4, 3);
+        graph.add_transition(3, 2, 5);
+        graph.add_transition(3, 2, 6);
+        graph.add_epsilon(4, 3);
+        graph.add_transition(5, 1, 6);
+        graph.set_accepting(6);
+
+        let symbols = expression_graph_symbols();
+        let grouped = super::try_compile_expression_labeled_nfa_direct(
+            &graph,
+            &symbols,
+            true,
+        )
+        .unwrap()
+        .expect("forced direct compiler should select the graph");
+        let reference = super::compile_expression_labeled_nfa_via_byte_nfa(&graph, &symbols)
+            .expect("byte-NFA reference should compile");
+        assert_dfa_observation_equivalent(&grouped, &reference);
+    }
+
+    #[test]
+    fn grouped_expression_graph_seeded_differential() {
+        use crate::automata::unweighted_u32::nfa::NFA as GraphNfa;
+
+        let symbols = expression_graph_symbols();
+        let mut rng = StdRng::seed_from_u64(0xD1EC_7E67_2026_0731);
+        for case in 0..48 {
+            let state_count = rng.gen_range(2..=8);
+            let mut graph = GraphNfa::new_empty();
+            for _ in 0..state_count {
+                graph.add_state();
+            }
+            graph.start_states.push(rng.gen_range(0..state_count) as u32);
+            if rng.gen_bool(0.35) {
+                let second = rng.gen_range(0..state_count) as u32;
+                if !graph.start_states.contains(&second) {
+                    graph.start_states.push(second);
+                }
+            }
+            graph.set_accepting(rng.gen_range(0..state_count) as u32);
+            for source in 0..state_count as u32 {
+                if rng.gen_bool(0.45) {
+                    graph.add_epsilon(source, rng.gen_range(0..state_count) as u32);
+                }
+                for _ in 0..rng.gen_range(1..=3) {
+                    graph.add_transition(
+                        source,
+                        rng.gen_range(0..symbols.len()) as i32,
+                        rng.gen_range(0..state_count) as u32,
+                    );
+                }
+            }
+
+            let grouped = super::try_compile_expression_labeled_nfa_direct(
+                &graph,
+                &symbols,
+                true,
+            )
+            .unwrap()
+            .expect("forced direct compiler should select the graph");
+            let reference = super::compile_expression_labeled_nfa_via_byte_nfa(&graph, &symbols)
+                .expect("byte-NFA reference should compile");
+            assert_dfa_observation_equivalent(&grouped, &reference);
+            assert_eq!(
+                grouped.num_states(),
+                reference.num_states(),
+                "minimal state count differs in case {case}",
+            );
+        }
     }
 
     fn component_pair_for_map_test(
@@ -9058,6 +10665,36 @@ mod tests {
         .expect("generic certification");
 
         assert_eq!(structural_map, generic.full_to_synthesized);
+    }
+
+    #[test]
+    fn vocabulary_repeat_horizon_cache_allows_nested_parallel_misses() {
+        use rayon::prelude::*;
+
+        let body = Arc::new(super::compile_expr_to_dfa(&Expr::Choice(vec![
+            Expr::U8Seq(b"ab".to_vec()),
+            Expr::U8Seq(b"aba".to_vec()),
+        ])));
+        let vocab = Arc::new(Vocab::new(
+            (0..256)
+                .map(|token| {
+                    let length = token as usize % 32 + 1;
+                    (token, b"ab".repeat(length))
+                })
+                .collect(),
+        ));
+        let cache = Arc::new(super::VocabularyRepeatHorizonCache::new());
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .expect("test thread pool");
+        let results = pool.install(|| {
+            (0..16)
+                .into_par_iter()
+                .map(|_| cache.horizon_for_dfa(&body, &vocab))
+                .collect::<Vec<_>>()
+        });
+        assert!(results.iter().all(|result| *result == results[0]));
     }
 
     #[test]
@@ -9252,6 +10889,51 @@ mod tests {
                     "left={left_expr:?} right={right_expr:?} input={input:?}",
                 );
             }
+        }
+    }
+
+    #[test]
+    fn lazy_zero_min_repeat_intersection_matches_materialized_product() {
+        let repeat_component = Expr::Seq(vec![
+            Expr::U8Seq(b"[".to_vec()),
+            Expr::Repeat {
+                expr: Box::new(Expr::Choice(vec![
+                    Expr::U8Seq(b"a".to_vec()),
+                    Expr::U8Seq(b"ab".to_vec()),
+                ])),
+                min: 0,
+                max: Some(1_024),
+            },
+            Expr::U8Seq(b"]".to_vec()),
+        ]);
+        let filter_component = Expr::Seq(vec![
+            Expr::U8Seq(b"[".to_vec()),
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"ab"))),
+                min: 0,
+                max: Some(7),
+            },
+            Expr::U8Seq(b"]".to_vec()),
+        ]);
+        let expression = Expr::Intersect {
+            expr: Box::new(repeat_component),
+            intersect: Box::new(filter_component),
+        };
+
+        let eager = super::compile_with_plan(super::build_exclusion_compile_plan(
+            std::slice::from_ref(&expression),
+        ));
+        let plan = super::build_exclusion_compile_plan(std::slice::from_ref(&expression));
+        let (lazy, trace) = super::try_compile_lazy_zero_min_repeat_intersection(&plan, false)
+            .expect("eligible repeat intersection must compile lazily");
+        assert_eq!(trace.state_tuples.len(), lazy.num_states());
+
+        for input in enumerate_inputs(b"[]abx", 9) {
+            assert_eq!(
+                dfa_state_observation(&lazy, 0, &input),
+                dfa_state_observation(&eager, 0, &input),
+                "lazy product differed for input {input:?}",
+            );
         }
     }
 
@@ -10914,6 +12596,75 @@ mod tests {
     }
 
     #[test]
+    fn direct_fixed_sequence_component_matches_generic_compilation() {
+        let expression = Expr::Seq(vec![
+            Expr::U8Class(U8Set::from_bytes(b"+-")),
+            Expr::Shared(Arc::new(Expr::U8Seq(b"ab".to_vec()))),
+            Expr::Epsilon,
+            Expr::U8Class(U8Set::from_bytes(b"xy")),
+        ]);
+        let direct = super::compile_product_component_dfa_direct(&expression)
+            .expect("fixed sequence should compile directly")
+            .0;
+        let generic = super::compile_product_component_dfa(&expression);
+        let direct = super::Regex { dfa: direct }.into_tokenizer(1, None);
+        let generic = super::Regex { dfa: generic }.into_tokenizer(1, None);
+
+        for input in enumerate_inputs(b"+-abxyz", 4) {
+            assert_eq!(
+                tokenizer_observation(&direct, &input),
+                tokenizer_observation(&generic, &input),
+                "direct fixed sequence differed for input {input:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn virtual_fixed_sequence_components_preserve_exact_product_layout() {
+        let expressions = vec![
+            Expr::Seq(vec![
+                Expr::U8Class(U8Set::from_bytes(b"+-")),
+                Expr::U8Seq(b"alpha".to_vec()),
+            ]),
+            Expr::U8Seq(b" beta".to_vec()),
+            Expr::Seq(vec![
+                Expr::U8Class(U8Set::from_bytes(b"xy")),
+                Expr::U8Class(U8Set::from_bytes(b"12")),
+            ]),
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"ab"))),
+                min: 1,
+                max: Some(3),
+            },
+        ];
+        let exclusions = BTreeMap::new();
+        let intersections = BTreeMap::new();
+
+        let baseline = super::build_product_dfa(
+            &expressions,
+            None,
+            expressions.len(),
+            &exclusions,
+            &intersections,
+            false,
+            false,
+        )
+        .0;
+        let virtualized = super::build_product_dfa(
+            &expressions,
+            None,
+            expressions.len(),
+            &exclusions,
+            &intersections,
+            false,
+            true,
+        )
+        .0;
+
+        assert_eq!(virtualized, baseline);
+    }
+
+    #[test]
     fn zero_min_repeat_suffix_dominance_matches_generic_ambiguous_boundaries() {
         let expressions = [
             Expr::Seq(vec![
@@ -11001,7 +12752,10 @@ mod tests {
                 Expr::U8Seq(b"\"".to_vec()),
                 Expr::Repeat {
                     expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"ab"))),
-                    min: 0,
+                    // Keep this regression on the ordinary deferred-product
+                    // implementation; zero-minimum repeat intersections have
+                    // their own exact lazy-product regression above.
+                    min: 1,
                     max: Some(max),
                 },
                 Expr::U8Seq(b"\"".to_vec()),

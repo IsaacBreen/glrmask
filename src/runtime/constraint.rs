@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use range_set_blaze::RangeSetBlaze;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use rayon::prelude::*;
 
@@ -846,7 +846,7 @@ impl Constraint {
             };
             let (action_origin, mut action_states) = match action {
                 Action::ReplaceShifts(targets) => {
-                    (targets.as_ptr() as usize, targets.clone())
+                    (targets.as_ptr() as usize, targets.to_vec())
                 }
                 Action::StackShifts(shifts)
                     if shifts
@@ -2014,30 +2014,59 @@ impl Constraint {
     }
 
     fn weight_token_set_inventory(&self) -> WeightTokenSetInventory<'_> {
-        let mut final_keys: FxHashSet<usize> = FxHashSet::default();
-        let mut final_sets = Vec::new();
-        let mut transition_sets: FxHashMap<usize, &RangeSetBlaze<u32>> = FxHashMap::default();
+        #[derive(Default)]
+        struct InventoryBatch<'a> {
+            final_sets: FxHashMap<usize, &'a Arc<RangeSetBlaze<u32>>>,
+            transition_sets: FxHashMap<usize, &'a RangeSetBlaze<u32>>,
+        }
 
-        for state in self.parser_dwa.states() {
-            for (_, weight) in state.transitions.values() {
-                for (_tsid_range, token_set) in weight.0.range_values() {
+        impl<'a> InventoryBatch<'a> {
+            fn add_state(&mut self, state: &'a crate::automata::weighted::dwa::DWAState) {
+                for (_, weight) in state.transitions.values() {
+                    for (_tsid_range, token_set) in weight.0.range_values() {
+                        let key = Arc::as_ptr(token_set) as usize;
+                        self.transition_sets.entry(key).or_insert(token_set.as_ref());
+                    }
+                }
+                let Some(final_weight) = &state.final_weight else {
+                    return;
+                };
+                if final_weight.is_full() || final_weight.is_empty() {
+                    return;
+                }
+                for (_tsid_range, token_set) in final_weight.0.range_values() {
                     let key = Arc::as_ptr(token_set) as usize;
-                    transition_sets.entry(key).or_insert(token_set.as_ref());
+                    self.final_sets.entry(key).or_insert(token_set);
                 }
             }
-            let Some(final_weight) = &state.final_weight else {
-                continue;
-            };
-            if final_weight.is_full() || final_weight.is_empty() {
-                continue;
-            }
-            for (_tsid_range, token_set) in final_weight.0.range_values() {
-                let key = Arc::as_ptr(token_set) as usize;
-                if final_keys.insert(key) {
-                    final_sets.push((key, token_set));
-                }
+
+            fn merge_from(&mut self, other: Self) {
+                self.final_sets.extend(other.final_sets);
+                self.transition_sets.extend(other.transition_sets);
             }
         }
+
+        let mut inventory = if rayon::current_num_threads() > 1
+            && self.parser_dwa.states().len() >= 4_096
+        {
+            self.parser_dwa
+                .states()
+                .par_iter()
+                .fold(InventoryBatch::default, |mut batch, state| {
+                    batch.add_state(state);
+                    batch
+                })
+                .reduce(InventoryBatch::default, |mut left, right| {
+                    left.merge_from(right);
+                    left
+                })
+        } else {
+            let mut batch = InventoryBatch::default();
+            for state in self.parser_dwa.states() {
+                batch.add_state(state);
+            }
+            batch
+        };
 
         for final_weight in self.parser_top_accept.values() {
             if final_weight.is_full() || final_weight.is_empty() {
@@ -2045,9 +2074,7 @@ impl Constraint {
             }
             for (_tsid_range, token_set) in final_weight.0.range_values() {
                 let key = Arc::as_ptr(token_set) as usize;
-                if final_keys.insert(key) {
-                    final_sets.push((key, token_set));
-                }
+                inventory.final_sets.entry(key).or_insert(token_set);
             }
         }
 
@@ -2057,9 +2084,7 @@ impl Constraint {
             }
             for (_tsid_range, token_set) in final_weight.0.range_values() {
                 let key = Arc::as_ptr(token_set) as usize;
-                if final_keys.insert(key) {
-                    final_sets.push((key, token_set));
-                }
+                inventory.final_sets.entry(key).or_insert(token_set);
             }
         }
 
@@ -2069,15 +2094,13 @@ impl Constraint {
             }
             for (_tsid_range, token_set) in final_weight.0.range_values() {
                 let key = Arc::as_ptr(token_set) as usize;
-                if final_keys.insert(key) {
-                    final_sets.push((key, token_set));
-                }
+                inventory.final_sets.entry(key).or_insert(token_set);
             }
         }
 
         WeightTokenSetInventory {
-            final_sets,
-            transition_sets,
+            final_sets: inventory.final_sets.into_iter().collect(),
+            transition_sets: inventory.transition_sets,
         }
     }
 

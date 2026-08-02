@@ -28,11 +28,10 @@ fn snowplow_hostname_replay_mask_includes_token_15() {
     assert!(token_allowed(&replay_mask, 15));
 
     let replay_stacks = replay_state.debug_parser_stacks();
-    assert_eq!(bytes_state.parser_root_count(), replay_state.parser_root_count());
-    assert_eq!(
-        bytes_state.parser_path_count(1_000_000),
-        replay_state.parser_path_count(1_000_000)
-    );
+    // Token-sized commits may retain duplicate flat-frontier alternatives to
+    // preserve exact lexer provenance without allocating a merged GSS. Compare
+    // the observable mask and canonical parser language, not encoded counts.
+    assert_eq!(bytes_mask, replay_mask);
     assert_eq!(bytes_stacks, replay_stacks);
 
     let mut replay_commit_bytes = replay_state.clone();
@@ -40,4 +39,15 @@ fn snowplow_hostname_replay_mask_includes_token_15() {
 
     let mut replay_commit_token = replay_state.clone();
     replay_commit_token.commit_token(15).unwrap();
+
+    let mut bytes_commit = bytes_state.clone();
+    bytes_commit.commit_bytes(b"0").unwrap();
+
+    let committed_mask = bytes_commit.mask();
+    assert_eq!(committed_mask, replay_commit_bytes.mask());
+    assert_eq!(committed_mask, replay_commit_token.mask());
+
+    let committed_stacks = bytes_commit.debug_parser_stacks();
+    assert_eq!(committed_stacks, replay_commit_bytes.debug_parser_stacks());
+    assert_eq!(committed_stacks, replay_commit_token.debug_parser_stacks());
 }

@@ -11,6 +11,7 @@ const DISABLE_UNIT_REDUCTION_INLINING_ENV: &str = "GLRMASK_DISABLE_UNIT_REDUCTIO
 const GLR_TABLE_CONSTRUCTION_ENV: &str = "GLRMASK_GLR_TABLE_CONSTRUCTION";
 const UNIT_REDUCTION_INLINING_MAX_PRE_MERGE_STATES_ENV: &str =
     "GLRMASK_UNIT_REDUCTION_INLINE_MAX_PRE_MERGE_STATES";
+const DEFAULT_UNIT_REDUCTION_INLINING_MAX_PRE_MERGE_STATES: u32 = 8_192;
 const ROW_BISIM_MAX_PRE_MERGE_STATES_ENV: &str =
     "GLRMASK_ROW_BISIM_MAX_PRE_MERGE_STATES";
 const SAME_CORE_MAX_PRE_MERGE_STATES_ENV: &str =
@@ -108,9 +109,9 @@ fn unit_reduction_inlining_max_pre_merge_states() -> Option<u32> {
         Ok(value) => match value.trim().parse::<u32>() {
             Ok(0) => None,
             Ok(parsed) => Some(parsed),
-            Err(_) => None,
+            Err(_) => Some(DEFAULT_UNIT_REDUCTION_INLINING_MAX_PRE_MERGE_STATES),
         },
-        Err(_) => None,
+        Err(_) => Some(DEFAULT_UNIT_REDUCTION_INLINING_MAX_PRE_MERGE_STATES),
     }
 }
 
@@ -148,11 +149,52 @@ fn same_core_quotient_enabled(pre_merge_states: u32) -> bool {
 }
 
 
+#[derive(Default)]
+struct DirectRegularActionInterner {
+    replace_target_scratch: Vec<u32>,
+    replace_targets: FxHashSet<Arc<[u32]>>,
+}
+
+impl DirectRegularActionInterner {
+    fn intern_targets(&mut self, targets: impl IntoIterator<Item = u32>) -> Arc<[u32]> {
+        self.replace_target_scratch.clear();
+        self.replace_target_scratch.extend(targets);
+        if let Some(existing) = self.replace_targets.get(self.replace_target_scratch.as_slice()) {
+            return Arc::clone(existing);
+        }
+        let targets: Arc<[u32]> = Arc::from(self.replace_target_scratch.clone());
+        self.replace_targets.insert(Arc::clone(&targets));
+        targets
+    }
+
+    fn action_from_sorted_scratch(&mut self) -> Option<Action> {
+        match self.replace_target_scratch.len() {
+            0 => None,
+            1 => Some(Action::Shift(self.replace_target_scratch[0], true)),
+            _ => {
+                let targets = if let Some(existing) = self
+                    .replace_targets
+                    .get(self.replace_target_scratch.as_slice())
+                {
+                    Arc::clone(existing)
+                } else {
+                    let targets: Arc<[u32]> = Arc::from(self.replace_target_scratch.clone());
+                    self.replace_targets.insert(Arc::clone(&targets));
+                    targets
+                };
+                Some(Action::ReplaceShifts(targets))
+            }
+        }
+    }
+
+}
+
 struct DirectRegularClosureWorkspace {
     seen_epoch: Vec<u32>,
     epoch: u32,
     stack: Vec<u32>,
     terminal_targets: Vec<(TerminalID, u32)>,
+    actions: DirectRegularActionInterner,
 }
 
 impl DirectRegularClosureWorkspace {
@@ -162,6 +204,7 @@ impl DirectRegularClosureWorkspace {
             epoch: 0,
             stack: Vec::new(),
             terminal_targets: Vec::new(),
+            actions: DirectRegularActionInterner::default(),
         }
     }
 
@@ -184,6 +227,14 @@ impl DirectRegularClosureWorkspace {
             *entry = self.epoch;
             true
         }
+    }
+
+    fn intern_replace_targets(&mut self, start: usize, end: usize) -> Arc<[u32]> {
+        self.actions.intern_targets(
+            self.terminal_targets[start..end]
+                .iter()
+                .map(|&(_, target)| target),
+        )
     }
 }
 
@@ -242,12 +293,7 @@ fn direct_regular_action_row_for_roots_with_widest(
         let action = if end == index + 1 {
             Action::Shift(workspace.terminal_targets[index].1, true)
         } else {
-            Action::ReplaceShifts(
-                workspace.terminal_targets[index..end]
-                    .iter()
-                    .map(|&(_, target)| target)
-                    .collect(),
-            )
+            Action::ReplaceShifts(workspace.intern_replace_targets(index, end))
         };
         advance.set(terminal as usize);
         row.push((terminal, action));
@@ -264,6 +310,311 @@ fn direct_regular_action_row_for_roots_with_widest(
     ))
 }
 
+fn direct_regular_action_targets<'a>(
+    action: &'a Action,
+    singleton: &'a mut [u32; 1],
+) -> Option<&'a [u32]> {
+    match action {
+        Action::Shift(target, true) => {
+            singleton[0] = *target;
+            Some(singleton)
+        }
+        Action::ReplaceShifts(targets) => Some(targets.as_ref()),
+        _ => None,
+    }
+}
+
+fn merge_direct_regular_actions(
+    left: &Action,
+    right: &Action,
+    interner: &mut DirectRegularActionInterner,
+) -> Option<Action> {
+    if left == right {
+        return Some(left.clone());
+    }
+
+    let mut left_singleton = [0u32; 1];
+    let mut right_singleton = [0u32; 1];
+    let left_targets = direct_regular_action_targets(left, &mut left_singleton)?;
+    let right_targets = direct_regular_action_targets(right, &mut right_singleton)?;
+    interner.replace_target_scratch.clear();
+    interner
+        .replace_target_scratch
+        .reserve(left_targets.len().saturating_add(right_targets.len()));
+    let mut left_index = 0usize;
+    let mut right_index = 0usize;
+    while left_index < left_targets.len() || right_index < right_targets.len() {
+        let next = match (
+            left_targets.get(left_index).copied(),
+            right_targets.get(right_index).copied(),
+        ) {
+            (Some(left), Some(right)) if left < right => {
+                left_index += 1;
+                left
+            }
+            (Some(left), Some(right)) if right < left => {
+                right_index += 1;
+                right
+            }
+            (Some(left), Some(_)) => {
+                left_index += 1;
+                right_index += 1;
+                left
+            }
+            (Some(left), None) => {
+                left_index += 1;
+                left
+            }
+            (None, Some(right)) => {
+                right_index += 1;
+                right
+            }
+            (None, None) => break,
+        };
+        interner.replace_target_scratch.push(next);
+    }
+    interner.action_from_sorted_scratch()
+}
+
+fn push_direct_regular_row_entry(
+    row: &mut Vec<(TerminalID, Action)>,
+    advance: &mut BitSet,
+    widest: &mut Option<(TerminalID, usize)>,
+    num_terminals: u32,
+    terminal: TerminalID,
+    action: Action,
+) {
+    if terminal == EOF {
+        advance.set(num_terminals as usize);
+    } else {
+        advance.set(terminal as usize);
+        let width = match &action {
+            Action::Shift(_, true) => 1,
+            Action::ReplaceShifts(targets) => targets.len(),
+            _ => 0,
+        };
+        if width != 0 && widest.as_ref().is_none_or(|(_, current)| width > *current) {
+            *widest = Some((terminal, width));
+        }
+    }
+    row.push((terminal, action));
+}
+
+fn merge_direct_regular_rows(
+    left: &ActionRow,
+    right: &ActionRow,
+    num_terminals: u32,
+    interner: &mut DirectRegularActionInterner,
+) -> Option<(ActionRow, BitSet, Option<(TerminalID, usize)>)> {
+    let mut output = Vec::with_capacity(left.len().saturating_add(right.len()));
+    let mut advance = BitSet::new(num_terminals as usize + 1);
+    let mut widest = None;
+    let mut left = left.iter().peekable();
+    let mut right = right.iter().peekable();
+    while left.peek().is_some() || right.peek().is_some() {
+        match (left.peek().copied(), right.peek().copied()) {
+            (Some((left_terminal, left_action)), Some((right_terminal, right_action))) => {
+                match left_terminal.cmp(&right_terminal) {
+                    std::cmp::Ordering::Less => {
+                        push_direct_regular_row_entry(
+                            &mut output,
+                            &mut advance,
+                            &mut widest,
+                            num_terminals,
+                            left_terminal,
+                            left_action.clone(),
+                        );
+                        left.next();
+                    }
+                    std::cmp::Ordering::Greater => {
+                        push_direct_regular_row_entry(
+                            &mut output,
+                            &mut advance,
+                            &mut widest,
+                            num_terminals,
+                            right_terminal,
+                            right_action.clone(),
+                        );
+                        right.next();
+                    }
+                    std::cmp::Ordering::Equal => {
+                        let action = merge_direct_regular_actions(
+                            left_action,
+                            right_action,
+                            interner,
+                        )?;
+                        push_direct_regular_row_entry(
+                            &mut output,
+                            &mut advance,
+                            &mut widest,
+                            num_terminals,
+                            left_terminal,
+                            action,
+                        );
+                        left.next();
+                        right.next();
+                    }
+                }
+            }
+            (Some((terminal, action)), None) => {
+                push_direct_regular_row_entry(
+                    &mut output,
+                    &mut advance,
+                    &mut widest,
+                    num_terminals,
+                    terminal,
+                    action.clone(),
+                );
+                left.next();
+            }
+            (None, Some((terminal, action))) => {
+                push_direct_regular_row_entry(
+                    &mut output,
+                    &mut advance,
+                    &mut widest,
+                    num_terminals,
+                    terminal,
+                    action.clone(),
+                );
+                right.next();
+            }
+            (None, None) => break,
+        }
+    }
+    Some((
+        ActionRow::Sparse(SparseRow::from_sorted_unique(output)),
+        advance,
+        widest,
+    ))
+}
+
+fn direct_regular_local_row(
+    grammar: &AnalyzedGrammar,
+    state_id: u32,
+    interner: &mut DirectRegularActionInterner,
+) -> Option<(ActionRow, BitSet, Option<(TerminalID, usize)>)> {
+    let automaton = grammar.direct_regular_automaton.as_ref()?;
+    let state = automaton.states.get(state_id as usize)?;
+    let mut row = Vec::with_capacity(state.transitions.len() + usize::from(state.is_accepting));
+    let mut advance = BitSet::new(grammar.num_terminals as usize + 1);
+    let mut widest = None;
+    for (&terminal, targets) in &state.transitions {
+        if terminal >= grammar.num_terminals {
+            return None;
+        }
+        interner.replace_target_scratch.clear();
+        for &target in targets {
+            interner
+                .replace_target_scratch
+                .push(target.checked_add(1)?);
+        }
+        interner.replace_target_scratch.sort_unstable();
+        interner.replace_target_scratch.dedup();
+        let Some(action) = interner.action_from_sorted_scratch() else {
+            continue;
+        };
+        push_direct_regular_row_entry(
+            &mut row,
+            &mut advance,
+            &mut widest,
+            grammar.num_terminals,
+            terminal,
+            action,
+        );
+    }
+    if state.is_accepting {
+        push_direct_regular_row_entry(
+            &mut row,
+            &mut advance,
+            &mut widest,
+            grammar.num_terminals,
+            EOF,
+            Action::Accept,
+        );
+    }
+    Some((
+        ActionRow::Sparse(SparseRow::from_sorted_unique(row)),
+        advance,
+        widest,
+    ))
+}
+
+fn direct_regular_dag_rows(
+    grammar: &AnalyzedGrammar,
+) -> Option<(
+    (ActionRow, BitSet, Option<(TerminalID, usize)>),
+    Vec<(ActionRow, BitSet, Option<(TerminalID, usize)>)>,
+)> {
+    let automaton = grammar.direct_regular_automaton.as_ref()?;
+    let mut indegree = vec![0u32; automaton.states.len()];
+    for state in &automaton.states {
+        for &target in &state.epsilons {
+            *indegree.get_mut(target as usize)? += 1;
+        }
+    }
+    let mut ready = VecDeque::new();
+    for (state, &indegree) in indegree.iter().enumerate() {
+        if indegree == 0 {
+            ready.push_back(state as u32);
+        }
+    }
+    let mut order = Vec::with_capacity(automaton.states.len());
+    while let Some(state_id) = ready.pop_front() {
+        order.push(state_id);
+        for &target in &automaton.states[state_id as usize].epsilons {
+            let target_indegree = &mut indegree[target as usize];
+            *target_indegree -= 1;
+            if *target_indegree == 0 {
+                ready.push_back(target);
+            }
+        }
+    }
+    if order.len() != automaton.states.len() {
+        return None;
+    }
+
+    let mut interner = DirectRegularActionInterner::default();
+    let mut rows: Vec<Option<(ActionRow, BitSet, Option<(TerminalID, usize)>)>> =
+        (0..automaton.states.len()).map(|_| None).collect();
+    for state_id in order.into_iter().rev() {
+        let state = &automaton.states[state_id as usize];
+        let mut built = direct_regular_local_row(grammar, state_id, &mut interner)?;
+        for &target in &state.epsilons {
+            let child = rows[target as usize].as_ref()?;
+            if built.0.is_empty() {
+                built = child.clone();
+            } else {
+                built = merge_direct_regular_rows(
+                    &built.0,
+                    &child.0,
+                    grammar.num_terminals,
+                    &mut interner,
+                )?;
+            }
+        }
+        rows[state_id as usize] = Some(built);
+    }
+    let rows = rows.into_iter().collect::<Option<Vec<_>>>()?;
+    let mut initial: Option<(ActionRow, BitSet, Option<(TerminalID, usize)>)> = None;
+    for &root in &automaton.start_states {
+        let root_row = rows.get(root as usize)?.clone();
+        initial = Some(match initial {
+            None => root_row,
+            Some(current) => merge_direct_regular_rows(
+                &current.0,
+                &root_row.0,
+                grammar.num_terminals,
+                &mut interner,
+            )?,
+        });
+    }
+    Some((initial?, rows))
+}
+
+fn direct_regular_dag_rows_enabled() -> bool {
+    std::env::var_os("GLRMASK_DISABLE_DIRECT_REGULAR_DAG_ROWS").is_none()
+}
+
 fn direct_regular_wide_frontier_descriptor(
     source_state: u32,
     terminal: TerminalID,
@@ -271,7 +622,7 @@ fn direct_regular_wide_frontier_descriptor(
 ) -> Option<DirectRegularWideFrontierDescriptor> {
     let mut target_states = match row.get(&terminal)? {
         Action::Shift(target, _) => vec![*target],
-        Action::ReplaceShifts(targets) => targets.clone(),
+        Action::ReplaceShifts(targets) => targets.to_vec(),
         Action::StackShifts(shifts)
             if shifts
                 .iter()
@@ -322,6 +673,7 @@ fn try_build_direct_regular_table(grammar: &AnalyzedGrammar) -> Option<GLRTable>
         let mut max_epsilon_outdegree = 0usize;
         let mut terminal_edges = 0usize;
         let mut terminal_targets = 0usize;
+        let mut epsilon_indegree = vec![0u32; automaton.states.len()];
         for (source, state) in automaton.states.iter().enumerate() {
             epsilon_edges += state.epsilons.len();
             max_epsilon_outdegree = max_epsilon_outdegree.max(state.epsilons.len());
@@ -331,6 +683,7 @@ fn try_build_direct_regular_table(grammar: &AnalyzedGrammar) -> Option<GLRTable>
                 _ => epsilon_outdegree_many += 1,
             }
             for &target in &state.epsilons {
+                epsilon_indegree[target as usize] += 1;
                 match (target as usize).cmp(&source) {
                     std::cmp::Ordering::Greater => epsilon_forward += 1,
                     std::cmp::Ordering::Less => epsilon_backward += 1,
@@ -340,8 +693,25 @@ fn try_build_direct_regular_table(grammar: &AnalyzedGrammar) -> Option<GLRTable>
             terminal_edges += state.transitions.len();
             terminal_targets += state.transitions.values().map(Vec::len).sum::<usize>();
         }
+        let mut ready = std::collections::VecDeque::new();
+        for (state, &indegree) in epsilon_indegree.iter().enumerate() {
+            if indegree == 0 {
+                ready.push_back(state as u32);
+            }
+        }
+        let mut epsilon_topological_states = 0usize;
+        while let Some(state) = ready.pop_front() {
+            epsilon_topological_states += 1;
+            for &target in &automaton.states[state as usize].epsilons {
+                let indegree = &mut epsilon_indegree[target as usize];
+                *indegree -= 1;
+                if *indegree == 0 {
+                    ready.push_back(target);
+                }
+            }
+        }
         eprintln!(
-            "[glrmask/profile][direct_regular_topology] states={} start_states={} accepting={} epsilon_edges={} epsilon_forward={} epsilon_backward={} epsilon_self={} epsilon_outdegree_zero={} epsilon_outdegree_one={} epsilon_outdegree_many={} max_epsilon_outdegree={} terminal_edges={} terminal_targets={}",
+            "[glrmask/profile][direct_regular_topology] states={} start_states={} accepting={} epsilon_edges={} epsilon_forward={} epsilon_backward={} epsilon_self={} epsilon_outdegree_zero={} epsilon_outdegree_one={} epsilon_outdegree_many={} max_epsilon_outdegree={} terminal_edges={} terminal_targets={} epsilon_topological_states={} epsilon_dag={}",
             automaton.states.len(),
             automaton.start_states.len(),
             automaton.states.iter().filter(|state| state.is_accepting).count(),
@@ -355,30 +725,41 @@ fn try_build_direct_regular_table(grammar: &AnalyzedGrammar) -> Option<GLRTable>
             max_epsilon_outdegree,
             terminal_edges,
             terminal_targets,
+            epsilon_topological_states,
+            epsilon_topological_states == automaton.states.len(),
         );
     }
     let row_started_at = profile.then(std::time::Instant::now);
-    let mut initial_workspace = DirectRegularClosureWorkspace::new(automaton.states.len());
-    let (initial, initial_advance, initial_widest) = direct_regular_action_row_for_roots_with_widest(
-        grammar,
-        automaton.start_states.iter().copied(),
-        &mut initial_workspace,
-    )?;
-    let rows_with_widest = (0..automaton.states.len() as u32)
-        .into_par_iter()
-        .map_init(
-            || DirectRegularClosureWorkspace::new(automaton.states.len()),
-            |workspace, root| {
-                direct_regular_action_row_for_roots_with_widest(
-                    grammar,
-                    std::iter::once(root),
-                    workspace,
+    let dag_rows = direct_regular_dag_rows_enabled()
+        .then(|| direct_regular_dag_rows(grammar))
+        .flatten();
+    let ((initial, initial_advance, initial_widest), rows_with_widest) =
+        if let Some(rows) = dag_rows {
+            rows
+        } else {
+            let mut initial_workspace = DirectRegularClosureWorkspace::new(automaton.states.len());
+            let initial = direct_regular_action_row_for_roots_with_widest(
+                grammar,
+                automaton.start_states.iter().copied(),
+                &mut initial_workspace,
+            )?;
+            let rows = (0..automaton.states.len() as u32)
+                .into_par_iter()
+                .map_init(
+                    || DirectRegularClosureWorkspace::new(automaton.states.len()),
+                    |workspace, root| {
+                        direct_regular_action_row_for_roots_with_widest(
+                            grammar,
+                            std::iter::once(root),
+                            workspace,
+                        )
+                    },
                 )
-            },
-        )
-        .collect::<Vec<_>>()
-        .into_iter()
-        .collect::<Option<Vec<_>>>()?;
+                .collect::<Vec<_>>()
+                .into_iter()
+                .collect::<Option<Vec<_>>>()?;
+            (initial, rows)
+        };
     let row_ms = row_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     let descriptor_started_at = profile.then(std::time::Instant::now);
     let mut widest_candidates = Vec::<(u32, TerminalID, usize)>::new();
@@ -436,6 +817,7 @@ fn try_build_direct_regular_table(grammar: &AnalyzedGrammar) -> Option<GLRTable>
                         stack_shift_actions += 1;
                         shift_targets += shifts.len();
                     }
+                    Action::ReplaceShifts(targets) => shift_targets += targets.len(),
                     Action::Accept => accept_actions += 1,
                     _ => {}
                 }
@@ -528,7 +910,7 @@ fn try_build_direct_regular_table_reference(grammar: &AnalyzedGrammar) -> Option
             let action = if targets.len() == 1 {
                 Action::Shift(targets[0], true)
             } else {
-                Action::ReplaceShifts(targets)
+                Action::ReplaceShifts(targets.into())
             };
             row.push((terminal, action));
         }
@@ -2931,6 +3313,30 @@ mod tests {
         assert_eq!(direct.action, reference.action);
         assert_eq!(direct.advance, reference.advance);
         assert_eq!(direct.num_states, reference.num_states);
+    }
+
+    #[test]
+    fn direct_regular_dag_rows_match_reference() {
+        let grammar = direct_regular_grammar();
+        let ((initial, initial_advance, _), rows) = super::direct_regular_dag_rows(&grammar)
+            .expect("regular fixture should be an epsilon DAG");
+        let mut action = Vec::with_capacity(rows.len() + 1);
+        let mut advance = Vec::with_capacity(rows.len() + 1);
+        action.push(initial);
+        advance.push(initial_advance);
+        for (row, advance_row, _) in rows {
+            action.push(row);
+            advance.push(advance_row);
+        }
+        let reference = try_build_direct_regular_table_reference(&grammar)
+            .expect("closure-reference direct table should build");
+        assert_eq!(action, reference.action);
+        assert_eq!(advance, reference.advance);
+    }
+
+    #[test]
+    fn direct_regular_dag_rows_reject_epsilon_cycles() {
+        assert!(super::direct_regular_dag_rows(&direct_regular_epsilon_cycle_grammar()).is_none());
     }
 
     #[test]

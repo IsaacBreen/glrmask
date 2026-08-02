@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 use crate::grammar::flat::NonterminalID;
 
@@ -35,7 +36,7 @@ pub enum Action {
     },
     Accept,
     /// Alternative pop-one/push-one replacements, stored compactly as targets.
-    ReplaceShifts(Vec<u32>),
+    ReplaceShifts(Arc<[u32]>),
 }
 
 impl Action {
@@ -80,7 +81,7 @@ impl Action {
                 }
             }
             Action::ReplaceShifts(targets) => {
-                for target in targets {
+                for target in targets.iter() {
                     f(1, std::slice::from_ref(target));
                 }
             }
@@ -121,6 +122,7 @@ impl Action {
 #[cfg(test)]
 mod tests {
     use super::{Action, GuardedStackShift, StackShift, StackShiftGuard};
+    use std::sync::Arc;
 
     #[test]
     fn guarded_stack_shifts_bincode_roundtrip_preserves_empty_guards() {
@@ -162,7 +164,7 @@ mod tests {
                 accept: true,
             },
             Action::Accept,
-            Action::ReplaceShifts(vec![1, 3, 5, 8]),
+            Action::ReplaceShifts(Arc::from([1, 3, 5, 8])),
         ];
 
         for (discriminant, action) in actions.into_iter().enumerate() {
@@ -172,5 +174,22 @@ mod tests {
                 bincode::deserialize(&bytes).expect("deserialization should succeed");
             assert_eq!(decoded, action);
         }
+
+        let targets = vec![1u32, 3, 5, 8];
+        let mut legacy_wire = 6u32.to_le_bytes().to_vec();
+        legacy_wire.extend(
+            bincode::serialize(&targets).expect("legacy Vec target payload should serialize"),
+        );
+        let shared = Action::ReplaceShifts(Arc::from(targets.into_boxed_slice()));
+        assert_eq!(
+            bincode::serialize(&shared).expect("shared target payload should serialize"),
+            legacy_wire,
+            "Arc<[u32]> must retain the historical Vec<u32> bincode wire shape",
+        );
+        assert_eq!(
+            bincode::deserialize::<Action>(&legacy_wire)
+                .expect("historical ReplaceShifts payload should still deserialize"),
+            shared,
+        );
     }
 }

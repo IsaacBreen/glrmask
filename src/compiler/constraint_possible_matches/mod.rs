@@ -11,6 +11,7 @@ use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
+use crate::automata::weighted::terminal_automaton::TerminalAutomaton;
 use crate::compiler::constraint_possible_matches::collector::{
     IntervalPossibleMatchMap, TerminalRangeGroup, TrieClassBuildResult,
 };
@@ -20,6 +21,7 @@ use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap, Mapped
 use crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::compat::{
     FlatDfa, FlatDfaState, TokenizerView,
 };
+use crate::compiler::stages::id_map_and_terminal_dwa::types::TerminalDwaFamilies;
 use crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::vocab::fast as vocab_equivalence_analysis;
 use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
@@ -86,6 +88,44 @@ pub(crate) struct ConstraintPossibleMatchesComputation {
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeDynamicMaskVocabArtifacts {
     pub(crate) vocab: DynamicMaskVocab,
+}
+
+/// Complete the possible-match artifact from the sole global-L1 transition.
+///
+/// This is intentionally much narrower than reusing terminal-DWA equivalence
+/// for possible matches in general, which is unsound. The caller proves that
+/// the parser language consumes one terminal at most once and that there is no
+/// ignore terminal. In that shape, the one-terminal lexer keeps acceptance
+/// monotone while the terminal remains live, so a token matches the delayed
+/// terminal at some prefix exactly when the global L1 scan ends in that
+/// terminal's accepting signature. The L1 transition weight is therefore the
+/// exact possible-match relation, already expressed in its compact TSID/token
+/// coordinates.
+pub(crate) fn complete_single_use_terminal_possible_matches_from_l1(
+    families: &TerminalDwaFamilies,
+    mut deferred: ConstraintPossibleMatchesComputation,
+) -> Option<ConstraintPossibleMatchesComputation> {
+    if deferred.complete || families.l2p.is_some() || families.special.is_some() {
+        return None;
+    }
+    let l1 = families.l1.as_ref()?;
+    let TerminalAutomaton::Dwa(dwa) = l1.artifact() else {
+        return None;
+    };
+    let start = dwa.states().get(dwa.start_state() as usize)?;
+    if start.transitions.len() != 1 {
+        return None;
+    }
+    let (&label, (_, weight)) = start.transitions.first_key_value()?;
+    let terminal = TerminalID::try_from(label).ok()?;
+
+    let mut possible_matches = RuntimePossibleMatchesByTerminal::new();
+    possible_matches.insert(terminal, weight.clone());
+    deferred.mapped_possible_matches =
+        MappedArtifact::new(possible_matches, l1.id_map().clone());
+    deferred.complete = true;
+    deferred.profile = ConstraintPossibleMatchesProfile::default();
+    Some(deferred)
 }
 
 #[derive(Debug, Clone)]
@@ -2985,6 +3025,16 @@ fn compute_constraint_possible_matches_with_artifacts(
         trie_build_states.dedup();
     }
 
+    let query_state_count = demand
+        .raw_query_state
+        .iter()
+        .filter(|&&active| active)
+        .count();
+    let relevant_state_count = demand
+        .raw_state_relevant
+        .iter()
+        .filter(|&&active| active)
+        .count();
     if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
         || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
     {
@@ -2992,17 +3042,22 @@ fn compute_constraint_possible_matches_with_artifacts(
             "[glrmask/profile][pm_delayed_terminal_demand] terminals={} accepting_future_states={} query_states={} relevant_states={} total_terminals={} total_states={}",
             demand.terminals.count_ones(),
             demand.accepting_future_states,
-            demand.raw_query_state.iter().filter(|&&active| active).count(),
-            demand.raw_state_relevant.iter().filter(|&&active| active).count(),
+            query_state_count,
+            relevant_state_count,
             tokenizer.num_terminals(),
             tokenizer.num_states(),
         );
     }
 
     let root_terminal_union = demand.terminals.count_ones();
+    // The exact NFA powerset collector only retains delayed-terminal-relevant
+    // states. Admission must therefore scale with that live domain, not with
+    // unrelated tokenizer states. Large synthesized tokenizers can have fewer
+    // than 500 relevant states; rejecting the powerset on total state count
+    // falls back to a multi-second sparse trie walk for no semantic benefit.
     let use_nfa_powerset_collect = tokenizer.has_epsilon_transitions()
         && !scalar_dispatch
-        && nfa_powerset_collect_enabled(tokenizer.num_states() as usize, root_terminal_union);
+        && nfa_powerset_collect_enabled(relevant_state_count, root_terminal_union);
     let use_sparse_root_collect = (tokenizer.has_epsilon_transitions() && !scalar_dispatch)
         || (sparse_root_collect_enabled()
             && trie_build_states.len() <= sparse_root_state_limit()
