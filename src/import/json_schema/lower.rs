@@ -1,7 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::hash::Hasher;
 use std::sync::{Arc, Mutex};
 
 use regex::{Regex, escape as regex_escape};
+use rustc_hash::FxHasher;
+use serde::Serialize;
 use serde_json::Value;
 
 use crate::automata::lexer::{Lexer, compile::build_regex};
@@ -47,16 +50,62 @@ pub(crate) const JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE: &str =
 pub(crate) const MAX_SHARED_ADDITIONAL_EXCLUSION_KEYS: usize = 256;
 const STRING_ENUM_REGEX_MIN_VALUES: usize = 64;
 const STRING_ENUM_REGEX_MIN_ENCODED_BYTES: usize = 1024;
+const DISABLE_STRUCTURAL_SCHEMA_MEMO_ENV: &str =
+    "GLRMASK_DISABLE_JSON_SCHEMA_STRUCTURAL_MEMO";
 pub(crate) const JSON_LITERAL_LEXER_PARTITION: &str = "json_literals";
 pub(crate) const JSON_OTHER_LEXER_PARTITION: &str = "json_other";
 pub(crate) const JSON_PATTERN_LEXER_PARTITION: &str = "json_patterns";
 pub(crate) const JSON_PATTERN_FAMILY_LEXER_PARTITION_PREFIX: &str = "json_pattern_family_";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub(crate) enum JsonTerminalPartitionClass {
     Other,
     Literal,
     Pattern,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+enum StructuralSchemaSite {
+    Ordinary,
+    AdditionalProperties,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct StructuralSchemaCacheKey {
+    schema: Schema,
+    terminal_partition_class: JsonTerminalPartitionClass,
+    site: StructuralSchemaSite,
+    object_variant_ref_stack: Vec<String>,
+}
+
+impl StructuralSchemaCacheKey {
+    fn fingerprint(&self) -> u64 {
+        // The fingerprint is only a bucket selector. Cache lookup always
+        // confirms full typed equality, so hash collisions cannot change the
+        // imported language.
+        let encoded = serde_json::to_vec(self)
+            .expect("loaded JSON Schema AST must remain JSON-serializable");
+        let mut hasher = FxHasher::default();
+        hasher.write(&encoded);
+        hasher.finish()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct StructuralSchemaCacheEntry {
+    key: StructuralSchemaCacheKey,
+    expr: GrammarExpr,
+}
+
+fn structural_schema_memo_enabled() -> bool {
+    std::env::var(DISABLE_STRUCTURAL_SCHEMA_MEMO_ENV)
+        .map(|value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(true)
 }
 
 impl JsonTerminalPartitionClass {
@@ -166,6 +215,10 @@ pub(crate) struct Lowerer<'a> {
     definition_rules: BTreeMap<String, String>,
     definition_by_pointer: BTreeMap<String, &'a Schema>,
     pub(crate) object_variant_ref_stack: BTreeSet<String>,
+    structural_schema_memo_enabled: bool,
+    structural_schema_expr_cache: HashMap<u64, Vec<StructuralSchemaCacheEntry>>,
+    structural_schema_cache_hits: usize,
+    structural_schema_cache_misses: usize,
     used_rule_names: BTreeSet<String>,
     next_rule_id: usize,
 }
@@ -224,6 +277,10 @@ impl<'a> Lowerer<'a> {
             definition_rules: BTreeMap::new(),
             definition_by_pointer,
             object_variant_ref_stack: BTreeSet::new(),
+            structural_schema_memo_enabled: structural_schema_memo_enabled(),
+            structural_schema_expr_cache: HashMap::new(),
+            structural_schema_cache_hits: 0,
+            structural_schema_cache_misses: 0,
             used_rule_names: BTreeSet::new(),
             next_rule_id: 0,
         };
@@ -263,6 +320,10 @@ impl<'a> Lowerer<'a> {
             definition_rules: BTreeMap::new(),
             definition_by_pointer: self.definition_by_pointer.clone(),
             object_variant_ref_stack: BTreeSet::new(),
+            structural_schema_memo_enabled: self.structural_schema_memo_enabled,
+            structural_schema_expr_cache: HashMap::new(),
+            structural_schema_cache_hits: 0,
+            structural_schema_cache_misses: 0,
             used_rule_names: BTreeSet::new(),
             next_rule_id,
         };
@@ -359,6 +420,22 @@ impl<'a> Lowerer<'a> {
                 profile.template_hits,
                 profile.template_misses,
                 shapes,
+            );
+        }
+        if self.structural_schema_memo_enabled
+            && (std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+                || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some())
+        {
+            let entries = self
+                .structural_schema_expr_cache
+                .values()
+                .map(Vec::len)
+                .sum::<usize>();
+            eprintln!(
+                "[glrmask/profile][json_schema_structural_memo] hits={} misses={} entries={}",
+                self.structural_schema_cache_hits,
+                self.structural_schema_cache_misses,
+                entries,
             );
         }
         let simplify_started_at = profile_enabled.then(std::time::Instant::now);
@@ -531,6 +608,62 @@ impl<'a> Lowerer<'a> {
     }
 
     pub(crate) fn lower_schema(&mut self, schema: &Schema) -> ImportResult<GrammarExpr> {
+        if !self.structural_schema_memo_enabled
+            || !matches!(schema.kind, SchemaKind::Assertions(_))
+        {
+            return self.lower_schema_uncached(schema);
+        }
+
+        self.lower_schema_memoized(schema)
+    }
+
+    fn lower_schema_memoized(&mut self, schema: &Schema) -> ImportResult<GrammarExpr> {
+        debug_assert!(matches!(schema.kind, SchemaKind::Assertions(_)));
+
+        let mut canonical = schema.clone();
+        canonical.normalize_locations_relative();
+        let key = StructuralSchemaCacheKey {
+            schema: canonical,
+            terminal_partition_class: self.terminal_partition_class,
+            site: if schema.location.ends_with("/additionalProperties") {
+                StructuralSchemaSite::AdditionalProperties
+            } else {
+                StructuralSchemaSite::Ordinary
+            },
+            object_variant_ref_stack: self
+                .object_variant_ref_stack
+                .iter()
+                .cloned()
+                .collect(),
+        };
+        let fingerprint = key.fingerprint();
+        if let Some(entry) = self
+            .structural_schema_expr_cache
+            .get(&fingerprint)
+            .and_then(|bucket| bucket.iter().find(|entry| entry.key == key))
+        {
+            // The cached expression references helper rules emitted by the
+            // original miss. Cache entries never cross Lowerer instances, and
+            // the key includes every mutable semantic context that can affect
+            // those rules, so a hit needs neither rule re-emission nor
+            // terminal-provenance replay.
+            let expr = entry.expr.clone();
+            self.structural_schema_cache_hits += 1;
+            return Ok(expr);
+        }
+        self.structural_schema_cache_misses += 1;
+        let expr = self.lower_schema_uncached(schema)?;
+        self.structural_schema_expr_cache
+            .entry(fingerprint)
+            .or_default()
+            .push(StructuralSchemaCacheEntry {
+                key,
+                expr: expr.clone(),
+            });
+        Ok(expr)
+    }
+
+    fn lower_schema_uncached(&mut self, schema: &Schema) -> ImportResult<GrammarExpr> {
         match &schema.kind {
             SchemaKind::Any => Ok(r(JSON_VALUE_RULE)),
             SchemaKind::Never => Ok(never()),
@@ -2169,5 +2302,161 @@ pub(crate) fn json_additional_key_string_rule() -> &'static str {
     match super::string::json_string_compat_mode() {
         super::string::JsonStringCompatMode::JsonSchema => JSON_STRING_RULE,
         super::string::JsonStringCompatMode::LlGuidanceNative => JSON_ADDITIONAL_KEY_STRING_RULE,
+    }
+}
+
+#[cfg(test)]
+mod structural_schema_memo_tests {
+    use super::*;
+
+    fn document() -> SchemaDocument {
+        SchemaDocument {
+            root: Schema::any("#"),
+            definitions: Vec::new(),
+            ref_targets: Vec::new(),
+        }
+    }
+
+    fn bounded_string(location: &str) -> Schema {
+        Schema::assertions(
+            location,
+            SchemaAssertions {
+                types: Some(vec![SchemaType::String]),
+                string: Some(StringSchema {
+                    max_length: Some(48),
+                    ..StringSchema::default()
+                }),
+                ..SchemaAssertions::default()
+            },
+        )
+    }
+
+    fn object_with_bounded_property(location: &str) -> Schema {
+        Schema::assertions(
+            location,
+            SchemaAssertions {
+                types: Some(vec![SchemaType::Object]),
+                object: Some(ObjectSchema {
+                    properties: vec![super::super::ast::PropertySchema {
+                        name: "value".to_string(),
+                        schema: bounded_string(&format!("{location}/properties/value")),
+                    }],
+                    ..ObjectSchema::default()
+                }),
+                ..SchemaAssertions::default()
+            },
+        )
+    }
+
+    #[test]
+    fn equal_subtrees_at_different_outer_locations_share_lowering() {
+        let document = document();
+        let mut lowerer = Lowerer::new(&document, JsonSchemaConfig::default());
+        let first = bounded_string("#/properties/first");
+        let second = bounded_string("#/properties/second");
+
+        let first_expr = lowerer.lower_schema_memoized(&first).unwrap();
+        let rules_after_first = lowerer.rules.len();
+        let second_expr = lowerer.lower_schema_memoized(&second).unwrap();
+
+        assert_eq!(first_expr, second_expr);
+        assert_eq!(lowerer.rules.len(), rules_after_first);
+        assert_eq!(lowerer.structural_schema_cache_hits, 1);
+        assert_eq!(lowerer.structural_schema_cache_misses, 1);
+    }
+
+    #[test]
+    fn nested_locations_are_normalized_relative_to_the_subtree() {
+        let document = document();
+        let mut lowerer = Lowerer::new(&document, JsonSchemaConfig::default());
+        let first = object_with_bounded_property("#/properties/first");
+        let second = object_with_bounded_property("#/properties/second");
+
+        let first_expr = lowerer.lower_schema_memoized(&first).unwrap();
+        let rules_after_first = lowerer.rules.len();
+        let second_expr = lowerer.lower_schema_memoized(&second).unwrap();
+
+        assert_eq!(first_expr, second_expr);
+        assert_eq!(lowerer.rules.len(), rules_after_first);
+        assert!(lowerer.structural_schema_cache_hits >= 1);
+    }
+
+    #[test]
+    fn additional_properties_site_does_not_share_with_ordinary_site() {
+        let document = document();
+        let mut lowerer = Lowerer::new(&document, JsonSchemaConfig::default());
+        let ordinary = bounded_string("#/properties/value");
+        let additional = bounded_string("#/additionalProperties");
+
+        let ordinary_expr = lowerer.lower_schema_memoized(&ordinary).unwrap();
+        let additional_expr = lowerer.lower_schema_memoized(&additional).unwrap();
+
+        assert_ne!(ordinary_expr, additional_expr);
+        assert_eq!(lowerer.structural_schema_cache_hits, 0);
+        assert_eq!(lowerer.structural_schema_cache_misses, 2);
+    }
+
+    #[test]
+    fn terminal_partition_class_is_part_of_the_cache_context() {
+        let document = document();
+        let mut lowerer = Lowerer::new(&document, JsonSchemaConfig::default());
+        let schema = bounded_string("#/properties/value");
+
+        let ordinary_expr = lowerer.lower_schema_memoized(&schema).unwrap();
+        let pattern_expr = lowerer.with_terminal_partition_class(
+            JsonTerminalPartitionClass::Pattern,
+            |lowerer| lowerer.lower_schema_memoized(&schema),
+        );
+
+        assert_ne!(ordinary_expr, pattern_expr.unwrap());
+        assert_eq!(lowerer.structural_schema_cache_hits, 0);
+        assert_eq!(lowerer.structural_schema_cache_misses, 2);
+    }
+
+    #[test]
+    fn fingerprint_collision_bucket_requires_typed_key_equality() {
+        let document = document();
+        let mut lowerer = Lowerer::new(&document, JsonSchemaConfig::default());
+        let wanted = bounded_string("#/properties/wanted");
+        let other = Schema::assertions(
+            "#/properties/other",
+            SchemaAssertions {
+                types: Some(vec![SchemaType::Number]),
+                number: Some(NumberSchema::default()),
+                ..SchemaAssertions::default()
+            },
+        );
+
+        let mut canonical_wanted = wanted.clone();
+        canonical_wanted.normalize_locations_relative();
+        let wanted_key = StructuralSchemaCacheKey {
+            schema: canonical_wanted,
+            terminal_partition_class: JsonTerminalPartitionClass::Other,
+            site: StructuralSchemaSite::Ordinary,
+            object_variant_ref_stack: Vec::new(),
+        };
+        let mut canonical_other = other;
+        canonical_other.normalize_locations_relative();
+        let other_key = StructuralSchemaCacheKey {
+            schema: canonical_other,
+            terminal_partition_class: JsonTerminalPartitionClass::Other,
+            site: StructuralSchemaSite::Ordinary,
+            object_variant_ref_stack: Vec::new(),
+        };
+        let fingerprint = wanted_key.fingerprint();
+        lowerer.structural_schema_expr_cache.insert(
+            fingerprint,
+            vec![StructuralSchemaCacheEntry {
+                key: other_key,
+                expr: r(JSON_NUMBER_RULE),
+            }],
+        );
+
+        let expr = lowerer.lower_schema_memoized(&wanted).unwrap();
+
+        assert_ne!(expr, r(JSON_NUMBER_RULE));
+        assert_eq!(lowerer.structural_schema_cache_hits, 0);
+        assert_eq!(lowerer.structural_schema_cache_misses, 1);
+        assert_eq!(lowerer.structural_schema_expr_cache[&fingerprint].len(), 2);
     }
 }

@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde::Serialize;
 use serde_json::Value;
 
 /// A loaded JSON Schema document.
@@ -21,13 +22,13 @@ pub(crate) struct SchemaDefinition {
     pub(crate) schema: Schema,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct Schema {
     pub(crate) location: String,
     pub(crate) kind: SchemaKind,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) enum SchemaKind {
     /// JSON Schema boolean `true`.
     Any,
@@ -39,7 +40,7 @@ pub(crate) enum SchemaKind {
     Assertions(Box<SchemaAssertions>),
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub(crate) struct SchemaAssertions {
     pub(crate) types: Option<Vec<SchemaType>>,
     pub(crate) const_value: Option<Value>,
@@ -96,7 +97,7 @@ impl SchemaAssertions {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub(crate) enum SchemaType {
     Null,
     Boolean,
@@ -107,7 +108,7 @@ pub(crate) enum SchemaType {
     Integer,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct ObjectSchema {
     pub(crate) properties: Vec<PropertySchema>,
     pub(crate) required: BTreeSet<String>,
@@ -136,26 +137,26 @@ impl Default for ObjectSchema {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct PropertySchema {
     pub(crate) name: String,
     pub(crate) schema: Schema,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct PatternPropertySchema {
     pub(crate) pattern: String,
     pub(crate) schema: Schema,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) enum AdditionalProperties {
     AllowAny,
     Deny,
     Schema(Box<Schema>),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct ArraySchema {
     pub(crate) items: Box<Schema>,
     pub(crate) prefix_items: Vec<Schema>,
@@ -174,7 +175,7 @@ impl Default for ArraySchema {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub(crate) struct StringSchema {
     pub(crate) min_length: usize,
     pub(crate) max_length: Option<usize>,
@@ -182,7 +183,7 @@ pub(crate) struct StringSchema {
     pub(crate) format: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub(crate) struct NumberSchema {
     pub(crate) integer: bool,
     pub(crate) minimum: Option<f64>,
@@ -194,6 +195,55 @@ pub(crate) struct NumberSchema {
 }
 
 impl Schema {
+    pub(crate) fn normalize_locations_relative(&mut self) {
+        let root = self.location.clone();
+        self.normalize_locations_relative_to(&root);
+    }
+
+    fn normalize_locations_relative_to(&mut self, root: &str) {
+        if self.location == root {
+            self.location = "#".to_string();
+        } else if let Some(suffix) = self.location.strip_prefix(root) {
+            if suffix.starts_with('/') {
+                self.location = format!("#{suffix}");
+            }
+        }
+        let SchemaKind::Assertions(assertions) = &mut self.kind else {
+            return;
+        };
+        for schema in assertions
+            .any_of
+            .iter_mut()
+            .chain(assertions.one_of.iter_mut())
+            .chain(assertions.all_of.iter_mut())
+        {
+            schema.normalize_locations_relative_to(root);
+        }
+        if let Some(schema) = assertions.not.as_mut() {
+            schema.normalize_locations_relative_to(root);
+        }
+        if let Some(object) = assertions.object.as_mut() {
+            for property in &mut object.properties {
+                property.schema.normalize_locations_relative_to(root);
+            }
+            for property in &mut object.pattern_properties {
+                property.schema.normalize_locations_relative_to(root);
+            }
+            if let Some(schema) = object.property_names.as_mut() {
+                schema.normalize_locations_relative_to(root);
+            }
+            if let AdditionalProperties::Schema(schema) = &mut object.additional_properties {
+                schema.normalize_locations_relative_to(root);
+            }
+        }
+        if let Some(array) = assertions.array.as_mut() {
+            array.items.normalize_locations_relative_to(root);
+            for schema in &mut array.prefix_items {
+                schema.normalize_locations_relative_to(root);
+            }
+        }
+    }
+
     pub(crate) fn any(location: impl Into<String>) -> Self {
         Self { location: location.into(), kind: SchemaKind::Any }
     }
