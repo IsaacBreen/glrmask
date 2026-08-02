@@ -11,6 +11,13 @@
   construction moves into vocabulary preparation. Small lexer NFAs may be
   determinized for faster masks, while large source automata skip that optional
   product construction before it becomes a build-time cliff.
+- Dynamic tokenizer construction now keeps very large exact binary
+  intersections in compressed runtime form, uses a compact fail-closed engine
+  for long zero-minimum bounded string residuals, and isolates nullable roots
+  before assembling the global lexer union. One-word automaton bitsets stay
+  inline and large single-group metadata is built in parallel. Representative
+  former 0.5–1.0 second dynamic builds now complete below 200 ms without
+  weakening lexer semantics or precomputing vocabulary-specific token programs.
 - Static constraint saving now serializes directly into the compressed
   artifact and borrows tokenizer DFA storage instead of materializing a full
   raw bincode payload and cloned wire automaton. Large compile-once artifacts

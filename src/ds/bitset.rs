@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BitSet {
-    words: Vec<u64>,
+    words: SmallVec<[u64; 1]>,
     len: usize,
 }
 
@@ -18,8 +19,10 @@ impl BitSet {
     }
 
     pub fn new(len: usize) -> Self {
+        let mut words = SmallVec::new();
+        words.resize(len.div_ceil(64), 0);
         Self {
-            words: vec![0; len.div_ceil(64)],
+            words,
             len,
         }
     }
@@ -29,8 +32,10 @@ impl BitSet {
     }
 
     pub fn all(len: usize) -> Self {
+        let mut words = SmallVec::new();
+        words.resize(len.div_ceil(64), u64::MAX);
         let mut set = Self {
-            words: vec![u64::MAX; len.div_ceil(64)],
+            words,
             len,
         };
         set.mask_unused_bits();
@@ -245,7 +250,42 @@ impl Iterator for BitIter {
 
 #[cfg(test)]
 mod tests {
+    use serde::{Deserialize, Serialize};
+
     use super::BitSet;
+
+    #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+    struct LegacyBitSet {
+        words: Vec<u64>,
+        len: usize,
+    }
+
+    #[test]
+    fn inline_words_preserve_legacy_bincode_wire_shape() {
+        for len in [0usize, 1, 64, 65, 130] {
+            let mut current = BitSet::new(len);
+            for bit in [0usize, 63, 64, 129] {
+                if bit < len {
+                    current.set(bit);
+                }
+            }
+            let legacy = LegacyBitSet {
+                words: current.words().to_vec(),
+                len,
+            };
+            let current_bytes = bincode::serialize(&current).unwrap();
+            let legacy_bytes = bincode::serialize(&legacy).unwrap();
+            assert_eq!(current_bytes, legacy_bytes);
+            assert_eq!(
+                bincode::deserialize::<BitSet>(&legacy_bytes).unwrap(),
+                current,
+            );
+            assert_eq!(
+                bincode::deserialize::<LegacyBitSet>(&current_bytes).unwrap(),
+                legacy,
+            );
+        }
+    }
 
     #[test]
     fn union_with_delta_reports_only_new_bits() {

@@ -4013,8 +4013,6 @@ pub(crate) fn build_regex_partitioned_with_profile_labels_and_adaptive(
         ),
     }
 }
-
-
 pub(crate) fn build_regex_partitioned_with_profile_labels_and_adaptive_and_residual_isolation(
     exprs: &[Expr],
     visible_labels: &[String],
@@ -4031,6 +4029,142 @@ pub(crate) fn build_regex_partitioned_with_profile_labels_and_adaptive_and_resid
             adaptive,
         ),
     }
+}
+
+/// Build an exact partitioned tokenizer while keeping very large pure binary
+/// intersection transition tables in their compressed runtime form.
+///
+/// Unlike the structural compile/runtime pair, this path does not construct a
+/// synthesized tokenizer or a full-to-synthesized state map. It is intended
+/// for consumers, such as direct dynamic masking, that need only the exact
+/// runtime tokenizer.
+pub(crate) fn build_exact_partitioned_runtime_tokenizer(
+    exprs: &[Expr],
+    visible_labels: Option<&[String]>,
+    partitions: &[u32],
+    residual_isolation_classes: &[Option<u32>],
+) -> Tokenizer {
+    // Below this size, the ordinary materialized product is already cheap and
+    // has better locality. Large products keep class transitions compressed.
+    const MIN_COMPRESSED_RUNTIME_PAIR_CELLS: usize = 1_000_000;
+
+    assert_eq!(exprs.len(), partitions.len());
+    assert_eq!(exprs.len(), residual_isolation_classes.len());
+    if let Some(labels) = visible_labels {
+        assert_eq!(exprs.len(), labels.len());
+    }
+
+    let rewritten_exprs = materialize_repeated_subexpression_dfas(exprs);
+    let compile_exprs = rewritten_exprs.as_deref().unwrap_or(exprs);
+    let mut grouped = BTreeMap::<u32, Vec<usize>>::new();
+    for (terminal, &partition) in partitions.iter().enumerate() {
+        grouped.entry(partition).or_default().push(terminal);
+    }
+
+    for terminal_ids in grouped.values() {
+        let mut class = None;
+        let mut has_unprotected = false;
+        for &terminal in terminal_ids {
+            match residual_isolation_classes[terminal] {
+                Some(current) => match class {
+                    Some(previous) => assert_eq!(
+                        previous, current,
+                        "one lexer partition cannot contain distinct protected residual classes",
+                    ),
+                    None => class = Some(current),
+                },
+                None => has_unprotected = true,
+            }
+        }
+        assert!(
+            class.is_none() || !has_unprotected,
+            "one lexer partition cannot mix protected and unprotected residual coordinates",
+        );
+    }
+
+    let shared_duplicates = shared_duplicate_nested_group_op_cache(compile_exprs, &grouped);
+    if let Some(shared_duplicates) = &shared_duplicates {
+        prewarm_shared_duplicate_nested_group_ops(shared_duplicates);
+    }
+
+    let components = grouped
+        .into_iter()
+        .collect::<Vec<_>>()
+        .into_par_iter()
+        .map(|(_partition, terminal_ids)| {
+            let local_exprs = terminal_ids
+                .iter()
+                .map(|&terminal| compile_exprs[terminal].clone())
+                .collect::<Vec<_>>();
+            let local_labels = visible_labels.map(|labels| {
+                terminal_ids
+                    .iter()
+                    .map(|&terminal| labels[terminal].clone())
+                    .collect::<Vec<_>>()
+            });
+            let mut nested_group_op_cache = NestedGroupOpCache {
+                shared_duplicates: shared_duplicates.clone(),
+                ..NestedGroupOpCache::default()
+            };
+            let plan = build_exclusion_compile_plan_with_labels_and_cache(
+                &local_exprs,
+                local_labels.as_deref(),
+                &mut nested_group_op_cache,
+            );
+            let full = match try_compile_with_plan_deferred_dense_min_pair_cells(
+                plan,
+                MIN_COMPRESSED_RUNTIME_PAIR_CELLS,
+                true,
+            ) {
+                Ok((mut full, trace)) => {
+                    if let Some(trace) = trace {
+                        full.attach_dense_runtime_trace(trace)
+                            .expect("deferred exact runtime tokenizer must accept its state trace");
+                    }
+                    full
+                }
+                Err(plan) => DeferredDfa::Ready(compile_with_plan(plan)),
+            };
+            (terminal_ids, full)
+        })
+        .collect::<Vec<_>>();
+
+    let mut combined = DFA::new(1);
+    combined.ensure_group_capacity(exprs.len());
+    let mut root_futures = BitSet::new(exprs.len());
+    let mut compressed_segments = Vec::new();
+    for (terminal_ids, full) in components {
+        let (mut component_dfa, compressed) = full.finish_runtime();
+        if compressed.is_none() {
+            // Isolate nullable roots while this component is still small and
+            // independent. The final tokenizer is a disjoint epsilon union of
+            // these components, so this is equivalent to isolating the full
+            // union but avoids rescanning every state in unrelated huge
+            // compressed components.
+            component_dfa = isolate_component_nullable_start(
+                component_dfa,
+                terminal_ids.len(),
+            )
+            .0;
+        }
+        debug_assert_eq!(component_dfa.num_groups(), terminal_ids.len());
+        for local_group in component_dfa.possible_future_group_ids(0).iter() {
+            root_futures.set(terminal_ids[local_group]);
+        }
+        let offset = combined.append_rebased_component(component_dfa, &terminal_ids);
+        combined.add_epsilon_transition(0, offset);
+        if let Some(mut segment) = compressed {
+            segment.state_offset = offset;
+            compressed_segments.push(segment);
+        }
+    }
+    combined.set_possible_future_group_ids(0, root_futures);
+    Tokenizer::from_parts_with_compressed_transitions(
+        combined,
+        exprs.len() as u32,
+        Some(Arc::from(exprs.to_vec().into_boxed_slice())),
+        compressed_segments,
+    )
 }
 
 fn env_flag(name: &str, default: bool) -> bool {
@@ -4149,6 +4283,10 @@ struct LexerComponentPair {
 
 enum DeferredDfa {
     Ready(DFA),
+    ReadyCompressed {
+        dfa: DFA,
+        segment: CompressedTransitionSegment,
+    },
     DenseBinary(DeferredDenseBinaryIntersectionProduct),
 }
 
@@ -4156,6 +4294,7 @@ impl DeferredDfa {
     fn num_states(&self) -> usize {
         match self {
             Self::Ready(dfa) => dfa.num_states(),
+            Self::ReadyCompressed { dfa, .. } => dfa.num_states(),
             Self::DenseBinary(product) => product.num_states(),
         }
     }
@@ -4165,6 +4304,9 @@ impl DeferredDfa {
             Self::Ready(dfa) => {
                 dfa.finalizers(0).is_empty() && !dfa.has_epsilon_transitions()
             }
+            Self::ReadyCompressed { dfa, .. } => {
+                dfa.finalizers(0).is_empty() && !dfa.has_epsilon_transitions()
+            }
             Self::DenseBinary(product) => !product.initial_is_accepting(),
         }
     }
@@ -4172,6 +4314,7 @@ impl DeferredDfa {
     fn ensure_group_capacity(&mut self, num_groups: usize) {
         match self {
             Self::Ready(dfa) => dfa.ensure_group_capacity(num_groups),
+            Self::ReadyCompressed { dfa, .. } => dfa.ensure_group_capacity(num_groups),
             Self::DenseBinary(product) => product.ensure_group_capacity(num_groups),
         }
     }
@@ -4179,13 +4322,14 @@ impl DeferredDfa {
     fn set_group_u8set(&mut self, group_id: u32, set: U8Set) {
         match self {
             Self::Ready(dfa) => dfa.set_group_u8set(group_id, set),
+            Self::ReadyCompressed { dfa, .. } => dfa.set_group_u8set(group_id, set),
             Self::DenseBinary(product) => product.set_group_u8set(group_id, set),
         }
     }
 
     fn attach_dense_runtime_trace(&mut self, trace: ProductBuildTrace) -> Option<()> {
         match self {
-            Self::Ready(_) => Some(()),
+            Self::Ready(_) | Self::ReadyCompressed { .. } => Some(()),
             Self::DenseBinary(product) => product.attach_runtime_trace(trace),
         }
     }
@@ -4193,6 +4337,7 @@ impl DeferredDfa {
     fn has_deferred_runtime_materialization(&self) -> bool {
         match self {
             Self::Ready(_) => false,
+            Self::ReadyCompressed { .. } => true,
             Self::DenseBinary(product) => product.deferred_transition_rows.is_some(),
         }
     }
@@ -4200,6 +4345,10 @@ impl DeferredDfa {
     fn finish(self) -> DFA {
         match self {
             Self::Ready(dfa) => dfa,
+            Self::ReadyCompressed { mut dfa, segment } => {
+                segment.materialize_into_dfa(&mut dfa);
+                dfa
+            }
             Self::DenseBinary(product) => product.finish(),
         }
     }
@@ -4207,6 +4356,7 @@ impl DeferredDfa {
     fn finish_runtime(self) -> (DFA, Option<CompressedTransitionSegment>) {
         match self {
             Self::Ready(dfa) => (dfa, None),
+            Self::ReadyCompressed { dfa, segment } => (dfa, Some(segment)),
             Self::DenseBinary(product) => {
                 let (dfa, segment) = product.finish_compressed();
                 (dfa, Some(segment))
@@ -6003,7 +6153,7 @@ pub(crate) fn prepare_partitioned_expression_pair_with_structural_map(
         } else {
             let dfa = match pair.full {
                 DeferredDfa::Ready(dfa) => dfa,
-                DeferredDfa::DenseBinary(_) => {
+                DeferredDfa::ReadyCompressed { .. } | DeferredDfa::DenseBinary(_) => {
                     unreachable!("ordinary lexer components are never deferred")
                 }
             };
@@ -6260,13 +6410,13 @@ fn set_single_group_futures_from_class_graph(
 /// compact transition row per state. A linked reverse graph can be assembled
 /// in one pass, and the reverse reachability walk itself identifies exactly
 /// the states with an outgoing edge to a final-reachable state.
-fn set_single_group_futures_from_class_graph_csr(
-    dfa: &mut DFA,
+fn compute_single_group_futures_from_class_graph_csr(
+    accepting: &[bool],
     transition_offsets: &[u32],
     transition_targets: &[u32],
     cooperative_yield_interval: usize,
-) {
-    let states = dfa.num_states();
+) -> Vec<bool> {
+    let states = accepting.len();
     debug_assert_eq!(transition_offsets.len(), states + 1);
 
     let mut predecessor_heads = vec![u32::MAX; states];
@@ -6297,8 +6447,8 @@ fn set_single_group_futures_from_class_graph_csr(
     let mut can_reach_final = vec![false; states];
     let mut has_future = vec![false; states];
     let mut queue = VecDeque::<u32>::new();
-    for state in 0..states {
-        if dfa.finalizers(state as u32).contains(0) {
+    for (state, &is_accepting) in accepting.iter().enumerate() {
+        if is_accepting {
             can_reach_final[state] = true;
             queue.push_back(state as u32);
         }
@@ -6323,11 +6473,25 @@ fn set_single_group_futures_from_class_graph_csr(
             edge = predecessor_next[edge as usize];
         }
     }
+    has_future
+}
 
+fn set_single_group_futures_from_class_graph_csr(
+    dfa: &mut DFA,
+    transition_offsets: &[u32],
+    transition_targets: &[u32],
+    cooperative_yield_interval: usize,
+) {
+    let accepting = (0..dfa.num_states())
+        .map(|state| dfa.finalizers(state as u32).contains(0))
+        .collect::<Vec<_>>();
+    let has_future = compute_single_group_futures_from_class_graph_csr(
+        &accepting,
+        transition_offsets,
+        transition_targets,
+        cooperative_yield_interval,
+    );
     for (state, &future) in has_future.iter().enumerate() {
-        if cooperative_yield_interval != 0 && state % cooperative_yield_interval == 0 {
-            let _ = rayon::yield_now();
-        }
         let mut future_groups = BitSet::new(1);
         if future {
             future_groups.set(0);
@@ -9503,27 +9667,31 @@ impl DeferredDenseBinaryIntersectionProduct {
         self.metadata.set_group_u8set(group_id, set);
     }
 
-    fn materialize_metadata(&mut self) -> DFA {
-        if self.metadata.num_states() == self.accepting.len() {
-            return std::mem::take(&mut self.metadata);
+    fn materialize_metadata_parts(
+        metadata: DFA,
+        accepting: Vec<bool>,
+        cooperative_yield_interval: usize,
+    ) -> DFA {
+        if metadata.num_states() == accepting.len() {
+            return metadata;
         }
-        let num_groups = self.metadata.num_groups();
-        let mut dfa = DFA::new(self.accepting.len());
+        let num_groups = metadata.num_groups();
+        let mut dfa = DFA::new(accepting.len());
         dfa.ensure_group_capacity(num_groups);
         for group in 0..num_groups {
             dfa.set_group_u8set(
                 group as u32,
-                *self.metadata.group_id_to_u8set(group as u32),
+                *metadata.group_id_to_u8set(group as u32),
             );
         }
         if num_groups != 0 {
-            for (state, &accepting) in self.accepting.iter().enumerate() {
-                if self.cooperative_yield_interval != 0
-                    && state % self.cooperative_yield_interval == 0
+            for (state, &is_accepting) in accepting.iter().enumerate() {
+                if cooperative_yield_interval != 0
+                    && state % cooperative_yield_interval == 0
                 {
                     let _ = rayon::yield_now();
                 }
-                if accepting {
+                if is_accepting {
                     let mut finalizers = BitSet::new(num_groups);
                     finalizers.set(0);
                     dfa.overwrite_state_metadata(
@@ -9565,7 +9733,8 @@ impl DeferredDenseBinaryIntersectionProduct {
         let Some(rows) = self.deferred_transition_rows.take() else {
             return Some(());
         };
-        if rows.pairs.len() != self.num_states()
+        let state_count = self.pending_class_transition_offsets.len().checked_sub(1)?;
+        if rows.pairs.len() != state_count
             || rows.state_by_pair.len() != self.pair_cells
         {
             return None;
@@ -9637,15 +9806,30 @@ impl DeferredDenseBinaryIntersectionProduct {
 
     fn finish(mut self) -> DFA {
         let profile_timing = self.started_at.is_some();
-        let transition_rows_started_at = profile_timing.then(Instant::now);
-        self.materialize_pending_class_transitions()
-            .expect("deferred dense transition rows must materialize");
-        let transition_rows_ms = transition_rows_started_at
-            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-        let metadata_started_at = profile_timing.then(Instant::now);
-        let mut dfa = self.materialize_metadata();
-        let metadata_ms = metadata_started_at
-            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let metadata = std::mem::take(&mut self.metadata);
+        let accepting = std::mem::take(&mut self.accepting);
+        let cooperative_yield_interval = self.cooperative_yield_interval;
+        let ((mut dfa, metadata_ms), (transition_ok, transition_rows_ms)) = rayon::join(
+            || {
+                let started_at = profile_timing.then(Instant::now);
+                let dfa = Self::materialize_metadata_parts(
+                    metadata,
+                    accepting,
+                    cooperative_yield_interval,
+                );
+                let ms = started_at
+                    .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+                (dfa, ms)
+            },
+            || {
+                let started_at = profile_timing.then(Instant::now);
+                let result = self.materialize_pending_class_transitions();
+                let ms = started_at
+                    .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+                (result, ms)
+            },
+        );
+        transition_ok.expect("deferred dense transition rows must materialize");
         let future_started_at = profile_timing.then(Instant::now);
         set_single_group_futures_from_class_graph_csr(
             &mut dfa,
@@ -9774,18 +9958,24 @@ impl DeferredDenseBinaryIntersectionProduct {
             .expect("deferred dense transition rows must materialize");
         let transition_rows_ms = transition_rows_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-        let metadata_started_at = profile_timing.then(Instant::now);
-        let mut dfa = self.materialize_metadata();
-        let metadata_ms = metadata_started_at
-            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let future_started_at = profile_timing.then(Instant::now);
-        set_single_group_futures_from_class_graph_csr(
-            &mut dfa,
+        let has_future = compute_single_group_futures_from_class_graph_csr(
+            &self.accepting,
             &self.pending_class_transition_offsets,
             &self.pending_class_transition_targets,
             self.cooperative_yield_interval,
         );
         let future_ms = future_started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let metadata_started_at = profile_timing.then(Instant::now);
+        debug_assert_eq!(self.metadata.num_groups(), 1);
+        let group_u8set = *self.metadata.group_id_to_u8set(0);
+        let dfa = DFA::new_with_single_group_metadata(
+            &self.accepting,
+            &has_future,
+            group_u8set,
+        );
+        let metadata_ms = metadata_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let mut byte_to_class = [0u8; 256];
         let class_members = self
@@ -9842,6 +10032,7 @@ fn try_discover_dense_binary_intersection_product(
     component_class_transitions: &[ProductComponentClassTransitions],
     capture_trace: bool,
     defer_transition_rows: bool,
+    defer_metadata: bool,
     profile_timing: bool,
 ) -> Option<(
     DeferredDenseBinaryIntersectionProduct,
@@ -9861,7 +10052,7 @@ fn try_discover_dense_binary_intersection_product(
         return None;
     }
     let num_classes = class_members.len();
-    let cooperative_yield_interval = defer_transition_rows
+    let cooperative_yield_interval = (defer_transition_rows || defer_metadata)
         .then(|| {
             std::env::var("GLRMASK_DEFERRED_DENSE_YIELD_INTERVAL")
                 .ok()
@@ -9898,7 +10089,7 @@ fn try_discover_dense_binary_intersection_product(
         left.finalizers(left_state).contains(0) && right.finalizers(right_state).contains(0)
     };
     let mut accepting = vec![is_accepting(0, 0)];
-    if accepting[0] && !defer_transition_rows {
+    if accepting[0] && !defer_metadata {
         let mut finalizers = BitSet::new(1);
         finalizers.set(0);
         metadata.overwrite_state_metadata(0, finalizers, BitSet::new(1));
@@ -9942,7 +10133,7 @@ fn try_discover_dense_binary_intersection_product(
                 pairs.push((left_target, right_target));
                 let target_accepting = is_accepting(left_target, right_target);
                 accepting.push(target_accepting);
-                if !defer_transition_rows {
+                if !defer_metadata {
                     let added = metadata.add_state();
                     debug_assert_eq!(added, target);
                     if target_accepting {
@@ -10037,9 +10228,280 @@ fn try_build_dense_binary_intersection_product(
         component_class_transitions,
         capture_trace,
         false,
+        false,
         profile_timing,
     )?;
     Some((deferred.finish(), true, trace))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct CompactZeroMinRepeatTailState {
+    body: Option<(u32, u32)>,
+    suffix_state: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum CompactZeroMinRepeatState {
+    Prefix(u32),
+    Tail(CompactZeroMinRepeatTailState),
+}
+
+fn compact_zero_min_repeat_tail(
+    state: &ZeroMinRepeatSuffixState,
+) -> Option<CompactZeroMinRepeatTailState> {
+    let mut body_iter = state
+        .body_min_counts
+        .iter()
+        .enumerate()
+        .filter(|(_, count)| **count != u32::MAX);
+    let body = body_iter
+        .next()
+        .map(|(body_state, &completed)| (body_state as u32, completed));
+    if body_iter.next().is_some() || state.suffix_states.len() > 1 {
+        return None;
+    }
+    let suffix_state = state.suffix_states.first().copied();
+    (body.is_some() || suffix_state.is_some()).then_some(CompactZeroMinRepeatTailState {
+        body,
+        suffix_state,
+    })
+}
+
+fn compact_zero_min_repeat_start(
+    lazy: &LazyZeroMinRepeatSuffixComponent,
+) -> Option<CompactZeroMinRepeatState> {
+    if lazy.prefix.is_empty() {
+        compact_zero_min_repeat_tail(lazy.tail_states.first()?)
+            .map(CompactZeroMinRepeatState::Tail)
+    } else {
+        Some(CompactZeroMinRepeatState::Prefix(0))
+    }
+}
+
+fn compact_zero_min_repeat_step(
+    lazy: &LazyZeroMinRepeatSuffixComponent,
+    state: CompactZeroMinRepeatState,
+    byte: u8,
+) -> Result<Option<CompactZeroMinRepeatState>, ()> {
+    let tail = match state {
+        CompactZeroMinRepeatState::Prefix(position) => {
+            let position = position as usize;
+            if lazy.prefix.get(position).copied() != Some(byte) {
+                return Ok(None);
+            }
+            let next = position + 1;
+            if next < lazy.prefix.len() {
+                return Ok(Some(CompactZeroMinRepeatState::Prefix(next as u32)));
+            }
+            let tail = compact_zero_min_repeat_tail(lazy.tail_states.first().ok_or(())?)
+                .map(CompactZeroMinRepeatState::Tail)
+                .map(Some)
+                .ok_or(())?;
+            return Ok(tail);
+        }
+        CompactZeroMinRepeatState::Tail(tail) => tail,
+    };
+
+    let mut body_candidates = SmallVec::<[(u32, u32); 2]>::new();
+    let mut suffix_candidates = SmallVec::<[u32; 2]>::new();
+
+    if let Some((body_state, completed)) = tail.body
+        && let Some(target) = lazy.body_dfa.step(body_state, byte)
+    {
+        if lazy.body_dfa.finalizers(target).contains(0) {
+            let completed = completed.saturating_add(1);
+            suffix_candidates.push(0);
+            if completed < lazy.max as u32 {
+                body_candidates.push((0, completed));
+            }
+        }
+        if lazy.body_dfa.possible_future_group_ids(target).contains(0) {
+            body_candidates.push((target, completed));
+        }
+    }
+    if let Some(suffix_state) = tail.suffix_state
+        && let Some(target) = lazy.suffix_dfa.step(suffix_state, byte)
+    {
+        if lazy.suffix_dfa.finalizers(target).contains(0)
+            || lazy
+                .suffix_dfa
+                .possible_future_group_ids(target)
+                .contains(0)
+        {
+            suffix_candidates.push(target);
+        }
+    }
+
+    body_candidates.sort_unstable();
+    body_candidates.dedup();
+    suffix_candidates.sort_unstable();
+    suffix_candidates.dedup();
+    if body_candidates.is_empty() && suffix_candidates.is_empty() {
+        return Ok(None);
+    }
+    if body_candidates.len() > 1 || suffix_candidates.len() > 1 {
+        return Err(());
+    }
+    Ok(Some(CompactZeroMinRepeatState::Tail(
+        CompactZeroMinRepeatTailState {
+            body: body_candidates.first().copied(),
+            suffix_state: suffix_candidates.first().copied(),
+        },
+    )))
+}
+
+fn compact_zero_min_repeat_is_accepting(
+    lazy: &LazyZeroMinRepeatSuffixComponent,
+    state: CompactZeroMinRepeatState,
+) -> bool {
+    match state {
+        CompactZeroMinRepeatState::Prefix(_) => false,
+        CompactZeroMinRepeatState::Tail(tail) => tail
+            .suffix_state
+            .is_some_and(|suffix_state| lazy.suffix_dfa.finalizers(suffix_state).contains(0)),
+    }
+}
+
+/// Build the exact runtime-only form of a large zero-minimum bounded-repeat
+/// intersection when every reachable lazy residual has at most one body
+/// state/count and at most one suffix state. This is the common maxLength string
+/// shape. The helper is deliberately fail-closed: any transition requiring a
+/// genuine residual set returns `None`, and the general lazy product remains
+/// authoritative.
+fn try_compile_compact_zero_min_repeat_intersection_runtime(
+    plan: &ExclusionCompilePlan,
+    profile_timing: bool,
+) -> Option<DeferredDfa> {
+    if plan.visible_groups != 1
+        || plan.compiled_exprs.len() != 2
+        || !pure_binary_intersection(&plan.exclusions, &plan.intersections)
+    {
+        return None;
+    }
+
+    let started_at = profile_timing.then(Instant::now);
+    let (lazy_index, lazy) = plan
+        .compiled_exprs
+        .iter()
+        .enumerate()
+        .find_map(|(index, expr)| {
+            LazyZeroMinRepeatSuffixComponent::from_expr(expr).map(|lazy| (index, lazy))
+        })?;
+    let other_index = 1 - lazy_index;
+    let other_component =
+        compile_product_component_with_options(&plan.compiled_exprs[other_index], false, true);
+    let other_dfa = other_component.materialized_dfa()?;
+    let other_dead = other_component.dead_state();
+    let (class_map, class_members) =
+        compute_lazy_zero_min_repeat_product_equivalence_classes(&lazy, other_dfa);
+    let other_transitions = build_product_class_transitions_for_dfa(other_dfa, &class_map);
+
+    let start_lazy = compact_zero_min_repeat_start(&lazy)?;
+    let start = (start_lazy, 0u32);
+    let mut state_by_pair = FxHashMap::<(CompactZeroMinRepeatState, u32), u32>::default();
+    state_by_pair.insert(start, 0);
+    let mut pairs = vec![start];
+    let mut accepting = vec![compact_zero_min_repeat_is_accepting(&lazy, start_lazy)
+        && other_dfa.finalizers(0).contains(0)];
+    let mut row_offsets = Vec::<u32>::with_capacity(lazy.max.saturating_add(3));
+    row_offsets.push(0);
+    let mut row_classes = Vec::<u8>::new();
+    let mut row_targets = Vec::<u32>::new();
+
+    let discovery_started_at = profile_timing.then(Instant::now);
+    let mut cursor = 0usize;
+    while cursor < pairs.len() {
+        let (lazy_state, other_state) = pairs[cursor];
+        for &(class, other_target) in &other_transitions[other_state as usize] {
+            if other_dead == Some(other_target) {
+                continue;
+            }
+            let representative = *class_members[class as usize].first()?;
+            let lazy_target = match compact_zero_min_repeat_step(
+                &lazy,
+                lazy_state,
+                representative,
+            ) {
+                Ok(Some(target)) => target,
+                Ok(None) => continue,
+                Err(()) => return None,
+            };
+            let key = (lazy_target, other_target);
+            let target = if let Some(&target) = state_by_pair.get(&key) {
+                target
+            } else {
+                let target = u32::try_from(pairs.len()).ok()?;
+                state_by_pair.insert(key, target);
+                pairs.push(key);
+                accepting.push(
+                    compact_zero_min_repeat_is_accepting(&lazy, lazy_target)
+                        && other_dfa.finalizers(other_target).contains(0),
+                );
+                target
+            };
+            row_classes.push(class);
+            row_targets.push(target);
+        }
+        row_offsets.push(u32::try_from(row_classes.len()).ok()?);
+        cursor += 1;
+    }
+    let discovery_ms = discovery_started_at
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+
+    let future_started_at = profile_timing.then(Instant::now);
+    let has_future = compute_single_group_futures_from_class_graph_csr(
+        &accepting,
+        &row_offsets,
+        &row_targets,
+        0,
+    );
+    let future_ms = future_started_at
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    let dfa = DFA::new_with_single_group_metadata(
+        &accepting,
+        &has_future,
+        expr_u8set(&plan.compiled_exprs[0]),
+    );
+
+    let mut byte_to_class = [0u8; 256];
+    let class_members = class_members
+        .into_iter()
+        .enumerate()
+        .map(|(class, bytes)| {
+            for &byte in &bytes {
+                byte_to_class[byte as usize] = class as u8;
+            }
+            bytes.into_boxed_slice()
+        })
+        .collect::<Vec<_>>();
+    let expanded_transition_count = row_classes
+        .iter()
+        .map(|class| class_members[*class as usize].len())
+        .sum();
+    let segment = CompressedTransitionSegment {
+        state_offset: 0,
+        state_count: dfa.num_states() as u32,
+        byte_to_class: Arc::from(byte_to_class.to_vec().into_boxed_slice()),
+        class_members: Arc::from(class_members),
+        row_offsets: Arc::from(row_offsets),
+        entries: CompressedTransitionEntries::from_parts(row_classes, row_targets),
+        expanded_transition_count,
+    };
+    if let Some(started_at) = started_at {
+        eprintln!(
+            "[glrmask/profile][tokenizer] compact_zero_min_repeat_runtime lazy_component={} product_states={} classes={} body_states={} suffix_states={} repeat_max={} discovery_ms={:.3} future_ms={:.3} total_ms={:.3}",
+            lazy_index,
+            dfa.num_states(),
+            segment.class_members.len(),
+            lazy.body_dfa.num_states(),
+            lazy.suffix_dfa.num_states(),
+            lazy.max,
+            discovery_ms,
+            future_ms,
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    Some(DeferredDfa::ReadyCompressed { dfa, segment })
 }
 
 fn try_compile_lazy_zero_min_repeat_intersection(
@@ -10242,6 +10704,14 @@ fn try_compile_lazy_zero_min_repeat_intersection(
 fn try_compile_with_plan_deferred_dense(
     plan: ExclusionCompilePlan,
 ) -> Result<(DeferredDfa, Option<ProductBuildTrace>), ExclusionCompilePlan> {
+    try_compile_with_plan_deferred_dense_min_pair_cells(plan, 0, false)
+}
+
+fn try_compile_with_plan_deferred_dense_min_pair_cells(
+    plan: ExclusionCompilePlan,
+    min_pair_cells: usize,
+    retain_transition_rows_during_discovery: bool,
+) -> Result<(DeferredDfa, Option<ProductBuildTrace>), ExclusionCompilePlan> {
     if plan.visible_groups != 1
         || plan.compiled_exprs.len() != 2
         || !pure_binary_intersection(&plan.exclusions, &plan.intersections)
@@ -10255,6 +10725,13 @@ fn try_compile_with_plan_deferred_dense(
         || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
     let lazy_zero_min_repeat_product =
         std::env::var_os("GLRMASK_DISABLE_LAZY_ZERO_MIN_REPEAT_PRODUCT").is_none();
+    if retain_transition_rows_during_discovery
+        && lazy_zero_min_repeat_product
+        && let Some(runtime) =
+            try_compile_compact_zero_min_repeat_intersection_runtime(&plan, profile_timing)
+    {
+        return Ok((runtime, None));
+    }
     if lazy_zero_min_repeat_product
         && let Some((dfa, trace)) =
             try_compile_lazy_zero_min_repeat_intersection(&plan, profile_timing)
@@ -10263,6 +10740,18 @@ fn try_compile_with_plan_deferred_dense(
     }
     let (components, component_cache_hits, _) =
         compile_product_components_profiled(&plan.compiled_exprs, profile_detail, true, true);
+    let pair_cells = components
+        .first()
+        .and_then(ProductComponent::materialized_dfa)
+        .and_then(|left| {
+            components
+                .get(1)
+                .and_then(ProductComponent::materialized_dfa)
+                .and_then(|right| left.num_states().checked_mul(right.num_states()))
+        });
+    if pair_cells.is_none_or(|pair_cells| pair_cells < min_pair_cells) {
+        return Err(plan);
+    }
     if profile_timing {
         eprintln!(
             "[glrmask/profile][tokenizer] deferred_product_component_cache groups={} unique_components={} cache_hits={}",
@@ -10280,11 +10769,14 @@ fn try_compile_with_plan_deferred_dense(
                 !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
             })
             .unwrap_or_else(|_| rayon::current_num_threads() > 1);
+    let retain_transition_rows_during_discovery =
+        retain_transition_rows_during_discovery && defer_runtime_materialization;
     let Some((mut deferred, trace)) = try_discover_dense_binary_intersection_product(
         &components,
         &class_members,
         &component_class_transitions,
-        true,
+        !retain_transition_rows_during_discovery,
+        defer_runtime_materialization && !retain_transition_rows_during_discovery,
         defer_runtime_materialization,
         profile_timing,
     ) else {
@@ -10294,6 +10786,15 @@ fn try_compile_with_plan_deferred_dense(
     deferred.ensure_group_capacity(1);
     deferred.set_group_u8set(0, expr_u8set(&plan.compiled_exprs[0]));
     Ok((DeferredDfa::DenseBinary(deferred), trace))
+}
+
+/// Return whether one terminal expression has the exact pure binary-product
+/// shape supported by the compressed runtime tokenizer builder.
+pub(crate) fn expression_supports_deferred_dense_runtime(expr: &Expr) -> bool {
+    let plan = build_exclusion_compile_plan(std::slice::from_ref(expr));
+    plan.visible_groups == 1
+        && plan.compiled_exprs.len() == 2
+        && pure_binary_intersection(&plan.exclusions, &plan.intersections)
 }
 
 fn refine_u8_partitions(partitions: Vec<U8Set>, split: U8Set) -> Vec<U8Set> {
@@ -10933,6 +11434,110 @@ mod tests {
                 dfa_state_observation(&lazy, 0, &input),
                 dfa_state_observation(&eager, 0, &input),
                 "lazy product differed for input {input:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn compact_zero_min_repeat_runtime_matches_materialized_product() {
+        let repeat_component = Expr::Seq(vec![
+            Expr::U8Seq(b"[".to_vec()),
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"ab"))),
+                min: 0,
+                max: Some(1_024),
+            },
+            Expr::U8Seq(b"]".to_vec()),
+        ]);
+        let filter_component = Expr::Seq(vec![
+            Expr::U8Seq(b"[".to_vec()),
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"ab"))),
+                min: 0,
+                max: Some(7),
+            },
+            Expr::U8Seq(b"]".to_vec()),
+        ]);
+        let expression = Expr::Intersect {
+            expr: Box::new(repeat_component),
+            intersect: Box::new(filter_component),
+        };
+
+        let eager = super::compile_with_plan(super::build_exclusion_compile_plan(
+            std::slice::from_ref(&expression),
+        ));
+        let plan = super::build_exclusion_compile_plan(std::slice::from_ref(&expression));
+        let compact = super::try_compile_compact_zero_min_repeat_intersection_runtime(
+            &plan,
+            false,
+        )
+        .expect("eligible deterministic repeat intersection must compile compactly");
+        let (compact_dfa, compact_segment) = compact.finish_runtime();
+        let compact = Tokenizer::from_parts_with_compressed_transitions(
+            compact_dfa,
+            1,
+            None,
+            compact_segment.into_iter().collect(),
+        );
+        let eager = Tokenizer::from_parts(eager, 1, None);
+
+        for input in enumerate_inputs(b"[]abx", 9) {
+            assert_eq!(
+                tokenizer_observation(&compact, &input),
+                tokenizer_observation(&eager, &input),
+                "compact runtime product differed for input {input:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn exact_runtime_union_preisolates_nullable_components() {
+        let expressions = vec![
+            Expr::Epsilon,
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+                min: 0,
+                max: None,
+            },
+            Expr::U8Seq(b"b".to_vec()),
+        ];
+        let partitions = [0, 1, 2];
+        let residual_classes = [None, None, None];
+
+        let baseline_regex =
+            super::build_regex_partitioned_with_adaptive_and_residual_isolation(
+                &expressions,
+                &partitions,
+                &residual_classes,
+                false,
+            );
+        let mut baseline = baseline_regex.into_tokenizer(
+            expressions.len() as u32,
+            Some(Arc::from(expressions.clone().into_boxed_slice())),
+        );
+        assert_eq!(
+            baseline.isolate_start_state_and_drain_nullable_terminals(),
+            BTreeSet::from([0, 1]),
+        );
+
+        let mut preisolated = super::build_exact_partitioned_runtime_tokenizer(
+            &expressions,
+            None,
+            &partitions,
+            &residual_classes,
+        );
+        assert!(
+            preisolated
+                .isolate_start_state_and_drain_nullable_terminals()
+                .is_empty(),
+            "component-local isolation must leave no nullable finalizer at the union root",
+        );
+
+        for input in enumerate_inputs(b"abx", 5) {
+            assert_eq!(
+                tokenizer_observation(&preisolated, &input),
+                tokenizer_observation(&baseline, &input),
+                "component-local nullable isolation differed for input {input:?}",
             );
         }
     }
@@ -12782,6 +13387,81 @@ mod tests {
         let finished = deferred.finish();
 
         assert_eq!(finished, eager);
+    }
+
+    #[test]
+    fn retained_dense_runtime_matches_eager_product() {
+        let bounded_string = |body: Expr, max| {
+            Expr::Seq(vec![
+                Expr::U8Seq(b"\"".to_vec()),
+                Expr::Repeat {
+                    expr: Box::new(body),
+                    min: 1,
+                    max: Some(max),
+                },
+                Expr::U8Seq(b"\"".to_vec()),
+            ])
+        };
+        let cases = [
+            Expr::Intersect {
+                expr: Box::new(bounded_string(
+                    Expr::U8Class(U8Set::from_bytes(b"ab")),
+                    31,
+                )),
+                intersect: Box::new(bounded_string(
+                    Expr::U8Class(U8Set::from_bytes(b"ab")),
+                    17,
+                )),
+            },
+            Expr::Intersect {
+                expr: Box::new(bounded_string(
+                    Expr::Choice(vec![
+                        Expr::U8Seq(b"a".to_vec()),
+                        Expr::U8Seq(b"ab".to_vec()),
+                    ]),
+                    24,
+                )),
+                intersect: Box::new(bounded_string(
+                    Expr::U8Class(U8Set::from_bytes(b"ab")),
+                    19,
+                )),
+            },
+        ];
+
+        for expression in cases {
+            let eager = Tokenizer::from_parts(
+                super::compile_with_plan(super::build_exclusion_compile_plan(
+                    std::slice::from_ref(&expression),
+                )),
+                1,
+                None,
+            );
+            let (retained, trace) = match
+                super::try_compile_with_plan_deferred_dense_min_pair_cells(
+                    super::build_exclusion_compile_plan(std::slice::from_ref(&expression)),
+                    0,
+                    true,
+                ) {
+                    Ok(prepared) => prepared,
+                    Err(_) => panic!("binary intersection must admit retained dense construction"),
+                };
+            assert!(trace.is_none(), "retained rows must not require a state trace");
+            let (dfa, segment) = retained.finish_runtime();
+            let runtime = Tokenizer::from_parts_with_compressed_transitions(
+                dfa,
+                1,
+                None,
+                segment.into_iter().collect(),
+            );
+
+            for input in enumerate_inputs(b"\"abx", 8) {
+                assert_eq!(
+                    tokenizer_observation(&runtime, &input),
+                    tokenizer_observation(&eager, &input),
+                    "retained compressed product differed for expression {expression:?}, input {input:?}",
+                );
+            }
+        }
     }
 
     #[test]

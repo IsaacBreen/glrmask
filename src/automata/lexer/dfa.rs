@@ -5,6 +5,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::OnceLock;
 
 use rustc_hash::FxHashSet;
+use rayon::prelude::*;
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use smallvec::SmallVec;
@@ -413,6 +414,58 @@ impl DFA {
         Self {
             states: vec![DFAState::default(); num_states],
             group_id_to_u8set: Vec::new(),
+            derived_stats: OnceLock::new(),
+            min_match_byte_len_cache: OnceLock::new(),
+        }
+    }
+
+    /// Construct a one-group DFA whose per-state acceptance and strict-future
+    /// metadata are already known.
+    ///
+    /// Large compressed intersection products otherwise create default states,
+    /// resize both bitsets for every state, then traverse the whole state array
+    /// twice more to install acceptance and future flags. Building the final
+    /// representation in one pass avoids that repeated memory traffic while
+    /// preserving the ordinary DFA representation and wire format.
+    pub(super) fn new_with_single_group_metadata(
+        accepting: &[bool],
+        possible_future: &[bool],
+        group_u8set: U8Set,
+    ) -> Self {
+        assert_eq!(accepting.len(), possible_future.len());
+        let build_state = |accepting: bool, possible_future: bool| {
+            let mut finalizers = BitSet::new(1);
+            if accepting {
+                finalizers.set(0);
+            }
+            let mut possible_future_group_ids = BitSet::new(1);
+            if possible_future {
+                possible_future_group_ids.set(0);
+            }
+            DFAState {
+                transitions: CharTransitions::default(),
+                finalizers,
+                possible_future_group_ids,
+                epsilon_transitions: Vec::new(),
+            }
+        };
+        const PARALLEL_METADATA_THRESHOLD: usize = 16_384;
+        let states = if accepting.len() >= PARALLEL_METADATA_THRESHOLD {
+            accepting
+                .par_iter()
+                .zip(possible_future.par_iter())
+                .map(|(&accepting, &possible_future)| build_state(accepting, possible_future))
+                .collect()
+        } else {
+            accepting
+                .iter()
+                .zip(possible_future)
+                .map(|(&accepting, &possible_future)| build_state(accepting, possible_future))
+                .collect()
+        };
+        Self {
+            states,
+            group_id_to_u8set: vec![group_u8set],
             derived_stats: OnceLock::new(),
             min_match_byte_len_cache: OnceLock::new(),
         }
