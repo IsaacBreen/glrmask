@@ -8,6 +8,7 @@ use range_set_blaze::RangeSetBlaze;
 
 use crate::Vocab;
 use crate::automata::lexer::compile::{
+    build_exact_partitioned_runtime_tokenizer,
     build_regex,
     build_regex_partitioned,
     build_regex_partitioned_with_adaptive,
@@ -19,6 +20,7 @@ use crate::automata::lexer::compile::{
     build_regex_partitioned_with_residual_isolation,
     build_regex_with_profile_labels,
     compile_terminal_expression_pair_with_structural_map,
+    expression_supports_deferred_dense_runtime,
     factor_regex_expr,
     prepare_partitioned_expression_pair_with_structural_map,
     DeferredPartitionedRegex,
@@ -485,6 +487,58 @@ fn build_dynamic_tokenizer(grammar: &GrammarDef) -> Tokenizer {
 
     let explicit_policy = std::env::var_os("GLRMASK_LEXER_SINGLETONS").is_some()
         || std::env::var_os("GLRMASK_LEXER_ADAPTIVE").is_some();
+    if !explicit_policy {
+        let labels = grammar
+            .terminals
+            .iter()
+            .enumerate()
+            .map(|(index, _)| grammar.terminal_display_name(index as u32))
+            .collect::<Vec<_>>();
+        let expressions = grammar
+            .terminals
+            .iter()
+            .map(terminal_expr)
+            .map(factor_regex_expr)
+            .collect::<Vec<_>>();
+        let mut residual_isolation_classes = lexer_residual_isolation_classes(grammar);
+        let mut next_class = residual_isolation_classes
+            .iter()
+            .flatten()
+            .copied()
+            .max()
+            .map_or(0, |class| class.saturating_add(1));
+        let mut deferred_terminals = 0usize;
+        for (terminal, expression) in expressions.iter().enumerate() {
+            if expression_supports_deferred_dense_runtime(expression) {
+                residual_isolation_classes[terminal] = Some(next_class);
+                next_class = next_class
+                    .checked_add(1)
+                    .expect("residual isolation class id overflow");
+                deferred_terminals += 1;
+            }
+        }
+        if deferred_terminals > 0 {
+            let partition_ids = lexer_partition_ids_with_residual_classes(
+                grammar,
+                false,
+                &residual_isolation_classes,
+            );
+            let tokenizer = build_exact_partitioned_runtime_tokenizer(
+                &expressions,
+                Some(&labels),
+                &partition_ids,
+                &residual_isolation_classes,
+            );
+            if compile_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][dynamic_tokenizer] path=direct_exact_runtime deferred_terminals={} states={}",
+                    deferred_terminals,
+                    tokenizer.num_states(),
+                );
+            }
+            return tokenizer;
+        }
+    }
     if !explicit_policy && grammar.terminals.len() >= LARGE_DYNAMIC_LEXER_TERMINALS {
         build_tokenizer_with_partition_options(grammar, true, false)
     } else {
@@ -3949,6 +4003,41 @@ pub(crate) fn compile_dynamic_owned_with_table_construction(
                 let started_at = Instant::now();
                 let mut tokenizer = build_dynamic_tokenizer(&prepared_grammar);
                 tokenizer.isolate_start_state_and_drain_nullable_terminals();
+                if tokenizer.has_epsilon_transitions() {
+                    let source_states = tokenizer.num_states();
+                    let source_transitions = tokenizer.transition_count();
+                    let source_state_limit = std::env::var(
+                        "GLRMASK_DYNAMIC_LEXER_MAX_SOURCE_STATES",
+                    )
+                        .ok()
+                        .and_then(|value| value.trim().parse::<u32>().ok())
+                        .filter(|&value| value > 0)
+                        .unwrap_or(512);
+                    if source_states <= source_state_limit {
+                        let transition_limit = source_transitions.saturating_mul(6).max(1);
+                        let state_limit = std::env::var("GLRMASK_DYNAMIC_LEXER_MAX_STATES")
+                            .ok()
+                            .and_then(|value| value.trim().parse::<usize>().ok())
+                            .filter(|&value| value > 0)
+                            .unwrap_or(8_192);
+                        if let Some(determinized) =
+                            tokenizer.try_full_determinization(state_limit, transition_limit)
+                        {
+                            tokenizer = determinized.tokenizer;
+                        }
+                    }
+                    if profile {
+                        eprintln!(
+                            "[glrmask/profile][dynamic_lexer_determinization] source_states={} source_transitions={} source_state_limit={} attempted={} final_states={} final_transitions={}",
+                            source_states,
+                            source_transitions,
+                            source_state_limit,
+                            source_states <= source_state_limit,
+                            tokenizer.num_states(),
+                            tokenizer.transition_count(),
+                        );
+                    }
+                }
                 (tokenizer, elapsed_ms(started_at))
             },
             || {

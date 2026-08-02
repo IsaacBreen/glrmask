@@ -2892,9 +2892,6 @@ impl Constraint {
 
     pub(crate) fn start_dynamic(&self) -> ConstraintState<'_> {
         crate::runtime::initialize_hot_path_config();
-        if self.tokenizer_has_epsilon_transitions {
-            drop(self.tokenizer.all_singleton_epsilon_closures());
-        }
         let mut state = ConstraintState {
             constraint: self,
             state: self.initial_state_map(),

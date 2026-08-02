@@ -256,6 +256,13 @@ impl CompressedTransitionSegment {
         entries
     }
 
+    pub(crate) fn materialize_into_dfa(&self, dfa: &mut DFA) {
+        for local_state in 0..self.state_count {
+            let state = self.state_offset + local_state;
+            dfa.set_transitions_from_sorted_entries(state, self.expanded_entries(state));
+        }
+    }
+
     fn fill_transition_row(&self, state: u32, row: &mut [u32; 256]) {
         row.fill(u32::MAX);
         let local_state = state - self.state_offset;
@@ -1545,6 +1552,12 @@ impl Tokenizer {
         Arc::clone(self.singleton_epsilon_closures.get_or_init(|| {
             Arc::from(self.dfa.all_singleton_epsilon_closures())
         }))
+    }
+
+    pub(crate) fn cached_singleton_epsilon_closures(
+        &self,
+    ) -> Option<&Arc<[Box<[u32]>]>> {
+        self.singleton_epsilon_closures.get()
     }
 
     /// Return one exact self-loop byte set per raw tokenizer state.

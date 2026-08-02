@@ -35,15 +35,28 @@ pub(crate) fn execute_tokenizer_reusable(
     start_state: u32,
     scratch: &mut ReusableTokenizerExecScratch,
 ) -> bool {
-    let closures = constraint.tokenizer.all_singleton_epsilon_closures();
-    let Some(start_closure) = closures.get(start_state as usize) else {
-        return false;
-    };
-    if start_closure.len() > scratch.states.capacity() {
-        return false;
-    }
+    let cached_closures = constraint.tokenizer.cached_singleton_epsilon_closures();
     scratch.states.clear();
-    scratch.states.extend_from_slice(start_closure);
+    if let Some(closures) = cached_closures {
+        let Some(start_closure) = closures.get(start_state as usize) else {
+            return false;
+        };
+        if start_closure.len() > scratch.states.capacity() {
+            return false;
+        }
+        scratch.states.extend_from_slice(start_closure);
+    } else if constraint
+        .tokenizer
+        .state_has_epsilon_transitions(start_state)
+    {
+        let start_closure = constraint.tokenizer.singleton_epsilon_closure(start_state);
+        if start_closure.len() > scratch.states.capacity() {
+            return false;
+        }
+        scratch.states.extend_from_slice(&start_closure);
+    } else {
+        scratch.states.push(start_state);
+    }
     scratch.matches.clear();
 
     for (index, &byte) in bytes.iter().enumerate() {
@@ -52,15 +65,29 @@ pub(crate) fn execute_tokenizer_reusable(
             let Some(target) = constraint.tokenizer.step(state, byte) else {
                 continue;
             };
-            let Some(target_closure) = closures.get(target as usize) else {
+            if let Some(closures) = cached_closures {
+                let Some(target_closure) = closures.get(target as usize) else {
+                    return false;
+                };
+                if scratch.next_states.len() + target_closure.len()
+                    > scratch.next_states.capacity()
+                {
+                    return false;
+                }
+                scratch.next_states.extend_from_slice(target_closure);
+            } else if constraint.tokenizer.state_has_epsilon_transitions(target) {
+                let target_closure = constraint.tokenizer.singleton_epsilon_closure(target);
+                if scratch.next_states.len() + target_closure.len()
+                    > scratch.next_states.capacity()
+                {
+                    return false;
+                }
+                scratch.next_states.extend_from_slice(&target_closure);
+            } else if scratch.next_states.len() == scratch.next_states.capacity() {
                 return false;
-            };
-            if scratch.next_states.len() + target_closure.len()
-                > scratch.next_states.capacity()
-            {
-                return false;
+            } else {
+                scratch.next_states.push(target);
             }
-            scratch.next_states.extend_from_slice(target_closure);
         }
         if scratch.next_states.is_empty() {
             scratch.states.clear();
