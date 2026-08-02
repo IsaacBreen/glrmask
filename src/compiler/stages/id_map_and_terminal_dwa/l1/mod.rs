@@ -2700,7 +2700,12 @@ fn find_l1_exact_state_equivalence_by_components_with_first_target_cache(
         // Apply this choice before the packed large-bucket branch so both the
         // automatic policy and the explicit `flat` diagnostic override are
         // actually respected.
-        let large_partition_prefers_flat = sorted_entries.len() >= 20_000;
+        // Large vocabularies often favor flat scans, but not when one bucket's
+        // token-by-target work is enormous. In that regime the packed/chunked
+        // scheduler amortizes suffix sharing and avoids a full Cartesian walk.
+        const LARGE_PARTITION_FLAT_MAX_WORK: usize = 8_000_000;
+        let large_partition_prefers_flat = sorted_entries.len() >= 20_000
+            && estimated_work <= LARGE_PARTITION_FLAT_MAX_WORK;
         if flat_supported
             && (requested == "flat"
                 || (requested == "auto" && large_partition_prefers_flat))
