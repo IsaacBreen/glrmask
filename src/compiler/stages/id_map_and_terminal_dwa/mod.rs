@@ -297,7 +297,7 @@ fn branch_active_state_map_enabled() -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AutomaticBranchActiveStateMapStrategy {
     None,
-    VeryLargeProfile,
+    SmallSourceVeryLargeVocab,
     DenseRequiresFastProjection,
 }
 
@@ -312,15 +312,19 @@ fn automatic_branch_active_state_map_strategy(
         return AutomaticBranchActiveStateMapStrategy::None;
     }
     let work = source_reps.saturating_mul(vocab_tokens);
-    if active_terminals <= 512 && vocab_tokens >= 50_000 && work >= 300_000_000 {
-        return AutomaticBranchActiveStateMapStrategy::VeryLargeProfile;
+    if active_terminals <= 512
+        && vocab_tokens >= 50_000
+        && source_reps <= 16_384
+        && work >= 300_000_000
+    {
+        return AutomaticBranchActiveStateMapStrategy::SmallSourceVeryLargeVocab;
     }
     let tiny_long_horizon_profile = (220..=240).contains(&active_terminals)
         && (2..=4).contains(&vocab_tokens)
         && source_reps >= 60_000
         && (24..=48).contains(&max_token_len);
     let dense_protected_profile = (180..=512).contains(&active_terminals)
-        && vocab_tokens >= 2_000
+        && (2_000..=30_000).contains(&vocab_tokens)
         && work >= 50_000_000
         && (source_reps >= 40_000 || vocab_tokens <= 8_000);
     if tiny_long_horizon_profile || dense_protected_profile {
@@ -363,11 +367,17 @@ pub(crate) fn build_branch_active_state_map(
         //
         // Three structural regimes amortize the quotient on protected-residual
         // workloads:
-        //   * a very large vocabulary/state product;
+        //   * a very large vocabulary over a source domain small enough that
+        //     stable refinement is cheap and enters the projected exact path;
         //   * a dense L1 terminal family with at least 50M raw state-token
-        //     pairs and at least 2k tokens;
+        //     pairs and a medium-sized 2k-30k vocabulary;
         //   * a tiny-vocabulary, bounded-horizon L1 family whose stable quotient
         //     is accepted only when it enters the fast projected L1 path.
+        //
+        // Very-large vocabularies over medium and large source domains are
+        // deliberately excluded. Their generic L1 path already constructs an
+        // exact relevant-powerset view, and stable refinement merely adds another
+        // whole-token pass before reaching essentially the same topology.
         //
         // The gates deliberately exclude medium-state/medium-vocabulary work
         // and longer tiny-vocabulary horizons. Paired measurements show that
@@ -391,7 +401,7 @@ pub(crate) fn build_branch_active_state_map(
             max_token_len,
         ) {
             AutomaticBranchActiveStateMapStrategy::None => return None,
-            AutomaticBranchActiveStateMapStrategy::VeryLargeProfile => {}
+            AutomaticBranchActiveStateMapStrategy::SmallSourceVeryLargeVocab => {}
             AutomaticBranchActiveStateMapStrategy::DenseRequiresFastProjection => {
                 automatic_requires_fast_projection = true;
             }
@@ -468,6 +478,31 @@ pub(crate) fn build_branch_active_state_map(
     selected.then_some((state_map, elapsed_ms))
 }
 
+const PARTITION_LOCAL_SHORT_HORIZON_MAX_BYTES: usize = 8;
+const PARTITION_LOCAL_SHORT_HORIZON_MIN_VOCAB: usize = 512;
+const PARTITION_LOCAL_SHORT_HORIZON_MIN_STATE_TOKEN_WORK: usize = 50_000_000;
+const PARTITION_LOCAL_SHORT_HORIZON_MIN_ESTIMATED_SAVING: u128 = 100_000_000;
+
+fn short_horizon_partition_local_synthesis_probe_selected(
+    source_states: usize,
+    vocab_tokens: usize,
+    max_token_len: usize,
+) -> bool {
+    max_token_len > 0
+        && max_token_len <= PARTITION_LOCAL_SHORT_HORIZON_MAX_BYTES
+        && vocab_tokens >= PARTITION_LOCAL_SHORT_HORIZON_MIN_VOCAB
+        && source_states.saturating_mul(vocab_tokens)
+            >= PARTITION_LOCAL_SHORT_HORIZON_MIN_STATE_TOKEN_WORK
+}
+
+fn short_horizon_partition_local_synthesis_estimate_is_profitable(
+    full_estimate: u128,
+    local_estimate: u128,
+) -> bool {
+    full_estimate.saturating_sub(local_estimate)
+        >= PARTITION_LOCAL_SHORT_HORIZON_MIN_ESTIMATED_SAVING
+}
+
 fn build_partition_local_tokenizer(
     global_tokenizer: &Tokenizer,
     vocab: &Vocab,
@@ -497,11 +532,13 @@ fn build_partition_local_tokenizer(
             !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
         })
         .unwrap_or(true);
-    // A local structural pair has a non-trivial fixed construction cost. Very
-    // small vocabulary partitions are already cheap, while a horizon close to
-    // the global maximum cannot remove enough protected residual depth to
-    // amortize that cost. This gate chooses an optimization strategy only; the
-    // ordinary global-tokenizer path remains the exact fallback.
+    // A local structural pair has a non-trivial fixed construction cost. The
+    // ordinary path therefore keeps a vocabulary and horizon floor. A separate
+    // short-horizon path admits smaller partitions only when the raw
+    // state-token product justifies a cheap AST probe. The estimated expression
+    // reduction below must then be large before any tokenizer is constructed.
+    // This chooses an optimization strategy only; the ordinary global tokenizer
+    // remains the exact fallback.
     let min_local_horizon = std::env::var("GLRMASK_PARTITION_LOCAL_SYNTHESIS_MIN_HORIZON")
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
@@ -510,8 +547,13 @@ fn build_partition_local_tokenizer(
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
         .unwrap_or(2_000);
-    if vocab.len() < min_local_vocab
-        || max_token_len < min_local_horizon
+    let ordinary_candidate = vocab.len() >= min_local_vocab && max_token_len >= min_local_horizon;
+    let short_horizon_probe = short_horizon_partition_local_synthesis_probe_selected(
+        global_tokenizer.num_states() as usize,
+        vocab.len(),
+        max_token_len,
+    );
+    if (!ordinary_candidate && !short_horizon_probe)
         || if allow_half_horizon {
             max_token_len.saturating_mul(2) > plan.global_max_token_len
         } else {
@@ -527,6 +569,7 @@ fn build_partition_local_tokenizer(
         .iter()
         .copied()
         .collect::<std::collections::BTreeSet<_>>();
+    let candidate_started_at = Instant::now();
     let mut candidate = synthetic_state_map::synthesize_terminal_expressions_for_horizon(
         &plan.expressions,
         max_token_len,
@@ -541,6 +584,44 @@ fn build_partition_local_tokenizer(
     }
     if !changed {
         return reject("unchanged_candidate", max_token_len);
+    }
+    if !ordinary_candidate {
+        let (full_estimate, local_estimate) = plan
+            .protected_terminal_ids
+            .iter()
+            .copied()
+            .fold((0u128, 0u128), |(full, local), terminal| {
+                let terminal = terminal as usize;
+                (
+                    full.saturating_add(synthetic_state_map::estimated_synthesis_state_volume(
+                        &plan.expressions[terminal],
+                    )),
+                    local.saturating_add(synthetic_state_map::estimated_synthesis_state_volume(
+                        &candidate.expressions[terminal],
+                    )),
+                )
+            });
+        let selected = short_horizon_partition_local_synthesis_estimate_is_profitable(
+            full_estimate,
+            local_estimate,
+        );
+        if compile_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][partition_local_synthesis_estimate] horizon={} source_states={} vocab_tokens={} protected_terminals={} full_volume={} local_volume={} saving_volume={} probe_ms={:.3} selected={}",
+                max_token_len,
+                global_tokenizer.num_states(),
+                vocab.len(),
+                plan.protected_terminal_ids.len(),
+                full_estimate,
+                local_estimate,
+                full_estimate.saturating_sub(local_estimate),
+                candidate_started_at.elapsed().as_secs_f64() * 1000.0,
+                selected,
+            );
+        }
+        if !selected {
+            return reject("insufficient_estimated_reduction", max_token_len);
+        }
     }
 
     let rebuilt_expressions = plan
@@ -2001,8 +2082,10 @@ mod tests {
     use super::{
         AutomaticBranchActiveStateMapStrategy,
         DEFAULT_GLOBAL_MAX_LENGTH_STABLE_SIGNATURE_CELL_LIMIT,
-        automatic_branch_active_state_map_strategy, should_auto_use_global_max_length,
-        use_global_single_terminal_l1,
+        automatic_branch_active_state_map_strategy,
+        short_horizon_partition_local_synthesis_estimate_is_profitable,
+        short_horizon_partition_local_synthesis_probe_selected,
+        should_auto_use_global_max_length, use_global_single_terminal_l1,
     };
     use crate::compiler::glr::analysis::AnalyzedGrammar;
     use crate::grammar::flat::{
@@ -2101,7 +2184,7 @@ mod tests {
     #[test]
     fn branch_active_state_map_auto_gate_selects_only_amortized_l1_regimes() {
         use AutomaticBranchActiveStateMapStrategy::{
-            DenseRequiresFastProjection, None, VeryLargeProfile,
+            DenseRequiresFastProjection, None, SmallSourceVeryLargeVocab,
         };
 
         assert_eq!(
@@ -2129,8 +2212,16 @@ mod tests {
             None,
         );
         assert_eq!(
+            automatic_branch_active_state_map_strategy("p2.l1", 82_266, 242, 8_028, 0),
+            SmallSourceVeryLargeVocab,
+        );
+        assert_eq!(
+            automatic_branch_active_state_map_strategy("p2.l1", 82_266, 242, 11_925, 0),
+            SmallSourceVeryLargeVocab,
+        );
+        assert_eq!(
             automatic_branch_active_state_map_strategy("p2.l1", 82_266, 229, 48_002, 0),
-            VeryLargeProfile,
+            None,
         );
         assert_eq!(
             automatic_branch_active_state_map_strategy("p2.l1", 82_270, 2_721, 89_478, 0),
@@ -2163,6 +2254,41 @@ mod tests {
             automatic_branch_active_state_map_strategy("p4.l2p", 17_646, 4, 45_180, 0),
             None,
         );
+    }
+
+    #[test]
+    fn short_horizon_partition_local_synthesis_requires_large_raw_work() {
+        assert!(short_horizon_partition_local_synthesis_probe_selected(
+            97_046, 1_209, 6,
+        ));
+        assert!(short_horizon_partition_local_synthesis_probe_selected(
+            100_000, 512, 8,
+        ));
+
+        assert!(!short_horizon_partition_local_synthesis_probe_selected(
+            11_925, 1_209, 6,
+        ));
+        assert!(!short_horizon_partition_local_synthesis_probe_selected(
+            8_028, 1_209, 6,
+        ));
+        assert!(!short_horizon_partition_local_synthesis_probe_selected(
+            97_046, 511, 6,
+        ));
+        assert!(!short_horizon_partition_local_synthesis_probe_selected(
+            97_046, 1_209, 9,
+        ));
+        assert!(!short_horizon_partition_local_synthesis_probe_selected(
+            97_046, 1_209, 0,
+        ));
+
+        assert!(short_horizon_partition_local_synthesis_estimate_is_profitable(
+            347_434_502,
+            21_433_364,
+        ));
+        assert!(!short_horizon_partition_local_synthesis_estimate_is_profitable(
+            56_179_251,
+            6_946_421,
+        ));
     }
 
     #[test]

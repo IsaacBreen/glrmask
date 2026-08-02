@@ -1157,6 +1157,44 @@ const L1_GENERIC_NFA_TOKEN_BOUNDED_LARGE_WORK_BUDGET:
     };
 const L1_GENERIC_NFA_RELEVANT_POWERSET_PROBE_MIN_VOCAB: usize = 20_000;
 const L1_GENERIC_NFA_RELEVANT_POWERSET_PROBE_MAX_STATES: usize = 4_096;
+const L1_GENERIC_NFA_TINY_VOCAB_POWERSET_MIN_RAW_STATES: usize = 60_000;
+const L1_GENERIC_NFA_TINY_VOCAB_POWERSET_MAX_VOCAB: usize = 128;
+const L1_GENERIC_NFA_SPARSE_MEDIUM_POWERSET_MIN_RAW_STATES: usize = 40_000;
+const L1_GENERIC_NFA_SPARSE_MEDIUM_POWERSET_MAX_RAW_STATES: usize = 60_000;
+const L1_GENERIC_NFA_SPARSE_MEDIUM_POWERSET_MIN_VOCAB: usize = 512;
+const L1_GENERIC_NFA_SPARSE_MEDIUM_POWERSET_MAX_VOCAB: usize = 1_024;
+const L1_GENERIC_NFA_SPARSE_MEDIUM_POWERSET_MAX_ACTIVE_TERMINALS: usize = 128;
+const L1_GENERIC_NFA_DENSE_MEDIUM_POWERSET_MIN_RAW_STATES: usize = 60_000;
+const L1_GENERIC_NFA_DENSE_MEDIUM_POWERSET_MIN_ACTIVE_TERMINALS: usize = 128;
+const L1_GENERIC_NFA_DENSE_MEDIUM_POWERSET_MAX_ACTIVE_TERMINALS: usize = 224;
+const L1_GENERIC_NFA_SMALL_VOCAB_POWERSET_MAX_STATES: usize = 131_072;
+
+fn l1_generic_nfa_small_vocab_powerset_probe_enabled(
+    state_count: usize,
+    vocab_count: usize,
+    active_terminal_count: usize,
+) -> bool {
+    let tiny_vocab_large_domain = state_count >= L1_GENERIC_NFA_TINY_VOCAB_POWERSET_MIN_RAW_STATES
+        && vocab_count <= L1_GENERIC_NFA_TINY_VOCAB_POWERSET_MAX_VOCAB;
+    let sparse_medium_domain =
+        (L1_GENERIC_NFA_SPARSE_MEDIUM_POWERSET_MIN_RAW_STATES
+            ..=L1_GENERIC_NFA_SPARSE_MEDIUM_POWERSET_MAX_RAW_STATES)
+            .contains(&state_count)
+            && (L1_GENERIC_NFA_SPARSE_MEDIUM_POWERSET_MIN_VOCAB
+                ..=L1_GENERIC_NFA_SPARSE_MEDIUM_POWERSET_MAX_VOCAB)
+                .contains(&vocab_count)
+            && active_terminal_count
+                <= L1_GENERIC_NFA_SPARSE_MEDIUM_POWERSET_MAX_ACTIVE_TERMINALS;
+    let dense_medium_large_domain =
+        state_count >= L1_GENERIC_NFA_DENSE_MEDIUM_POWERSET_MIN_RAW_STATES
+            && (L1_GENERIC_NFA_SPARSE_MEDIUM_POWERSET_MIN_VOCAB
+                ..=L1_GENERIC_NFA_SPARSE_MEDIUM_POWERSET_MAX_VOCAB)
+                .contains(&vocab_count)
+            && (L1_GENERIC_NFA_DENSE_MEDIUM_POWERSET_MIN_ACTIVE_TERMINALS
+                ..=L1_GENERIC_NFA_DENSE_MEDIUM_POWERSET_MAX_ACTIVE_TERMINALS)
+                .contains(&active_terminal_count);
+    tiny_vocab_large_domain || sparse_medium_domain || dense_medium_large_domain
+}
 
 pub(crate) fn l1_generic_nfa_token_bounded_view_enabled(
     state_count: usize,
@@ -1192,6 +1230,57 @@ fn build_l1_generic_nfa_analysis_view(
     for (_, bytes) in token_entries {
         for &byte in bytes.iter() {
             relevant_bytes[byte as usize] = true;
+        }
+    }
+
+    let active_terminal_count = active_terminals.iter().filter(|&&active| active).count();
+    if l1_generic_nfa_small_vocab_powerset_probe_enabled(
+        raw_states.len(),
+        token_entries.len(),
+        active_terminal_count,
+    ) {
+        match super::l2p::equivalence_analysis::state_equivalence::nfa::build_relevant_powerset_view_budgeted(
+            tokenizer,
+            &relevant_bytes,
+            Some(active_terminals),
+            None,
+            super::l2p::equivalence_analysis::state_equivalence::nfa::RelevantPowersetWorkBudget {
+                max_configurations: L1_GENERIC_NFA_SMALL_VOCAB_POWERSET_MAX_STATES,
+                max_edges: usize::MAX,
+            },
+        ) {
+            Ok(powerset_view) => {
+                let state_count = powerset_view.configurations.len();
+                let view_states = raw_states
+                    .iter()
+                    .map(|&raw_state| powerset_view.raw_start_to_view[raw_state] as usize)
+                    .collect::<Vec<_>>();
+                if compile_profile_enabled() {
+                    eprintln!(
+                        "[glrmask/profile][l1_small_vocab_powerset_probe] outcome=selected raw_states={} vocab_tokens={} view_states={} max_states={}",
+                        raw_states.len(),
+                        token_entries.len(),
+                        state_count,
+                        L1_GENERIC_NFA_SMALL_VOCAB_POWERSET_MAX_STATES,
+                    );
+                }
+                return (
+                    view_states,
+                    powerset_view.into_tokenizer_view(),
+                    "relevant_powerset_small_vocab",
+                );
+            }
+            Err(work) => {
+                if compile_profile_enabled() {
+                    eprintln!(
+                        "[glrmask/profile][l1_small_vocab_powerset_probe] outcome=aborted raw_states={} vocab_tokens={} states={} max_states={}",
+                        raw_states.len(),
+                        token_entries.len(),
+                        work.configurations,
+                        L1_GENERIC_NFA_SMALL_VOCAB_POWERSET_MAX_STATES,
+                    );
+                }
+            }
         }
     }
 
@@ -6779,6 +6868,40 @@ mod generic_nfa_tests {
             derived.token_buckets.has_empty_suffix_by_bucket,
             standalone.token_buckets.has_empty_suffix_by_bucket,
         );
+    }
+
+    #[test]
+    fn small_vocab_powerset_probe_selects_supported_structural_domains() {
+        assert!(l1_generic_nfa_small_vocab_powerset_probe_enabled(
+            60_000, 128, 240,
+        ));
+        assert!(l1_generic_nfa_small_vocab_powerset_probe_enabled(
+            97_046, 4, 240,
+        ));
+        assert!(l1_generic_nfa_small_vocab_powerset_probe_enabled(
+            41_451, 630, 46,
+        ));
+        assert!(l1_generic_nfa_small_vocab_powerset_probe_enabled(
+            97_046, 630, 189,
+        ));
+        assert!(!l1_generic_nfa_small_vocab_powerset_probe_enabled(
+            44_597, 630, 193,
+        ));
+        assert!(!l1_generic_nfa_small_vocab_powerset_probe_enabled(
+            97_046, 630, 225,
+        ));
+        assert!(!l1_generic_nfa_small_vocab_powerset_probe_enabled(
+            59_999, 128, 240,
+        ));
+        assert!(!l1_generic_nfa_small_vocab_powerset_probe_enabled(
+            97_046, 129, 240,
+        ));
+        assert!(!l1_generic_nfa_small_vocab_powerset_probe_enabled(
+            39_999, 630, 46,
+        ));
+        assert!(!l1_generic_nfa_small_vocab_powerset_probe_enabled(
+            60_001, 630, 46,
+        ));
     }
 
     #[test]
