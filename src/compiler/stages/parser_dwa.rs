@@ -29,6 +29,9 @@ use crate::ds::weight::{ScopedWeightOpCache, Weight};
 type TerminalBundle = BTreeMap<TerminalID, Weight>;
 type BundleSignature = Vec<(TerminalID, Weight)>;
 type TargetContribs = SmallVec<[(u32, Weight); 4]>;
+type DeferredFinalEntries = SmallVec<[(u32, Weight); 4]>;
+type FinalPathWeights = SmallVec<[Weight; 4]>;
+type FinalGroups = SmallVec<[(Weight, FinalPathWeights); 4]>;
 
 const PROFILE_PARSER_DWA_DETERMINIZE_DETAIL_ENV: &str =
     "GLRMASK_PROFILE_PARSER_DWA_DETERMINIZE_DETAIL";
@@ -1621,7 +1624,7 @@ fn determinize_with_supports(
 
     // Deferred final weight computation: store subset entries for each DWA state
     // and compute final weights in parallel after the main loop.
-    let mut deferred_final_entries: Vec<(u32, Vec<(u32, Weight)>)> = Vec::new();
+    let mut deferred_final_entries: Vec<(u32, DeferredFinalEntries)> = Vec::new();
 
     while let Some((from_state, subset_entries)) = worklist.pop_front() {
         if let Some(detail) = detail.as_mut() {
@@ -1630,7 +1633,7 @@ fn determinize_with_supports(
 
         // Save subset entries for deferred parallel final weight computation.
         // Only save entries whose NWA states have final weights.
-        let has_finals: Vec<(u32, Weight)> = subset_entries.iter()
+        let has_finals: DeferredFinalEntries = subset_entries.iter()
             .filter(|(nwa_state_id, _)| nwa.states()[*nwa_state_id as usize].final_weight.is_some())
             .map(|(id, w)| (*id, w.clone()))
             .collect();
@@ -1903,7 +1906,7 @@ fn determinize_with_supports(
     }
 
     let mut final_signature_ids: FxHashMap<Vec<(usize, Vec<usize>)>, usize> = FxHashMap::default();
-    let mut final_signature_groups: Vec<Vec<(Weight, SmallVec<[Weight; 4]>)>> = Vec::new();
+    let mut final_signature_groups: Vec<FinalGroups> = Vec::new();
     let mut final_jobs: Vec<(u32, usize)> = Vec::with_capacity(deferred_final_entries.len());
     let final_grouping_started = detail.as_ref().map(|_| Instant::now());
     for (state_id, entries) in &deferred_final_entries {
@@ -1912,7 +1915,7 @@ fn determinize_with_supports(
             detail.final_weight_entries_max = detail.final_weight_entries_max.max(entries.len());
         }
 
-        let mut groups: Vec<(usize, Weight, SmallVec<[Weight; 4]>)> = Vec::new();
+        let mut groups: SmallVec<[(usize, Weight, FinalPathWeights); 4]> = SmallVec::new();
         for (nwa_state_id, path_weight) in entries {
             if let Some(state_final) = nwa.states()[*nwa_state_id as usize].final_weight.as_ref() {
                 let final_key = state_final.ptr_key();
@@ -1942,7 +1945,7 @@ fn determinize_with_supports(
             Entry::Occupied(entry) => *entry.get(),
             Entry::Vacant(entry) => {
                 let signature_id = final_signature_groups.len();
-                let owned_groups = groups
+                let owned_groups: FinalGroups = groups
                     .into_iter()
                     .map(|(_, state_final, path_weights)| (state_final, path_weights))
                     .collect();
@@ -1971,7 +1974,7 @@ fn determinize_with_supports(
             let intern_started_at = Instant::now();
             let mut component_ids = FxHashMap::<(usize, Vec<usize>), usize>::default();
             let mut components = Vec::<(Weight, SmallVec<[Weight; 4]>)>::new();
-            let signature_components = final_signature_groups
+            let signature_components: Vec<SmallVec<[usize; 8]>> = final_signature_groups
                 .iter()
                 .map(|groups| {
                     groups
@@ -1990,7 +1993,7 @@ fn determinize_with_supports(
                                 component_id
                             }
                         })
-                        .collect::<Vec<_>>()
+                        .collect::<SmallVec<[usize; 8]>>()
                 })
                 .collect::<Vec<_>>();
             let intern_ms = elapsed_ms(intern_started_at);
@@ -2053,7 +2056,7 @@ fn determinize_with_supports(
                 detail.final_output_union_ms += elapsed_ms(output_started_at);
             }
             if compile_profile_enabled() {
-                let total_components = signature_components.iter().map(Vec::len).sum::<usize>();
+                let total_components = signature_components.iter().map(|ids| ids.len()).sum::<usize>();
                 eprintln!(
                     "[glrmask/profile][parser_final_group_intern] signatures={} total_components={} unique_components={} intern_ms={:.3}",
                     signature_components.len(),
