@@ -2868,6 +2868,15 @@ pub(crate) fn runtime_dynamic_vocab_for_vocab(vocab: &Vocab) -> DynamicMaskVocab
     runtime_dynamic_vocab_artifacts(&artifacts).vocab
 }
 
+pub(crate) fn prepare_vocab_for_dynamic_mask(vocab: &Vocab) {
+    let artifacts = get_ordered_vocab_trie_artifacts_for_vocab(vocab).0;
+    artifacts.runtime_dynamic_trie.get_or_init(|| {
+        Arc::new(DynamicMaskTrie::from_vocab_prefix_tree(
+            artifacts.trie.as_ref(),
+        ))
+    });
+}
+
 /// Neutral PM artifact for the deferred mode. All dimensions are deliberately
 /// unmapped so PM cannot force tokenizer-state or vocabulary splits during ID
 /// reconciliation; the independently retained dynamic vocabulary is the exact

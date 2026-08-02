@@ -417,12 +417,25 @@ pub(crate) struct DynamicMaskTrieEdge {
     pub(crate) child: u32,
 }
 
+/// One radix edge in depth-first preorder. `subtree_end` is the first walk
+/// entry after the child subtree, so a failed edge or accepted whole subtree
+/// can be skipped with one index assignment.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct DynamicMaskTrieWalkEdge {
+    pub(crate) byte_start: u32,
+    pub(crate) child: u32,
+    pub(crate) subtree_end: u32,
+    pub(crate) byte_len: u16,
+    pub(crate) parent_depth: u16,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct DynamicMaskTrie {
     pub(crate) nodes: Vec<DynamicMaskTrieNode>,
     pub(crate) edges: Vec<DynamicMaskTrieEdge>,
     edge_bytes: Vec<u8>,
     subtree_tokens: Vec<u32>,
+    walk_edges: Vec<DynamicMaskTrieWalkEdge>,
 }
 
 impl DynamicMaskTrie {
@@ -432,6 +445,7 @@ impl DynamicMaskTrie {
             edges: Vec::new(),
             edge_bytes: Vec::new(),
             subtree_tokens: Vec::new(),
+            walk_edges: Vec::new(),
         }
     }
 
@@ -456,10 +470,33 @@ impl DynamicMaskTrie {
     }
 
     #[inline]
+    pub(crate) fn walk_edges(&self) -> &[DynamicMaskTrieWalkEdge] {
+        &self.walk_edges
+    }
+
+    #[inline]
+    pub(crate) fn walk_edge_bytes(&self, edge: &DynamicMaskTrieWalkEdge) -> &[u8] {
+        let start = edge.byte_start as usize;
+        let end = start + edge.byte_len as usize;
+        &self.edge_bytes[start..end]
+    }
+
+    #[inline]
     pub(crate) fn subtree_tokens(&self, node: u32) -> &[u32] {
         let node = self.node(node);
         &self.subtree_tokens
             [node.subtree_token_start as usize..node.subtree_token_end as usize]
+    }
+
+    #[inline]
+    pub(crate) fn subtree_token_index_range(&self, node: u32) -> std::ops::Range<usize> {
+        let node = self.node(node);
+        node.subtree_token_start as usize..node.subtree_token_end as usize
+    }
+
+    #[inline]
+    fn all_subtree_tokens(&self) -> &[u32] {
+        &self.subtree_tokens
     }
 
     #[inline]
@@ -516,6 +553,41 @@ impl DynamicMaskTrie {
         if !self.nodes.is_empty() {
             self.collect_subtree_metadata(0);
         }
+        self.finalize_walk_edges();
+    }
+
+    fn append_walk_edges(&mut self, node_id: u32, parent_depth: u16) {
+        let first_child = self.nodes[node_id as usize].first_child as usize;
+        let child_len = self.nodes[node_id as usize].child_len as usize;
+        for edge_index in first_child..first_child + child_len {
+            let edge = self.edges[edge_index].clone();
+            let byte_len = u16::try_from(edge.byte_len)
+                .expect("dynamic mask trie radix edge exceeds u16 length");
+            let entry_index = self.walk_edges.len();
+            self.walk_edges.push(DynamicMaskTrieWalkEdge {
+                byte_start: edge.byte_start,
+                child: edge.child,
+                subtree_end: 0,
+                byte_len,
+                parent_depth,
+            });
+            self.append_walk_edges(
+                edge.child,
+                parent_depth
+                    .checked_add(1)
+                    .expect("dynamic mask trie depth exceeds u16"),
+            );
+            self.walk_edges[entry_index].subtree_end = self.walk_edges.len() as u32;
+        }
+    }
+
+    fn finalize_walk_edges(&mut self) {
+        self.walk_edges.clear();
+        self.walk_edges.reserve(self.edges.len());
+        if !self.nodes.is_empty() {
+            self.append_walk_edges(0, 0);
+        }
+        debug_assert_eq!(self.walk_edges.len(), self.edges.len());
     }
 
     fn flatten_vocab_node(node: &VocabPrefixTreeNode, output: &mut Self) -> u32 {
@@ -560,6 +632,7 @@ impl DynamicMaskTrie {
             edges: Vec::new(),
             edge_bytes: Vec::new(),
             subtree_tokens: Vec::new(),
+            walk_edges: Vec::new(),
         };
         let root = Self::flatten_vocab_node(node, &mut output);
         debug_assert_eq!(root, 0);
@@ -598,6 +671,7 @@ impl DynamicMaskTrie {
             edges: Vec::with_capacity(edge_capacity),
             edge_bytes: Vec::with_capacity(byte_capacity),
             subtree_tokens: Vec::with_capacity(node_capacity),
+            walk_edges: Vec::with_capacity(edge_capacity),
         };
         output.nodes.push(DynamicMaskTrieNode {
             token_id: root.has_token().then_some(root.token_id() as u32),
@@ -682,6 +756,11 @@ pub(crate) struct DynamicMaskVocabSource {
 pub(crate) struct DynamicMaskVocab {
     pub(crate) trie: Arc<DynamicMaskTrie>,
     token_aliases: DynamicMaskAliasStore,
+    canonical_original_token_offsets: Arc<Vec<u32>>,
+    canonical_original_tokens: Arc<Vec<u32>>,
+    node_token_markers: Arc<Vec<u64>>,
+    subtree_original_token_offsets: Arc<Vec<u32>>,
+    subtree_original_tokens: Arc<Vec<u32>>,
     pending_source: Option<DynamicMaskVocabSource>,
     initialized: bool,
     mask_cache: Arc<Mutex<Vec<DynamicMaskCacheEntry>>>,
@@ -709,9 +788,28 @@ impl DynamicMaskVocab {
         trie: Arc<DynamicMaskTrie>,
         token_aliases: Arc<Vec<Vec<u32>>>,
     ) -> Self {
+        let token_aliases = DynamicMaskAliasStore::Ordered(token_aliases);
+        let (canonical_original_token_offsets, canonical_original_tokens) =
+            Self::flatten_canonical_original_tokens(&token_aliases);
+        let node_token_markers = Self::build_node_token_markers(
+            trie.as_ref(),
+            &canonical_original_token_offsets,
+            &canonical_original_tokens,
+        );
+        let (subtree_original_token_offsets, subtree_original_tokens) =
+            Self::flatten_subtree_original_tokens(
+                trie.as_ref(),
+                &canonical_original_token_offsets,
+                &canonical_original_tokens,
+            );
         Self {
             trie,
-            token_aliases: DynamicMaskAliasStore::Ordered(token_aliases),
+            token_aliases,
+            canonical_original_token_offsets,
+            canonical_original_tokens,
+            node_token_markers,
+            subtree_original_token_offsets,
+            subtree_original_tokens,
             pending_source: None,
             initialized: true,
             mask_cache: Arc::new(Mutex::new(Vec::new())),
@@ -722,6 +820,11 @@ impl DynamicMaskVocab {
         Self {
             trie: Arc::new(DynamicMaskTrie::new()),
             token_aliases: DynamicMaskAliasStore::Packed(Arc::new(Vec::new())),
+            canonical_original_token_offsets: Arc::new(vec![0]),
+            canonical_original_tokens: Arc::new(Vec::new()),
+            node_token_markers: Arc::new(vec![0]),
+            subtree_original_token_offsets: Arc::new(vec![0]),
+            subtree_original_tokens: Arc::new(Vec::new()),
             pending_source: Some(source),
             initialized: false,
             mask_cache: Arc::new(Mutex::new(Vec::new())),
@@ -732,9 +835,28 @@ impl DynamicMaskVocab {
         trie: Arc<DynamicMaskTrie>,
         token_aliases: Arc<Vec<Option<PackedDynamicMaskTokenAliases>>>,
     ) -> Self {
+        let token_aliases = DynamicMaskAliasStore::Packed(token_aliases);
+        let (canonical_original_token_offsets, canonical_original_tokens) =
+            Self::flatten_canonical_original_tokens(&token_aliases);
+        let node_token_markers = Self::build_node_token_markers(
+            trie.as_ref(),
+            &canonical_original_token_offsets,
+            &canonical_original_tokens,
+        );
+        let (subtree_original_token_offsets, subtree_original_tokens) =
+            Self::flatten_subtree_original_tokens(
+                trie.as_ref(),
+                &canonical_original_token_offsets,
+                &canonical_original_tokens,
+            );
         Self {
             trie,
-            token_aliases: DynamicMaskAliasStore::Packed(token_aliases),
+            token_aliases,
+            canonical_original_token_offsets,
+            canonical_original_tokens,
+            node_token_markers,
+            subtree_original_token_offsets,
+            subtree_original_tokens,
             pending_source: None,
             initialized: true,
             mask_cache: Arc::new(Mutex::new(Vec::new())),
@@ -751,27 +873,141 @@ impl DynamicMaskVocab {
         };
         self.trie = Arc::new(DynamicMaskTrie::from_vocab_prefix_tree(source.trie.as_ref()));
         self.token_aliases = DynamicMaskAliasStore::Ordered(source.token_aliases);
+        (self.canonical_original_token_offsets, self.canonical_original_tokens) =
+            Self::flatten_canonical_original_tokens(&self.token_aliases);
+        self.node_token_markers = Self::build_node_token_markers(
+            self.trie.as_ref(),
+            &self.canonical_original_token_offsets,
+            &self.canonical_original_tokens,
+        );
+        (self.subtree_original_token_offsets, self.subtree_original_tokens) =
+            Self::flatten_subtree_original_tokens(
+                self.trie.as_ref(),
+                &self.canonical_original_token_offsets,
+                &self.canonical_original_tokens,
+            );
         self.initialized = true;
         true
     }
 
+    fn flatten_canonical_original_tokens(
+        token_aliases: &DynamicMaskAliasStore,
+    ) -> (Arc<Vec<u32>>, Arc<Vec<u32>>) {
+        let alias_slots = match token_aliases {
+            DynamicMaskAliasStore::Ordered(aliases) => aliases.len(),
+            DynamicMaskAliasStore::Packed(aliases) => aliases.len(),
+        };
+        let mut offsets = Vec::with_capacity(alias_slots + 1);
+        let mut originals = Vec::new();
+        offsets.push(0);
+        for canonical_token in 0..alias_slots {
+            match token_aliases {
+                DynamicMaskAliasStore::Ordered(aliases) => {
+                    originals.extend_from_slice(&aliases[canonical_token]);
+                }
+                DynamicMaskAliasStore::Packed(aliases) => {
+                    if let Some(alias) = aliases[canonical_token].as_ref() {
+                        match alias {
+                            PackedDynamicMaskTokenAliases::Single(token_id) => {
+                                originals.push(*token_id);
+                            }
+                            PackedDynamicMaskTokenAliases::Many(token_ids) => {
+                                originals.extend_from_slice(token_ids);
+                            }
+                        }
+                    }
+                }
+            }
+            offsets.push(originals.len() as u32);
+        }
+        (Arc::new(offsets), Arc::new(originals))
+    }
+
+    fn flatten_subtree_original_tokens(
+        trie: &DynamicMaskTrie,
+        canonical_offsets: &[u32],
+        canonical_original_tokens: &[u32],
+    ) -> (Arc<Vec<u32>>, Arc<Vec<u32>>) {
+        let subtree_canonical_tokens = trie.all_subtree_tokens();
+        let mut offsets = Vec::with_capacity(subtree_canonical_tokens.len() + 1);
+        let mut originals = Vec::new();
+        offsets.push(0);
+        for &canonical_token in subtree_canonical_tokens {
+            let index = canonical_token as usize;
+            let start = canonical_offsets[index] as usize;
+            let end = canonical_offsets[index + 1] as usize;
+            originals.extend_from_slice(&canonical_original_tokens[start..end]);
+            offsets.push(originals.len() as u32);
+        }
+        (Arc::new(offsets), Arc::new(originals))
+    }
+
+    fn build_node_token_markers(
+        trie: &DynamicMaskTrie,
+        canonical_offsets: &[u32],
+        canonical_original_tokens: &[u32],
+    ) -> Arc<Vec<u64>> {
+        const FALLBACK_TAG: u64 = 1u64 << 63;
+        let mut markers = Vec::with_capacity(trie.nodes.len());
+        for node in &trie.nodes {
+            let Some(canonical_token) = node.token_id else {
+                markers.push(0);
+                continue;
+            };
+            let index = canonical_token as usize;
+            let start = canonical_offsets[index] as usize;
+            let end = canonical_offsets[index + 1] as usize;
+            let aliases = &canonical_original_tokens[start..end];
+            let Some(&first_token) = aliases.first() else {
+                markers.push(FALLBACK_TAG | (canonical_token as u64 + 1));
+                continue;
+            };
+            let word = first_token / 32;
+            let mut bits = 0u32;
+            let mut one_word = true;
+            for &token_id in aliases {
+                if token_id / 32 != word {
+                    one_word = false;
+                    break;
+                }
+                bits |= 1u32 << (token_id % 32);
+            }
+            if one_word {
+                debug_assert_ne!(bits, 0);
+                debug_assert!(word < (1u32 << 31));
+                markers.push((u64::from(word) << 32) | u64::from(bits));
+            } else {
+                markers.push(FALLBACK_TAG | (canonical_token as u64 + 1));
+            }
+        }
+        Arc::new(markers)
+    }
+
+    #[inline]
+    pub(crate) fn subtree_original_tokens(&self, node: u32) -> &[u32] {
+        let canonical_range = self.trie.subtree_token_index_range(node);
+        let start = self.subtree_original_token_offsets[canonical_range.start] as usize;
+        let end = self.subtree_original_token_offsets[canonical_range.end] as usize;
+        &self.subtree_original_tokens[start..end]
+    }
+
     #[inline]
     pub(crate) fn token_ids(&self, canonical_token_id: u32) -> Option<&[u32]> {
-        match &self.token_aliases {
-            DynamicMaskAliasStore::Ordered(token_aliases) => token_aliases
-                .get(canonical_token_id as usize)
-                .map(Vec::as_slice),
-            DynamicMaskAliasStore::Packed(token_aliases) => match token_aliases
-                .get(canonical_token_id as usize)
-                .and_then(Option::as_ref)
-            {
-                Some(PackedDynamicMaskTokenAliases::Single(token_id)) => {
-                    Some(std::slice::from_ref(token_id))
-                }
-                Some(PackedDynamicMaskTokenAliases::Many(token_ids)) => Some(token_ids),
-                None => None,
-            },
-        }
+        let index = canonical_token_id as usize;
+        let end_index = index.checked_add(1)?;
+        let (&start, &end) = self
+            .canonical_original_token_offsets
+            .get(index)
+            .zip(self.canonical_original_token_offsets.get(end_index))?;
+        (start != end).then(|| {
+            &self.canonical_original_tokens[start as usize..end as usize]
+        })
+    }
+
+    #[inline(always)]
+    pub(crate) fn node_token_marker(&self, node: u32) -> u64 {
+        debug_assert!((node as usize) < self.node_token_markers.len());
+        unsafe { *self.node_token_markers.get_unchecked(node as usize) }
     }
 
     pub(crate) fn copy_cached_mask(
@@ -817,6 +1053,11 @@ impl Default for DynamicMaskVocab {
         Self {
             trie: Arc::new(DynamicMaskTrie::new()),
             token_aliases: DynamicMaskAliasStore::Packed(Arc::new(Vec::new())),
+            canonical_original_token_offsets: Arc::new(vec![0]),
+            canonical_original_tokens: Arc::new(Vec::new()),
+            node_token_markers: Arc::new(vec![0]),
+            subtree_original_token_offsets: Arc::new(vec![0]),
+            subtree_original_tokens: Arc::new(Vec::new()),
             pending_source: None,
             initialized: false,
             mask_cache: Arc::new(Mutex::new(Vec::new())),

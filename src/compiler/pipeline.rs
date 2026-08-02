@@ -3918,6 +3918,41 @@ pub(crate) fn compile_dynamic_owned_with_table_construction(
                 let started_at = Instant::now();
                 let mut tokenizer = build_dynamic_tokenizer(&prepared_grammar);
                 tokenizer.isolate_start_state_and_drain_nullable_terminals();
+                if tokenizer.has_epsilon_transitions() {
+                    let source_states = tokenizer.num_states();
+                    let source_transitions = tokenizer.transition_count();
+                    let source_state_limit = std::env::var(
+                        "GLRMASK_DYNAMIC_LEXER_MAX_SOURCE_STATES",
+                    )
+                        .ok()
+                        .and_then(|value| value.trim().parse::<u32>().ok())
+                        .filter(|&value| value > 0)
+                        .unwrap_or(512);
+                    if source_states <= source_state_limit {
+                        let transition_limit = source_transitions.saturating_mul(6).max(1);
+                        let state_limit = std::env::var("GLRMASK_DYNAMIC_LEXER_MAX_STATES")
+                            .ok()
+                            .and_then(|value| value.trim().parse::<usize>().ok())
+                            .filter(|&value| value > 0)
+                            .unwrap_or(8_192);
+                        if let Some(determinized) =
+                            tokenizer.try_full_determinization(state_limit, transition_limit)
+                        {
+                            tokenizer = determinized.tokenizer;
+                        }
+                    }
+                    if profile {
+                        eprintln!(
+                            "[glrmask/profile][dynamic_lexer_determinization] source_states={} source_transitions={} source_state_limit={} attempted={} final_states={} final_transitions={}",
+                            source_states,
+                            source_transitions,
+                            source_state_limit,
+                            source_states <= source_state_limit,
+                            tokenizer.num_states(),
+                            tokenizer.transition_count(),
+                        );
+                    }
+                }
                 (tokenizer, elapsed_ms(started_at))
             },
             || {
