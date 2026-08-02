@@ -922,6 +922,34 @@ fn json_string_accepts_escaped_solidus() {
 }
 
 #[test]
+fn json_string_accepts_raw_delete_character() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _guard = EnvVarGuard::unset(GLRMASK_LLGUIDANCE_COMPAT_ENV);
+    let schema = json!({"type": "string"});
+    assert!(schema_accepts_bytes(&schema, b"\"\x7f\""));
+}
+
+#[test]
+fn patterned_string_accepts_raw_delete_character() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _guard = EnvVarGuard::unset(GLRMASK_LLGUIDANCE_COMPAT_ENV);
+    let schema = json!({"type": "string", "pattern": "^.$"});
+    assert!(schema_accepts_bytes(&schema, b"\"\x7f\""));
+
+    let schema = json!({"type": "string", "pattern": "^[\\u007f]$"});
+    assert!(schema_accepts_bytes(&schema, b"\"\x7f\""));
+    assert!(schema_accepts_bytes(&schema, br#""\u007f""#));
+}
+
+#[test]
+fn llguidance_compat_still_rejects_raw_delete_character() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
+    let schema = json!({"type": "string"});
+    assert!(!schema_accepts_bytes(&schema, b"\"\x7f\""));
+}
+
+#[test]
 fn patterned_string_accepts_escaped_solidus_for_decoded_slash() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
     let _guard = EnvVarGuard::unset(GLRMASK_LLGUIDANCE_COMPAT_ENV);
@@ -7598,6 +7626,93 @@ fn recursive_ref_in_allof_is_not_inlined() {
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
     lower(&grammar).unwrap();
+}
+
+#[test]
+fn allof_distributes_over_recursive_ref_anyof() {
+    let schema = json!({
+        "allOf": [
+            {"$ref": "#/definitions/primitive"},
+            {"$ref": "#/definitions/element"}
+        ],
+        "definitions": {
+            "primitive": {
+                "type": "object",
+                "anyOf": [
+                    {"$ref": "#/definitions/a"},
+                    {"$ref": "#/definitions/layer"}
+                ]
+            },
+            "a": {
+                "type": "object",
+                "properties": {"type": {"enum": ["a"]}},
+                "required": ["type"]
+            },
+            "layer": {
+                "type": "object",
+                "properties": {
+                    "type": {"enum": ["layer"]},
+                    "children": {
+                        "type": "array",
+                        "items": {"$ref": "#/definitions/primitive"}
+                    }
+                },
+                "required": ["type"]
+            },
+            "element": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}}
+            }
+        }
+    });
+
+    assert!(schema_accepts_bytes(&schema, br#"{"type": "a"}"#));
+    assert!(schema_accepts_bytes(&schema, br#"{"type": "layer"}"#));
+    assert!(!schema_accepts_bytes(&schema, br#"{"type": "nonsense"}"#));
+    assert!(!schema_accepts_bytes(&schema, br#"{"type": true}"#));
+    assert!(!schema_accepts_bytes(&schema, br#"{}"#));
+}
+
+#[test]
+fn allof_intersects_string_enum_with_pattern() {
+    let schema = json!({
+        "definitions": {
+            "base": {
+                "type": "object",
+                "properties": {
+                    "type": {
+                        "type": "string",
+                        "enum": ["atomic", "compound"]
+                    }
+                },
+                "required": ["type"]
+            }
+        },
+        "allOf": [
+            {"$ref": "#/definitions/base"},
+            {
+                "type": "object",
+                "properties": {
+                    "type": {"type": "string", "pattern": "atomic"},
+                    "on": {"type": "object"}
+                },
+                "required": ["on"]
+            }
+        ]
+    });
+
+    assert!(schema_accepts_bytes(
+        &schema,
+        br#"{"type": "atomic", "on": {}}"#,
+    ));
+    assert!(!schema_accepts_bytes(
+        &schema,
+        br#"{"type": "xatomic", "on": {}}"#,
+    ));
+    assert!(!schema_accepts_bytes(
+        &schema,
+        br#"{"type": "compound", "on": {}}"#,
+    ));
 }
 
 #[test]

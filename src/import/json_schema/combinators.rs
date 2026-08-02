@@ -755,7 +755,9 @@ impl<'a> Lowerer<'a> {
         {
             return self.lower_object_requiring_any_property(&object, &any_required_names);
         }
-        if let Some((kind, distributed)) = self.distribute_all_of_over_single_object_choice(&branches)? {
+        if let Some((kind, distributed)) =
+            self.distribute_all_of_over_single_object_choice(&branches)?
+        {
             return match kind {
                 ChoiceKind::AnyOf => {
                     if let Some(expr) =
@@ -1487,14 +1489,14 @@ fn merge_all_of_string_like_schema(branches: &[Schema]) -> Option<Schema> {
     let mut string = super::ast::StringSchema::default();
     let mut pattern: Option<String> = None;
     let mut format: Option<String> = None;
+    let mut candidates: Option<Vec<Value>> = None;
+    let mut candidate_constraints = Vec::new();
 
     for branch in branches {
         let SchemaKind::Assertions(assertions) = &branch.kind else {
             return None;
         };
-        if assertions.const_value.is_some()
-            || assertions.enum_values.is_some()
-            || assertions.object.is_some()
+        if assertions.object.is_some()
             || assertions.array.is_some()
             || assertions.number.is_some()
             || !assertions.any_of.is_empty()
@@ -1509,8 +1511,23 @@ fn merge_all_of_string_like_schema(branches: &[Schema]) -> Option<Schema> {
         {
             return None;
         }
+        let branch_candidates = assertions
+            .const_value
+            .as_ref()
+            .map(|value| vec![value.clone()])
+            .or_else(|| assertions.enum_values.clone());
+        if let Some(branch_candidates) = branch_candidates {
+            candidates = Some(match candidates {
+                Some(existing) => existing
+                    .into_iter()
+                    .filter(|value| branch_candidates.contains(value))
+                    .collect(),
+                None => branch_candidates,
+            });
+        }
         if let Some(branch_string) = &assertions.string {
             saw_string_family = true;
+            candidate_constraints.push(branch_string.clone());
             string.min_length = string.min_length.max(branch_string.min_length);
             string.max_length = match (string.max_length, branch_string.max_length) {
                 (Some(left), Some(right)) => Some(left.min(right)),
@@ -1538,7 +1555,31 @@ fn merge_all_of_string_like_schema(branches: &[Schema]) -> Option<Schema> {
     }
 
     if !saw_string_family {
-        return None;
+        if candidates.is_none() {
+            return None;
+        }
+    }
+    if let Some(mut values) = candidates {
+        values.retain(|value| {
+            value.is_string()
+                && candidate_constraints.iter().all(|constraint| {
+                    string_value_satisfies_schema(value, constraint)
+                        .unwrap_or(false)
+                })
+        });
+        if values.is_empty() {
+            return Some(Schema::never(
+                "<merged-allOf-string-like:empty-enum>",
+            ));
+        }
+        return Some(Schema::assertions(
+            "<merged-allOf-string-like:enum>",
+            SchemaAssertions {
+                types: Some(vec![SchemaType::String]),
+                enum_values: Some(values),
+                ..SchemaAssertions::default()
+            },
+        ));
     }
     if string.max_length.is_some_and(|max| max < string.min_length) {
         return Some(Schema::never("<merged-allOf-string-like:empty-length>"));
@@ -2938,26 +2979,27 @@ impl<'a> Lowerer<'a> {
         branches: &[Schema],
     ) -> ImportResult<Option<(ChoiceKind, Vec<Schema>)>> {
         let mut choice_branch = None;
-        for branch in branches {
-            if let Some((kind, object_sibling, alternatives)) = object_branch_with_single_choice(branch)
+        for (branch_idx, branch) in branches.iter().enumerate() {
+            if let Some((kind, object_sibling, alternatives)) =
+                self.resolved_object_branch_with_single_choice(branch)?
             {
                 if choice_branch.is_some() {
                     return Ok(None);
                 }
-                choice_branch = Some((kind, object_sibling, alternatives.to_vec()));
+                choice_branch = Some((branch_idx, kind, object_sibling, alternatives));
             } else if !self.schema_is_object_like_resolved(branch)? {
                 return Ok(None);
             }
         }
 
-        let Some((kind, object_sibling, alternatives)) = choice_branch else {
+        let Some((choice_branch_idx, kind, object_sibling, alternatives)) = choice_branch else {
             return Ok(None);
         };
         let mut object_siblings = Vec::new();
-        for branch in branches
-            .iter()
-            .filter(|branch| object_branch_with_single_choice(branch).is_none())
-        {
+        for (branch_idx, branch) in branches.iter().enumerate() {
+            if branch_idx == choice_branch_idx {
+                continue;
+            }
             let Some(sibling) = self.object_like_distribution_schema(branch)? else {
                 return Ok(None);
             };
@@ -2990,18 +3032,45 @@ impl<'a> Lowerer<'a> {
         Ok(Some((kind, distributed)))
     }
 
+    fn resolved_object_branch_with_single_choice(
+        &self,
+        schema: &Schema,
+    ) -> ImportResult<Option<(ChoiceKind, Schema, Vec<Schema>)>> {
+        self.resolved_object_branch_with_single_choice_inner(schema, 0)
+    }
+
+    fn resolved_object_branch_with_single_choice_inner(
+        &self,
+        schema: &Schema,
+        ref_depth: usize,
+    ) -> ImportResult<Option<(ChoiceKind, Schema, Vec<Schema>)>> {
+        if let Some((kind, sibling, alternatives)) = object_branch_with_single_choice(schema) {
+            return Ok(Some((kind, sibling, alternatives.to_vec())));
+        }
+        let SchemaKind::Ref(pointer) = &schema.kind else {
+            return Ok(None);
+        };
+        if ref_depth >= 4 {
+            return Ok(None);
+        }
+        self.resolved_object_branch_with_single_choice_inner(
+            self.resolve_ref_target(pointer)?,
+            ref_depth + 1,
+        )
+    }
+
     fn distribute_all_of_over_single_object_choice(
         &self,
         branches: &[Schema],
     ) -> ImportResult<Option<(ChoiceKind, Vec<Schema>)>> {
         let mut choice_branch = None;
         for (branch_idx, branch) in branches.iter().enumerate() {
-            if let Some((kind, alternatives)) = pure_choice_branch(branch) {
+            if let Some((kind, alternatives)) = self.resolved_pure_choice_branch(branch)? {
                 if choice_branch.is_some() {
                     return Ok(None);
                 }
                 let mut distributed_alternatives = Vec::with_capacity(alternatives.len());
-                for alternative in alternatives {
+                for alternative in &alternatives {
                     let Some(distributed) = self.object_like_distribution_schema(alternative)? else {
                         return Ok(None);
                     };
@@ -3042,6 +3111,33 @@ impl<'a> Lowerer<'a> {
                 })
                 .collect(),
         )))
+    }
+
+    fn resolved_pure_choice_branch(
+        &self,
+        schema: &Schema,
+    ) -> ImportResult<Option<(ChoiceKind, Vec<Schema>)>> {
+        self.resolved_pure_choice_branch_inner(schema, 0)
+    }
+
+    fn resolved_pure_choice_branch_inner(
+        &self,
+        schema: &Schema,
+        ref_depth: usize,
+    ) -> ImportResult<Option<(ChoiceKind, Vec<Schema>)>> {
+        if let Some((kind, alternatives)) = pure_choice_branch(schema) {
+            return Ok(Some((kind, alternatives.to_vec())));
+        }
+        let SchemaKind::Ref(pointer) = &schema.kind else {
+            return Ok(None);
+        };
+        if ref_depth >= 4 {
+            return Ok(None);
+        }
+        self.resolved_pure_choice_branch_inner(
+            self.resolve_ref_target(pointer)?,
+            ref_depth + 1,
+        )
     }
 
     fn object_like_distribution_schema(&self, schema: &Schema) -> ImportResult<Option<Schema>> {
