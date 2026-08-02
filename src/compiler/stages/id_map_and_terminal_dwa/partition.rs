@@ -127,17 +127,6 @@ fn automatic_branch_active_state_map_selected(
                 && (8_000..=30_000).contains(&vocab_tokens)
                 && (10_000..=24_000).contains(&source_states)
         }
-        // A long-horizon binary-token L1 family otherwise rescans the complete
-        // ~97k-state lexer to discover fewer than 1k exact profiles. Its stable
-        // active-language quotient is cheaper and is consumed directly by the
-        // generic L1 path; deterministic tokenizer materialization is not.
-        // Keep the active-terminal band narrow: the adjacent 168- and 223-
-        // terminal families do not share the same cost balance.
-        "p6.l1" => {
-            (180..=200).contains(&active_terminals)
-                && (512..=1_024).contains(&vocab_tokens)
-                && source_states >= 60_000
-        }
         _ => false,
     }
 }
@@ -866,10 +855,10 @@ mod tests {
     }
 
     #[test]
-    fn long_horizon_p6_uses_map_without_materialization() {
+    fn long_horizon_p6_defers_to_direct_exact_analysis() {
         use super::automatic_branch_active_state_map_selected;
 
-        assert!(automatic_branch_active_state_map_selected(
+        assert!(!automatic_branch_active_state_map_selected(
             "p6.l1", 630, 189, 97_046,
         ));
         assert!(!automatic_branch_active_state_map_selected(
