@@ -1953,6 +1953,270 @@ struct ZeroMinRepeatSuffixBuild {
     state_by_key: FxHashMap<ZeroMinRepeatSuffixState, u32>,
 }
 
+/// Lazily interns the exact dominance states for a zero-minimum bounded
+/// repeat followed by a non-nullable suffix. Product construction can then
+/// visit only component residuals that survive the other intersection
+/// coordinate instead of materializing every repeat-count layer first.
+struct LazyZeroMinRepeatSuffixComponent {
+    prefix: Vec<u8>,
+    body_dfa: DFA,
+    suffix_dfa: DFA,
+    max: usize,
+    group_u8set: U8Set,
+    tail_states: Vec<ZeroMinRepeatSuffixState>,
+    tail_state_by_key: FxHashMap<ZeroMinRepeatSuffixState, u32>,
+    class_count: usize,
+    class_targets: Vec<u32>,
+}
+
+impl LazyZeroMinRepeatSuffixComponent {
+    fn from_expr(expr: &Expr) -> Option<Self> {
+        let unwrapped = unwrap_shared(expr);
+        let Expr::Seq(parts) = unwrapped else {
+            return None;
+        };
+        let mut flat_parts = Vec::<Expr>::new();
+        for part in parts {
+            match unwrap_shared(part) {
+                Expr::Seq(inner) => flat_parts.extend(inner.iter().cloned()),
+                _ => flat_parts.push(part.clone()),
+            }
+        }
+
+        for repeat_index in 0..flat_parts.len().saturating_sub(1) {
+            let Expr::Repeat {
+                expr: body,
+                min: 0,
+                max: Some(max),
+            } = unwrap_shared(&flat_parts[repeat_index])
+            else {
+                continue;
+            };
+            // The lazy product is intended for very large bounded residuals
+            // whose eager constituent DFA would dominate compilation. Smaller
+            // repeats are already cheap to materialize and preserve better
+            // downstream state locality through the ordinary product path.
+            if *max < 1_024 {
+                continue;
+            }
+            let prefix = collect_suffix_bytes(&flat_parts[..repeat_index])?;
+            let suffix_expr = seq_from_parts(flat_parts[repeat_index + 1..].to_vec());
+            let body_dfa = compile_expr_to_dfa(body);
+            let suffix_dfa = compile_expr_to_dfa(&suffix_expr);
+            if body_dfa.num_states() == 0
+                || body_dfa.num_states() > 256
+                || body_dfa.finalizers(0).contains(0)
+                || suffix_dfa.num_states() == 0
+                || suffix_dfa.finalizers(0).contains(0)
+            {
+                continue;
+            }
+
+            let mut start_body = vec![u32::MAX; body_dfa.num_states()];
+            start_body[0] = 0;
+            let mut start_suffix = vec![0u32];
+            close_zero_min_repeat_suffix_state(
+                &mut start_body,
+                &mut start_suffix,
+                &body_dfa,
+                &suffix_dfa,
+                *max,
+            );
+            let start = ZeroMinRepeatSuffixState {
+                body_min_counts: start_body.into_boxed_slice(),
+                suffix_states: start_suffix.into_boxed_slice(),
+            };
+            let mut tail_state_by_key = FxHashMap::default();
+            tail_state_by_key.insert(start.clone(), 0);
+            return Some(Self {
+                prefix,
+                body_dfa,
+                suffix_dfa,
+                max: *max,
+                group_u8set: expr_u8set(expr),
+                tail_states: vec![start],
+                tail_state_by_key,
+                class_count: 0,
+                class_targets: Vec::new(),
+            });
+        }
+        None
+    }
+
+    fn prefix_len(&self) -> usize {
+        self.prefix.len()
+    }
+
+    fn num_states(&self) -> usize {
+        self.prefix.len() + self.tail_states.len()
+    }
+
+    fn start_state(&self) -> u32 {
+        0
+    }
+
+    fn prepare_classes(&mut self, class_count: usize) {
+        debug_assert_eq!(self.class_count, 0);
+        debug_assert!(self.class_targets.is_empty());
+        self.class_count = class_count;
+        self.class_targets = vec![u32::MAX; self.num_states().saturating_mul(class_count)];
+    }
+
+    fn is_accepting(&self, state: u32) -> bool {
+        let Some(tail) = (state as usize)
+            .checked_sub(self.prefix.len())
+            .and_then(|index| self.tail_states.get(index))
+        else {
+            return false;
+        };
+        tail.suffix_states
+            .iter()
+            .any(|&suffix_state| self.suffix_dfa.finalizers(suffix_state).contains(0))
+    }
+
+    fn has_future(&self, state: u32) -> bool {
+        if (state as usize) < self.prefix.len() {
+            return true;
+        }
+        let tail = &self.tail_states[state as usize - self.prefix.len()];
+        tail.body_min_counts.iter().any(|&count| count != u32::MAX)
+            || tail.suffix_states.iter().any(|&suffix_state| {
+                self.suffix_dfa
+                    .possible_future_group_ids(suffix_state)
+                    .contains(0)
+            })
+    }
+
+    fn step_class(&mut self, state: u32, class: u8, byte: u8) -> Option<u32> {
+        let cache_index = (state as usize)
+            .checked_mul(self.class_count)?
+            .checked_add(class as usize)?;
+        let cached = *self.class_targets.get(cache_index)?;
+        // `u32::MAX - 1` is the cached dead-transition sentinel. The real DFA
+        // state space is bounded far below it by the surrounding product.
+        const DEAD: u32 = u32::MAX - 1;
+        if cached == DEAD {
+            return None;
+        }
+        if cached != u32::MAX {
+            return Some(cached);
+        }
+        let target = self.step_uncached(state, byte).unwrap_or(DEAD);
+        self.class_targets[cache_index] = target;
+        if target == DEAD {
+            None
+        } else {
+            Some(target)
+        }
+    }
+
+    fn step_uncached(&mut self, state: u32, byte: u8) -> Option<u32> {
+        let state = state as usize;
+        if state < self.prefix.len() {
+            if self.prefix[state] != byte {
+                return None;
+            }
+            return Some((state + 1) as u32);
+        }
+
+        let tail_index = state - self.prefix.len();
+        let next = {
+            let current = self.tail_states.get(tail_index)?;
+            let mut next_body = vec![u32::MAX; self.body_dfa.num_states()];
+            for (body_state, &completed) in current.body_min_counts.iter().enumerate() {
+                if completed == u32::MAX {
+                    continue;
+                }
+                if let Some(target) = self.body_dfa.step(body_state as u32, byte) {
+                    let target_count = &mut next_body[target as usize];
+                    *target_count = (*target_count).min(completed);
+                }
+            }
+            let mut next_suffix = Vec::with_capacity(current.suffix_states.len());
+            for &suffix_state in current.suffix_states.iter() {
+                if let Some(target) = self.suffix_dfa.step(suffix_state, byte) {
+                    next_suffix.push(target);
+                }
+            }
+            close_zero_min_repeat_suffix_state(
+                &mut next_body,
+                &mut next_suffix,
+                &self.body_dfa,
+                &self.suffix_dfa,
+                self.max,
+            );
+            if next_body.iter().all(|&count| count == u32::MAX) && next_suffix.is_empty() {
+                return None;
+            }
+            ZeroMinRepeatSuffixState {
+                body_min_counts: next_body.into_boxed_slice(),
+                suffix_states: next_suffix.into_boxed_slice(),
+            }
+        };
+        let local = if let Some(&local) = self.tail_state_by_key.get(&next) {
+            local
+        } else {
+            let local = u32::try_from(self.tail_states.len()).ok()?;
+            self.tail_state_by_key.insert(next.clone(), local);
+            self.tail_states.push(next);
+            self.class_targets
+                .extend(std::iter::repeat_n(u32::MAX, self.class_count));
+            local
+        };
+        Some(self.prefix.len() as u32 + local)
+    }
+
+    fn into_product_component(
+        self,
+        class_members: &[Vec<u8>],
+    ) -> ProductComponent {
+        let mut dfa = DFA::new(self.num_states());
+        dfa.ensure_group_capacity(1);
+        dfa.set_group_u8set(0, self.group_u8set);
+        for state in 0..self.num_states() {
+            let mut finalizers = BitSet::new(1);
+            if self.is_accepting(state as u32) {
+                finalizers.set(0);
+            }
+            let mut future = BitSet::new(1);
+            if self.has_future(state as u32) {
+                future.set(0);
+            }
+            dfa.overwrite_state_metadata(state as u32, finalizers, future);
+            let mut transitions = Vec::new();
+            let row_start = state * self.class_count;
+            for class in 0..self.class_count {
+                let target = self.class_targets[row_start + class];
+                if target >= u32::MAX - 1 {
+                    continue;
+                }
+                transitions.extend(
+                    class_members[class]
+                        .iter()
+                        .copied()
+                        .map(|byte| (byte, target)),
+                );
+            }
+            transitions.sort_unstable_by_key(|entry| entry.0);
+            dfa.set_transitions_from_sorted_entries(state as u32, transitions);
+        }
+        let dfa = Arc::new(dfa);
+        let trace = ZeroMinRepeatSuffixComponentTrace {
+            dfa: Arc::clone(&dfa),
+            prefix_len: self.prefix.len(),
+            body_dfa: self.body_dfa,
+            suffix_dfa: self.suffix_dfa,
+            max: self.max,
+            tail_states: self.tail_states,
+            tail_state_by_key: self.tail_state_by_key,
+        };
+        ProductComponent::MaterializedZeroMinRepeatSuffix {
+            dfa,
+            trace: Arc::new(trace),
+        }
+    }
+}
+
 fn compute_dfa_byte_equivalence_classes(dfas: &[&DFA]) -> (Vec<u8>, Vec<Vec<u8>>) {
     let mut partitions = vec![U8Set::all()];
     let mut seen_sets = FxHashSet::default();
@@ -1974,6 +2238,40 @@ fn compute_dfa_byte_equivalence_classes(dfas: &[&DFA]) -> (Vec<u8>, Vec<Vec<u8>>
                 }
             }
         }
+    }
+
+    let mut class_map = vec![0u8; 256];
+    let mut class_members = vec![Vec::new(); partitions.len()];
+    for (class_id, partition) in partitions.iter().enumerate() {
+        for byte in partition.iter() {
+            class_map[byte as usize] = class_id as u8;
+            class_members[class_id].push(byte);
+        }
+    }
+    (class_map, class_members)
+}
+
+fn compute_lazy_zero_min_repeat_product_equivalence_classes(
+    lazy: &LazyZeroMinRepeatSuffixComponent,
+    other: &DFA,
+) -> (Vec<u8>, Vec<Vec<u8>>) {
+    let (_, class_members) = compute_dfa_byte_equivalence_classes(&[
+        &lazy.body_dfa,
+        &lazy.suffix_dfa,
+        other,
+    ]);
+    let mut partitions = class_members
+        .into_iter()
+        .map(|bytes| {
+            let mut set = U8Set::empty();
+            for byte in bytes {
+                set.insert(byte);
+            }
+            set
+        })
+        .collect::<Vec<_>>();
+    for &byte in &lazy.prefix {
+        partitions = refine_u8_partitions(partitions, U8Set::single(byte));
     }
 
     let mut class_map = vec![0u8; 256];
@@ -5979,7 +6277,7 @@ fn zero_min_repeat_suffix_candidate(
         .suffix_states
         .iter()
         .map(|&state| suffix_state_map[state as usize])
-        .collect::<Vec<_>>();
+        .collect::<Vec<u32>>();
     close_zero_min_repeat_suffix_state(
         &mut body_min_counts,
         &mut suffix_states,
@@ -8775,6 +9073,203 @@ fn try_build_dense_binary_intersection_product(
     Some((deferred.finish(), true, trace))
 }
 
+fn try_compile_lazy_zero_min_repeat_intersection(
+    plan: &ExclusionCompilePlan,
+    profile_timing: bool,
+) -> Option<(DFA, ProductBuildTrace)> {
+    if plan.visible_groups != 1
+        || plan.compiled_exprs.len() != 2
+        || !pure_binary_intersection(&plan.exclusions, &plan.intersections)
+    {
+        return None;
+    }
+
+    let started_at = profile_timing.then(Instant::now);
+    let (lazy_index, mut lazy) = plan
+        .compiled_exprs
+        .iter()
+        .enumerate()
+        .find_map(|(index, expr)| {
+            LazyZeroMinRepeatSuffixComponent::from_expr(expr).map(|lazy| (index, lazy))
+        })?;
+    let other_index = 1 - lazy_index;
+    let other_component =
+        compile_product_component_with_options(&plan.compiled_exprs[other_index], true);
+    let other_dfa = other_component.materialized_dfa()?;
+    let other_dead = other_component.dead_state();
+
+    let (class_map, class_members) =
+        compute_lazy_zero_min_repeat_product_equivalence_classes(&lazy, other_dfa);
+    lazy.prepare_classes(class_members.len());
+    let other_transitions = build_product_class_transitions_for_dfa(other_dfa, &class_map);
+
+    let mut dfa = DFA::new(1);
+    dfa.ensure_group_capacity(1);
+    dfa.set_group_u8set(0, expr_u8set(&plan.compiled_exprs[0]));
+    let start_accepting = lazy.is_accepting(0) && other_dfa.finalizers(0).contains(0);
+    if start_accepting {
+        let mut finalizers = BitSet::new(1);
+        finalizers.set(0);
+        dfa.overwrite_state_metadata(0, finalizers, BitSet::new(1));
+    }
+
+    let mut pairs = vec![(0u32, 0u32)];
+    let other_state_count = other_dfa.num_states();
+    let mut state_by_lazy_other = vec![u32::MAX; lazy.num_states() * other_state_count];
+    state_by_lazy_other[0] = 0;
+    let mut pending_class_transitions = vec![Vec::<(u8, u32)>::new()];
+    let discovery_started_at = profile_timing.then(Instant::now);
+    let mut cursor = 0usize;
+    while cursor < pairs.len() {
+        let pair = pairs[cursor];
+        let (lazy_state, other_state) = if lazy_index == 0 {
+            (pair.0, pair.1)
+        } else {
+            (pair.1, pair.0)
+        };
+        let mut row = Vec::with_capacity(other_transitions[other_state as usize].len());
+        for &(class, other_target) in &other_transitions[other_state as usize] {
+            if other_dead == Some(other_target) {
+                continue;
+            }
+            let representative = *class_members[class as usize].first()?;
+            let Some(lazy_target) = lazy.step_class(lazy_state, class, representative) else {
+                continue;
+            };
+            let target_pair = if lazy_index == 0 {
+                (lazy_target, other_target)
+            } else {
+                (other_target, lazy_target)
+            };
+            let required_cells = lazy.num_states().checked_mul(other_state_count)?;
+            if state_by_lazy_other.len() < required_cells {
+                state_by_lazy_other.resize(required_cells, u32::MAX);
+            }
+            let lookup_index = (lazy_target as usize)
+                .checked_mul(other_state_count)?
+                .checked_add(other_target as usize)?;
+            let existing = state_by_lazy_other[lookup_index];
+            let target = if existing != u32::MAX {
+                existing
+            } else {
+                let target = u32::try_from(pairs.len()).ok()?;
+                state_by_lazy_other[lookup_index] = target;
+                pairs.push(target_pair);
+                pending_class_transitions.push(Vec::new());
+                let added = dfa.add_state();
+                debug_assert_eq!(added, target);
+                let accepting = lazy.is_accepting(lazy_target)
+                    && other_dfa.finalizers(other_target).contains(0);
+                if accepting {
+                    let mut finalizers = BitSet::new(1);
+                    finalizers.set(0);
+                    dfa.overwrite_state_metadata(target, finalizers, BitSet::new(1));
+                }
+                target
+            };
+            row.push((class, target));
+        }
+        pending_class_transitions[cursor] = row;
+        cursor += 1;
+    }
+    let discovery_ms = discovery_started_at
+        .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+
+    let future_started_at = profile_timing.then(Instant::now);
+    set_single_group_futures_from_class_graph(&mut dfa, &pending_class_transitions);
+    let future_ms = future_started_at
+        .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+    let expansion_started_at = profile_timing.then(Instant::now);
+    let expanded_transitions = pending_class_transitions
+        .into_par_iter()
+        .map(|class_transitions| {
+            let byte_capacity = class_transitions
+                .iter()
+                .map(|(class, _)| class_members[*class as usize].len())
+                .sum();
+            let mut transitions = Vec::with_capacity(byte_capacity);
+            for (class, target) in class_transitions {
+                for &byte in &class_members[class as usize] {
+                    transitions.push((byte, target));
+                }
+            }
+            if transitions.len() > 1 {
+                transitions.sort_unstable_by_key(|entry| entry.0);
+            }
+            crate::ds::char_transitions::CharTransitions::from_sorted_entries(transitions)
+        })
+        .collect::<Vec<_>>();
+    for (state, transitions) in dfa.states_mut().iter_mut().zip(expanded_transitions) {
+        state.transitions = transitions;
+    }
+    let expansion_ms = expansion_started_at
+        .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+
+    let component_started_at = profile_timing.then(Instant::now);
+    let body_states = lazy.body_dfa.num_states();
+    let suffix_states = lazy.suffix_dfa.num_states();
+    let repeat_max = lazy.max;
+    let lazy_component = lazy.into_product_component(&class_members);
+    let lazy_states = lazy_component
+        .materialized_dfa()
+        .map(DFA::num_states)?;
+    let other_states = other_dfa.num_states();
+    let (components, left_states, right_states) = if lazy_index == 0 {
+        (vec![lazy_component, other_component], lazy_states, other_states)
+    } else {
+        (vec![other_component, lazy_component], other_states, lazy_states)
+    };
+    let component_ms = component_started_at
+        .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+    let lookup_started_at = profile_timing.then(Instant::now);
+    let pair_cells = left_states.checked_mul(right_states)?;
+    let mut dense_lookup = vec![u32::MAX; pair_cells];
+    for (state, &(left, right)) in pairs.iter().enumerate() {
+        let index = (left as usize)
+            .checked_mul(right_states)?
+            .checked_add(right as usize)?;
+        dense_lookup[index] = state as u32;
+    }
+    let trace = ProductBuildTrace {
+        components,
+        state_tuples: ProductStateTuples::DenseBinary(pairs),
+        state_lookup: ProductStateLookup::DenseBinary {
+            right_states,
+            state_by_pair: dense_lookup,
+            overflow: FxHashMap::default(),
+        },
+        direct_single_visible_group: true,
+    };
+    let lookup_ms = lookup_started_at
+        .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+
+    if let Some(started_at) = started_at {
+        eprintln!(
+            "[glrmask/profile][tokenizer] lazy_zero_min_repeat_intersection lazy_component={} lazy_states={} other_states={} product_states={} classes={} body_states={} suffix_states={} repeat_max={} discovery_ms={:.3} future_ms={:.3} expansion_ms={:.3} component_ms={:.3} lookup_ms={:.3} total_ms={:.3}",
+            lazy_index,
+            lazy_states,
+            other_states,
+            dfa.num_states(),
+            class_members.len(),
+            body_states,
+            suffix_states,
+            repeat_max,
+            discovery_ms,
+            future_ms,
+            expansion_ms,
+            component_ms,
+            lookup_ms,
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    Some((dfa, trace))
+}
+
 fn try_compile_with_plan_deferred_dense(
     plan: ExclusionCompilePlan,
 ) -> Result<(DeferredDfa, Option<ProductBuildTrace>), ExclusionCompilePlan> {
@@ -8789,6 +9284,14 @@ fn try_compile_with_plan_deferred_dense(
         || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some();
     let profile_timing = profile_detail
         || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
+    let lazy_zero_min_repeat_product =
+        std::env::var_os("GLRMASK_DISABLE_LAZY_ZERO_MIN_REPEAT_PRODUCT").is_none();
+    if lazy_zero_min_repeat_product
+        && let Some((dfa, trace)) =
+            try_compile_lazy_zero_min_repeat_intersection(&plan, profile_timing)
+    {
+        return Ok((DeferredDfa::Ready(dfa), Some(trace)));
+    }
     let (components, component_cache_hits, _) =
         compile_product_components_profiled(&plan.compiled_exprs, profile_detail, true);
     if profile_timing {
@@ -9287,6 +9790,51 @@ mod tests {
                     "left={left_expr:?} right={right_expr:?} input={input:?}",
                 );
             }
+        }
+    }
+
+    #[test]
+    fn lazy_zero_min_repeat_intersection_matches_materialized_product() {
+        let repeat_component = Expr::Seq(vec![
+            Expr::U8Seq(b"[".to_vec()),
+            Expr::Repeat {
+                expr: Box::new(Expr::Choice(vec![
+                    Expr::U8Seq(b"a".to_vec()),
+                    Expr::U8Seq(b"ab".to_vec()),
+                ])),
+                min: 0,
+                max: Some(1_024),
+            },
+            Expr::U8Seq(b"]".to_vec()),
+        ]);
+        let filter_component = Expr::Seq(vec![
+            Expr::U8Seq(b"[".to_vec()),
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"ab"))),
+                min: 0,
+                max: Some(7),
+            },
+            Expr::U8Seq(b"]".to_vec()),
+        ]);
+        let expression = Expr::Intersect {
+            expr: Box::new(repeat_component),
+            intersect: Box::new(filter_component),
+        };
+
+        let eager = super::compile_with_plan(super::build_exclusion_compile_plan(
+            std::slice::from_ref(&expression),
+        ));
+        let plan = super::build_exclusion_compile_plan(std::slice::from_ref(&expression));
+        let (lazy, trace) = super::try_compile_lazy_zero_min_repeat_intersection(&plan, false)
+            .expect("eligible repeat intersection must compile lazily");
+        assert_eq!(trace.state_tuples.len(), lazy.num_states());
+
+        for input in enumerate_inputs(b"[]abx", 9) {
+            assert_eq!(
+                dfa_state_observation(&lazy, 0, &input),
+                dfa_state_observation(&eager, 0, &input),
+                "lazy product differed for input {input:?}",
+            );
         }
     }
 
@@ -11036,7 +11584,10 @@ mod tests {
                 Expr::U8Seq(b"\"".to_vec()),
                 Expr::Repeat {
                     expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"ab"))),
-                    min: 0,
+                    // Keep this regression on the ordinary deferred-product
+                    // implementation; zero-minimum repeat intersections have
+                    // their own exact lazy-product regression above.
+                    min: 1,
                     max: Some(max),
                 },
                 Expr::U8Seq(b"\"".to_vec()),
