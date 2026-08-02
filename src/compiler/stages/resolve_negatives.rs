@@ -15,7 +15,7 @@ use crate::ds::weight::{ScopedWeightOpCache, Weight};
 type QueryKey = (u32, i32);
 type CancellationTask = (u32, u32, i32);
 type QueryWeights = Vec<SmallQueryWeights>;
-type DerivedEpsilons = Vec<Option<FxHashMap<u32, Weight>>>;
+type DerivedEpsilons = Vec<SmallTargetWeights>;
 type SubsetMemo = FxHashMap<(usize, usize), bool>;
 
 /// Wave scheduling pays two parallel-iterator setup costs per DAG layer.  This
@@ -37,6 +37,97 @@ enum SmallQueryWeights {
     Empty,
     One(QueryKey, Weight),
     Many(FxHashMap<QueryKey, Weight>),
+}
+
+#[derive(Clone, Default)]
+enum SmallTargetWeights {
+    #[default]
+    Empty,
+    One(u32, Weight),
+    Many(FxHashMap<u32, Weight>),
+}
+
+enum SmallTargetWeightsIntoIter {
+    Empty,
+    One(Option<(u32, Weight)>),
+    Many(std::collections::hash_map::IntoIter<u32, Weight>),
+}
+
+impl Iterator for SmallTargetWeightsIntoIter {
+    type Item = (u32, Weight);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Empty => None,
+            Self::One(entry) => entry.take(),
+            Self::Many(entries) => entries.next(),
+        }
+    }
+}
+
+impl SmallTargetWeights {
+    fn merge(&mut self, target: u32, add: Weight) -> bool {
+        match self {
+            Self::Empty => {
+                if add.is_empty() {
+                    return false;
+                }
+                *self = Self::One(target, add);
+                true
+            }
+            Self::One(existing_target, existing_weight) if *existing_target == target => {
+                merge_weight(existing_weight, add)
+            }
+            Self::One(existing_target, existing_weight) => {
+                if add.is_empty() {
+                    return false;
+                }
+                let previous_target = *existing_target;
+                let previous_weight = existing_weight.clone();
+                let mut entries = FxHashMap::with_capacity_and_hasher(4, Default::default());
+                entries.insert(previous_target, previous_weight);
+                entries.insert(target, add);
+                *self = Self::Many(entries);
+                true
+            }
+            Self::Many(entries) => {
+                let entry = entries.entry(target).or_insert_with(Weight::empty);
+                merge_weight(entry, add)
+            }
+        }
+    }
+
+    fn get(&self, target: u32) -> Option<&Weight> {
+        match self {
+            Self::Empty => None,
+            Self::One(existing_target, weight) => {
+                (*existing_target == target).then_some(weight)
+            }
+            Self::Many(entries) => entries.get(&target),
+        }
+    }
+
+    fn for_each(&self, mut f: impl FnMut(u32, &Weight)) {
+        match self {
+            Self::Empty => {}
+            Self::One(target, weight) => f(*target, weight),
+            Self::Many(entries) => {
+                for (&target, weight) in entries {
+                    f(target, weight);
+                }
+            }
+        }
+    }
+
+    fn into_entries(self) -> SmallTargetWeightsIntoIter {
+        match self {
+            Self::Empty => SmallTargetWeightsIntoIter::Empty,
+            Self::One(target, weight) => {
+                SmallTargetWeightsIntoIter::One(Some((target, weight)))
+            }
+            Self::Many(entries) => SmallTargetWeightsIntoIter::Many(entries.into_iter()),
+        }
+    }
 }
 
 impl SmallQueryWeights {
@@ -343,8 +434,8 @@ fn propagate_query_through_derived_epsilons(
     derived_epsilons: &DerivedEpsilons,
     foreign_derived: Option<&DerivedEpsilons>,
 ) {
-    let local = derived_epsilons[current_state as usize].as_ref();
-    let foreign = foreign_derived.and_then(|fd| fd[current_state as usize].as_ref());
+    let local = &derived_epsilons[current_state as usize];
+    let foreign = foreign_derived.map(|derived| &derived[current_state as usize]);
 
     let propagate = |target_state: u32,
                      epsilon_weight: &Weight,
@@ -368,17 +459,15 @@ fn propagate_query_through_derived_epsilons(
         );
     };
 
-    if let Some(local_map) = local {
-        for (&target_state, epsilon_weight) in local_map {
-            propagate(target_state, epsilon_weight, query_weights, worklist);
-        }
-    }
-    if let Some(foreign_map) = foreign {
-        for (&target_state, epsilon_weight) in foreign_map {
+    local.for_each(|target_state, epsilon_weight| {
+        propagate(target_state, epsilon_weight, query_weights, worklist);
+    });
+    if let Some(foreign) = foreign {
+        foreign.for_each(|target_state, epsilon_weight| {
             // Skip if local already has a stronger entry for this target
             // (merging handled below in queue_query_weight's dedup anyway).
             propagate(target_state, epsilon_weight, query_weights, worklist);
-        }
+        });
     }
 }
 
@@ -402,20 +491,11 @@ fn extend_derived_epsilons(
         return;
     }
 
-    {
-        let derived_weight = derived_epsilons[source_state as usize]
-            .get_or_insert_with(FxHashMap::default)
-            .entry(target_state)
-            .or_insert_with(Weight::empty);
-        if !merge_weight(derived_weight, new_derived_weight) {
-            return;
-        }
+    if !derived_epsilons[source_state as usize].merge(target_state, new_derived_weight) {
+        return;
     }
 
-    let Some(derived_weight) = derived_epsilons[source_state as usize]
-        .as_ref()
-        .and_then(|targets| targets.get(&target_state))
-    else {
+    let Some(derived_weight) = derived_epsilons[source_state as usize].get(target_state) else {
         return;
     };
 
@@ -463,20 +543,11 @@ fn extend_derived_epsilon_precomputed(
         return;
     }
 
-    {
-        let derived_weight = derived_epsilons[source_state as usize]
-            .get_or_insert_with(FxHashMap::default)
-            .entry(target_state)
-            .or_insert_with(Weight::empty);
-        if !merge_weight(derived_weight, new_derived_weight.clone()) {
-            return;
-        }
+    if !derived_epsilons[source_state as usize].merge(target_state, new_derived_weight.clone()) {
+        return;
     }
 
-    let Some(derived_weight) = derived_epsilons[source_state as usize]
-        .as_ref()
-        .and_then(|targets| targets.get(&target_state))
-    else {
+    let Some(derived_weight) = derived_epsilons[source_state as usize].get(target_state) else {
         return;
     };
     let existing_queries = &query_weights[source_state as usize];
@@ -585,7 +656,8 @@ fn compute_cancellations_range_grouped_inner(
 
     let mut query_weights: QueryWeights = vec![SmallQueryWeights::Empty; state_count as usize];
     let mut worklist = VecDeque::<CancellationTask>::new();
-    let mut derived_epsilons: DerivedEpsilons = vec![None; state_count as usize];
+    let mut derived_epsilons: DerivedEpsilons =
+        vec![SmallTargetWeights::Empty; state_count as usize];
     let mut subset_memo = SubsetMemo::default();
 
     for source_state in range {
@@ -636,10 +708,10 @@ fn compute_cancellations_range_grouped_inner(
             let current_state = group.current_state;
             let positive_label = group.positive_label;
 
-            let propagate_map = |targets: &FxHashMap<u32, Weight>,
+            let propagate_map = |targets: &SmallTargetWeights,
                                  query_weights: &mut QueryWeights,
                                  worklist: &mut VecDeque<CancellationTask>| {
-                for (&target_state, epsilon_weight) in targets {
+                targets.for_each(|target_state, epsilon_weight| {
                     let propagated = intersect_with_single_weight_hint(
                         &group.weight,
                         query_single.as_ref(),
@@ -653,13 +725,12 @@ fn compute_cancellations_range_grouped_inner(
                         positive_label,
                         &propagated,
                     );
-                }
+                });
             };
-            if let Some(local) = derived_epsilons[current_state as usize].as_ref() {
-                propagate_map(local, &mut query_weights, &mut worklist);
-            }
-            if let Some(foreign) = foreign_derived
-                .and_then(|derived| derived[current_state as usize].as_ref())
+            let local = &derived_epsilons[current_state as usize];
+            propagate_map(local, &mut query_weights, &mut worklist);
+            if let Some(foreign) =
+                foreign_derived.map(|derived| &derived[current_state as usize])
             {
                 propagate_map(foreign, &mut query_weights, &mut worklist);
             }
@@ -744,10 +815,7 @@ fn collect_non_empty_derived_epsilons(
     let mut result = Vec::new();
 
     for (from_state, targets) in derived_epsilons.into_iter().enumerate() {
-        let Some(targets) = targets else {
-            continue;
-        };
-        for (to_state, weight) in targets {
+        for (to_state, weight) in targets.into_entries() {
             if !weight.is_empty() {
                 result.push((from_state as u32, to_state, weight));
             }
@@ -797,7 +865,8 @@ fn compute_cancellations_range_serial_inner(
 
     let mut query_weights: QueryWeights = vec![SmallQueryWeights::Empty; state_count as usize];
     let mut worklist = VecDeque::<CancellationTask>::new();
-    let mut derived_epsilons: DerivedEpsilons = vec![None; state_count as usize];
+    let mut derived_epsilons: DerivedEpsilons =
+        vec![SmallTargetWeights::Empty; state_count as usize];
     let mut subset_memo = SubsetMemo::default();
 
     for source_state in range {
@@ -1702,6 +1771,32 @@ mod terminal_default_tests {
     ) -> Vec<(u32, u32, Weight)> {
         cancellations.sort_by_key(|(from, to, _)| (*from, *to));
         cancellations
+    }
+
+    #[test]
+    fn small_target_weights_promotes_merges_and_iterates_exactly() {
+        let mut targets = SmallTargetWeights::Empty;
+        let first = weight(0..=7);
+        let first_add = weight(4..=11);
+        let second = weight(16..=23);
+
+        assert!(targets.merge(3, first.clone()));
+        assert_eq!(targets.get(3), Some(&first));
+        assert!(!targets.merge(3, weight(0..=3)));
+        assert!(targets.merge(3, first_add));
+        assert_eq!(
+            targets.get(3).unwrap().tokens_for_tsid(0),
+            Weight::from_token_set_for_tsid(0, RangeSetBlaze::from_iter([0..=11]))
+                .tokens_for_tsid(0)
+        );
+
+        assert!(targets.merge(9, second.clone()));
+        assert_eq!(targets.get(9), Some(&second));
+        let mut entries = targets.into_entries().collect::<Vec<_>>();
+        entries.sort_by_key(|(target, _)| *target);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].0, 3);
+        assert_eq!(entries[1], (9, second));
     }
 
     fn generated_cancellation_nwa(seed: u32) -> NWA {
