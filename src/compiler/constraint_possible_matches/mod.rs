@@ -2976,6 +2976,16 @@ fn compute_constraint_possible_matches_with_artifacts(
         trie_build_states.dedup();
     }
 
+    let query_state_count = demand
+        .raw_query_state
+        .iter()
+        .filter(|&&active| active)
+        .count();
+    let relevant_state_count = demand
+        .raw_state_relevant
+        .iter()
+        .filter(|&&active| active)
+        .count();
     if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
         || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
     {
@@ -2983,17 +2993,22 @@ fn compute_constraint_possible_matches_with_artifacts(
             "[glrmask/profile][pm_delayed_terminal_demand] terminals={} accepting_future_states={} query_states={} relevant_states={} total_terminals={} total_states={}",
             demand.terminals.count_ones(),
             demand.accepting_future_states,
-            demand.raw_query_state.iter().filter(|&&active| active).count(),
-            demand.raw_state_relevant.iter().filter(|&&active| active).count(),
+            query_state_count,
+            relevant_state_count,
             tokenizer.num_terminals(),
             tokenizer.num_states(),
         );
     }
 
     let root_terminal_union = demand.terminals.count_ones();
+    // The exact NFA powerset collector only retains delayed-terminal-relevant
+    // states. Admission must therefore scale with that live domain, not with
+    // unrelated tokenizer states. Large synthesized tokenizers can have fewer
+    // than 500 relevant states; rejecting the powerset on total state count
+    // falls back to a multi-second sparse trie walk for no semantic benefit.
     let use_nfa_powerset_collect = tokenizer.has_epsilon_transitions()
         && !scalar_dispatch
-        && nfa_powerset_collect_enabled(tokenizer.num_states() as usize, root_terminal_union);
+        && nfa_powerset_collect_enabled(relevant_state_count, root_terminal_union);
     let use_sparse_root_collect = (tokenizer.has_epsilon_transitions() && !scalar_dispatch)
         || (sparse_root_collect_enabled()
             && trie_build_states.len() <= sparse_root_state_limit()

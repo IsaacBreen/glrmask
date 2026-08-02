@@ -762,7 +762,17 @@ pub(crate) fn compute_cancellations_range(
     let use_grouped = match solver_override.as_deref().map(str::trim) {
         Some(value) if value.eq_ignore_ascii_case("grouped") => true,
         Some(value) if value.eq_ignore_ascii_case("serial") => false,
-        _ => allow_grouped && nwa.states().len() >= GROUPED_CANCELLATION_MIN_STATES,
+        _ => {
+            let explicitly_enabled = std::env::var("GLRMASK_ENABLE_GROUPED_CANCELLATION")
+                .map(|value| {
+                    let value = value.trim();
+                    !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+                })
+                .unwrap_or(false);
+            allow_grouped
+                && explicitly_enabled
+                && nwa.states().len() >= GROUPED_CANCELLATION_MIN_STATES
+        }
     };
     if use_grouped {
         compute_cancellations_range_grouped_inner(nwa, range, None)
@@ -1410,8 +1420,14 @@ pub(crate) fn apply_finality_fixpoint(nwa: &mut NWA) {
 }
 
 pub(crate) fn remove_negative_transitions(nwa: &mut NWA) {
-    for state in  nwa.states_mut() {
-        state.transitions.retain(|label, _| !is_negative_label(*label));
+    if rayon::current_num_threads() > 1 && nwa.states().len() >= 4_096 {
+        nwa.states_mut()
+            .par_iter_mut()
+            .for_each(|state| state.transitions.retain(|label, _| !is_negative_label(*label)));
+    } else {
+        for state in nwa.states_mut() {
+            state.transitions.retain(|label, _| !is_negative_label(*label));
+        }
     }
 }
 
@@ -1541,7 +1557,7 @@ fn grow_terminal_state_set(nwa: &NWA, terminal_states: &mut [bool]) {
 }
 
 fn prune_terminal_default_targets(nwa: &mut NWA, terminal_states: &[bool]) {
-    for state in  nwa.states_mut() {
+    let prune = |state: &mut NWAState| {
         let final_weight = state.final_weight.clone();
         if let Some(targets) = state.transitions.get_mut(&DEFAULT_LABEL) {
             targets.retain(|(target, edge_weight)| {
@@ -1555,15 +1571,27 @@ fn prune_terminal_default_targets(nwa: &mut NWA, terminal_states: &[bool]) {
             });
         }
         state.transitions.retain(|_, targets| !targets.is_empty());
+    };
+    if rayon::current_num_threads() > 1 && nwa.states().len() >= 4_096 {
+        nwa.states_mut().par_iter_mut().for_each(prune);
+    } else {
+        for state in nwa.states_mut() {
+            prune(state);
+        }
     }
 }
 
 pub(crate) fn remove_redundant_default_transitions(nwa: &mut NWA) {
-    let mut terminal_states: Vec<bool> = nwa
-        .states()
-        .iter()
-        .map(|state| is_terminal_shape_candidate(state) && !state.transitions.contains_key(&DEFAULT_LABEL))
-        .collect();
+    let classify = |state: &NWAState| {
+        is_terminal_shape_candidate(state) && !state.transitions.contains_key(&DEFAULT_LABEL)
+    };
+    let mut terminal_states: Vec<bool> = if rayon::current_num_threads() > 1
+        && nwa.states().len() >= 4_096
+    {
+        nwa.states().par_iter().map(classify).collect()
+    } else {
+        nwa.states().iter().map(classify).collect()
+    };
 
     grow_terminal_state_set(nwa, &mut terminal_states);
     prune_terminal_default_targets(nwa, &terminal_states);

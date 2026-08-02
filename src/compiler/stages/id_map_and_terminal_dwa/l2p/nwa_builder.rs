@@ -371,6 +371,7 @@ pub(crate) struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     self_loop_subtree_skip_enabled: bool,
     profile_timing: bool,
     has_epsilon_transitions: bool,
+    scalar_deterministic_dispatch: bool,
     dfa_scan_strict_reference: bool,
 }
 
@@ -397,6 +398,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         shared_flat_transitions: Option<&'tok [u32]>,
     ) -> Self {
         let has_epsilon_transitions = tokenizer.has_epsilon_transitions();
+        let scalar_deterministic_dispatch = tokenizer.has_scalar_deterministic_dispatch();
         let nfa_scan_cache = has_epsilon_transitions
             .then(|| NfaTrieScanCache::new(tokenizer, active_terminals.clone()));
         Self {
@@ -434,6 +436,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             .is_some(),
             profile_timing: std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some(),
             has_epsilon_transitions,
+            scalar_deterministic_dispatch,
             dfa_scan_strict_reference: std::env::var_os(
                 "GLRMASK_L2P_NWA_DFA_SCAN_STRICT_REFERENCE",
             )
@@ -761,7 +764,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         tokenizer_state: TokenizerState,
     ) -> bool {
         if self.has_epsilon_transitions
-            && !self.tokenizer.has_scalar_deterministic_dispatch()
+            && !self.scalar_deterministic_dispatch
         {
             return false;
         }
@@ -985,7 +988,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     ) {
         assert!(
             !self.has_epsilon_transitions
-                || self.tokenizer.has_scalar_deterministic_dispatch(),
+                || self.scalar_deterministic_dispatch,
             "L1 flat-state construction requires scalar deterministic scan roots",
         );
         // Pre-populate flat transition tables for ALL tokenizer states.
@@ -1264,7 +1267,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                     if next_offset == segment_bytes.len()
                         && child_node.has_token()
                         && ((self.has_epsilon_transitions
-                            && !self.tokenizer.has_scalar_deterministic_dispatch())
+                            && !self.scalar_deterministic_dispatch)
                             || !end_states.iter().copied().any(|s| {
                                 self.possible_future_terminals_for_state(s)
                                     .contains(&matched.id)
