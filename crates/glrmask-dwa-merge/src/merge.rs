@@ -14,12 +14,13 @@ use smallvec::SmallVec;
 
 use crate::automata::weighted::determinize::determinize;
 use crate::automata::weighted::equivalence::find_difference;
-use crate::automata::weighted::dwa::DWA;
+use crate::automata::weighted::dwa::{DWA, DWAState};
 use crate::automata::weighted::minimize::minimize_owned;
 use crate::automata::weighted::minimize_token_deterministic_nwa::{
     minimize_token_deterministic_nwa_owned, quotient_disjoint_source_nwa_owned,
 };
 use crate::automata::weighted::nwa::NWA;
+use crate::compiler::glr::labels::DEFAULT_LABEL;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::compiler::stages::mapped_artifact::MappedArtifact;
 use crate::ds::weight::Weight;
@@ -799,6 +800,343 @@ fn immediate_dwa_accepting_edges(dwa: &DWA) -> Option<Vec<(i32, Weight)>> {
         accepting.push((label, weight));
     }
     Some(accepting)
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct ExactWeightedStateSignature {
+    final_weight: Option<usize>,
+    transitions: Vec<(i32, usize, usize)>,
+}
+
+/// Merge only states with byte-for-byte identical weighted behavior modulo
+/// already-merged children. This is linear-ish hash-consing for an acyclic DWA,
+/// not the compatibility search performed by the full weighted minimizer.
+fn exact_quotient_acyclic_dwa(dwa: DWA) -> DWA {
+    if dwa.states().is_empty() || !dwa.is_acyclic() {
+        return dwa;
+    }
+
+    fn visit(state: usize, dwa: &DWA, seen: &mut [bool], order: &mut Vec<usize>) {
+        if seen[state] {
+            return;
+        }
+        seen[state] = true;
+        for (target, weight) in dwa.states()[state].transitions.values() {
+            let target = *target as usize;
+            if !weight.is_empty() && target < dwa.states().len() {
+                visit(target, dwa, seen, order);
+            }
+        }
+        order.push(state);
+    }
+
+    let mut seen = vec![false; dwa.states().len()];
+    let mut order = Vec::with_capacity(dwa.states().len());
+    visit(dwa.start_state() as usize, &dwa, &mut seen, &mut order);
+
+    let mut class_of = vec![usize::MAX; dwa.states().len()];
+    let mut signature_to_class = FxHashMap::<ExactWeightedStateSignature, usize>::default();
+    let mut representatives = Vec::<usize>::new();
+    for &state_id in &order {
+        let state = &dwa.states()[state_id];
+        let signature = ExactWeightedStateSignature {
+            final_weight: state.final_weight.as_ref().map(Weight::ptr_key),
+            transitions: state
+                .transitions
+                .iter()
+                .filter_map(|(&label, (target, weight))| {
+                    (!weight.is_empty()).then_some((
+                        label,
+                        class_of[*target as usize],
+                        weight.ptr_key(),
+                    ))
+                })
+                .collect(),
+        };
+        let class = if let Some(&class) = signature_to_class.get(&signature) {
+            class
+        } else {
+            let class = representatives.len();
+            signature_to_class.insert(signature, class);
+            representatives.push(state_id);
+            class
+        };
+        class_of[state_id] = class;
+    }
+
+    let mut states = vec![DWAState::default(); representatives.len()];
+    for (class, &representative) in representatives.iter().enumerate() {
+        let source = &dwa.states()[representative];
+        states[class].final_weight = source.final_weight.clone();
+        states[class].transitions = source
+            .transitions
+            .iter()
+            .filter_map(|(&label, (target, weight))| {
+                (!weight.is_empty()).then_some((
+                    label,
+                    (class_of[*target as usize] as u32, weight.clone()),
+                ))
+            })
+            .collect();
+    }
+    DWA::from_parts(states, class_of[dwa.start_state() as usize] as u32)
+}
+
+/// Fold a depth-one parser language into another deterministic parser DWA.
+///
+/// For a label accepted by both inputs, the merged start edge reaches a
+/// decorated copy of the other destination. The copy admits the immediate
+/// branch in its final weight, while every continuation edge is intersected
+/// with the other branch's incoming weight. This preserves the token-path
+/// correlation exactly, even when the two source weight domains overlap.
+fn try_graft_immediate_parser_dwa(immediate: &DWA, mut other: DWA) -> Option<DWA> {
+    let accepting = immediate_dwa_accepting_edges(immediate)?;
+    let start_id = other.start_state();
+    let original_start = other.states().get(start_id as usize)?.clone();
+    let mut decorated_by_key = FxHashMap::<(u32, usize, usize), u32>::default();
+    let mut missing = Vec::<(i32, Weight)>::new();
+    for (label, add_weight) in accepting {
+        let existing = original_start
+            .transitions
+            .get(&label)
+            .or_else(|| original_start.transitions.get(&DEFAULT_LABEL))
+            .cloned();
+        if let Some((target, edge_weight)) = existing {
+            let key = (target, edge_weight.ptr_key(), add_weight.ptr_key());
+            let decorated = if let Some(&existing) = decorated_by_key.get(&key) {
+                existing
+            } else {
+                let source_state = if target == start_id {
+                    &original_start
+                } else {
+                    other.states().get(target as usize)?
+                };
+                let mut decorated_state = source_state.clone();
+                decorated_state.final_weight = Some(match decorated_state.final_weight.take() {
+                    Some(final_weight) => final_weight.union(&add_weight),
+                    None => add_weight.clone(),
+                });
+                decorated_state.transitions.retain(|_, (_, continuation_weight)| {
+                    *continuation_weight = continuation_weight.intersection(&edge_weight);
+                    !continuation_weight.is_empty()
+                });
+                let new_state = other.add_state();
+                other.states_mut()[new_state as usize] = decorated_state;
+                decorated_by_key.insert(key, new_state);
+                new_state
+            };
+            other.add_transition(
+                start_id,
+                label,
+                decorated,
+                edge_weight.union(&add_weight),
+            );
+        } else {
+            missing.push((label, add_weight));
+        }
+    }
+
+    if !missing.is_empty() {
+        let sink = other.add_state();
+        other.set_final_weight(sink, Weight::all());
+        for (label, weight) in missing {
+            other.add_transition(start_id, label, sink, weight);
+        }
+    }
+    Some(other)
+}
+
+/// Merge parser-family DWAs without paying for an unnecessary second global
+/// weighted minimization.
+///
+/// A depth-one family is grafted exactly into the other family, including the
+/// overlapping-weight case. Other shapes retain the ordinary generic merge as
+/// a fallback. Parser-family artifacts are immediately reconciled with possible
+/// matches and finalized, so globally minimizing them here can dominate compile
+/// time without being required for correctness.
+pub fn merge_mapped_parser_dwas(
+    inputs: Vec<MappedArtifact<DWA>>,
+    num_tokenizer_states: usize,
+    max_token_id: u32,
+) -> MappedArtifact<DWA> {
+    assert!(
+        !inputs.is_empty(),
+        "merge_mapped_parser_dwas called with empty inputs"
+    );
+    if inputs.len() == 1 {
+        return inputs.into_iter().next().unwrap();
+    }
+
+    if inputs.len() == 2 {
+        let total_started_at = Instant::now();
+        let mut iter = inputs.into_iter();
+        let left = iter.next().unwrap();
+        let right = iter.next().unwrap();
+        let left_is_immediate = immediate_dwa_accepting_edges(left.artifact()).is_some();
+        let right_is_immediate = immediate_dwa_accepting_edges(right.artifact()).is_some();
+
+        // Reconcile with the deeper family first so refinements of each L2P
+        // class remain contiguous. Then form the exact deterministic union.
+        // Do not run the generic weighted minimizer here: parser DWAs interpret
+        // DEFAULT_LABEL as fallback, while that minimizer treats labels as an
+        // ordinary alphabet and can change the parser language.
+        let reconcile_started_at = Instant::now();
+        let reconciled = if left_is_immediate && !right_is_immediate {
+            let paired = right.pair_forced_common(left);
+            let ((right, left), id_map) = paired.into_parts();
+            MappedArtifact::new(vec![left, right], id_map)
+        } else if right_is_immediate && !left_is_immediate {
+            let paired = left.pair_forced_common(right);
+            let ((left, right), id_map) = paired.into_parts();
+            MappedArtifact::new(vec![left, right], id_map)
+        } else {
+            MappedArtifact::reconcile_vec(vec![left, right])
+        };
+        let reconcile_ms = reconcile_started_at.elapsed().as_secs_f64() * 1000.0;
+        let (dwas, common_id_map) = reconciled.into_parts();
+
+        let union_started_at = Instant::now();
+        let mut union = NWA::new(
+            common_id_map.num_tsids(),
+            common_id_map.max_internal_token_id(),
+        );
+        let mut body = union.body();
+        for dwa in dwas {
+            body = union.union_in_place(&dwa.to_nwa(), &body);
+        }
+        union.set_start_states(body.start_states);
+        let dwa = determinize(&union).expect("parser-family NWA union must determinize");
+        let union_ms = union_started_at.elapsed().as_secs_f64() * 1000.0;
+        if compile_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][parser_dwa_merge] inputs=2 mode=exact_raw_union reconcile_ms={:.3} union_ms={:.3} states={} transitions={} total_ms={:.3}",
+                reconcile_ms,
+                union_ms,
+                dwa.num_states(),
+                dwa.num_transitions(),
+                total_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        return MappedArtifact::new(dwa, common_id_map);
+    }
+
+    let locals: Vec<LocalIdMapTerminalDwa> = inputs
+        .into_iter()
+        .map(|input| {
+            let (dwa, id_map) = input.into_parts();
+            LocalIdMapTerminalDwa {
+                id_map,
+                dwa,
+                profile: TerminalDwaPhaseProfile::default(),
+            }
+        })
+        .collect();
+    let input_refs: Vec<&LocalIdMapTerminalDwa> = locals.iter().collect();
+    let id_map_refs: Vec<&InternalIdMap> =
+        input_refs.iter().map(|input| &input.id_map).collect();
+    let total_started_at = Instant::now();
+    let (global_id_map, direct_local_to_global_token_maps) =
+        build_unified_global_id_map(&id_map_refs, num_tokenizer_states, max_token_id);
+
+    if let Some(dwa) = try_merge_disjoint_token_domain_dwas(
+        &locals,
+        &global_id_map,
+        direct_local_to_global_token_maps.as_ref(),
+        max_token_id,
+    ) {
+        if compile_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][parser_dwa_merge] inputs={} mode=direct_disjoint states={} transitions={} total_ms={:.3}",
+                locals.len(),
+                dwa.num_states(),
+                dwa.num_transitions(),
+                total_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        return MappedArtifact::new(dwa, global_id_map);
+    }
+
+    // Overlapping source domains need the generic weighted union and
+    // minimization used by the ordinary merge path.
+    let inputs = locals
+        .into_iter()
+        .map(|local| MappedArtifact::new(local.dwa, local.id_map))
+        .collect();
+    merge_mapped_dwas(inputs, num_tokenizer_states, max_token_id)
+}
+
+/// Keep an immediate parser family as a top-state acceptance overlay instead
+/// of materializing its union with the deeper parser DWA.
+///
+/// The returned DWA is the non-immediate family in the exact common ID space;
+/// `top_accept[label]` is unioned after consuming the first stack symbol. This
+/// is semantically the same union that `try_graft_immediate_parser_dwa` builds,
+/// but avoids destination decoration and the subsequent quotient.
+pub fn merge_mapped_parser_dwas_with_top_accept(
+    inputs: Vec<MappedArtifact<DWA>>,
+    num_tokenizer_states: usize,
+    max_token_id: u32,
+) -> (MappedArtifact<DWA>, BTreeMap<i32, Weight>) {
+    assert!(
+        !inputs.is_empty(),
+        "merge_mapped_parser_dwas_with_top_accept called with empty inputs"
+    );
+    if inputs.len() == 1 {
+        return (inputs.into_iter().next().unwrap(), BTreeMap::new());
+    }
+
+    if inputs.len() == 2 {
+        let total_started_at = Instant::now();
+        let mut iter = inputs.into_iter();
+        let left = iter.next().unwrap();
+        let right = iter.next().unwrap();
+        let left_is_immediate = immediate_dwa_accepting_edges(left.artifact()).is_some();
+        let right_is_immediate = immediate_dwa_accepting_edges(right.artifact()).is_some();
+
+        if left_is_immediate || right_is_immediate {
+            let (primary, immediate) = if left_is_immediate {
+                (right, left)
+            } else {
+                (left, right)
+            };
+            let (immediate_dwa, immediate_id_map) = immediate.into_parts();
+            let top_accept: BTreeMap<i32, Weight> =
+                immediate_dwa_accepting_edges(&immediate_dwa)
+                    .expect("immediate parser shape was checked above")
+                    .into_iter()
+                    .collect();
+            let reconciled = primary
+                .pair_forced_common(MappedArtifact::new(top_accept, immediate_id_map));
+            let ((primary_dwa, top_accept), common_id_map) = reconciled.into_parts();
+            if compile_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][parser_dwa_merge] inputs=2 mode=top_accept_overlay overlay_labels={} states={} transitions={} total_ms={:.3}",
+                    top_accept.len(),
+                    primary_dwa.num_states(),
+                    primary_dwa.num_transitions(),
+                    total_started_at.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
+            return (
+                MappedArtifact::new(primary_dwa, common_id_map),
+                top_accept,
+            );
+        }
+
+        return (
+            merge_mapped_parser_dwas(
+                vec![left, right],
+                num_tokenizer_states,
+                max_token_id,
+            ),
+            BTreeMap::new(),
+        );
+    }
+
+    (
+        merge_mapped_parser_dwas(inputs, num_tokenizer_states, max_token_id),
+        BTreeMap::new(),
+    )
 }
 
 /// Build the ordinary global NWA union and determinize it. This is used only
@@ -3057,5 +3395,58 @@ mod tests {
         }
     }
 
+    #[test]
+    fn immediate_parser_graft_preserves_overlapping_path_correlation() {
+        let mut immediate = DWA::new(1, 2);
+        let immediate_final = immediate.add_state();
+        immediate.add_transition(
+            immediate.start_state(),
+            7,
+            immediate_final,
+            token_range_weight(0, 1),
+        );
+        immediate.set_final_weight(immediate_final, Weight::all());
 
+        let mut other = DWA::new(1, 2);
+        let middle = other.add_state();
+        let end = other.add_state();
+        other.add_transition(
+            other.start_state(),
+            7,
+            middle,
+            token_range_weight(1, 2),
+        );
+        // Token 0 occurs on the continuation edge, but it did not take the
+        // other automaton's first edge. A naive merged edge/final update would
+        // incorrectly allow token 0 to continue through label 8.
+        other.add_transition(middle, 8, end, token_range_weight(0, 2));
+        other.set_final_weight(middle, singleton_weight(1));
+        other.set_final_weight(end, Weight::all());
+
+        let generic = generic_union(&[immediate.clone(), other.clone()]);
+        let grafted = try_graft_immediate_parser_dwa(&immediate, other.clone())
+            .expect("depth-one parser DWA should graft");
+        let quotient = exact_quotient_acyclic_dwa(grafted);
+        let overlay: BTreeMap<i32, Weight> = immediate_dwa_accepting_edges(&immediate)
+            .expect("depth-one parser DWA should form an overlay")
+            .into_iter()
+            .collect();
+
+        for word in all_words(&[7, 8], 3) {
+            let overlay_result = match word.as_slice() {
+                [label] => other
+                    .eval_word(&word)
+                    .union(overlay.get(label).unwrap_or(&Weight::empty())),
+                _ => other.eval_word(&word),
+            };
+            assert_eq!(
+                quotient.eval_word(&word),
+                generic.eval_word(&word),
+                "word={word:?}"
+            );
+            assert_eq!(overlay_result, generic.eval_word(&word), "overlay word={word:?}");
+        }
+        assert_eq!(quotient.eval_word(&[7]), token_range_weight(0, 1));
+        assert_eq!(quotient.eval_word(&[7, 8]), token_range_weight(1, 2));
+    }
 }

@@ -18,7 +18,7 @@ pub mod grammar_helpers;
 pub mod l1;
 pub mod l2p;
 pub mod synthetic_state_map;
-pub mod merge;
+pub use glrmask_dwa_merge::merge;
 pub mod partition;
 pub mod types;
 

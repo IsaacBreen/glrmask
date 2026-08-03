@@ -15,6 +15,7 @@ ahash = "0.8"
 blake3 = "1"
 glrmask-artifact = { version = "=0.1.1", path = "../glrmask-artifact" }
 glrmask-finite-automata = { version = "=0.1.1", path = "../glrmask-finite-automata" }
+glrmask-dwa-merge = { version = "=0.1.1", path = "../glrmask-dwa-merge" }
 glrmask-glr = { version = "=0.1.1", path = "../glrmask-glr" }
 glrmask-grammar = { version = "=0.1.1", path = "../glrmask-grammar" }
 glrmask-invariant = { version = "=0.1.1", path = "../glrmask-invariant" }

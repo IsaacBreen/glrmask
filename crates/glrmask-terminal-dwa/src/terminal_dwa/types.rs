@@ -1,8 +1,7 @@
 //! Shared types used across the terminal DWA build pipeline.
 
-use crate::automata::weighted::dwa::DWA;
 use crate::automata::weighted::terminal_automaton::TerminalAutomaton;
-use crate::compiler::stages::equiv_types::{InternalIdMap, MappedArtifact};
+use crate::compiler::stages::equiv_types::MappedArtifact;
 use crate::grammar::flat::TerminalID;
 
 /// Color identifier (index into graph-coloring partition).
@@ -78,21 +77,7 @@ pub struct TerminalDwaBuildProfile {
     pub trie_self_loop_cache_misses: u64,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct TerminalDwaPhaseProfile {
-    pub id_map_ms: f64,
-    pub terminal_dwa_ms: f64,
-    pub compact_ms: f64,
-    pub split_terminal_dwa_total_ms: f64,
-    pub global_merge_ms: f64,
-}
-
-#[derive(Debug, Clone)]
-pub struct LocalIdMapTerminalDwa {
-    pub id_map: InternalIdMap,
-    pub dwa: DWA,
-    pub profile: TerminalDwaPhaseProfile,
-}
+pub use glrmask_dwa_merge::{LocalIdMapTerminalDwa, TerminalDwaPhaseProfile};
 
 /// The independently-built terminal-DWA pieces produced by one vocabulary
 /// partition.  The third slot is the cheap L1 construction over tokens split
@@ -155,20 +140,6 @@ impl TerminalDwaFamilies {
                     .map(|token_id| token_id as u32)
             })
             .max()
-    }
-}
-
-impl TerminalDwaPhaseProfile {
-    pub fn total_ms(self) -> f64 {
-        self.id_map_ms + self.terminal_dwa_ms + self.compact_ms
-    }
-
-    pub fn add_assign(&mut self, other: Self) {
-        self.id_map_ms += other.id_map_ms;
-        self.terminal_dwa_ms += other.terminal_dwa_ms;
-        self.compact_ms += other.compact_ms;
-        self.split_terminal_dwa_total_ms += other.split_terminal_dwa_total_ms;
-        self.global_merge_ms += other.global_merge_ms;
     }
 }
 
