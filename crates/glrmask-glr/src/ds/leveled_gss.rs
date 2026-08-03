@@ -1556,7 +1556,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> SemanticPendingNode<T, 
 /// the result. The canonical representation is a deterministic trie whose
 /// nodes are interned and shared. Work follows reachable GSS/trie nodes rather
 /// than enumerating concrete stack paths.
-pub(crate) struct GssSemanticKeyInterner<
+pub struct GssSemanticKeyInterner<
     T: Clone + Eq + Hash + Ord,
     A: Merge + Clone + Eq + Hash,
 > {
@@ -1592,13 +1592,13 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash> std::fmt::Debug
 impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
     GssSemanticKeyInterner<T, A>
 {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::with_budget(usize::MAX, usize::MAX, usize::MAX)
     }
 
     /// Compatibility constructor for reusable, effectively-unbounded
     /// interners used by the established runtime paths.
-    pub(crate) fn with_capacity(capacity: usize) -> Self {
+    pub fn with_capacity(capacity: usize) -> Self {
         let mut interner = Self::with_budget(usize::MAX, usize::MAX, usize::MAX);
         interner.nodes.reserve(capacity);
         interner.interned.reserve(capacity);
@@ -1609,7 +1609,7 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
         interner
     }
 
-    pub(crate) fn with_budget(
+    pub fn with_budget(
         max_nodes: usize,
         max_source_keys: usize,
         max_union_entries: usize,
@@ -1647,13 +1647,13 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
     }
 
     #[inline]
-    pub(crate) fn is_exhausted(&self) -> bool {
+    pub fn is_exhausted(&self) -> bool {
         self.exhausted
     }
 
     /// Reset semantic contents while retaining scratch allocations and the
     /// configured work budgets.
-    pub(crate) fn clear(&mut self) {
+    pub fn clear(&mut self) {
         let empty_language = SemanticTrieNode {
             empty: false,
             children: Vec::new(),
@@ -1885,22 +1885,22 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
         self.union_memo.get(&root).copied().unwrap_or(0)
     }
 
-    pub(crate) fn union_keys(&mut self, left: u32, right: u32) -> u32 {
+    pub fn union_keys(&mut self, left: u32, right: u32) -> u32 {
         self.union_ids(left, right)
     }
 
-    pub(crate) fn top_branches(&self, root: u32) -> &[(T, u32)] {
+    pub fn top_branches(&self, root: u32) -> &[(T, u32)] {
         &self.nodes[root as usize].children
     }
 
-    pub(crate) fn push_key(&mut self, root: u32, value: T) -> u32 {
+    pub fn push_key(&mut self, root: u32, value: T) -> u32 {
         if root == 0 {
             return 0;
         }
         self.intern_node(false, vec![(value, root)])
     }
 
-    pub(crate) fn gss_from_key(&mut self, root: u32, accumulator: A) -> LeveledGSS<T, A> {
+    pub fn gss_from_key(&mut self, root: u32, accumulator: A) -> LeveledGSS<T, A> {
         if root == 0 {
             return LeveledGSS::empty();
         }
@@ -1940,7 +1940,7 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
         gss
     }
 
-    pub(crate) fn key(&mut self, gss: &LeveledGSS<T, A>) -> u32 {
+    pub fn key(&mut self, gss: &LeveledGSS<T, A>) -> u32 {
         if self.exhausted {
             return 0;
         }
@@ -2228,7 +2228,7 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
         Some(id)
     }
 
-    pub(crate) fn work_summary(&self) -> (usize, usize, usize, usize) {
+    pub fn work_summary(&self) -> (usize, usize, usize, usize) {
         (
             self.nodes.len(),
             self.lower_memo.len(),
@@ -2243,7 +2243,7 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
     }
 }
 
-pub(crate) struct IndexedLowerIdentity<T: Clone + Eq + Hash> {
+pub struct IndexedLowerIdentity<T: Clone + Eq + Hash> {
     ptr: usize,
     _keepalive: Arc<Lower<T>>,
 }
@@ -2257,7 +2257,7 @@ impl<T: Clone + Eq + Hash> IndexedLowerIdentity<T> {
     }
 
     #[inline]
-    pub(crate) fn ptr_key(&self) -> usize {
+    pub fn ptr_key(&self) -> usize {
         self.ptr
     }
 }
@@ -2284,7 +2284,7 @@ impl<T: Clone + Eq + Hash> std::hash::Hash for IndexedLowerIdentity<T> {
 }
 
 #[derive(Clone)]
-pub(crate) enum IndexedLeveledGssNode<T: Clone + Eq + Hash, A> {
+pub enum IndexedLeveledGssNode<T: Clone + Eq + Hash, A> {
     UpperBranch {
         empty: Option<A>,
         children: Vec<(T, u32)>,
@@ -2305,9 +2305,9 @@ pub(crate) enum IndexedLeveledGssNode<T: Clone + Eq + Hash, A> {
     },
 }
 
-pub(crate) struct IndexedLeveledGss<T: Clone + Eq + Hash, A> {
-    pub(crate) root: u32,
-    pub(crate) nodes: Vec<IndexedLeveledGssNode<T, A>>,
+pub struct IndexedLeveledGss<T: Clone + Eq + Hash, A> {
+    pub root: u32,
+    pub nodes: Vec<IndexedLeveledGssNode<T, A>>,
 }
 
 impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
@@ -2316,7 +2316,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     /// Node sharing is preserved by pointer identity. This is intended for
     /// allocation-free dynamic programs that need random access to the DAG but
     /// must not rebuild, flatten, or enumerate the represented stack language.
-    pub(crate) fn indexed_dag(&self) -> IndexedLeveledGss<T, A> {
+    pub fn indexed_dag(&self) -> IndexedLeveledGss<T, A> {
         fn index_lower<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash>(
             lower: &Arc<Lower<T>>,
             nodes: &mut Vec<IndexedLeveledGssNode<T, A>>,
@@ -2405,7 +2405,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         IndexedLeveledGss { root, nodes }
     }
 
-    pub(crate) fn indexed_dag_many(
+    pub fn indexed_dag_many(
         roots: &[Self],
     ) -> (IndexedLeveledGss<T, A>, Vec<u32>) {
         let (dag, root_ids, _, _) = Self::indexed_dag_many_reusing(
@@ -2418,7 +2418,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         (dag, root_ids)
     }
 
-    pub(crate) fn indexed_dag_many_reusing(
+    pub fn indexed_dag_many_reusing(
         roots: &[Self],
         mut nodes: Vec<IndexedLeveledGssNode<T, A>>,
         mut root_ids: Vec<u32>,
@@ -2746,7 +2746,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> VirtualStack<T, A> {
     /// Segment prefix above that floor; guarded operations that need to inspect
     /// deeper values must fall back to the branch-aware GSS representation.
     #[inline]
-    pub(crate) fn has_hidden_floor_values(&self) -> bool {
+    pub fn has_hidden_floor_values(&self) -> bool {
         let mut next = &self.next;
         loop {
             match &**next {
@@ -2943,11 +2943,11 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     }
 
     #[inline(always)]
-    pub(crate) fn top_value_count(&self) -> usize {
+    pub fn top_value_count(&self) -> usize {
         self.inner.children_len()
     }
 
-    pub(crate) fn single_interface_lower_id(&self) -> Option<usize> {
+    pub fn single_interface_lower_id(&self) -> Option<usize> {
         match &*self.inner {
             Upper::Interface(i) => Some(lower_node_id(&i.inner)),
             Upper::Branch(_) => None,
@@ -3112,7 +3112,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     /// Construct a set of already-sorted, unique one-value stacks sharing one
     /// accumulator. This is the canonical depth-one representation used by
     /// cached direct-regular frontiers.
-    pub(crate) fn from_sorted_unique_single_value_stacks(values: &[T], acc: A) -> Self
+    pub fn from_sorted_unique_single_value_stacks(values: &[T], acc: A) -> Self
     where
         T: Ord,
     {
@@ -3164,7 +3164,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     /// is intended for cheap admission checks before an exact bounded stack
     /// traversal. Unlike `for_each_stack_top_first_bounded`, it does not clone
     /// stack values or maintain a path buffer.
-    pub(crate) fn for_each_stack_len_bounded(
+    pub fn for_each_stack_len_bounded(
         &self,
         limit: usize,
         mut f: impl FnMut(usize, &A),
@@ -3300,7 +3300,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     /// This is intended for bounded runtime fast paths which already reject
     /// highly ambiguous GSSes. The traversal buffer stays inline for stack
     /// depths up to 64.
-    pub(crate) fn for_each_stack_top_first_bounded(
+    pub fn for_each_stack_top_first_bounded(
         &self,
         limit: usize,
         mut f: impl FnMut(&[T], &A),
@@ -3454,7 +3454,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     ///
     /// This intentionally materializes stacks and is meant for validation and
     /// diagnostics, not production hot paths. `PartialEq` remains structural.
-    pub(crate) fn semantically_eq(&self, other: &Self, max_stacks: usize) -> Option<bool> {
+    pub fn semantically_eq(&self, other: &Self, max_stacks: usize) -> Option<bool> {
         if self == other {
             return Some(true);
         }
@@ -4476,7 +4476,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
     /// Copy the complete sole stack into preallocated scratch. Unary General
     /// nodes are traversed exactly; branching or an optional early end declines.
-    pub(crate) fn single_path_acc(&self) -> Option<A> {
+    pub fn single_path_acc(&self) -> Option<A> {
         let Upper::Interface(interface) = &*self.inner else {
             return None;
         };
@@ -4484,7 +4484,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         Some(interface.acc.clone())
     }
 
-    pub(crate) fn copy_single_path_stack_into(&self, out: &mut Vec<T>) -> bool {
+    pub fn copy_single_path_stack_into(&self, out: &mut Vec<T>) -> bool {
         let Upper::Interface(interface) = &*self.inner else {
             return false;
         };
@@ -4554,7 +4554,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         }
     }
 
-    pub(crate) fn can_replace_single_path_state_in_place(&self, values: &[T]) -> bool {
+    pub fn can_replace_single_path_state_in_place(&self, values: &[T]) -> bool {
         if values.is_empty() || self.single_path_terminal_floor().is_none() {
             return false;
         }
@@ -4577,7 +4577,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
     /// Replace a uniquely-owned sole stack and accumulator, reusing the reserved
     /// top Segment and existing terminal floor.
-    pub(crate) fn try_replace_single_path_state_in_place(
+    pub fn try_replace_single_path_state_in_place(
         &mut self,
         values: &[T],
         acc: A,
@@ -4612,7 +4612,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         true
     }
 
-    pub(crate) fn try_replace_single_path_stack_in_place(&mut self, values: &[T]) -> bool {
+    pub fn try_replace_single_path_stack_in_place(&mut self, values: &[T]) -> bool {
         let Upper::Interface(interface) = &*self.inner else {
             return false;
         };
@@ -4622,7 +4622,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
     /// Reserve the uniquely-owned linear Segment used by the deterministic
     /// runtime fast path. This is called before timed decoding operations.
-    pub(crate) fn reserve_single_segment_capacity(&mut self, min_capacity: usize) -> bool {
+    pub fn reserve_single_segment_capacity(&mut self, min_capacity: usize) -> bool {
         // Startup is outside the timed hot path: deliberately detach the small
         // linear representation from any compile-time/shared Arcs so subsequent
         // deterministic commits can mutate it without allocating.
@@ -4644,7 +4644,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     /// Apply one deterministic stack effect directly to a uniquely-owned
     /// single Segment. Returns false without mutation when the operation would
     /// cross the Segment floor, grow capacity, or invalidate a cached suffix.
-    pub(crate) fn try_apply_single_segment_stack_effect_in_place(
+    pub fn try_apply_single_segment_stack_effect_in_place(
         &mut self,
         pop: usize,
         pushes: &[T],
@@ -4979,7 +4979,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     /// Lower GSS nodes carry no accumulator and are therefore irrelevant to
     /// discovering the partition labels. Returning `None` is transactional:
     /// `self` is immutable and no partial partition escapes.
-    pub(crate) fn partition_by_accumulator_at_most(
+    pub fn partition_by_accumulator_at_most(
         &self,
         max_accumulators: usize,
         max_upper_nodes: usize,
@@ -5663,7 +5663,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     /// This measures compact representation work rather than represented stack
     /// count. It retains no node identities after returning and never expands
     /// concrete paths.
-    pub(crate) fn node_count_at_most(&self, limit: usize) -> usize {
+    pub fn node_count_at_most(&self, limit: usize) -> usize {
         if limit == 0 || self.is_empty() {
             return 0;
         }
@@ -5845,7 +5845,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
     /// is within `max_depth`. The O(1) depth rejection happens before walking
     /// any General-node chain, and the subsequent traversal rejects branching
     /// immediately rather than enumerating alternative paths.
-    pub(crate) fn try_single_stack_bounded(&self, max_depth: usize) -> Option<(Vec<T>, A)> {
+    pub fn try_single_stack_bounded(&self, max_depth: usize) -> Option<(Vec<T>, A)> {
         if self.max_depth() as usize > max_depth {
             return None;
         }
@@ -6033,7 +6033,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         walk(&self.inner, &mut visited, &mut f);
     }
 
-    pub(crate) fn uniform_accumulator(&self) -> Option<A> {
+    pub fn uniform_accumulator(&self) -> Option<A> {
         let mut value: Option<A> = None;
         let mut uniform = true;
         self.for_each_acc(|candidate| match &value {
@@ -6046,7 +6046,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
     /// Reuse an Interface-backed stack-language topology with a different
     /// uniform accumulator. The lower graph is immutable and shared.
-    pub(crate) fn with_uniform_accumulator(&self, acc: A) -> Option<Self> {
+    pub fn with_uniform_accumulator(&self, acc: A) -> Option<Self> {
         let Upper::Interface(interface) = &*self.inner else {
             return None;
         };
@@ -6328,7 +6328,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
 
 
 impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
-    pub(crate) fn single_predecessor_below_top(&self, top: &T) -> Option<T> {
+    pub fn single_predecessor_below_top(&self, top: &T) -> Option<T> {
         fn single_top<T: Clone + Eq + Hash>(node: &Arc<Lower<T>>) -> Option<T> {
             match &**node {
                 Lower::Segment(_) => Some(node.segment_top_value().clone()),
@@ -6369,7 +6369,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         }
     }
 
-    pub(crate) fn from_small_stack_slices_shared_prefix<'a>(
+    pub fn from_small_stack_slices_shared_prefix<'a>(
         stacks: &[&'a [T]],
         acc: A,
     ) -> Option<Self>
@@ -6480,7 +6480,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         })
     }
 
-    pub(crate) fn try_replace_predecessors_below_top(
+    pub fn try_replace_predecessors_below_top(
         &self,
         top: &T,
         mut replacement: impl FnMut(&T) -> Result<Option<T>, ()>,
@@ -6562,7 +6562,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         })
     }
 
-    pub(crate) fn try_replace_top_predecessors_with_sequences(
+    pub fn try_replace_top_predecessors_with_sequences(
         &self,
         max_lower_prefix: usize,
         mut replacement: impl FnMut(
@@ -6693,7 +6693,7 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         })
     }
 
-    pub(crate) fn try_apply_top_stack_effects<'a, I>(&self, effects: I) -> Option<Self>
+    pub fn try_apply_top_stack_effects<'a, I>(&self, effects: I) -> Option<Self>
     where
         I: IntoIterator<Item = (T, usize, &'a [T])>,
         T: 'a,

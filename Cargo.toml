@@ -30,6 +30,7 @@ glrmask-weighted-automata = { version = "=0.1.1", path = "crates/glrmask-weighte
 glrmask-vocab = { version = "=0.1.1", path = "crates/glrmask-vocab" }
 glrmask-lexer = { version = "=0.1.1", path = "crates/glrmask-lexer" }
 glrmask-grammar = { version = "=0.1.1", path = "crates/glrmask-grammar" }
+glrmask-glr = { version = "=0.1.1", path = "crates/glrmask-glr" }
 rustc-hash = "1"
 ahash = "0.8"
 smallvec = { version = "1", features = ["serde"] }
@@ -188,5 +189,6 @@ members = [
     "crates/glrmask-vocab",
     "crates/glrmask-lexer",
     "crates/glrmask-grammar",
+    "crates/glrmask-glr",
 ]
 resolver = "2"

@@ -1151,7 +1151,7 @@ fn replace_gotos_enabled() -> bool {
 }
 
 std::thread_local! {
-    pub(crate) static LOCAL_FORWARD_REPLACE_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    pub static LOCAL_FORWARD_REPLACE_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
 
 fn local_forward_replace_enabled() -> bool {

@@ -14,7 +14,7 @@ use crate::grammar::flat::{NonterminalID, TerminalID};
 const INLINE_ROW_CAPACITY: usize = 8;
 
 #[derive(Debug, Clone)]
-pub(crate) enum SparseRow<K: Copy + Eq + Hash + Ord, V: Clone> {
+pub enum SparseRow<K: Copy + Eq + Hash + Ord, V: Clone> {
     Inline(SmallVec<[(K, V); INLINE_ROW_CAPACITY]>),
     Sorted(Vec<(K, V)>),
     Large(FxHashMap<K, V>),
@@ -28,7 +28,7 @@ impl<K: Copy + Eq + Hash + Ord, V: Clone> Default for SparseRow<K, V> {
 
 impl<K: Copy + Eq + Hash + Ord, V: Clone> SparseRow<K, V> {
     #[inline]
-    pub(crate) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         match self {
             Self::Inline(entries) => entries.len(),
             Self::Sorted(entries) => entries.len(),
@@ -37,12 +37,12 @@ impl<K: Copy + Eq + Hash + Ord, V: Clone> SparseRow<K, V> {
     }
 
     #[inline]
-    pub(crate) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     #[inline]
-    pub(crate) fn get(&self, key: &K) -> Option<&V> {
+    pub fn get(&self, key: &K) -> Option<&V> {
         match self {
             Self::Inline(entries) => entries
                 .iter()
@@ -57,7 +57,7 @@ impl<K: Copy + Eq + Hash + Ord, V: Clone> SparseRow<K, V> {
     }
 
     #[inline]
-    pub(crate) fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+    pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
         match self {
             Self::Inline(entries) => entries
                 .iter_mut()
@@ -76,7 +76,7 @@ impl<K: Copy + Eq + Hash + Ord, V: Clone> SparseRow<K, V> {
     /// Builders commonly already own such a vector. Re-inserting it through
     /// `insert` would needlessly perform O(n²) inline duplicate scans and an
     /// avoidable inline-to-hash-map promotion.
-    pub(crate) fn from_sorted_unique(entries: Vec<(K, V)>) -> Self {
+    pub fn from_sorted_unique(entries: Vec<(K, V)>) -> Self {
         debug_assert!(entries.windows(2).all(|pair| pair[0].0 < pair[1].0));
         if entries.len() <= INLINE_ROW_CAPACITY {
             Self::Inline(SmallVec::from_vec(entries))
@@ -87,7 +87,7 @@ impl<K: Copy + Eq + Hash + Ord, V: Clone> SparseRow<K, V> {
 
     /// Consume a hash map without reinserting every entry. Small rows retain
     /// the compact inline representation; large rows preserve the map.
-    pub(crate) fn from_hash_map(entries: FxHashMap<K, V>) -> Self {
+    pub fn from_hash_map(entries: FxHashMap<K, V>) -> Self {
         if entries.len() <= INLINE_ROW_CAPACITY {
             Self::Inline(entries.into_iter().collect())
         } else {
@@ -95,7 +95,7 @@ impl<K: Copy + Eq + Hash + Ord, V: Clone> SparseRow<K, V> {
         }
     }
 
-    pub(crate) fn insert(&mut self, key: K, value: V) -> Option<V> {
+    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
         match self {
             Self::Inline(entries) => {
                 for (entry_key, entry_value) in entries.iter_mut() {
@@ -127,7 +127,7 @@ impl<K: Copy + Eq + Hash + Ord, V: Clone> SparseRow<K, V> {
         }
     }
 
-    pub(crate) fn remove(&mut self, key: &K) -> Option<V> {
+    pub fn remove(&mut self, key: &K) -> Option<V> {
         match self {
             Self::Inline(entries) => {
                 let position = entries.iter().position(|(entry_key, _)| entry_key == key)?;
@@ -144,12 +144,12 @@ impl<K: Copy + Eq + Hash + Ord, V: Clone> SparseRow<K, V> {
     }
 
     #[inline]
-    pub(crate) fn contains_key(&self, key: &K) -> bool {
+    pub fn contains_key(&self, key: &K) -> bool {
         self.get(key).is_some()
     }
 
     #[inline]
-    pub(crate) fn iter(&self) -> SparseRowIter<'_, K, V> {
+    pub fn iter(&self) -> SparseRowIter<'_, K, V> {
         match self {
             Self::Inline(entries) => SparseRowIter::Inline(entries.iter()),
             Self::Sorted(entries) => SparseRowIter::Sorted(entries.iter()),
@@ -158,7 +158,7 @@ impl<K: Copy + Eq + Hash + Ord, V: Clone> SparseRow<K, V> {
     }
 
     #[inline]
-    pub(crate) fn keys(&self) -> SparseRowKeys<'_, K, V> {
+    pub fn keys(&self) -> SparseRowKeys<'_, K, V> {
         match self {
             Self::Inline(entries) => SparseRowKeys::Inline(entries.iter()),
             Self::Sorted(entries) => SparseRowKeys::Sorted(entries.iter()),
@@ -167,7 +167,7 @@ impl<K: Copy + Eq + Hash + Ord, V: Clone> SparseRow<K, V> {
     }
 
     #[inline]
-    pub(crate) fn values(&self) -> SparseRowValues<'_, K, V> {
+    pub fn values(&self) -> SparseRowValues<'_, K, V> {
         match self {
             Self::Inline(entries) => SparseRowValues::Inline(entries.iter()),
             Self::Sorted(entries) => SparseRowValues::Sorted(entries.iter()),
@@ -176,7 +176,7 @@ impl<K: Copy + Eq + Hash + Ord, V: Clone> SparseRow<K, V> {
     }
 
     #[inline]
-    pub(crate) fn for_each_value_mut(&mut self, mut f: impl FnMut(&mut V)) {
+    pub fn for_each_value_mut(&mut self, mut f: impl FnMut(&mut V)) {
         match self {
             Self::Inline(entries) => {
                 for (_, value) in entries {
@@ -290,7 +290,7 @@ impl<K: Copy + Eq + Hash + Ord, V: Clone> FromIterator<(K, V)> for SparseRow<K, 
     }
 }
 
-pub(crate) enum SparseRowIter<'a, K: Copy + Eq + Hash + Ord, V: Clone> {
+pub enum SparseRowIter<'a, K: Copy + Eq + Hash + Ord, V: Clone> {
     Inline(std::slice::Iter<'a, (K, V)>),
     Sorted(std::slice::Iter<'a, (K, V)>),
     Large(std::collections::hash_map::Iter<'a, K, V>),
@@ -308,7 +308,7 @@ impl<'a, K: Copy + Eq + Hash + Ord, V: Clone> Iterator for SparseRowIter<'a, K, 
     }
 }
 
-pub(crate) enum SparseRowKeys<'a, K: Copy + Eq + Hash + Ord, V: Clone> {
+pub enum SparseRowKeys<'a, K: Copy + Eq + Hash + Ord, V: Clone> {
     Inline(std::slice::Iter<'a, (K, V)>),
     Sorted(std::slice::Iter<'a, (K, V)>),
     Large(std::collections::hash_map::Keys<'a, K, V>),
@@ -326,7 +326,7 @@ impl<'a, K: Copy + Eq + Hash + Ord, V: Clone> Iterator for SparseRowKeys<'a, K, 
     }
 }
 
-pub(crate) enum SparseRowValues<'a, K: Copy + Eq + Hash + Ord, V: Clone> {
+pub enum SparseRowValues<'a, K: Copy + Eq + Hash + Ord, V: Clone> {
     Inline(std::slice::Iter<'a, (K, V)>),
     Sorted(std::slice::Iter<'a, (K, V)>),
     Large(std::collections::hash_map::Values<'a, K, V>),
@@ -345,7 +345,7 @@ impl<'a, K: Copy + Eq + Hash + Ord, V: Clone> Iterator for SparseRowValues<'a, K
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) enum ActionRow {
+pub enum ActionRow {
     Sparse(SparseRow<TerminalID, Action>),
     Default {
         default: Action,
@@ -362,12 +362,12 @@ impl Default for ActionRow {
 
 impl ActionRow {
     #[inline]
-    pub(crate) fn is_default_compressed(&self) -> bool {
+    pub fn is_default_compressed(&self) -> bool {
         matches!(self, Self::Default { .. })
     }
 
     #[inline]
-    pub(crate) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         match self {
             Self::Sparse(row) => row.len(),
             Self::Default {
@@ -382,12 +382,12 @@ impl ActionRow {
     }
 
     #[inline]
-    pub(crate) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     #[inline]
-    pub(crate) fn get(&self, key: &TerminalID) -> Option<&Action> {
+    pub fn get(&self, key: &TerminalID) -> Option<&Action> {
         match self {
             Self::Sparse(row) => row.get(key),
             Self::Default {
@@ -407,7 +407,7 @@ impl ActionRow {
         }
     }
 
-    pub(crate) fn get_mut(&mut self, key: &TerminalID) -> Option<&mut Action> {
+    pub fn get_mut(&mut self, key: &TerminalID) -> Option<&mut Action> {
         if matches!(self, Self::Default { .. }) {
             self.expand_default_to_sparse();
         }
@@ -417,7 +417,7 @@ impl ActionRow {
         }
     }
 
-    pub(crate) fn insert(&mut self, key: TerminalID, value: Action) -> Option<Action> {
+    pub fn insert(&mut self, key: TerminalID, value: Action) -> Option<Action> {
         match self {
             Self::Sparse(row) => row.insert(key, value),
             Self::Default {
@@ -446,7 +446,7 @@ impl ActionRow {
         }
     }
 
-    pub(crate) fn remove(&mut self, key: &TerminalID) -> Option<Action> {
+    pub fn remove(&mut self, key: &TerminalID) -> Option<Action> {
         match self {
             Self::Sparse(row) => row.remove(key),
             Self::Default {
@@ -475,12 +475,12 @@ impl ActionRow {
     }
 
     #[inline]
-    pub(crate) fn contains_key(&self, key: &TerminalID) -> bool {
+    pub fn contains_key(&self, key: &TerminalID) -> bool {
         self.get(key).is_some()
     }
 
     #[inline]
-    pub(crate) fn iter(&self) -> ActionRowIter<'_> {
+    pub fn iter(&self) -> ActionRowIter<'_> {
         match self {
             Self::Sparse(row) => ActionRowIter::Sparse(row.iter()),
             Self::Default {
@@ -497,16 +497,16 @@ impl ActionRow {
     }
 
     #[inline]
-    pub(crate) fn keys(&self) -> ActionRowKeys<'_> {
+    pub fn keys(&self) -> ActionRowKeys<'_> {
         ActionRowKeys { iter: self.iter() }
     }
 
     #[inline]
-    pub(crate) fn values(&self) -> ActionRowValues<'_> {
+    pub fn values(&self) -> ActionRowValues<'_> {
         ActionRowValues { iter: self.iter() }
     }
 
-    pub(crate) fn for_each_value_mut(&mut self, mut f: impl FnMut(&mut Action)) {
+    pub fn for_each_value_mut(&mut self, mut f: impl FnMut(&mut Action)) {
         self.expand_default_to_sparse();
         match self {
             Self::Sparse(row) => row.for_each_value_mut(|action| f(action)),
@@ -514,7 +514,7 @@ impl ActionRow {
         }
     }
 
-    pub(crate) fn compress_default(&mut self, num_terminals: TerminalID) {
+    pub fn compress_default(&mut self, num_terminals: TerminalID) {
         let Self::Sparse(row) = self else {
             return;
         };
@@ -635,7 +635,7 @@ impl FromIterator<(TerminalID, Action)> for ActionRow {
     }
 }
 
-pub(crate) enum ActionRowIter<'a> {
+pub enum ActionRowIter<'a> {
     Sparse(SparseRowIter<'a, TerminalID, Action>),
     Default(DefaultActionRowIter<'a>),
 }
@@ -651,7 +651,7 @@ impl<'a> Iterator for ActionRowIter<'a> {
     }
 }
 
-pub(crate) struct DefaultActionRowIter<'a> {
+pub struct DefaultActionRowIter<'a> {
     next_terminal: TerminalID,
     default: &'a Action,
     exceptions: &'a SparseRow<TerminalID, Option<Action>>,
@@ -675,7 +675,7 @@ impl<'a> Iterator for DefaultActionRowIter<'a> {
     }
 }
 
-pub(crate) struct ActionRowKeys<'a> {
+pub struct ActionRowKeys<'a> {
     iter: ActionRowIter<'a>,
 }
 
@@ -687,7 +687,7 @@ impl<'a> Iterator for ActionRowKeys<'a> {
     }
 }
 
-pub(crate) struct ActionRowValues<'a> {
+pub struct ActionRowValues<'a> {
     iter: ActionRowIter<'a>,
 }
 
@@ -699,7 +699,7 @@ impl<'a> Iterator for ActionRowValues<'a> {
     }
 }
 
-pub(crate) type GotoRow = SparseRow<NonterminalID, (u32, bool)>;
+pub type GotoRow = SparseRow<NonterminalID, (u32, bool)>;
 
 #[cfg(test)]
 mod tests {

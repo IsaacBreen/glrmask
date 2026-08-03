@@ -198,7 +198,7 @@ impl AdvancedBranch {
     }
 }
 
-pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> ParserGSS {
+pub fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> ParserGSS {
     let advanced = advance_stacks_core(table, stack.clone(), token);
     assert_advance_oracles(
         advance_assertion_flags(),
@@ -212,7 +212,7 @@ pub(crate) fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: Termina
 
 /// Like `advance_stacks` but takes ownership of the GSS, avoiding an
 /// unnecessary Arc clone when the caller doesn't need the original.
-pub(crate) fn advance_stacks_owned(table: &GLRTable, stack: ParserGSS, token: TerminalID) -> ParserGSS {
+pub fn advance_stacks_owned(table: &GLRTable, stack: ParserGSS, token: TerminalID) -> ParserGSS {
     let assertion_flags = advance_assertion_flags();
     if assertion_flags != 0 {
         let before = stack.clone();
@@ -491,7 +491,7 @@ fn assert_advance_oracles(
     }
 }
 
-pub(crate) fn advance_stacks_profiled(
+pub fn advance_stacks_profiled(
     table: &GLRTable,
     stack: &ParserGSS,
     token: TerminalID,
@@ -2403,7 +2403,7 @@ fn apply_guarded_stack_shifts_as_predecessor_remap(
     Some(predecessor_frontier.apply_top_pure_shifts(remaps))
 }
 
-pub(crate) fn apply_guarded_stack_shifts_fast(
+pub fn apply_guarded_stack_shifts_fast(
     gss: &ParserGSS,
     shifts: &[GuardedStackShift],
     index: Option<&GuardedShiftCellIndex>,
@@ -3672,7 +3672,7 @@ fn advance_deterministically(
 /// TODO: Rename this eventually, e.g. to `stack_can_advance_on`. The current
 /// `may_advance` name sounds like a speculative approximation, but this is an
 /// exact applicability predicate.
-pub(crate) fn stack_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> bool {
+pub fn stack_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> bool {
     if table.admission_policy == AdmissionPolicy::ExactSimulation {
         return exact_admission_may_advance_on(table, stack, token);
     }
@@ -5911,7 +5911,7 @@ mod tests {
 /// Return exactly the candidate terminals on which this parser stack can
 /// advance. Unlike repeated `stack_may_advance_on_any` calls, ExactSimulation
 /// explores the reduction closure once while propagating all candidate bits.
-pub(crate) fn stack_admissible_terminals(
+pub fn stack_admissible_terminals(
     table: &GLRTable,
     stack: &ParserGSS,
     terminals: &BitSet,
@@ -5972,7 +5972,7 @@ pub(crate) fn stack_admissible_terminals(
 /// TODO: Rename this eventually, e.g. to `stack_can_advance_on_any`. The current
 /// `may_advance` name sounds like a speculative approximation, but this is an
 /// exact applicability predicate.
-pub(crate) fn stack_may_advance_on_any(
+pub fn stack_may_advance_on_any(
     table: &GLRTable,
     stack: &ParserGSS,
     terminals: &BitSet,
@@ -5999,7 +5999,7 @@ pub(crate) fn stack_may_advance_on_any(
     admitted
 }
 
-pub(crate) fn stacks_finished(table: &GLRTable, stack: &ParserGSS) -> bool {
+pub fn stacks_finished(table: &GLRTable, stack: &ParserGSS) -> bool {
     if stack.is_empty() {
         return false;
     }

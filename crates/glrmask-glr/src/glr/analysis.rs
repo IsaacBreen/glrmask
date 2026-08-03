@@ -304,7 +304,7 @@ impl AnalyzedGrammar {
 
 /// Eliminate right recursion by first inlining indirect cycles and then
 /// rewriting direct right recursion into left recursion.
-pub(crate) fn eliminate_right_recursion(
+pub fn eliminate_right_recursion(
     rules: &mut Vec<Rule>,
     fresh_nt: &mut impl FnMut() -> NonterminalID,
 ) -> bool {
@@ -545,7 +545,7 @@ fn find_indirect_lr_cycle(
     find_cycle(graph, 2, false)
 }
 
-pub(crate) fn has_indirect_left_recursion(rules: &[Rule]) -> bool {
+pub fn has_indirect_left_recursion(rules: &[Rule]) -> bool {
     let nullable = compute_nullable(rules, max_nt_id(rules) + 1);
     has_indirect_left_recursion_with_nullable(rules, &nullable)
 }
@@ -1520,7 +1520,7 @@ fn get_or_create_non_nullable_nt(
 /// Preprocess long nullable runs with a balanced binary tree before doing the
 /// existing exhaustive elimination, to avoid the raw power-set blowups that
 /// occur when many nullable nonterminals appear consecutively.
-pub(crate) fn inline_null_productions(rules: &[Rule], num_nt: u32) -> Vec<Rule> {
+pub fn inline_null_productions(rules: &[Rule], num_nt: u32) -> Vec<Rule> {
     let profile_enabled = compile_profile_enabled();
     let total_started_at = profile_enabled.then(Instant::now);
     let rules_before = rules.len();
@@ -2228,7 +2228,7 @@ fn is_reflexive_unit_rule(rule: &Rule) -> bool {
     matches!(rule.rhs.as_slice(), [Symbol::Nonterminal(nonterminal)] if *nonterminal == rule.lhs)
 }
 
-pub(crate) fn merge_identical_nonterminals(
+pub fn merge_identical_nonterminals(
     rules: &[Rule],
     start: NonterminalID,
 ) -> Vec<Rule> {

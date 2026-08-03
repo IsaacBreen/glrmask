@@ -225,11 +225,11 @@ impl GLRTable {
         self.advance.len() == self.num_states as usize
     }
 
-    pub(crate) fn rebuild_advance_rows_from_actions(&mut self) {
+    pub fn rebuild_advance_rows_from_actions(&mut self) {
         self.advance = action_presence_rows(&self.action, self.num_terminals);
     }
 
-    pub(crate) fn rebuild_guarded_shift_index(&mut self) {
+    pub fn rebuild_guarded_shift_index(&mut self) {
         self.guarded_shift_index = vec![FxHashMap::default(); self.num_states as usize];
 
         for (state, row) in self.action.iter().enumerate() {
@@ -282,7 +282,7 @@ impl GLRTable {
     }
 
     #[inline]
-    pub(crate) fn guarded_shift_index(
+    pub fn guarded_shift_index(
         &self,
         state: u32,
         terminal: TerminalID,
@@ -293,7 +293,7 @@ impl GLRTable {
     }
 
     #[inline]
-    pub(crate) fn advance_row_allows(&self, state: u32, terminal: TerminalID) -> bool {
+    pub fn advance_row_allows(&self, state: u32, terminal: TerminalID) -> bool {
         if self.has_advance_rows() {
             let Some(bit) = self.terminal_bit(terminal) else {
                 return false;
@@ -311,14 +311,14 @@ impl GLRTable {
     }
 
     #[inline]
-    pub(crate) fn advance_row(&self, state: u32) -> Option<&BitSet> {
+    pub fn advance_row(&self, state: u32) -> Option<&BitSet> {
         self.has_advance_rows()
             .then(|| self.advance.get(state as usize))
             .flatten()
     }
 
     #[inline]
-    pub(crate) fn advance_row_intersects(&self, state: u32, terminals: &BitSet) -> bool {
+    pub fn advance_row_intersects(&self, state: u32, terminals: &BitSet) -> bool {
         if self.has_advance_rows()
             && let Some(row) = self.advance.get(state as usize)
         {
@@ -337,7 +337,7 @@ impl GLRTable {
         })
     }
 
-    pub(crate) fn compress_default_action_rows(&mut self) {
+    pub fn compress_default_action_rows(&mut self) {
         use rayon::prelude::*;
         let num_terminals = self.num_terminals;
         if rayon::current_num_threads() == 1 || self.action.len() < 128 {
@@ -551,7 +551,7 @@ fn action_presence_row(action_row: &ActionRow, num_terminals: u32) -> BitSet {
 }
 
 impl GLRTable {
-    pub(crate) fn extend_advance_rows_from_actions(&mut self) {
+    pub fn extend_advance_rows_from_actions(&mut self) {
         if self.advance.is_empty() {
             return;
         }
@@ -563,13 +563,12 @@ impl GLRTable {
     }
 }
 
-#[cfg(test)]
-pub(crate) mod testing {
+pub mod testing {
     use super::row::{ActionRow, GotoRow};
     use super::{Action, AdmissionPolicy, GlrTableConstruction, GLRTable};
     use crate::grammar::flat::{NonterminalID, TerminalID};
 
-    pub(crate) fn build_test_table(
+    pub fn build_test_table(
         num_states: u32,
         num_terminals: u32,
         action_rows: &[&[(TerminalID, Action)]],

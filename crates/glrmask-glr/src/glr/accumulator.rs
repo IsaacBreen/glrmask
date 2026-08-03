@@ -26,18 +26,18 @@ enum Repr {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum TerminalSetRef<'a> {
+pub enum TerminalSetRef<'a> {
     One(&'a u32),
     Few(&'a [(u32, u32)]),
     Many(&'a BTreeSet<u32>),
 }
 
 impl TerminalSetRef<'_> {
-    pub(crate) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         false
     }
 
-    pub(crate) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         match self {
             Self::One(_) => 1,
             Self::Few(values) => values.len(),
@@ -45,7 +45,7 @@ impl TerminalSetRef<'_> {
         }
     }
 
-    pub(crate) fn contains(&self, terminal: &u32) -> bool {
+    pub fn contains(&self, terminal: &u32) -> bool {
         match self {
             Self::One(value) => *value == terminal,
             Self::Few(values) => values.iter().any(|(_, value)| value == terminal),
@@ -53,11 +53,11 @@ impl TerminalSetRef<'_> {
         }
     }
 
-    pub(crate) fn to_btree_set(self) -> BTreeSet<u32> {
+    pub fn to_btree_set(self) -> BTreeSet<u32> {
         self.iter().copied().collect()
     }
 
-    pub(crate) fn iter(&self) -> TerminalSetIter<'_> {
+    pub fn iter(&self) -> TerminalSetIter<'_> {
         match self {
             Self::One(value) => TerminalSetIter::One(Some(value)),
             Self::Few(values) => TerminalSetIter::Few(values.iter()),
@@ -79,7 +79,7 @@ impl<'a> IntoIterator for TerminalSetRef<'a> {
     }
 }
 
-pub(crate) enum TerminalSetIter<'a> {
+pub enum TerminalSetIter<'a> {
     One(Option<&'a u32>),
     Few(std::slice::Iter<'a, (u32, u32)>),
     Many(std::collections::btree_set::Iter<'a, u32>),
@@ -97,7 +97,7 @@ impl<'a> Iterator for TerminalSetIter<'a> {
     }
 }
 
-pub(crate) enum TerminalsDisallowedIter<'a> {
+pub enum TerminalsDisallowedIter<'a> {
     Empty,
     One {
         state: Option<&'a u32>,
@@ -167,7 +167,7 @@ impl TerminalsDisallowed {
         }
     }
 
-    pub(crate) fn from_map(map: BTreeMap<u32, BTreeSet<u32>>) -> Self {
+    pub fn from_map(map: BTreeMap<u32, BTreeSet<u32>>) -> Self {
         let pair_count = map.values().map(BTreeSet::len).sum::<usize>();
         if pair_count <= INLINE_PAIR_CAPACITY {
             let mut pairs = InlinePairs::new();
@@ -185,11 +185,11 @@ impl TerminalsDisallowed {
         matches!(self.0, Repr::Empty)
     }
 
-    pub(crate) fn is_inline(&self) -> bool {
+    pub fn is_inline(&self) -> bool {
         !matches!(self.0, Repr::Many(_))
     }
 
-    pub(crate) fn try_with_insert_inline(&self, state: u32, terminal: u32) -> Option<Self> {
+    pub fn try_with_insert_inline(&self, state: u32, terminal: u32) -> Option<Self> {
         let mut pairs = self.inline_pairs()?;
         let pair = (state, terminal);
         match pairs.binary_search(&pair) {
@@ -202,7 +202,7 @@ impl TerminalsDisallowed {
         }
     }
 
-    pub(crate) fn try_merge_inline(&self, other: &Self) -> Option<Self> {
+    pub fn try_merge_inline(&self, other: &Self) -> Option<Self> {
         let mut pairs = self.inline_pairs()?;
         for pair in other.inline_pairs()? {
             match pairs.binary_search(&pair) {
@@ -214,7 +214,7 @@ impl TerminalsDisallowed {
         Some(Self::from_inline_pairs(pairs))
     }
 
-    pub(crate) fn try_remap_single_state_inline(
+    pub fn try_remap_single_state_inline(
         &self,
         source_state: u32,
         end_states: &[u32],
@@ -263,7 +263,7 @@ impl TerminalsDisallowed {
         }
     }
 
-    pub(crate) fn get(&self, state: &u32) -> Option<TerminalSetRef<'_>> {
+    pub fn get(&self, state: &u32) -> Option<TerminalSetRef<'_>> {
         match &self.0 {
             Repr::Empty => None,
             Repr::One {
@@ -282,7 +282,7 @@ impl TerminalsDisallowed {
         }
     }
 
-    pub(crate) fn iter(&self) -> TerminalsDisallowedIter<'_> {
+    pub fn iter(&self) -> TerminalsDisallowedIter<'_> {
         match &self.0 {
             Repr::Empty => TerminalsDisallowedIter::Empty,
             Repr::One { state, terminal } => TerminalsDisallowedIter::One {
