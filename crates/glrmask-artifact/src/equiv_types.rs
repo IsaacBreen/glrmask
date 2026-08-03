@@ -14,7 +14,7 @@ pub struct ManyToOneIdMap {
 }
 
 impl ManyToOneIdMap {
-    pub(crate) fn empty() -> Self {
+    pub fn empty() -> Self {
         Self {
             original_to_internal: Vec::new(),
             internal_to_originals: Vec::new(),
@@ -230,7 +230,7 @@ impl ManyToOneIdMap {
 /// Consumers must rely on the producer's representative-substitution contract
 /// for the observations they make rather than assuming pairwise equivalence.
 #[derive(Debug, Clone)]
-pub(crate) struct GlobalScannerStateQuotient {
+pub struct GlobalScannerStateQuotient {
     map: ManyToOneIdMap,
 }
 
@@ -238,7 +238,7 @@ impl GlobalScannerStateQuotient {
     /// Wrap a structurally total raw-state representative map. Semantic safety
     /// for a particular consumer follows from the producer's replacement
     /// proof, which may be directional rather than an equivalence relation.
-    pub(crate) fn from_total_raw_state_map(map: ManyToOneIdMap, raw_state_count: usize) -> Self {
+    pub fn from_total_raw_state_map(map: ManyToOneIdMap, raw_state_count: usize) -> Self {
         assert_eq!(
             map.original_to_internal.len(),
             raw_state_count,
@@ -266,12 +266,12 @@ impl GlobalScannerStateQuotient {
     }
 
     #[inline]
-    pub(crate) fn as_many_to_one(&self) -> &ManyToOneIdMap {
+    pub fn as_many_to_one(&self) -> &ManyToOneIdMap {
         &self.map
     }
 
     #[inline]
-    pub(crate) fn raw_state_count(&self) -> usize {
+    pub fn raw_state_count(&self) -> usize {
         self.map.original_to_internal.len()
     }
 
@@ -284,10 +284,10 @@ pub struct InternalIdMap {
     /// Internal-token order for a temporary singleton vocabulary coordinate.
     /// Local L1 artifacts are compacted immediately, so retaining the prepared
     /// order by `Arc` avoids cloning two dense token maps per partition.
-    pub(crate) deferred_vocab_singleton_original_ids: Option<Arc<[u32]>>,
+    pub deferred_vocab_singleton_original_ids: Option<Arc<[u32]>>,
 }
 
-pub(crate) use super::mapped_artifact::MappedArtifact;
+pub use super::mapped_artifact::MappedArtifact;
 
 impl InternalIdMap {
     pub fn num_tsids(&self) -> u32 {
@@ -304,7 +304,7 @@ impl InternalIdMap {
         self.num_internal_tokens().saturating_sub(1)
     }
 
-    pub(crate) fn internal_token_for_original(&self, original: u32) -> Option<u32> {
+    pub fn internal_token_for_original(&self, original: u32) -> Option<u32> {
         if let Some(original_ids) = self.deferred_vocab_singleton_original_ids.as_ref() {
             return original_ids
                 .iter()
@@ -318,7 +318,7 @@ impl InternalIdMap {
             .filter(|&internal| internal != u32::MAX)
     }
 
-    pub(crate) fn materialize_deferred_vocab_singletons(&mut self) {
+    pub fn materialize_deferred_vocab_singletons(&mut self) {
         let Some(original_ids) = self.deferred_vocab_singleton_original_ids.take() else {
             return;
         };

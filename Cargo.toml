@@ -32,6 +32,7 @@ glrmask-lexer = { version = "=0.1.1", path = "crates/glrmask-lexer" }
 glrmask-grammar = { version = "=0.1.1", path = "crates/glrmask-grammar" }
 glrmask-glr = { version = "=0.1.1", path = "crates/glrmask-glr" }
 glrmask-json-schema = { version = "=0.1.1", path = "crates/glrmask-json-schema" }
+glrmask-artifact = { version = "=0.1.1", path = "crates/glrmask-artifact" }
 rustc-hash = "1"
 ahash = "0.8"
 smallvec = { version = "1", features = ["serde"] }
@@ -192,5 +193,6 @@ members = [
     "crates/glrmask-grammar",
     "crates/glrmask-glr",
     "crates/glrmask-json-schema",
+    "crates/glrmask-artifact",
 ]
 resolver = "2"
