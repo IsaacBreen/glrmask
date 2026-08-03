@@ -1,3 +1,4 @@
+#![recursion_limit = "512"]
 //! PyO3 Python bindings for glrmask.
 //!
 //! Exposes `Constraint` and `ConstraintState` to Python, matching the interface
