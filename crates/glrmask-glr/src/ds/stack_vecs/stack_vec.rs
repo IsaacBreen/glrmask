@@ -3,7 +3,7 @@ use std::hash::Hash;
 /// Common interface for stack-like vectors used in GSS segments.
 ///
 /// Implementations provide different trade-offs:
-/// - `ArcArrayVec`: Arc<Vec<T>> with window. O(1) clone, O(1) access, COW push.
+/// - `ArcArrayVec`: `Arc<Vec<T>>` with window. O(1) clone, O(1) access, COW push.
 /// - `VecStackVec`: Plain Vec. O(n) clone, O(1) access.
 pub trait StackVec<T>: Clone + PartialEq + Eq + Hash + Default
 where

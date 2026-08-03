@@ -286,7 +286,7 @@ mod lexer_partition_policy_tests {
 ///
 /// The implementation intentionally has two phases:
 ///
-/// 1. [`load_document`] parses serde_json data into a typed schema AST.
+/// 1. [`load::load_document`] parses serde_json data into a typed schema AST.
 /// 2. [`lower_document`] lowers that schema AST into `GrammarExpr` rules.
 ///
 /// Unsupported schema keywords are rejected while loading so the lowering phase
