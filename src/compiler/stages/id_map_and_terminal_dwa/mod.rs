@@ -77,6 +77,12 @@ struct PreparedPartitionLocalTokenizer {
     build_ms: f64,
 }
 
+struct ReadyPartitionLocalTokenizer {
+    local: PartitionLocalTokenizer,
+    flat_trans: Arc<[u32]>,
+    classify_cache: classify::SharedClassifyCache,
+}
+
 pub(crate) struct PreparedPartitionLocalTokenizers {
     entries: Vec<Mutex<Option<PreparedPartitionLocalTokenizer>>>,
 }
@@ -238,12 +244,38 @@ pub(crate) fn grammar_def_uses_global_single_terminal_l1(grammar: &GrammarDef) -
 }
 
 impl PreparedPartitionLocalTokenizers {
-    fn take(&self, partition: usize) -> Option<PreparedPartitionLocalTokenizer> {
-        self.entries
+    fn prepare_if_available(
+        &self,
+        partition: usize,
+        global_tokenizer: &Tokenizer,
+        vocab: &Vocab,
+    ) -> Option<ReadyPartitionLocalTokenizer> {
+        let prepared = self
+            .entries
             .get(partition)?
             .lock()
             .expect("prepared partition-local tokenizer slot poisoned")
-            .take()
+            .take()?;
+        finish_prepared_partition_local_tokenizer(
+            global_tokenizer,
+            prepared,
+            vocab,
+        )
+        .map(|local| {
+            let flat_trans: Arc<[u32]> =
+                Arc::from(l1::build_flat_transition_table(&local.tokenizer));
+            let classify_cache = classify::SharedClassifyCache::new();
+            classify::prewarm_shared_classify_cache(
+                &local.tokenizer,
+                local.tokenizer.num_terminals(),
+                &classify_cache,
+            );
+            ReadyPartitionLocalTokenizer {
+                local,
+                flat_trans,
+                classify_cache,
+            }
+        })
     }
 }
 
@@ -1644,19 +1676,31 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
         let started_at = Instant::now();
         let label = format!("p{}", idx);
 
-        let prepared_local = prepared_partition_local_tokenizers
-            .and_then(|prepared| prepared.take(idx))
-            .and_then(|prepared| {
-                finish_prepared_partition_local_tokenizer(tokenizer, prepared, sub_vocab)
-            });
-        if partition_local_synthesis_selected(&label)
-            && let Some(local) = prepared_local.or_else(|| {
+        let ready_local = prepared_partition_local_tokenizers
+            .and_then(|prepared| prepared.prepare_if_available(idx, tokenizer, sub_vocab))
+            .or_else(|| {
                 partition_local_synthesis_plan
                     .and_then(|plan| build_partition_local_tokenizer(tokenizer, sub_vocab, plan))
-            })
+                    .map(|local| {
+                        let flat_trans: Arc<[u32]> =
+                            Arc::from(l1::build_flat_transition_table(&local.tokenizer));
+                        let classify_cache = classify::SharedClassifyCache::new();
+                        classify::prewarm_shared_classify_cache(
+                            &local.tokenizer,
+                            local.tokenizer.num_terminals(),
+                            &classify_cache,
+                        );
+                        ReadyPartitionLocalTokenizer {
+                            local,
+                            flat_trans,
+                            classify_cache,
+                        }
+                    })
+            });
+        if partition_local_synthesis_selected(&label)
+            && let Some(ready) = ready_local
         {
-            let local_flat_trans: Arc<[u32]> =
-                Arc::from(l1::build_flat_transition_table(&local.tokenizer));
+            let local = &ready.local;
             let local_vocab_dfa_cache =
                 l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache::new();
             let local_original_vocab_dfa_cache =
@@ -1664,8 +1708,11 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
             let local_original_vocab_analysis_dfa_cache =
                 l2p::equivalence_analysis::vocab::fast::SharedVocabAnalysisDfaCache::default();
             let local_transition_cache = OnceLock::new();
-            let local_ti_output_cache = l2p::SharedTiTokenizerOutputCache::new();
-            let local_classify_cache = classify::SharedClassifyCache::new();
+            let local_ti_output_cache = ready
+                .classify_cache
+                .get()
+                .and_then(l2p::SharedTiTokenizerOutputCache::new_with_classify_bytesets)
+                .unwrap_or_else(l2p::SharedTiTokenizerOutputCache::new);
             let mut local_result = partition::build_partition_id_map_and_terminal_dwa(
                 &label,
                 &local.tokenizer,
@@ -1678,14 +1725,14 @@ pub(crate) fn build_terminal_dwa_families_with_precomputed_global_max_length(
                 disallowed_follows,
                 &token_path_disallowed_follows,
                 &normalized_token_path_disallowed_follows,
-                &local_flat_trans,
+                &ready.flat_trans,
                 None,
                 Some(&local_vocab_dfa_cache),
                 Some(&local_original_vocab_dfa_cache),
                 Some(&local_original_vocab_analysis_dfa_cache),
                 Some(&local_transition_cache),
                 Some(&local_ti_output_cache),
-                Some(&local_classify_cache),
+                Some(&ready.classify_cache),
             );
             if let Some(parts) = local_result.as_mut()
                 && lift_partition_terminal_dwas_to_global(parts, &local.global_to_local).is_some()

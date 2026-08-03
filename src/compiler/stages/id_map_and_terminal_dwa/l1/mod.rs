@@ -806,33 +806,33 @@ fn l1_exact_profile_reuse_enabled() -> bool {
 }
 
 fn l1_remaining_horizon_quotients_enabled(state_count: usize, vocab_count: usize) -> bool {
-    // The packed suffix-profile walker now beats this finite-depth quotient
-    // prepass on the large-vocabulary cases that originally motivated it. Keep
-    // the exact quotient available for diagnostics and future topologies, but
-    // do not charge every production compile for its O(k * states * classes)
-    // dynamic program.
+    // Large vocabularies repeatedly revisit the same residual targets at
+    // progressively shorter suffix horizons.  A finite-depth Moore quotient
+    // pays one state/alphabet refinement per token byte, then lets every token
+    // sharing a target reuse the resulting canonical coordinate.  The target
+    // frontier gate below remains the final profitability check, so small or
+    // already-collapsed frontiers stay on the direct packed suffix walker.
+    let structural_candidate = (4_000..=100_000).contains(&state_count)
+        && vocab_count >= 50_000
+        && state_count.saturating_mul(vocab_count) >= 100_000_000;
     let explicitly_enabled = std::env::var("GLRMASK_ENABLE_L1_REMAINING_HORIZON_QUOTIENTS")
         .map(|value| {
             let value = value.trim();
             !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
         })
         .unwrap_or(false);
-    explicitly_enabled
-        && state_count <= 5_000
+    (structural_candidate || explicitly_enabled)
+        && state_count >= 4_000
+        && state_count <= 100_000
         && vocab_count >= 50_000
-        && state_count.saturating_mul(vocab_count) >= 100_000_000
         && std::env::var_os("GLRMASK_DISABLE_L1_REMAINING_HORIZON_QUOTIENTS").is_none()
 }
 
-fn l1_remaining_horizon_target_probe_supports_quotients(
-    state_count: usize,
-    raw_unique_targets: usize,
-) -> bool {
+fn l1_remaining_horizon_target_probe_supports_quotients(raw_unique_targets: usize) -> bool {
     // A depth quotient has to amortize O(depth * states * byte_classes) work.
     // If the unquotiented first-byte frontier is already small, the direct
     // packed suffix walk is cheaper than constructing the quotient family.
     raw_unique_targets >= 20_000
-        && raw_unique_targets >= state_count.saturating_mul(4)
 }
 
 fn l1_sequential_group_assembly_enabled() -> bool {
@@ -2665,10 +2665,7 @@ fn find_l1_exact_state_equivalence_by_components_with_first_target_cache(
     });
     let use_remaining_horizon_quotients = allow_remaining_horizon_quotients
         && l1_remaining_horizon_quotients_enabled(states.len(), sorted_entries.len())
-        && l1_remaining_horizon_target_probe_supports_quotients(
-            states.len(),
-            raw_unique_targets_len,
-        );
+        && l1_remaining_horizon_target_probe_supports_quotients(raw_unique_targets_len);
     let horizon_quotient_started_at = profile_enabled.then(Instant::now);
     let owned_horizon_view = if use_remaining_horizon_quotients
         && horizon_tokenizer_view.is_none()
@@ -7388,16 +7385,19 @@ mod packed_suffix_product_tests {
     };
 
     #[test]
+    fn remaining_horizon_policy_selects_large_vocabulary_state_work() {
+        assert!(l1_remaining_horizon_quotients_enabled(48_220, 82_266));
+        assert!(l1_remaining_horizon_quotients_enabled(5_709, 82_266));
+        assert!(!l1_remaining_horizon_quotients_enabled(48_220, 49_999));
+        assert!(!l1_remaining_horizon_quotients_enabled(2_000, 50_000));
+        assert!(!l1_remaining_horizon_quotients_enabled(100_001, 82_266));
+    }
+
+    #[test]
     fn remaining_horizon_probe_rejects_small_raw_frontiers() {
-        assert!(!l1_remaining_horizon_target_probe_supports_quotients(
-            8_108, 9_949,
-        ));
-        assert!(!l1_remaining_horizon_target_probe_supports_quotients(
-            3_000, 19_999,
-        ));
-        assert!(l1_remaining_horizon_target_probe_supports_quotients(
-            3_229, 45_355,
-        ));
+        assert!(!l1_remaining_horizon_target_probe_supports_quotients(9_949));
+        assert!(!l1_remaining_horizon_target_probe_supports_quotients(19_999));
+        assert!(l1_remaining_horizon_target_probe_supports_quotients(45_355));
     }
 
     #[test]
@@ -7517,6 +7517,14 @@ mod packed_suffix_product_tests {
             Some(&relevant_bytes),
             Some(&byte_to_class),
         );
+        let reference_horizon_maps = super::super::l2p::equivalence_analysis::state::max_length::find_canonical_state_maps_by_depth_from_labels_reference(
+            &tokenizer_view,
+            max_token_len,
+            &state_to_terminal_signature,
+            Some(&relevant_bytes),
+            Some(&byte_to_class),
+        );
+        assert_eq!(horizon_maps, reference_horizon_maps);
 
         for first_byte in 0..256usize {
             let token_ids = &buckets.token_indices_by_first_byte[first_byte];
