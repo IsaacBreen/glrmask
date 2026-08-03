@@ -2,7 +2,7 @@
 //!
 //! ## Denotational invariant
 //!
-//! Fix a terminal `t`. A [`RelationConfig`] denotes a relation between an
+//! Fix a terminal `t`. A `RelationConfig` denotes a relation between an
 //! original parser stack and the concrete stack segment obtained after zero or
 //! more non-consuming LR reductions for `t`:
 //!

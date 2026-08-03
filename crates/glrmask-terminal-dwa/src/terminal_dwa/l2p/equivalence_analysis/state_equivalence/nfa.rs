@@ -1064,7 +1064,7 @@ fn build_byte_trie<'a>(sequences: impl IntoIterator<Item = &'a [u8]>) -> Vec<Byt
     nodes
 }
 
-/// Build the same trie as [`build_byte_trie`] when input sequences are already
+/// Build the same trie as `build_byte_trie` when input sequences are already
 /// in lexicographic byte order. Consecutive sequences share exactly their LCP,
 /// so no edge hash table is needed: truncate the previous prefix path to the
 /// LCP and append the new suffix once.

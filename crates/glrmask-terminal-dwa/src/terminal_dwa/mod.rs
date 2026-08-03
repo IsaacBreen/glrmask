@@ -224,7 +224,7 @@ fn use_global_single_terminal_l1(
 
 /// Whether the prepared grammar will use the exact global L1 construction and
 /// can therefore derive its one delayed-terminal possible-match table from the
-/// same token relation. This mirrors [`use_global_single_terminal_l1`] before
+/// same token relation. This mirrors `use_global_single_terminal_l1` before
 /// GLR analysis adds the augmented start rule.
 pub fn grammar_def_uses_global_single_terminal_l1(grammar: &GrammarDef) -> bool {
     if grammar.num_terminals() != 1
