@@ -2314,7 +2314,7 @@ impl Weight {
             .unwrap_or_else(|| Arc::clone(&EMPTY_RANGESET))
     }
 
-    /// Batched, sorted equivalent of [`shared_tokens_for_tsid`] for a slice of
+    /// Batched, sorted equivalent of [`Self::shared_tokens_for_tsid`] for a slice of
     /// strictly-ascending tsids. A single linear merge over the weight's ranges
     /// replaces one binary-search point lookup per tsid, which is the dominant
     /// cost of the post-DWA group-signature step. `u32::MAX` is the "no
