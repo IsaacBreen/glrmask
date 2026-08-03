@@ -2,7 +2,6 @@ pub use crate::grammar::ast as ast;
 pub use glrmask_grammar::import::ebnf;
 pub mod json_schema;
 pub use glrmask_grammar::import::lark;
-pub mod numeric_range;
 
 use std::collections::BTreeSet;
 
@@ -30,6 +29,10 @@ fn parse_lark_to_named(source: &str) -> crate::Result<ast::NamedGrammar> {
 
 fn parse_glrm_to_named(source: &str) -> crate::Result<ast::NamedGrammar> {
     Ok(crate::grammar::glrm::from_glrm(source)?)
+}
+
+fn prepare_json_schema_named(grammar: &mut ast::NamedGrammar) -> crate::Result<()> {
+    Ok(json_schema::prepare_named_grammar(grammar)?)
 }
 
 type GrammarParser = fn(&str) -> crate::Result<GrammarDef>;
@@ -220,7 +223,7 @@ pub fn __profile_json_schema_import(schema_json: &str) -> crate::Result<()> {
     let grammar = lower_factored_named_grammar(
         schema_json,
         parse_json_schema_to_named,
-        Some(json_schema::prepare_named_grammar),
+        Some(prepare_json_schema_named),
         &[],
     )?;
     std::hint::black_box(&grammar);
@@ -236,7 +239,7 @@ fn parse_json_schema_to_named(schema_json: &str) -> crate::Result<ast::NamedGram
     let schema_to_named_started_at = emit_import_phase_start("schema_to_named_grammar");
     let named = json_schema::schema_to_named_grammar(&schema);
     emit_import_phase_end("schema_to_named_grammar", schema_to_named_started_at);
-    named
+    Ok(named?)
 }
 
 impl Constraint {
@@ -307,7 +310,7 @@ impl Constraint {
                     "json_schema",
                     GlrTableConstruction::LegacyRowBisim,
                     parse_json_schema_to_named,
-                    Some(json_schema::prepare_named_grammar),
+                    Some(prepare_json_schema_named),
                     end_token_ids,
                 )
             })
@@ -403,7 +406,7 @@ impl DynamicConstraint {
                 vocab,
                 GlrTableConstruction::Lalr,
                 parse_json_schema_to_named,
-                Some(json_schema::prepare_named_grammar),
+                Some(prepare_json_schema_named),
                 end_token_ids,
             )
         })

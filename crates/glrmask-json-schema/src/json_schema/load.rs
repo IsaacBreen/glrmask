@@ -14,14 +14,14 @@ use super::error::{ImportResult, SchemaImportError};
 /// Raw-document facts needed before typed loading. A single scan avoids
 /// repeatedly walking large schemas that have neither definitions nor refs.
 #[derive(Default)]
-pub(crate) struct DocumentFeatures {
-    pub(crate) has_one_of: bool,
+pub struct DocumentFeatures {
+    pub has_one_of: bool,
     has_definitions: bool,
     has_local_id_alias: bool,
     ref_pointers: BTreeSet<String>,
 }
 
-pub(crate) fn scan_document_features(root: &Value) -> DocumentFeatures {
+pub fn scan_document_features(root: &Value) -> DocumentFeatures {
     let mut features = DocumentFeatures::default();
     scan_document_features_inner(root, true, &mut features);
     features
@@ -233,12 +233,12 @@ fn local_id_alias(object: &Map<String, Value>, location: &str) -> Option<String>
     None
 }
 
-pub(crate) fn load_document(root: &Value) -> ImportResult<SchemaDocument> {
+pub fn load_document(root: &Value) -> ImportResult<SchemaDocument> {
     let features = scan_document_features(root);
     load_document_with_features(root, &features)
 }
 
-pub(crate) fn load_document_with_features(
+pub fn load_document_with_features(
     root: &Value,
     features: &DocumentFeatures,
 ) -> ImportResult<SchemaDocument> {
@@ -1066,7 +1066,7 @@ fn read_string_keyword(object: &Map<String, Value>, key: &str, location: &str) -
         .ok_or_else(|| SchemaImportError::at(location, format!("{key} must be a string")))
 }
 
-pub(crate) fn escape_pointer_segment(segment: &str) -> String {
+pub fn escape_pointer_segment(segment: &str) -> String {
     segment.replace('~', "~0").replace('/', "~1")
 }
 

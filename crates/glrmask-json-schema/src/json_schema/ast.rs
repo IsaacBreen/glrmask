@@ -10,26 +10,26 @@ use serde_json::Value;
 /// phase can turn recursive references into grammar rules without touching
 /// serde_json values again.
 #[derive(Debug, Clone)]
-pub(crate) struct SchemaDocument {
-    pub(crate) root: Schema,
-    pub(crate) definitions: Vec<SchemaDefinition>,
-    pub(crate) ref_targets: Vec<SchemaDefinition>,
+pub struct SchemaDocument {
+    pub root: Schema,
+    pub definitions: Vec<SchemaDefinition>,
+    pub ref_targets: Vec<SchemaDefinition>,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct SchemaDefinition {
-    pub(crate) pointer: String,
-    pub(crate) schema: Schema,
+pub struct SchemaDefinition {
+    pub pointer: String,
+    pub schema: Schema,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub(crate) struct Schema {
-    pub(crate) location: String,
-    pub(crate) kind: SchemaKind,
+pub struct Schema {
+    pub location: String,
+    pub kind: SchemaKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub(crate) enum SchemaKind {
+pub enum SchemaKind {
     /// JSON Schema boolean `true`.
     Any,
     /// JSON Schema boolean `false` or an explicitly unsatisfiable merge.
@@ -41,22 +41,22 @@ pub(crate) enum SchemaKind {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
-pub(crate) struct SchemaAssertions {
-    pub(crate) types: Option<Vec<SchemaType>>,
-    pub(crate) const_value: Option<Value>,
-    pub(crate) enum_values: Option<Vec<Value>>,
-    pub(crate) object: Option<ObjectSchema>,
-    pub(crate) array: Option<ArraySchema>,
-    pub(crate) string: Option<StringSchema>,
-    pub(crate) number: Option<NumberSchema>,
-    pub(crate) any_of: Vec<Schema>,
-    pub(crate) one_of: Vec<Schema>,
-    pub(crate) all_of: Vec<Schema>,
-    pub(crate) not: Option<Schema>,
+pub struct SchemaAssertions {
+    pub types: Option<Vec<SchemaType>>,
+    pub const_value: Option<Value>,
+    pub enum_values: Option<Vec<Value>>,
+    pub object: Option<ObjectSchema>,
+    pub array: Option<ArraySchema>,
+    pub string: Option<StringSchema>,
+    pub number: Option<NumberSchema>,
+    pub any_of: Vec<Schema>,
+    pub one_of: Vec<Schema>,
+    pub all_of: Vec<Schema>,
+    pub not: Option<Schema>,
 }
 
 impl SchemaAssertions {
-    pub(crate) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.types.is_none()
             && self.const_value.is_none()
             && self.enum_values.is_none()
@@ -70,7 +70,7 @@ impl SchemaAssertions {
             && self.not.is_none()
     }
 
-    pub(crate) fn has_value_assertions_without_combinators(&self) -> bool {
+    pub fn has_value_assertions_without_combinators(&self) -> bool {
         self.types.is_some()
             || self.const_value.is_some()
             || self.enum_values.is_some()
@@ -80,7 +80,7 @@ impl SchemaAssertions {
             || self.number.is_some()
     }
 
-    pub(crate) fn clone_without_combinators(&self) -> Self {
+    pub fn clone_without_combinators(&self) -> Self {
         Self {
             types: self.types.clone(),
             const_value: self.const_value.clone(),
@@ -98,7 +98,7 @@ impl SchemaAssertions {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-pub(crate) enum SchemaType {
+pub enum SchemaType {
     Null,
     Boolean,
     Object,
@@ -109,16 +109,16 @@ pub(crate) enum SchemaType {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub(crate) struct ObjectSchema {
-    pub(crate) properties: Vec<PropertySchema>,
-    pub(crate) required: BTreeSet<String>,
-    pub(crate) required_order: Vec<String>,
-    pub(crate) property_dependencies: BTreeMap<String, BTreeSet<String>>,
-    pub(crate) min_properties: usize,
-    pub(crate) max_properties: Option<usize>,
-    pub(crate) pattern_properties: Vec<PatternPropertySchema>,
-    pub(crate) property_names: Option<Schema>,
-    pub(crate) additional_properties: AdditionalProperties,
+pub struct ObjectSchema {
+    pub properties: Vec<PropertySchema>,
+    pub required: BTreeSet<String>,
+    pub required_order: Vec<String>,
+    pub property_dependencies: BTreeMap<String, BTreeSet<String>>,
+    pub min_properties: usize,
+    pub max_properties: Option<usize>,
+    pub pattern_properties: Vec<PatternPropertySchema>,
+    pub property_names: Option<Schema>,
+    pub additional_properties: AdditionalProperties,
 }
 
 impl Default for ObjectSchema {
@@ -138,30 +138,30 @@ impl Default for ObjectSchema {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub(crate) struct PropertySchema {
-    pub(crate) name: String,
-    pub(crate) schema: Schema,
+pub struct PropertySchema {
+    pub name: String,
+    pub schema: Schema,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub(crate) struct PatternPropertySchema {
-    pub(crate) pattern: String,
-    pub(crate) schema: Schema,
+pub struct PatternPropertySchema {
+    pub pattern: String,
+    pub schema: Schema,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub(crate) enum AdditionalProperties {
+pub enum AdditionalProperties {
     AllowAny,
     Deny,
     Schema(Box<Schema>),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub(crate) struct ArraySchema {
-    pub(crate) items: Box<Schema>,
-    pub(crate) prefix_items: Vec<Schema>,
-    pub(crate) min_items: usize,
-    pub(crate) max_items: Option<usize>,
+pub struct ArraySchema {
+    pub items: Box<Schema>,
+    pub prefix_items: Vec<Schema>,
+    pub min_items: usize,
+    pub max_items: Option<usize>,
 }
 
 impl Default for ArraySchema {
@@ -176,26 +176,26 @@ impl Default for ArraySchema {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
-pub(crate) struct StringSchema {
-    pub(crate) min_length: usize,
-    pub(crate) max_length: Option<usize>,
-    pub(crate) pattern: Option<String>,
-    pub(crate) format: Option<String>,
+pub struct StringSchema {
+    pub min_length: usize,
+    pub max_length: Option<usize>,
+    pub pattern: Option<String>,
+    pub format: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
-pub(crate) struct NumberSchema {
-    pub(crate) integer: bool,
-    pub(crate) minimum: Option<f64>,
-    pub(crate) maximum: Option<f64>,
-    pub(crate) exclusive_minimum: bool,
-    pub(crate) exclusive_maximum: bool,
-    pub(crate) multiple_of: Option<f64>,
-    pub(crate) format: Option<String>,
+pub struct NumberSchema {
+    pub integer: bool,
+    pub minimum: Option<f64>,
+    pub maximum: Option<f64>,
+    pub exclusive_minimum: bool,
+    pub exclusive_maximum: bool,
+    pub multiple_of: Option<f64>,
+    pub format: Option<String>,
 }
 
 impl Schema {
-    pub(crate) fn normalize_locations_relative(&mut self) {
+    pub fn normalize_locations_relative(&mut self) {
         let root = self.location.clone();
         self.normalize_locations_relative_to(&root);
     }
@@ -244,15 +244,15 @@ impl Schema {
         }
     }
 
-    pub(crate) fn any(location: impl Into<String>) -> Self {
+    pub fn any(location: impl Into<String>) -> Self {
         Self { location: location.into(), kind: SchemaKind::Any }
     }
 
-    pub(crate) fn never(location: impl Into<String>) -> Self {
+    pub fn never(location: impl Into<String>) -> Self {
         Self { location: location.into(), kind: SchemaKind::Never }
     }
 
-    pub(crate) fn assertions(location: impl Into<String>, assertions: SchemaAssertions) -> Self {
+    pub fn assertions(location: impl Into<String>, assertions: SchemaAssertions) -> Self {
         Self { location: location.into(), kind: SchemaKind::Assertions(Box::new(assertions)) }
     }
 }

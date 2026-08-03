@@ -7,7 +7,7 @@ use super::lower::{
 };
 
 impl<'a> Lowerer<'a> {
-    pub(crate) fn lower_array(&mut self, schema: &ArraySchema) -> ImportResult<GrammarExpr> {
+    pub fn lower_array(&mut self, schema: &ArraySchema) -> ImportResult<GrammarExpr> {
         if schema.max_items.is_some_and(|max| max < schema.min_items) {
             return Ok(never());
         }

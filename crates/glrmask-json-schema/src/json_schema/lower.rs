@@ -23,42 +23,42 @@ use super::config::JsonSchemaConfig;
 use super::error::{ImportResult, SchemaImportError};
 use super::string::{property_name_matches_pattern, string_value_satisfies_schema};
 
-pub(crate) const JSON_VALUE_RULE: &str = "json_value";
-pub(crate) const JSON_OBJECT_RULE: &str = "json_object";
-pub(crate) const JSON_ARRAY_RULE: &str = "json_array";
-pub(crate) const JSON_STRING_RULE: &str = "JSON_STRING";
-pub(crate) const JSON_QUOTE_RULE: &str = "JSON_QUOTE";
-pub(crate) const JSON_KEY_STRING_RULE: &str = "JSON_KEY_STRING";
-pub(crate) const JSON_ADDITIONAL_KEY_STRING_RULE: &str = "JSON_ADDITIONAL_KEY_STRING";
-pub(crate) const JSON_STRING_CHAR_RULE: &str = "JSON_STRING_CHAR";
-pub(crate) const JSON_STRING_PATTERN_DOT_CHAR_RULE: &str = "JSON_STRING_PATTERN_DOT_CHAR";
-pub(crate) const JSON_KEY_STRING_CHAR_RULE: &str = "JSON_KEY_STRING_CHAR";
-pub(crate) const JSON_ADDITIONAL_KEY_STRING_CHAR_RULE: &str = "JSON_ADDITIONAL_KEY_STRING_CHAR";
-pub(crate) const JSON_ITEM_SEPARATOR_RULE: &str = "JSON_ITEM_SEPARATOR";
-pub(crate) const JSON_KEY_SEPARATOR_RULE: &str = "JSON_KEY_SEPARATOR";
-pub(crate) const JSON_KEY_SUFFIX_RULE: &str = "JSON_KEY_SUFFIX";
-pub(crate) const JSON_INTEGER_RULE: &str = "JSON_INTEGER";
-pub(crate) const JSON_NUMBER_RULE: &str = "JSON_NUMBER";
-pub(crate) const JSON_BOOL_RULE: &str = "JSON_BOOL";
-pub(crate) const JSON_NULL_RULE: &str = "JSON_NULL";
-pub(crate) const JSON_SEPARATOR_WS_REGEX: &str = r#" "#;
-pub(crate) const JSON_ADDITIONAL_KEY_COLON_SHARED_RULE: &str = "JSON_ADDITIONAL_KEY_COLON_SHARED";
-pub(crate) const JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE: &str =
+pub const JSON_VALUE_RULE: &str = "json_value";
+pub const JSON_OBJECT_RULE: &str = "json_object";
+pub const JSON_ARRAY_RULE: &str = "json_array";
+pub const JSON_STRING_RULE: &str = "JSON_STRING";
+pub const JSON_QUOTE_RULE: &str = "JSON_QUOTE";
+pub const JSON_KEY_STRING_RULE: &str = "JSON_KEY_STRING";
+pub const JSON_ADDITIONAL_KEY_STRING_RULE: &str = "JSON_ADDITIONAL_KEY_STRING";
+pub const JSON_STRING_CHAR_RULE: &str = "JSON_STRING_CHAR";
+pub const JSON_STRING_PATTERN_DOT_CHAR_RULE: &str = "JSON_STRING_PATTERN_DOT_CHAR";
+pub const JSON_KEY_STRING_CHAR_RULE: &str = "JSON_KEY_STRING_CHAR";
+pub const JSON_ADDITIONAL_KEY_STRING_CHAR_RULE: &str = "JSON_ADDITIONAL_KEY_STRING_CHAR";
+pub const JSON_ITEM_SEPARATOR_RULE: &str = "JSON_ITEM_SEPARATOR";
+pub const JSON_KEY_SEPARATOR_RULE: &str = "JSON_KEY_SEPARATOR";
+pub const JSON_KEY_SUFFIX_RULE: &str = "JSON_KEY_SUFFIX";
+pub const JSON_INTEGER_RULE: &str = "JSON_INTEGER";
+pub const JSON_NUMBER_RULE: &str = "JSON_NUMBER";
+pub const JSON_BOOL_RULE: &str = "JSON_BOOL";
+pub const JSON_NULL_RULE: &str = "JSON_NULL";
+pub const JSON_SEPARATOR_WS_REGEX: &str = r#" "#;
+pub const JSON_ADDITIONAL_KEY_COLON_SHARED_RULE: &str = "JSON_ADDITIONAL_KEY_COLON_SHARED";
+pub const JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE: &str =
     "JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED";
-pub(crate) const JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE: &str =
+pub const JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE: &str =
     "json_additional_excluded_key_colon_shared";
-pub(crate) const MAX_SHARED_ADDITIONAL_EXCLUSION_KEYS: usize = 256;
+pub const MAX_SHARED_ADDITIONAL_EXCLUSION_KEYS: usize = 256;
 const STRING_ENUM_REGEX_MIN_VALUES: usize = 64;
 const STRING_ENUM_REGEX_MIN_ENCODED_BYTES: usize = 1024;
 const DISABLE_STRUCTURAL_SCHEMA_MEMO_ENV: &str =
     "GLRMASK_DISABLE_JSON_SCHEMA_STRUCTURAL_MEMO";
-pub(crate) const JSON_LITERAL_LEXER_PARTITION: &str = "json_literals";
-pub(crate) const JSON_OTHER_LEXER_PARTITION: &str = "json_other";
-pub(crate) const JSON_PATTERN_LEXER_PARTITION: &str = "json_patterns";
-pub(crate) const JSON_PATTERN_FAMILY_LEXER_PARTITION_PREFIX: &str = "json_pattern_family_";
+pub const JSON_LITERAL_LEXER_PARTITION: &str = "json_literals";
+pub const JSON_OTHER_LEXER_PARTITION: &str = "json_other";
+pub const JSON_PATTERN_LEXER_PARTITION: &str = "json_patterns";
+pub const JSON_PATTERN_FAMILY_LEXER_PARTITION_PREFIX: &str = "json_pattern_family_";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub(crate) enum JsonTerminalPartitionClass {
+pub enum JsonTerminalPartitionClass {
     Other,
     Literal,
     Pattern,
@@ -109,7 +109,7 @@ fn structural_schema_memo_enabled() -> bool {
 }
 
 impl JsonTerminalPartitionClass {
-    pub(crate) fn merge(self, other: Self) -> Self {
+    pub fn merge(self, other: Self) -> Self {
         use JsonTerminalPartitionClass::{Literal, Other, Pattern};
         match (self, other) {
             (Pattern, _) | (_, Pattern) => Pattern,
@@ -120,7 +120,7 @@ impl JsonTerminalPartitionClass {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct JsonPatternPartitionKey {
+pub struct JsonPatternPartitionKey {
     min_length: usize,
     max_length: Option<usize>,
     pattern: Option<String>,
@@ -139,33 +139,33 @@ impl From<&StringSchema> for JsonPatternPartitionKey {
 }
 
 #[derive(Default)]
-pub(crate) struct FixedObjectShapeProfile {
-    pub(crate) calls: usize,
-    pub(crate) item_symbol_ms: f64,
-    pub(crate) graph_build_ms: f64,
-    pub(crate) determinize_minimize_ms: f64,
-    pub(crate) total_ms: f64,
+pub struct FixedObjectShapeProfile {
+    pub calls: usize,
+    pub item_symbol_ms: f64,
+    pub graph_build_ms: f64,
+    pub determinize_minimize_ms: f64,
+    pub total_ms: f64,
 }
 
 #[derive(Default)]
-pub(crate) struct FixedObjectLowerProfile {
-    pub(crate) calls: usize,
-    pub(crate) total_items: usize,
-    pub(crate) template_hits: usize,
-    pub(crate) template_misses: usize,
-    pub(crate) shapes: BTreeMap<(usize, usize), FixedObjectShapeProfile>,
+pub struct FixedObjectLowerProfile {
+    pub calls: usize,
+    pub total_items: usize,
+    pub template_hits: usize,
+    pub template_misses: usize,
+    pub shapes: BTreeMap<(usize, usize), FixedObjectShapeProfile>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub(crate) struct FixedObjectTemplateKey {
-    pub(crate) required: Vec<bool>,
+pub struct FixedObjectTemplateKey {
+    pub required: Vec<bool>,
     /// ExprNfaBuilder label IDs in the exact order the fixed-object builder
     /// first observes them. This captures equality relationships between key,
     /// value, and separator expressions while abstracting their identities.
-    pub(crate) symbol_occurrences: Vec<i32>,
+    pub symbol_occurrences: Vec<i32>,
 }
 
-pub(crate) fn lower_document(
+pub fn lower_document(
     document: &SchemaDocument,
     config: JsonSchemaConfig,
 ) -> ImportResult<NamedGrammar> {
@@ -187,34 +187,34 @@ pub(crate) fn lower_document(
     Ok(grammar)
 }
 
-pub(crate) struct Lowerer<'a> {
-    pub(crate) document: &'a SchemaDocument,
-    pub(crate) config: JsonSchemaConfig,
-    pub(crate) rules: Vec<NamedRule>,
-    pub(crate) shared_string_exact_rules: BTreeMap<usize, String>,
-    pub(crate) shared_string_upto_rules: BTreeMap<usize, String>,
-    pub(crate) shared_string_upto_close_rules: BTreeMap<usize, String>,
-    pub(crate) shared_string_unbounded_rules: BTreeMap<(usize, bool, bool), String>,
-    pub(crate) shared_string_exact_open_rules: BTreeMap<usize, String>,
-    pub(crate) shared_string_upto_wrapped_rules: BTreeMap<usize, String>,
-    pub(crate) shared_ap_literal_keys: BTreeSet<String>,
-    pub(crate) shared_ap_patterns: Vec<String>,
-    pub(crate) shared_ap_base_rule: Option<String>,
-    pub(crate) shared_ap_excluded_rule: Option<String>,
-    pub(crate) shared_additional_key_colon_local_rules: BTreeMap<(Vec<String>, Vec<String>), String>,
-    pub(crate) shared_ap_pattern_rules: BTreeMap<String, String>,
-    pub(crate) shared_pattern_overlap_keys: BTreeMap<String, Vec<String>>,
-    pub(crate) shared_pattern_overlap_literal_rules: BTreeMap<String, String>,
-    pub(crate) shared_pattern_appearance_rules: BTreeMap<(String, Vec<String>), String>,
-    pub(crate) property_pattern_regex_cache: Arc<Mutex<HashMap<String, Result<Regex, String>>>>,
-    pub(crate) fixed_object_profile: Option<FixedObjectLowerProfile>,
-    pub(crate) fixed_object_nfa_templates: HashMap<FixedObjectTemplateKey, ExprNFA>,
-    pub(crate) terminal_partition_classes: BTreeMap<String, JsonTerminalPartitionClass>,
-    pub(crate) terminal_pattern_partition_keys: BTreeMap<String, JsonPatternPartitionKey>,
+pub struct Lowerer<'a> {
+    pub document: &'a SchemaDocument,
+    pub config: JsonSchemaConfig,
+    pub rules: Vec<NamedRule>,
+    pub shared_string_exact_rules: BTreeMap<usize, String>,
+    pub shared_string_upto_rules: BTreeMap<usize, String>,
+    pub shared_string_upto_close_rules: BTreeMap<usize, String>,
+    pub shared_string_unbounded_rules: BTreeMap<(usize, bool, bool), String>,
+    pub shared_string_exact_open_rules: BTreeMap<usize, String>,
+    pub shared_string_upto_wrapped_rules: BTreeMap<usize, String>,
+    pub shared_ap_literal_keys: BTreeSet<String>,
+    pub shared_ap_patterns: Vec<String>,
+    pub shared_ap_base_rule: Option<String>,
+    pub shared_ap_excluded_rule: Option<String>,
+    pub shared_additional_key_colon_local_rules: BTreeMap<(Vec<String>, Vec<String>), String>,
+    pub shared_ap_pattern_rules: BTreeMap<String, String>,
+    pub shared_pattern_overlap_keys: BTreeMap<String, Vec<String>>,
+    pub shared_pattern_overlap_literal_rules: BTreeMap<String, String>,
+    pub shared_pattern_appearance_rules: BTreeMap<(String, Vec<String>), String>,
+    pub property_pattern_regex_cache: Arc<Mutex<HashMap<String, Result<Regex, String>>>>,
+    pub fixed_object_profile: Option<FixedObjectLowerProfile>,
+    pub fixed_object_nfa_templates: HashMap<FixedObjectTemplateKey, ExprNFA>,
+    pub terminal_partition_classes: BTreeMap<String, JsonTerminalPartitionClass>,
+    pub terminal_pattern_partition_keys: BTreeMap<String, JsonPatternPartitionKey>,
     terminal_partition_class: JsonTerminalPartitionClass,
     definition_rules: BTreeMap<String, String>,
     definition_by_pointer: BTreeMap<String, &'a Schema>,
-    pub(crate) object_variant_ref_stack: BTreeSet<String>,
+    pub object_variant_ref_stack: BTreeSet<String>,
     structural_schema_memo_enabled: bool,
     structural_schema_expr_cache: HashMap<u64, Vec<StructuralSchemaCacheEntry>>,
     structural_schema_cache_hits: usize,
@@ -232,7 +232,7 @@ fn quoted_repeated_char_rule_expr(char_rule: &str) -> GrammarExpr {
 }
 
 impl<'a> Lowerer<'a> {
-    pub(crate) fn llguidance_compat_enabled(&self) -> bool {
+    pub fn llguidance_compat_enabled(&self) -> bool {
         self.config.llguidance_compat
     }
 
@@ -291,7 +291,7 @@ impl<'a> Lowerer<'a> {
     /// Creates an independent lowerer for a disjoint non-recursive schema
     /// fragment. Its caller merges the emitted rules through
     /// `append_isolated_rules` after lowering in parallel.
-    pub(crate) fn isolated_fragment_lowerer(&self, next_rule_id: usize) -> Self {
+    pub fn isolated_fragment_lowerer(&self, next_rule_id: usize) -> Self {
         let mut lowerer = Self {
             document: self.document,
             config: self.config.clone(),
@@ -335,7 +335,7 @@ impl<'a> Lowerer<'a> {
     /// Merges rules emitted by an isolated lowerer. Every isolated lowerer
     /// emits the JSON built-ins; equal definitions are coalesced, but a
     /// conflicting duplicate name is rejected rather than silently changed.
-    pub(crate) fn append_isolated_rules(
+    pub fn append_isolated_rules(
         &mut self,
         rules: Vec<NamedRule>,
         terminal_partition_classes: BTreeMap<String, JsonTerminalPartitionClass>,
@@ -588,11 +588,11 @@ impl<'a> Lowerer<'a> {
         );
     }
 
-    pub(crate) fn item_separator_expr(&self) -> GrammarExpr {
+    pub fn item_separator_expr(&self) -> GrammarExpr {
         r(JSON_ITEM_SEPARATOR_RULE)
     }
 
-    pub(crate) fn key_separator_expr(&self) -> GrammarExpr {
+    pub fn key_separator_expr(&self) -> GrammarExpr {
         r(JSON_KEY_SEPARATOR_RULE)
     }
 
@@ -603,11 +603,11 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    pub(crate) fn json_string_char_regex(&self) -> String {
+    pub fn json_string_char_regex(&self) -> String {
         super::string::json_string_body_char_regex().to_string()
     }
 
-    pub(crate) fn lower_schema(&mut self, schema: &Schema) -> ImportResult<GrammarExpr> {
+    pub fn lower_schema(&mut self, schema: &Schema) -> ImportResult<GrammarExpr> {
         if !self.structural_schema_memo_enabled
             || !matches!(schema.kind, SchemaKind::Assertions(_))
         {
@@ -672,7 +672,7 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    pub(crate) fn lower_ref(&mut self, pointer: &str) -> ImportResult<GrammarExpr> {
+    pub fn lower_ref(&mut self, pointer: &str) -> ImportResult<GrammarExpr> {
         let normalized = normalize_local_ref(pointer)?;
         if let Some(rule_name) = self.definition_rules.get(&normalized) {
             return Ok(r(rule_name));
@@ -689,7 +689,7 @@ impl<'a> Lowerer<'a> {
         Ok(r(&rule_name))
     }
 
-    pub(crate) fn resolve_ref_target(&self, pointer: &str) -> ImportResult<&'a Schema> {
+    pub fn resolve_ref_target(&self, pointer: &str) -> ImportResult<&'a Schema> {
         let normalized = normalize_local_ref(pointer)?;
         self.definition_by_pointer
             .get(&normalized)
@@ -885,7 +885,7 @@ impl<'a> Lowerer<'a> {
         Ok(choice(alternatives))
     }
 
-    pub(crate) fn lower_json_literal(&mut self, value: &Value) -> GrammarExpr {
+    pub fn lower_json_literal(&mut self, value: &Value) -> GrammarExpr {
         match value {
             Value::String(text) => self.lower_string_literal(text),
             Value::Null => lit("null"),
@@ -1162,7 +1162,7 @@ impl<'a> Lowerer<'a> {
         Ok(true)
     }
 
-    pub(crate) fn add_nonterminal_rule(&mut self, name: &str, expr: GrammarExpr) {
+    pub fn add_nonterminal_rule(&mut self, name: &str, expr: GrammarExpr) {
         let expr = self.hoist_raw_regexes_out_of_expr_nfa_symbols(expr);
         self.used_rule_names.insert(name.to_string());
         self.rules.push(NamedRule {
@@ -1309,7 +1309,7 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    pub(crate) fn add_terminal_rule(&mut self, name: &str, expr: GrammarExpr) {
+    pub fn add_terminal_rule(&mut self, name: &str, expr: GrammarExpr) {
         self.used_rule_names.insert(name.to_string());
         self.terminal_partition_classes
             .entry(name.to_string())
@@ -1325,7 +1325,7 @@ impl<'a> Lowerer<'a> {
         });
     }
 
-    pub(crate) fn with_terminal_partition_class<T>(
+    pub fn with_terminal_partition_class<T>(
         &mut self,
         class: JsonTerminalPartitionClass,
         f: impl FnOnce(&mut Self) -> T,
@@ -1336,19 +1336,19 @@ impl<'a> Lowerer<'a> {
         result
     }
 
-    pub(crate) fn add_literal_terminal_rule(&mut self, name: &str, expr: GrammarExpr) {
+    pub fn add_literal_terminal_rule(&mut self, name: &str, expr: GrammarExpr) {
         self.with_terminal_partition_class(JsonTerminalPartitionClass::Literal, |lowerer| {
             lowerer.add_terminal_rule(name, expr);
         });
     }
 
-    pub(crate) fn add_pattern_terminal_rule(&mut self, name: &str, expr: GrammarExpr) {
+    pub fn add_pattern_terminal_rule(&mut self, name: &str, expr: GrammarExpr) {
         self.with_terminal_partition_class(JsonTerminalPartitionClass::Pattern, |lowerer| {
             lowerer.add_terminal_rule(name, expr);
         });
     }
 
-    pub(crate) fn add_pattern_terminal_rule_with_partition_key(
+    pub fn add_pattern_terminal_rule_with_partition_key(
         &mut self,
         name: &str,
         expr: GrammarExpr,
@@ -1358,7 +1358,7 @@ impl<'a> Lowerer<'a> {
         self.terminal_pattern_partition_keys.insert(name.to_string(), key);
     }
 
-    pub(crate) fn add_internal_terminal_rule(&mut self, name: &str, expr: GrammarExpr) {
+    pub fn add_internal_terminal_rule(&mut self, name: &str, expr: GrammarExpr) {
         self.used_rule_names.insert(name.to_string());
         self.rules.push(NamedRule {
             name: name.to_string(),
@@ -1368,7 +1368,7 @@ impl<'a> Lowerer<'a> {
         });
     }
 
-    pub(crate) fn fresh_rule_name(&mut self, prefix: &str) -> String {
+    pub fn fresh_rule_name(&mut self, prefix: &str) -> String {
         loop {
             let candidate = format!("{prefix}_{}", self.next_rule_id);
             self.next_rule_id += 1;
@@ -1384,12 +1384,12 @@ const PROBLEMATIC_REPEATED_BYTES: &[u8] =
     b" \t\r\n!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RepeatedSingleByteTerminalHazard {
-    pub(crate) rule_name: String,
-    pub(crate) terminal_name: String,
-    pub(crate) quantifier: Quantifier,
-    pub(crate) alphanumeric_bytes: Vec<u8>,
-    pub(crate) problematic_bytes: Vec<u8>,
+pub struct RepeatedSingleByteTerminalHazard {
+    pub rule_name: String,
+    pub terminal_name: String,
+    pub quantifier: Quantifier,
+    pub alphanumeric_bytes: Vec<u8>,
+    pub problematic_bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -1713,7 +1713,7 @@ fn single_byte_only_repeated_byte_matches(expr: &Expr) -> Vec<u8> {
     matches
 }
 
-pub(crate) fn find_repeated_single_byte_terminal_hazards(
+pub fn find_repeated_single_byte_terminal_hazards(
     grammar: &NamedGrammar,
     resolved_terminals: &BTreeMap<String, Expr>,
 ) -> Vec<RepeatedSingleByteTerminalHazard> {
@@ -2228,7 +2228,7 @@ fn is_escaped_fixed_ascii_regex_byte(byte: u8) -> bool {
         && !byte.is_ascii_alphanumeric()
 }
 
-pub(crate) fn normalize_local_ref(pointer: &str) -> ImportResult<String> {
+pub fn normalize_local_ref(pointer: &str) -> ImportResult<String> {
     if pointer == "#" {
         return Ok("#".to_string());
     }
@@ -2248,19 +2248,19 @@ fn is_absolute_self_ref_alias(pointer: &str) -> bool {
     pointer.contains("://") && pointer.ends_with("#")
 }
 
-pub(crate) fn r(name: &str) -> GrammarExpr {
+pub fn r(name: &str) -> GrammarExpr {
     GrammarExpr::Ref(name.to_string())
 }
 
-pub(crate) fn lit(text: &str) -> GrammarExpr {
+pub fn lit(text: &str) -> GrammarExpr {
     lit_bytes(text.as_bytes().to_vec())
 }
 
-pub(crate) fn lit_bytes(bytes: Vec<u8>) -> GrammarExpr {
+pub fn lit_bytes(bytes: Vec<u8>) -> GrammarExpr {
     GrammarExpr::Literal(bytes)
 }
 
-pub(crate) fn seq(mut parts: Vec<GrammarExpr>) -> GrammarExpr {
+pub fn seq(mut parts: Vec<GrammarExpr>) -> GrammarExpr {
     match parts.len() {
         0 => GrammarExpr::Epsilon,
         1 => parts.pop().unwrap(),
@@ -2268,7 +2268,7 @@ pub(crate) fn seq(mut parts: Vec<GrammarExpr>) -> GrammarExpr {
     }
 }
 
-pub(crate) fn choice(mut alternatives: Vec<GrammarExpr>) -> GrammarExpr {
+pub fn choice(mut alternatives: Vec<GrammarExpr>) -> GrammarExpr {
     if alternatives
         .iter()
         .any(|expr| matches!(expr, GrammarExpr::Ref(name) if name == JSON_NUMBER_RULE))
@@ -2283,14 +2283,14 @@ pub(crate) fn choice(mut alternatives: Vec<GrammarExpr>) -> GrammarExpr {
     }
 }
 
-pub(crate) fn never() -> GrammarExpr {
+pub fn never() -> GrammarExpr {
     GrammarExpr::Choice(Vec::new())
 }
 
 /// Returns the rule name to use for JSON object keys.
 /// In `LlGuidanceNative` compat mode, this is the strict key rule used by
 /// literal `properties` and `patternProperties` key paths.
-pub(crate) fn json_key_string_rule() -> &'static str {
+pub fn json_key_string_rule() -> &'static str {
     match super::string::json_string_compat_mode() {
         super::string::JsonStringCompatMode::JsonSchema => JSON_STRING_RULE,
         super::string::JsonStringCompatMode::LlGuidanceNative => JSON_KEY_STRING_RULE,
@@ -2298,7 +2298,7 @@ pub(crate) fn json_key_string_rule() -> &'static str {
 }
 
 /// Returns the rule name to use for additional/generic object keys.
-pub(crate) fn json_additional_key_string_rule() -> &'static str {
+pub fn json_additional_key_string_rule() -> &'static str {
     match super::string::json_string_compat_mode() {
         super::string::JsonStringCompatMode::JsonSchema => JSON_STRING_RULE,
         super::string::JsonStringCompatMode::LlGuidanceNative => JSON_ADDITIONAL_KEY_STRING_RULE,

@@ -11,7 +11,7 @@ const MAX_EXPLICIT_INTEGER_RANGE: i64 = 512;
 const MAX_EXPLICIT_INTEGER_MULTIPLES: i64 = 2048;
 
 impl<'a> Lowerer<'a> {
-    pub(crate) fn lower_number(&mut self, schema: &NumberSchema) -> ImportResult<GrammarExpr> {
+    pub fn lower_number(&mut self, schema: &NumberSchema) -> ImportResult<GrammarExpr> {
         if schema.integer {
             return self.lower_integer(schema);
         }

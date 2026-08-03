@@ -5,38 +5,38 @@
 /// default; any explicit compatibility opt-out is deliberately semantically
 /// weaker and must never be selected merely because a pattern is expensive.
 #[derive(Debug, Clone)]
-pub(crate) struct JsonSchemaConfig {
-    pub(crate) llguidance_compat: bool,
-    pub(crate) coerce_one_of_to_any_of: bool,
-    pub(crate) repeat_chunk_size: usize,
-    pub(crate) string_repeat_chunk_size: usize,
-    pub(crate) terminalize_bounded_string_max: usize,
-    pub(crate) preserve_pattern_max_length: bool,
-    pub(crate) pattern_max_length_complexity_limit: usize,
-    pub(crate) pattern_max_length_hard_complexity_limit: usize,
-    pub(crate) split_complex_patterns: bool,
-    pub(crate) value_merging: MergeFamily,
-    pub(crate) key_merging: MergeFamily,
-    pub(crate) object_merging: ObjectMergeConfig,
+pub struct JsonSchemaConfig {
+    pub llguidance_compat: bool,
+    pub coerce_one_of_to_any_of: bool,
+    pub repeat_chunk_size: usize,
+    pub string_repeat_chunk_size: usize,
+    pub terminalize_bounded_string_max: usize,
+    pub preserve_pattern_max_length: bool,
+    pub pattern_max_length_complexity_limit: usize,
+    pub pattern_max_length_hard_complexity_limit: usize,
+    pub split_complex_patterns: bool,
+    pub value_merging: MergeFamily,
+    pub key_merging: MergeFamily,
+    pub object_merging: ObjectMergeConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct QuoteMerge {
-    pub(crate) merge_open: bool,
-    pub(crate) merge_close: bool,
+pub struct QuoteMerge {
+    pub merge_open: bool,
+    pub merge_close: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct MergeFamily {
-    pub(crate) generic: QuoteMerge,
-    pub(crate) literal: QuoteMerge,
-    pub(crate) pattern: QuoteMerge,
+pub struct MergeFamily {
+    pub generic: QuoteMerge,
+    pub literal: QuoteMerge,
+    pub pattern: QuoteMerge,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ObjectMergeConfig {
-    pub(crate) closed_objects: bool,
-    pub(crate) open_objects: bool,
+pub struct ObjectMergeConfig {
+    pub closed_objects: bool,
+    pub open_objects: bool,
 }
 
 impl Default for JsonSchemaConfig {
@@ -89,7 +89,7 @@ impl Default for JsonSchemaConfig {
 }
 
 impl JsonSchemaConfig {
-    pub(crate) fn from_env() -> Self {
+    pub fn from_env() -> Self {
         let mut config = Self::default();
         config.llguidance_compat = super::string::json_string_compat_mode() == super::string::JsonStringCompatMode::LlGuidanceNative;
         config.coerce_one_of_to_any_of = read_bool(

@@ -239,11 +239,11 @@ impl<'a> Lowerer<'a> {
     const ISOLATED_PAYLOAD_RULE_ID_BASE: usize = 1_000_000_000;
     const ISOLATED_PAYLOAD_RULE_ID_STRIDE: usize = 1_000_000;
 
-    pub(crate) fn lower_object(&mut self, schema: &ObjectSchema) -> ImportResult<GrammarExpr> {
+    pub fn lower_object(&mut self, schema: &ObjectSchema) -> ImportResult<GrammarExpr> {
         self.lower_object_internal(schema, None, None)
     }
 
-    pub(crate) fn lower_object_requiring_any_property(
+    pub fn lower_object_requiring_any_property(
         &mut self,
         schema: &ObjectSchema,
         any_required_names: &BTreeSet<String>,
@@ -251,7 +251,7 @@ impl<'a> Lowerer<'a> {
         self.lower_object_internal(schema, Some(any_required_names), None)
     }
 
-    pub(crate) fn lower_object_with_exclusive_properties(
+    pub fn lower_object_with_exclusive_properties(
         &mut self,
         schema: &ObjectSchema,
         exclusive_names: &BTreeSet<String>,
@@ -286,7 +286,7 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    pub(crate) fn try_lower_closed_object_any_of_variants(
+    pub fn try_lower_closed_object_any_of_variants(
         &mut self,
         branches: &[Schema],
         suppress_untyped_non_object_alts: bool,
@@ -594,7 +594,7 @@ impl<'a> Lowerer<'a> {
         Ok(expressions)
     }
 
-    pub(crate) fn try_lower_open_object_any_of_variants(
+    pub fn try_lower_open_object_any_of_variants(
         &mut self,
         branches: &[Schema],
     ) -> ImportResult<Option<GrammarExpr>> {
@@ -655,7 +655,7 @@ impl<'a> Lowerer<'a> {
         Ok(false)
     }
 
-    pub(crate) fn try_lower_ref_string_path_object_any_of(
+    pub fn try_lower_ref_string_path_object_any_of(
         &mut self,
         _current_schema: &Schema,
         _branches: &[Schema],

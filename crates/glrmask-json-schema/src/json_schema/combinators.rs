@@ -22,7 +22,7 @@ fn discriminator_anyof_fastpath_disabled() -> bool {
 }
 
 impl<'a> Lowerer<'a> {
-    pub(crate) fn lower_any_of(
+    pub fn lower_any_of(
         &mut self,
         schema: &Schema,
         assertions: &SchemaAssertions,
@@ -228,7 +228,7 @@ impl<'a> Lowerer<'a> {
         Ok(Some(choice(alternatives)))
     }
 
-    pub(crate) fn lower_one_of(&mut self, assertions: &SchemaAssertions) -> ImportResult<GrammarExpr> {
+    pub fn lower_one_of(&mut self, assertions: &SchemaAssertions) -> ImportResult<GrammarExpr> {
         self.validate_mixed_ref_disjoint_family_one_of(assertions)?;
         let siblings = sibling_assertion_schema(assertions);
         let branches = assertions
@@ -638,7 +638,7 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    pub(crate) fn lower_all_of(&mut self, assertions: &SchemaAssertions) -> ImportResult<GrammarExpr> {
+    pub fn lower_all_of(&mut self, assertions: &SchemaAssertions) -> ImportResult<GrammarExpr> {
         if let Some(expr) = self.try_lower_single_ref_with_object_siblings(assertions)? {
             return Ok(expr);
         }
@@ -879,7 +879,7 @@ impl<'a> Lowerer<'a> {
         Ok(current)
     }
 
-    pub(crate) fn schema_transitively_refs_pointer(
+    pub fn schema_transitively_refs_pointer(
         &self,
         schema: &Schema,
         wanted: &str,
@@ -2829,7 +2829,7 @@ fn primitive_branch_types_overlap(left: SchemaType, right: SchemaType) -> bool {
         || matches!((left, right), (SchemaType::Integer, SchemaType::Number))
 }
 
-pub(crate) fn try_merge_all_of_objects(branches: &[Schema]) -> Option<ObjectSchema> {
+pub fn try_merge_all_of_objects(branches: &[Schema]) -> Option<ObjectSchema> {
     let mut objects = branches.iter().map(plain_object_schema).collect::<Option<Vec<_>>>()?;
     let mut merged = objects.remove(0).clone();
     for object in objects {
@@ -3355,7 +3355,7 @@ fn merge_array_bounds(left: &mut ArraySchema, right: &ArraySchema) {
 }
 
 
-pub(crate) 
+pub 
 fn closed_object_required_conflict(left: &ObjectSchema, right: &ObjectSchema) -> bool {
     let Some(left_allowed) = closed_object_allowed_properties(left) else {
         return false;
@@ -3377,7 +3377,7 @@ fn closed_object_allowed_properties(object: &ObjectSchema) -> Option<BTreeSet<St
     Some(object.properties.iter().map(|property| property.name.clone()).collect())
 }
 
-pub(crate) fn merge_two_objects(left: &ObjectSchema, right: &ObjectSchema) -> ObjectSchema {
+pub fn merge_two_objects(left: &ObjectSchema, right: &ObjectSchema) -> ObjectSchema {
     let mut merged = left.clone();
     merged.min_properties = merged.min_properties.max(right.min_properties);
     merged.max_properties = match (merged.max_properties, right.max_properties) {
@@ -3561,7 +3561,7 @@ fn merge_additional_properties(
     }
 }
 
-pub(crate) fn all_of_schema(left: Schema, right: Schema) -> Schema {
+pub fn all_of_schema(left: Schema, right: Schema) -> Schema {
     Schema::assertions(
         "<merged-allOf-property>",
         SchemaAssertions {

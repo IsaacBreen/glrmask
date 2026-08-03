@@ -32,7 +32,7 @@ fn encoded_json_key_regex(encoded: &str) -> String {
 }
 
 impl<'a> Lowerer<'a> {
-    pub(crate) fn property_name_matches_pattern_cached(
+    pub fn property_name_matches_pattern_cached(
         &self,
         pattern: &str,
         property_name: &str,
@@ -83,7 +83,7 @@ impl<'a> Lowerer<'a> {
         parts
     }
 
-    pub(crate) fn lower_string(&mut self, schema: &StringSchema) -> ImportResult<GrammarExpr> {
+    pub fn lower_string(&mut self, schema: &StringSchema) -> ImportResult<GrammarExpr> {
         let should_terminalize_length = schema.max_length.is_none_or(|max_length| {
             !self.should_split_bounded_string(schema.min_length, max_length)
         });
@@ -134,7 +134,7 @@ impl<'a> Lowerer<'a> {
         self.lower_string_expr(schema)
     }
 
-    pub(crate) fn lower_inline_bounded_array_string_item_expr(
+    pub fn lower_inline_bounded_array_string_item_expr(
         &mut self,
         schema: &super::ast::Schema,
     ) -> ImportResult<Option<(GrammarExpr, JsonTerminalPartitionClass)>> {
@@ -209,7 +209,7 @@ impl<'a> Lowerer<'a> {
     /// the ordinary string-item fast path: JSON Schema keywords such as
     /// `pattern` and `format` do not constrain non-string values when `type`
     /// is absent, so untyped items must keep their normal JSON-value branches.
-    pub(crate) fn lower_isolated_array_string_item_expr(
+    pub fn lower_isolated_array_string_item_expr(
         &mut self,
         schema: &super::ast::Schema,
     ) -> ImportResult<Option<(GrammarExpr, Option<usize>)>> {
@@ -1343,7 +1343,7 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    pub(crate) fn lower_literal_key_colon_with_prefix_and_string_schema(
+    pub fn lower_literal_key_colon_with_prefix_and_string_schema(
         &mut self,
         prefix: &[u8],
         key: &str,
@@ -1411,7 +1411,7 @@ impl<'a> Lowerer<'a> {
         )
     }
 
-    pub(crate) fn lower_string_literal(&mut self, text: &str) -> GrammarExpr {
+    pub fn lower_string_literal(&mut self, text: &str) -> GrammarExpr {
         let encoded = serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string());
         seq(self.quoted_literal_parts(
             encoded.as_bytes(),
@@ -1447,7 +1447,7 @@ impl<'a> Lowerer<'a> {
         parts
     }
 
-    pub(crate) fn lower_literal_key_colon(&mut self, key: &str) -> GrammarExpr {
+    pub fn lower_literal_key_colon(&mut self, key: &str) -> GrammarExpr {
         self.lower_literal_key_colon_with_prefix(b"", key)
     }
 
@@ -1485,7 +1485,7 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    pub(crate) fn lower_literal_key_colon_with_prefix(
+    pub fn lower_literal_key_colon_with_prefix(
         &mut self,
         prefix: &[u8],
         key: &str,
@@ -1495,7 +1495,7 @@ impl<'a> Lowerer<'a> {
         exact
     }
 
-    pub(crate) fn lower_literal_key_colon_with_prefix_and_suffix(
+    pub fn lower_literal_key_colon_with_prefix_and_suffix(
         &mut self,
         prefix: &[u8],
         key: &str,
@@ -1528,7 +1528,7 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    pub(crate) fn lower_literal_key_colon_with_prefix_and_json_string(
+    pub fn lower_literal_key_colon_with_prefix_and_json_string(
         &mut self,
         prefix: &[u8],
         key: &str,
@@ -1563,7 +1563,7 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    pub(crate) fn lower_literal_key_colon_with_prefix_and_literal_value(
+    pub fn lower_literal_key_colon_with_prefix_and_literal_value(
         &mut self,
         prefix: &[u8],
         key: &str,
@@ -1650,7 +1650,7 @@ impl<'a> Lowerer<'a> {
         Ok(alternatives)
     }
 
-    pub(crate) fn lower_pattern_key_colon_terminal(
+    pub fn lower_pattern_key_colon_terminal(
         &mut self,
         pattern: &str,
     ) -> ImportResult<GrammarExpr> {
@@ -1776,7 +1776,7 @@ impl<'a> Lowerer<'a> {
         Ok(Some(r(&name)))
     }
 
-    pub(crate) fn lower_pattern_key_colon_appearance(
+    pub fn lower_pattern_key_colon_appearance(
         &mut self,
         pattern: &str,
         fixed_keys: &BTreeSet<String>,
@@ -1811,7 +1811,7 @@ impl<'a> Lowerer<'a> {
         Ok(r(&name))
     }
 
-    pub(crate) fn lower_additional_key_colon(
+    pub fn lower_additional_key_colon(
         &mut self,
         fixed_keys: &BTreeSet<String>,
         local_patterns: &[String],
@@ -2274,7 +2274,7 @@ fn string_pattern_as_body_regex(pattern: &str, context: JsonStringContext) -> Im
     string_pattern_hir_as_body_regex(&hir, context)
 }
 
-pub(crate) fn preprocess_ascii_shorthand(pattern: &str) -> String {
+pub fn preprocess_ascii_shorthand(pattern: &str) -> String {
     let mut lowered = String::with_capacity(pattern.len());
     let mut chars = pattern.chars().peekable();
     let mut in_class = false;
@@ -3621,16 +3621,16 @@ fn prepend_literal_prefix_to_expr(prefix: Vec<u8>, expr: GrammarExpr) -> Grammar
     }
 }
 
-pub(crate) const GLRMASK_LLGUIDANCE_COMPAT_ENV: &str = "GLRMASK_LLGUIDANCE_COMPAT";
+pub const GLRMASK_LLGUIDANCE_COMPAT_ENV: &str = "GLRMASK_LLGUIDANCE_COMPAT";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum JsonStringCompatMode {
+pub enum JsonStringCompatMode {
     JsonSchema,
     LlGuidanceNative,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum JsonStringContext {
+pub enum JsonStringContext {
     Value,
     // Literal and pattern property key paths (llguidance json_dumps/json_quote behavior).
     KeyStrict,
@@ -3677,10 +3677,10 @@ fn initial_compat_mode() -> JsonStringCompatMode {
 }
 
 std::thread_local! {
-    pub(crate) static TEST_COMPAT_MODE: std::cell::Cell<JsonStringCompatMode> = std::cell::Cell::new(initial_compat_mode());
+    pub static TEST_COMPAT_MODE: std::cell::Cell<JsonStringCompatMode> = std::cell::Cell::new(initial_compat_mode());
 }
 
-pub(crate) fn json_string_compat_mode() -> JsonStringCompatMode {
+pub fn json_string_compat_mode() -> JsonStringCompatMode {
     TEST_COMPAT_MODE.with(|cell| cell.get())
 }
 
@@ -3849,11 +3849,11 @@ fn json_unicode_escape_regex_for_bmp_non_whitespace() -> String {
     }
 }
 
-pub(crate) fn json_string_body_char_regex() -> &'static str {
+pub fn json_string_body_char_regex() -> &'static str {
     json_string_body_char_regex_in_mode(json_string_compat_mode(), JsonStringContext::Value)
 }
 
-pub(crate) fn json_string_body_char_regex_in_mode(
+pub fn json_string_body_char_regex_in_mode(
     mode: JsonStringCompatMode,
     context: JsonStringContext,
 ) -> &'static str {
@@ -3881,7 +3881,7 @@ fn json_string_body_dot_regex() -> &'static str {
     json_string_body_dot_regex_in_mode(json_string_compat_mode(), JsonStringContext::Value)
 }
 
-pub(crate) fn json_string_body_dot_regex_in_mode(
+pub fn json_string_body_dot_regex_in_mode(
     mode: JsonStringCompatMode,
     context: JsonStringContext,
 ) -> &'static str {
@@ -3905,7 +3905,7 @@ fn is_safe_raw_json_string_char(ch: char) -> bool {
     ch.is_ascii() && !matches!(ch, '"' | '\\' | '\u{00}'..='\u{1f}' | '\u{7f}')
 }
 
-pub(crate) fn property_name_matches_pattern(pattern: &str, property_name: &str) -> ImportResult<bool> {
+pub fn property_name_matches_pattern(pattern: &str, property_name: &str) -> ImportResult<bool> {
     let ascii_pattern = preprocess_ascii_shorthand(pattern);
     Regex::new(&ascii_pattern)
         .map(|regex| regex.is_match(property_name))
@@ -3916,7 +3916,7 @@ fn is_regex_compile_limit_error(error: &SchemaImportError) -> bool {
     error.message().contains("Compiled regex exceeds size limit")
 }
 
-pub(crate) fn string_value_satisfies_schema(
+pub fn string_value_satisfies_schema(
     value: &serde_json::Value,
     schema: &StringSchema,
 ) -> ImportResult<bool> {

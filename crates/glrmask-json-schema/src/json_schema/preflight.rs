@@ -10,7 +10,6 @@ const DEFAULT_MAX_NODES: usize = 100_000;
 const ALLOW_LARGE_ENV: &str = "GLRMASK_JSON_SCHEMA_ALLOW_LARGE";
 const MAX_NODES_ENV: &str = "GLRMASK_JSON_SCHEMA_MAX_NODES";
 
-#[cfg(test)]
 std::thread_local! {
     static MAX_NODES_TEST_OVERRIDE: std::cell::RefCell<Option<String>> =
         const { std::cell::RefCell::new(None) };
@@ -18,13 +17,11 @@ std::thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
-#[cfg(test)]
-pub(crate) fn swap_max_nodes_test_override(value: Option<String>) -> Option<String> {
+pub fn swap_max_nodes_test_override(value: Option<String>) -> Option<String> {
     MAX_NODES_TEST_OVERRIDE.with(|override_value| override_value.replace(value))
 }
 
-#[cfg(test)]
-pub(crate) fn swap_allow_large_test_override(value: Option<bool>) -> Option<bool> {
+pub fn swap_allow_large_test_override(value: Option<bool>) -> Option<bool> {
     ALLOW_LARGE_TEST_OVERRIDE.with(|override_value| override_value.replace(value))
 }
 
@@ -40,12 +37,12 @@ struct SchemaSizeMetrics {
     all_of_branches: usize,
 }
 
-pub(crate) fn check_schema_preflight(schema: &Value) -> ImportResult<()> {
+pub fn check_schema_preflight(schema: &Value) -> ImportResult<()> {
     check_pattern_properties_disjointness(schema)?;
     check_schema_size(schema)
 }
 
-pub(crate) fn check_schema_size(schema: &Value) -> ImportResult<()> {
+pub fn check_schema_size(schema: &Value) -> ImportResult<()> {
     if env_flag_enabled(ALLOW_LARGE_ENV) {
         return Ok(());
     }
@@ -181,7 +178,6 @@ fn check_pattern_properties_object(value: &Value) -> ImportResult<()> {
 }
 
 fn max_nodes_limit() -> ImportResult<usize> {
-    #[cfg(test)]
     if let Some(raw) = MAX_NODES_TEST_OVERRIDE.with(|value| value.borrow().clone()) {
         return parse_max_nodes_limit(&raw);
     }
