@@ -207,7 +207,6 @@ fn parse_max_nodes_limit(raw: &str) -> ImportResult<usize> {
 }
 
 fn env_flag_enabled(key: &str) -> bool {
-    #[cfg(test)]
     if key == ALLOW_LARGE_ENV
         && let Some(value) = ALLOW_LARGE_TEST_OVERRIDE.with(std::cell::Cell::get)
     {

@@ -9,7 +9,7 @@ fn env_flag(name: &str) -> Option<bool> {
 /// not change ordinary static compilation unless the caller requests them.
 /// The disable flag wins so an operator always has an unambiguous rollback
 /// switch when testing the feature.
-pub(crate) fn commit_template_dfas_enabled() -> bool {
+pub fn commit_template_dfas_enabled() -> bool {
     if env_flag("GLRMASK_DISABLE_COMMIT_TEMPLATE_DFAS") == Some(true) {
         return false;
     }

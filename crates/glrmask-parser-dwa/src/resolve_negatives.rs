@@ -833,7 +833,7 @@ fn collect_non_empty_derived_epsilons(
     result
 }
 
-pub(crate) fn compute_cancellations_range(
+pub fn compute_cancellations_range(
     nwa: &NWA,
     range: std::ops::Range<u32>,
     allow_grouped: bool,
@@ -1006,7 +1006,7 @@ fn compute_cancellations_range_serial_inner(
     collect_non_empty_derived_epsilons(derived_epsilons)
 }
 
-pub(crate) fn apply_cancellations_range(
+pub fn apply_cancellations_range(
     nwa: &mut NWA,
     range: std::ops::Range<u32>,
     allow_grouped: bool,
@@ -1378,7 +1378,7 @@ fn apply_finality_fixpoint_acyclic_parallel_waves_chunked(
     }
 }
 
-pub(crate) fn apply_finality_fixpoint(nwa: &mut NWA) {
+pub fn apply_finality_fixpoint(nwa: &mut NWA) {
     let n = nwa.states().len();
     if n == 0 {
         return;
@@ -1558,7 +1558,7 @@ pub(crate) fn apply_finality_fixpoint(nwa: &mut NWA) {
     }
 }
 
-pub(crate) fn remove_negative_transitions(nwa: &mut NWA) {
+pub fn remove_negative_transitions(nwa: &mut NWA) {
     if rayon::current_num_threads() > 1 && nwa.states().len() >= 4_096 {
         nwa.states_mut()
             .par_iter_mut()
@@ -1720,7 +1720,7 @@ fn prune_terminal_default_targets(nwa: &mut NWA, terminal_states: &[bool]) {
     }
 }
 
-pub(crate) fn remove_redundant_default_transitions(nwa: &mut NWA) {
+pub fn remove_redundant_default_transitions(nwa: &mut NWA) {
     let classify = |state: &NWAState| {
         is_terminal_shape_candidate(state) && !state.transitions.contains_key(&DEFAULT_LABEL)
     };
@@ -1736,7 +1736,7 @@ pub(crate) fn remove_redundant_default_transitions(nwa: &mut NWA) {
     prune_terminal_default_targets(nwa, &terminal_states);
 }
 
-pub(crate) fn resolve_negative_codes_in_nwa(nwa: &mut NWA, allow_grouped_cancellation: bool) {
+pub fn resolve_negative_codes_in_nwa(nwa: &mut NWA, allow_grouped_cancellation: bool) {
     let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
         || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
     let cancellation_started_at = profile_enabled.then(std::time::Instant::now);

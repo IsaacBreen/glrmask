@@ -10,6 +10,7 @@ pub mod ds {
     pub use glrmask_weight as weight;
 }
 
+pub mod commit_templates;
 pub mod equiv_types;
 pub mod mapped_artifact;
 
@@ -19,3 +20,5 @@ pub mod compiler {
         pub use crate::mapped_artifact;
     }
 }
+
+pub use commit_templates::CommitTemplateDfas;

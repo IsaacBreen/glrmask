@@ -18,13 +18,17 @@ use crate::compiler::glr::table::{
 };
 use crate::grammar::flat::TerminalID;
 use crate::compiler::stages::equiv_types::InternalIdMap;
-use crate::compiler::stages::id_map_and_terminal_dwa::types::compile_profile_enabled;
 use crate::compiler::stages::resolve_negatives::{
     apply_finality_fixpoint, resolve_negative_codes_in_nwa,
 };
 use crate::compiler::stages::templates::Templates;
 use crate::ds::bitset::BitSet;
 use crate::ds::weight::{ScopedWeightOpCache, Weight};
+
+fn compile_profile_enabled() -> bool {
+    std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+}
 
 type TerminalBundle = BTreeMap<TerminalID, Weight>;
 type BundleSignature = Vec<(TerminalID, Weight)>;
@@ -628,7 +632,7 @@ fn immediate_acceptance_certificates(
         .collect()
 }
 
-pub(crate) fn try_build_immediate_parser_top_accept_parts(
+pub fn try_build_immediate_parser_top_accept_parts(
     terminal_automaton: &TerminalAutomaton,
     grammar: &AnalyzedGrammar,
     table: &GLRTable,
@@ -637,7 +641,7 @@ pub(crate) fn try_build_immediate_parser_top_accept_parts(
         .then(|| immediate_acceptance_certificate_parts(terminal_automaton, grammar, table))
 }
 
-pub(crate) fn try_build_immediate_terminal_completion_weights(
+pub fn try_build_immediate_terminal_completion_weights(
     terminal_automaton: &TerminalAutomaton,
     grammar: &AnalyzedGrammar,
     table: &GLRTable,
@@ -670,7 +674,7 @@ fn direct_regular_action_targets(action: &Action) -> Option<SmallVec<[u32; 4]>> 
 /// solving the weighted product of terminal-automaton states and parser-top
 /// states. All product edges are epsilon edges because the sole parser-stack
 /// symbol has already selected the product's parser-top coordinate.
-pub(crate) fn try_build_direct_regular_parser_top_accept_parts(
+pub fn try_build_direct_regular_parser_top_accept_parts(
     terminal_automaton: &TerminalAutomaton,
     grammar: &AnalyzedGrammar,
     table: &GLRTable,
@@ -1048,7 +1052,7 @@ fn terminal_automaton_is_immediate_completion(
     saw_edge
 }
 
-pub(crate) fn try_build_immediate_parser_dwa(
+pub fn try_build_immediate_parser_dwa(
     terminal_automaton: &TerminalAutomaton,
     grammar: &AnalyzedGrammar,
     table: &GLRTable,
@@ -3207,7 +3211,7 @@ fn build_parser_nwa_from_terminal_dwa(
     ))
 }
 
-pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
+pub fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     table: &GLRTable,
     grammar: &AnalyzedGrammar,
     terminal_dwa: &TerminalAutomaton,

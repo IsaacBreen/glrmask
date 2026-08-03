@@ -26,56 +26,56 @@ use crate::grammar::flat::TerminalID;
 use crate::runtime::CommitTemplateDfas;
 
 #[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct TemplateCompileProfile {
-    pub(crate) build_nfa_ms: f64,
-    pub(crate) determinize_ms: f64,
-    pub(crate) minimize_ms: f64,
-    pub(crate) fanout_ms: f64,
-    pub(crate) validation_ms: f64,
-    pub(crate) total_ms: f64,
-    pub(crate) wall_ms: f64,
-    pub(crate) num_terminals: usize,
-    pub(crate) unique_characterizations: usize,
-    pub(crate) compiled_characterizations: usize,
-    pub(crate) quotient_hits: usize,
-    pub(crate) max_characterization_multiplicity: usize,
-    pub(crate) minimize_skipped: bool,
-    pub(crate) total_nfa_states: usize,
-    pub(crate) max_nfa_states: usize,
-    pub(crate) total_nfa_transitions: usize,
-    pub(crate) max_nfa_transitions: usize,
-    pub(crate) total_dfa_states: usize,
-    pub(crate) max_dfa_states: usize,
-    pub(crate) total_dfa_transitions: usize,
-    pub(crate) max_dfa_transitions: usize,
-    pub(crate) total_premin_dfa_states: usize,
-    pub(crate) max_premin_dfa_states: usize,
-    pub(crate) total_premin_dfa_transitions: usize,
-    pub(crate) max_premin_dfa_transitions: usize,
+pub struct TemplateCompileProfile {
+    pub build_nfa_ms: f64,
+    pub determinize_ms: f64,
+    pub minimize_ms: f64,
+    pub fanout_ms: f64,
+    pub validation_ms: f64,
+    pub total_ms: f64,
+    pub wall_ms: f64,
+    pub num_terminals: usize,
+    pub unique_characterizations: usize,
+    pub compiled_characterizations: usize,
+    pub quotient_hits: usize,
+    pub max_characterization_multiplicity: usize,
+    pub minimize_skipped: bool,
+    pub total_nfa_states: usize,
+    pub max_nfa_states: usize,
+    pub total_nfa_transitions: usize,
+    pub max_nfa_transitions: usize,
+    pub total_dfa_states: usize,
+    pub max_dfa_states: usize,
+    pub total_dfa_transitions: usize,
+    pub max_dfa_transitions: usize,
+    pub total_premin_dfa_states: usize,
+    pub max_premin_dfa_states: usize,
+    pub total_premin_dfa_transitions: usize,
+    pub max_premin_dfa_transitions: usize,
 }
 
 impl TemplateCompileProfile {
-    pub(crate) fn avg_nfa_states(&self) -> f64 {
+    pub fn avg_nfa_states(&self) -> f64 {
         average(self.total_nfa_states, self.num_terminals)
     }
 
-    pub(crate) fn avg_nfa_transitions(&self) -> f64 {
+    pub fn avg_nfa_transitions(&self) -> f64 {
         average(self.total_nfa_transitions, self.num_terminals)
     }
 
-    pub(crate) fn avg_dfa_states(&self) -> f64 {
+    pub fn avg_dfa_states(&self) -> f64 {
         average(self.total_dfa_states, self.num_terminals)
     }
 
-    pub(crate) fn avg_dfa_transitions(&self) -> f64 {
+    pub fn avg_dfa_transitions(&self) -> f64 {
         average(self.total_dfa_transitions, self.num_terminals)
     }
 
-    pub(crate) fn avg_premin_dfa_states(&self) -> f64 {
+    pub fn avg_premin_dfa_states(&self) -> f64 {
         average(self.total_premin_dfa_states, self.num_terminals)
     }
 
-    pub(crate) fn avg_premin_dfa_transitions(&self) -> f64 {
+    pub fn avg_premin_dfa_transitions(&self) -> f64 {
         average(self.total_premin_dfa_transitions, self.num_terminals)
     }
 
@@ -428,7 +428,7 @@ fn specialize_template_dfa_defaults_for_commit_determinized(dfa: &UnweightedDfa)
     specialized
 }
 
-pub(crate) fn specialize_template_dfa_defaults_for_commit(
+pub fn specialize_template_dfa_defaults_for_commit(
     dfa: &UnweightedDfa,
 ) -> UnweightedDfa {
     let determinized = specialize_template_dfa_defaults_for_commit_determinized(dfa);
@@ -439,7 +439,7 @@ pub(crate) fn specialize_template_dfa_defaults_for_commit(
     }
 }
 
-pub(crate) fn specialize_template_dfa_defaults_for_commit_split_input(
+pub fn specialize_template_dfa_defaults_for_commit_split_input(
     dfa: &UnweightedDfa,
 ) -> UnweightedDfa {
     specialize_template_dfa_defaults_for_commit_determinized(dfa)
@@ -613,7 +613,7 @@ fn find_split_commit_language_mismatch(
     find_nfa_dfa_language_mismatch(&recombined, unsplit)
 }
 
-pub(crate) fn try_split_commit_template_dfas(
+pub fn try_split_commit_template_dfas(
     dfa: &UnweightedDfa,
 ) -> Option<CommitTemplateDfas> {
     let mut pop = UnweightedDfa::default();
@@ -818,7 +818,7 @@ impl Templates {
     /// sharing middle states by target set, instead of passing through generic
     /// stack-effect characterization, NFA construction, determinization and
     /// minimization.
-    pub(crate) fn from_direct_regular_table(
+    pub fn from_direct_regular_table(
         table: &GLRTable,
         num_terminals: u32,
     ) -> Option<Self> {
@@ -884,13 +884,13 @@ impl Templates {
         })
     }
 
-    pub(crate) fn from_characterizations(
+    pub fn from_characterizations(
         characterizations: &BTreeMap<TerminalID, TerminalCharacterization>,
     ) -> Self {
         Self::from_characterizations_profiled(characterizations).0
     }
 
-    pub(crate) fn from_characterizations_profiled(
+    pub fn from_characterizations_profiled(
         characterizations: &BTreeMap<TerminalID, TerminalCharacterization>,
     ) -> (Self, TemplateCompileProfile) {
         use rayon::prelude::*;

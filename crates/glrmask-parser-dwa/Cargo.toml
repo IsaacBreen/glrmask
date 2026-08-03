@@ -1,0 +1,21 @@
+[package]
+name = "glrmask-parser-dwa"
+version = "0.1.1"
+edition = "2024"
+description = "Terminal-automaton and GLR-table to parser-DWA compiler for GLRMask"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/IsaacBreen/glrmask"
+
+[dependencies]
+glrmask-artifact = { version = "=0.1.1", path = "../glrmask-artifact" }
+glrmask-finite-automata = { version = "=0.1.1", path = "../glrmask-finite-automata" }
+glrmask-glr = { version = "=0.1.1", path = "../glrmask-glr" }
+glrmask-grammar = { version = "=0.1.1", path = "../glrmask-grammar" }
+glrmask-lexer = { version = "=0.1.1", path = "../glrmask-lexer" }
+glrmask-vocab = { version = "=0.1.1", path = "../glrmask-vocab" }
+glrmask-weight = { version = "=0.1.1", path = "../glrmask-weight" }
+glrmask-weighted-automata = { version = "=0.1.1", path = "../glrmask-weighted-automata" }
+range-set-blaze = "0.3.0"
+rayon = "1"
+rustc-hash = "1"
+smallvec = { version = "1", features = ["serde"] }

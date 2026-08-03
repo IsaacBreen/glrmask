@@ -1,3 +1,4 @@
+use glrmask_artifact::CommitTemplateDfas;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use rayon::prelude::*;
@@ -1063,16 +1064,6 @@ impl Default for DynamicMaskVocab {
             mask_cache: Arc::new(Mutex::new(Vec::new())),
         }
     }
-}
-
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub(crate) struct CommitTemplateDfas {
-    pub(crate) pop: UnweightedDfa,
-    pub(crate) read: UnweightedDfa,
-    pub(crate) push: UnweightedDfa,
-    pub(crate) pop_to_read: Vec<Option<u32>>,
-    pub(crate) pop_to_push: Vec<Option<u32>>,
-    pub(crate) read_to_push: Vec<Option<u32>>,
 }
 
 #[derive(

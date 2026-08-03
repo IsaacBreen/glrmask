@@ -263,52 +263,52 @@ fn build_subset_segment_unions(group_weights: &[Weight]) -> Vec<Weight> {
 }
 
 #[derive(Clone, Debug, Default)]
-pub(crate) struct BundleBuildProfile {
-    pub(crate) input_terminals: usize,
-    pub(crate) nonempty_terminals: usize,
-    pub(crate) weight_groups: usize,
-    pub(crate) single_entry_weights: usize,
-    pub(crate) single_tsid_weights: usize,
-    pub(crate) total_weight_outer_ranges: usize,
-    pub(crate) singleton_groups: usize,
-    pub(crate) multi_terminal_groups: usize,
-    pub(crate) largest_weight_group: usize,
-    pub(crate) build_group_dfas_ms: f64,
-    pub(crate) union_groups_ms: f64,
-    pub(crate) slowest_group_terminals: usize,
-    pub(crate) slowest_group_dfa_states: usize,
-    pub(crate) slowest_group_dfa_transitions: usize,
-    pub(crate) slowest_group_ms: f64,
-    pub(crate) determinize_bundle_ms: f64,
-    pub(crate) determinize_pop_state_ms: f64,
-    pub(crate) determinize_alive_groups_ms: f64,
-    pub(crate) determinize_effective_weights_ms: f64,
-    pub(crate) determinize_final_weight_ms: f64,
-    pub(crate) determinize_collect_labels_ms: f64,
-    pub(crate) determinize_next_state_ms: f64,
-    pub(crate) determinize_edge_weight_ms: f64,
-    pub(crate) determinize_state_lookup_ms: f64,
-    pub(crate) determinize_add_transition_ms: f64,
-    pub(crate) determinize_states_visited: usize,
-    pub(crate) determinize_labels_processed: usize,
-    pub(crate) determinize_transitions_added: usize,
-    pub(crate) determinize_worklist_peak: usize,
-    pub(crate) determinize_cache_entries: usize,
-    pub(crate) determinize_edge_subset_total: usize,
-    pub(crate) determinize_edge_subset_max: usize,
-    pub(crate) determinize_edge_cache_hits: usize,
-    pub(crate) determinize_edge_cache_hit_subset_total: usize,
-    pub(crate) determinize_edge_cache_misses: usize,
-    pub(crate) determinize_edge_cache_miss_subset_total: usize,
-    pub(crate) minimize_ms: f64,
-    pub(crate) dwa_to_nwa_ms: f64,
-    pub(crate) result_dwa_states: usize,
-    pub(crate) result_dwa_transitions: usize,
-    pub(crate) result_nwa_states: usize,
-    pub(crate) result_nwa_transitions: usize,
-    pub(crate) total_ms: f64,
-    pub(crate) used_single_terminal_fast_path: bool,
-    pub(crate) minimize_skipped: bool,
+pub struct BundleBuildProfile {
+    pub input_terminals: usize,
+    pub nonempty_terminals: usize,
+    pub weight_groups: usize,
+    pub single_entry_weights: usize,
+    pub single_tsid_weights: usize,
+    pub total_weight_outer_ranges: usize,
+    pub singleton_groups: usize,
+    pub multi_terminal_groups: usize,
+    pub largest_weight_group: usize,
+    pub build_group_dfas_ms: f64,
+    pub union_groups_ms: f64,
+    pub slowest_group_terminals: usize,
+    pub slowest_group_dfa_states: usize,
+    pub slowest_group_dfa_transitions: usize,
+    pub slowest_group_ms: f64,
+    pub determinize_bundle_ms: f64,
+    pub determinize_pop_state_ms: f64,
+    pub determinize_alive_groups_ms: f64,
+    pub determinize_effective_weights_ms: f64,
+    pub determinize_final_weight_ms: f64,
+    pub determinize_collect_labels_ms: f64,
+    pub determinize_next_state_ms: f64,
+    pub determinize_edge_weight_ms: f64,
+    pub determinize_state_lookup_ms: f64,
+    pub determinize_add_transition_ms: f64,
+    pub determinize_states_visited: usize,
+    pub determinize_labels_processed: usize,
+    pub determinize_transitions_added: usize,
+    pub determinize_worklist_peak: usize,
+    pub determinize_cache_entries: usize,
+    pub determinize_edge_subset_total: usize,
+    pub determinize_edge_subset_max: usize,
+    pub determinize_edge_cache_hits: usize,
+    pub determinize_edge_cache_hit_subset_total: usize,
+    pub determinize_edge_cache_misses: usize,
+    pub determinize_edge_cache_miss_subset_total: usize,
+    pub minimize_ms: f64,
+    pub dwa_to_nwa_ms: f64,
+    pub result_dwa_states: usize,
+    pub result_dwa_transitions: usize,
+    pub result_nwa_states: usize,
+    pub result_nwa_transitions: usize,
+    pub total_ms: f64,
+    pub used_single_terminal_fast_path: bool,
+    pub minimize_skipped: bool,
 }
 
 fn elapsed_ms(started_at: Instant) -> f64 {
@@ -433,7 +433,7 @@ impl Templates {
         group_dfas
     }
 
-    pub(crate) fn build_bundle_profiled(
+    pub fn build_bundle_profiled(
         &self,
         terminal_weights: &BTreeMap<TerminalID, Weight>,
     ) -> (NWA, BundleBuildProfile) {
@@ -530,7 +530,7 @@ impl Templates {
     /// because parser-DWA composition reuses these fragments directly and the
     /// minimization cost dominates compile time on large schemas. Set
     /// `GLRMASK_MINIMIZE_TEMPLATE_BUNDLES=1` to restore the old behavior.
-    pub(crate) fn build_bundle(
+    pub fn build_bundle(
         &self,
         terminal_weights: &BTreeMap<TerminalID, Weight>,
     ) -> NWA {

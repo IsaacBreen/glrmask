@@ -83,17 +83,17 @@ pub struct TerminalCharacterization {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct TerminalCharacterizationProfile {
-    pub(crate) terminals: usize,
-    pub(crate) unique_action_signatures: usize,
-    pub(crate) max_action_signature_multiplicity: usize,
-    pub(crate) quotient_hits: usize,
-    pub(crate) signature_ms: f64,
-    pub(crate) characterize_ms: f64,
-    pub(crate) fanout_ms: f64,
-    pub(crate) validation_ms: f64,
-    pub(crate) total_ms: f64,
-    pub(crate) quotient_disabled: bool,
+pub struct TerminalCharacterizationProfile {
+    pub terminals: usize,
+    pub unique_action_signatures: usize,
+    pub max_action_signature_multiplicity: usize,
+    pub quotient_hits: usize,
+    pub signature_ms: f64,
+    pub characterize_ms: f64,
+    pub fanout_ms: f64,
+    pub validation_ms: f64,
+    pub total_ms: f64,
+    pub quotient_disabled: bool,
 }
 
 type DenseTerminalActionSignature = Vec<(u32, Option<Action>, bool)>;
@@ -982,7 +982,7 @@ fn characterize_terminal(
 }
 
 
-pub(crate) fn characterize_terminals(
+pub fn characterize_terminals(
     table: &GLRTable,
     grammar: &AnalyzedGrammar,
 ) -> BTreeMap<TerminalID, TerminalCharacterization> {
@@ -1041,7 +1041,7 @@ fn validate_characterization_quotient(
     }
 }
 
-pub(crate) fn characterize_terminals_profiled(
+pub fn characterize_terminals_profiled(
     table: &GLRTable,
     grammar: &AnalyzedGrammar,
 ) -> (BTreeMap<TerminalID, TerminalCharacterization>, TerminalCharacterizationProfile) {

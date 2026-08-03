@@ -2252,7 +2252,7 @@ fn build_and_merge_parser_dwa_families(
             )
         } else {
             let mapped_dwa =
-                crate::compiler::stages::id_map_and_terminal_dwa::merge::merge_mapped_parser_dwas(
+                glrmask_parser_dwa::merge::merge_mapped_parser_dwas(
                     parser_dwas,
                     tokenizer.num_states() as usize,
                     max_token_id,
@@ -2306,7 +2306,7 @@ fn build_and_merge_parser_dwa_families(
     }
 
     let (mapped_dwa, combined) =
-        crate::compiler::stages::id_map_and_terminal_dwa::merge::merge_mapped_parser_dwas_with_top_accept(
+        glrmask_parser_dwa::merge::merge_mapped_parser_dwas_with_top_accept(
             parser_dwas,
             tokenizer.num_states() as usize,
             max_token_id,
