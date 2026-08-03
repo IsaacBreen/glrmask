@@ -2662,7 +2662,7 @@ impl<'a> Lowerer<'a> {
 ///
 /// The cache is shared across all inputs, so repeated helper references remain
 /// `Arc`-shared while the caller compiles a larger explicit graph.
-pub(crate) fn resolve_terminal_subexpressions(
+pub fn resolve_terminal_subexpressions(
     grammar: &NamedGrammar,
     exprs: &[GrammarExpr],
 ) -> Result<Vec<Expr>, GlrMaskError> {
@@ -2690,7 +2690,7 @@ pub(crate) fn resolve_terminal_subexpressions(
 /// Resolve every externally emitting named terminal to the exact lexer-level
 /// expression used by [`lower`]. Equal values here are precisely the terminal
 /// expressions that `register_terminal_expr` deduplicates to one `TerminalID`.
-pub(crate) fn resolved_named_terminal_exprs(
+pub fn resolved_named_terminal_exprs(
     grammar: &NamedGrammar,
 ) -> Result<BTreeMap<String, Expr>, GlrMaskError> {
     let terminal_bodies = grammar
@@ -3119,7 +3119,7 @@ pub fn expr_to_grammar_expr(expr: &Expr) -> GrammarExpr {
 /// Encode a [`U8Set`] as a character-class definition string (without the surrounding `[...]`).
 ///
 /// Uses range notation where possible. Always produces a non-negated form.
-pub(crate) fn u8set_to_class_def(set: &U8Set) -> String {
+pub fn u8set_to_class_def(set: &U8Set) -> String {
     let mut out = String::new();
     let bytes: Vec<u8> = set.iter().collect();
     let mut i = 0usize;

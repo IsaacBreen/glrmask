@@ -1125,7 +1125,7 @@ pub fn parse_lark(input: &str) -> Result<GrammarDef, GlrMaskError> {
     lower(&factored)
 }
 
-pub(crate) fn parse_lark_to_named_uncompressed(
+pub fn parse_lark_to_named_uncompressed(
     input: &str,
 ) -> Result<NamedGrammar, GlrMaskError> {
     let mut lexer = Lexer::new(input);

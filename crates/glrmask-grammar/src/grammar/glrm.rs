@@ -1637,43 +1637,6 @@ accept 1;
     }
 
     #[test]
-    fn lexer_groups_round_trip_and_control_tokenizer_partitions() {
-        let grammar = from_glrm(
-            r#"
-start s;
-lexer group words ::= A, B;
-t A ::= "a";
-t B ::= "ab";
-t C ::= "z";
-nt s ::= A | B | C;
-"#,
-        )
-        .unwrap();
-        assert_eq!(grammar.lexer_partitions.get("A").map(String::as_str), Some("words"));
-        assert_eq!(grammar.lexer_partitions.get("B").map(String::as_str), Some("words"));
-        assert!(!grammar.lexer_partitions.contains_key("C"));
-
-        let dumped = to_glrm(&grammar);
-        assert!(dumped.contains("lexer group words ::= A, B;"), "{dumped}");
-        let reparsed = from_glrm(&dumped).unwrap();
-        assert_eq!(reparsed.lexer_partitions, grammar.lexer_partitions);
-
-        let lowered = lower(&grammar).unwrap();
-        assert_eq!(lowered.lexer_partitions.len(), 2);
-        let tokenizer = crate::compiler::pipeline::build_tokenizer_with_partition_options(
-            &lowered,
-            false,
-            false,
-        );
-        assert!(tokenizer.has_epsilon_transitions());
-        assert_eq!(
-            tokenizer.initial_epsilon_branch_count(),
-            2,
-            "A/B should share one component while unspecified C is isolated in stress mode",
-        );
-    }
-
-    #[test]
     fn lexer_groups_accept_anonymous_literals_and_a_catch_all() {
         let grammar = from_glrm(
             r#"

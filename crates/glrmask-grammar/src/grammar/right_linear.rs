@@ -549,7 +549,7 @@ fn compress_right_linear_grammar_impl(
     true
 }
 
-pub(crate) fn compress_right_linear_grammar_unchecked(
+pub fn compress_right_linear_grammar_unchecked(
     grammar: &mut NamedGrammar,
     min_parser_rules: usize,
 ) -> bool {
@@ -597,25 +597,6 @@ mod tests {
             grammar.rules.iter().find(|rule| !rule.is_terminal).unwrap().expr,
             GrammarExpr::ExprNFA(_)
         ));
-    }
-
-    #[test]
-    fn direct_regular_metadata_survives_compile_preparation() {
-        let mut source = String::from("start: s0\n");
-        for index in 0..40 {
-            source.push_str(&format!("s{index}: A s{} | B\n", index + 1));
-        }
-        source.push_str("s40: B\nA: /a/\nB: /b/\n");
-
-        let mut named = parse_lark_to_named_uncompressed(&source).unwrap();
-        assert!(compress_large_right_linear_grammar(&mut named));
-        let factored = crate::grammar::factoring::factor_named_grammar(named);
-        let lowered = crate::grammar::ast::lower(&factored).unwrap();
-        assert!(lowered.direct_regular_automaton.is_some(), "AST lower lost direct regular metadata");
-        let prepared = crate::compiler::grammar::transforms::prepare_grammar_transforms_only(lowered);
-        assert!(prepared.direct_regular_automaton.is_some(), "grammar transforms lost direct regular metadata");
-        let analyzed = crate::compiler::glr::analysis::AnalyzedGrammar::from_grammar_def(&prepared);
-        assert!(analyzed.direct_regular_automaton.is_some(), "analysis lost direct regular metadata");
     }
 
     #[test]

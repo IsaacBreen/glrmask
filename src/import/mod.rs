@@ -1,7 +1,7 @@
 pub use crate::grammar::ast as ast;
-pub mod ebnf;
+pub use glrmask_grammar::import::ebnf;
 pub mod json_schema;
-pub mod lark;
+pub use glrmask_grammar::import::lark;
 pub mod numeric_range;
 
 use std::collections::BTreeSet;
@@ -19,6 +19,18 @@ use crate::grammar::flat::GrammarDef;
 use crate::compiler::glr::table::GlrTableConstruction;
 use crate::runtime::Constraint;
 use crate::DynamicConstraint;
+
+fn parse_ebnf_to_named(source: &str) -> crate::Result<ast::NamedGrammar> {
+    Ok(ebnf::parse_ebnf_to_named(source)?)
+}
+
+fn parse_lark_to_named(source: &str) -> crate::Result<ast::NamedGrammar> {
+    Ok(lark::parse_lark_to_named(source)?)
+}
+
+fn parse_glrm_to_named(source: &str) -> crate::Result<ast::NamedGrammar> {
+    Ok(crate::grammar::glrm::from_glrm(source)?)
+}
 
 type GrammarParser = fn(&str) -> crate::Result<GrammarDef>;
 type NamedGrammarParser = fn(&str) -> crate::Result<ast::NamedGrammar>;
@@ -147,7 +159,7 @@ fn lower_factored_named_grammar(
     let grammar = ast::lower(&factored);
     emit_import_phase_end("ast_lower", ast_lower_started_at);
     emit_import_phase_end("lower_factored_named_grammar", lower_started_at);
-    grammar
+    Ok(grammar?)
 }
 
 fn compile_from_source(
@@ -245,7 +257,7 @@ impl Constraint {
                 vocab,
                 "ebnf",
                 GlrTableConstruction::ExperimentalCoreMerged,
-                ebnf::parse_ebnf_to_named,
+                parse_ebnf_to_named,
                 None,
                 end_token_ids,
             )
@@ -269,7 +281,7 @@ impl Constraint {
                 vocab,
                 "lark",
                 GlrTableConstruction::ExperimentalCoreMerged,
-                lark::parse_lark_to_named,
+                parse_lark_to_named,
                 None,
                 end_token_ids,
             )
@@ -319,7 +331,7 @@ impl Constraint {
                 vocab,
                 "glrm",
                 GlrTableConstruction::ExperimentalCoreMerged,
-                crate::grammar::glrm::from_glrm,
+                parse_glrm_to_named,
                 None,
                 end_token_ids,
             )
@@ -344,7 +356,7 @@ impl DynamicConstraint {
                 ebnf,
                 vocab,
                 GlrTableConstruction::ExperimentalCoreMerged,
-                ebnf::parse_ebnf_to_named,
+                parse_ebnf_to_named,
                 None,
                 end_token_ids,
             )
@@ -367,7 +379,7 @@ impl DynamicConstraint {
                 lark,
                 vocab,
                 GlrTableConstruction::ExperimentalCoreMerged,
-                lark::parse_lark_to_named,
+                parse_lark_to_named,
                 None,
                 end_token_ids,
             )
@@ -413,7 +425,7 @@ impl DynamicConstraint {
                 glrm,
                 vocab,
                 GlrTableConstruction::ExperimentalCoreMerged,
-                crate::grammar::glrm::from_glrm,
+                parse_glrm_to_named,
                 None,
                 end_token_ids,
             )

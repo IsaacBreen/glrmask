@@ -43,6 +43,14 @@ pub type GlrMaskError = Error;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+impl From<glrmask_grammar::Error> for Error {
+    fn from(error: glrmask_grammar::Error) -> Self {
+        match error {
+            glrmask_grammar::Error::GrammarParse(message) => Self::GrammarParse(message),
+        }
+    }
+}
+
 impl From<glrmask_weighted_automata::Error> for Error {
     fn from(error: glrmask_weighted_automata::Error) -> Self {
         match error {

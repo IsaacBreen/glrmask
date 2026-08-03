@@ -26,11 +26,11 @@ pub struct ExprNFA {
     /// Preserve this automaton as a nondeterministic left-linear grammar rather
     /// than determinizing its label graph during AST lowering. This is
     /// performance metadata and does not affect expression identity.
-    pub(crate) prefer_direct_nfa_emission: bool,
+    pub prefer_direct_nfa_emission: bool,
     /// The exact DFA produced by the first minimization, when available.
     /// This is performance metadata only: equality and hashing deliberately
     /// ignore it, and any graph or symbol rewrite must clear it.
-    pub(crate) canonical_dfa: Option<DFA>,
+    pub canonical_dfa: Option<DFA>,
 }
 
 impl PartialEq for ExprNFA {
@@ -86,7 +86,7 @@ impl ExprNFA {
         }
     }
 
-    pub(crate) fn with_direct_nfa_emission(mut self) -> Self {
+    pub fn with_direct_nfa_emission(mut self) -> Self {
         self.prefer_direct_nfa_emission = true;
         self
     }

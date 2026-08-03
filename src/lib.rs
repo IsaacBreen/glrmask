@@ -60,7 +60,7 @@ pub(crate) mod automata;
 pub(crate) mod compiler;
 pub(crate) mod ds;
 mod error;
-pub(crate) mod grammar;
+pub(crate) use glrmask_grammar::grammar;
 pub(crate) mod import;
 pub(crate) mod runtime;
 #[path = "runtime/dynamic_constraint.rs"]
@@ -106,6 +106,9 @@ pub fn compiler_cache_stats(vocab: Option<&Vocab>) -> CompilerCacheStats {
         vocab_artifacts: vocab.map_or(0, Vocab::compiler_cache_entry_count),
     }
 }
+
+#[cfg(test)]
+mod grammar_cross_tests;
 
 pub(crate) use error::{GlrMaskError, Result};
 
