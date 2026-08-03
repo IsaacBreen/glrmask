@@ -308,7 +308,7 @@ fn max_repeat_translation_over_vocab_suffixes(
     }
 
     vocab
-        .entries
+        .entries_map()
         .values()
         .collect::<Vec<_>>()
         .par_iter()

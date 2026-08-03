@@ -6,9 +6,13 @@ description = "Mapped compiled-artifact and tokenizer-ID representations for GLR
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/IsaacBreen/glrmask"
 
+[features]
+default = []
+internal-api = []
+
 [dependencies]
 glrmask-finite-automata = { version = "=0.1.1", path = "../glrmask-finite-automata" }
-glrmask-weight = { version = "=0.1.1", path = "../glrmask-weight" }
+glrmask-weight = { version = "=0.1.1", path = "../glrmask-weight", features = ["internal-api"] }
 glrmask-weighted-automata = { version = "=0.1.1", path = "../glrmask-weighted-automata" }
 range-set-blaze = "0.3.0"
 rayon = "1"

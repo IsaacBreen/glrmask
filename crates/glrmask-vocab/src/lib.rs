@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 /// sparse; masks are indexed by the original model token IDs.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Vocab {
-    pub entries: Arc<BTreeMap<u32, Vec<u8>>>,
+    entries: Arc<BTreeMap<u32, Vec<u8>>>,
     #[serde(skip)]
     compiler_cache: VocabCompilerCache,
     #[serde(skip)]
@@ -31,13 +31,19 @@ struct VocabRelevantBytes {
 
 impl VocabDerivedArtifact for VocabRelevantBytes {}
 
-/// Marker for artifacts that are pure functions of a `Vocab`'s token bytes.
-///
-/// Do not implement this for grammar-, tokenizer-, or constraint-specific
-/// artifacts. `Vocab` instances can be reused across many grammar compiles, so
-/// this cache must only contain data that remains valid for every grammar using
-/// the same token bytes.
-pub trait VocabDerivedArtifact: Any + Send + Sync {}
+mod derived_artifact {
+    use std::any::Any;
+
+    /// Marker for artifacts that are pure functions of a `Vocab`'s token bytes.
+    ///
+    /// Do not implement this for grammar-, tokenizer-, or constraint-specific
+    /// artifacts. `Vocab` instances can be reused across many grammar compiles,
+    /// so this cache must only contain data that remains valid for every grammar
+    /// using the same token bytes.
+    pub trait VocabDerivedArtifact: Any + Send + Sync {}
+}
+
+use derived_artifact::VocabDerivedArtifact;
 
 impl fmt::Debug for VocabCompilerCache {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -102,7 +108,7 @@ impl Vocab {
 
     /// Sorted byte alphabet observed anywhere in the vocabulary.
     pub fn relevant_bytes(&self) -> Arc<[u8]> {
-        if let Some(cached) = self.vocab_derived_cache_get::<VocabRelevantBytes>() {
+        if let Some(cached) = self.vocab_derived_cache_get_internal::<VocabRelevantBytes>() {
             return Arc::clone(&cached.bytes);
         }
         let mut observed = [false; 256];
@@ -118,7 +124,7 @@ impl Vocab {
                 .filter_map(|(byte, &present)| present.then_some(byte as u8))
                 .collect::<Vec<_>>(),
         );
-        self.vocab_derived_cache_set(Arc::new(VocabRelevantBytes {
+        self.vocab_derived_cache_set_internal(Arc::new(VocabRelevantBytes {
             bytes: Arc::clone(&bytes),
         }));
         bytes
@@ -141,7 +147,7 @@ impl Vocab {
             .map_or(0, |(&token_id, _)| token_id)
     }
 
-    pub fn vocab_derived_cache_get<T: VocabDerivedArtifact>(&self) -> Option<Arc<T>> {
+    fn vocab_derived_cache_get_internal<T: VocabDerivedArtifact>(&self) -> Option<Arc<T>> {
         self.compiler_cache
             .artifacts
             .lock()
@@ -151,13 +157,50 @@ impl Vocab {
             .and_then(|artifact| artifact.downcast::<T>().ok())
     }
 
-    pub fn vocab_derived_cache_set<T: VocabDerivedArtifact>(&self, artifact: Arc<T>) {
+    fn vocab_derived_cache_set_internal<T: VocabDerivedArtifact>(&self, artifact: Arc<T>) {
         let erased: Arc<dyn Any + Send + Sync> = artifact;
         if let Ok(mut artifacts) = self.compiler_cache.artifacts.lock() {
             artifacts.entry(TypeId::of::<T>()).or_insert(erased);
         }
     }
 
+    /// Return the bytes associated with one token ID.
+    pub fn get(&self, token_id: u32) -> Option<&[u8]> {
+        self.entries.get(&token_id).map(Vec::as_slice)
+    }
+
+    /// Iterate over token IDs and their exact byte sequences in ID order.
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = (u32, &[u8])> {
+        self.entries
+            .iter()
+            .map(|(&token_id, bytes)| (token_id, bytes.as_slice()))
+    }
+
+    #[cfg(feature = "internal-api")]
+    #[doc(hidden)]
+    pub fn entries_map(&self) -> &BTreeMap<u32, Vec<u8>> {
+        &self.entries
+    }
+
+    #[cfg(feature = "internal-api")]
+    #[doc(hidden)]
+    pub fn entries_arc(&self) -> Arc<BTreeMap<u32, Vec<u8>>> {
+        Arc::clone(&self.entries)
+    }
+
+    #[cfg(feature = "internal-api")]
+    #[doc(hidden)]
+    pub fn vocab_derived_cache_get<T: __private::VocabDerivedArtifact>(&self) -> Option<Arc<T>> {
+        self.vocab_derived_cache_get_internal::<T>()
+    }
+
+    #[cfg(feature = "internal-api")]
+    #[doc(hidden)]
+    pub fn vocab_derived_cache_set<T: __private::VocabDerivedArtifact>(&self, artifact: Arc<T>) {
+        self.vocab_derived_cache_set_internal(artifact);
+    }
+
+    #[cfg(feature = "internal-api")]
     #[doc(hidden)]
     pub fn compiler_cache_entry_count(&self) -> usize {
         self.compiler_cache
@@ -168,4 +211,18 @@ impl Vocab {
     }
 }
 
-pub mod vocab_prefix_tree;
+pub(crate) mod vocab_prefix_tree;
+
+/// Implementation details shared by the GLRMask workspace.
+///
+/// This module is deliberately feature-gated and is not a stable API.
+#[cfg(feature = "internal-api")]
+#[doc(hidden)]
+pub mod __private {
+    pub use super::derived_artifact::VocabDerivedArtifact;
+    pub use super::Vocab;
+
+    pub mod vocab_prefix_tree {
+        pub use super::super::vocab_prefix_tree::*;
+    }
+}

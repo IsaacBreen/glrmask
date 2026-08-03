@@ -290,7 +290,7 @@ impl GuardedFinalWeight {
     fn is_guarded_by(&self, edge_weight: &Weight) -> bool {
         self.subset_of
             .as_ref()
-            .is_some_and(|guard| Arc::ptr_eq(&guard.0, &edge_weight.0))
+            .is_some_and(|guard| guard.storage_ptr_eq(edge_weight))
     }
 
     fn intersection_with_edge(&self, edge_weight: &Weight) -> Option<Self> {
@@ -364,7 +364,7 @@ fn merge_guarded_final_weight(
                     .subset_of
                     .as_ref()
                     .zip(add.subset_of.as_ref())
-                    .is_some_and(|(left, right)| Arc::ptr_eq(&left.0, &right.0))
+                    .is_some_and(|(left, right)| left.storage_ptr_eq(right))
                 {
                     existing.subset_of.clone()
                 } else {
@@ -397,7 +397,7 @@ fn union_guarded_pending(
                     entry
                         .subset_of
                         .as_ref()
-                        .is_some_and(|guard| Arc::ptr_eq(&first_guard.0, &guard.0))
+                        .is_some_and(|guard| first_guard.storage_ptr_eq(guard))
                 })
             });
             let weight = weight_ops.union_all(pending.iter().map(|entry| &entry.weight));

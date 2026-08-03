@@ -437,7 +437,6 @@ dependencies = [
  "derivre",
  "glrmask",
  "glrmask-artifact",
- "glrmask-dwa-merge",
  "glrmask-finite-automata",
  "glrmask-glr",
  "glrmask-grammar",

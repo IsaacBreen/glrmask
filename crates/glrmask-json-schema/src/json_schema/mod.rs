@@ -1,15 +1,15 @@
-pub mod array;
-pub mod ast;
-pub mod combinators;
-pub mod config;
-pub mod error;
-pub mod load;
-pub mod lower;
-pub mod number;
-pub mod object;
-pub mod pattern_splitting;
-pub mod preflight;
-pub mod string;
+pub(crate) mod array;
+pub(crate) mod ast;
+pub(crate) mod combinators;
+pub(crate) mod config;
+pub(crate) mod error;
+pub(crate) mod load;
+pub(crate) mod lower;
+pub(crate) mod number;
+pub(crate) mod object;
+pub(crate) mod pattern_splitting;
+pub(crate) mod preflight;
+pub(crate) mod string;
 
 
 use std::borrow::Cow;
@@ -286,8 +286,8 @@ mod lexer_partition_policy_tests {
 ///
 /// The implementation intentionally has two phases:
 ///
-/// 1. [`load::load_document`] parses serde_json data into a typed schema AST.
-/// 2. [`lower_document`] lowers that schema AST into `GrammarExpr` rules.
+/// 1. `load::load_document` parses serde_json data into a typed schema AST.
+/// 2. `lower_document` lowers that schema AST into `GrammarExpr` rules.
 ///
 /// Unsupported schema keywords are rejected while loading so the lowering phase
 /// is not forced to carry partially-understood JSON values.

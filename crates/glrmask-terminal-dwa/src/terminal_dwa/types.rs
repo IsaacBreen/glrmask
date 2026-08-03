@@ -77,7 +77,7 @@ pub struct TerminalDwaBuildProfile {
     pub trie_self_loop_cache_misses: u64,
 }
 
-pub use glrmask_dwa_merge::{LocalIdMapTerminalDwa, TerminalDwaPhaseProfile};
+pub use glrmask_dwa_merge::__private::{LocalIdMapTerminalDwa, TerminalDwaPhaseProfile};
 
 /// The independently-built terminal-DWA pieces produced by one vocabulary
 /// partition.  The third slot is the cheap L1 construction over tokens split

@@ -180,7 +180,7 @@ fn token_ranges_after_perm(weights: &[Weight], token_perm: &[u32]) -> usize {
         if weight.is_full() || weight.is_empty() {
             continue;
         }
-        for (_tsid_range, token_set) in weight.0.range_values() {
+        for (_tsid_range, token_set) in weight.raw_range_values() {
             let ptr = Arc::as_ptr(token_set) as usize;
             if !seen_ptrs.insert(ptr) {
                 continue;
@@ -211,7 +211,7 @@ fn sketch_layout_from_mapped_weight_token_sets(
         if weight.is_full() || weight.is_empty() {
             continue;
         }
-        for (_tsid_range, token_set) in weight.0.range_values() {
+        for (_tsid_range, token_set) in weight.raw_range_values() {
             let ptr = Arc::as_ptr(token_set) as usize;
             if !seen_ptrs.insert(ptr) {
                 continue;
@@ -259,7 +259,7 @@ fn exact_profile_layout_from_mapped_weight_token_sets(
         if weight.is_full() || weight.is_empty() {
             continue;
         }
-        for (_tsid_range, token_set) in weight.0.range_values() {
+        for (_tsid_range, token_set) in weight.raw_range_values() {
             let ptr = Arc::as_ptr(token_set) as usize;
             if !seen_ptrs.insert(ptr) {
                 continue;
@@ -335,7 +335,7 @@ fn exact_profile_layout_from_tsid_equal_values(weights: &[Weight], num_groups: u
         }
 
         let mut contexts_by_token_set = HashMap::<Vec<(u32, u32)>, u32>::new();
-        for (tsid_range, token_set) in weight.0.range_values() {
+        for (tsid_range, token_set) in weight.raw_range_values() {
             let token_set_context = *contexts_by_token_set
                 .entry(rangeset_key(token_set))
                 .or_insert_with(|| {
@@ -368,7 +368,7 @@ fn sketch_layout_from_tsid_equal_values(weights: &[Weight], num_groups: usize) -
         }
 
         let mut contexts_by_token_set = HashMap::<Vec<(u32, u32)>, u64>::new();
-        for (tsid_range, token_set) in weight.0.range_values() {
+        for (tsid_range, token_set) in weight.raw_range_values() {
             let token_set_context = *contexts_by_token_set
                 .entry(rangeset_key(token_set))
                 .or_insert_with(|| {

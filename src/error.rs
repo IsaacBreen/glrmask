@@ -1,7 +1,7 @@
 use thiserror::Error as ThisError;
 
 pub(crate) fn catch_internal_invariant<T>(f: impl FnOnce() -> T) -> Result<T> {
-    glrmask_invariant::catch_internal_invariant_message(f).map_err(Error::InternalInvariant)
+    glrmask_invariant::__private::catch_internal_invariant_message(f).map_err(Error::InternalInvariant)
 }
 
 #[derive(ThisError, Debug)]
@@ -47,7 +47,7 @@ mod tests {
     fn internal_invariant_crossing_rayon_is_returned_as_a_normal_error() {
         let error = catch_internal_invariant(|| {
             let _: ((), usize) = rayon::join(
-                || glrmask_invariant::fail_internal_invariant("analysis coordinate escaped its domain"),
+                || glrmask_invariant::__private::fail_internal_invariant("analysis coordinate escaped its domain"),
                 || 1,
             );
         })

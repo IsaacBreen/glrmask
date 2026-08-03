@@ -1108,7 +1108,7 @@ fn determinize_impl_with_options(
 
         let max_weight_dim = dwa.states().iter()
             .filter_map(|s| s.final_weight.as_ref())
-            .map(|w| w.0.ranges_len())
+            .map(Weight::num_ranges)
             .max()
             .unwrap_or(0);
         let mut final_pairs = FxHashSet::default();
@@ -1198,7 +1198,7 @@ fn determinize_impl_with_options(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::automata::weighted_u32::equivalence::find_difference;
+    use crate::weighted_u32::equivalence::find_difference;
     use range_set_blaze::RangeSetBlaze;
 
     fn tokens(values: impl IntoIterator<Item = u32>) -> Weight {

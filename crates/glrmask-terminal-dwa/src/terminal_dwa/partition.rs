@@ -560,9 +560,9 @@ pub fn build_partition_id_map_and_terminal_dwa(
                                 eprintln!(
                                     "[glrmask/dump][l2p_boundary_vocab] partition={} count={}",
                                     partition_label,
-                                    boundary_vocab.entries.len(),
+                                    boundary_vocab.entries_map().len(),
                                 );
-                                for (&token_id, bytes) in boundary_vocab.entries.iter() {
+                                for (&token_id, bytes) in boundary_vocab.entries_map().iter() {
                                     eprintln!(
                                         "[glrmask/dump][l2p_boundary_vocab] partition={} token_id={} bytes={:?}",
                                         partition_label,
@@ -735,7 +735,7 @@ pub fn build_partition_id_map_and_terminal_dwa(
                     eprintln!(
                         "[glrmask/profile][l2p_vocab_split] partition={} total_tokens={} adjacent_tokens={} boundary_tokens={} single_tokens={} irrelevant_tokens={} boundary_ms={:.3} single_ms={:.3}",
                         partition_label,
-                        vocab.entries.len(),
+                        vocab.entries_map().len(),
                         split.adjacent_tokens,
                         split.boundary_tokens,
                         split.single_tokens,
@@ -799,7 +799,7 @@ pub fn build_partition_id_map_and_terminal_dwa(
         eprintln!(
             "[glrmask/profile][partition] label={} vocab_tokens={} length0={} length1={} length2plus={} pre_classify_setup_ms={:.3} classify_ms={:.3} routing_ms={:.3} branch_build_wall_ms={:.3} l1_branch_wall_ms={:.3} l2p_branch_wall_ms={:.3} l2p_boundary_wall_ms={:.3} l2p_single_l1_wall_ms={:.3} post_branch_ms={:.3} profile_bookkeeping_ms={:.3} critical_path_id_map_ms={:.3} critical_path_terminal_dwa_ms={:.3} critical_path_compact_ms={:.3} critical_path_profile_ms={:.3} accounted_wall_ms={:.3} timing_residual_ms={:.3} total_ms={:.3}",
             partition_label,
-            vocab.entries.len(),
+            vocab.entries_map().len(),
             num_zero,
             num_one,
             num_two_plus,

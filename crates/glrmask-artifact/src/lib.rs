@@ -2,23 +2,31 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
-pub mod automata {
-    pub use glrmask_weighted_automata::automata::weighted_u32;
+pub(crate) mod automata {
+    pub(crate) use glrmask_weighted_automata::weighted_u32;
 }
 
-pub mod ds {
-    pub use glrmask_weight as weight;
+pub(crate) mod ds {
+    pub(crate) use glrmask_weight::__private as weight;
 }
 
-pub mod commit_templates;
-pub mod equiv_types;
-pub mod mapped_artifact;
-
-pub mod compiler {
-    pub mod stages {
-        pub use crate::equiv_types;
-        pub use crate::mapped_artifact;
-    }
-}
+mod commit_templates;
+pub(crate) mod equiv_types;
+pub(crate) mod mapped_artifact;
 
 pub use commit_templates::CommitTemplateDfas;
+
+/// Implementation details shared by the GLRMask workspace.
+///
+/// This module is deliberately feature-gated and is not a stable API.
+#[cfg(feature = "internal-api")]
+#[doc(hidden)]
+pub mod __private {
+    pub mod equiv_types {
+        pub use crate::equiv_types::*;
+    }
+    pub mod mapped_artifact {
+        pub use crate::mapped_artifact::*;
+    }
+    pub use crate::commit_templates::CommitTemplateDfas;
+}

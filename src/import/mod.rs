@@ -1,7 +1,7 @@
 pub use crate::grammar::ast as ast;
-pub use glrmask_grammar::import::ebnf;
+pub(crate) use glrmask_grammar::__private::import::ebnf;
 pub mod json_schema;
-pub use glrmask_grammar::import::lark;
+pub(crate) use glrmask_grammar::__private::import::lark;
 
 use std::collections::BTreeSet;
 

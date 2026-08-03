@@ -76,7 +76,7 @@ fn compute_reachable_from_start(dwa: &DWA, start_state: usize) -> Vec<bool> {
 }
 
 fn weight_body_id(weight: &Weight) -> usize {
-    Arc::as_ptr(&weight.0) as usize
+    weight.ptr_key()
 }
 
 fn intersection_memo_key(left: &Weight, right: &Weight) -> (usize, usize) {
@@ -462,19 +462,19 @@ fn debug_assert_pushed_weights_within_needed(dwa: &DWA, needed: &[Weight]) {
 /// verified with a zero-allocation sweep (`token_sets_agree_on_domain`).
 fn weights_equal_on_domain(w_a: &Weight, w_b: &Weight, domain: &Weight) -> bool {
     // Fast path: identical Arc ⇒ trivially equal on any domain.
-    if Arc::ptr_eq(&w_a.0, &w_b.0) {
+    if w_a.storage_ptr_eq(w_b) {
         return true;
     }
     if domain.is_empty() {
         return true;
     }
 
-    let mut a_iter = w_a.0.range_values();
-    let mut b_iter = w_b.0.range_values();
+    let mut a_iter = w_a.raw_range_values();
+    let mut b_iter = w_b.raw_range_values();
     let mut a_entry = a_iter.next();
     let mut b_entry = b_iter.next();
 
-    for (d_range, d_tokens) in domain.0.range_values() {
+    for (d_range, d_tokens) in domain.raw_range_values() {
         let d_lo = *d_range.start();
         let d_hi = *d_range.end();
 
@@ -719,10 +719,10 @@ fn weight_is_disjoint_from_domain_intersection(
     left_domain: &Weight,
     right_domain: &Weight,
 ) -> bool {
-    let mut weight_iter = weight.0.range_values();
+    let mut weight_iter = weight.raw_range_values();
     let mut weight_entry = weight_iter.next();
-    let mut left_iter = left_domain.0.range_values();
-    let mut right_iter = right_domain.0.range_values();
+    let mut left_iter = left_domain.raw_range_values();
+    let mut right_iter = right_domain.raw_range_values();
     let mut left_entry = left_iter.next();
     let mut right_entry = right_iter.next();
 
@@ -794,14 +794,14 @@ fn weights_equal_on_domain_intersection(
     left_domain: &Weight,
     right_domain: &Weight,
 ) -> bool {
-    if Arc::ptr_eq(&w_a.0, &w_b.0) {
+    if w_a.storage_ptr_eq(w_b) {
         return true;
     }
 
-    let mut a_iter = w_a.0.range_values();
-    let mut b_iter = w_b.0.range_values();
-    let mut left_iter = left_domain.0.range_values();
-    let mut right_iter = right_domain.0.range_values();
+    let mut a_iter = w_a.raw_range_values();
+    let mut b_iter = w_b.raw_range_values();
+    let mut left_iter = left_domain.raw_range_values();
+    let mut right_iter = right_domain.raw_range_values();
     let mut a_entry = a_iter.next();
     let mut b_entry = b_iter.next();
     let mut left_entry = left_iter.next();
@@ -1778,7 +1778,7 @@ fn build_pointwise_profile(
         .final_weight
         .as_ref()
         .map(|fw| {
-            fw.0.range_values()
+            fw.raw_range_values()
                 .map(|(r, tokens)| (*r.start(), *r.end(), tokens.as_ref()))
                 .collect()
         })
@@ -1787,8 +1787,7 @@ fn build_pointwise_profile(
         .iter()
         .map(|(_, _, weight)| {
             weight
-                .0
-                .range_values()
+                .raw_range_values()
                 .map(|(r, tokens)| (*r.start(), *r.end(), tokens.as_ref()))
                 .collect()
         })
@@ -1935,7 +1934,7 @@ fn build_pointwise_range_profile(
     for (domain_start, domain_end, domain_tokens) in domain.compact_entries()? {
         let mut boundaries = vec![u64::from(domain_start), u64::from(domain_end) + 1];
         if let Some(final_weight) = &profile.final_weight {
-            for (tsid_range, _) in final_weight.0.range_values() {
+            for (tsid_range, _) in final_weight.raw_range_values() {
                 add_tsid_boundary_if_overlapping(
                     &mut boundaries,
                     domain_start,
@@ -1946,7 +1945,7 @@ fn build_pointwise_range_profile(
             }
         }
         for (_, _, weight) in &transitions {
-            for (tsid_range, _) in weight.0.range_values() {
+            for (tsid_range, _) in weight.raw_range_values() {
                 add_tsid_boundary_if_overlapping(
                     &mut boundaries,
                     domain_start,
@@ -1970,11 +1969,11 @@ fn build_pointwise_range_profile(
             let final_tokens = profile
                 .final_weight
                 .as_ref()
-                .and_then(|weight| weight.0.get(tsid_start))
+                .and_then(|weight| weight.token_set_for_tsid_ref(tsid_start))
                 .map(|tokens| tokens.as_ref());
             let mut active_transitions = Vec::new();
             for (label, target, weight) in &transitions {
-                if let Some(tokens) = weight.0.get(tsid_start) {
+                if let Some(tokens) = weight.token_set_for_tsid_ref(tsid_start) {
                     active_transitions.push((*label, *target, tokens.as_ref()));
                 }
             }
@@ -4301,7 +4300,7 @@ mod tests {
         PointwiseRegionBuildCache, PointwiseRegionInterner, TokenBehaviorRange,
         build_token_behavior_region,
     };
-    use crate::automata::weighted_u32::dwa::{DWA, DWAState};
+    use crate::weighted_u32::dwa::{DWA, DWAState};
     use crate::ds::weight::Weight;
     use range_set_blaze::RangeSetBlaze;
     use std::sync::Arc;

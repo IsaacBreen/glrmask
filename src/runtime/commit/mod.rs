@@ -7476,7 +7476,7 @@ nt start ::= item item? item?;
                     let mut next = Vec::new();
                     for (state, path) in frontier {
                         let mask = state.mask();
-                        for (&token_id, bytes) in vocab.entries.iter() {
+                        for (&token_id, bytes) in vocab.entries_map().iter() {
                             let context = format!(
                                 "A_mask={a:#06b} B_mask={b:#06b} depth={depth} path={path:?}\ngrammar:\n{grammar}"
                             );
@@ -7539,7 +7539,7 @@ nt start ::= item item? item?;
         let fast_result = commit_bytes_impl(
             &constraint,
             &mut fast.state,
-            vocab.entries.get(&0).unwrap(),
+            vocab.entries_map().get(&0).unwrap(),
             &mut fast.buffers,
         );
         fast.generation += 1;
@@ -7547,7 +7547,7 @@ nt start ::= item item? item?;
         let slow_result = commit_bytes_impl_profiled(
             &constraint,
             &mut slow.state,
-            vocab.entries.get(&0).unwrap(),
+            vocab.entries_map().get(&0).unwrap(),
             &mut slow.buffers,
             None,
             false,
@@ -7561,13 +7561,13 @@ nt start ::= item item? item?;
         let fast_result = commit_bytes_impl(
             &constraint,
             &mut next_fast.state,
-            vocab.entries.get(&5).unwrap(),
+            vocab.entries_map().get(&5).unwrap(),
             &mut next_fast.buffers,
         );
         let slow_result = commit_bytes_impl_profiled(
             &constraint,
             &mut next_slow.state,
-            vocab.entries.get(&5).unwrap(),
+            vocab.entries_map().get(&5).unwrap(),
             &mut next_slow.buffers,
             None,
             false,
@@ -7662,7 +7662,7 @@ nt start ::= item item? item?;
                     continue;
                 }
 
-                for (&token_id, bytes) in vocab.entries.iter() {
+                for (&token_id, bytes) in vocab.entries_map().iter() {
                     let mut next_fast = fast.clone();
                     let mut next_profiled = profiled.clone();
                     let mut next_general = general.clone();

@@ -485,7 +485,7 @@ fn prepare_equivalence_inputs<'a>(
     let max_token_id = vocab.max_token_id();
     let mut token_bytes: Vec<&[u8]> = Vec::with_capacity(vocab.len());
     let mut token_ids: Vec<u32> = Vec::with_capacity(vocab.len());
-    for (&tid, bytes) in vocab.entries.iter() {
+    for (&tid, bytes) in vocab.entries_map().iter() {
         token_ids.push(tid);
         token_bytes.push(bytes.as_slice());
     }
@@ -868,7 +868,7 @@ fn try_analyze_equivalences_with_token_position_partition(
     let num_states = tokenizer.num_states() as usize;
     if seed.original_to_internal.len() != num_states
         || seed.representative_original_ids.is_empty()
-        || vocab.entries.values().any(Vec::is_empty)
+        || vocab.entries_map().values().any(Vec::is_empty)
     {
         return None;
     }

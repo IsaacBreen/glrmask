@@ -1,5 +1,5 @@
-use glrmask_artifact::equiv_types::InternalIdMap;
-use glrmask_weighted_automata::automata::weighted_u32::dwa::DWA;
+use glrmask_artifact::__private::equiv_types::InternalIdMap;
+use glrmask_weighted_automata::weighted_u32::dwa::DWA;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TerminalDwaPhaseProfile {

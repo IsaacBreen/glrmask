@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use crate::automata::weighted_u32::dwa::DWA;
 use crate::automata::weighted_u32::nwa::NWA;
 use crate::automata::weighted_u32::terminal_automaton::TerminalAutomaton;
-use crate::compiler::stages::equiv_types::InternalIdMap;
+use crate::equiv_types::InternalIdMap;
 use crate::ds::weight::Weight;
 
 pub use compaction::{CompactPlan, CompactReport, InternedRangeCounts};

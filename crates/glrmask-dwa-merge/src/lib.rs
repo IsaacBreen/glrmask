@@ -2,25 +2,34 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
-pub mod automata {
-    pub use glrmask_weighted_automata::automata::weighted_u32;
-    pub use weighted_u32 as weighted;
+pub(crate) mod automata {
+    pub(crate) use glrmask_weighted_automata::weighted_u32;
+    pub(crate) use weighted_u32 as weighted;
 }
 
-pub mod compiler {
-    pub use glrmask_glr::glr;
+pub(crate) mod compiler {
+    pub(crate) use glrmask_glr::__private::glr;
 
-    pub mod stages {
-        pub use glrmask_artifact::{equiv_types, mapped_artifact};
+    pub(crate) mod stages {
+        pub(crate) use glrmask_artifact::__private::{equiv_types, mapped_artifact};
     }
 }
 
-pub mod ds {
-    pub use glrmask_weight as weight;
+pub(crate) mod ds {
+    pub(crate) use glrmask_weight::__private as weight;
 }
 
-pub mod merge;
-pub mod types;
+pub(crate) mod merge;
+pub(crate) mod types;
 
-pub use merge::*;
-pub use types::{LocalIdMapTerminalDwa, TerminalDwaPhaseProfile};
+/// Implementation details shared by the GLRMask workspace.
+///
+/// This module is deliberately feature-gated and is not a stable API.
+#[cfg(feature = "internal-api")]
+#[doc(hidden)]
+pub mod __private {
+    pub mod merge {
+        pub use crate::merge::*;
+    }
+    pub use crate::types::{LocalIdMapTerminalDwa, TerminalDwaPhaseProfile};
+}

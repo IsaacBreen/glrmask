@@ -15,7 +15,9 @@ pub mod postprocess;
 mod terminal_dwa_equivalence;
 mod terminal_interchangeability;
 
+#[cfg(feature = "internal-api")]
 pub use terminal_interchangeability::warm_ti_pool;
+#[cfg(feature = "internal-api")]
 pub use terminal_interchangeability::with_ti_pool;
 pub use terminal_interchangeability::SharedTiTokenizerOutputCache;
 
@@ -270,7 +272,7 @@ fn l2p_token_length_stats(vocab: &Vocab) -> L2PTokenLengthStats {
         gt_64: 0,
     };
 
-    for bytes in vocab.entries.values() {
+    for bytes in vocab.entries_map().values() {
         let len = bytes.len();
         stats.max_len = stats.max_len.max(len);
         if len > 4 {
@@ -313,14 +315,13 @@ fn l2p_token_length_stats(vocab: &Vocab) -> L2PTokenLengthStats {
 fn quotient_exact_duplicate_states(dwa: DWA) -> DWA {
     use crate::automata::weighted_u32::dwa::DWAState;
     use std::collections::BTreeMap as StdBTreeMap;
-    use std::sync::Arc;
 
     let states = dwa.states();
     let n = states.len();
     if n <= 1 {
         return dwa;
     }
-    let wptr = |w: &Weight| Arc::as_ptr(&w.0) as u64;
+    let wptr = |w: &Weight| w.ptr_key() as u64;
 
     // Initial partition by local output signature (ignores destinations).
     let mut class: Vec<u32> = vec![0; n];
@@ -442,7 +443,7 @@ pub fn build_l2p_id_map_and_terminal_dwa(
     let num_active_terminals = active_terminals.iter().filter(|&&active| active).count();
 
     let mut relevant_bytes = [false; 256];
-    for bytes in vocab.entries.values() {
+    for bytes in vocab.entries_map().values() {
         for &byte in bytes {
             relevant_bytes[byte as usize] = true;
         }
@@ -1268,7 +1269,7 @@ pub fn build_l2p_id_map_and_terminal_dwa(
         eprintln!(
             "[glrmask/profile][l2p] partition={} vocab_tokens={} active_terminals={} original_states={} tsids={} internal_vocab_entries={} initial_states_considered={} max_length_skipped={} max_token_len={} token_len_gt_4={} token_len_gt_8={} token_len_gt_16={} token_len_gt_32={} token_len_gt_64={} raw_analysis_base_init_ms={:.3} analysis_view_build_ms={:.3} active_mask_filter_ms={:.3} effective_follows_normalize_ms={:.3} prepare_inputs_ms={:.3} byte_class_setup_ms={:.3} vocab_analysis_dfa_build_ms={:.3} token_dedup_ms={:.3} max_length_state_equiv_ms={:.3} vocab_equiv_ms={:.3} exact_state_equiv_ms={:.3} id_map_finalize_ms={:.3} id_map_unattributed_ms={:.3} max_length_reps={} exact_reps={} exact_rep_confirmation_used={} fast_sound_id_map_used={} max_length_reduction_pct={:.2} exact_reduction_pct={:.2} restricted_observation_state_equiv_ms={:.3} restricted_observation_reps={} id_map_ms={:.3} tsid_fallback_ms={:.3} vocab_tree_ms={:.3} possible_matches_ms={:.3} seed_ms={:.3} terminal_nwa_build_ms={:.3} nwa_trie_walk_ms={:.3} nwa_flush_ms={:.3} nwa_flush_leaf_ms={:.3} nwa_flush_future_ms={:.3} nwa_flush_weight_ms={:.3} nwa_trie_self_loop_ms={:.3} nwa_trie_execute_ms={:.3} nwa_trie_match_filter_ms={:.3} nwa_trie_end_state_ms={:.3} nwa_trie_match_process_ms={:.3} nwa_trie_continuation_weight_ms={:.3} nwa_trie_execute_calls={} nwa_trie_execute_input_bytes={} nwa_trie_matches={} nwa_trie_end_states={} nwa_trie_self_loop_checks={} nwa_trie_self_loop_skips={} nwa_trie_self_loop_source_nodes={} nwa_trie_self_loop_skipped_source_nodes={} nwa_trie_self_loop_cache_misses={} nwa_future_terminal_additions={} nwa_match_transition_additions={} nwa_states={}->{}->{}->{}->{} always_allowed_ms={:.3} collapse_ms={:.3} disallowed_ms={:.3} prune_ms={:.3} canonicalize_ms={:.3} postprocess_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} compact_ms={:.3} minimize_states={} dwa_states={} dwa_transitions={} dwa_transition_pairs={} dwa_interned_ranges_before_compact={} dwa_interned_ranges_after_compact={} total_ms={:.3}",
             partition_label,
-            vocab.entries.len(),
+            vocab.entries_map().len(),
             num_active_terminals,
             num_original_states,
             id_map.num_tsids(),

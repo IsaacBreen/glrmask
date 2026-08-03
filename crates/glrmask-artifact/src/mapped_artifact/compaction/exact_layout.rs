@@ -87,7 +87,7 @@ pub(super) fn build_tsid_equal_value_pair_weights(weights: &[Weight], num_groups
         }
 
         let mut by_token_set = HashMap::<Vec<(u32, u32)>, Vec<usize>>::new();
-        for (tsid_range, token_set) in weight.0.range_values() {
+        for (tsid_range, token_set) in weight.raw_range_values() {
             let members = by_token_set.entry(rangeset_key(token_set)).or_default();
             let start = (*tsid_range.start() as usize).min(num_groups);
             let end = (*tsid_range.end() as usize).min(num_groups.saturating_sub(1));

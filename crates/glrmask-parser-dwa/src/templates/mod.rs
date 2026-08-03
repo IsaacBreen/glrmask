@@ -16,8 +16,8 @@ pub fn commit_template_dfas_enabled() -> bool {
     env_flag("GLRMASK_ENABLE_COMMIT_TEMPLATE_DFAS").unwrap_or(false)
 }
 
-pub mod characterize;
-pub mod compile_bundle;
-pub mod compile_dfa;
+pub(crate) mod characterize;
+pub(crate) mod compile_bundle;
+pub(crate) mod compile_dfa;
 
 pub use compile_dfa::Templates;

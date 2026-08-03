@@ -1614,7 +1614,7 @@ fn assert_partitioned_runtime_matches_dynamic(
             }
 
             let mask = partitioned_state.mask();
-            for &token in vocab.entries.keys() {
+            for (token, _) in vocab.iter() {
                 let word = token as usize / 32;
                 let bit = token % 32;
                 let expected_allowed = mask

@@ -586,7 +586,7 @@ fn position_byte_sets(vocab: &Vocab, tail_start_position: usize) -> PositionByte
     let mut position_masks = vec![[false; 256]; explicit_positions];
     let mut tail_mask = [false; 256];
 
-    for token in vocab.entries.values() {
+    for token in vocab.entries_map().values() {
         for (index, &byte) in token.iter().enumerate() {
             if index < tail_start_position {
                 position_masks[index][byte as usize] = true;
@@ -1333,7 +1333,7 @@ pub fn compute_global_token_boundary_state_partition(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
 ) -> Option<GlobalTokenBoundaryStatePartition> {
-    if vocab.entries.values().any(Vec::is_empty) {
+    if vocab.entries_map().values().any(Vec::is_empty) {
         return None;
     }
     let first_bytes = position_byte_sets(vocab, MIN_TAIL_START_POSITION)
@@ -1353,7 +1353,7 @@ fn compute_global_token_position_map_with_tail_start_and_flat_trans(
     flat_trans: Option<&[u32]>,
 ) -> Option<(ManyToOneIdMap, GlobalTokenPositionEquivalenceProfile)> {
     let started_at = Instant::now();
-    if vocab.entries.values().any(Vec::is_empty) {
+    if vocab.entries_map().values().any(Vec::is_empty) {
         return None;
     }
     let byte_sets = position_byte_sets(vocab, tail_start_position);
@@ -1818,7 +1818,7 @@ mod tests {
         for members in &map.internal_to_originals {
             let representative = *members.first().expect("total quotient class") as usize;
             for &state in members {
-                for token in vocab.entries.values() {
+                for token in vocab.entries_map().values() {
                     let mut left = Some(state);
                     let mut right = Some(representative as u32);
                     for &byte in token {
@@ -2130,7 +2130,7 @@ mod tests {
         for members in &map.internal_to_originals {
             let representative = *members.first().expect("total quotient class");
             for &state in members {
-                for token in vocab.entries.values() {
+                for token in vocab.entries_map().values() {
                     let mut left = tokenizer.execute_from_state_end_only(&[], state);
                     let mut right = tokenizer.execute_from_state_end_only(&[], representative);
                     for &byte in token {
