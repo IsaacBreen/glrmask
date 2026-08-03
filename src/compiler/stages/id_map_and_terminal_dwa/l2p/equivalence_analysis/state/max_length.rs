@@ -38,6 +38,28 @@ fn refine_mode() -> RefineMode {
     })
 }
 
+fn canonical_singleton_pruning_enabled() -> bool {
+    std::env::var("GLRMASK_MAX_LENGTH_SINGLETON_PRUNING")
+        .map(|value| {
+            let value = value.trim();
+            value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or(true)
+}
+
+#[inline]
+fn canonical_singleton_pruning_is_profitable(
+    state_count: usize,
+    singleton_states: usize,
+) -> bool {
+    // Counting block sizes and rebuilding the active-state order has a fixed
+    // O(states) cost.  It pays only on the large finite-horizon quotients where
+    // a material part of the partition is already permanently singleton.
+    state_count >= 20_000
+        && singleton_states >= 4_096
+        && singleton_states.saturating_mul(8) >= state_count
+}
+
 fn is_full_state_query(states: &[usize], total_states: usize) -> bool {
     if states.len() != total_states {
         return false;
@@ -313,6 +335,94 @@ fn refine_once_sorted(
     (next_blocks, block_count)
 }
 
+fn refine_once_sorted_monotone(
+    active_targets: &ActiveTransitionTable,
+    label_ids: &[u32],
+    prev_blocks: &[u32],
+    block_sizes: &[u32],
+    signatures: &mut [u32],
+    row_hashes: &mut [u64],
+    order: &mut Vec<usize>,
+) -> (Vec<u32>, usize) {
+    let n = prev_blocks.len();
+    let width = 1 + active_targets.width;
+    debug_assert_eq!(signatures.len(), n * width);
+    debug_assert_eq!(row_hashes.len(), n);
+
+    signatures
+        .par_chunks_mut(width)
+        .zip(row_hashes.par_iter_mut())
+        .enumerate()
+        .for_each(|(state, (row, row_hash))| {
+            if block_sizes[prev_blocks[state] as usize] == 1 {
+                *row_hash = 0;
+                return;
+            }
+            row[0] = label_ids[state];
+            let target_start = state * active_targets.width;
+            let targets =
+                &active_targets.targets_flat[target_start..target_start + active_targets.width];
+            for (i, &target) in targets.iter().enumerate() {
+                row[i + 1] = if target == MISSING_BLOCK {
+                    MISSING_BLOCK
+                } else {
+                    prev_blocks[target as usize]
+                };
+            }
+            *row_hash = hash_signature_row(row);
+        });
+
+    order.clear();
+    order.extend(
+        (0..n).filter(|&state| block_sizes[prev_blocks[state] as usize] > 1),
+    );
+    order.par_sort_unstable_by(|&left, &right| {
+        prev_blocks[left]
+            .cmp(&prev_blocks[right])
+            .then_with(|| row_hashes[left].cmp(&row_hashes[right]))
+            .then_with(|| {
+                let left_start = left * width;
+                let right_start = right * width;
+                signatures[left_start..left_start + width]
+                    .cmp(&signatures[right_start..right_start + width])
+            })
+            .then_with(|| left.cmp(&right))
+    });
+
+    let mut next_blocks = vec![u32::MAX; n];
+    let mut next_block_count = 0usize;
+    for state in 0..n {
+        if block_sizes[prev_blocks[state] as usize] == 1 {
+            next_blocks[state] = usize_to_u32(next_block_count, "partition block id");
+            next_block_count += 1;
+        }
+    }
+
+    let mut previous_state = None::<usize>;
+    let mut current_block = u32::MAX;
+    for &state in order.iter() {
+        let starts_new_block = previous_state.map_or(true, |previous| {
+            if prev_blocks[state] != prev_blocks[previous]
+                || row_hashes[state] != row_hashes[previous]
+            {
+                return true;
+            }
+            let state_start = state * width;
+            let previous_start = previous * width;
+            signatures[state_start..state_start + width]
+                != signatures[previous_start..previous_start + width]
+        });
+        if starts_new_block {
+            current_block = usize_to_u32(next_block_count, "partition block id");
+            next_block_count += 1;
+        }
+        next_blocks[state] = current_block;
+        previous_state = Some(state);
+    }
+    debug_assert!(next_blocks.iter().all(|&block| block != u32::MAX));
+    (next_blocks, next_block_count)
+}
+
 #[inline(always)]
 fn row_hash(
     state: usize,
@@ -531,17 +641,23 @@ fn build_subset_mapping(states: &[usize], blocks: &[u32]) -> Vec<usize> {
     mapping
 }
 
-fn build_full_canonical_mapping(blocks: &[u32], block_count: usize) -> Arc<[u32]> {
+fn build_full_canonical_mapping(
+    blocks: &[u32],
+    block_count: usize,
+) -> (Arc<[u32]>, Vec<u32>, usize) {
     let mut representative_by_block = vec![u32::MAX; block_count];
+    let mut block_sizes = vec![0u32; block_count];
     let mut mapping = vec![u32::MAX; blocks.len()];
     for (state, &block) in blocks.iter().enumerate() {
+        block_sizes[block as usize] += 1;
         let slot = &mut representative_by_block[block as usize];
         if *slot == u32::MAX {
             *slot = state as u32;
         }
         mapping[state] = *slot;
     }
-    mapping.into()
+    let singleton_states = block_sizes.iter().filter(|&&size| size == 1).count();
+    (mapping.into(), block_sizes, singleton_states)
 }
 
 /// Exact finite-depth Moore quotients for caller-supplied state observations.
@@ -551,12 +667,13 @@ fn build_full_canonical_mapping(blocks: &[u32], block_count: usize) -> Arc<[u32]
 /// supplied labels are the depth-zero observations.  This is useful when a
 /// caller needs a family of progressively coarser quotients as its remaining
 /// input horizon shrinks.
-pub(crate) fn find_canonical_state_maps_by_depth_from_labels(
+fn find_canonical_state_maps_by_depth_from_labels_impl(
     tokenizer: &TokenizerView,
     k: usize,
     label_ids: &[u32],
     relevant_bytes: Option<&[bool; 256]>,
     byte_to_class: Option<&[u8; 256]>,
+    singleton_pruning: bool,
 ) -> Vec<Arc<[u32]>> {
     let dfa = tokenizer.dfa();
     let n = dfa.states.len();
@@ -566,10 +683,16 @@ pub(crate) fn find_canonical_state_maps_by_depth_from_labels(
     }
 
     let active_bytes = active_byte_representatives(relevant_bytes, byte_to_class);
-    let mut block_count = label_ids.iter().copied().max().map_or(0usize, |id| id as usize + 1);
+    let mut block_count = label_ids
+        .iter()
+        .copied()
+        .max()
+        .map_or(0usize, |id| id as usize + 1);
     let mut blocks = label_ids.to_vec();
     let mut maps = Vec::with_capacity(k + 1);
-    maps.push(build_full_canonical_mapping(&blocks, block_count));
+    let (depth_zero_map, mut block_sizes, mut singleton_states) =
+        build_full_canonical_mapping(&blocks, block_count);
+    maps.push(depth_zero_map);
 
     if block_count == n || active_bytes.is_empty() {
         while maps.len() <= k {
@@ -591,7 +714,20 @@ pub(crate) fn find_canonical_state_maps_by_depth_from_labels(
             RefineMode::Interned => false,
             RefineMode::Auto => auto_prefers_sorted_refinement(true, n, active_bytes.len()),
         };
-        let (next_blocks, next_count) = if use_sorted {
+        let prune_singletons = singleton_pruning
+            && use_sorted
+            && canonical_singleton_pruning_is_profitable(n, singleton_states);
+        let (next_blocks, next_count) = if prune_singletons {
+            refine_once_sorted_monotone(
+                &active_targets,
+                label_ids,
+                &blocks,
+                &block_sizes,
+                &mut signatures,
+                &mut row_hashes,
+                &mut order,
+            )
+        } else if use_sorted {
             refine_once_sorted(
                 &active_targets,
                 label_ids,
@@ -603,10 +739,18 @@ pub(crate) fn find_canonical_state_maps_by_depth_from_labels(
         } else {
             refine_once_interned(label_ids, &blocks, &active_targets, &mut row_hashes)
         };
-        let stable = same_partition(&blocks, block_count, &next_blocks, next_count);
+        let stable = if prune_singletons {
+            next_count == block_count
+        } else {
+            same_partition(&blocks, block_count, &next_blocks, next_count)
+        };
         blocks = next_blocks;
         block_count = next_count;
-        maps.push(build_full_canonical_mapping(&blocks, block_count));
+        let (map, next_block_sizes, next_singleton_states) =
+            build_full_canonical_mapping(&blocks, block_count);
+        maps.push(map);
+        block_sizes = next_block_sizes;
+        singleton_states = next_singleton_states;
         if stable || block_count == n {
             while maps.len() <= k {
                 maps.push(Arc::clone(maps.last().expect("stable canonical map")));
@@ -616,6 +760,46 @@ pub(crate) fn find_canonical_state_maps_by_depth_from_labels(
     }
 
     maps
+}
+
+/// Exact finite-depth Moore quotients for caller-supplied state observations.
+///
+/// Entry `d` maps every DFA state to the smallest representative with the same
+/// observation after every active-byte string of length at most `d`. The
+/// supplied labels are the depth-zero observations.
+pub(crate) fn find_canonical_state_maps_by_depth_from_labels(
+    tokenizer: &TokenizerView,
+    k: usize,
+    label_ids: &[u32],
+    relevant_bytes: Option<&[bool; 256]>,
+    byte_to_class: Option<&[u8; 256]>,
+) -> Vec<Arc<[u32]>> {
+    find_canonical_state_maps_by_depth_from_labels_impl(
+        tokenizer,
+        k,
+        label_ids,
+        relevant_bytes,
+        byte_to_class,
+        canonical_singleton_pruning_enabled(),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn find_canonical_state_maps_by_depth_from_labels_reference(
+    tokenizer: &TokenizerView,
+    k: usize,
+    label_ids: &[u32],
+    relevant_bytes: Option<&[bool; 256]>,
+    byte_to_class: Option<&[u8; 256]>,
+) -> Vec<Arc<[u32]>> {
+    find_canonical_state_maps_by_depth_from_labels_impl(
+        tokenizer,
+        k,
+        label_ids,
+        relevant_bytes,
+        byte_to_class,
+        false,
+    )
 }
 
 pub(crate) fn find_state_equivalence_classes_kbounded(
@@ -711,4 +895,20 @@ pub fn find_state_equivalence_classes_byte_restricted<S: AsRef<[u8]>>(
     );
 
     mapping
+}
+
+#[cfg(test)]
+mod tests {
+    use super::canonical_singleton_pruning_is_profitable;
+
+    #[test]
+    fn singleton_pruning_policy_requires_large_material_singleton_frontier() {
+        assert!(canonical_singleton_pruning_is_profitable(33_649, 4_458));
+        assert!(canonical_singleton_pruning_is_profitable(33_649, 15_019));
+
+        assert!(!canonical_singleton_pruning_is_profitable(33_649, 4_095));
+        assert!(!canonical_singleton_pruning_is_profitable(42_355, 4_329));
+        assert!(!canonical_singleton_pruning_is_profitable(9_881, 4_943));
+        assert!(!canonical_singleton_pruning_is_profitable(19_999, 10_000));
+    }
 }
