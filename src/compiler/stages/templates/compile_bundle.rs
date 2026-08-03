@@ -611,10 +611,15 @@ fn determinize_bundle_groups_profiled(
 
     let mut dwa = DWA::new(0, 0);
     let mut state_map: FxHashMap<Vec<(u32, u32)>, u32> = FxHashMap::default();
-    let mut worklist: VecDeque<Vec<(u32, u32)>> = VecDeque::new();
+    let mut singleton_state_map: FxHashMap<(u32, u32), u32> = FxHashMap::default();
+    let mut worklist: VecDeque<(u32, Vec<(u32, u32)>)> = VecDeque::new();
 
-    state_map.insert(start_key.clone(), 0);
-    worklist.push_back(start_key.clone());
+    if let [singleton] = start_key.as_slice() {
+        singleton_state_map.insert(*singleton, 0);
+    } else {
+        state_map.insert(start_key.clone(), 0);
+    }
+    worklist.push_back((0, start_key));
     profile.worklist_peak = worklist.len();
 
     let mut label_targets = LabelTargets::new();
@@ -624,10 +629,9 @@ fn determinize_bundle_groups_profiled(
     let mut edge_groups = SmallVec::<[usize; 8]>::new();
     let mut edge_key = SubsetKey::from_elem(0, key_words);
 
-    while let Some(product_state) = worklist.pop_front() {
+    while let Some((dwa_state, product_state)) = worklist.pop_front() {
         profile.states_visited += 1;
         let state_started_at = Instant::now();
-        let dwa_state = state_map[&product_state];
         profile.pop_state_ms += elapsed_ms(state_started_at);
 
         let alive_started_at = Instant::now();
@@ -676,12 +680,20 @@ fn determinize_bundle_groups_profiled(
             let next_state_started_at = Instant::now();
             edge_groups.clear();
             clear_subset_key(&mut edge_key);
-            let mut next_state = Vec::with_capacity(label_end - label_start);
+            let singleton_target = (label_end == label_start + 1).then(|| {
+                let (_, group_id, target) = label_targets[label_start];
+                (group_id, target)
+            });
+            let mut next_state = singleton_target
+                .is_none()
+                .then(|| Vec::with_capacity(label_end - label_start));
             for &(_, group_id, target) in &label_targets[label_start..label_end] {
                 let group_id = group_id as usize;
                 edge_groups.push(group_id);
                 set_subset_key_bit(&mut edge_key, group_id);
-                next_state.push((group_id as u32, target));
+                if let Some(next_state) = next_state.as_mut() {
+                    next_state.push((group_id as u32, target));
+                }
             }
             profile.next_state_ms += elapsed_ms(next_state_started_at);
 
@@ -713,14 +725,27 @@ fn determinize_bundle_groups_profiled(
             profile.edge_weight_ms += elapsed_ms(edge_weight_started_at);
 
             let lookup_started_at = Instant::now();
-            let to_dwa = if let Some(&existing) = state_map.get(&next_state) {
-                existing
+            let to_dwa = if let Some(singleton_target) = singleton_target {
+                if let Some(&existing) = singleton_state_map.get(&singleton_target) {
+                    existing
+                } else {
+                    let new_id = dwa.add_state();
+                    singleton_state_map.insert(singleton_target, new_id);
+                    worklist.push_back((new_id, vec![singleton_target]));
+                    profile.worklist_peak = profile.worklist_peak.max(worklist.len());
+                    new_id
+                }
             } else {
-                let new_id = dwa.add_state();
-                state_map.insert(next_state.clone(), new_id);
-                worklist.push_back(next_state);
-                profile.worklist_peak = profile.worklist_peak.max(worklist.len());
-                new_id
+                let next_state = next_state.expect("non-singleton bundle state is populated");
+                if let Some(&existing) = state_map.get(&next_state) {
+                    existing
+                } else {
+                    let new_id = dwa.add_state();
+                    state_map.insert(next_state.clone(), new_id);
+                    worklist.push_back((new_id, next_state));
+                    profile.worklist_peak = profile.worklist_peak.max(worklist.len());
+                    new_id
+                }
             };
             profile.state_lookup_ms += elapsed_ms(lookup_started_at);
 
@@ -770,10 +795,15 @@ fn determinize_bundle_groups(groups: &[(&Weight, BundleGroupDfa<'_>)]) -> DWA {
 
     let mut dwa = DWA::new(0, 0);
     let mut state_map: FxHashMap<Vec<(u32, u32)>, u32> = FxHashMap::default();
-    let mut worklist: VecDeque<Vec<(u32, u32)>> = VecDeque::new();
+    let mut singleton_state_map: FxHashMap<(u32, u32), u32> = FxHashMap::default();
+    let mut worklist: VecDeque<(u32, Vec<(u32, u32)>)> = VecDeque::new();
 
-    state_map.insert(start_key.clone(), 0);
-    worklist.push_back(start_key);
+    if let [singleton] = start_key.as_slice() {
+        singleton_state_map.insert(*singleton, 0);
+    } else {
+        state_map.insert(start_key.clone(), 0);
+    }
+    worklist.push_back((0, start_key));
 
     let mut label_targets = LabelTargets::new();
     let key_words = n.div_ceil(64);
@@ -782,8 +812,7 @@ fn determinize_bundle_groups(groups: &[(&Weight, BundleGroupDfa<'_>)]) -> DWA {
     let mut edge_groups = SmallVec::<[usize; 8]>::new();
     let mut edge_key = SubsetKey::from_elem(0, key_words);
 
-    while let Some(product_state) = worklist.pop_front() {
-        let dwa_state = state_map[&product_state];
+    while let Some((dwa_state, product_state)) = worklist.pop_front() {
 
         final_groups.clear();
         clear_subset_key(&mut final_key);
@@ -818,12 +847,20 @@ fn determinize_bundle_groups(groups: &[(&Weight, BundleGroupDfa<'_>)]) -> DWA {
 
             edge_groups.clear();
             clear_subset_key(&mut edge_key);
-            let mut next_state = Vec::with_capacity(label_end - label_start);
+            let singleton_target = (label_end == label_start + 1).then(|| {
+                let (_, group_id, target) = label_targets[label_start];
+                (group_id, target)
+            });
+            let mut next_state = singleton_target
+                .is_none()
+                .then(|| Vec::with_capacity(label_end - label_start));
             for &(_, group_id, target) in &label_targets[label_start..label_end] {
                 let group_id = group_id as usize;
                 edge_groups.push(group_id);
                 set_subset_key_bit(&mut edge_key, group_id);
-                next_state.push((group_id as u32, target));
+                if let Some(next_state) = next_state.as_mut() {
+                    next_state.push((group_id as u32, target));
+                }
             }
 
             let edge_w = cached_subset_union(
@@ -839,13 +876,25 @@ fn determinize_bundle_groups(groups: &[(&Weight, BundleGroupDfa<'_>)]) -> DWA {
                 continue;
             }
 
-            let to_dwa = if let Some(&existing) = state_map.get(&next_state) {
-                existing
+            let to_dwa = if let Some(singleton_target) = singleton_target {
+                if let Some(&existing) = singleton_state_map.get(&singleton_target) {
+                    existing
+                } else {
+                    let new_id = dwa.add_state();
+                    singleton_state_map.insert(singleton_target, new_id);
+                    worklist.push_back((new_id, vec![singleton_target]));
+                    new_id
+                }
             } else {
-                let new_id = dwa.add_state();
-                state_map.insert(next_state.clone(), new_id);
-                worklist.push_back(next_state);
-                new_id
+                let next_state = next_state.expect("non-singleton bundle state is populated");
+                if let Some(&existing) = state_map.get(&next_state) {
+                    existing
+                } else {
+                    let new_id = dwa.add_state();
+                    state_map.insert(next_state.clone(), new_id);
+                    worklist.push_back((new_id, next_state));
+                    new_id
+                }
             };
 
             dwa.add_transition(dwa_state, label, to_dwa, edge_w);
@@ -921,7 +970,70 @@ fn dwa_to_nwa(dwa: &DWA) -> NWA {
 
 #[cfg(test)]
 mod tests {
+    use range_set_blaze::RangeSetBlaze;
+
     use super::*;
+
+    fn weight(tokens: std::ops::RangeInclusive<u32>) -> Weight {
+        Weight::from_token_set_for_tsid(0, RangeSetBlaze::from_iter([tokens]))
+    }
+
+    fn eval_bundle_product(
+        groups: &[(&Weight, BundleGroupDfa<'_>)],
+        word: &[i32],
+    ) -> Weight {
+        let mut product_state = groups
+            .iter()
+            .enumerate()
+            .map(|(group_id, (_, dfa))| (group_id, dfa.dfa().start_state))
+            .collect::<Vec<_>>();
+        let mut accumulated = Weight::all();
+
+        for &label in word {
+            let mut next_state = Vec::new();
+            let mut edge_weights = SmallVec::<[&Weight; 4]>::new();
+            for &(group_id, dfa_state) in &product_state {
+                let dfa = groups[group_id].1.dfa();
+                let Some(&target) = dfa.states[dfa_state as usize].transitions.get(&label) else {
+                    continue;
+                };
+                next_state.push((group_id, target));
+                edge_weights.push(groups[group_id].0);
+            }
+            let edge_weight = Weight::union_all(edge_weights);
+            accumulated = accumulated.intersection(&edge_weight);
+            if accumulated.is_empty() {
+                return accumulated;
+            }
+            product_state = next_state;
+        }
+
+        let final_weight = Weight::union_all(product_state.iter().filter_map(
+            |&(group_id, dfa_state)| {
+                groups[group_id].1.dfa().states[dfa_state as usize]
+                    .is_accepting
+                    .then_some(groups[group_id].0)
+            },
+        ));
+        accumulated.intersection(&final_weight)
+    }
+
+    fn visit_words(
+        alphabet: &[i32],
+        remaining: usize,
+        word: &mut Vec<i32>,
+        visit: &mut impl FnMut(&[i32]),
+    ) {
+        visit(word);
+        if remaining == 0 {
+            return;
+        }
+        for &label in alphabet {
+            word.push(label);
+            visit_words(alphabet, remaining - 1, word, visit);
+            word.pop();
+        }
+    }
 
     #[test]
     fn collect_label_targets_is_sorted() {
@@ -942,5 +1054,48 @@ mod tests {
         collect_label_targets(&groups, &state, &mut targets);
 
         assert_eq!(targets.as_slice(), &[(1, 0, 10), (1, 1, 11), (2, 0, 20), (3, 1, 31)]);
+    }
+
+    #[test]
+    fn singleton_bundle_state_interner_preserves_weighted_product() {
+        let mut first = UnweightedDfa::new();
+        let first_after_shared = first.add_state();
+        let first_after_singleton = first.add_state();
+        first.add_transition(0, 1, first_after_shared);
+        first.add_transition(first_after_shared, 2, first_after_singleton);
+        first.add_transition(first_after_shared, 5, first_after_shared);
+        first.set_accepting(first_after_shared, true);
+        first.set_accepting(first_after_singleton, true);
+
+        let mut second = UnweightedDfa::new();
+        let second_after_shared = second.add_state();
+        let second_after_singleton = second.add_state();
+        second.add_transition(0, 1, second_after_shared);
+        second.add_transition(second_after_shared, 3, second_after_singleton);
+        second.add_transition(second_after_shared, 5, second_after_shared);
+        second.set_accepting(second_after_singleton, true);
+
+        let mut third = UnweightedDfa::new();
+        let third_after_singleton = third.add_state();
+        third.add_transition(0, 4, third_after_singleton);
+        third.set_accepting(third_after_singleton, true);
+
+        let first_weight = weight(0..=15);
+        let second_weight = weight(8..=23);
+        let third_weight = weight(20..=31);
+        let groups = vec![
+            (&first_weight, BundleGroupDfa::Owned(first)),
+            (&second_weight, BundleGroupDfa::Owned(second)),
+            (&third_weight, BundleGroupDfa::Owned(third)),
+        ];
+
+        let optimized = determinize_bundle_groups(&groups);
+        let (profiled, _) = determinize_bundle_groups_profiled(&groups);
+        let mut word = Vec::new();
+        visit_words(&[1, 2, 3, 4, 5], 4, &mut word, &mut |word| {
+            let expected = eval_bundle_product(&groups, word);
+            assert_eq!(optimized.eval_word(word), expected, "optimized word={word:?}");
+            assert_eq!(profiled.eval_word(word), expected, "profiled word={word:?}");
+        });
     }
 }

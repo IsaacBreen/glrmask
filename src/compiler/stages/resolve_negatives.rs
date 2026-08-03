@@ -15,7 +15,7 @@ use crate::ds::weight::{ScopedWeightOpCache, Weight};
 type QueryKey = (u32, i32);
 type CancellationTask = (u32, u32, i32);
 type QueryWeights = Vec<SmallQueryWeights>;
-type DerivedEpsilons = Vec<Option<FxHashMap<u32, Weight>>>;
+type DerivedEpsilons = Vec<SmallTargetWeights>;
 type SubsetMemo = FxHashMap<(usize, usize), bool>;
 
 /// Wave scheduling pays two parallel-iterator setup costs per DAG layer.  This
@@ -26,6 +26,14 @@ const MIN_PARALLEL_FINALITY_EDGES_PER_WORKER: usize = 512;
 /// Grouping identical cancellation queries pays for a wave/group build. Large
 /// parser NWAs amortize it heavily; small NWAs are faster with the direct FIFO.
 const GROUPED_CANCELLATION_MIN_STATES: usize = 4_096;
+/// Checking for structurally dead cancellation tasks avoids weight cloning and
+/// inspection on the large parser-NWA tail, but the extra transition probes do
+/// not amortize on small graphs.
+const DEAD_CANCELLATION_FAST_PATH_MIN_STATES: usize = 65_536;
+/// Direct reverse-topological accumulation avoids one pending buffer per state
+/// and wins on the large parser-NWA tail. Smaller graphs benefit more from
+/// batching their few multi-edge contributions before unioning them.
+const DIRECT_ACYCLIC_FINALITY_MIN_STATES: usize = 65_536;
 
 #[derive(Clone, Default)]
 enum SmallQueryWeights {
@@ -33,6 +41,101 @@ enum SmallQueryWeights {
     Empty,
     One(QueryKey, Weight),
     Many(FxHashMap<QueryKey, Weight>),
+}
+
+#[derive(Clone, Default)]
+enum SmallTargetWeights {
+    #[default]
+    Empty,
+    One(u32, Weight),
+    Many(FxHashMap<u32, Weight>),
+}
+
+enum SmallTargetWeightsIntoIter {
+    Empty,
+    One(Option<(u32, Weight)>),
+    Many(std::collections::hash_map::IntoIter<u32, Weight>),
+}
+
+impl Iterator for SmallTargetWeightsIntoIter {
+    type Item = (u32, Weight);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Empty => None,
+            Self::One(entry) => entry.take(),
+            Self::Many(entries) => entries.next(),
+        }
+    }
+}
+
+impl SmallTargetWeights {
+    fn merge(&mut self, target: u32, add: Weight) -> bool {
+        match self {
+            Self::Empty => {
+                if add.is_empty() {
+                    return false;
+                }
+                *self = Self::One(target, add);
+                true
+            }
+            Self::One(existing_target, existing_weight) if *existing_target == target => {
+                merge_weight(existing_weight, add)
+            }
+            Self::One(existing_target, existing_weight) => {
+                if add.is_empty() {
+                    return false;
+                }
+                let previous_target = *existing_target;
+                let previous_weight = existing_weight.clone();
+                let mut entries = FxHashMap::with_capacity_and_hasher(4, Default::default());
+                entries.insert(previous_target, previous_weight);
+                entries.insert(target, add);
+                *self = Self::Many(entries);
+                true
+            }
+            Self::Many(entries) => {
+                let entry = entries.entry(target).or_insert_with(Weight::empty);
+                merge_weight(entry, add)
+            }
+        }
+    }
+
+    fn get(&self, target: u32) -> Option<&Weight> {
+        match self {
+            Self::Empty => None,
+            Self::One(existing_target, weight) => {
+                (*existing_target == target).then_some(weight)
+            }
+            Self::Many(entries) => entries.get(&target),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        matches!(self, Self::Empty)
+    }
+
+    fn for_each(&self, mut f: impl FnMut(u32, &Weight)) {
+        match self {
+            Self::Empty => {}
+            Self::One(target, weight) => f(*target, weight),
+            Self::Many(entries) => {
+                for (&target, weight) in entries {
+                    f(target, weight);
+                }
+            }
+        }
+    }
+
+    fn into_entries(self) -> SmallTargetWeightsIntoIter {
+        match self {
+            Self::Empty => SmallTargetWeightsIntoIter::Empty,
+            Self::One(target, weight) => {
+                SmallTargetWeightsIntoIter::One(Some((target, weight)))
+            }
+            Self::Many(entries) => SmallTargetWeightsIntoIter::Many(entries.into_iter()),
+        }
+    }
 }
 
 impl SmallQueryWeights {
@@ -339,8 +442,8 @@ fn propagate_query_through_derived_epsilons(
     derived_epsilons: &DerivedEpsilons,
     foreign_derived: Option<&DerivedEpsilons>,
 ) {
-    let local = derived_epsilons[current_state as usize].as_ref();
-    let foreign = foreign_derived.and_then(|fd| fd[current_state as usize].as_ref());
+    let local = &derived_epsilons[current_state as usize];
+    let foreign = foreign_derived.map(|derived| &derived[current_state as usize]);
 
     let propagate = |target_state: u32,
                      epsilon_weight: &Weight,
@@ -364,17 +467,15 @@ fn propagate_query_through_derived_epsilons(
         );
     };
 
-    if let Some(local_map) = local {
-        for (&target_state, epsilon_weight) in local_map {
-            propagate(target_state, epsilon_weight, query_weights, worklist);
-        }
-    }
-    if let Some(foreign_map) = foreign {
-        for (&target_state, epsilon_weight) in foreign_map {
+    local.for_each(|target_state, epsilon_weight| {
+        propagate(target_state, epsilon_weight, query_weights, worklist);
+    });
+    if let Some(foreign) = foreign {
+        foreign.for_each(|target_state, epsilon_weight| {
             // Skip if local already has a stronger entry for this target
             // (merging handled below in queue_query_weight's dedup anyway).
             propagate(target_state, epsilon_weight, query_weights, worklist);
-        }
+        });
     }
 }
 
@@ -398,20 +499,11 @@ fn extend_derived_epsilons(
         return;
     }
 
-    {
-        let derived_weight = derived_epsilons[source_state as usize]
-            .get_or_insert_with(FxHashMap::default)
-            .entry(target_state)
-            .or_insert_with(Weight::empty);
-        if !merge_weight(derived_weight, new_derived_weight) {
-            return;
-        }
+    if !derived_epsilons[source_state as usize].merge(target_state, new_derived_weight) {
+        return;
     }
 
-    let Some(derived_weight) = derived_epsilons[source_state as usize]
-        .as_ref()
-        .and_then(|targets| targets.get(&target_state))
-    else {
+    let Some(derived_weight) = derived_epsilons[source_state as usize].get(target_state) else {
         return;
     };
 
@@ -459,20 +551,11 @@ fn extend_derived_epsilon_precomputed(
         return;
     }
 
-    {
-        let derived_weight = derived_epsilons[source_state as usize]
-            .get_or_insert_with(FxHashMap::default)
-            .entry(target_state)
-            .or_insert_with(Weight::empty);
-        if !merge_weight(derived_weight, new_derived_weight.clone()) {
-            return;
-        }
+    if !derived_epsilons[source_state as usize].merge(target_state, new_derived_weight.clone()) {
+        return;
     }
 
-    let Some(derived_weight) = derived_epsilons[source_state as usize]
-        .as_ref()
-        .and_then(|targets| targets.get(&target_state))
-    else {
+    let Some(derived_weight) = derived_epsilons[source_state as usize].get(target_state) else {
         return;
     };
     let existing_queries = &query_weights[source_state as usize];
@@ -581,7 +664,8 @@ fn compute_cancellations_range_grouped_inner(
 
     let mut query_weights: QueryWeights = vec![SmallQueryWeights::Empty; state_count as usize];
     let mut worklist = VecDeque::<CancellationTask>::new();
-    let mut derived_epsilons: DerivedEpsilons = vec![None; state_count as usize];
+    let mut derived_epsilons: DerivedEpsilons =
+        vec![SmallTargetWeights::Empty; state_count as usize];
     let mut subset_memo = SubsetMemo::default();
 
     for source_state in range {
@@ -632,10 +716,10 @@ fn compute_cancellations_range_grouped_inner(
             let current_state = group.current_state;
             let positive_label = group.positive_label;
 
-            let propagate_map = |targets: &FxHashMap<u32, Weight>,
+            let propagate_map = |targets: &SmallTargetWeights,
                                  query_weights: &mut QueryWeights,
                                  worklist: &mut VecDeque<CancellationTask>| {
-                for (&target_state, epsilon_weight) in targets {
+                targets.for_each(|target_state, epsilon_weight| {
                     let propagated = intersect_with_single_weight_hint(
                         &group.weight,
                         query_single.as_ref(),
@@ -649,13 +733,12 @@ fn compute_cancellations_range_grouped_inner(
                         positive_label,
                         &propagated,
                     );
-                }
+                });
             };
-            if let Some(local) = derived_epsilons[current_state as usize].as_ref() {
-                propagate_map(local, &mut query_weights, &mut worklist);
-            }
-            if let Some(foreign) = foreign_derived
-                .and_then(|derived| derived[current_state as usize].as_ref())
+            let local = &derived_epsilons[current_state as usize];
+            propagate_map(local, &mut query_weights, &mut worklist);
+            if let Some(foreign) =
+                foreign_derived.map(|derived| &derived[current_state as usize])
             {
                 propagate_map(foreign, &mut query_weights, &mut worklist);
             }
@@ -740,10 +823,7 @@ fn collect_non_empty_derived_epsilons(
     let mut result = Vec::new();
 
     for (from_state, targets) in derived_epsilons.into_iter().enumerate() {
-        let Some(targets) = targets else {
-            continue;
-        };
-        for (to_state, weight) in targets {
+        for (to_state, weight) in targets.into_entries() {
             if !weight.is_empty() {
                 result.push((from_state as u32, to_state, weight));
             }
@@ -793,8 +873,11 @@ fn compute_cancellations_range_serial_inner(
 
     let mut query_weights: QueryWeights = vec![SmallQueryWeights::Empty; state_count as usize];
     let mut worklist = VecDeque::<CancellationTask>::new();
-    let mut derived_epsilons: DerivedEpsilons = vec![None; state_count as usize];
+    let mut derived_epsilons: DerivedEpsilons =
+        vec![SmallTargetWeights::Empty; state_count as usize];
     let mut subset_memo = SubsetMemo::default();
+    let use_dead_task_fast_path =
+        state_count as usize >= DEAD_CANCELLATION_FAST_PATH_MIN_STATES;
 
     for source_state in range {
         if source_state >= state_count {
@@ -822,6 +905,23 @@ fn compute_cancellations_range_serial_inner(
     }
 
     while let Some((current_state, source_state, positive_label)) = worklist.pop_front() {
+        let state = &nwa.states()[current_state as usize];
+        let local_derived = &derived_epsilons[current_state as usize];
+        let foreign_derived_at_state =
+            foreign_derived.map(|derived| &derived[current_state as usize]);
+        let positive_targets = state.transitions.get(&positive_label);
+        let default_targets = state.transitions.get(&DEFAULT_LABEL);
+
+        if use_dead_task_fast_path
+            && local_derived.is_empty()
+            && foreign_derived_at_state.is_none_or(SmallTargetWeights::is_empty)
+            && positive_targets.is_none()
+            && default_targets.is_none()
+            && state.epsilons.is_empty()
+        {
+            continue;
+        }
+
         let Some(query_weight_to_current) = query_weights[current_state as usize]
             .get(&(source_state, positive_label))
             .cloned()
@@ -842,10 +942,7 @@ fn compute_cancellations_range_serial_inner(
             foreign_derived,
         );
 
-        if let Some(positive_targets) = nwa.states()[current_state as usize]
-            .transitions
-            .get(&positive_label)
-        {
+        if let Some(positive_targets) = positive_targets {
             for (target_state, edge_weight) in positive_targets {
                 if *target_state < state_count {
                     extend_derived_epsilons(
@@ -863,10 +960,7 @@ fn compute_cancellations_range_serial_inner(
             }
         }
 
-        if let Some(default_targets) = nwa.states()[current_state as usize]
-            .transitions
-            .get(&DEFAULT_LABEL)
-        {
+        if let Some(default_targets) = default_targets {
             for (target_state, edge_weight) in default_targets {
                 if *target_state < state_count {
                     extend_derived_epsilons(
@@ -884,7 +978,7 @@ fn compute_cancellations_range_serial_inner(
             }
         }
 
-        for (target_state, epsilon_weight) in &nwa.states()[current_state as usize].epsilons {
+        for (target_state, epsilon_weight) in &state.epsilons {
             if *target_state >= state_count {
                 continue;
             }
@@ -1065,6 +1159,36 @@ fn apply_finality_fixpoint_worklist(
                 worklist.push_back(pred_state);
             },
         );
+    }
+}
+
+fn apply_finality_fixpoint_acyclic_direct(
+    preds: &[Vec<PredEdge<'_>>],
+    reachable_final_weights: &mut [Option<GuardedFinalWeight>],
+    reverse_topo_order: &[usize],
+    weight_ops: &mut ScopedWeightOpCache,
+) {
+    // In reverse topological order, every successor of `state_id` has already
+    // contributed its complete final weight. Merge each propagated contribution
+    // directly into the predecessor's single accumulator instead of allocating
+    // one pending SmallVec per graph state and batching those contributions later.
+    for &state_id in reverse_topo_order {
+        let Some(reachable_final) = reachable_final_weights[state_id].clone() else {
+            continue;
+        };
+
+        for edge in &preds[state_id] {
+            let Some(propagated) =
+                reachable_final.intersection_with_edge_cached(edge.weight, weight_ops)
+            else {
+                continue;
+            };
+            merge_guarded_final_weight(
+                &mut reachable_final_weights[edge.from],
+                propagated,
+                weight_ops,
+            );
+        }
     }
 }
 
@@ -1344,6 +1468,13 @@ pub(crate) fn apply_finality_fixpoint(nwa: &mut NWA) {
         && acyclic
         && rayon_workers > 1
         && finality_edge_count >= MIN_PARALLEL_FINALITY_EDGES_PER_WORKER * rayon_workers;
+    let direct_acyclic_finality_disabled =
+        std::env::var_os("GLRMASK_DISABLE_DIRECT_ACYCLIC_FINALITY").is_some();
+    let use_direct_acyclic_finality = !use_chunked_parallel_waves
+        && acyclic
+        && !direct_acyclic_finality_disabled
+        && (n >= DIRECT_ACYCLIC_FINALITY_MIN_STATES
+            || std::env::var_os("GLRMASK_FORCE_DIRECT_ACYCLIC_FINALITY").is_some());
 
     let solve_started_at = profile_enabled.then(std::time::Instant::now);
     if let Some(reverse_topo_order) = reverse_topo_order.as_deref() {
@@ -1352,6 +1483,13 @@ pub(crate) fn apply_finality_fixpoint(nwa: &mut NWA) {
                 &preds,
                 &mut reachable_final_weights,
                 reverse_topo_order,
+            );
+        } else if use_direct_acyclic_finality {
+            apply_finality_fixpoint_acyclic_direct(
+                &preds,
+                &mut reachable_final_weights,
+                reverse_topo_order,
+                &mut weight_ops,
             );
         } else {
             apply_finality_fixpoint_acyclic(
@@ -1398,7 +1536,7 @@ pub(crate) fn apply_finality_fixpoint(nwa: &mut NWA) {
     )
     {
         eprintln!(
-            "[glrmask/profile][finality_fixpoint] states={} edges={} unique_edge_weights={} full_weights={} single_entry_weights={} total_weight_ranges={} wide_edges={} unique_wide_edge_weights={} acyclic={} rayon_workers={} chunked_parallel_waves={} preds_ms={:.3} topo_ms={:.3} initial_ms={:.3} solve_ms={:.3} write_ms={:.3}",
+            "[glrmask/profile][finality_fixpoint] states={} edges={} unique_edge_weights={} full_weights={} single_entry_weights={} total_weight_ranges={} wide_edges={} unique_wide_edge_weights={} acyclic={} rayon_workers={} chunked_parallel_waves={} direct_acyclic={} preds_ms={:.3} topo_ms={:.3} initial_ms={:.3} solve_ms={:.3} write_ms={:.3}",
             n,
             edge_count,
             unique_edge_weights,
@@ -1410,6 +1548,7 @@ pub(crate) fn apply_finality_fixpoint(nwa: &mut NWA) {
             acyclic,
             rayon_workers,
             use_chunked_parallel_waves,
+            use_direct_acyclic_finality,
             preds_ms,
             topo_ms,
             initial_ms,
@@ -1655,6 +1794,32 @@ mod terminal_default_tests {
         cancellations
     }
 
+    #[test]
+    fn small_target_weights_promotes_merges_and_iterates_exactly() {
+        let mut targets = SmallTargetWeights::Empty;
+        let first = weight(0..=7);
+        let first_add = weight(4..=11);
+        let second = weight(16..=23);
+
+        assert!(targets.merge(3, first.clone()));
+        assert_eq!(targets.get(3), Some(&first));
+        assert!(!targets.merge(3, weight(0..=3)));
+        assert!(targets.merge(3, first_add));
+        assert_eq!(
+            targets.get(3).unwrap().tokens_for_tsid(0),
+            Weight::from_token_set_for_tsid(0, RangeSetBlaze::from_iter([0..=11]))
+                .tokens_for_tsid(0)
+        );
+
+        assert!(targets.merge(9, second.clone()));
+        assert_eq!(targets.get(9), Some(&second));
+        let mut entries = targets.into_entries().collect::<Vec<_>>();
+        entries.sort_by_key(|(target, _)| *target);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].0, 3);
+        assert_eq!(entries[1], (9, second));
+    }
+
     fn generated_cancellation_nwa(seed: u32) -> NWA {
         use crate::compiler::glr::labels::encode_negative_label;
 
@@ -1797,6 +1962,7 @@ mod terminal_default_tests {
         let reverse_topo_order =
             build_finality_reverse_topo_order(&preds, outdegree).expect("test graph is acyclic");
         let mut serial = collect_initial_final_weights(&nwa);
+        let mut direct = serial.clone();
         let mut chunked_parallel = serial.clone();
         let mut weight_ops = ScopedWeightOpCache::default();
 
@@ -1806,14 +1972,27 @@ mod terminal_default_tests {
             &reverse_topo_order,
             &mut weight_ops,
         );
+        let mut direct_weight_ops = ScopedWeightOpCache::default();
+        apply_finality_fixpoint_acyclic_direct(
+            &preds,
+            &mut direct,
+            &reverse_topo_order,
+            &mut direct_weight_ops,
+        );
         apply_finality_fixpoint_acyclic_parallel_waves_chunked(
             &preds,
             &mut chunked_parallel,
             &reverse_topo_order,
         );
 
-        for (serial_weight, chunked_weight) in serial.iter().zip(&chunked_parallel) {
+        for ((serial_weight, direct_weight), chunked_weight) in
+            serial.iter().zip(&direct).zip(&chunked_parallel)
+        {
             let serial_weight = serial_weight
+                .as_ref()
+                .map(|weight| weight.weight.clone())
+                .unwrap_or_else(Weight::empty);
+            let direct_weight = direct_weight
                 .as_ref()
                 .map(|weight| weight.weight.clone())
                 .unwrap_or_else(Weight::empty);
@@ -1822,6 +2001,10 @@ mod terminal_default_tests {
                 .map(|weight| weight.weight.clone())
                 .unwrap_or_else(Weight::empty);
             for tsid in 0..=7 {
+                assert_eq!(
+                    serial_weight.tokens_for_tsid(tsid),
+                    direct_weight.tokens_for_tsid(tsid),
+                );
                 assert_eq!(
                     serial_weight.tokens_for_tsid(tsid),
                     chunked_weight.tokens_for_tsid(tsid),

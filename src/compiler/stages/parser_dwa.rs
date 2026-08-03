@@ -29,6 +29,9 @@ use crate::ds::weight::{ScopedWeightOpCache, Weight};
 type TerminalBundle = BTreeMap<TerminalID, Weight>;
 type BundleSignature = Vec<(TerminalID, Weight)>;
 type TargetContribs = SmallVec<[(u32, Weight); 4]>;
+type DeferredFinalEntries = SmallVec<[(u32, Weight); 4]>;
+type FinalPathWeights = SmallVec<[Weight; 4]>;
+type FinalGroups = SmallVec<[(Weight, FinalPathWeights); 4]>;
 
 const PROFILE_PARSER_DWA_DETERMINIZE_DETAIL_ENV: &str =
     "GLRMASK_PROFILE_PARSER_DWA_DETERMINIZE_DETAIL";
@@ -1353,6 +1356,62 @@ fn local_epsilon_closure(
     }
 }
 
+fn local_epsilon_closure_canonical(
+    nwa: &NWA,
+    weight_by_state: &mut [Option<Weight>],
+    closure_queue: &mut VecDeque<u32>,
+    seeds: &[(u32, Weight)],
+    touched_states: &mut Vec<u32>,
+    canonical: &mut Vec<(u32, Weight)>,
+) {
+    debug_assert!(closure_queue.is_empty());
+    touched_states.clear();
+    canonical.clear();
+
+    for (state_id, weight) in seeds {
+        let slot = &mut weight_by_state[*state_id as usize];
+        debug_assert!(slot.is_none());
+        *slot = Some(weight.clone());
+        closure_queue.push_back(*state_id);
+        touched_states.push(*state_id);
+    }
+
+    while let Some(state_id) = closure_queue.pop_front() {
+        let Some(current_weight) = weight_by_state[state_id as usize].clone() else {
+            continue;
+        };
+        let Some(state) = nwa.states().get(state_id as usize) else {
+            continue;
+        };
+        for (target, edge_weight) in &state.epsilons {
+            let contribution = current_weight.intersection(edge_weight);
+            if contribution.is_empty() {
+                continue;
+            }
+            let target_idx = *target as usize;
+            if let Some(existing) = &weight_by_state[target_idx] {
+                if !contribution.is_subset(existing) {
+                    weight_by_state[target_idx] = Some(existing.union(&contribution));
+                    closure_queue.push_back(*target);
+                }
+            } else {
+                weight_by_state[target_idx] = Some(contribution);
+                closure_queue.push_back(*target);
+                touched_states.push(*target);
+            }
+        }
+    }
+
+    touched_states.sort_unstable();
+    for &state_id in touched_states.iter() {
+        if let Some(weight) = weight_by_state[state_id as usize].take()
+            && !weight.is_empty()
+        {
+            canonical.push((state_id, weight));
+        }
+    }
+}
+
 fn determinize_with_supports(
     nwa: &NWA,
     dense_positive_label_limit: Option<u32>,
@@ -1363,7 +1422,8 @@ fn determinize_with_supports(
 
       #[derive(Default)]
       struct UnionAllCache {
-        entries: FxHashMap<Vec<usize>, Weight>,
+        entries: FxHashMap<SmallVec<[usize; 16]>, Weight>,
+        ordered_keys: bool,
         profile_enabled: bool,
         hits: usize,
         misses: usize,
@@ -1401,9 +1461,17 @@ fn determinize_with_supports(
                 return meaningful[0].clone();
             }
 
-            let mut key: Vec<usize> = meaningful.iter().map(|weight| weight.ptr_key()).collect();
-            key.sort_unstable();
-            key.dedup();
+            let mut key: SmallVec<[usize; 16]> =
+                meaningful.iter().map(|weight| weight.ptr_key()).collect();
+            // Contributions are already in deterministic target-state order.
+            // Using that exact sequence as the cache key preserves correctness:
+            // a different order merely misses the cache and recomputes the exact
+            // union. Canonical sorting only increases sharing, while costing more
+            // than the rare extra miss on parser-DWA workloads.
+            if !self.ordered_keys {
+                key.sort_unstable();
+                key.dedup();
+            }
             self.key_len_sum += key.len();
             self.key_len_max = self.key_len_max.max(key.len());
 
@@ -1548,16 +1616,25 @@ fn determinize_with_supports(
     // Memoize local epsilon-closure outputs keyed by pre-closure weighted subsets.
     let mut closure_cache: FxHashMap<Vec<(u32, usize)>, CachedClosure> = FxHashMap::default();
     let mut key_buf: Vec<(u32, usize)> = Vec::new();
+    let mut closure_touched_states: Vec<u32> = Vec::new();
+    let mut closure_canon: Vec<(u32, Weight)> = Vec::new();
+    let use_flat_canonical_closure = std::env::var("GLRMASK_DISABLE_FLAT_CANONICAL_EPSILON_CLOSURE")
+        .map(|value| {
+            let value = value.trim();
+            value.is_empty() || value == "0" || value.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(true);
     let mut detail =
         ParserDwaDeterminizeDetail::enabled().then(ParserDwaDeterminizeDetail::default);
     let mut union_cache = UnionAllCache {
+        ordered_keys: std::env::var_os("GLRMASK_DISABLE_ORDERED_UNION_CACHE_KEY").is_none(),
         profile_enabled: detail.is_some(),
         ..UnionAllCache::default()
     };
 
     // Deferred final weight computation: store subset entries for each DWA state
     // and compute final weights in parallel after the main loop.
-    let mut deferred_final_entries: Vec<(u32, Vec<(u32, Weight)>)> = Vec::new();
+    let mut deferred_final_entries: Vec<(u32, DeferredFinalEntries)> = Vec::new();
 
     while let Some((from_state, subset_entries)) = worklist.pop_front() {
         if let Some(detail) = detail.as_mut() {
@@ -1566,7 +1643,7 @@ fn determinize_with_supports(
 
         // Save subset entries for deferred parallel final weight computation.
         // Only save entries whose NWA states have final weights.
-        let has_finals: Vec<(u32, Weight)> = subset_entries.iter()
+        let has_finals: DeferredFinalEntries = subset_entries.iter()
             .filter(|(nwa_state_id, _)| nwa.states()[*nwa_state_id as usize].final_weight.is_some())
             .map(|(id, w)| (*id, w.clone()))
             .collect();
@@ -1717,35 +1794,49 @@ fn determinize_with_supports(
             if edge_weight.is_empty() {
                 return;
             }
-            let mut target_subset: FxHashMap<u32, Weight> = contribs
-                .iter()
-                .map(|(state_id, weight)| (*state_id, weight.clone()))
-                .collect();
             let closure_started = detail.as_ref().map(|_| Instant::now());
-            local_epsilon_closure(
-                nwa,
-                &mut weight_by_state,
-                &mut closure_queue,
-                &mut target_subset,
-            );
+            let mut owned_canon = Vec::new();
+            if use_flat_canonical_closure {
+                local_epsilon_closure_canonical(
+                    nwa,
+                    &mut weight_by_state,
+                    &mut closure_queue,
+                    &contribs,
+                    &mut closure_touched_states,
+                    &mut closure_canon,
+                );
+            } else {
+                let mut target_subset: FxHashMap<u32, Weight> = contribs
+                    .iter()
+                    .map(|(state_id, weight)| (*state_id, weight.clone()))
+                    .collect();
+                local_epsilon_closure(
+                    nwa,
+                    &mut weight_by_state,
+                    &mut closure_queue,
+                    &mut target_subset,
+                );
+                owned_canon = target_subset
+                    .iter()
+                    .filter(|(_, weight)| !weight.is_empty())
+                    .map(|(state_id, weight)| (*state_id, weight.clone()))
+                    .collect();
+                owned_canon.sort_unstable_by_key(|(state_id, _)| *state_id);
+            }
             if let (Some(detail), Some(started_at)) = (detail.as_mut(), closure_started) {
                 detail.local_epsilon_closure_miss_ms += elapsed_ms(started_at);
             }
-            if target_subset.is_empty() {
-                return;
-            }
-            let mut canon: Vec<(u32, Weight)> = target_subset
-                .iter()
-                .filter(|(_, w)| !w.is_empty())
-                .map(|(id, w)| (*id, w.clone()))
-                .collect();
-            canon.sort_unstable_by_key(|(state_id, _)| *state_id);
+            let canon = if use_flat_canonical_closure {
+                closure_canon.as_slice()
+            } else {
+                owned_canon.as_slice()
+            };
             if canon.is_empty() {
                 return;
             }
 
             let subset_lookup_started = detail.as_ref().map(|_| Instant::now());
-            let to_state = if let [(only_state, only_weight)] = canon.as_slice() {
+            let to_state = if let [(only_state, only_weight)] = canon {
                 let singleton_key = (*only_state, only_weight.ptr_key());
                 if let Some(existing) = singleton_subsets.get(&singleton_key).copied() {
                     if let Some(detail) = detail.as_mut() {
@@ -1759,7 +1850,7 @@ fn determinize_with_supports(
                     let new_state = dwa.add_state();
                     subset_map.insert(vec![singleton_key], new_state);
                     singleton_subsets.insert(singleton_key, new_state);
-                    worklist.push_back((new_state, canon.clone()));
+                    worklist.push_back((new_state, canon.to_vec()));
                     supports.push(vec![*only_state]);
                     new_state
                 }
@@ -1784,7 +1875,7 @@ fn determinize_with_supports(
                     }
                     let new_state = dwa.add_state();
                     subset_map.insert(key_buf.clone(), new_state);
-                    worklist.push_back((new_state, canon.clone()));
+                    worklist.push_back((new_state, canon.to_vec()));
                     supports.push(canon.iter().map(|(sid, _)| *sid).collect());
                     new_state
                 }
@@ -1825,7 +1916,7 @@ fn determinize_with_supports(
     }
 
     let mut final_signature_ids: FxHashMap<Vec<(usize, Vec<usize>)>, usize> = FxHashMap::default();
-    let mut final_signature_groups: Vec<Vec<(Weight, SmallVec<[Weight; 4]>)>> = Vec::new();
+    let mut final_signature_groups: Vec<FinalGroups> = Vec::new();
     let mut final_jobs: Vec<(u32, usize)> = Vec::with_capacity(deferred_final_entries.len());
     let final_grouping_started = detail.as_ref().map(|_| Instant::now());
     for (state_id, entries) in &deferred_final_entries {
@@ -1834,7 +1925,7 @@ fn determinize_with_supports(
             detail.final_weight_entries_max = detail.final_weight_entries_max.max(entries.len());
         }
 
-        let mut groups: Vec<(usize, Weight, SmallVec<[Weight; 4]>)> = Vec::new();
+        let mut groups: SmallVec<[(usize, Weight, FinalPathWeights); 4]> = SmallVec::new();
         for (nwa_state_id, path_weight) in entries {
             if let Some(state_final) = nwa.states()[*nwa_state_id as usize].final_weight.as_ref() {
                 let final_key = state_final.ptr_key();
@@ -1864,7 +1955,7 @@ fn determinize_with_supports(
             Entry::Occupied(entry) => *entry.get(),
             Entry::Vacant(entry) => {
                 let signature_id = final_signature_groups.len();
-                let owned_groups = groups
+                let owned_groups: FinalGroups = groups
                     .into_iter()
                     .map(|(_, state_final, path_weights)| (state_final, path_weights))
                     .collect();
@@ -1893,7 +1984,7 @@ fn determinize_with_supports(
             let intern_started_at = Instant::now();
             let mut component_ids = FxHashMap::<(usize, Vec<usize>), usize>::default();
             let mut components = Vec::<(Weight, SmallVec<[Weight; 4]>)>::new();
-            let signature_components = final_signature_groups
+            let signature_components: Vec<SmallVec<[usize; 8]>> = final_signature_groups
                 .iter()
                 .map(|groups| {
                     groups
@@ -1912,7 +2003,7 @@ fn determinize_with_supports(
                                 component_id
                             }
                         })
-                        .collect::<Vec<_>>()
+                        .collect::<SmallVec<[usize; 8]>>()
                 })
                 .collect::<Vec<_>>();
             let intern_ms = elapsed_ms(intern_started_at);
@@ -1975,7 +2066,7 @@ fn determinize_with_supports(
                 detail.final_output_union_ms += elapsed_ms(output_started_at);
             }
             if compile_profile_enabled() {
-                let total_components = signature_components.iter().map(Vec::len).sum::<usize>();
+                let total_components = signature_components.iter().map(|ids| ids.len()).sum::<usize>();
                 eprintln!(
                     "[glrmask/profile][parser_final_group_intern] signatures={} total_components={} unique_components={} intern_ms={:.3}",
                     signature_components.len(),
@@ -3329,18 +3420,23 @@ pub(crate) fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+
     use range_set_blaze::RangeSetBlaze;
+    use rustc_hash::FxHashMap;
 
     use super::{
         PossibleOutgoingIds, build_parser_nwa_from_terminal_dwa,
         collapse_final_leaf_targets, determinize_parser_dwa_with_fallbacks,
         determinize_with_supports, immediate_acceptance_certificates,
+        local_epsilon_closure, local_epsilon_closure_canonical,
         try_build_direct_regular_parser_top_accept_parts,
         try_build_direct_regular_parser_top_accept_parts_table_product_reference,
         try_build_immediate_parser_top_accept_parts,
         subtract_final_weights_from_outgoing_dwa_impl,
     };
     use crate::automata::weighted::dwa::DWA;
+    use crate::automata::weighted::nwa::NWA;
     use crate::automata::weighted::terminal_automaton::TerminalAutomaton;
     use crate::compiler::glr::analysis::AnalyzedGrammar;
     use crate::compiler::glr::labels::DEFAULT_LABEL;
@@ -3380,6 +3476,82 @@ mod tests {
             .map_or_else(Weight::empty, |final_weight| {
                 accumulated.intersection(final_weight)
             })
+    }
+
+    #[test]
+    fn flat_canonical_epsilon_closure_matches_map_reference() {
+        fn next_u32(state: &mut u64) -> u32 {
+            *state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (*state >> 32) as u32
+        }
+
+        const STATE_COUNT: usize = 64;
+        let mut random = 0x8f4d_3a2b_1907_65ceu64;
+        let mut nwa = NWA::new(0, 0);
+        for _ in 0..STATE_COUNT {
+            nwa.add_state();
+        }
+        for source in 0..STATE_COUNT - 1 {
+            let remaining = STATE_COUNT - source - 1;
+            let edge_count = 1 + next_u32(&mut random) as usize % remaining.min(4);
+            for _ in 0..edge_count {
+                let target = source + 1 + next_u32(&mut random) as usize % remaining;
+                let start = next_u32(&mut random) % 24;
+                let end = (start + next_u32(&mut random) % 8).min(31);
+                nwa.add_epsilon(source as u32, target as u32, weight(start..=end));
+            }
+        }
+
+        for case in 0..256 {
+            let mut seeds = FxHashMap::<u32, Weight>::default();
+            let seed_count = 1 + next_u32(&mut random) as usize % 8;
+            for _ in 0..seed_count {
+                let state = next_u32(&mut random) as usize % STATE_COUNT;
+                let start = next_u32(&mut random) % 24;
+                let end = (start + next_u32(&mut random) % 8).min(31);
+                let add = weight(start..=end);
+                seeds
+                    .entry(state as u32)
+                    .and_modify(|existing| *existing = existing.union(&add))
+                    .or_insert(add);
+            }
+
+            let mut reference = seeds.clone();
+            let mut reference_weights = vec![None; STATE_COUNT];
+            let mut reference_queue = VecDeque::new();
+            local_epsilon_closure(
+                &nwa,
+                &mut reference_weights,
+                &mut reference_queue,
+                &mut reference,
+            );
+            let mut reference_canonical = reference.into_iter().collect::<Vec<_>>();
+            reference_canonical.sort_unstable_by_key(|(state, _)| *state);
+
+            let mut seed_canonical = seeds.into_iter().collect::<Vec<_>>();
+            seed_canonical.sort_unstable_by_key(|(state, _)| *state);
+            let mut flat_weights = vec![None; STATE_COUNT];
+            let mut flat_queue = VecDeque::new();
+            let mut touched = Vec::new();
+            let mut flat_canonical = Vec::new();
+            local_epsilon_closure_canonical(
+                &nwa,
+                &mut flat_weights,
+                &mut flat_queue,
+                &seed_canonical,
+                &mut touched,
+                &mut flat_canonical,
+            );
+
+            assert_eq!(
+                flat_canonical, reference_canonical,
+                "epsilon-closure mismatch in generated case {case}",
+            );
+            assert!(flat_weights.iter().all(Option::is_none));
+            assert!(flat_queue.is_empty());
+        }
     }
 
     #[test]
