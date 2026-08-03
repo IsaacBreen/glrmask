@@ -3965,6 +3965,9 @@ fn compile_prepared_with_profile_and_table_construction(
 }
 
 pub(crate) fn compile_prepared(prepared_grammar: GrammarDef, vocab: &Vocab) -> Constraint {
+    crate::automata::lexer::compile::install_vocabulary_exact_state_certifier(
+        crate::compiler::stages::id_map_and_terminal_dwa::synthetic_state_map::certify_vocabulary_exact_state_candidates,
+    );
     compile_prepared_with_profile(prepared_grammar, vocab).0
 }
 

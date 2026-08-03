@@ -26,6 +26,12 @@ impl Merge for () {
     }
 }
 
+impl Merge for glrmask_weight::Weight {
+    fn merge(&self, other: &Self) -> Self {
+        self.union(other)
+    }
+}
+
 /// A map optimized for small sizes (≤4 entries). Uses inline SmallVec storage
 /// for small maps and falls back to im::HashMap for larger ones.
 /// Drop-in replacement for im::HashMap in GSS children maps.

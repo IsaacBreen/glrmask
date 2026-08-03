@@ -43,6 +43,14 @@ pub type GlrMaskError = Error;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+impl From<glrmask_weighted_automata::Error> for Error {
+    fn from(error: glrmask_weighted_automata::Error) -> Self {
+        match error {
+            glrmask_weighted_automata::Error::Compilation(message) => Self::Compilation(message),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

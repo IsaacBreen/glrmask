@@ -18,8 +18,8 @@ fn pop_lowest_state_bit(word: &mut u64, word_index: u32) -> Option<usize> {
 
 /// Sparse bitset that tracks which words became non-zero so clearing is cheap.
 pub struct SparseStateSet {
-    pub(crate) words: Vec<u64>,
-    pub(crate) dirty_words: Vec<usize>,
+    pub words: Vec<u64>,
+    pub dirty_words: Vec<usize>,
 }
 
 impl SparseStateSet {
@@ -96,8 +96,8 @@ impl SparseStateSet {
 #[derive(Clone, Eq, Debug, Default)]
 pub struct CompressedStateSet {
     /// Sorted `(word_index, word_bits)` pairs for non-zero words only.
-    pub(crate) words: Vec<(u32, u64)>,
-    pub(crate) hash: u64,
+    pub words: Vec<(u32, u64)>,
+    pub hash: u64,
 }
 
 impl PartialEq for CompressedStateSet {

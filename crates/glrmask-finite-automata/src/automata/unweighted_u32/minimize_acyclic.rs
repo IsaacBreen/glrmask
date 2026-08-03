@@ -115,18 +115,18 @@ fn build_minimized_acyclic_dfa(
 /// Callers must guarantee that the input is minimal and has no explicit dead
 /// state (the normal output of `minimize_acyclic` satisfies both conditions).
 #[derive(Debug, Clone)]
-pub(crate) struct AcyclicDfaReindex {
+pub struct AcyclicDfaReindex {
     /// Original state IDs in the exact order assigned by `minimize_acyclic`.
-    pub(crate) old_states_in_new_order: Vec<usize>,
+    pub old_states_in_new_order: Vec<usize>,
     /// New state ID for each original state, or `u32::MAX` for unreachable
     /// states omitted by the partial-DFA representation.
-    pub(crate) new_state_of_old: Vec<u32>,
-    pub(crate) start_state: u32,
+    pub new_state_of_old: Vec<u32>,
+    pub start_state: u32,
 }
 
 /// Compute the exact reindexing performed by [`reindex_minimized_acyclic_dfa`]
 /// without copying transition maps.
-pub(crate) fn reindex_minimized_acyclic_order(dfa: &DFA) -> AcyclicDfaReindex {
+pub fn reindex_minimized_acyclic_order(dfa: &DFA) -> AcyclicDfaReindex {
     debug_assert!(
         dfa.compute_is_acyclic(),
         "reindex_minimized_acyclic_order: input DFA is cyclic"

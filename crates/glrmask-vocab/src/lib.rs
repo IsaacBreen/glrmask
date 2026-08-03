@@ -1,3 +1,6 @@
+#![deny(warnings)]
+#![allow(dead_code)]
+
 use std::any::{Any, TypeId};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -34,7 +37,7 @@ impl VocabDerivedArtifact for VocabRelevantBytes {}
 /// artifacts. `Vocab` instances can be reused across many grammar compiles, so
 /// this cache must only contain data that remains valid for every grammar using
 /// the same token bytes.
-pub(crate) trait VocabDerivedArtifact: Any + Send + Sync {}
+pub trait VocabDerivedArtifact: Any + Send + Sync {}
 
 impl fmt::Debug for VocabCompilerCache {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -91,14 +94,14 @@ impl Vocab {
     /// Fresh vocabularies compute this while being constructed. Deserialized
     /// vocabularies fill it lazily on first use, after which clones preserve the
     /// value instead of rescanning every token for every grammar compilation.
-    pub(crate) fn max_token_byte_len(&self) -> usize {
+    pub fn max_token_byte_len(&self) -> usize {
         *self
             .max_token_byte_len
             .get_or_init(|| self.entries.values().map(Vec::len).max().unwrap_or(0))
     }
 
     /// Sorted byte alphabet observed anywhere in the vocabulary.
-    pub(crate) fn relevant_bytes(&self) -> Arc<[u8]> {
+    pub fn relevant_bytes(&self) -> Arc<[u8]> {
         if let Some(cached) = self.vocab_derived_cache_get::<VocabRelevantBytes>() {
             return Arc::clone(&cached.bytes);
         }
@@ -138,7 +141,7 @@ impl Vocab {
             .map_or(0, |(&token_id, _)| token_id)
     }
 
-    pub(crate) fn vocab_derived_cache_get<T: VocabDerivedArtifact>(&self) -> Option<Arc<T>> {
+    pub fn vocab_derived_cache_get<T: VocabDerivedArtifact>(&self) -> Option<Arc<T>> {
         self.compiler_cache
             .artifacts
             .lock()
@@ -148,7 +151,7 @@ impl Vocab {
             .and_then(|artifact| artifact.downcast::<T>().ok())
     }
 
-    pub(crate) fn vocab_derived_cache_set<T: VocabDerivedArtifact>(&self, artifact: Arc<T>) {
+    pub fn vocab_derived_cache_set<T: VocabDerivedArtifact>(&self, artifact: Arc<T>) {
         let erased: Arc<dyn Any + Send + Sync> = artifact;
         if let Ok(mut artifacts) = self.compiler_cache.artifacts.lock() {
             artifacts.entry(TypeId::of::<T>()).or_insert(erased);

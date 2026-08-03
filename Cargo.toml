@@ -24,6 +24,11 @@ default = []
 internal-api = []
 
 [dependencies]
+glrmask-finite-automata = { version = "=0.1.1", path = "crates/glrmask-finite-automata" }
+glrmask-weight = { version = "=0.1.1", path = "crates/glrmask-weight" }
+glrmask-weighted-automata = { version = "=0.1.1", path = "crates/glrmask-weighted-automata" }
+glrmask-vocab = { version = "=0.1.1", path = "crates/glrmask-vocab" }
+glrmask-lexer = { version = "=0.1.1", path = "crates/glrmask-lexer" }
 rustc-hash = "1"
 ahash = "0.8"
 smallvec = { version = "1", features = ["serde"] }
@@ -173,5 +178,13 @@ name = "snowplow_hostname_replay_mre"
 path = "tests/regressions/replay/snowplow_hostname.rs"
 
 [workspace]
-members = [".", "python"]
+members = [
+    ".",
+    "python",
+    "crates/glrmask-finite-automata",
+    "crates/glrmask-weight",
+    "crates/glrmask-weighted-automata",
+    "crates/glrmask-vocab",
+    "crates/glrmask-lexer",
+]
 resolver = "2"

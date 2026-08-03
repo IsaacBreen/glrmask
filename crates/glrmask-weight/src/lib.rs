@@ -1,3 +1,6 @@
+#![deny(warnings)]
+#![allow(dead_code)]
+
 use once_cell::sync::Lazy;
 use range_set_blaze::{
     CheckSortedDisjoint, CheckSortedDisjointMap, RangeMapBlaze, RangeSetBlaze,
@@ -147,7 +150,7 @@ impl ScopedWeightOpCache {
         value
     }
 
-    pub(crate) fn intersection_entry_count(&self) -> usize {
+    pub fn intersection_entry_count(&self) -> usize {
         self.intersection_entries.len()
     }
 
@@ -272,7 +275,7 @@ impl ScopedWeightOpCache {
     }
 }
 
-pub(crate) type SharedTokenSet = Arc<RangeSetBlaze<u32>>;
+pub type SharedTokenSet = Arc<RangeSetBlaze<u32>>;
 type WeightMap = RangeMapBlaze<u32, SharedTokenSet>;
 
 const INTERNER_CLEANUP_INTERVAL: usize = 1024;
@@ -305,17 +308,17 @@ static ALL_WEIGHT: Lazy<Weight> = Lazy::new(|| {
 /// Defers expensive global interner sweeps until the last active compiler
 /// exits. Fresh interning remains exact; only the timing of weak-entry removal
 /// changes.
-pub(crate) struct WeightInternerCleanupDeferral {
+pub struct WeightInternerCleanupDeferral {
     active: bool,
 }
 
-pub(crate) fn defer_weight_interner_cleanup() -> WeightInternerCleanupDeferral {
+pub fn defer_weight_interner_cleanup() -> WeightInternerCleanupDeferral {
     INTERNER_CLEANUP_DEFERRAL_DEPTH.fetch_add(1, Ordering::AcqRel);
     WeightInternerCleanupDeferral { active: true }
 }
 
 impl WeightInternerCleanupDeferral {
-    pub(crate) fn finish(mut self) {
+    pub fn finish(mut self) {
         self.release();
     }
 
@@ -1025,7 +1028,7 @@ pub fn clear_weight_op_caches() {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct WeightCacheStats {
+pub struct WeightCacheStats {
     pub token_set_entries: usize,
     pub live_token_set_entries: usize,
     pub weight_buckets: usize,
@@ -1039,7 +1042,7 @@ pub(crate) struct WeightCacheStats {
     pub weight_hash_generation: u64,
 }
 
-pub(crate) fn weight_cache_stats() -> WeightCacheStats {
+pub fn weight_cache_stats() -> WeightCacheStats {
     let token_set_entries = GLOBAL_TOKEN_SETS.len();
     let live_token_set_entries = GLOBAL_TOKEN_SETS
         .iter()
@@ -1103,7 +1106,7 @@ fn with_memoized_weight_op(
     result
 }
 
-pub(crate) fn finalize_weight_map(map: WeightMap) -> Weight {
+pub fn finalize_weight_map(map: WeightMap) -> Weight {
     if map.ranges().next().is_none() {
         EMPTY_WEIGHT.clone()
     } else {
@@ -1137,7 +1140,7 @@ fn is_sentinel_token_set(tokens: &RangeSetBlaze<u32>) -> bool {
         && *range.end() == WEIGHT_ALL_SENTINEL
 }
 
-pub(crate) fn shared_rangeset(tokens: RangeSetBlaze<u32>) -> SharedTokenSet {
+pub fn shared_rangeset(tokens: RangeSetBlaze<u32>) -> SharedTokenSet {
     intern_rangeset(tokens)
 }
 
@@ -1211,7 +1214,7 @@ struct WeightRangeEntry {
 }
 
 #[derive(Clone)]
-pub(crate) struct WeightIntersectionIndex {
+pub struct WeightIntersectionIndex {
     source: Weight,
     entries: Vec<WeightRangeEntry>,
 }
@@ -2087,11 +2090,11 @@ fn intersect_single_entry_with_weight(single: &WeightRangeEntry, other: &Weight)
 }
 
 impl Weight {
-    pub(crate) fn intersection_index(&self) -> WeightIntersectionIndex {
+    pub fn intersection_index(&self) -> WeightIntersectionIndex {
         WeightIntersectionIndex::new(self)
     }
 
-    pub(crate) fn intersection_with_index(&self, index: &WeightIntersectionIndex) -> Self {
+    pub fn intersection_with_index(&self, index: &WeightIntersectionIndex) -> Self {
         let other = &index.source;
         if self.is_empty() || other.is_empty() {
             return Self::empty();
@@ -2115,15 +2118,15 @@ impl Weight {
         result
     }
 
-    pub(crate) fn ptr_key(&self) -> usize {
+    pub fn ptr_key(&self) -> usize {
         Arc::as_ptr(&self.0) as usize
     }
 
-    pub(crate) fn structural_hash_cached(&self) -> u64 {
+    pub fn structural_hash_cached(&self) -> u64 {
         cached_structural_weight_hash(self)
     }
 
-    pub(crate) fn compact_entries(&self) -> Option<Vec<(u32, u32, SharedTokenSet)>> {
+    pub fn compact_entries(&self) -> Option<Vec<(u32, u32, SharedTokenSet)>> {
         if self.is_full() {
             return None;
         }
@@ -2137,7 +2140,7 @@ impl Weight {
     }
 
     /// Borrowed outer-map entries for consumers that do not retain token sets.
-    pub(crate) fn range_entries(
+    pub fn range_entries(
         &self,
     ) -> impl Iterator<Item = (u32, u32, &SharedTokenSet)> + '_ {
         self.0
@@ -2148,7 +2151,7 @@ impl Weight {
     /// Remap only the inner token sets while preserving the already-sorted,
     /// disjoint TSID ranges. This avoids rebuilding a large weight through one
     /// B-tree insertion per range when its outer coordinates are unchanged.
-    pub(crate) fn remap_token_sets_preserving_tsid_ranges(
+    pub fn remap_token_sets_preserving_tsid_ranges(
         &self,
         mut remap: impl FnMut(&SharedTokenSet) -> SharedTokenSet,
     ) -> Self {
@@ -2233,7 +2236,7 @@ impl Weight {
     /// Build a weight from ordered inclusive TSID ranges that already share
     /// one interned token set. Retained as the general range-oriented name;
     /// `from_tsid_runs_shared` is the equivalent run-oriented spelling.
-    pub(crate) fn from_tsid_ranges_shared(
+    pub fn from_tsid_ranges_shared(
         entries: impl IntoIterator<Item = (u32, u32, SharedTokenSet)>,
     ) -> Self {
         Self::from_tsid_runs_shared(entries)
@@ -2244,7 +2247,7 @@ impl Weight {
     /// byte-identical to pushing every TSID in `start..=end` individually (the
     /// builder merges same-Arc contiguous TSIDs anyway) but skips the per-TSID
     /// iteration when the caller already knows the contiguous coordinate runs.
-    pub(crate) fn from_tsid_runs_shared(
+    pub fn from_tsid_runs_shared(
         runs: impl IntoIterator<Item = (u32, u32, SharedTokenSet)>,
     ) -> Self {
         let mut builder = CompactRangeBuilder::new();
@@ -2264,7 +2267,7 @@ impl Weight {
     /// merge against this weight's ascending core-TSID ranges. Requires that
     /// `self` is neither empty nor full and that `runs` is sorted by
     /// `coordinate` (guaranteed by the post-clustering final-TSID relabel).
-    pub(crate) fn lift_sorted_coordinate_runs(&self, runs: &[(u32, u32, u32)]) -> Self {
+    pub fn lift_sorted_coordinate_runs(&self, runs: &[(u32, u32, u32)]) -> Self {
         debug_assert!(!self.is_full());
         debug_assert!(
             runs.windows(2).all(|pair| pair[0].2 <= pair[1].2),
@@ -2295,7 +2298,7 @@ impl Weight {
     /// Return the interned token set at one TSID without cloning its range
     /// contents. This is intentionally crate-visible for sparse coordinate
     /// remaps in the terminal-DWA compiler.
-    pub(crate) fn shared_tokens_for_tsid(&self, tsid: u32) -> SharedTokenSet {
+    pub fn shared_tokens_for_tsid(&self, tsid: u32) -> SharedTokenSet {
         if self.is_full() {
             return self
                 .0
@@ -2317,7 +2320,7 @@ impl Weight {
     /// cost of the post-DWA group-signature step. `u32::MAX` is the "no
     /// coordinate" sentinel and always yields the empty token set, matching the
     /// point helper's caller contract.
-    pub(crate) fn shared_tokens_for_sorted_tsids(&self, tsids: &[u32]) -> Vec<SharedTokenSet> {
+    pub fn shared_tokens_for_sorted_tsids(&self, tsids: &[u32]) -> Vec<SharedTokenSet> {
         debug_assert!(
             tsids.windows(2).all(|pair| pair[0] < pair[1]),
             "shared_tokens_for_sorted_tsids requires strictly-ascending tsids"
@@ -2358,7 +2361,7 @@ impl Weight {
     /// Apply a sorted, unique set of point-TSID token-set overrides without
     /// expanding the unchanged ranges of `self`. Empty override token sets
     /// remove that point from the result.
-    pub(crate) fn with_sparse_tsid_overrides(
+    pub fn with_sparse_tsid_overrides(
         &self,
         overrides: &[(u32, SharedTokenSet)],
     ) -> Self {
@@ -2414,7 +2417,7 @@ impl Weight {
     /// `self.with_sparse_tsid_overrides(overrides).intersection(domain)`, but
     /// avoids interning and then immediately re-reading the intermediate
     /// overridden weight.
-    pub(crate) fn with_sparse_tsid_overrides_intersection(
+    pub fn with_sparse_tsid_overrides_intersection(
         &self,
         overrides: &[(u32, SharedTokenSet)],
         domain: &Weight,
@@ -2431,7 +2434,7 @@ impl Weight {
     /// `domain`. This is the ranged analogue of
     /// `with_sparse_tsid_overrides_intersection`: an override replaces the base
     /// token set at every TSID in its inclusive range.
-    pub(crate) fn with_sparse_tsid_range_overrides_intersection(
+    pub fn with_sparse_tsid_range_overrides_intersection(
         &self,
         overrides: &[(u32, u32, SharedTokenSet)],
         domain: &Weight,
@@ -2529,7 +2532,7 @@ impl Weight {
     /// The entries must be nondecreasing by TSID. Equal TSIDs are reduced with
     /// the canonical token-set union before the compact map is built, avoiding
     /// a sequence of whole-weight unions for point-entry workloads.
-    pub(crate) fn union_sorted_point_entries(
+    pub fn union_sorted_point_entries(
         entries: impl IntoIterator<Item = (u32, SharedTokenSet)>,
     ) -> Self {
         let mut builder = CompactRangeBuilder::new();
@@ -2605,7 +2608,7 @@ impl Weight {
     /// Return the set of TSID ranges covered by this weight, ignoring token
     /// subranges. `None` denotes the mathematical full weight, whose TSID
     /// coverage may overlap any finite TSID set.
-    pub(crate) fn tsid_coverage(&self) -> Option<RangeSetBlaze<u32>> {
+    pub fn tsid_coverage(&self) -> Option<RangeSetBlaze<u32>> {
         if self.is_full() {
             return None;
         }
@@ -2699,7 +2702,7 @@ impl Weight {
 
     /// Exact direct multi-way union. This avoids allocating pairwise
     /// intermediate weights when several complex operands are merged once.
-    pub(crate) fn union_all_direct<'a>(weights: impl IntoIterator<Item = &'a Self>) -> Self {
+    pub fn union_all_direct<'a>(weights: impl IntoIterator<Item = &'a Self>) -> Self {
         let mut meaningful = SmallVec::<[&Weight; 8]>::new();
         for weight in weights {
             if weight.is_full() {
@@ -2725,7 +2728,7 @@ impl Weight {
     /// that repeatedly carry the same interned token-set body. Coalesce only
     /// those same-valued coordinate intervals before the ordinary event sweep;
     /// unrelated bulk-union callers retain the normal path and pay no scan.
-    pub(crate) fn union_all_reconstruction<'a>(
+    pub fn union_all_reconstruction<'a>(
         weights: impl IntoIterator<Item = &'a Self>,
     ) -> Self {
         let mut meaningful = SmallVec::<[&Weight; 8]>::new();
@@ -2797,7 +2800,7 @@ impl Weight {
         result
     }
 
-    pub(crate) fn intersection_uncached(&self, other: &Self) -> Self {
+    pub fn intersection_uncached(&self, other: &Self) -> Self {
         if self.is_empty() || other.is_empty() {
             return Self::empty();
         }
@@ -2885,18 +2888,18 @@ impl Weight {
             .unwrap_or_else(RangeSetBlaze::new)
     }
 
-    pub(crate) fn single_compact_entry_parts(
+    pub fn single_compact_entry_parts(
         &self,
     ) -> Option<(u32, u32, SharedTokenSet)> {
         let entry = single_compact_entry(self)?;
         Some((entry.start, entry.end, entry.tokens))
     }
 
-    pub(crate) fn outer_range_count(&self) -> usize {
+    pub fn outer_range_count(&self) -> usize {
         self.0.ranges().count()
     }
 
-    pub(crate) fn single_tsid_shared_entry(&self) -> Option<(u32, SharedTokenSet)> {
+    pub fn single_tsid_shared_entry(&self) -> Option<(u32, SharedTokenSet)> {
         let (start, end, tokens) = self.single_compact_entry_parts()?;
         if start == end && start != WEIGHT_ALL_SENTINEL {
             Some((start, tokens))
@@ -2905,7 +2908,7 @@ impl Weight {
         }
     }
 
-    pub(crate) fn union_single_tsid_shared_entries(
+    pub fn union_single_tsid_shared_entries(
         entries: impl IntoIterator<Item = (u32, SharedTokenSet)>,
     ) -> Self {
         let mut per_tsid: BTreeMap<u32, SharedTokenSet> = BTreeMap::new();
@@ -2924,7 +2927,7 @@ impl Weight {
         builder.finish()
     }
 
-    pub(crate) fn intersect_single_parts(
+    pub fn intersect_single_parts(
         &self,
         start: u32,
         end: u32,
@@ -2938,7 +2941,7 @@ impl Weight {
         intersect_single_entry_with_weight(&single, self)
     }
 
-    pub(crate) fn for_each_intersection_tokens_with_single<F>(
+    pub fn for_each_intersection_tokens_with_single<F>(
         &self,
         start: u32,
         end: u32,
@@ -3571,12 +3574,6 @@ mod tests {
 }
 
 impl Eq for Weight {}
-
-impl super::leveled_gss::Merge for Weight {
-    fn merge(&self, other: &Self) -> Self {
-        self.union(other)
-    }
-}
 
 impl std::hash::Hash for Weight {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {

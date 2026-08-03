@@ -119,7 +119,7 @@ fn subset_final_weight(
             path_weight,
             state_final,
             final_weight_indices,
-            MAX_INDEXED_FINAL_PATH_RANGES,
+            max_indexed_path_ranges,
         ))
     })
 }
@@ -172,7 +172,7 @@ fn subset_final_weight_profiled(
             path_weight,
             state_final,
             final_weight_indices,
-            MAX_INDEXED_FINAL_PATH_RANGES,
+            max_indexed_path_ranges,
         );
         profile.intersection_ms += intersection_started_at.elapsed().as_secs_f64() * 1000.0;
         if contribution.is_empty() {

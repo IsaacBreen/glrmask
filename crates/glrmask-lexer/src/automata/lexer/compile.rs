@@ -10,9 +10,6 @@ use smallvec::SmallVec;
 
 use crate::ds::{bitset::BitSet, u8set::U8Set};
 use crate::Vocab;
-use crate::compiler::stages::id_map_and_terminal_dwa::synthetic_state_map::{
-    CertifiedVocabularyExactStateCandidates, certify_vocabulary_exact_state_candidates,
-};
 
 use super::ast::Expr;
 use super::tokenizer::{
@@ -22,6 +19,53 @@ use super::dfa::DFA;
 use super::nfa::NFA;
 
 type ProductStateTuple = SmallVec<[(u32, u32); 12]>;
+
+#[derive(Debug, Clone)]
+pub struct CertifiedVocabularyExactStateCandidates {
+    primary: Vec<u32>,
+    candidates_by_full_state: Vec<Arc<[u32]>>,
+}
+
+impl CertifiedVocabularyExactStateCandidates {
+    pub fn new(primary: Vec<u32>, candidates_by_full_state: Vec<Arc<[u32]>>) -> Self {
+        Self { primary, candidates_by_full_state }
+    }
+
+    pub fn primary(&self) -> &[u32] {
+        &self.primary
+    }
+
+    pub fn visit_candidates(
+        &self,
+        full_state: u32,
+        mut visit: impl FnMut(u32) -> bool,
+    ) -> bool {
+        self.candidates_by_full_state[full_state as usize]
+            .iter()
+            .copied()
+            .any(&mut visit)
+    }
+}
+
+pub type VocabularyExactStateCertifier = fn(
+    &Tokenizer,
+    &Tokenizer,
+    &Vocab,
+    Option<&[bool]>,
+) -> Option<CertifiedVocabularyExactStateCandidates>;
+
+static VOCABULARY_EXACT_STATE_CERTIFIER: OnceLock<VocabularyExactStateCertifier> = OnceLock::new();
+
+pub fn install_vocabulary_exact_state_certifier(certifier: VocabularyExactStateCertifier) {
+    if let Some(existing) = VOCABULARY_EXACT_STATE_CERTIFIER.get() {
+        assert!(
+            std::ptr::fn_addr_eq(*existing, certifier),
+            "vocabulary exact-state certifier installed more than once with different implementations",
+        );
+        return;
+    }
+    let _ = VOCABULARY_EXACT_STATE_CERTIFIER.set(certifier);
+}
 
 const DEAD_REPEAT_TRANSLATION_STATE: u32 = u32::MAX;
 
@@ -94,16 +138,16 @@ impl RepeatBodyLanguageKey {
 }
 
 #[derive(Default)]
-pub(crate) struct VocabularyRepeatHorizonCache {
+pub struct VocabularyRepeatHorizonCache {
     horizons: Mutex<FxHashMap<RepeatBodyLanguageKey, Option<usize>>>,
 }
 
 impl VocabularyRepeatHorizonCache {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::default()
     }
 
-    pub(crate) fn horizon_for_dfa(&self, body: &DFA, vocab: &Vocab) -> Option<usize> {
+    pub fn horizon_for_dfa(&self, body: &DFA, vocab: &Vocab) -> Option<usize> {
         let key = RepeatBodyLanguageKey::from_dfa(body);
         if let Some(cached) = self
             .horizons
@@ -126,7 +170,7 @@ impl VocabularyRepeatHorizonCache {
         *horizons.entry(key).or_insert(computed)
     }
 
-    pub(crate) fn horizon_for_expr(&self, body: &Expr, vocab: &Vocab) -> Option<usize> {
+    pub fn horizon_for_expr(&self, body: &Expr, vocab: &Vocab) -> Option<usize> {
         // The ordinary expression-to-DFA helper requires nested language
         // operations to be lowered before NFA compilation. Repeat synthesis is
         // an optimization, so unsupported body shapes must fail closed rather
@@ -329,7 +373,7 @@ fn vocabulary_repeat_boundary_horizon_for_dfa_uncached(
     Some(horizon)
 }
 
-pub(crate) fn vocabulary_repeat_boundary_horizon(
+pub fn vocabulary_repeat_boundary_horizon(
     body_expr: &Expr,
     vocab: &Vocab,
 ) -> Option<usize> {
@@ -471,7 +515,7 @@ fn factor_choice_literals(options: &[Expr]) -> Option<Expr> {
     ]))
 }
 
-pub(crate) fn factor_regex_expr(expr: Expr) -> Expr {
+pub fn factor_regex_expr(expr: Expr) -> Expr {
     match expr {
         Expr::Seq(parts) => {
             let mut out = Vec::new();
@@ -2361,7 +2405,7 @@ fn compile_expression_labeled_nfa_via_byte_nfa(
 /// including nullable edge languages. This preserves the graph's factorization
 /// and avoids constructing
 /// a global epsilon NFA whose powerset immediately has to rediscover it.
-pub(crate) fn compile_expression_labeled_nfa(
+pub fn compile_expression_labeled_nfa(
     graph: &crate::automata::unweighted_u32::nfa::NFA,
     symbols: &[Expr],
 ) -> Result<DFA, String> {
@@ -3676,7 +3720,7 @@ pub struct Regex {
 }
 
 impl Regex {
-    pub(crate) fn into_tokenizer(self, num_terminals: u32, exprs: Option<std::sync::Arc<[Expr]>>) -> Tokenizer {
+    pub fn into_tokenizer(self, num_terminals: u32, exprs: Option<std::sync::Arc<[Expr]>>) -> Tokenizer {
         Tokenizer {
             dfa: self.dfa,
             num_terminals,
@@ -3905,7 +3949,7 @@ pub fn build_regex(exprs: &[Expr]) -> Regex {
 }
 
 /// Compile all expressions into one traditional deterministic lexer.
-pub(crate) fn build_regex_monolithic(exprs: &[Expr]) -> Regex {
+pub fn build_regex_monolithic(exprs: &[Expr]) -> Regex {
     Regex {
         dfa: compile_with_plan(build_exclusion_compile_plan(exprs)),
     }
@@ -3924,11 +3968,11 @@ pub fn build_regex_with_profile_labels(exprs: &[Expr], visible_labels: &[String]
 /// those partitions with epsilon edges from one global start state. Terminals
 /// sharing a partition may be jointly determinized; terminals in different
 /// partitions can never cause a cross-partition subset/product blow-up.
-pub(crate) fn build_regex_partitioned(exprs: &[Expr], partitions: &[u32]) -> Regex {
+pub fn build_regex_partitioned(exprs: &[Expr], partitions: &[u32]) -> Regex {
     build_regex_partitioned_with_adaptive(exprs, partitions, adaptive_lexer_enabled())
 }
 
-pub(crate) fn build_regex_partitioned_with_residual_isolation(
+pub fn build_regex_partitioned_with_residual_isolation(
     exprs: &[Expr],
     partitions: &[u32],
     residual_isolation_classes: &[Option<u32>],
@@ -3941,7 +3985,7 @@ pub(crate) fn build_regex_partitioned_with_residual_isolation(
     )
 }
 
-pub(crate) fn build_regex_partitioned_with_adaptive(
+pub fn build_regex_partitioned_with_adaptive(
     exprs: &[Expr],
     partitions: &[u32],
     adaptive: bool,
@@ -3951,7 +3995,7 @@ pub(crate) fn build_regex_partitioned_with_adaptive(
     }
 }
 
-pub(crate) fn build_regex_partitioned_with_adaptive_and_residual_isolation(
+pub fn build_regex_partitioned_with_adaptive_and_residual_isolation(
     exprs: &[Expr],
     partitions: &[u32],
     residual_isolation_classes: &[Option<u32>],
@@ -3968,7 +4012,7 @@ pub(crate) fn build_regex_partitioned_with_adaptive_and_residual_isolation(
     }
 }
 
-pub(crate) fn build_regex_partitioned_with_profile_labels(
+pub fn build_regex_partitioned_with_profile_labels(
     exprs: &[Expr],
     visible_labels: &[String],
     partitions: &[u32],
@@ -3982,7 +4026,7 @@ pub(crate) fn build_regex_partitioned_with_profile_labels(
 }
 
 
-pub(crate) fn build_regex_partitioned_with_profile_labels_and_residual_isolation(
+pub fn build_regex_partitioned_with_profile_labels_and_residual_isolation(
     exprs: &[Expr],
     visible_labels: &[String],
     partitions: &[u32],
@@ -3997,7 +4041,7 @@ pub(crate) fn build_regex_partitioned_with_profile_labels_and_residual_isolation
     )
 }
 
-pub(crate) fn build_regex_partitioned_with_profile_labels_and_adaptive(
+pub fn build_regex_partitioned_with_profile_labels_and_adaptive(
     exprs: &[Expr],
     visible_labels: &[String],
     partitions: &[u32],
@@ -4013,7 +4057,7 @@ pub(crate) fn build_regex_partitioned_with_profile_labels_and_adaptive(
         ),
     }
 }
-pub(crate) fn build_regex_partitioned_with_profile_labels_and_adaptive_and_residual_isolation(
+pub fn build_regex_partitioned_with_profile_labels_and_adaptive_and_residual_isolation(
     exprs: &[Expr],
     visible_labels: &[String],
     partitions: &[u32],
@@ -4038,7 +4082,7 @@ pub(crate) fn build_regex_partitioned_with_profile_labels_and_adaptive_and_resid
 /// synthesized tokenizer or a full-to-synthesized state map. It is intended
 /// for consumers, such as direct dynamic masking, that need only the exact
 /// runtime tokenizer.
-pub(crate) fn build_exact_partitioned_runtime_tokenizer(
+pub fn build_exact_partitioned_runtime_tokenizer(
     exprs: &[Expr],
     visible_labels: Option<&[String]>,
     partitions: &[u32],
@@ -4371,25 +4415,25 @@ fn isolate_component_nullable_start(dfa: DFA, num_terminals: usize) -> (DFA, BTr
     (tokenizer.dfa, nullable)
 }
 
-pub(crate) struct CompiledPartitionedExpressionPair {
-    pub(crate) synthesized: Regex,
-    pub(crate) full: Regex,
-    pub(crate) full_to_synthesized: Vec<u32>,
+pub struct CompiledPartitionedExpressionPair {
+    pub synthesized: Regex,
+    pub full: Regex,
+    pub full_to_synthesized: Vec<u32>,
 }
 
-pub(crate) struct PreparedPartitionedExpressionPair {
-    pub(crate) synthesized: Regex,
+pub struct PreparedPartitionedExpressionPair {
+    pub synthesized: Regex,
     full: DeferredPartitionedRegex,
-    pub(crate) full_to_synthesized: Vec<u32>,
-    pub(crate) synthesized_expressions: Vec<Expr>,
+    pub full_to_synthesized: Vec<u32>,
+    pub synthesized_expressions: Vec<Expr>,
 }
 
 impl PreparedPartitionedExpressionPair {
-    pub(crate) fn full_num_states(&self) -> usize {
+    pub fn full_num_states(&self) -> usize {
         self.full.num_states()
     }
 
-    pub(crate) fn finish_full(self) -> CompiledPartitionedExpressionPair {
+    pub fn finish_full(self) -> CompiledPartitionedExpressionPair {
         CompiledPartitionedExpressionPair {
             synthesized: self.synthesized,
             full: self.full.finish(),
@@ -4397,7 +4441,7 @@ impl PreparedPartitionedExpressionPair {
         }
     }
 
-    pub(crate) fn into_parts(
+    pub fn into_parts(
         self,
     ) -> (Regex, DeferredPartitionedRegex, Vec<u32>, Vec<Expr>) {
         (
@@ -4409,13 +4453,13 @@ impl PreparedPartitionedExpressionPair {
     }
 }
 
-pub(crate) struct DeferredPartitionedRegex {
+pub struct DeferredPartitionedRegex {
     components: Vec<LexerComponentPair>,
     total_groups: usize,
 }
 
 impl DeferredPartitionedRegex {
-    pub(crate) fn num_states(&self) -> usize {
+    pub fn num_states(&self) -> usize {
         1 + self
             .components
             .iter()
@@ -4423,13 +4467,13 @@ impl DeferredPartitionedRegex {
             .sum::<usize>()
     }
 
-    pub(crate) fn has_deferred_runtime_materialization(&self) -> bool {
+    pub fn has_deferred_runtime_materialization(&self) -> bool {
         self.components
             .iter()
             .any(|component| component.full.has_deferred_runtime_materialization())
     }
 
-    pub(crate) fn finish(self) -> Regex {
+    pub fn finish(self) -> Regex {
         let components = self
             .components
             .into_iter()
@@ -4444,7 +4488,7 @@ impl DeferredPartitionedRegex {
         }
     }
 
-    pub(crate) fn finish_runtime_tokenizer(
+    pub fn finish_runtime_tokenizer(
         self,
         num_terminals: u32,
         expressions: Arc<[Expr]>,
@@ -5320,15 +5364,15 @@ fn combine_lexer_components_under_epsilon_root(
     combined
 }
 
-pub(crate) struct ExtractedDispatchComponent {
-    pub(crate) terminal_ids: Vec<usize>,
-    pub(crate) source_states: Vec<u32>,
-    pub(crate) dfa: DFA,
+pub struct ExtractedDispatchComponent {
+    pub terminal_ids: Vec<usize>,
+    pub source_states: Vec<u32>,
+    pub dfa: DFA,
 }
 
-pub(crate) struct PrecompiledFurtherSynthesisPairs {
+pub struct PrecompiledFurtherSynthesisPairs {
     pairs: Mutex<BTreeMap<usize, CompiledTerminalExpressionPair>>,
-    pub(crate) build_ms: f64,
+    pub build_ms: f64,
 }
 
 impl PrecompiledFurtherSynthesisPairs {
@@ -5340,7 +5384,7 @@ impl PrecompiledFurtherSynthesisPairs {
     }
 }
 
-pub(crate) fn precompile_further_synthesis_pairs(
+pub fn precompile_further_synthesis_pairs(
     source_expressions: &[Expr],
     synthesized_expressions: &[Expr],
     protected_terminal_ids: &[u32],
@@ -5474,7 +5518,7 @@ fn extract_dispatch_component_from_states(
     })
 }
 
-pub(crate) fn extract_dispatch_components(
+pub fn extract_dispatch_components(
     tokenizer: &Tokenizer,
 ) -> Option<Vec<ExtractedDispatchComponent>> {
     let roots = tokenizer.deterministic_dispatch_roots()?;
@@ -5495,7 +5539,7 @@ pub(crate) fn extract_dispatch_components(
 /// Extract singleton dispatch components together with externally entered
 /// residual states that were cloned outside the live root-reachable component
 /// graph by protected residual synthesis.
-pub(crate) fn extract_augmented_singleton_dispatch_components(
+pub fn extract_augmented_singleton_dispatch_components(
     tokenizer: &Tokenizer,
 ) -> Option<Vec<ExtractedDispatchComponent>> {
     let profile = std::env::var_os("GLRMASK_DEFINITION_PHYSICAL_REPORT").is_some();
@@ -5752,7 +5796,7 @@ fn augment_component_from_verified_prefix(
 /// synthesis, then clone any externally-entered residual states appended to
 /// the actual source component. The returned map covers the actual source
 /// tokenizer's raw-state domain.
-pub(crate) fn compile_further_synthesized_tokenizer_with_structural_map(
+pub fn compile_further_synthesized_tokenizer_with_structural_map(
     source: &Tokenizer,
     source_expressions: &[Expr],
     synthesized_expressions: &[Expr],
@@ -5958,7 +6002,7 @@ pub(crate) fn compile_further_synthesized_tokenizer_with_structural_map(
 /// certified local product maps. Adaptive prefix determinization remains
 /// available for the ordinary components but never crosses a protected
 /// residual coordinate.
-pub(crate) fn prepare_partitioned_expression_pair_with_structural_map(
+pub fn prepare_partitioned_expression_pair_with_structural_map(
     full_exprs: &[Expr],
     synthesized_exprs: &[Expr],
     visible_labels: Option<&[String]>,
@@ -6206,7 +6250,7 @@ pub(crate) fn prepare_partitioned_expression_pair_with_structural_map(
     })
 }
 
-pub(crate) fn compile_partitioned_expression_pair_with_structural_map(
+pub fn compile_partitioned_expression_pair_with_structural_map(
     full_exprs: &[Expr],
     synthesized_exprs: &[Expr],
     visible_labels: Option<&[String]>,
@@ -6707,7 +6751,7 @@ fn compile_product_component_dfa(expr: &Expr) -> DFA {
 /// intersections before NFA/DFA construction. Definition-level analyses must
 /// use this entry point because terminal expressions are not guaranteed to be
 /// primitive product leaves.
-pub(crate) fn compile_terminal_expr_dfa(expr: &Expr) -> DFA {
+pub fn compile_terminal_expr_dfa(expr: &Expr) -> DFA {
     compile_product_component_dfa(expr)
 }
 
@@ -8035,11 +8079,11 @@ fn augment_product_dfa_from_seed_tuples(
     }
 }
 
-pub(crate) struct CompiledTerminalExpressionPair {
-    pub(crate) synthesized: Regex,
-    pub(crate) full: Regex,
-    pub(crate) full_to_synthesized: Vec<u32>,
-    pub(crate) synthesized_expression: Expr,
+pub struct CompiledTerminalExpressionPair {
+    pub synthesized: Regex,
+    pub full: Regex,
+    pub full_to_synthesized: Vec<u32>,
+    pub synthesized_expression: Expr,
 }
 
 struct PreparedTerminalExpressionPair {
@@ -8058,7 +8102,7 @@ struct PreparedTerminalExpressionPair {
 /// large and input-sensitive planning cliff. Callers may therefore use this as
 /// a cheap fail-closed capability check before selecting a new optimization
 /// candidate.
-pub(crate) fn structural_pair_component_count(
+pub fn structural_pair_component_count(
     full_expression: &Expr,
     synthesized_expression: &Expr,
 ) -> Option<usize> {
@@ -8429,12 +8473,14 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
                     let full_tokenizer = Regex { dfa: full.clone() }.into_tokenizer(1, None);
                     let synthesized_tokenizer =
                         Regex { dfa: synthesized.clone() }.into_tokenizer(1, None);
-                    certify_vocabulary_exact_state_candidates(
-                        &full_tokenizer,
-                        &synthesized_tokenizer,
-                        vocab,
-                        Some(&[true]),
-                    )
+                    VOCABULARY_EXACT_STATE_CERTIFIER.get().and_then(|certify| {
+                        certify(
+                            &full_tokenizer,
+                            &synthesized_tokenizer,
+                            vocab,
+                            Some(&[true]),
+                        )
+                    })
                 })
                 .flatten()
             };
@@ -8829,7 +8875,7 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
     })
 }
 
-pub(crate) fn compile_terminal_expression_pair_with_structural_map(
+pub fn compile_terminal_expression_pair_with_structural_map(
     full_expression: &Expr,
     synthesized_expression: &Expr,
     vocab: &Vocab,
@@ -10790,7 +10836,7 @@ fn try_compile_with_plan_deferred_dense_min_pair_cells(
 
 /// Return whether one terminal expression has the exact pure binary-product
 /// shape supported by the compressed runtime tokenizer builder.
-pub(crate) fn expression_supports_deferred_dense_runtime(expr: &Expr) -> bool {
+pub fn expression_supports_deferred_dense_runtime(expr: &Expr) -> bool {
     let plan = build_exclusion_compile_plan(std::slice::from_ref(expr));
     plan.visible_groups == 1
         && plan.compiled_exprs.len() == 2
@@ -11116,56 +11162,6 @@ mod tests {
         for input in enumerate_inputs(b"ab", 2) {
             assert_eq!(terminal_matches(rebuilt.clone(), &input), input == b"a");
         }
-    }
-
-    #[test]
-    fn terminal_structural_map_matches_generic_certifier_on_small_repeat() {
-        let full_expression = Expr::Repeat {
-            expr: Box::new(byte_expr(b'a')),
-            min: 1,
-            max: Some(64),
-        };
-        let synthesized_expression = Expr::Repeat {
-            expr: Box::new(byte_expr(b'a')),
-            min: 1,
-            max: Some(6),
-        };
-        let vocab = Vocab::new(vec![
-            (0, b"a".to_vec()),
-            (1, b"aa".to_vec()),
-            (2, b"aaaa".to_vec()),
-            (3, b"x".to_vec()),
-        ]);
-        let horizons = super::VocabularyRepeatHorizonCache::new();
-        let pair = super::compile_terminal_expression_pair_with_structural_map(
-            &full_expression,
-            &synthesized_expression,
-            &vocab,
-            &horizons,
-            vocab.max_token_byte_len(),
-            &vocab.relevant_bytes(),
-        )
-        .expect("structural repeat map");
-        let structural_map = pair.full_to_synthesized.clone();
-        let full = pair.full.into_tokenizer(
-            1,
-            Some(Arc::from(vec![full_expression].into_boxed_slice())),
-        );
-        let synthesized = pair.synthesized.into_tokenizer(
-            1,
-            Some(Arc::from(
-                vec![pair.synthesized_expression].into_boxed_slice(),
-            )),
-        );
-        let generic = crate::compiler::stages::id_map_and_terminal_dwa::synthetic_state_map::certify_full_to_synthesized_state_map(
-            &full,
-            &synthesized,
-            &vocab,
-            Some(&[true]),
-        )
-        .expect("generic certification");
-
-        assert_eq!(structural_map, generic.full_to_synthesized);
     }
 
     #[test]

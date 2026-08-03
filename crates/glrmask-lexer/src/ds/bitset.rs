@@ -97,7 +97,7 @@ impl BitSet {
     ///
     /// This avoids allocating a temporary intersection and is useful when a
     /// large collection of bitset pairs contributes to one accumulated set.
-    pub(crate) fn union_intersection_with(&mut self, left: &BitSet, right: &BitSet) -> bool {
+    pub fn union_intersection_with(&mut self, left: &BitSet, right: &BitSet) -> bool {
         self.assert_same_len(left);
         self.assert_same_len(right);
         let mut any = false;
@@ -135,7 +135,7 @@ impl BitSet {
         out
     }
 
-    pub(crate) fn intersect_with(&mut self, other: &BitSet) {
+    pub fn intersect_with(&mut self, other: &BitSet) {
         self.assert_same_len(other);
         for (lhs, rhs) in self.words.iter_mut().zip(&other.words) {
             *lhs &= *rhs;

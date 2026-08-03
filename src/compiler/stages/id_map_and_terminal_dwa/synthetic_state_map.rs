@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use crate::Vocab;
 use crate::automata::lexer::compile::{
-    VocabularyRepeatHorizonCache, structural_pair_component_count,
+    CertifiedVocabularyExactStateCandidates, VocabularyRepeatHorizonCache,
+    structural_pair_component_count,
 };
 use crate::automata::lexer::Lexer;
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -29,29 +30,6 @@ use super::l2p::equivalence_analysis::state_equivalence::max_length::{
 pub(crate) struct CertifiedFullToSynthesizedStateMap {
     /// Full raw lexer state -> synthesized raw lexer state.
     pub(crate) full_to_synthesized: Vec<u32>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct CertifiedVocabularyExactStateCandidates {
-    primary: Vec<u32>,
-    candidates_by_full_state: Vec<Arc<[u32]>>,
-}
-
-impl CertifiedVocabularyExactStateCandidates {
-    pub(crate) fn primary(&self) -> &[u32] {
-        &self.primary
-    }
-
-    pub(crate) fn visit_candidates(
-        &self,
-        full_state: u32,
-        mut visit: impl FnMut(u32) -> bool,
-    ) -> bool {
-        self.candidates_by_full_state[full_state as usize]
-            .iter()
-            .copied()
-            .any(&mut visit)
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -1780,10 +1758,10 @@ pub(crate) fn certify_vocabulary_exact_state_candidates(
             started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
         );
     }
-    Some(CertifiedVocabularyExactStateCandidates {
+    Some(CertifiedVocabularyExactStateCandidates::new(
         primary,
         candidates_by_full_state,
-    })
+    ))
 }
 
 pub(crate) fn certify_vocabulary_exact_state_map(
@@ -1799,7 +1777,7 @@ pub(crate) fn certify_vocabulary_exact_state_map(
         active_terminals,
     )?;
     Some(CertifiedFullToSynthesizedStateMap {
-        full_to_synthesized: certified.primary,
+        full_to_synthesized: certified.primary().to_vec(),
     })
 }
 
@@ -2211,4 +2189,60 @@ mod tests {
             Constraint::from_json_schema(schema, &vocab).expect("pathological exact constraint"),
         );
     }
+    #[test]
+    fn terminal_structural_map_matches_generic_certifier_on_small_repeat() {
+        use crate::automata::lexer::ast::Expr;
+        use crate::automata::lexer::compile::{
+            VocabularyRepeatHorizonCache, compile_terminal_expression_pair_with_structural_map,
+        };
+        use std::sync::Arc;
+
+        let full_expression = Expr::Repeat {
+            expr: Box::new(Expr::U8Seq(vec![b'a'])),
+            min: 1,
+            max: Some(64),
+        };
+        let synthesized_expression = Expr::Repeat {
+            expr: Box::new(Expr::U8Seq(vec![b'a'])),
+            min: 1,
+            max: Some(6),
+        };
+        let vocab = Vocab::new(vec![
+            (0, b"a".to_vec()),
+            (1, b"aa".to_vec()),
+            (2, b"aaaa".to_vec()),
+            (3, b"x".to_vec()),
+        ]);
+        let horizons = VocabularyRepeatHorizonCache::new();
+        let pair = compile_terminal_expression_pair_with_structural_map(
+            &full_expression,
+            &synthesized_expression,
+            &vocab,
+            &horizons,
+            vocab.max_token_byte_len(),
+            &vocab.relevant_bytes(),
+        )
+        .expect("structural repeat map");
+        let structural_map = pair.full_to_synthesized.clone();
+        let full = pair.full.into_tokenizer(
+            1,
+            Some(Arc::from(vec![full_expression].into_boxed_slice())),
+        );
+        let synthesized = pair.synthesized.into_tokenizer(
+            1,
+            Some(Arc::from(
+                vec![pair.synthesized_expression].into_boxed_slice(),
+            )),
+        );
+        let generic = certify_full_to_synthesized_state_map(
+            &full,
+            &synthesized,
+            &vocab,
+            Some(&[true]),
+        )
+        .expect("generic certification");
+
+        assert_eq!(structural_map, generic.full_to_synthesized);
+    }
+
 }

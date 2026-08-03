@@ -502,19 +502,19 @@ impl DFA {
             .get_or_init(|| self.compute_derived_stats())
     }
 
-    pub(crate) fn transition_count(&self) -> usize {
+    pub fn transition_count(&self) -> usize {
         self.derived_stats().byte_transition_count
     }
 
-    pub(crate) fn epsilon_transition_count(&self) -> usize {
+    pub fn epsilon_transition_count(&self) -> usize {
         self.derived_stats().epsilon_transition_count
     }
 
-    pub(crate) fn has_self_loops(&self) -> bool {
+    pub fn has_self_loops(&self) -> bool {
         self.derived_stats().has_self_loops
     }
 
-    pub(crate) fn num_states(&self) -> usize {
+    pub fn num_states(&self) -> usize {
         self.states.len()
     }
 
@@ -617,13 +617,13 @@ impl DFA {
         offset
     }
 
-    pub(crate) fn has_epsilon_transitions(&self) -> bool {
+    pub fn has_epsilon_transitions(&self) -> bool {
         self.epsilon_transition_count() != 0
     }
 
     /// Minimum number of consumed bytes needed to reach any accepting state.
     /// Epsilon transitions have zero cost and byte transitions have unit cost.
-    pub(crate) fn min_match_byte_len(&self) -> Option<usize> {
+    pub fn min_match_byte_len(&self) -> Option<usize> {
         *self
             .min_match_byte_len_cache
             .get_or_init(|| self.compute_min_match_byte_len())
@@ -839,13 +839,13 @@ impl DFA {
         }
     }
 
-    pub(crate) fn step(&self, state: u32, byte: u8) -> Option<u32> {
+    pub fn step(&self, state: u32, byte: u8) -> Option<u32> {
         self.states
             .get(state as usize)
             .and_then(|state| state.transitions.get(byte).copied())
     }
 
-    pub(crate) fn transitions(&self, state: u32) -> impl Iterator<Item = (u8, u32)> + '_ {
+    pub fn transitions(&self, state: u32) -> impl Iterator<Item = (u8, u32)> + '_ {
         self.states[state as usize]
             .transitions
             .iter()
@@ -870,11 +870,11 @@ impl DFA {
         &self.group_id_to_u8set[group_id as usize]
     }
 
-    pub(crate) fn finalizers(&self, state: u32) -> &BitSet {
+    pub fn finalizers(&self, state: u32) -> &BitSet {
         &self.states[state as usize].finalizers
     }
 
-    pub(crate) fn possible_future_group_ids(&self, state: u32) -> &BitSet {
+    pub fn possible_future_group_ids(&self, state: u32) -> &BitSet {
         &self.states[state as usize].possible_future_group_ids
     }
 

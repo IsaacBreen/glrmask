@@ -65,11 +65,11 @@ pub(crate) mod import;
 pub(crate) mod runtime;
 #[path = "runtime/dynamic_constraint.rs"]
 mod dynamic_constraint;
-mod vocab;
+pub(crate) use glrmask_vocab as vocab;
 
 pub use dynamic_constraint::{DynamicConstraint, DynamicConstraintState};
 pub use runtime::{Constraint, ConstraintState};
-pub use vocab::Vocab;
+pub use glrmask_vocab::Vocab;
 
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, Default)]

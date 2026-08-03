@@ -56,31 +56,31 @@ pub struct Tokenizer {
     pub(super) scalar_deterministic_dispatch_cache: OnceLock<bool>,
 }
 
-pub(crate) struct FullTokenizerDeterminization {
-    pub(crate) tokenizer: Tokenizer,
+pub struct FullTokenizerDeterminization {
+    pub tokenizer: Tokenizer,
     /// Exact epsilon-closed source-state subset represented by each new state.
-    pub(crate) source_subsets: Vec<Box<[u32]>>,
+    pub source_subsets: Vec<Box<[u32]>>,
     /// First state of an appended exact copy of the source tokenizer.  The
     /// copy is a correctness fallback for parser histories that cease to be
     /// uniform across one determinized subset.
-    pub(crate) source_state_offset: u32,
+    pub source_state_offset: u32,
     /// A source state whose singleton epsilon closure is exactly the product
     /// subset, or `u32::MAX` when no such scalar representative exists.
-    pub(crate) exact_source_states: Vec<u32>,
+    pub exact_source_states: Vec<u32>,
 }
 
 /// Exact deterministic transition rows over a byte-equivalence-class alphabet.
 /// Targets and row coordinates are local to one DFA component; `state_offset`
 /// rebases both into the final partitioned runtime tokenizer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct CompressedTransitionSegment {
-    pub(crate) state_offset: u32,
-    pub(crate) state_count: u32,
-    pub(crate) byte_to_class: Arc<[u8]>,
-    pub(crate) class_members: Arc<[Box<[u8]>]>,
-    pub(crate) row_offsets: Arc<[u32]>,
-    pub(crate) entries: CompressedTransitionEntries,
-    pub(crate) expanded_transition_count: usize,
+pub struct CompressedTransitionSegment {
+    pub state_offset: u32,
+    pub state_count: u32,
+    pub byte_to_class: Arc<[u8]>,
+    pub class_members: Arc<[Box<[u8]>]>,
+    pub row_offsets: Arc<[u32]>,
+    pub entries: CompressedTransitionEntries,
+    pub expanded_transition_count: usize,
 }
 
 /// Structure-of-arrays storage for compressed transition entries. Rust pads a
@@ -88,13 +88,13 @@ pub(crate) struct CompressedTransitionSegment {
 /// bytes per entry while retaining the historical serialized sequence of
 /// `(class, target)` pairs.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct CompressedTransitionEntries {
+pub struct CompressedTransitionEntries {
     classes: Arc<[u8]>,
     targets: Arc<[u32]>,
 }
 
 impl CompressedTransitionEntries {
-    pub(crate) fn from_parts(classes: Vec<u8>, targets: Vec<u32>) -> Self {
+    pub fn from_parts(classes: Vec<u8>, targets: Vec<u32>) -> Self {
         assert_eq!(classes.len(), targets.len());
         Self {
             classes: Arc::from(classes.into_boxed_slice()),
@@ -160,7 +160,7 @@ impl<'de> Deserialize<'de> for CompressedTransitionEntries {
     }
 }
 
-pub(crate) mod artifact_serde {
+pub mod artifact_serde {
     use super::*;
     use serde::{Deserializer, Serializer};
 
@@ -178,7 +178,7 @@ pub(crate) mod artifact_serde {
         compressed_transition_segments: Vec<CompressedTransitionSegment>,
     }
 
-    pub(crate) fn serialize<S>(tokenizer: &Tokenizer, serializer: S) -> Result<S::Ok, S::Error>
+    pub fn serialize<S>(tokenizer: &Tokenizer, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
@@ -190,7 +190,7 @@ pub(crate) mod artifact_serde {
         .serialize(serializer)
     }
 
-    pub(crate) fn deserialize<'de, D>(deserializer: D) -> Result<Tokenizer, D::Error>
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Tokenizer, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -256,7 +256,7 @@ impl CompressedTransitionSegment {
         entries
     }
 
-    pub(crate) fn materialize_into_dfa(&self, dfa: &mut DFA) {
+    pub fn materialize_into_dfa(&self, dfa: &mut DFA) {
         for local_state in 0..self.state_count {
             let state = self.state_offset + local_state;
             dfa.set_transitions_from_sorted_entries(state, self.expanded_entries(state));
@@ -298,7 +298,7 @@ enum TokenizerTransitionsIterInner<'a> {
     Empty,
 }
 
-pub(crate) struct TokenizerTransitionsIter<'a> {
+pub struct TokenizerTransitionsIter<'a> {
     inner: TokenizerTransitionsIterInner<'a>,
 }
 
@@ -389,13 +389,13 @@ pub type TokenizerStateSet = SmallVec<[u32; 1]>;
 /// Exact disjoint union used only by cross-tokenizer compile-time analyses.
 /// Source state `s` is represented by `left_offset + s` or
 /// `right_offset + s`; state zero is a fresh epsilon dispatcher.
-pub(crate) struct TokenizerAnalysisUnion {
-    pub(crate) tokenizer: Tokenizer,
-    pub(crate) left_offset: u32,
-    pub(crate) right_offset: u32,
+pub struct TokenizerAnalysisUnion {
+    pub tokenizer: Tokenizer,
+    pub left_offset: u32,
+    pub right_offset: u32,
 }
 
-pub(crate) trait Lexer {
+pub trait Lexer {
     fn start_state(&self) -> u32;
     fn num_terminals(&self) -> u32;
     fn has_epsilon_transitions(&self) -> bool;
@@ -510,7 +510,7 @@ impl Tokenizer {
     /// construction.  Each returned DFA state carries the epsilon-closed set of
     /// source states it represents so callers can transport the already-final
     /// tokenizer-state ID map without rebuilding compiler analyses.
-    pub(crate) fn try_full_determinization(
+    pub fn try_full_determinization(
         &self,
         state_limit: usize,
         transition_limit: usize,
@@ -641,7 +641,7 @@ impl Tokenizer {
     /// expand such a state into this appended source coordinate, execute the
     /// historical NFA semantics unchanged, and re-coalesce only exact uniform
     /// subsets afterward. The product start state remains state zero.
-    pub(crate) fn finish_full_determinization_with_source_fallback(
+    pub fn finish_full_determinization_with_source_fallback(
         &mut self,
         mut built: FullTokenizerDeterminization,
     ) -> FullTokenizerDeterminization {
@@ -680,7 +680,7 @@ impl Tokenizer {
     /// The view may be a powerset of this tokenizers epsilon-NFA. State zero is
     /// reserved for the supplied start state, and the returned old-to-new map
     /// lets callers lift raw-start mappings into the materialized coordinate.
-    pub(crate) fn materialize_deterministic_view(
+    pub fn materialize_deterministic_view(
         &self,
         start_state: usize,
         finalizers: &[Vec<usize>],
@@ -769,7 +769,7 @@ impl Tokenizer {
     /// byte after filtering labels to `active_terminals`. The method verifies
     /// that property over every class member before constructing the smaller
     /// tokenizer, so callers can fail closed to the original tokenizer.
-    pub(crate) fn materialize_active_quotient(
+    pub fn materialize_active_quotient(
         &self,
         original_to_quotient: &[u32],
         representatives: &[u32],
@@ -913,7 +913,7 @@ impl Tokenizer {
     /// every edge through the completed source-to-self map.  The result is a
     /// transition homomorphism over the actual source tokenizer, not a bounded
     /// semantic approximation.
-    pub(crate) fn augment_from_verified_component_prefixes(
+    pub fn augment_from_verified_component_prefixes(
         &mut self,
         source: &Tokenizer,
         rebuilt: &Tokenizer,
@@ -1055,7 +1055,7 @@ impl Tokenizer {
         }
     }
 
-    pub(crate) fn from_parts_with_compressed_transitions(
+    pub fn from_parts_with_compressed_transitions(
         dfa: DFA,
         num_terminals: u32,
         exprs: Option<Arc<[Expr]>>,
@@ -1090,7 +1090,7 @@ impl Tokenizer {
         })
     }
 
-    pub(crate) fn has_compressed_transition_state(&self, state: u32) -> bool {
+    pub fn has_compressed_transition_state(&self, state: u32) -> bool {
         self.compressed_segment_for_state(state).is_some()
     }
 
@@ -1109,7 +1109,7 @@ impl Tokenizer {
     /// epsilon root without identifying any source states. This lets the exact
     /// state-equivalence machinery compare residual states across independently
     /// built full and synthesized lexers.
-    pub(crate) fn disjoint_union_for_analysis(
+    pub fn disjoint_union_for_analysis(
         left: &Tokenizer,
         right: &Tokenizer,
     ) -> TokenizerAnalysisUnion {
@@ -1186,23 +1186,23 @@ impl Tokenizer {
         self.num_terminals
     }
 
-    pub(crate) fn has_epsilon_transitions(&self) -> bool {
+    pub fn has_epsilon_transitions(&self) -> bool {
         self.dfa.has_epsilon_transitions()
     }
 
     #[inline]
-    pub(crate) fn state_has_epsilon_transitions(&self, state: u32) -> bool {
+    pub fn state_has_epsilon_transitions(&self, state: u32) -> bool {
         self.dfa
             .states()
             .get(state as usize)
             .is_some_and(|state| !state.epsilon_transitions.is_empty())
     }
 
-    pub(crate) fn terminal_expr(&self, terminal: TerminalID) -> Option<&Expr> {
+    pub fn terminal_expr(&self, terminal: TerminalID) -> Option<&Expr> {
         self.exprs.as_deref()?.get(terminal as usize)
     }
 
-    pub(crate) fn initial_epsilon_branch_count(&self) -> usize {
+    pub fn initial_epsilon_branch_count(&self) -> usize {
         self.dfa
             .states()
             .get(self.start_state() as usize)
@@ -1218,7 +1218,7 @@ impl Tokenizer {
     /// independently deterministic components.  Nullable-start isolation may
     /// leave an unreachable cloned dispatch state elsewhere in the DFA, so the
     /// predicate is based on the live reset shape rather than a whole-DFA scan.
-    pub(crate) fn deterministic_dispatch_roots(&self) -> Option<&[u32]> {
+    pub fn deterministic_dispatch_roots(&self) -> Option<&[u32]> {
         let start = self.dfa.states().get(self.start_state() as usize)?;
         if start.epsilon_transitions.len() < 2 || !start.transitions.is_empty() {
             return None;
@@ -1235,7 +1235,7 @@ impl Tokenizer {
     }
 
     #[inline]
-    pub(crate) fn has_deterministic_dispatch(&self) -> bool {
+    pub fn has_deterministic_dispatch(&self) -> bool {
         self.deterministic_dispatch_roots().is_some()
     }
 
@@ -1249,7 +1249,7 @@ impl Tokenizer {
     /// Whole-token flat-transition walkers are sound only under the stronger
     /// condition checked here: no state byte-reachable from a dispatch root has
     /// an epsilon transition.
-    pub(crate) fn has_scalar_deterministic_dispatch(&self) -> bool {
+    pub fn has_scalar_deterministic_dispatch(&self) -> bool {
         *self.scalar_deterministic_dispatch_cache.get_or_init(|| {
             let Some(roots) = self.deterministic_dispatch_roots() else {
                 return false;
@@ -1280,7 +1280,7 @@ impl Tokenizer {
     /// Return the closed, pairwise-disjoint state sets below the global
     /// epsilon dispatcher. Components may contain internal epsilon structure,
     /// but no byte or epsilon edge may cross between returned sets.
-    pub(crate) fn disjoint_dispatch_components(&self) -> Option<Vec<Vec<u32>>> {
+    pub fn disjoint_dispatch_components(&self) -> Option<Vec<Vec<u32>>> {
         let roots = self.deterministic_dispatch_roots()?;
         let mut owner = vec![usize::MAX; self.dfa.states().len()];
         owner[self.start_state() as usize] = roots.len();
@@ -1320,7 +1320,7 @@ impl Tokenizer {
     /// state per component; keeping them separate avoids materializing their
     /// product while preserving cross-component terminal sequences inside one
     /// vocabulary token.
-    pub(crate) fn deterministic_reset_states(&self) -> TokenizerStateSet {
+    pub fn deterministic_reset_states(&self) -> TokenizerStateSet {
         self.deterministic_dispatch_roots()
             .map(TokenizerStateSet::from_slice)
             .unwrap_or_else(|| TokenizerStateSet::from_buf([self.initial_state_id()]))
@@ -1548,13 +1548,13 @@ impl Tokenizer {
             .collect()
     }
 
-    pub(crate) fn all_singleton_epsilon_closures(&self) -> Arc<[Box<[u32]>]> {
+    pub fn all_singleton_epsilon_closures(&self) -> Arc<[Box<[u32]>]> {
         Arc::clone(self.singleton_epsilon_closures.get_or_init(|| {
             Arc::from(self.dfa.all_singleton_epsilon_closures())
         }))
     }
 
-    pub(crate) fn cached_singleton_epsilon_closures(
+    pub fn cached_singleton_epsilon_closures(
         &self,
     ) -> Option<&Arc<[Box<[u32]>]>> {
         self.singleton_epsilon_closures.get()
@@ -1565,7 +1565,7 @@ impl Tokenizer {
     /// This is deliberately separate from `self_loop_bytes(state)`: callers
     /// needing one state keep the local O(out-degree) query, while whole-DFA
     /// compiler passes explicitly opt into one cached O(transitions) build.
-    pub(crate) fn all_self_loop_bytes(&self) -> Arc<[U8Set]> {
+    pub fn all_self_loop_bytes(&self) -> Arc<[U8Set]> {
         Arc::clone(self.all_self_loop_bytes_cache.get_or_init(|| {
             Arc::from(
                 (0..self.num_states())
@@ -1576,7 +1576,7 @@ impl Tokenizer {
         }))
     }
 
-    pub(crate) fn singleton_epsilon_closure(&self, state: u32) -> Box<[u32]> {
+    pub fn singleton_epsilon_closure(&self, state: u32) -> Box<[u32]> {
         self.dfa.epsilon_closure(&[state]).into_boxed_slice()
     }
 
@@ -1838,8 +1838,7 @@ pub struct TokenizerResult {
     pub matches: Vec<(usize, BTreeSet<TerminalID>)>,
 }
 
-#[cfg(test)]
-pub(crate) fn arbitrary_epsilon_l1_test_tokenizer() -> Tokenizer {
+pub fn arbitrary_epsilon_l1_test_tokenizer() -> Tokenizer {
     let mut dfa = DFA::new(7);
     dfa.ensure_group_capacity(2);
     dfa.add_epsilon_transition(0, 1);
