@@ -540,7 +540,14 @@ fn build_dynamic_tokenizer(grammar: &GrammarDef) -> Tokenizer {
         }
     }
     if !explicit_policy && grammar.terminals.len() >= LARGE_DYNAMIC_LEXER_TERMINALS {
-        build_tokenizer_with_partition_options(grammar, true, false)
+        // Large source-state grammars often contain thousands of exact-line
+        // terminals with substantial shared prefixes. Keeping each terminal in
+        // a singleton partition duplicates those prefixes in the runtime NFA
+        // and makes dynamic mask generation walk every partition. Build one
+        // combined product tokenizer instead: it preserves terminal identities
+        // while sharing prefix states and gives the runtime a deterministic
+        // transition structure.
+        build_tokenizer_with_partition_options(grammar, false, false)
     } else {
         build_tokenizer(grammar)
     }
