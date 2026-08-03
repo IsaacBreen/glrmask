@@ -34,6 +34,7 @@ glrmask-glr = { version = "=0.1.1", path = "crates/glrmask-glr" }
 glrmask-json-schema = { version = "=0.1.1", path = "crates/glrmask-json-schema" }
 glrmask-artifact = { version = "=0.1.1", path = "crates/glrmask-artifact" }
 glrmask-invariant = { version = "=0.1.1", path = "crates/glrmask-invariant" }
+glrmask-terminal-dwa = { version = "=0.1.1", path = "crates/glrmask-terminal-dwa" }
 rustc-hash = "1"
 ahash = "0.8"
 smallvec = { version = "1", features = ["serde"] }
@@ -196,5 +197,6 @@ members = [
     "crates/glrmask-json-schema",
     "crates/glrmask-artifact",
     "crates/glrmask-invariant",
+    "crates/glrmask-terminal-dwa",
 ]
 resolver = "2"

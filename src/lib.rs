@@ -109,6 +109,8 @@ pub fn compiler_cache_stats(vocab: Option<&Vocab>) -> CompilerCacheStats {
 
 #[cfg(test)]
 mod grammar_cross_tests;
+#[cfg(test)]
+mod terminal_dwa_cross_tests;
 
 pub(crate) use error::{GlrMaskError, Result};
 
