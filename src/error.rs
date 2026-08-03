@@ -1,27 +1,9 @@
 use thiserror::Error as ThisError;
 
-#[derive(Debug)]
-pub(crate) struct InternalInvariantViolation {
-    message: String,
-}
-
-pub(crate) fn fail_internal_invariant(message: impl Into<String>) -> ! {
-    // `resume_unwind` deliberately skips the global panic hook. The payload is
-    // caught at the public compilation boundary and converted into a normal,
-    // structured `Error::InternalInvariant`; unrelated panics still propagate.
-    std::panic::resume_unwind(Box::new(InternalInvariantViolation {
-        message: message.into(),
-    }))
-}
+pub(crate) use glrmask_invariant::fail_internal_invariant;
 
 pub(crate) fn catch_internal_invariant<T>(f: impl FnOnce() -> T) -> Result<T> {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
-        Ok(value) => Ok(value),
-        Err(payload) => match payload.downcast::<InternalInvariantViolation>() {
-            Ok(violation) => Err(Error::InternalInvariant(violation.message)),
-            Err(payload) => std::panic::resume_unwind(payload),
-        },
-    }
+    glrmask_invariant::catch_internal_invariant_message(f).map_err(Error::InternalInvariant)
 }
 
 #[derive(ThisError, Debug)]

@@ -167,3 +167,5 @@ impl Vocab {
             .unwrap_or(0)
     }
 }
+
+pub mod vocab_prefix_tree;

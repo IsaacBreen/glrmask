@@ -5,6 +5,7 @@
 pub use glrmask_vocab::Vocab;
 
 pub mod ds {
+    pub use glrmask_vocab::vocab_prefix_tree;
     pub mod bitset;
     pub mod char_transitions;
     pub mod compressed_state_set;
@@ -24,3 +25,9 @@ pub mod automata {
 }
 
 pub use automata::lexer;
+
+pub mod possible_matches;
+
+pub mod compiler {
+    pub use crate::possible_matches;
+}

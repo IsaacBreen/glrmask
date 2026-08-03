@@ -33,7 +33,7 @@ fn merge_possible_match_maps(into: &mut PossibleMatchMap, other: &PossibleMatchM
     }
 }
 
-pub(crate) struct PossibleMatchesComputer<'a> {
+pub struct PossibleMatchesComputer<'a> {
     tokenizer: &'a Tokenizer,
     canonical_state: Option<&'a [u32]>,
     cache: FxHashMap<(usize, TokenizerStateSet), Rc<PossibleMatchMap>>,
@@ -44,11 +44,11 @@ pub(crate) struct PossibleMatchesComputer<'a> {
 }
 
 impl<'a> PossibleMatchesComputer<'a> {
-    pub(crate) fn new(tokenizer: &'a Tokenizer) -> Self {
+    pub fn new(tokenizer: &'a Tokenizer) -> Self {
         Self::new_with_canonical_state(tokenizer, None)
     }
 
-    pub(crate) fn new_with_canonical_state(
+    pub fn new_with_canonical_state(
         tokenizer: &'a Tokenizer,
         canonical_state: Option<&'a [u32]>,
     ) -> Self {
@@ -100,7 +100,7 @@ impl<'a> PossibleMatchesComputer<'a> {
         U8Set::from_words(*node.subtree_bytes()).is_subset(self_loop_bytes)
     }
 
-    pub(crate) fn possible_matches_for_node(
+    pub fn possible_matches_for_node(
         &mut self,
         node: &VocabPrefixTreeNode,
         tokenizer_state: u32,
@@ -118,7 +118,7 @@ impl<'a> PossibleMatchesComputer<'a> {
     /// boundary for every token below `node`, because every such token shares
     /// those bytes. After the suffix, ordinary trie-relative possible-match
     /// analysis handles matches in the remaining descendant bytes.
-    pub(crate) fn possible_matches_for_suffix_and_node(
+    pub fn possible_matches_for_suffix_and_node(
         &mut self,
         suffix: &[u8],
         node: &VocabPrefixTreeNode,

@@ -10,6 +10,7 @@ repository = "https://github.com/IsaacBreen/glrmask"
 glrmask-finite-automata = { version = "=0.1.1", path = "../glrmask-finite-automata" }
 glrmask-vocab = { version = "=0.1.1", path = "../glrmask-vocab" }
 rayon = "1"
+range-set-blaze = "0.3.0"
 rustc-hash = "1"
 serde = { version = "1", features = ["derive", "rc"] }
 smallvec = { version = "1", features = ["serde"] }

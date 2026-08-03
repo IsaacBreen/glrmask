@@ -5,7 +5,7 @@ pub mod grammar;
 pub(crate) mod pipeline;
 pub(crate) mod terminal_run_collapse;
 pub(crate) mod pm_profile;
-pub(crate) mod possible_matches;
+pub(crate) use glrmask_lexer::possible_matches;
 pub mod stages;
 
 pub(crate) use compile::compile_owned;
