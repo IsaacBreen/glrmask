@@ -1422,7 +1422,8 @@ fn determinize_with_supports(
 
       #[derive(Default)]
       struct UnionAllCache {
-        entries: FxHashMap<Vec<usize>, Weight>,
+        entries: FxHashMap<SmallVec<[usize; 16]>, Weight>,
+        ordered_keys: bool,
         profile_enabled: bool,
         hits: usize,
         misses: usize,
@@ -1460,9 +1461,17 @@ fn determinize_with_supports(
                 return meaningful[0].clone();
             }
 
-            let mut key: Vec<usize> = meaningful.iter().map(|weight| weight.ptr_key()).collect();
-            key.sort_unstable();
-            key.dedup();
+            let mut key: SmallVec<[usize; 16]> =
+                meaningful.iter().map(|weight| weight.ptr_key()).collect();
+            // Contributions are already in deterministic target-state order.
+            // Using that exact sequence as the cache key preserves correctness:
+            // a different order merely misses the cache and recomputes the exact
+            // union. Canonical sorting only increases sharing, while costing more
+            // than the rare extra miss on parser-DWA workloads.
+            if !self.ordered_keys {
+                key.sort_unstable();
+                key.dedup();
+            }
             self.key_len_sum += key.len();
             self.key_len_max = self.key_len_max.max(key.len());
 
@@ -1618,6 +1627,7 @@ fn determinize_with_supports(
     let mut detail =
         ParserDwaDeterminizeDetail::enabled().then(ParserDwaDeterminizeDetail::default);
     let mut union_cache = UnionAllCache {
+        ordered_keys: std::env::var_os("GLRMASK_DISABLE_ORDERED_UNION_CACHE_KEY").is_none(),
         profile_enabled: detail.is_some(),
         ..UnionAllCache::default()
     };
