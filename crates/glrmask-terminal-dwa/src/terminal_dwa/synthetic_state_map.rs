@@ -2197,7 +2197,8 @@ mod tests {
     fn terminal_structural_map_matches_generic_certifier_on_small_repeat() {
         use crate::automata::lexer::ast::Expr;
         use crate::automata::lexer::compile::{
-            VocabularyRepeatHorizonCache, compile_terminal_expression_pair_with_structural_map,
+            VocabularyRepeatHorizonCache,
+            compile_terminal_expression_pair_with_vocabulary_token_quotient,
         };
         use std::sync::Arc;
 
@@ -2218,7 +2219,7 @@ mod tests {
             (3, b"x".to_vec()),
         ]);
         let horizons = VocabularyRepeatHorizonCache::new();
-        let pair = compile_terminal_expression_pair_with_structural_map(
+        let pair = compile_terminal_expression_pair_with_vocabulary_token_quotient(
             &full_expression,
             &synthesized_expression,
             &vocab,

@@ -17,8 +17,9 @@ use super::state_equivalence::{
 use super::state_equivalence::nfa::{
     PrebuiltSparsePowersetRefinement, TokenBoundedAnalysisTrie, build_bounded_analysis_view,
     build_bounded_analysis_view_with_trie,
+    RelevantPowersetView, RelevantPowersetWork, RelevantPowersetWorkBudget,
     build_bounded_analysis_view_from_relevant_powerset, build_relevant_powerset_view,
-    powerset_output_class_ids,
+    build_relevant_powerset_view_budgeted, powerset_output_class_ids,
 };
 use crate::ds::bitset::BitSet;
 use super::compat::{TokenizerView, compute_active_terminal_language_byte_classes};
@@ -641,6 +642,45 @@ fn should_probe_l2p_nfa_powerset(
         L2pNfaAnalysisViewPolicy::Adaptive => bounded_pair_estimate >= min_bounded_pairs,
         L2pNfaAnalysisViewPolicy::Bounded => false,
         L2pNfaAnalysisViewPolicy::Powerset => true,
+    }
+}
+
+fn build_l2p_nfa_powerset_candidate(
+    policy: L2pNfaAnalysisViewPolicy,
+    tokenizer: &Tokenizer,
+    relevant_bytes: &[bool; 256],
+    active_groups: Option<&[bool]>,
+    max_states: usize,
+) -> (Option<RelevantPowersetView>, Option<RelevantPowersetWork>) {
+    match policy {
+        L2pNfaAnalysisViewPolicy::Bounded => (None, None),
+        // Explicit forced-powerset mode remains diagnostic and unbounded.
+        L2pNfaAnalysisViewPolicy::Powerset => (
+            Some(build_relevant_powerset_view(
+                tokenizer,
+                relevant_bytes,
+                active_groups,
+                None,
+            )),
+            None,
+        ),
+        L2pNfaAnalysisViewPolicy::Adaptive => {
+            let active_bytes = relevant_bytes.iter().filter(|&&active| active).count().max(1);
+            let budget = RelevantPowersetWorkBudget {
+                max_configurations: max_states,
+                max_edges: max_states.saturating_mul(active_bytes),
+            };
+            match build_relevant_powerset_view_budgeted(
+                tokenizer,
+                relevant_bytes,
+                active_groups,
+                None,
+                budget,
+            ) {
+                Ok(view) => (Some(view), None),
+                Err(work) => (None, Some(work)),
+            }
+        }
     }
 }
 
@@ -2022,14 +2062,18 @@ fn analyze_equivalences_impl(
             active_language_byte_classes.as_ref(),
         );
         let prepass_powerset_started_at = Instant::now();
-        let mut prepass_powerset_candidate = should_probe_prepass_powerset.then(|| {
-            build_relevant_powerset_view(
-                tokenizer,
-                &prepass_relevant_bytes,
-                active_groups,
-                None,
-            )
-        });
+        let (mut prepass_powerset_candidate, prepass_powerset_aborted) =
+            if should_probe_prepass_powerset {
+                build_l2p_nfa_powerset_candidate(
+                    analysis_view_policy,
+                    tokenizer,
+                    &prepass_relevant_bytes,
+                    active_groups,
+                    powerset_max_states,
+                )
+            } else {
+                (None, None)
+            };
         let prepass_powerset_build_ms =
             prepass_powerset_started_at.elapsed().as_secs_f64() * 1000.0;
         let prepass_powerset_states = prepass_powerset_candidate
@@ -2061,7 +2105,7 @@ fn analyze_equivalences_impl(
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
         {
             eprintln!(
-                "[glrmask/profile][l2p_nfa_prepass_view] partition={} policy={} selected={} active_bytes={} pair_estimate={} powerset_states={} powerset_max_states={} build_ms={:.3}",
+                "[glrmask/profile][l2p_nfa_prepass_view] partition={} policy={} selected={} active_bytes={} pair_estimate={} powerset_states={} powerset_max_states={} aborted_configurations={} aborted_edges={} build_ms={:.3}",
                 partition_label,
                 analysis_view_policy.as_str(),
                 if prebuilt_nfa_refinement.is_some() {
@@ -2073,6 +2117,8 @@ fn analyze_equivalences_impl(
                 prepass_pair_estimate,
                 prepass_powerset_states,
                 powerset_max_states,
+                prepass_powerset_aborted.map_or(0, |work| work.configurations),
+                prepass_powerset_aborted.map_or(0, |work| work.edges),
                 prepass_powerset_build_ms,
             );
         }
@@ -2106,15 +2152,33 @@ fn analyze_equivalences_impl(
         );
         let powerset_started_at = Instant::now();
         let can_reuse_prepass_powerset = prepass_relevant_bytes == relevant_bytes;
-        let mut powerset_candidate = should_probe_powerset.then(|| {
-            if can_reuse_prepass_powerset {
-                prepass_powerset_candidate.take().unwrap_or_else(|| {
-                    build_relevant_powerset_view(tokenizer, &relevant_bytes, active_groups, None)
-                })
+        let (mut powerset_candidate, powerset_aborted) = if !should_probe_powerset {
+            (None, None)
+        } else if can_reuse_prepass_powerset {
+            if let Some(candidate) = prepass_powerset_candidate.take() {
+                (Some(candidate), None)
+            } else if prepass_powerset_aborted.is_some() {
+                // The same alphabet already exceeded the adaptive budget.
+                // Do not repeat the failed construction after refinement.
+                (None, prepass_powerset_aborted)
             } else {
-                build_relevant_powerset_view(tokenizer, &relevant_bytes, active_groups, None)
+                build_l2p_nfa_powerset_candidate(
+                    analysis_view_policy,
+                    tokenizer,
+                    &relevant_bytes,
+                    active_groups,
+                    powerset_max_states,
+                )
             }
-        });
+        } else {
+            build_l2p_nfa_powerset_candidate(
+                analysis_view_policy,
+                tokenizer,
+                &relevant_bytes,
+                active_groups,
+                powerset_max_states,
+            )
+        };
         let powerset_build_ms = powerset_started_at.elapsed().as_secs_f64() * 1000.0;
         let powerset_probed = powerset_candidate.is_some();
         let powerset_states = powerset_candidate
@@ -2178,7 +2242,7 @@ fn analyze_equivalences_impl(
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
         {
             eprintln!(
-                "[glrmask/profile][l2p_nfa_analysis_view] partition={} policy={} selected={} bounded_pair_estimate={} powerset_min_bounded_pairs={} powerset_probed={} powerset_states={} powerset_max_states={} powerset_build_ms={:.3} total_build_ms={:.3}",
+                "[glrmask/profile][l2p_nfa_analysis_view] partition={} policy={} selected={} bounded_pair_estimate={} powerset_min_bounded_pairs={} powerset_probed={} powerset_states={} powerset_max_states={} aborted_configurations={} aborted_edges={} powerset_build_ms={:.3} total_build_ms={:.3}",
                 partition_label,
                 analysis_view_policy.as_str(),
                 analysis_view_kind,
@@ -2187,6 +2251,8 @@ fn analyze_equivalences_impl(
                 powerset_probed,
                 powerset_states,
                 powerset_max_states,
+                powerset_aborted.map_or(0, |work| work.configurations),
+                powerset_aborted.map_or(0, |work| work.edges),
                 powerset_build_ms,
                 analysis_view_build_ms,
             );
@@ -2804,9 +2870,27 @@ fn analyze_equivalences_impl(
     // alphabet. When its map is also output-labelled congruent, token paths can
     // be evaluated exactly on the quotient instead of reinitializing 18k raw
     // lexer states for the exact and vocabulary phases.
-    let analysis_quotient = tokenizer_view
-        .is_relevant_byte_congruent(&pre_state_map, &relevant_bytes)
+    let quotient_cert_started_at = Instant::now();
+    let quotient_certified = pipeline_profile.relevant_byte_congruence_certified
+        || tokenizer_view.is_relevant_byte_congruent(&pre_state_map, &relevant_bytes);
+    let quotient_cert_ms = quotient_cert_started_at.elapsed().as_secs_f64() * 1000.0;
+    let quotient_materialize_started_at = Instant::now();
+    let analysis_quotient = quotient_certified
         .then(|| tokenizer_view.quotient_by_state_map(&pre_state_map));
+    let quotient_materialize_ms =
+        quotient_materialize_started_at.elapsed().as_secs_f64() * 1000.0;
+    if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
+        eprintln!(
+            "[glrmask/profile][analysis_quotient] partition={} certified_by_construction={} certified={} source_states={} quotient_states={} certify_ms={:.3} materialize_ms={:.3}",
+            partition_label,
+            pipeline_profile.relevant_byte_congruence_certified,
+            quotient_certified,
+            tokenizer_view.dfa().states.len(),
+            pre_state_map.num_internal_ids(),
+            quotient_cert_ms,
+            quotient_materialize_ms,
+        );
+    }
     let uses_analysis_quotient = analysis_quotient.is_some();
     let analysis_view = analysis_quotient.as_ref().unwrap_or(&tokenizer_view);
     let pre_reduced_states: Vec<usize> = if uses_analysis_quotient {

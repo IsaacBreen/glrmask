@@ -5418,13 +5418,14 @@ pub fn precompile_further_synthesis_pairs(
     let pairs = changed
         .par_iter()
         .map(|&terminal| {
-            compile_terminal_expression_pair_with_structural_map(
+            compile_terminal_expression_pair_with_structural_map_and_proof(
                 &source_expressions[terminal],
                 &synthesized_expressions[terminal],
                 vocab,
                 repeat_horizons,
                 max_token_len,
                 relevant_bytes,
+                StructuralPairProof::VocabularyTokenQuotient,
             )
             .map(|pair| (terminal, pair))
         })
@@ -5787,6 +5788,69 @@ fn augment_component_from_verified_prefix(
     Some(source_to_synthesized)
 }
 
+/// Certify the only states not copied exactly by protected-component
+/// augmentation. A partition-local terminal DWA observes only bytes that occur
+/// in its vocabulary, so congruence is required on that exact alphabet rather
+/// than on unrelated bytes that can never be consumed in this compiler lane.
+fn certify_component_prefix_homomorphism_on_bytes(
+    source: &DFA,
+    synthesized: &DFA,
+    source_to_synthesized: &[u32],
+    prefix_states: usize,
+    relevant_bytes: &[u8],
+) -> bool {
+    if source.num_groups() != synthesized.num_groups()
+        || source_to_synthesized.len() != source.num_states()
+        || prefix_states > source.num_states()
+        || source_to_synthesized
+            .iter()
+            .any(|&state| state as usize >= synthesized.num_states())
+    {
+        return false;
+    }
+
+    let mut mapped_epsilon = Vec::<u32>::new();
+    let mut synthesized_epsilon = Vec::<u32>::new();
+    for source_state in 0..prefix_states as u32 {
+        let synthesized_state = source_to_synthesized[source_state as usize];
+        if source.finalizers(source_state) != synthesized.finalizers(synthesized_state)
+            || source.possible_future_group_ids(source_state)
+                != synthesized.possible_future_group_ids(synthesized_state)
+        {
+            return false;
+        }
+
+        mapped_epsilon.clear();
+        mapped_epsilon.extend(
+            source.states()[source_state as usize]
+                .epsilon_transitions
+                .iter()
+                .map(|&target| source_to_synthesized[target as usize]),
+        );
+        mapped_epsilon.sort_unstable();
+        mapped_epsilon.dedup();
+        synthesized_epsilon.clear();
+        synthesized_epsilon.extend_from_slice(
+            &synthesized.states()[synthesized_state as usize].epsilon_transitions,
+        );
+        synthesized_epsilon.sort_unstable();
+        synthesized_epsilon.dedup();
+        if mapped_epsilon != synthesized_epsilon {
+            return false;
+        }
+
+        for &byte in relevant_bytes {
+            let mapped_source = source
+                .step(source_state, byte)
+                .map(|target| source_to_synthesized[target as usize]);
+            if mapped_source != synthesized.step(synthesized_state, byte) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Further synthesize protected singleton components of an already-built
 /// partitioned tokenizer without recompiling its ordinary components.
 ///
@@ -5876,13 +5940,14 @@ pub fn compile_further_synthesized_tokenizer_with_structural_map(
         let Some(pair) = precompiled_pairs
             .and_then(|pairs| pairs.take(terminal))
             .or_else(|| {
-                compile_terminal_expression_pair_with_structural_map(
+                compile_terminal_expression_pair_with_structural_map_and_proof(
                     &source_expressions[terminal],
                     &synthesized_expressions[terminal],
                     vocab,
                     repeat_horizons,
                     max_token_len,
                     relevant_bytes,
+                    StructuralPairProof::VocabularyTokenQuotient,
                 )
             })
         else {
@@ -5895,6 +5960,7 @@ pub fn compile_further_synthesized_tokenizer_with_structural_map(
         if !synthesized_nullable.is_empty() || !rebuilt_nullable.is_empty() {
             return reject("protected_nullable");
         }
+        let rebuilt_states = rebuilt.num_states();
         let Some(source_to_synthesized) = augment_component_from_verified_prefix(
             &component.dfa,
             &rebuilt,
@@ -5912,6 +5978,15 @@ pub fn compile_further_synthesized_tokenizer_with_structural_map(
             }
             return reject("protected_prefix");
         };
+        if !certify_component_prefix_homomorphism_on_bytes(
+            &component.dfa,
+            &synthesized,
+            &source_to_synthesized,
+            rebuilt_states,
+            relevant_bytes,
+        ) {
+            return reject("protected_relevant_homomorphism");
+        }
         component_maps.push((component.source_states, source_to_synthesized));
         output_components.push(LexerComponent {
             terminal_ids: component.terminal_ids,
@@ -6001,7 +6076,7 @@ pub fn compile_further_synthesized_tokenizer_with_structural_map(
 /// certified local product maps. Adaptive prefix determinization remains
 /// available for the ordinary components but never crosses a protected
 /// residual coordinate.
-pub fn prepare_partitioned_expression_pair_with_structural_map(
+fn prepare_partitioned_expression_pair_with_proof(
     full_exprs: &[Expr],
     synthesized_exprs: &[Expr],
     visible_labels: Option<&[String]>,
@@ -6012,6 +6087,7 @@ pub fn prepare_partitioned_expression_pair_with_structural_map(
     repeat_horizons: &VocabularyRepeatHorizonCache,
     max_token_len: usize,
     relevant_bytes: &[u8],
+    proof: StructuralPairProof,
 ) -> Option<PreparedPartitionedExpressionPair> {
     let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
     if full_exprs.len() != synthesized_exprs.len()
@@ -6132,13 +6208,15 @@ pub fn prepare_partitioned_expression_pair_with_structural_map(
             }
             let terminal = changed_terminals[0];
             residual_isolation_classes[terminal]?;
-            let pair = prepare_terminal_expression_pair_with_structural_map(
+            let pair = prepare_terminal_expression_pair_with_structural_map_inner(
                 &full_exprs[terminal],
                 &synthesized_exprs[terminal],
                 vocab,
                 repeat_horizons,
                 max_token_len,
                 relevant_bytes,
+                true,
+                proof,
             );
             let Some(pair) = pair else {
                 if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some() {
@@ -6247,6 +6325,60 @@ pub fn prepare_partitioned_expression_pair_with_structural_map(
         full_to_synthesized,
         synthesized_expressions: effective_synthesized_expressions,
     })
+}
+
+pub fn prepare_partitioned_expression_pair_with_structural_map(
+    full_exprs: &[Expr],
+    synthesized_exprs: &[Expr],
+    visible_labels: Option<&[String]>,
+    partitions: &[u32],
+    residual_isolation_classes: &[Option<u32>],
+    adaptive: bool,
+    vocab: &Vocab,
+    repeat_horizons: &VocabularyRepeatHorizonCache,
+    max_token_len: usize,
+    relevant_bytes: &[u8],
+) -> Option<PreparedPartitionedExpressionPair> {
+    prepare_partitioned_expression_pair_with_proof(
+        full_exprs,
+        synthesized_exprs,
+        visible_labels,
+        partitions,
+        residual_isolation_classes,
+        adaptive,
+        vocab,
+        repeat_horizons,
+        max_token_len,
+        relevant_bytes,
+        StructuralPairProof::RawHomomorphism,
+    )
+}
+
+pub fn prepare_partitioned_expression_pair_with_vocabulary_token_quotient(
+    full_exprs: &[Expr],
+    synthesized_exprs: &[Expr],
+    visible_labels: Option<&[String]>,
+    partitions: &[u32],
+    residual_isolation_classes: &[Option<u32>],
+    adaptive: bool,
+    vocab: &Vocab,
+    repeat_horizons: &VocabularyRepeatHorizonCache,
+    max_token_len: usize,
+    relevant_bytes: &[u8],
+) -> Option<PreparedPartitionedExpressionPair> {
+    prepare_partitioned_expression_pair_with_proof(
+        full_exprs,
+        synthesized_exprs,
+        visible_labels,
+        partitions,
+        residual_isolation_classes,
+        adaptive,
+        vocab,
+        repeat_horizons,
+        max_token_len,
+        relevant_bytes,
+        StructuralPairProof::VocabularyTokenQuotient,
+    )
 }
 
 pub fn compile_partitioned_expression_pair_with_structural_map(
@@ -8092,6 +8224,12 @@ struct PreparedTerminalExpressionPair {
     synthesized_expression: Expr,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StructuralPairProof {
+    RawHomomorphism,
+    VocabularyTokenQuotient,
+}
+
 /// Return the number of structurally aligned product components available to
 /// the paired terminal compiler without constructing either DFA.
 ///
@@ -8139,6 +8277,7 @@ fn prepare_terminal_expression_pair_with_structural_map(
         max_token_len,
         relevant_bytes,
         true,
+        StructuralPairProof::RawHomomorphism,
     )
 }
 
@@ -8150,6 +8289,7 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
     max_token_len: usize,
     relevant_bytes: &[u8],
     allow_component_identity_fallback: bool,
+    proof: StructuralPairProof,
 ) -> Option<PreparedTerminalExpressionPair> {
     let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
     let total_started_at = profile.then(Instant::now);
@@ -8225,6 +8365,17 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
             }
             return None;
         };
+        if !used_homomorphism && proof == StructuralPairProof::RawHomomorphism {
+            if profile {
+                eprintln!(
+                    "[glrmask/profile][tokenizer] structural_pair_rejected reason=single_component_map_not_raw_homomorphism full_states={} synthesized_states={} depth={}",
+                    full_dfa.num_states(),
+                    synthesized_dfa.num_states(),
+                    max_token_len,
+                );
+            }
+            return None;
+        }
         let map_ms = map_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         if profile {
@@ -8597,6 +8748,7 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
             max_token_len,
             relevant_bytes,
             false,
+            proof,
         );
     }
     let Some(component_maps) = component_maps.into_iter().collect::<Option<Vec<_>>>() else {
@@ -8808,6 +8960,42 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
     for (&position, tuple) in missing_positions.iter().zip(&missing_tuples) {
         full_to_synthesized[position] = synthesized_trace.state_lookup.get(tuple)?;
     }
+    full.attach_dense_runtime_trace(full_trace)?;
+    let (full_dfa, full_compressed) = full.finish_runtime();
+    let raw_homomorphism = certify_supplied_dfa_state_homomorphism(
+        &full_dfa,
+        full_compressed.as_ref(),
+        &synthesized_dfa,
+        &full_to_synthesized,
+    );
+    if !raw_homomorphism && proof == StructuralPairProof::RawHomomorphism {
+        if profile {
+            eprintln!(
+                "[glrmask/profile][tokenizer] structural_pair_rejected reason=augmented_map_not_raw_homomorphism missing_tuples={}",
+                missing_before,
+            );
+        }
+        if std::env::var_os("GLRMASK_PROFILE_SYNTH_CERT").is_some() {
+            let mut materialized = full_dfa.clone();
+            if let Some(segment) = full_compressed.as_ref() {
+                segment.materialize_into_dfa(&mut materialized);
+            }
+            let started_at = Instant::now();
+            let minimized = materialized.minimize();
+            eprintln!(
+                "[glrmask/profile][synth_cert] exact_minimized_full_states={} minimize_ms={:.3}",
+                minimized.num_states(),
+                started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        return None;
+    }
+    if !raw_homomorphism && profile {
+        eprintln!(
+            "[glrmask/profile][tokenizer] structural_pair_accepted proof=vocabulary_token_quotient raw_homomorphism=false missing_tuples={}",
+            missing_before,
+        );
+    }
     let lookup_ms = lookup_started_at
         .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
@@ -8862,7 +9050,13 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
         );
     }
 
-    full.attach_dense_runtime_trace(full_trace)?;
+    let full = match full_compressed {
+        Some(segment) => DeferredDfa::ReadyCompressed {
+            dfa: full_dfa,
+            segment,
+        },
+        None => DeferredDfa::Ready(full_dfa),
+    };
 
     Some(PreparedTerminalExpressionPair {
         synthesized: Regex {
@@ -8874,21 +9068,24 @@ fn prepare_terminal_expression_pair_with_structural_map_inner(
     })
 }
 
-pub fn compile_terminal_expression_pair_with_structural_map(
+fn compile_terminal_expression_pair_with_structural_map_and_proof(
     full_expression: &Expr,
     synthesized_expression: &Expr,
     vocab: &Vocab,
     repeat_horizons: &VocabularyRepeatHorizonCache,
     max_token_len: usize,
     relevant_bytes: &[u8],
+    proof: StructuralPairProof,
 ) -> Option<CompiledTerminalExpressionPair> {
-    let prepared = prepare_terminal_expression_pair_with_structural_map(
+    let prepared = prepare_terminal_expression_pair_with_structural_map_inner(
         full_expression,
         synthesized_expression,
         vocab,
         repeat_horizons,
         max_token_len,
         relevant_bytes,
+        true,
+        proof,
     )?;
     Some(CompiledTerminalExpressionPair {
         synthesized: prepared.synthesized,
@@ -8898,6 +9095,44 @@ pub fn compile_terminal_expression_pair_with_structural_map(
         full_to_synthesized: prepared.full_to_synthesized,
         synthesized_expression: prepared.synthesized_expression,
     })
+}
+
+pub fn compile_terminal_expression_pair_with_structural_map(
+    full_expression: &Expr,
+    synthesized_expression: &Expr,
+    vocab: &Vocab,
+    repeat_horizons: &VocabularyRepeatHorizonCache,
+    max_token_len: usize,
+    relevant_bytes: &[u8],
+) -> Option<CompiledTerminalExpressionPair> {
+    compile_terminal_expression_pair_with_structural_map_and_proof(
+        full_expression,
+        synthesized_expression,
+        vocab,
+        repeat_horizons,
+        max_token_len,
+        relevant_bytes,
+        StructuralPairProof::RawHomomorphism,
+    )
+}
+
+pub fn compile_terminal_expression_pair_with_vocabulary_token_quotient(
+    full_expression: &Expr,
+    synthesized_expression: &Expr,
+    vocab: &Vocab,
+    repeat_horizons: &VocabularyRepeatHorizonCache,
+    max_token_len: usize,
+    relevant_bytes: &[u8],
+) -> Option<CompiledTerminalExpressionPair> {
+    compile_terminal_expression_pair_with_structural_map_and_proof(
+        full_expression,
+        synthesized_expression,
+        vocab,
+        repeat_horizons,
+        max_token_len,
+        relevant_bytes,
+        StructuralPairProof::VocabularyTokenQuotient,
+    )
 }
 
 enum ProductComponentClassTransitions {
@@ -9019,6 +9254,122 @@ fn compile_product_component_with_options(
 
 fn compile_product_component(expr: &Expr) -> ProductComponent {
     compile_product_component_with_options(expr, false, true)
+}
+
+fn certify_supplied_dfa_state_homomorphism(
+    full: &DFA,
+    full_compressed: Option<&CompressedTransitionSegment>,
+    synthesized: &DFA,
+    full_to_synthesized: &[u32],
+) -> bool {
+    if full.num_groups() != synthesized.num_groups()
+        || full_to_synthesized.len() != full.num_states()
+        || full_to_synthesized
+            .iter()
+            .any(|&state| state as usize >= synthesized.num_states())
+    {
+        return false;
+    }
+
+    let diagnostics = std::env::var_os("GLRMASK_PROFILE_SYNTH_CERT").is_some();
+    let mut metadata_mismatch_states = 0usize;
+    let mut epsilon_mismatch_states = 0usize;
+    let mut transition_mismatch_states = 0usize;
+    let mut mismatched_synthesized_states = FxHashSet::<u32>::default();
+    let synthesized_dense_len = match synthesized.num_states().checked_mul(256) {
+        Some(len) => len,
+        None => return false,
+    };
+    let mut synthesized_dense = vec![u32::MAX; synthesized_dense_len];
+    let mut synthesized_transition_counts = vec![0usize; synthesized.num_states()];
+    for (state, dfa_state) in synthesized.states().iter().enumerate() {
+        synthesized_transition_counts[state] = dfa_state.transitions.len();
+        let row = &mut synthesized_dense[state * 256..(state + 1) * 256];
+        for (byte, &target) in dfa_state.transitions.iter() {
+            row[byte as usize] = target;
+        }
+    }
+
+    let mut mapped_epsilon = Vec::<u32>::new();
+    for full_state in 0..full.num_states() as u32 {
+        let synthesized_state = full_to_synthesized[full_state as usize];
+        if full.finalizers(full_state) != synthesized.finalizers(synthesized_state)
+            || full.possible_future_group_ids(full_state)
+                != synthesized.possible_future_group_ids(synthesized_state)
+        {
+            if !diagnostics {
+                return false;
+            }
+            metadata_mismatch_states += 1;
+            mismatched_synthesized_states.insert(synthesized_state);
+        }
+
+        mapped_epsilon.clear();
+        mapped_epsilon.extend(
+            full.states()[full_state as usize]
+                .epsilon_transitions
+                .iter()
+                .map(|&target| full_to_synthesized[target as usize]),
+        );
+        mapped_epsilon.sort_unstable();
+        mapped_epsilon.dedup();
+        if mapped_epsilon
+            != synthesized.states()[synthesized_state as usize].epsilon_transitions
+        {
+            if !diagnostics {
+                return false;
+            }
+            epsilon_mismatch_states += 1;
+            mismatched_synthesized_states.insert(synthesized_state);
+        }
+
+        let synthesized_row = &synthesized_dense
+            [synthesized_state as usize * 256..(synthesized_state as usize + 1) * 256];
+        let full_transition_count = match full_compressed {
+            Some(segment) if segment.contains_state(full_state) => {
+                segment.transition_count(full_state)
+            }
+            _ => full.states()[full_state as usize].transitions.len(),
+        };
+        let mut transition_mismatch = full_transition_count
+            != synthesized_transition_counts[synthesized_state as usize];
+        let transitions_match = match full_compressed {
+            Some(segment) if segment.contains_state(full_state) => segment.transitions_satisfy(
+                full_state,
+                |byte, target| {
+                    full_to_synthesized[target as usize] == synthesized_row[byte as usize]
+                },
+            ),
+            _ => full.states()[full_state as usize]
+                .transitions
+                .iter()
+                .all(|(byte, &target)| {
+                    full_to_synthesized[target as usize] == synthesized_row[byte as usize]
+                }),
+        };
+        transition_mismatch |= !transitions_match;
+        if transition_mismatch && !diagnostics {
+            return false;
+        }
+        if transition_mismatch {
+            transition_mismatch_states += 1;
+            mismatched_synthesized_states.insert(synthesized_state);
+        }
+    }
+    if diagnostics {
+        eprintln!(
+            "[glrmask/profile][synth_cert] full_states={} synthesized_states={} metadata_mismatch_states={} epsilon_mismatch_states={} transition_mismatch_states={} mismatched_synthesized_states={}",
+            full.num_states(),
+            synthesized.num_states(),
+            metadata_mismatch_states,
+            epsilon_mismatch_states,
+            transition_mismatch_states,
+            mismatched_synthesized_states.len(),
+        );
+    }
+    metadata_mismatch_states == 0
+        && epsilon_mismatch_states == 0
+        && transition_mismatch_states == 0
 }
 
 fn deterministic_component_homomorphism_state_map(

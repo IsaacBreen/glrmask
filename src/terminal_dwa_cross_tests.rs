@@ -240,6 +240,73 @@ nt S ::= FROM V | SPACE V SPACE CLASS;
 mod synthetic_state_facade_tests {
     use crate::{Constraint, DynamicConstraint, Vocab};
 
+    struct LlGuidanceCompatGuard;
+
+    impl LlGuidanceCompatGuard {
+        fn enabled() -> Self {
+            crate::set_test_compat_mode(true);
+            Self
+        }
+    }
+
+    impl Drop for LlGuidanceCompatGuard {
+        fn drop(&mut self) {
+            crate::set_test_compat_mode(false);
+        }
+    }
+
+    #[test]
+    fn synthesized_intersection_never_drops_long_live_tokens_after_min_length() {
+        let _compat = LlGuidanceCompatGuard::enabled();
+        let vocab = Vocab::new(vec![
+            (0, b"{\"".to_vec()),
+            (1, b"email".to_vec()),
+            (2, b"\":".to_vec()),
+            (3, b" \"".to_vec()),
+            (4, b"john".to_vec()),
+            (5, b".".to_vec()),
+            (6, b"_____".to_vec()),
+        ]);
+        let schema = r#"{
+            "type": "object",
+            "properties": {
+                "email": {
+                    "type": "string",
+                    "pattern": "^\\S+@\\S+$",
+                    "minLength": 5,
+                    "maxLength": 255
+                }
+            },
+            "required": ["email"]
+        }"#;
+
+        let constraint = Constraint::from_json_schema(schema, &vocab).expect("static constraint");
+        let dynamic =
+            DynamicConstraint::from_json_schema(schema, &vocab).expect("dynamic constraint");
+        let mut static_state = constraint.start();
+        let mut dynamic_state = dynamic.start();
+        for token in 0..=5 {
+            static_state.commit_token(token).expect("static prefix token");
+            dynamic_state.commit_token(token).expect("dynamic prefix token");
+        }
+
+        let static_mask = static_state.mask();
+        let dynamic_mask = dynamic_state.mask();
+        assert_eq!(static_mask, dynamic_mask);
+        assert_ne!(
+            static_mask[0] & (1 << 6),
+            0,
+            "five-byte non-whitespace token must remain live after minLength is reached",
+        );
+        static_state
+            .commit_token(6)
+            .expect("a token admitted by the exact language must commit statically");
+        dynamic_state
+            .commit_token(6)
+            .expect("a token admitted by the exact language must commit dynamically");
+        assert_eq!(static_state.mask(), dynamic_state.mask());
+    }
+
     #[test]
     fn static_synthesized_pipeline_matches_exact_dynamic_runtime_through_full_bound() {
         let vocab = Vocab::new(vec![

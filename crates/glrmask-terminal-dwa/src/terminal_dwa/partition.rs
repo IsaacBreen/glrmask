@@ -76,9 +76,21 @@ fn automatic_structural_branch_tokenizer_selected(
         // powerset view for every whole-token profile. On the 97k-state hard
         // cohort this cuts the dominant branch from about 1.0s to about 0.22s.
         "p4.l1" => {
-            (160..=208).contains(&active_terminals)
+            ((160..=208).contains(&active_terminals)
                 && (15_000..=30_000).contains(&vocab_tokens)
-                && (30_000..=60_000).contains(&source_states)
+                && (30_000..=60_000).contains(&source_states))
+                // A low-terminal textual family can still have a very large
+                // inherited token-quotient domain. Its exact active-language
+                // quotient is roughly half the size and avoids constructing a
+                // multi-million-state token-bounded view.
+                || ((24..=64).contains(&active_terminals)
+                    && (15_000..=30_000).contains(&vocab_tokens)
+                    && (50_000..=80_000).contains(&source_states))
+        }
+        "p2.l1" => {
+            (24..=64).contains(&active_terminals)
+                && (60_000..=100_000).contains(&vocab_tokens)
+                && (50_000..=80_000).contains(&source_states)
         }
         // A medium mixed-token L1 family with a substantial active terminal
         // set is dominated by repeated whole-token analysis on the raw lexer.
@@ -251,6 +263,7 @@ pub fn build_partition_id_map_and_terminal_dwa(
     shared_transition_cache: Option<&std::sync::OnceLock<super::l2p::equivalence_analysis::compat::FlatTransitionCache>>,
     shared_ti_output_cache: Option<&super::l2p::SharedTiTokenizerOutputCache>,
     shared_classify_cache: Option<&super::classify::SharedClassifyCache>,
+    terminal_filter: Option<&[bool]>,
 ) -> Option<PartitionTerminalDwas> {
     if vocab.is_empty() {
         return None;
@@ -291,6 +304,10 @@ pub fn build_partition_id_map_and_terminal_dwa(
     let mut num_one = 0usize;
     let mut num_two_plus = 0usize;
     for (i, len) in terminal_path_lengths.iter().enumerate() {
+        if terminal_filter.is_some_and(|filter| !filter.get(i).copied().unwrap_or(false)) {
+            num_zero += 1;
+            continue;
+        }
         match len {
             TerminalPathLength::One => {
                 l1_mask[i] = true;
@@ -842,6 +859,15 @@ mod tests {
     fn wide_text_l1_materialization_is_structurally_bounded() {
         assert!(automatic_structural_branch_tokenizer_selected(
             "p4.l1", 21_308, 187, 45_202,
+        ));
+        assert!(automatic_structural_branch_tokenizer_selected(
+            "p4.l1", 21_310, 32, 60_874,
+        ));
+        assert!(automatic_structural_branch_tokenizer_selected(
+            "p2.l1", 82_164, 34, 60_874,
+        ));
+        assert!(!automatic_structural_branch_tokenizer_selected(
+            "p2.l1", 82_164, 12, 60_874,
         ));
         assert!(!automatic_structural_branch_tokenizer_selected(
             "p4.l1", 21_308, 159, 45_202,

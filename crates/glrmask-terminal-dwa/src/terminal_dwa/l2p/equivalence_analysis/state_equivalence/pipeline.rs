@@ -58,6 +58,10 @@ pub struct StateEquivalencePipelineProfile {
     pub max_length_state_equiv_ms: f64,
     pub max_length_reps: usize,
     pub max_length_congruence_certified: bool,
+    /// The current map is an output-labelled right congruence over the
+    /// vocabulary byte alphabet and can be materialized directly as the exact
+    /// analysis quotient without a second whole-DFA scan.
+    pub relevant_byte_congruence_certified: bool,
 }
 
 fn parse_passes(value: &str) -> Vec<StateEquivalencePassKind> {
@@ -153,13 +157,13 @@ pub fn run_state_equivalence_pipeline(
         ..StateEquivalencePipelineProfile::default()
     };
     let statistic = max_length::cached_statistic(vocab);
-    let mut epsilon_stable_restricted_observation = false;
+    let mut stable_restricted_observation = false;
 
     for kind in &config.passes {
         let bounded_observer_already_certified =
             matches!(kind, StateEquivalencePassKind::MaxLength)
                 && matches!(scope, StateEquivalenceScope::L2p)
-                && (epsilon_stable_restricted_observation
+                && (stable_restricted_observation
                     || (!tokenizer.has_epsilon_transitions()
                         && kbounded_tokenizer_view.is_some_and(|view| {
                             view.is_relevant_byte_congruent(
@@ -182,6 +186,7 @@ pub fn run_state_equivalence_pipeline(
             profile.max_length_state_equiv_ms = 0.0;
             profile.max_length_reps = current_state_map.num_internal_ids() as usize;
             profile.max_length_congruence_certified = true;
+            profile.relevant_byte_congruence_certified = true;
             profile.pass_profiles.push(StateEquivalencePassProfile {
                 kind: StateEquivalencePassKind::MaxLength,
                 name: "max_length_congruence_certified",
@@ -238,11 +243,23 @@ pub fn run_state_equivalence_pipeline(
                     started_at.elapsed().as_secs_f64() * 1000.0,
                     current_state_map.num_internal_ids() as usize,
                 );
-                if tokenizer.has_epsilon_transitions() {
-                    epsilon_stable_restricted_observation = true;
-                }
+                // The stable epsilon-NFA construction includes frozen
+                // visible outputs directly. For deterministic views, the
+                // source-observation seed used whenever max-length is present
+                // likewise makes the fixed point output-labelled. In either
+                // case the resulting partition is already the exact right
+                // congruence that downstream quotient materialization needs.
+                let includes_source_observation = config
+                    .passes
+                    .iter()
+                    .any(|kind| matches!(kind, StateEquivalencePassKind::MaxLength));
+                stable_restricted_observation =
+                    tokenizer.has_epsilon_transitions() || includes_source_observation;
+                profile.relevant_byte_congruence_certified = stable_restricted_observation;
             }
             StateEquivalencePassKind::MaxLength => {
+                stable_restricted_observation = false;
+                profile.relevant_byte_congruence_certified = false;
                 let mode = match scope {
                     StateEquivalenceScope::Global => MaxLengthMode::StableByteRestricted,
                     StateEquivalenceScope::L2p => MaxLengthMode::KBoundedByteRestricted,
@@ -333,6 +350,52 @@ mod tests {
             })
     }
 
+
+    #[test]
+    fn deterministic_restricted_observation_carries_exact_right_congruence() {
+        use crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::compat::TokenizerView;
+
+        let source = arbitrary_epsilon_l1_test_tokenizer();
+        let tokenizer = source
+            .try_full_determinization(1_024, 100_000)
+            .expect("small test tokenizer determinizes")
+            .tokenizer;
+        assert!(!tokenizer.has_epsilon_transitions());
+
+        let vocab = Vocab::new(vec![
+            (0, b"a".to_vec()),
+            (1, b"b".to_vec()),
+            (2, b"ab".to_vec()),
+            (3, b"ba".to_vec()),
+        ]);
+        let config = StateEquivalencePipelineConfig {
+            passes: vec![
+                StateEquivalencePassKind::RestrictedObservation,
+                StateEquivalencePassKind::MaxLength,
+            ],
+        };
+        let tokenizer_view = TokenizerView::new(&tokenizer);
+        let (state_map, profile) = run_state_equivalence_pipeline(
+            &tokenizer,
+            &vocab,
+            None,
+            None,
+            StateEquivalenceScope::L2p,
+            &config,
+            None,
+            Some(&tokenizer_view),
+            None,
+        );
+
+        let mut relevant_bytes = [false; 256];
+        for &byte in vocab.relevant_bytes().iter() {
+            relevant_bytes[byte as usize] = true;
+        }
+        assert!(profile.relevant_byte_congruence_certified);
+        assert!(profile.max_length_congruence_certified);
+        assert!(TokenizerView::new(&tokenizer)
+            .is_relevant_byte_congruent(&state_map, &relevant_bytes));
+    }
     #[test]
     fn stable_epsilon_restricted_observation_certifies_bounded_max_length() {
         let tokenizer = arbitrary_epsilon_l1_test_tokenizer();

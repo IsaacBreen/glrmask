@@ -1299,7 +1299,21 @@ fn use_global_max_length(
 pub fn build_global_max_length_state_map(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
+    flat_trans: &Arc<[u32]>,
+) -> ManyToOneIdMap {
+    build_global_max_length_state_map_with_initial(
+        tokenizer,
+        vocab,
+        flat_trans,
+        None,
+    )
+}
+
+pub fn build_global_max_length_state_map_with_initial(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
     _flat_trans: &Arc<[u32]>,
+    initial_state_map: Option<&ManyToOneIdMap>,
 ) -> ManyToOneIdMap {
     let started_at = Instant::now();
     let num_states_u32 = tokenizer.num_states();
@@ -1314,7 +1328,7 @@ pub fn build_global_max_length_state_map(
     let (state_map, profile) = run_state_equivalence_pipeline(
         tokenizer,
         vocab,
-        None,
+        initial_state_map,
         None,
         StateEquivalenceScope::Global,
         &config,
@@ -1400,6 +1414,44 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length(
     >,
     partition_local_synthesis_plan: Option<&PartitionLocalSynthesisPlan>,
     prepared_partition_local_tokenizers: Option<&PreparedPartitionLocalTokenizers>,
+) -> (TerminalDwaFamilies, TerminalDwaPhaseProfile) {
+    build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
+        tokenizer,
+        vocab,
+        terminal_coloring,
+        use_terminal_coloring,
+        ignore_terminal,
+        grammar,
+        disallowed_follows,
+        precomputed_always_allowed_follows,
+        flat_trans,
+        global_max_length_state_map,
+        external_classify_cache,
+        external_transition_cache,
+        partition_local_synthesis_plan,
+        prepared_partition_local_tokenizers,
+        None,
+    )
+}
+
+pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    terminal_coloring: &TerminalColoring,
+    use_terminal_coloring: bool,
+    ignore_terminal: Option<TerminalID>,
+    grammar: &AnalyzedGrammar,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    precomputed_always_allowed_follows: Option<&[Vec<TerminalID>]>,
+    flat_trans: Arc<[u32]>,
+    global_max_length_state_map: &ManyToOneIdMap,
+    external_classify_cache: Option<&classify::SharedClassifyCache>,
+    external_transition_cache: Option<
+        &OnceLock<l2p::equivalence_analysis::compat::FlatTransitionCache>,
+    >,
+    partition_local_synthesis_plan: Option<&PartitionLocalSynthesisPlan>,
+    prepared_partition_local_tokenizers: Option<&PreparedPartitionLocalTokenizers>,
+    terminal_filter: Option<&[bool]>,
 ) -> (TerminalDwaFamilies, TerminalDwaPhaseProfile) {
     let total_started_at = Instant::now();
     let mut profile = TerminalDwaPhaseProfile::default();
@@ -1733,6 +1785,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length(
                 Some(&local_transition_cache),
                 Some(&local_ti_output_cache),
                 Some(&ready.classify_cache),
+                terminal_filter,
             );
             if let Some(parts) = local_result.as_mut()
                 && lift_partition_terminal_dwas_to_global(parts, &local.global_to_local).is_some()
@@ -1789,6 +1842,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length(
             Some(shared_transition_cache),
             Some(&shared_ti_output_cache),
             Some(&shared_classify_cache),
+            terminal_filter,
         )
         .map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0));
         (result, idx)

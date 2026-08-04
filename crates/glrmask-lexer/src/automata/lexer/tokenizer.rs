@@ -482,7 +482,7 @@ pub mod compact_artifact_serde {
 
 impl CompressedTransitionSegment {
     #[inline]
-    fn contains_state(&self, state: u32) -> bool {
+    pub(super) fn contains_state(&self, state: u32) -> bool {
         state >= self.state_offset && state - self.state_offset < self.state_count
     }
 
@@ -499,7 +499,7 @@ impl CompressedTransitionSegment {
     }
 
     #[inline]
-    fn transition(&self, state: u32, byte: u8) -> Option<u32> {
+    pub(super) fn transition(&self, state: u32, byte: u8) -> Option<u32> {
         self.local_transition(state - self.state_offset, byte)
             .map(|target| self.state_offset + target)
     }
@@ -532,7 +532,7 @@ impl CompressedTransitionSegment {
         }
     }
 
-    fn fill_transition_row(&self, state: u32, row: &mut [u32; 256]) {
+    pub(super) fn fill_transition_row(&self, state: u32, row: &mut [u32; 256]) {
         row.fill(u32::MAX);
         let local_state = state - self.state_offset;
         let start = self.row_offsets[local_state as usize] as usize;
@@ -545,7 +545,7 @@ impl CompressedTransitionSegment {
         }
     }
 
-    fn transition_count(&self, state: u32) -> usize {
+    pub(super) fn transition_count(&self, state: u32) -> usize {
         let local_state = state - self.state_offset;
         let start = self.row_offsets[local_state as usize] as usize;
         let end = self.row_offsets[local_state as usize + 1] as usize;
@@ -554,6 +554,25 @@ impl CompressedTransitionSegment {
             .iter()
             .map(|class| self.class_members[*class as usize].len())
             .sum()
+    }
+
+    pub(super) fn transitions_satisfy(
+        &self,
+        state: u32,
+        mut predicate: impl FnMut(u8, u32) -> bool,
+    ) -> bool {
+        let local_state = state - self.state_offset;
+        let start = self.row_offsets[local_state as usize] as usize;
+        let end = self.row_offsets[local_state as usize + 1] as usize;
+        for (class, target) in self.entries.iter_range(start, end) {
+            let target = self.state_offset + target;
+            for &byte in self.class_members[class as usize].iter() {
+                if !predicate(byte, target) {
+                    return false;
+                }
+            }
+        }
+        true
     }
 }
 
@@ -1171,6 +1190,84 @@ impl Tokenizer {
         })
     }
 
+    /// Verify that `source_to_self` is a raw tokenizer homomorphism.
+    ///
+    /// Whole-vocabulary token equivalence is not sufficient here: callers use
+    /// the target tokenizer as the byte-transition coordinate while building a
+    /// partition-local terminal DWA. Every mapped source state must therefore
+    /// preserve labels, epsilon successors, and every byte successor exactly.
+    fn certifies_mapped_prefix_homomorphism_from(
+        &self,
+        source: &Tokenizer,
+        source_to_self: &[u32],
+        source_to_rebuilt: &[u32],
+    ) -> bool {
+        if source.num_terminals != self.num_terminals
+            || source_to_self.len() != source.num_states() as usize
+            || source_to_rebuilt.len() != source.num_states() as usize
+            || source_to_self
+                .iter()
+                .any(|&state| state as usize >= self.num_states() as usize)
+            || source_to_self.get(source.start_state() as usize).copied()
+                != Some(self.start_state())
+        {
+            return false;
+        }
+
+        let mut mapped_epsilon = Vec::<u32>::new();
+        let mut target_epsilon = Vec::<u32>::new();
+        for source_state in 0..source.num_states() {
+            // States absent from the rebuilt prefix were appended below by
+            // copying their exact metadata and transition rows through the
+            // completed source-to-self map. Only states represented by the
+            // synthesized prefix can violate the raw homomorphism.
+            if source_to_rebuilt[source_state as usize] == u32::MAX {
+                continue;
+            }
+            let target_state = source_to_self[source_state as usize];
+            if source.dfa.finalizers(source_state) != self.dfa.finalizers(target_state)
+                || source.dfa.possible_future_group_ids(source_state)
+                    != self.dfa.possible_future_group_ids(target_state)
+            {
+                return false;
+            }
+
+            mapped_epsilon.clear();
+            mapped_epsilon.extend(
+                source.dfa.states()[source_state as usize]
+                    .epsilon_transitions
+                    .iter()
+                    .map(|&next| source_to_self[next as usize]),
+            );
+            mapped_epsilon.sort_unstable();
+            mapped_epsilon.dedup();
+            target_epsilon.clear();
+            target_epsilon.extend_from_slice(
+                &self.dfa.states()[target_state as usize].epsilon_transitions,
+            );
+            target_epsilon.sort_unstable();
+            target_epsilon.dedup();
+            if mapped_epsilon != target_epsilon {
+                return false;
+            }
+
+            let mut source_transitions = source.transitions_from(source_state);
+            let mut target_transitions = self.transitions_from(target_state);
+            loop {
+                match (source_transitions.next(), target_transitions.next()) {
+                    (None, None) => break,
+                    (
+                        Some((source_byte, source_next)),
+                        Some((target_byte, target_next)),
+                    ) if source_byte == target_byte
+                        && source_to_self[source_next as usize] == target_next => {}
+                    _ => return false,
+                }
+            }
+        }
+        true
+    }
+
     /// Extend `self` with the source-only residual states that were appended to
     /// `source` after `rebuilt` was constructed.  `rebuilt_to_self` must be a
     /// structural state map from the rebuilt expression DFA into `self`.
@@ -1303,6 +1400,13 @@ impl Tokenizer {
                 .filter(|&&state| state == u32::MAX)
                 .count(),
         );
+        if !self.certifies_mapped_prefix_homomorphism_from(
+            source,
+            &source_to_self,
+            &source_to_rebuilt,
+        ) {
+            return None;
+        }
         Some(source_to_self)
     }
 
@@ -2299,6 +2403,25 @@ mod tests {
 
         let result = tokenizer.execute_from_state_end_only(b"ab", tokenizer.initial_state_id());
         assert_eq!(result.as_slice(), &[3]);
+    }
+
+    #[test]
+    fn structural_prefix_augmentation_rejects_a_non_homomorphic_target_prefix() {
+        let source = dispatch_prefix_tokenizer(true);
+        let rebuilt = dispatch_prefix_tokenizer(false);
+        let mut local = rebuilt.clone();
+        local
+            .dfa
+            .set_transitions_from_sorted_entries(2, vec![(b'a', 3)]);
+        let rebuilt_to_local = (0..rebuilt.num_states()).collect::<Vec<_>>();
+
+        assert!(local
+            .augment_from_verified_component_prefixes(
+                &source,
+                &rebuilt,
+                &rebuilt_to_local,
+            )
+            .is_none());
     }
 
     #[test]
