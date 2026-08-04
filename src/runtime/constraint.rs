@@ -213,6 +213,24 @@ fn initial_commit_prime_token_ids(mask: &[u32]) -> Option<Vec<u32>> {
     Some(token_ids)
 }
 
+#[derive(Default)]
+struct TokenMaskCacheBuildProfile {
+    word_block_ms: f64,
+    quad_block_ms: f64,
+    byte_block_ms: f64,
+    block_ms: f64,
+    pair_ms: f64,
+    quad_ms: f64,
+    super_ms: f64,
+    mega_ms: f64,
+    giga_ms: f64,
+    all_tokens_ms: f64,
+    heavy_ms: f64,
+    flat_ms: f64,
+    costs_ms: f64,
+    derived_ms: f64,
+}
+
 impl Constraint {
     #[inline]
     pub(crate) fn uses_dynamic_runtime(&self) -> bool {
@@ -1673,211 +1691,21 @@ impl Constraint {
         rows
     }
 
-    pub(crate) fn rebuild_runtime_caches_impl(&mut self) {
-        self.tokenizer_has_epsilon_transitions = self.tokenizer.has_epsilon_transitions();
-        let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
-        let total_started_at = profile.then(std::time::Instant::now);
-        let terminal_live_started_at = profile.then(std::time::Instant::now);
-        if self.terminal_live_states.len() != self.tokenizer.num_terminals() as usize {
-            self.terminal_live_states = self.compute_terminal_live_states();
-        }
-        let terminal_live_ms = terminal_live_started_at
-            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-        if self.uses_sparse_direct_regular_runtime() {
-            let support = self
-                .direct_regular_automaton
-                .as_ref()
-                .map_or_else(DirectRegularTerminalSupport::default, |automaton| {
-                    DirectRegularTerminalSupport::build(
-                        automaton,
-                        self.table.num_terminals as usize,
-                    )
-                });
-            self.dynamic_mask_vocab
-                .set_direct_regular_terminal_support(support);
-        }
+    fn token_mask_caches_ready(&self) -> bool {
+        self.internal_token_buf_masks.len() == self.internal_token_to_tokens.len()
+            && self.internal_token_buf_offsets.len()
+                == self.internal_token_to_tokens.len().saturating_add(1)
+    }
 
-        let wide_frontier_started_at = profile.then(std::time::Instant::now);
-        self.direct_regular_wide_frontier_acceptance =
-            self.compute_direct_regular_wide_frontier_acceptance();
-        self.direct_regular_parser_state_acceptance =
-            self.compute_direct_regular_parser_state_acceptance();
-        let wide_frontier_ms = wide_frontier_started_at
-            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-        if profile && !self.direct_regular_wide_frontier_acceptance.is_empty() {
-            eprintln!(
-                "[glrmask/profile][wide_frontier_acceptance] summaries={} max_states={} ms={:.3}",
-                self.direct_regular_wide_frontier_acceptance.len(),
-                self.direct_regular_wide_frontier_acceptance
-                    .iter()
-                    .map(|summary| summary.state_count)
-                    .max()
-                    .unwrap_or(0),
-                wide_frontier_ms,
-            );
-        }
+    pub(crate) fn prebuild_token_mask_caches(&mut self) {
+        self.internal_token_buf_masks = self.compute_buf_masks();
+        let _ = self.rebuild_token_mask_derived_caches(false);
+    }
 
-        let guarded_shift_started_at = profile.then(std::time::Instant::now);
-        if self.table.guarded_shift_index.len() != self.table.num_states as usize {
-            if self.table.num_rules == 0 {
-                self.table.guarded_shift_index =
-                    vec![FxHashMap::default(); self.table.num_states as usize];
-            } else {
-                self.table.rebuild_guarded_shift_index();
-            }
-        }
-        let state_count = self.tokenizer.num_states() as usize;
-        let state_relation_ready = self.state_internal_tsid_offsets.len() == state_count + 1
-            && self
-                .state_internal_tsid_offsets
-                .last()
-                .is_some_and(|&end| end as usize == self.state_internal_tsids.len());
-        if !state_relation_ready {
-            self.rebuild_state_internal_tsid_relation();
-        }
-        self.rebuild_runtime_product_state_lookup();
-        let fast_template_dfas_by_terminal = self.compute_fast_template_dfas();
-        let guarded_shift_ms = guarded_shift_started_at
-            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-        // This mapping is a derived cache. Reset it before scheduling the
-        // independent cache builders so the direct sparse weight-cache branch
-        // observes the same default mapping as the historical serial path.
-        self.final_mask_mapping = FinalMaskMapping::default();
-        // Static cache finalization never constructs the direct-dynamic
-        // vocabulary. Deferred possible-match fallback materializes it lazily
-        // on the first state that actually requires a dynamic mask.
-        let dynamic_vocab_reused = false;
-        let dynamic_vocab_ms = 0.0;
-        let primary_started_at = profile.then(std::time::Instant::now);
-        let mut prebuilt_tokenizer_fast_transitions =
-            (self.tokenizer_fast_transitions.len() == self.tokenizer.num_states() as usize)
-                .then(|| std::mem::take(&mut self.tokenizer_fast_transitions));
-        let (
-            internal_token_buf_masks,
-            internal_token_buf_masks_ms,
-            tokenizer_fast_transitions,
-            tokenizer_fast_transitions_ms,
-            (dense_mask_words, dense_masks),
-            dense_token_masks_ms,
-            fast_transitions,
-            dwa_fast_transitions_ms,
-            prebuilt_weight_caches,
-            prebuilt_weight_sparse_ms,
-        ) = if rayon::current_num_threads() == 1 {
-            let started = profile.then(std::time::Instant::now);
-            let internal_token_buf_masks = self.compute_buf_masks();
-            let internal_token_buf_masks_ms =
-                started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-            let started = profile.then(std::time::Instant::now);
-            let weight_token_sets = self.weight_token_set_inventory();
-            let prebuilt_weight_caches = self.compute_direct_sparse_weight_token_buf_masks(
-                &weight_token_sets.final_sets,
-                &internal_token_buf_masks,
-            );
-            let prebuilt_weight_sparse_ms =
-                started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-            let started = profile.then(std::time::Instant::now);
-            let reused_tokenizer_fast_transitions = prebuilt_tokenizer_fast_transitions.is_some();
-            let tokenizer_fast_transitions = prebuilt_tokenizer_fast_transitions
-                .take()
-                .unwrap_or_else(|| self.compute_tokenizer_fast_transitions());
-            let tokenizer_fast_transitions_ms = if reused_tokenizer_fast_transitions {
-                0.0
-            } else {
-                started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0)
-            };
-            let started = profile.then(std::time::Instant::now);
-            let dense_masks = self.compute_dense_token_masks_excluding_direct_final(
-                &prebuilt_weight_caches.eligible,
-                weight_token_sets,
-            );
-            let dense_token_masks_ms =
-                started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-            let started = profile.then(std::time::Instant::now);
-            let fast_transitions = self.compute_fast_transitions();
-            let dwa_fast_transitions_ms =
-                started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-            (
-                internal_token_buf_masks,
-                internal_token_buf_masks_ms,
-                tokenizer_fast_transitions,
-                tokenizer_fast_transitions_ms,
-                dense_masks,
-                dense_token_masks_ms,
-                fast_transitions,
-                dwa_fast_transitions_ms,
-                prebuilt_weight_caches,
-                prebuilt_weight_sparse_ms,
-            )
-        } else {
-            let (
-                ((tokenizer_fast_transitions, tokenizer_fast_transitions_ms), (fast_transitions, dwa_fast_transitions_ms)),
-                (((internal_token_buf_masks, internal_token_buf_masks_ms), ((dense_mask_words, dense_masks), dense_token_masks_ms)), (prebuilt_weight_caches, prebuilt_weight_sparse_ms)),
-            ) = rayon::join(
-                || {
-                    let build_tokenizer_fast_transitions = || {
-                        let started = profile.then(std::time::Instant::now);
-                        if let Some(prebuilt) = prebuilt_tokenizer_fast_transitions.take() {
-                            return (prebuilt, 0.0);
-                        }
-                        let result = self.compute_tokenizer_fast_transitions();
-                        let ms = started
-                            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-                        (result, ms)
-                    };
-                    let build_dwa_fast_transitions = || {
-                        let started = profile.then(std::time::Instant::now);
-                        let result = self.compute_fast_transitions();
-                        let ms = started
-                            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-                        (result, ms)
-                    };
-                    rayon::join(build_tokenizer_fast_transitions, build_dwa_fast_transitions)
-                },
-                || {
-                    let started = profile.then(std::time::Instant::now);
-                    let internal_token_buf_masks = self.compute_buf_masks();
-                    let internal_token_buf_masks_ms = started
-                        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-                    let started = profile.then(std::time::Instant::now);
-                    let weight_token_sets = self.weight_token_set_inventory();
-                    let prebuilt_weight_caches = self.compute_direct_sparse_weight_token_buf_masks(
-                        &weight_token_sets.final_sets,
-                        &internal_token_buf_masks,
-                    );
-                    let prebuilt_weight_sparse_ms = started
-                        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-                    let started = profile.then(std::time::Instant::now);
-                    let (dense_mask_words, dense_masks) = self
-                        .compute_dense_token_masks_excluding_direct_final(
-                            &prebuilt_weight_caches.eligible,
-                            weight_token_sets,
-                        );
-                    let dense_token_masks_ms = started
-                        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-                    (
-                        ((internal_token_buf_masks, internal_token_buf_masks_ms), ((dense_mask_words, dense_masks), dense_token_masks_ms)),
-                        (prebuilt_weight_caches, prebuilt_weight_sparse_ms),
-                    )
-                },
-            );
-            (
-                internal_token_buf_masks,
-                internal_token_buf_masks_ms,
-                tokenizer_fast_transitions,
-                tokenizer_fast_transitions_ms,
-                (dense_mask_words, dense_masks),
-                dense_token_masks_ms,
-                fast_transitions,
-                dwa_fast_transitions_ms,
-                prebuilt_weight_caches,
-                prebuilt_weight_sparse_ms,
-            )
-        };
-        let primary_ms = primary_started_at
-            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-        self.internal_token_buf_masks = internal_token_buf_masks;
+    fn rebuild_token_mask_derived_caches(
+        &mut self,
+        profile: bool,
+    ) -> TokenMaskCacheBuildProfile {
         self.word_group_buf_masks = Vec::new();
         let block_started_at = profile.then(std::time::Instant::now);
         let build_word_blocks = || {
@@ -2008,6 +1836,276 @@ impl Constraint {
         let n_light = n_internal.saturating_sub(self.heavy_token_indices.len());
         let light_total = self.total_internal_buf_cost.saturating_sub(self.heavy_total_cost);
         self.light_avg_cost_x256 = if n_light > 0 { (light_total * 256) / n_light } else { 0 };
+        let derived_ms = derived_started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+
+        TokenMaskCacheBuildProfile {
+            word_block_ms,
+            quad_block_ms,
+            byte_block_ms,
+            block_ms,
+            pair_ms,
+            quad_ms,
+            super_ms,
+            mega_ms,
+            giga_ms,
+            all_tokens_ms,
+            heavy_ms,
+            flat_ms,
+            costs_ms,
+            derived_ms,
+        }
+    }
+
+    pub(crate) fn rebuild_runtime_caches_impl(&mut self) {
+        self.tokenizer_has_epsilon_transitions = self.tokenizer.has_epsilon_transitions();
+        let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
+        let total_started_at = profile.then(std::time::Instant::now);
+        let terminal_live_started_at = profile.then(std::time::Instant::now);
+        if self.terminal_live_states.len() != self.tokenizer.num_terminals() as usize {
+            self.terminal_live_states = self.compute_terminal_live_states();
+        }
+        let terminal_live_ms = terminal_live_started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        if self.uses_sparse_direct_regular_runtime() {
+            let support = self
+                .direct_regular_automaton
+                .as_ref()
+                .map_or_else(DirectRegularTerminalSupport::default, |automaton| {
+                    DirectRegularTerminalSupport::build(
+                        automaton,
+                        self.table.num_terminals as usize,
+                    )
+                });
+            self.dynamic_mask_vocab
+                .set_direct_regular_terminal_support(support);
+        }
+
+        let wide_frontier_started_at = profile.then(std::time::Instant::now);
+        self.direct_regular_wide_frontier_acceptance =
+            self.compute_direct_regular_wide_frontier_acceptance();
+        self.direct_regular_parser_state_acceptance =
+            self.compute_direct_regular_parser_state_acceptance();
+        let wide_frontier_ms = wide_frontier_started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        if profile && !self.direct_regular_wide_frontier_acceptance.is_empty() {
+            eprintln!(
+                "[glrmask/profile][wide_frontier_acceptance] summaries={} max_states={} ms={:.3}",
+                self.direct_regular_wide_frontier_acceptance.len(),
+                self.direct_regular_wide_frontier_acceptance
+                    .iter()
+                    .map(|summary| summary.state_count)
+                    .max()
+                    .unwrap_or(0),
+                wide_frontier_ms,
+            );
+        }
+
+        let guarded_shift_started_at = profile.then(std::time::Instant::now);
+        if self.table.guarded_shift_index.len() != self.table.num_states as usize {
+            if self.table.num_rules == 0 {
+                self.table.guarded_shift_index =
+                    vec![FxHashMap::default(); self.table.num_states as usize];
+            } else {
+                self.table.rebuild_guarded_shift_index();
+            }
+        }
+        let state_count = self.tokenizer.num_states() as usize;
+        let singleton_state_relation_ready = self.state_internal_tsid_offsets.as_slice()
+            == [u32::MAX]
+            && self.state_internal_tsids.is_empty()
+            && self.state_to_internal_tsid.len() == state_count;
+        let state_relation_ready = singleton_state_relation_ready
+            || (self.state_internal_tsid_offsets.len() == state_count + 1
+                && self
+                    .state_internal_tsid_offsets
+                    .last()
+                    .is_some_and(|&end| end as usize == self.state_internal_tsids.len()));
+        if !state_relation_ready {
+            self.rebuild_state_internal_tsid_relation();
+        }
+        self.rebuild_runtime_product_state_lookup();
+        let fast_template_dfas_by_terminal = self.compute_fast_template_dfas();
+        let guarded_shift_ms = guarded_shift_started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        // This mapping is a derived cache. Reset it before scheduling the
+        // independent cache builders so the direct sparse weight-cache branch
+        // observes the same default mapping as the historical serial path.
+        self.final_mask_mapping = FinalMaskMapping::default();
+        // Static cache finalization never constructs the direct-dynamic
+        // vocabulary. Deferred possible-match fallback materializes it lazily
+        // on the first state that actually requires a dynamic mask.
+        let dynamic_vocab_reused = false;
+        let dynamic_vocab_ms = 0.0;
+        let token_mask_caches_prebuilt = self.token_mask_caches_ready();
+        let mut prebuilt_internal_token_buf_masks = token_mask_caches_prebuilt
+            .then(|| std::mem::take(&mut self.internal_token_buf_masks));
+        let primary_started_at = profile.then(std::time::Instant::now);
+        let mut prebuilt_tokenizer_fast_transitions =
+            (self.tokenizer_fast_transitions.len() == self.tokenizer.num_states() as usize)
+                .then(|| std::mem::take(&mut self.tokenizer_fast_transitions));
+        let (
+            internal_token_buf_masks,
+            internal_token_buf_masks_ms,
+            tokenizer_fast_transitions,
+            tokenizer_fast_transitions_ms,
+            (dense_mask_words, dense_masks),
+            dense_token_masks_ms,
+            fast_transitions,
+            dwa_fast_transitions_ms,
+            prebuilt_weight_caches,
+            prebuilt_weight_sparse_ms,
+        ) = if rayon::current_num_threads() == 1 {
+            let started = profile.then(std::time::Instant::now);
+            let reused_internal_token_buf_masks = prebuilt_internal_token_buf_masks.is_some();
+            let internal_token_buf_masks = prebuilt_internal_token_buf_masks
+                .take()
+                .unwrap_or_else(|| self.compute_buf_masks());
+            let internal_token_buf_masks_ms = if reused_internal_token_buf_masks {
+                0.0
+            } else {
+                started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0)
+            };
+            let started = profile.then(std::time::Instant::now);
+            let weight_token_sets = self.weight_token_set_inventory();
+            let prebuilt_weight_caches = self.compute_direct_sparse_weight_token_buf_masks(
+                &weight_token_sets.final_sets,
+                &internal_token_buf_masks,
+            );
+            let prebuilt_weight_sparse_ms =
+                started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+            let started = profile.then(std::time::Instant::now);
+            let reused_tokenizer_fast_transitions = prebuilt_tokenizer_fast_transitions.is_some();
+            let tokenizer_fast_transitions = prebuilt_tokenizer_fast_transitions
+                .take()
+                .unwrap_or_else(|| self.compute_tokenizer_fast_transitions());
+            let tokenizer_fast_transitions_ms = if reused_tokenizer_fast_transitions {
+                0.0
+            } else {
+                started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0)
+            };
+            let started = profile.then(std::time::Instant::now);
+            let dense_masks = self.compute_dense_token_masks_excluding_direct_final(
+                &prebuilt_weight_caches.eligible,
+                weight_token_sets,
+            );
+            let dense_token_masks_ms =
+                started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+            let started = profile.then(std::time::Instant::now);
+            let fast_transitions = self.compute_fast_transitions();
+            let dwa_fast_transitions_ms =
+                started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+            (
+                internal_token_buf_masks,
+                internal_token_buf_masks_ms,
+                tokenizer_fast_transitions,
+                tokenizer_fast_transitions_ms,
+                dense_masks,
+                dense_token_masks_ms,
+                fast_transitions,
+                dwa_fast_transitions_ms,
+                prebuilt_weight_caches,
+                prebuilt_weight_sparse_ms,
+            )
+        } else {
+            let (
+                ((tokenizer_fast_transitions, tokenizer_fast_transitions_ms), (fast_transitions, dwa_fast_transitions_ms)),
+                (((internal_token_buf_masks, internal_token_buf_masks_ms), ((dense_mask_words, dense_masks), dense_token_masks_ms)), (prebuilt_weight_caches, prebuilt_weight_sparse_ms)),
+            ) = rayon::join(
+                || {
+                    let build_tokenizer_fast_transitions = || {
+                        let started = profile.then(std::time::Instant::now);
+                        if let Some(prebuilt) = prebuilt_tokenizer_fast_transitions.take() {
+                            return (prebuilt, 0.0);
+                        }
+                        let result = self.compute_tokenizer_fast_transitions();
+                        let ms = started
+                            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+                        (result, ms)
+                    };
+                    let build_dwa_fast_transitions = || {
+                        let started = profile.then(std::time::Instant::now);
+                        let result = self.compute_fast_transitions();
+                        let ms = started
+                            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+                        (result, ms)
+                    };
+                    rayon::join(build_tokenizer_fast_transitions, build_dwa_fast_transitions)
+                },
+                || {
+                    let started = profile.then(std::time::Instant::now);
+                    let reused_internal_token_buf_masks =
+                        prebuilt_internal_token_buf_masks.is_some();
+                    let internal_token_buf_masks = prebuilt_internal_token_buf_masks
+                        .take()
+                        .unwrap_or_else(|| self.compute_buf_masks());
+                    let internal_token_buf_masks_ms = if reused_internal_token_buf_masks {
+                        0.0
+                    } else {
+                        started.map_or(0.0, |started| {
+                            started.elapsed().as_secs_f64() * 1000.0
+                        })
+                    };
+                    let started = profile.then(std::time::Instant::now);
+                    let weight_token_sets = self.weight_token_set_inventory();
+                    let prebuilt_weight_caches = self.compute_direct_sparse_weight_token_buf_masks(
+                        &weight_token_sets.final_sets,
+                        &internal_token_buf_masks,
+                    );
+                    let prebuilt_weight_sparse_ms = started
+                        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+                    let started = profile.then(std::time::Instant::now);
+                    let (dense_mask_words, dense_masks) = self
+                        .compute_dense_token_masks_excluding_direct_final(
+                            &prebuilt_weight_caches.eligible,
+                            weight_token_sets,
+                        );
+                    let dense_token_masks_ms = started
+                        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+                    (
+                        ((internal_token_buf_masks, internal_token_buf_masks_ms), ((dense_mask_words, dense_masks), dense_token_masks_ms)),
+                        (prebuilt_weight_caches, prebuilt_weight_sparse_ms),
+                    )
+                },
+            );
+            (
+                internal_token_buf_masks,
+                internal_token_buf_masks_ms,
+                tokenizer_fast_transitions,
+                tokenizer_fast_transitions_ms,
+                (dense_mask_words, dense_masks),
+                dense_token_masks_ms,
+                fast_transitions,
+                dwa_fast_transitions_ms,
+                prebuilt_weight_caches,
+                prebuilt_weight_sparse_ms,
+            )
+        };
+        let primary_ms = primary_started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        self.internal_token_buf_masks = internal_token_buf_masks;
+        let token_mask_profile = if token_mask_caches_prebuilt {
+            TokenMaskCacheBuildProfile::default()
+        } else {
+            self.rebuild_token_mask_derived_caches(profile)
+        };
+        let TokenMaskCacheBuildProfile {
+            word_block_ms,
+            quad_block_ms,
+            byte_block_ms,
+            block_ms,
+            pair_ms,
+            quad_ms,
+            super_ms,
+            mega_ms,
+            giga_ms,
+            all_tokens_ms,
+            heavy_ms,
+            flat_ms,
+            costs_ms,
+            derived_ms,
+        } = token_mask_profile;
 
         self.token_bytes_dense = Vec::new();
         self.internal_token_dense_words = dense_mask_words;
@@ -2105,7 +2203,6 @@ impl Constraint {
         }
         self.fast_template_dfas_by_terminal = fast_template_dfas_by_terminal;
         self.tokenizer_fast_transitions = tokenizer_fast_transitions;
-        let derived_ms = derived_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let seed_started_at = profile.then(std::time::Instant::now);
         self.build_seed_dense_masks();
         let seed_ms = seed_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);

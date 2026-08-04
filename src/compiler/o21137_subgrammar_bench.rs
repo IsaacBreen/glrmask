@@ -1013,12 +1013,29 @@ pub(crate) fn run(mode: &str) {
                 .and_then(|value| value.parse::<usize>().ok())
                 .unwrap_or(5)
                 .max(1);
+            let consume_original = std::env::var_os("O21137_COMPOSE_CONSUME_ORIGINAL").is_some();
+            assert!(
+                !consume_original || repeats == 1,
+                "O21137_COMPOSE_CONSUME_ORIGINAL requires O21137_COMPOSE_REPEATS=1",
+            );
+            let mut parent_once = Some(parts.parent);
             let mut clone_samples = Vec::with_capacity(repeats);
             let mut compose_samples = Vec::with_capacity(repeats);
             for sample in 0..repeats {
                 let clone_started = Instant::now();
-                let parent = parts.parent.clone();
-                let clone_ms = elapsed_ms(clone_started);
+                let parent = if consume_original {
+                    parent_once.take().expect("original parent already consumed")
+                } else {
+                    parent_once
+                        .as_ref()
+                        .expect("benchmark parent missing")
+                        .clone()
+                };
+                let clone_ms = if consume_original {
+                    0.0
+                } else {
+                    elapsed_ms(clone_started)
+                };
                 let bindings = child_bindings(&parts.placeholder_names, &parts.children);
                 let compose_started = Instant::now();
                 let composed = parent
@@ -1038,10 +1055,11 @@ pub(crate) fn run(mode: &str) {
             compose_samples.sort_by(f64::total_cmp);
             let child_total_ms = parts.child_ms.iter().sum::<f64>();
             eprintln!(
-                "O21137_COMPOSE_ONLY modules={} unique_modules={} repeats={} planning_ms={:.3} child_total_ms={child_total_ms:.3} child_ms={:?} parent_ms={:.3} clone_median_ms={:.3} compose_min_ms={:.3} compose_median_ms={:.3} compose_max_ms={:.3} total_ms={:.3}",
+                "O21137_COMPOSE_ONLY modules={} unique_modules={} repeats={} consume_original={} planning_ms={:.3} child_total_ms={child_total_ms:.3} child_ms={:?} parent_ms={:.3} clone_median_ms={:.3} compose_min_ms={:.3} compose_median_ms={:.3} compose_max_ms={:.3} total_ms={:.3}",
                 parts.modules,
                 parts.children.len(),
                 repeats,
+                consume_original,
                 parts.planning_ms,
                 parts.child_ms,
                 parts.parent_ms,

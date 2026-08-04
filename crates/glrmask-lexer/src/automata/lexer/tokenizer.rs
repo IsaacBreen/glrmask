@@ -799,6 +799,20 @@ impl Tokenizer {
             .max()
             .unwrap_or(0);
 
+        let mut merged_byte_transition_count = parent.dfa.transition_count();
+        let mut merged_epsilon_transition_count = parent.dfa.epsilon_transition_count();
+        let mut merged_has_self_loops = parent.dfa.has_self_loops();
+        for &(tokenizer, _) in children {
+            merged_byte_transition_count = merged_byte_transition_count
+                .checked_add(tokenizer.dfa.transition_count())
+                .expect("merged tokenizer byte-transition count overflow");
+            merged_epsilon_transition_count = merged_epsilon_transition_count
+                .checked_add(tokenizer.dfa.epsilon_transition_count())
+                .and_then(|count| count.checked_add(1))
+                .expect("merged tokenizer epsilon-transition count overflow");
+            merged_has_self_loops |= tokenizer.dfa.has_self_loops();
+        }
+
         parent
             .dfa
             .ensure_group_mapping_capacity(total_terminals as usize);
@@ -870,6 +884,11 @@ impl Tokenizer {
         parent
             .dfa
             .overwrite_state_metadata(parent.start_state(), root_finalizers, root_futures);
+        parent.dfa.set_derived_stats(
+            merged_byte_transition_count,
+            merged_epsilon_transition_count,
+            merged_has_self_loops,
+        );
         parent.num_terminals = total_terminals;
         parent.compressed_transition_segments =
             Arc::from(compressed_segments.into_boxed_slice());
@@ -2143,6 +2162,37 @@ impl Tokenizer {
             end_state: end_states,
             matches: into_longest_matches(matches),
         }
+    }
+
+    /// Exact compact residual scan for compiler analyses that need only each
+    /// terminal's longest width and the live states after the complete input.
+    /// Unlike `execute_from_state`, this does not retain one matching end-state
+    /// set per terminal only to discard it afterward.
+    pub fn execute_summary_from_state(
+        &self,
+        input: &[u8],
+        start: u32,
+    ) -> (TokenizerStateSet, SmallVec<[(TerminalID, usize); 4]>) {
+        let mut matches = SmallVec::<[(TerminalID, usize); 4]>::new();
+        let end_states = self.scan_input(
+            input,
+            start,
+            &mut matches,
+            |tokenizer, matches, state, width| {
+                for terminal in tokenizer.matched_terminals_iter(state) {
+                    if let Some((_, longest)) = matches
+                        .iter_mut()
+                        .find(|(candidate, _)| *candidate == terminal)
+                    {
+                        *longest = (*longest).max(width);
+                    } else {
+                        matches.push((terminal, width));
+                    }
+                }
+            },
+        );
+        matches.sort_unstable_by_key(|(terminal, _)| *terminal);
+        (end_states, matches)
     }
 
     fn execute_from_state_end_only(&self, input: &[u8], start: u32) -> TokenizerStateSet {

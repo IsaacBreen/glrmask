@@ -659,6 +659,22 @@ impl DFA {
         self.derived_stats().epsilon_transition_count
     }
 
+    pub(super) fn set_derived_stats(
+        &mut self,
+        byte_transition_count: usize,
+        epsilon_transition_count: usize,
+        has_self_loops: bool,
+    ) {
+        let _ = self.derived_stats.take();
+        self.derived_stats
+            .set(DfaDerivedStats {
+                byte_transition_count,
+                epsilon_transition_count,
+                has_self_loops,
+            })
+            .expect("DFA derived stats were unexpectedly initialized");
+    }
+
     pub fn has_self_loops(&self) -> bool {
         self.derived_stats().has_self_loops
     }

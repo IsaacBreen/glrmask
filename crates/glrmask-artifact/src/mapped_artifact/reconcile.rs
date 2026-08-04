@@ -1115,7 +1115,7 @@ pub fn remap_weights_with_maps(
     let token_run_map =
         DisjointRunLocalMap::from_local_to_common(local_to_common_tokens, common_token_count);
     let identity_tsids = local_to_common_is_identity(local_to_common_tsids, common_tsid_count);
-    let mut unique_by_ptr = HashMap::<usize, usize>::new();
+    let mut unique_by_ptr = FxHashMap::<usize, usize>::default();
     let mut unique_weights = Vec::<Weight>::new();
     let mut weight_to_unique = Vec::with_capacity(weights.len());
     for weight in weights.iter() {
