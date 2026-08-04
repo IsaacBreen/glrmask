@@ -7,10 +7,10 @@ use super::analysis::{AnalyzedGrammar, EOF};
 use crate::ds::bitset::BitSet;
 use crate::grammar::flat::{NonterminalID, Rule, Symbol, TerminalID};
 
-mod action;
+pub(crate) mod action;
 mod build;
 mod optimize;
-mod row;
+pub(crate) mod row;
 
 pub use action::{Action, GuardedStackShift, StackShift, StackShiftGuard};
 

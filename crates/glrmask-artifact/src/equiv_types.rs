@@ -287,6 +287,7 @@ pub struct InternalIdMap {
     pub deferred_vocab_singleton_original_ids: Option<Arc<[u32]>>,
 }
 
+#[cfg(feature = "internal-api")]
 pub use super::mapped_artifact::MappedArtifact;
 
 impl InternalIdMap {

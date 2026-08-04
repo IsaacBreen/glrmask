@@ -157,7 +157,7 @@ impl L2pVocabBoundarySplit {
     fn materialize_vocab(vocab: &Vocab, token_ids: &[u32]) -> Vocab {
         let mut entries = Vec::with_capacity(token_ids.len());
         let mut token_ids = token_ids.iter().copied().peekable();
-        for (&token_id, bytes) in vocab.entries.iter() {
+        for (&token_id, bytes) in vocab.entries_map().iter() {
             while token_ids.peek().is_some_and(|candidate| *candidate < token_id) {
                 token_ids.next();
             }
@@ -241,7 +241,7 @@ fn vocab_adjacent_pair_index(vocab: &Vocab) -> Arc<VocabAdjacentPairIndex> {
     let mut entry_split_offsets = Vec::with_capacity(vocab.len() + 1);
     let mut total_splits = 0usize;
     entry_split_offsets.push(0);
-    for bytes in vocab.entries.values() {
+    for bytes in vocab.entries_map().values() {
         assert!(total_splits <= u32::MAX as usize);
         for pair in bytes.windows(2) {
             counts[((pair[0] as usize) << 8) | pair[1] as usize] += 1;
@@ -256,7 +256,7 @@ fn vocab_adjacent_pair_index(vocab: &Vocab) -> Arc<VocabAdjacentPairIndex> {
     }
     let mut next = pair_offsets[..1 << 16].to_vec();
     let mut occurrences = vec![0u64; total_splits];
-    for (entry_index, bytes) in vocab.entries.values().enumerate() {
+    for (entry_index, bytes) in vocab.entries_map().values().enumerate() {
         assert!(entry_index <= u32::MAX as usize);
         for (split_after, pair) in bytes.windows(2).enumerate() {
             let pair_id = ((pair[0] as usize) << 8) | pair[1] as usize;
@@ -283,7 +283,7 @@ fn vocab_classification_facts(vocab: &Vocab) -> Arc<VocabClassificationFacts> {
 
     let mut byteset = U8Set::empty();
     let mut observed_follow_bytes = [U8Set::empty(); 256];
-    for bytes in vocab.entries.values() {
+    for bytes in vocab.entries_map().values() {
         for &byte in bytes {
             byteset.insert(byte);
         }
@@ -2145,7 +2145,7 @@ fn exact_terminal_path_two_plus_finite_literals(
     let mut found = 0u64;
     let mut witnesses = vec![None; candidates.len()];
     let mut checked_prefix_matches = 0usize;
-    'tokens: for (&token_id, bytes) in vocab.entries.iter() {
+    'tokens: for (&token_id, bytes) in vocab.entries_map().iter() {
         if bytes.len() < 2 {
             continue;
         }
@@ -2850,7 +2850,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
     let total_splits = adjacent_pair_index.as_ref().map_or_else(
         || {
             vocab
-                .entries
+                .entries_map()
                 .values()
                 .map(|bytes| bytes.len().saturating_sub(1))
                 .sum::<usize>()
@@ -2874,9 +2874,9 @@ fn exact_terminal_path_two_plus_candidate_dfa(
         &index.entry_split_offsets
     } else {
         owned_split_offsets = {
-            let mut offsets = Vec::with_capacity(vocab.entries.len() + 1);
+            let mut offsets = Vec::with_capacity(vocab.entries_map().len() + 1);
             offsets.push(0usize);
-            for bytes in vocab.entries.values() {
+            for bytes in vocab.entries_map().values() {
                 offsets.push(
                     offsets
                         .last()
@@ -2921,7 +2921,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
     let mut any_viable_suffix = false;
     if words_per_mask == 1 && adjacent_pair_index.is_some() {
         let index = adjacent_pair_index.as_ref().expect("checked above");
-        let vocab_entries = vocab.entries.iter().collect::<Vec<_>>();
+        let vocab_entries = vocab.entries_map().iter().collect::<Vec<_>>();
         for left in 0u8..=u8::MAX {
             for right in feasible_follow_bytes_by_last_byte[left as usize].iter() {
                 for &packed in index.occurrences_for_pair(left, right) {
@@ -2971,7 +2971,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
             }
         }
     } else if words_per_mask == 1 {
-        for (token_index, bytes) in vocab.entries.values().enumerate() {
+        for (token_index, bytes) in vocab.entries_map().values().enumerate() {
             let split_start = split_offsets[token_index];
             for split_after in 0..bytes.len().saturating_sub(1) {
                 if !split_may_host_boundary(bytes, split_after) {
@@ -3019,7 +3019,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
         }
     } else {
         let mut matched = vec![0u64; words_per_mask];
-        for (token_index, bytes) in vocab.entries.values().enumerate() {
+        for (token_index, bytes) in vocab.entries_map().values().enumerate() {
             let split_start = split_offsets[token_index];
             for split_after in 0..bytes.len().saturating_sub(1) {
                 if !split_may_host_boundary(bytes, split_after) {
@@ -3140,7 +3140,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
         let mut next_continuations = Vec::<(u32, u64)>::new();
         let mut matched = [0u64; 1];
         let mut followers = [0u64; 1];
-        for (token_index, (&token_id, bytes)) in vocab.entries.iter().enumerate() {
+        for (token_index, (&token_id, bytes)) in vocab.entries_map().iter().enumerate() {
             continuations.clear();
             let split_start = split_offsets[token_index];
             let Some(last_candidate_split) = (0..bytes.len().saturating_sub(1))
@@ -3238,7 +3238,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
         let mut matched = vec![0u64; words_per_mask];
         let mut live = vec![0u64; words_per_mask];
         let mut followers = vec![0u64; words_per_mask];
-        for (token_index, (&token_id, bytes)) in vocab.entries.iter().enumerate() {
+        for (token_index, (&token_id, bytes)) in vocab.entries_map().iter().enumerate() {
             continuations.clear();
             let split_start = split_offsets[token_index];
             let Some(last_candidate_split) = (0..bytes.len().saturating_sub(1))
@@ -3351,7 +3351,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
     if super::types::compile_profile_enabled() {
         eprintln!(
             "[glrmask/profile][terminal_path_candidate_dfa] tokens={} candidates={} states={} transitions={} uses_original_tokenizer={} automatic_subset_tokenizer={} feasible_split_work={} prefix_entries={} suffix_splits={} candidate_splits={} prefix_configs={} split_checks={} allowed_pairs={} two_plus={} compile_ms={:.3} trie_ms={:.3} prefix_ms={:.3} suffix_ms={:.3} combine_ms={:.3} analyze_ms={:.3} total_ms={:.3}",
-            vocab.entries.len(),
+            vocab.entries_map().len(),
             candidate_ids.len(),
             candidate_tokenizer.num_states(),
             candidate_tokenizer.transition_count(),
@@ -3727,7 +3727,7 @@ fn exact_terminal_path_two_plus_fused_nfa(
     let mut split_checks = 0usize;
     let mut allowed_pairs = 0usize;
 
-    for (&token_id, bytes) in vocab.entries.iter() {
+    for (&token_id, bytes) in vocab.entries_map().iter() {
         if bytes.len() < 2 {
             continue;
         }
@@ -3799,7 +3799,7 @@ fn exact_terminal_path_two_plus_bounded_view_from_starts(
     raw_start_states: &[usize],
 ) -> ExactTerminalPathTwoPlus {
     let token_entries = vocab
-        .entries
+        .entries_map()
         .iter()
         .map(|(&token_id, bytes)| (token_id, bytes.as_slice()))
         .collect::<Vec<_>>();
@@ -4085,10 +4085,10 @@ pub fn split_vocab_for_active_l2p_terminals(
 
     let vocab_scan_started_at = std::time::Instant::now();
     let mut boundary_token_ids = Vec::<u32>::new();
-    let mut single_token_ids = Vec::<u32>::with_capacity(vocab.entries.len());
+    let mut single_token_ids = Vec::<u32>::with_capacity(vocab.entries_map().len());
     let mut irrelevant_tokens = 0usize;
     let mut adjacent_entries = Vec::new();
-    for (&token_id, bytes) in vocab.entries.iter() {
+    for (&token_id, bytes) in vocab.entries_map().iter() {
         match token_l2p_route_hint(
             bytes,
             &route_setup.allowed_boundary_pair_words,
@@ -4118,7 +4118,7 @@ pub fn split_vocab_for_active_l2p_terminals(
     if std::env::var_os("GLRMASK_PROFILE_EXACT_L2P_BOUNDARY_FILTER").is_some() {
         eprintln!(
             "[glrmask/profile][exact_l2p_boundary_filter] vocab_tokens={} active_terminals={} active_start_states={} adjacent_candidates={} estimated_work={} enabled={}",
-            vocab.entries.len(),
+            vocab.entries_map().len(),
             active.len(),
             route_setup.active_start_states.len(),
             adjacent_candidate_count,
@@ -4212,7 +4212,7 @@ pub fn split_vocab_for_active_l2p_terminals(
     if super::types::compile_profile_enabled() {
         eprintln!(
             "[glrmask/profile][l2p_vocab_route] tokens={} active={} starts={} adjacent={} exact_viable={} setup_ms={:.3} pairs_ms={:.3} scan_ms={:.3} exact_prefilter_ms={:.3} exact_batch_ms={:.3} exact_ms={:.3} finalize_ms={:.3} total_ms={:.3}",
-            vocab.entries.len(),
+            vocab.entries_map().len(),
             active.len(),
             route_setup.active_start_states.len(),
             adjacent_entries.len(),
@@ -4287,7 +4287,7 @@ fn compute_token_l2p_map(
         build_byte_terminal_reverse_index(bytesets, num_terminals);
 
     let mut token_l2p_map = BTreeMap::<u32, BitSet>::new();
-    for (&token_id, bytes) in vocab.entries.iter() {
+    for (&token_id, bytes) in vocab.entries_map().iter() {
         token_l2p_map.insert(
             token_id,
             token_l2p_terminals(
@@ -4330,7 +4330,7 @@ pub fn partition_vocab_char_type_tokens(
     };
     let mut partitions: Vec<Vec<u32>> =
         (0..partition_count).map(|_| Vec::new()).collect();
-    for (&token_id, bytes) in vocab.entries.iter() {
+    for (&token_id, bytes) in vocab.entries_map().iter() {
         let mut idx = classify_vocab_char_type(bytes) as usize;
         if idx == 0
             && p0_overflow_threshold.is_some_and(|threshold| bytes.len() > threshold)

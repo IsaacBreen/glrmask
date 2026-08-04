@@ -1,4 +1,4 @@
-use glrmask_finite_automata::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
+use glrmask_finite_automata::unweighted_u32::dfa::DFA as UnweightedDfa;
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct CommitTemplateDfas {

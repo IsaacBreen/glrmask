@@ -9,15 +9,15 @@ pub enum Error {
     Compilation(String),
 }
 
-pub type GlrMaskError = Error;
+pub(crate) type GlrMaskError = Error;
 
-pub mod ds {
-    pub use glrmask_weight as weight;
+pub(crate) mod ds {
+    pub(crate) use glrmask_weight::__private as weight;
 }
 
-pub mod automata {
+mod automata {
     pub mod weighted_u32;
-    pub use weighted_u32 as weighted;
 }
 
 pub use automata::weighted_u32;
+pub use weighted_u32 as weighted;

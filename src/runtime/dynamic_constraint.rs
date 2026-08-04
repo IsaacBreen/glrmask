@@ -162,7 +162,7 @@ impl DynamicConstraint {
                     tokenizer,
                     ignore_terminal,
                     direct_regular_automaton,
-                    token_bytes: Arc::clone(&vocab.entries),
+                    token_bytes: vocab.entries_arc(),
                 },
                 special_token_terminals,
             },
@@ -187,7 +187,7 @@ impl DynamicConstraint {
                 tokenizer,
                 ignore_terminal,
                 direct_regular_automaton,
-                token_bytes: Arc::clone(&vocab.entries),
+                token_bytes: vocab.entries_arc(),
             },
             special_token_terminals,
         };
@@ -226,7 +226,7 @@ impl DynamicConstraint {
                     tokenizer,
                     ignore_terminal,
                     direct_regular_automaton: None,
-                    token_bytes: Arc::clone(&vocab.entries),
+                    token_bytes: vocab.entries_arc(),
                 },
                 special_token_terminals,
             },
@@ -574,7 +574,7 @@ impl DynamicConstraint {
         let payload: DynamicConstraintTransferPayloadV1 =
             bincode::deserialize(&bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..])
                 .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
-        let token_bytes = Arc::clone(&vocab.entries);
+        let token_bytes = vocab.entries_arc();
         Self::from_payload_v3(DynamicConstraintPayloadV3 {
             alternatives: payload
                 .alternatives

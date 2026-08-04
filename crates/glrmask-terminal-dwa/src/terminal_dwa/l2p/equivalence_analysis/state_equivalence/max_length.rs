@@ -482,7 +482,7 @@ pub fn stable_refinement_from_initial_blocks(
 pub fn compute_statistic(vocab: &Vocab) -> MaxLengthStatistic {
     let mut relevant_bytes = [false; 256];
     let mut max_token_len = 0usize;
-    for bytes in vocab.entries.values() {
+    for bytes in vocab.entries_map().values() {
         max_token_len = max_token_len.max(bytes.len());
         for &byte in bytes {
             relevant_bytes[byte as usize] = true;

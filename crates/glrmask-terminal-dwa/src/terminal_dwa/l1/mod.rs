@@ -217,7 +217,7 @@ fn l1_identity_vocab_order(vocab: &Vocab) -> Arc<L1IdentityVocabOrder> {
     let total_started_at = profiling.then(Instant::now);
     let collect_started_at = profiling.then(Instant::now);
     let mut token_entries_sorted: Vec<(u32, Arc<[u8]>)> = vocab
-        .entries
+        .entries_map()
         .iter()
         .map(|(&id, bytes)| (id, Arc::<[u8]>::from(bytes.clone().into_boxed_slice())))
         .collect();
@@ -319,7 +319,7 @@ fn derive_l1_identity_vocab_order_from_parent(
     let total_started_at = profiling.then(Instant::now);
     let membership_started_at = profiling.then(Instant::now);
     let mut included = vec![false; parent.original_to_internal.len()];
-    for &token_id in subset_vocab.entries.keys() {
+    for &token_id in subset_vocab.entries_map().keys() {
         let token_id = token_id as usize;
         assert!(token_id < included.len(), "subset token missing from parent order");
         included[token_id] = true;
@@ -895,7 +895,7 @@ pub fn count_l1_equivalence_classes(
 ) -> usize {
     let states: Vec<usize> = (0..tokenizer.num_states() as usize).collect();
     let tokenizer_view = TokenizerView::new_filtered(tokenizer, active_terminals);
-    let token_bytes: Vec<&[u8]> = vocab.entries.values().map(|b| b.as_slice()).collect();
+    let token_bytes: Vec<&[u8]> = vocab.entries_map().values().map(|b| b.as_slice()).collect();
     let mut relevant_bytes = [false; 256];
     for bytes in &token_bytes {
         for &byte in *bytes {
@@ -1087,7 +1087,7 @@ pub fn build_l1_id_map_and_terminal_dwa(
         eprintln!(
             "[glrmask/profile][l1] partition={} vocab_tokens={} tsids={} rep_states={} initial_states_considered={} max_length_skipped={} max_token_len={} token_len_gt_4={} token_len_gt_8={} token_len_gt_16={} token_len_gt_32={} token_len_gt_64={} state_equiv_ms={:.3} max_length_state_equiv_ms={:.3} exact_state_equiv_ms={:.3} max_length_reps={} exact_reps={} token_identity_map_ms={:.3} id_map_ms={:.3} internal_vocab_ms={:.3} vocab_tree_build_ms={:.3} state_seed_ms={:.3} token_set_intern_ms={:.3} tsid_profile_merge_ms={:.3} tsid_profile_merge_before={} tsid_profile_merge_after={} vocab_tree_traversal_ms={:.3} direct_terminal_dwa_ms={:.3} dwa_states={} dwa_transitions={} dwa_transition_pairs={} dwa_interned_ranges_before_compact={} dwa_interned_ranges_after_compact={} terminal_build_ms={:.3} compact_ms={:.3} determinize=none minimize=none prune=none total_ms={:.3}{}",
             partition_label,
-            vocab.entries.len(),
+            vocab.entries_map().len(),
             id_map.num_tsids(),
             id_map.tokenizer_states.representative_original_ids.len(),
             id_map_profile.initial_states_considered,
@@ -1634,7 +1634,7 @@ fn build_l1_generic_nfa_fallback_id_map<'a>(
 ) {
     let num_states = tokenizer.num_states() as usize;
     let token_bytes = vocab
-        .entries
+        .entries_map()
         .values()
         .map(Vec::as_slice)
         .collect::<Vec<_>>();
@@ -1994,12 +1994,12 @@ fn build_l1_id_map<'a>(
 
     if should_use_fast_projected_l1_id_map(
         partition_label,
-        vocab.entries.len(),
+        vocab.entries_map().len(),
         initial_state_map,
         num_dfa_states,
     ) {
         let token_bytes: Vec<&[u8]> = vocab
-            .entries
+            .entries_map()
             .values()
             .map(|bytes| bytes.as_slice())
             .collect();
@@ -7046,7 +7046,7 @@ mod generic_nfa_tests {
             let optimized_tsid =
                 optimized_id_map.tokenizer_states.original_to_internal[raw_state as usize];
             let scalar_tsid = scalar_id_map.tokenizer_states.original_to_internal[raw_state as usize];
-            for (&token_id, bytes) in vocab.entries.iter() {
+            for (&token_id, bytes) in vocab.entries_map().iter() {
                 let optimized_token =
                     optimized_id_map.internal_token_for_original(token_id).expect("optimized token");
                 let scalar_token = scalar_id_map.internal_token_for_original(token_id).expect("scalar token");
@@ -7095,7 +7095,7 @@ mod generic_nfa_tests {
         let active = [true, true];
         let raw_states = (0..tokenizer.num_states() as usize).collect::<Vec<_>>();
         let full_tokens = full_vocab
-            .entries
+            .entries_map()
             .values()
             .map(|bytes| bytes.as_slice())
             .collect::<Vec<_>>();
@@ -7165,7 +7165,7 @@ mod generic_nfa_tests {
         for raw_state in 0..tokenizer.num_states() as usize {
             let shared_tsid = shared_map.tokenizer_states.original_to_internal[raw_state];
             let standalone_tsid = standalone_map.tokenizer_states.original_to_internal[raw_state];
-            for (&token_id, bytes) in subset_vocab.entries.iter() {
+            for (&token_id, bytes) in subset_vocab.entries_map().iter() {
                 let shared_token = shared_map.internal_token_for_original(token_id).expect("shared token");
                 let standalone_token =
                     standalone_map.internal_token_for_original(token_id).expect("standalone token");
@@ -7264,7 +7264,7 @@ mod generic_nfa_tests {
         for raw_state in 0..tokenizer.num_states() as usize {
             let baseline_tsid = baseline_map.tokenizer_states.original_to_internal[raw_state];
             let projected_tsid = projected_map.tokenizer_states.original_to_internal[raw_state];
-            for (&token_id, bytes) in vocab.entries.iter() {
+            for (&token_id, bytes) in vocab.entries_map().iter() {
                 let baseline_token = baseline_map
                     .internal_token_for_original(token_id)
                     .expect("baseline token");
@@ -7340,7 +7340,7 @@ mod generic_nfa_tests {
             let exact_tsid = exact_id_map.tokenizer_states.original_to_internal[raw_state as usize];
             assert_ne!(fallback_tsid, u32::MAX, "fallback raw_state={raw_state}");
             assert_ne!(exact_tsid, u32::MAX, "exact raw_state={raw_state}");
-            for (&token_id, bytes) in vocab.entries.iter() {
+            for (&token_id, bytes) in vocab.entries_map().iter() {
                 let fallback_token =
                     fallback_id_map.internal_token_for_original(token_id).expect("fallback token");
                 let exact_token = exact_id_map.internal_token_for_original(token_id).expect("exact token");
@@ -7752,7 +7752,7 @@ mod packed_suffix_product_tests {
             assert_ne!(optimized_tsid, u32::MAX, "raw_state={raw_state}");
             assert_ne!(fallback_tsid, u32::MAX, "raw_state={raw_state}");
 
-            for (&token_id, bytes) in vocab.entries.iter() {
+            for (&token_id, bytes) in vocab.entries_map().iter() {
                 let optimized_token =
                     optimized_id_map.internal_token_for_original(token_id).expect("optimized token");
                 let fallback_token =
@@ -7862,7 +7862,7 @@ mod packed_suffix_product_tests {
                 optimized_id_map.tokenizer_states.original_to_internal[raw_state as usize];
             let fallback_tsid =
                 fallback_id_map.tokenizer_states.original_to_internal[raw_state as usize];
-            for (&token_id, bytes) in vocab.entries.iter() {
+            for (&token_id, bytes) in vocab.entries_map().iter() {
                 let optimized_token =
                     optimized_id_map.internal_token_for_original(token_id).expect("optimized token");
                 let fallback_token =

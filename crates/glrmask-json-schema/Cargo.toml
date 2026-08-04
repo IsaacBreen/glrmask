@@ -6,10 +6,14 @@ description = "JSON Schema to grammar lowering for GLRMask"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/IsaacBreen/glrmask"
 
+[features]
+default = []
+internal-api = []
+
 [dependencies]
 derivre = { version = "=0.3.8", default-features = false, features = ["compress"] }
-glrmask-grammar = { version = "=0.1.1", path = "../glrmask-grammar" }
-glrmask-lexer = { version = "=0.1.1", path = "../glrmask-lexer" }
+glrmask-grammar = { version = "=0.1.1", path = "../glrmask-grammar", features = ["internal-api"] }
+glrmask-lexer = { version = "=0.1.1", path = "../glrmask-lexer", features = ["internal-api"] }
 rayon = "1"
 regex = "1"
 regex-syntax = "0.8"

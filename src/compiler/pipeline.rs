@@ -2259,7 +2259,7 @@ fn build_and_merge_parser_dwa_families(
             )
         } else {
             let mapped_dwa =
-                glrmask_parser_dwa::merge::merge_mapped_parser_dwas(
+                glrmask_parser_dwa::__private::merge::merge_mapped_parser_dwas(
                     parser_dwas,
                     tokenizer.num_states() as usize,
                     max_token_id,
@@ -2313,7 +2313,7 @@ fn build_and_merge_parser_dwa_families(
     }
 
     let (mapped_dwa, combined) =
-        glrmask_parser_dwa::merge::merge_mapped_parser_dwas_with_top_accept(
+        glrmask_parser_dwa::__private::merge::merge_mapped_parser_dwas_with_top_accept(
             parser_dwas,
             tokenizer.num_states() as usize,
             max_token_id,
@@ -2766,7 +2766,7 @@ fn compile_prepared_with_profile_and_table_construction(
                 adaptive: lexer_adaptive_override
                     .unwrap_or_else(|| env_flag_enabled_by_default("GLRMASK_LEXER_ADAPTIVE")),
                 global_max_token_len: vocab
-                    .entries
+                    .entries_map()
                     .values()
                     .map(Vec::len)
                     .max()
@@ -3882,7 +3882,7 @@ fn compile_prepared_with_profile_and_table_construction(
         profile.parser_pm_joint_interned_ranges = parser_pm_joint_interned_ranges;
 
         let finalize_started_at = Instant::now();
-        let token_bytes = std::sync::Arc::clone(&vocab.entries);
+        let token_bytes = vocab.entries_arc();
         let special_token_terminals = collect_special_token_terminals(&prepared_grammar);
         let tokenizer = runtime_tokenizer.unwrap_or(tokenizer);
         let constraint = finalize_constraint(Constraint {

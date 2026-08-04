@@ -6,9 +6,13 @@ description = "Grammar representations, transformations, and text frontends for 
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/IsaacBreen/glrmask"
 
+[features]
+default = []
+internal-api = []
+
 [dependencies]
 glrmask-finite-automata = { version = "=0.1.1", path = "../glrmask-finite-automata" }
-glrmask-lexer = { version = "=0.1.1", path = "../glrmask-lexer" }
+glrmask-lexer = { version = "=0.1.1", path = "../glrmask-lexer", features = ["internal-api"] }
 rayon = "1"
 rustc-hash = "1"
 serde = { version = "1", features = ["derive", "rc"] }

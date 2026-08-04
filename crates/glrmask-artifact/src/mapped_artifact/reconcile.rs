@@ -6,7 +6,7 @@ use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
-use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
+use crate::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::ds::weight::{SharedTokenSet, Weight, finalize_weight_map, shared_rangeset};
 
 pub(super) fn reconcile_weight_id_maps(
@@ -852,7 +852,7 @@ fn remap_weight_with_injective_maps(
     }
 
     let mut entries = Vec::<(u32, SharedTokenSet)>::new();
-    for (local_range, tokens) in weight.0.range_values() {
+    for (local_range, tokens) in weight.raw_range_values() {
         let mapped_tokens = remap_token_set_with_injective_map(tokens, token_map, token_cache);
         if mapped_tokens.is_empty() {
             continue;
@@ -1003,7 +1003,7 @@ fn remap_weights_with_maps(
     let mut unique_weights = Vec::<Weight>::new();
     let mut weight_to_unique = Vec::with_capacity(weights.len());
     for weight in weights.iter() {
-        let ptr = Arc::as_ptr(&weight.0) as usize;
+        let ptr = weight.ptr_key();
         let unique = *unique_by_ptr.entry(ptr).or_insert_with(|| {
             let index = unique_weights.len();
             unique_weights.push((**weight).clone());
@@ -1211,7 +1211,7 @@ fn remap_weight_cached_general(
     common_tsid_count: usize,
     cache: &mut HashMap<usize, Weight>,
 ) -> Weight {
-    let ptr = Arc::as_ptr(&weight.0) as usize;
+    let ptr = weight.ptr_key();
     if let Some(cached) = cache.get(&ptr) {
         return cached.clone();
     }
@@ -1381,8 +1381,7 @@ mod tests {
 
     fn entries_key(weight: &Weight) -> Vec<(u32, u32, Vec<(u32, u32)>)> {
         weight
-            .0
-            .range_values()
+            .raw_range_values()
             .map(|(range, tokens)| {
                 (
                     *range.start(),

@@ -1659,7 +1659,7 @@ pub fn certify_vocabulary_exact_state_candidates(
         .unwrap_or_else(|| vec![true; full.num_terminals() as usize]);
     let view = TokenizerView::new_filtered(&union.tokenizer, &active);
     let tokens = vocab
-        .entries
+        .entries_map()
         .values()
         .map(Vec::as_slice)
         .collect::<Vec<_>>();

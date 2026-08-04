@@ -7,7 +7,6 @@
 //! a quotient cannot safely collapse them.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::time::Instant;
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -97,7 +96,7 @@ struct PushProfile {
 
 #[inline]
 fn weight_id(weight: &Weight) -> usize {
-    Arc::as_ptr(&weight.0) as usize
+    weight.ptr_key()
 }
 
 fn cached_intersection(
@@ -113,7 +112,7 @@ fn cached_intersection(
     if left.is_full() {
         return right.clone();
     }
-    if right.is_full() || Arc::ptr_eq(&left.0, &right.0) {
+    if right.is_full() || left.storage_ptr_eq(right) {
         profile.push_noop_hits += 1;
         return left.clone();
     }
@@ -478,8 +477,8 @@ mod tests {
     use range_set_blaze::RangeSetBlaze;
 
     use super::*;
-    use crate::automata::weighted::determinize::determinize;
-    use crate::automata::weighted::equivalence::find_difference;
+    use crate::weighted_u32::determinize::determinize;
+    use crate::weighted_u32::equivalence::find_difference;
 
     fn tokens(values: &[u32]) -> Weight {
         Weight::from_per_tsid_token_sets(std::iter::once((

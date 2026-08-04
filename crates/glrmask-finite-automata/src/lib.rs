@@ -1,7 +1,7 @@
 #![deny(warnings)]
 #![allow(dead_code)]
 
-pub mod automata {
+mod automata {
     pub mod unweighted_u32;
 }
 

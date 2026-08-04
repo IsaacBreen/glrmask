@@ -17,7 +17,7 @@ use std::time::Instant;
 use rayon::prelude::*;
 use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
 
-use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
+use crate::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::ds::weight::{SharedTokenSet, Weight, finalize_weight_map, shared_rangeset};
 
 mod almost_optimal_layout;
@@ -722,7 +722,7 @@ fn build_exact_token_merge_permutation(weights: &[&Weight], num_tokens: usize) -
         if weight.is_full() || weight.is_empty() {
             continue;
         }
-        for (_tsid_range, token_set) in weight.0.range_values() {
+        for (_tsid_range, token_set) in weight.raw_range_values() {
             let ptr = Arc::as_ptr(token_set) as usize;
             if seen_token_sets.insert(ptr) {
                 token_sets.push(Arc::clone(token_set));
@@ -1133,7 +1133,7 @@ fn build_exact_token_merge_permutation_with_remaps(
         if weight.is_full() || weight.is_empty() {
             continue;
         }
-        for (_tsid_range, token_set) in weight.0.range_values() {
+        for (_tsid_range, token_set) in weight.raw_range_values() {
             let ptr = Arc::as_ptr(token_set) as usize;
             if seen.insert(ptr) {
                 token_sets.push((ptr, Arc::clone(token_set)));
@@ -1278,7 +1278,7 @@ fn build_exact_tsid_merge_permutation_with_token_remaps(
         // pointer to skip recomputing the remap key for those repeats; this is
         // exact and only avoids redundant `rangeset_key` allocations.
         let mut context_by_source_ptr = HashMap::<usize, u32>::new();
-        for (tsid_range, token_set) in weight.0.range_values() {
+        for (tsid_range, token_set) in weight.raw_range_values() {
             let token_set_ptr = Arc::as_ptr(token_set) as usize;
             let token_set_context = match context_by_source_ptr.entry(token_set_ptr) {
                 std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
@@ -1323,7 +1323,7 @@ fn build_exact_tsid_merge_permutation(weights: &[&Weight], num_tsids: usize) -> 
             continue;
         }
         let mut contexts_by_token_set = HashMap::<Vec<(u32, u32)>, u32>::new();
-        for (tsid_range, token_set) in weight.0.range_values() {
+        for (tsid_range, token_set) in weight.raw_range_values() {
             let key = rangeset_key(token_set);
             let token_set_context = *contexts_by_token_set.entry(key).or_insert_with(|| {
                 let current = context;
@@ -1430,7 +1430,7 @@ fn apply_permutations_to_weight_set_with_token_remaps(
         .iter()
         .map(|weight| {
             (
-                Arc::as_ptr(&weight.0) as usize,
+                weight.ptr_key(),
                 permute_weight_with_caches(weight, &perm_context, &empty_cache, &token_remaps),
             )
         })
@@ -1470,7 +1470,7 @@ fn apply_permutations_to_weight_refs(
         .then(|| PermutationContext::new(tsid_perm, &identity_perm(token_perm.len())));
     let needs_token_fallback = !perm_context.token_perm_is_identity
         && unique_weights.iter().any(|weight| {
-            let ptr = Arc::as_ptr(&weight.0) as usize;
+            let ptr = weight.ptr_key();
             direct_weight_remaps
                 .is_none_or(|remaps| !remaps.contains_key(&ptr))
                 && tsid_only_context
@@ -1493,7 +1493,7 @@ fn apply_permutations_to_weight_refs(
     let transform_started_at = profile_compaction.then(Instant::now);
     let empty_token_cache = TokenRemapCache::new();
     let permute_entry = |weight: &Weight| {
-        let ptr = Arc::as_ptr(&weight.0) as usize;
+        let ptr = weight.ptr_key();
         let new_weight = if let Some(remaps) = direct_weight_remaps
             && let Some(remapped) = remaps.get(&ptr)
         {
@@ -1529,7 +1529,7 @@ fn apply_permutations_to_weight_refs(
 
     let writeback_started_at = profile_compaction.then(Instant::now);
     for weight in weights.iter_mut() {
-        let ptr = Arc::as_ptr(&weight.0) as usize;
+        let ptr = weight.ptr_key();
         if let Some(new_weight) = weight_map.get(&ptr) {
             **weight = new_weight.clone();
         }
@@ -1572,7 +1572,7 @@ fn permute_weight_with_caches(
         }
 
         let mut map = RangeMapBlaze::new();
-        for (tsid_range, token_set) in weight.0.range_values() {
+        for (tsid_range, token_set) in weight.raw_range_values() {
             let token_set_ptr = Arc::as_ptr(token_set) as usize;
             let mapped_tokens = lookup_permuted_token_set(
                 token_set,
@@ -1619,7 +1619,7 @@ fn permute_weight_with_bijective_tsid_perm(
 ) -> Weight {
     debug_assert!(perm_context.tsid_perm_is_bijection);
     let mut entries = Vec::<(u32, Arc<RangeSetBlaze<u32>>)>::new();
-    for (tsid_range, token_set) in weight.0.range_values() {
+    for (tsid_range, token_set) in weight.raw_range_values() {
         let token_set_ptr = Arc::as_ptr(token_set) as usize;
         let mapped_tokens = if perm_context.token_perm_is_identity {
             Arc::clone(token_set)
@@ -1680,7 +1680,7 @@ fn permute_weight_with_general_tsid_remap(
     // point contributions and use Weight's exact sorted reducer instead of
     // clearing a dense output slot for every destination TSID per weight.
     let mut entries = Vec::<(u32, SharedTokenSet)>::new();
-    for (tsid_range, token_set) in weight.0.range_values() {
+    for (tsid_range, token_set) in weight.raw_range_values() {
         let token_set_ptr = Arc::as_ptr(token_set) as usize;
         let mapped_tokens = if perm_context.token_perm_is_identity {
             Arc::clone(token_set)
@@ -1741,7 +1741,7 @@ fn build_missing_global_permuted_token_cache(
         if weight.is_full() || weight.is_empty() {
             continue;
         }
-        for (_tsid_range, token_set) in weight.0.range_values() {
+        for (_tsid_range, token_set) in weight.raw_range_values() {
             let ptr = Arc::as_ptr(token_set) as usize;
             if precomputed_token_remaps.contains_key(&ptr) {
                 continue;
@@ -2070,7 +2070,7 @@ fn collect_token_sets_after_permutation(
         if weight.is_full() || weight.is_empty() {
             continue;
         }
-        for (_tsid_range, token_set) in weight.0.range_values() {
+        for (_tsid_range, token_set) in weight.raw_range_values() {
             let ptr = Arc::as_ptr(token_set) as usize;
             let mapped = cache
                 .entry(ptr)
@@ -2088,7 +2088,7 @@ fn collect_unique_weights_from_refs(weights: &[&mut Weight]) -> Vec<Weight> {
     let mut seen = HashSet::new();
     let mut unique = Vec::new();
     for weight in weights {
-        if seen.insert(Arc::as_ptr(&weight.0) as usize) {
+        if seen.insert(weight.ptr_key()) {
             unique.push((**weight).clone());
         }
     }
@@ -2099,7 +2099,7 @@ fn collect_unique_weights_from_weight_refs(weights: &[&Weight]) -> Vec<Weight> {
     let mut seen = HashSet::new();
     let mut unique = Vec::new();
     for weight in weights {
-        if seen.insert(Arc::as_ptr(&weight.0) as usize) {
+        if seen.insert(weight.ptr_key()) {
             unique.push((**weight).clone());
         }
     }
@@ -2110,7 +2110,7 @@ fn dedup_weights_by_storage_ptr(weights: Vec<Weight>) -> Vec<Weight> {
     let mut seen = HashSet::new();
     let mut unique = Vec::new();
     for weight in weights {
-        if seen.insert(Arc::as_ptr(&weight.0) as usize) {
+        if seen.insert(weight.ptr_key()) {
             unique.push(weight);
         }
     }
@@ -2123,10 +2123,10 @@ fn count_unique_storage_for_weight_refs(weights: &[&Weight]) -> UniqueStorageCou
     let mut storage = UniqueStorageCounts::default();
 
     for weight in weights {
-        if seen_weights.insert(Arc::as_ptr(&weight.0) as usize) {
+        if seen_weights.insert(weight.ptr_key()) {
             storage.weight_ranges += weight.num_ranges();
         }
-        for (_tsid_range, token_set) in weight.0.range_values() {
+        for (_tsid_range, token_set) in weight.raw_range_values() {
             if seen_token_sets.insert(Arc::as_ptr(token_set) as usize) {
                 storage.token_ranges += token_set.ranges().count();
             }
@@ -2211,7 +2211,7 @@ mod tests {
 
         assert_eq!(cached, fallback);
         for ((_, source_tokens), (_, cached_tokens)) in
-            weight.0.range_values().zip(cached.0.range_values())
+            weight.raw_range_values().zip(cached.raw_range_values())
         {
             let source_ptr = Arc::as_ptr(source_tokens) as usize;
             assert!(Arc::ptr_eq(cached_tokens, cache.get(&source_ptr).unwrap()));

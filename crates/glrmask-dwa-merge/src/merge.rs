@@ -443,7 +443,7 @@ fn remap_weight_with_contiguous_tsid_blocks_cached(
     cache: &mut RemapCache<Weight>,
     token_cache: &mut RemapCache<Arc<RangeSetBlaze<u32>>>,
 ) -> Weight {
-    let key = Arc::as_ptr(&weight.0) as usize;
+    let key = weight.ptr_key();
     if let Some(existing) = cache.get(&key) {
         return existing.clone();
     }
@@ -2867,7 +2867,7 @@ fn remap_weight_cached_with_tsid_runs(
     cache: &mut RemapCache<Weight>,
     token_cache: &mut RemapCache<Arc<RangeSetBlaze<u32>>>,
 ) -> Weight {
-    let ptr = Arc::as_ptr(&weight.0) as usize;
+    let ptr = weight.ptr_key();
     if let Some(cached) = cache.get(&ptr) {
         return cached.clone();
     }
@@ -2970,7 +2970,7 @@ fn remap_weight_cached_with_token_remap(
     cache: &mut RemapCache<Weight>,
     token_cache: &mut RemapCache<Arc<RangeSetBlaze<u32>>>,
 ) -> Weight {
-    let ptr = Arc::as_ptr(&weight.0) as usize;
+    let ptr = weight.ptr_key();
     if let Some(cached) = cache.get(&ptr) {
         return cached.clone();
     }

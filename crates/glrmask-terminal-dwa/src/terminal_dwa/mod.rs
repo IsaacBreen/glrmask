@@ -18,7 +18,7 @@ pub mod grammar_helpers;
 pub mod l1;
 pub mod l2p;
 pub mod synthetic_state_map;
-pub use glrmask_dwa_merge::merge;
+pub use glrmask_dwa_merge::__private::merge;
 pub mod partition;
 pub mod types;
 
@@ -554,7 +554,7 @@ fn build_partition_local_tokenizer(
     if !partition_local_synthesis_enabled() || vocab.is_empty() {
         return None;
     }
-    let max_token_len = vocab.entries.values().map(Vec::len).max().unwrap_or(0);
+    let max_token_len = vocab.entries_map().values().map(Vec::len).max().unwrap_or(0);
     if max_token_len == 0 || max_token_len >= plan.global_max_token_len {
         return None;
     }
@@ -668,7 +668,7 @@ fn build_partition_local_tokenizer(
         .map(factor_regex_expr)
         .collect::<Vec<_>>();
     let mut relevant_bytes = vocab
-        .entries
+        .entries_map()
         .values()
         .flat_map(|bytes| bytes.iter().copied())
         .collect::<Vec<_>>();
@@ -788,7 +788,7 @@ fn prepare_partition_local_tokenizer(
     if !partition_local_synthesis_enabled() || vocab.is_empty() {
         return None;
     }
-    let max_token_len = vocab.entries.values().map(Vec::len).max().unwrap_or(0);
+    let max_token_len = vocab.entries_map().values().map(Vec::len).max().unwrap_or(0);
     if max_token_len == 0 || max_token_len >= plan.global_max_token_len {
         return None;
     }
@@ -855,7 +855,7 @@ fn prepare_partition_local_tokenizer(
             .into_boxed_slice(),
     );
     let mut relevant_bytes = vocab
-        .entries
+        .entries_map()
         .values()
         .flat_map(|bytes| bytes.iter().copied())
         .collect::<Vec<_>>();
@@ -1122,7 +1122,7 @@ fn vocab_from_token_partitions(vocab: &Vocab, token_partitions: Vec<Vec<u32>>) -
         .map(|token_ids| {
             let entries = token_ids
                 .into_iter()
-                .filter_map(|token_id| vocab.entries.get(&token_id).map(|bytes| (token_id, bytes.clone())))
+                .filter_map(|token_id| vocab.entries_map().get(&token_id).map(|bytes| (token_id, bytes.clone())))
                 .collect();
             Vocab::new(entries)
         })
@@ -1180,7 +1180,7 @@ fn build_char_type_sub_vocabs(
     let mut partition_bytes = vec![U8Set::empty(); partition_count];
     let mut partition_follow_bytes: Vec<[U8Set; 256]> =
         (0..partition_count).map(|_| [U8Set::empty(); 256]).collect();
-    for (&token_id, bytes) in vocab.entries.iter() {
+    for (&token_id, bytes) in vocab.entries_map().iter() {
         let idx = char_type_partition_index(
             bytes,
             p0_overflow_threshold,
@@ -1742,7 +1742,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length(
                     eprintln!(
                         "[glrmask/profile][partition_local_synthesis] partition={} horizon={} global_states={} local_states={} local_transitions={} build_ms={:.3} selected=true",
                         label,
-                        sub_vocab.entries.values().map(Vec::len).max().unwrap_or(0),
+                        sub_vocab.entries_map().values().map(Vec::len).max().unwrap_or(0),
                         tokenizer.num_states(),
                         local.tokenizer.num_states(),
                         local.tokenizer.transition_count(),
@@ -1761,7 +1761,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length(
                 eprintln!(
                     "[glrmask/profile][partition_local_synthesis] partition={} horizon={} global_states={} local_states={} build_ms={:.3} selected=false reason=build_or_lift_failed",
                     label,
-                    sub_vocab.entries.values().map(Vec::len).max().unwrap_or(0),
+                    sub_vocab.entries_map().values().map(Vec::len).max().unwrap_or(0),
                     tokenizer.num_states(),
                     local.tokenizer.num_states(),
                     local.build_ms,
@@ -1973,7 +1973,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length(
                 format!(
                     "p{}_tokens={} p{}_ms={:.3}",
                     i,
-                    sv.entries.len(),
+                    sv.entries_map().len(),
                     i,
                     partition_ms[i]
                 )

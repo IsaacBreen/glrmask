@@ -50,11 +50,11 @@ impl TerminalAutomaton {
                 let mut total_outer_ranges = 0usize;
                 let mut total_inner_ranges = 0usize;
                 let mut process_weight = |weight: &Weight| {
-                    let weight_ptr = Arc::as_ptr(&weight.0) as usize;
+                    let weight_ptr = weight.ptr_key();
                     if seen_weight_ptrs.insert(weight_ptr) {
-                        total_outer_ranges += weight.0.range_values().count();
+                        total_outer_ranges += weight.raw_range_values().count();
                     }
-                    for (_, tokens) in weight.0.range_values() {
+                    for (_, tokens) in weight.raw_range_values() {
                         let token_ptr = Arc::as_ptr(tokens) as usize;
                         if seen_rangeset_ptrs.insert(token_ptr) {
                             total_inner_ranges += tokens.ranges().count();

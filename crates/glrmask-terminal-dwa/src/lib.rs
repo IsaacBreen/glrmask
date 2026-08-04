@@ -4,49 +4,60 @@
 
 use thiserror::Error as ThisError;
 
-pub use glrmask_vocab::Vocab;
-pub use glrmask_vocab as vocab;
+pub(crate) use glrmask_vocab::__private as vocab;
+pub(crate) use glrmask_vocab::Vocab;
 
 #[derive(ThisError, Debug)]
-pub enum Error {
+pub(crate) enum Error {
     #[error("Internal compiler invariant violated: {0}")]
     InternalInvariant(String),
 }
 
-pub mod error {
-    pub use super::Error;
-    pub use glrmask_invariant::fail_internal_invariant;
+pub(crate) mod error {
+    pub(crate) use super::Error;
+    pub(crate) use glrmask_invariant::__private::fail_internal_invariant;
 
-    pub fn catch_internal_invariant<T>(f: impl FnOnce() -> T) -> Result<T, Error> {
-        glrmask_invariant::catch_internal_invariant_message(f).map_err(Error::InternalInvariant)
+    pub(crate) fn catch_internal_invariant<T>(f: impl FnOnce() -> T) -> Result<T, Error> {
+        glrmask_invariant::__private::catch_internal_invariant_message(f).map_err(Error::InternalInvariant)
     }
 }
 
-pub mod automata {
-    pub use glrmask_finite_automata::automata::unweighted_u32;
-    pub use glrmask_lexer::automata::{lexer, regex};
-    pub use glrmask_weighted_automata::automata::weighted_u32;
-    pub use weighted_u32 as weighted;
+pub(crate) mod automata {
+    pub(crate) use glrmask_finite_automata::unweighted_u32;
+    pub(crate) use glrmask_lexer::__private::automata::{lexer, regex};
+    pub(crate) use glrmask_weighted_automata::weighted_u32;
+    pub(crate) use weighted_u32 as weighted;
 }
 
-pub mod ds {
-    pub use glrmask_lexer::ds::{bitset, u8set};
-    pub use glrmask_vocab::vocab_prefix_tree;
-    pub use glrmask_weight as weight;
+pub(crate) mod ds {
+    pub(crate) use glrmask_lexer::__private::ds::{bitset, u8set};
+    pub(crate) use glrmask_vocab::__private::vocab_prefix_tree;
+    pub(crate) use glrmask_weight::__private as weight;
 }
 
-pub mod grammar {
-    pub use glrmask_grammar::grammar::*;
+pub(crate) mod grammar {
+    pub(crate) use glrmask_grammar::__private::grammar::*;
 }
 
-pub mod compiler {
-    pub use glrmask_glr::glr;
-    pub use glrmask_lexer::possible_matches;
+pub(crate) mod compiler {
+    pub(crate) use glrmask_glr::__private::glr;
+    pub(crate) use glrmask_lexer::__private::possible_matches;
 
-    pub mod stages {
-        pub use glrmask_artifact::{equiv_types, mapped_artifact};
-        pub use crate::terminal_dwa as id_map_and_terminal_dwa;
+    pub(crate) mod stages {
+        pub(crate) use crate::terminal_dwa as id_map_and_terminal_dwa;
+        pub(crate) use glrmask_artifact::__private::{equiv_types, mapped_artifact};
     }
 }
 
-pub mod terminal_dwa;
+mod terminal_dwa;
+
+/// Implementation details shared by the GLRMask workspace.
+///
+/// This module is deliberately feature-gated and is not a stable API.
+#[cfg(feature = "internal-api")]
+#[doc(hidden)]
+pub mod __private {
+    pub mod terminal_dwa {
+        pub use crate::terminal_dwa::*;
+    }
+}

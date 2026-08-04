@@ -88,7 +88,7 @@ impl Serialize for DWA {
         let mut weight_pool: Vec<WeightPoolEntry> = Vec::new();
 
         let mut intern_weight = |w: &Weight| -> u32 {
-            let ptr = std::sync::Arc::as_ptr(&w.0) as usize;
+            let ptr = w.ptr_key();
             *w_ptr_to_idx.entry(ptr).or_insert_with(|| {
                 let idx = weight_pool.len() as u32;
                 if w.is_full() {
@@ -98,8 +98,7 @@ impl Serialize for DWA {
                     });
                 } else {
                     let entries = w
-                        .0
-                        .range_values()
+                        .raw_range_values()
                         .map(|(range, tokens)| {
                             let ts_idx = intern_token_set(tokens);
                             (*range.start(), *range.end(), ts_idx)
@@ -298,11 +297,11 @@ impl DWA {
         let mut total_inner_ranges = 0usize;
 
         let mut process_weight = |weight: &Weight| {
-            let weight_ptr = std::sync::Arc::as_ptr(&weight.0) as usize;
+            let weight_ptr = weight.ptr_key();
             if seen_weight_ptrs.insert(weight_ptr) {
-                total_outer_ranges += weight.0.range_values().count();
+                total_outer_ranges += weight.raw_range_values().count();
             }
-            for (_, tokens) in weight.0.range_values() {
+            for (_, tokens) in weight.raw_range_values() {
                 let token_ptr = std::sync::Arc::as_ptr(tokens) as usize;
                 if seen_rangeset_ptrs.insert(token_ptr) {
                     total_inner_ranges += tokens.ranges().count();

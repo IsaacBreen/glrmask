@@ -1560,7 +1560,7 @@ impl Constraint {
             if weight.is_empty() {
                 continue;
             }
-            for (tsid_range, token_set) in weight.0.range_values() {
+            for (tsid_range, token_set) in weight.raw_range_values() {
                 let key = Arc::as_ptr(token_set) as usize;
                 let dense = dense_cache.get(&key).cloned().unwrap_or_else(|| {
                     Self::dense_words_from_internal_set_with_words(
@@ -2542,7 +2542,7 @@ impl Constraint {
         impl<'a> InventoryBatch<'a> {
             fn add_state(&mut self, state: &'a crate::automata::weighted::dwa::DWAState) {
                 for (_, weight) in state.transitions.values() {
-                    for (_tsid_range, token_set) in weight.0.range_values() {
+                    for (_tsid_range, token_set) in weight.raw_range_values() {
                         let key = Arc::as_ptr(token_set) as usize;
                         self.transition_sets.entry(key).or_insert(token_set.as_ref());
                     }
@@ -2553,7 +2553,7 @@ impl Constraint {
                 if final_weight.is_full() || final_weight.is_empty() {
                     return;
                 }
-                for (_tsid_range, token_set) in final_weight.0.range_values() {
+                for (_tsid_range, token_set) in final_weight.raw_range_values() {
                     let key = Arc::as_ptr(token_set) as usize;
                     self.final_sets.entry(key).or_insert(token_set);
                 }
@@ -2591,7 +2591,7 @@ impl Constraint {
             if final_weight.is_full() || final_weight.is_empty() {
                 continue;
             }
-            for (_tsid_range, token_set) in final_weight.0.range_values() {
+            for (_tsid_range, token_set) in final_weight.raw_range_values() {
                 let key = Arc::as_ptr(token_set) as usize;
                 inventory.final_sets.entry(key).or_insert(token_set);
             }
@@ -2601,7 +2601,7 @@ impl Constraint {
             if final_weight.is_full() || final_weight.is_empty() {
                 continue;
             }
-            for (_tsid_range, token_set) in final_weight.0.range_values() {
+            for (_tsid_range, token_set) in final_weight.raw_range_values() {
                 let key = Arc::as_ptr(token_set) as usize;
                 inventory.final_sets.entry(key).or_insert(token_set);
             }
@@ -2611,7 +2611,7 @@ impl Constraint {
             if final_weight.is_full() || final_weight.is_empty() {
                 continue;
             }
-            for (_tsid_range, token_set) in final_weight.0.range_values() {
+            for (_tsid_range, token_set) in final_weight.raw_range_values() {
                 let key = Arc::as_ptr(token_set) as usize;
                 inventory.final_sets.entry(key).or_insert(token_set);
             }
@@ -3026,7 +3026,7 @@ impl Constraint {
                 if weight.is_full() {
                     continue;
                 }
-                for (_, tokens) in weight.0.iter() {
+                for (_, tokens) in weight.raw_iter() {
                     let key = Arc::as_ptr(tokens) as usize;
                     if !mask_by_token_set.contains_key(&key) {
                         let mask = self.indexed_dag_dense_mask_for_tokens(tokens);
@@ -3037,7 +3037,7 @@ impl Constraint {
             if let Some(weight) = state.final_weight.as_ref()
                 && !weight.is_full()
             {
-                for (_, tokens) in weight.0.iter() {
+                for (_, tokens) in weight.raw_iter() {
                     let key = Arc::as_ptr(tokens) as usize;
                     if !mask_by_token_set.contains_key(&key) {
                         let mask = self.indexed_dag_dense_mask_for_tokens(tokens);
@@ -3053,7 +3053,7 @@ impl Constraint {
                         IndexedDagDenseTransitionMasks::Full
                     } else {
                         IndexedDagDenseTransitionMasks::from_entries(
-                            weight.0.iter().map(|(tsid, tokens)| {
+                            weight.raw_iter().map(|(tsid, tokens)| {
                                 (
                                     tsid,
                                     mask_by_token_set[&(Arc::as_ptr(tokens) as usize)].clone(),
@@ -3084,7 +3084,7 @@ impl Constraint {
                 None => IndexedDagDenseTransitionMasks::from_entries(std::iter::empty()),
                 Some(weight) if weight.is_full() => IndexedDagDenseTransitionMasks::Full,
                 Some(weight) => IndexedDagDenseTransitionMasks::from_entries(
-                    weight.0.iter().map(|(tsid, tokens)| {
+                    weight.raw_iter().map(|(tsid, tokens)| {
                         (
                             tsid,
                             mask_by_token_set[&(Arc::as_ptr(tokens) as usize)].clone(),
@@ -3327,7 +3327,7 @@ impl Constraint {
         // `unique_sets` already deduplicates globally. Avoid allocating and
         // linearly deduplicating a temporary vector for every individual
         // weight before inserting the same pointers here.
-        for (_tsid_range, token_set) in weight.0.range_values() {
+        for (_tsid_range, token_set) in weight.raw_range_values() {
             let token_set = token_set.as_ref();
             let key = token_set as *const RangeSetBlaze<u32> as usize;
             unique_sets.entry(key).or_insert(token_set);
