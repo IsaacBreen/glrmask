@@ -881,7 +881,6 @@ mod lexer_partition_plan_tests {
             GlrTableConstruction::ExperimentalCoreMerged,
         );
 
-        assert!(!profile.synthetic_certified);
         assert!(profile.synthetic_token_quotient_certified);
         assert!(profile.synthetic_candidate_terminals > 0);
         assert!(profile.synthetic_observation_states < profile.tokenizer_final_states);
@@ -1201,6 +1200,31 @@ struct SyntheticTokenizerPlan {
     residual_isolation_classes: Vec<Option<u32>>,
     changed_terminal_count: usize,
     repeat_horizons: Arc<crate::automata::lexer::compile::VocabularyRepeatHorizonCache>,
+}
+
+fn direct_token_quotient_expr_is_safe(expr: &Expr) -> bool {
+    match expr {
+        Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Epsilon => true,
+        Expr::Shared(expr) => direct_token_quotient_expr_is_safe(expr),
+        Expr::Repeat { expr, .. } => direct_token_quotient_expr_is_safe(expr),
+        Expr::Seq(exprs) | Expr::Choice(exprs) => {
+            exprs.iter().all(direct_token_quotient_expr_is_safe)
+        }
+        // Whole-token certification preserves token-boundary transitions, but
+        // terminal-DWA construction also observes intermediate byte states.
+        // Product/subtraction and opaque DFA nodes can need distinctions that
+        // are invisible at token boundaries, so keep the full compile
+        // coordinate unless raw structural certification succeeded.
+        Expr::Intersect { .. } | Expr::Exclude { .. } | Expr::Dfa(_) => false,
+    }
+}
+
+fn direct_token_quotient_plan_is_safe(plan: &SyntheticTokenizerPlan) -> bool {
+    plan.changed_terminal_ids.iter().all(|&terminal_id| {
+        plan.synthesized_expressions
+            .get(terminal_id as usize)
+            .is_some_and(direct_token_quotient_expr_is_safe)
+    })
 }
 
 fn synthetic_state_reduction_is_profitable(full_states: usize, synthesized_states: usize) -> bool {
@@ -3085,7 +3109,10 @@ fn compile_prepared_with_profile_and_table_construction(
                             let value = value.trim().to_ascii_lowercase();
                             !matches!(value.as_str(), "" | "0" | "false" | "no" | "off")
                         })
-                        .unwrap_or(true);
+                        .unwrap_or_else(|_| {
+                            synthetic_tokenizer_plan_ref
+                                .is_some_and(direct_token_quotient_plan_is_safe)
+                        });
                 if use_full_tokenizer_for_token_quotient
                     && !direct_token_quotient_compile
                     && let (Some(deferred), Some(certified)) = (
