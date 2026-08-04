@@ -6355,50 +6355,52 @@ pub fn compile_partitioned_expression_pair_with_structural_map(
     .map(PreparedPartitionedExpressionPair::finish_full)
 }
 
-fn product_state_metadata(
+fn product_component_state_flags(component: &ProductComponent, state: u32) -> (bool, bool) {
+    match component {
+        ProductComponent::Materialized(dfa)
+        | ProductComponent::MaterializedZeroMinRepeatSuffix { dfa, .. } => (
+            dfa.finalizers(state).contains(0),
+            dfa.possible_future_group_ids(state).contains(0),
+        ),
+        ProductComponent::VirtualFixedSequence {
+            byte_sets,
+            suffix_live,
+        } => {
+            let position = state as usize;
+            (
+                position == byte_sets.len(),
+                position < byte_sets.len()
+                    && suffix_live.get(position).copied().unwrap_or(false),
+            )
+        }
+        ProductComponent::VirtualBoundedRepeat { base_dfa, min, max } => {
+            let base_state_count = base_dfa.num_states() as u32;
+            let copy_count = state / base_state_count;
+            let base_state = state % base_state_count;
+            (base_state == 0 && copy_count >= *min, copy_count < *max)
+        }
+    }
+}
+
+fn product_state_metadata_with_layout(
     components: &[ProductComponent],
+    coordinate_groups: &[Vec<usize>],
+    num_groups: usize,
     state_tuple: &ProductStateTuple,
 ) -> (BitSet, BitSet) {
-    let num_groups = components.len();
     let mut finalizers = BitSet::new(num_groups);
     let mut future = BitSet::new(num_groups);
 
-    for &(group_id, state) in state_tuple {
-        let group_id = group_id as usize;
-        match &components[group_id] {
-            ProductComponent::Materialized(dfa)
-            | ProductComponent::MaterializedZeroMinRepeatSuffix { dfa, .. } => {
-                if dfa.finalizers(state).contains(0) {
-                    finalizers.set(group_id);
-                }
-                if dfa.possible_future_group_ids(state).contains(0) {
-                    future.set(group_id);
-                }
+    for &(coordinate_id, state) in state_tuple {
+        let coordinate = coordinate_id as usize;
+        let (accepting, can_continue) =
+            product_component_state_flags(&components[coordinate], state);
+        for &group in &coordinate_groups[coordinate] {
+            if accepting {
+                finalizers.set(group);
             }
-            ProductComponent::VirtualFixedSequence {
-                byte_sets,
-                suffix_live,
-            } => {
-                let position = state as usize;
-                if position == byte_sets.len() {
-                    finalizers.set(group_id);
-                }
-                if position < byte_sets.len()
-                    && suffix_live.get(position).copied().unwrap_or(false)
-                {
-                    future.set(group_id);
-                }
-            }
-            ProductComponent::VirtualBoundedRepeat { base_dfa, min, max } => {
-                let base_state_count = base_dfa.num_states() as u32;
-                let copy_count = state / base_state_count;
-                let base_state = state % base_state_count;
-                if base_state == 0 && copy_count >= *min {
-                    finalizers.set(group_id);
-                }
-                if copy_count < *max {
-                    future.set(group_id);
-                }
+            if can_continue {
+                future.set(group);
             }
         }
     }
@@ -6406,28 +6408,21 @@ fn product_state_metadata(
     (finalizers, future)
 }
 
-fn product_state_single_visible_finalizer(
+fn product_state_single_visible_finalizer_with_layout(
     components: &[ProductComponent],
+    coordinate_groups: &[Vec<usize>],
+    num_groups: usize,
     state_tuple: &ProductStateTuple,
     exclusions: &BTreeMap<u32, BTreeSet<u32>>,
     intersections: &BTreeMap<u32, BTreeSet<u32>>,
 ) -> BitSet {
-    let mut accepting = vec![false; components.len()];
-    for &(group_id, state) in state_tuple {
-        let group = group_id as usize;
-        accepting[group] = match &components[group] {
-            ProductComponent::Materialized(dfa)
-            | ProductComponent::MaterializedZeroMinRepeatSuffix { dfa, .. } => {
-                dfa.finalizers(state).contains(0)
-            }
-            ProductComponent::VirtualFixedSequence { byte_sets, .. } => {
-                state as usize == byte_sets.len()
-            }
-            ProductComponent::VirtualBoundedRepeat { base_dfa, min, .. } => {
-                let base_state_count = base_dfa.num_states() as u32;
-                state % base_state_count == 0 && state / base_state_count >= *min
-            }
-        };
+    let mut accepting = vec![false; num_groups];
+    for &(coordinate_id, state) in state_tuple {
+        let coordinate = coordinate_id as usize;
+        let is_accepting = product_component_state_flags(&components[coordinate], state).0;
+        for &group in &coordinate_groups[coordinate] {
+            accepting[group] = is_accepting;
+        }
     }
 
     let mut visible_accepting = accepting.first().copied().unwrap_or(false);
@@ -6451,6 +6446,40 @@ fn product_state_single_visible_finalizer(
         finalizers.set(0);
     }
     finalizers
+}
+
+fn identity_product_coordinate_groups(num_groups: usize) -> Vec<Vec<usize>> {
+    (0..num_groups).map(|group| vec![group]).collect()
+}
+
+fn product_state_metadata(
+    components: &[ProductComponent],
+    state_tuple: &ProductStateTuple,
+) -> (BitSet, BitSet) {
+    let coordinate_groups = identity_product_coordinate_groups(components.len());
+    product_state_metadata_with_layout(
+        components,
+        &coordinate_groups,
+        components.len(),
+        state_tuple,
+    )
+}
+
+fn product_state_single_visible_finalizer(
+    components: &[ProductComponent],
+    state_tuple: &ProductStateTuple,
+    exclusions: &BTreeMap<u32, BTreeSet<u32>>,
+    intersections: &BTreeMap<u32, BTreeSet<u32>>,
+) -> BitSet {
+    let coordinate_groups = identity_product_coordinate_groups(components.len());
+    product_state_single_visible_finalizer_with_layout(
+        components,
+        &coordinate_groups,
+        components.len(),
+        state_tuple,
+        exclusions,
+        intersections,
+    )
 }
 
 fn set_single_group_futures_from_class_graph(
@@ -9261,6 +9290,7 @@ fn compile_product_components_profiled(
     Vec<ProductComponent>,
     usize,
     Option<Vec<ProductComponentCompileProfile>>,
+    Vec<usize>,
 ) {
     let mut unique_exprs = Vec::<&Expr>::new();
     let mut unique_first_group_indices = Vec::<usize>::new();
@@ -9333,16 +9363,53 @@ fn compile_product_components_profiled(
             .collect::<Vec<_>>()
     });
     let components = component_indices
-        .into_iter()
+        .iter()
+        .copied()
         .map(|index| unique_components[index].clone())
         .collect();
-    (components, cache_hits, profiles)
+    (components, cache_hits, profiles, component_indices)
 }
 
 fn compile_product_components(exprs: &[Expr]) -> (Vec<ProductComponent>, usize) {
-    let (components, cache_hits, _) =
+    let (components, cache_hits, _, _) =
         compile_product_components_profiled(exprs, false, false, true);
     (components, cache_hits)
+}
+
+fn product_coordinate_layout(
+    logical_components: Vec<ProductComponent>,
+    component_indices: &[usize],
+    collapse_duplicates: bool,
+) -> (Vec<ProductComponent>, Vec<Vec<usize>>) {
+    if !collapse_duplicates {
+        let coordinate_groups = (0..logical_components.len())
+            .map(|group| vec![group])
+            .collect();
+        return (logical_components, coordinate_groups);
+    }
+
+    let coordinate_count = component_indices
+        .iter()
+        .copied()
+        .max()
+        .map_or(0, |max_index| max_index + 1);
+    let mut components = vec![None; coordinate_count];
+    let mut coordinate_groups = vec![Vec::new(); coordinate_count];
+    for (group, (component, &coordinate)) in logical_components
+        .into_iter()
+        .zip(component_indices)
+        .enumerate()
+    {
+        coordinate_groups[coordinate].push(group);
+        if components[coordinate].is_none() {
+            components[coordinate] = Some(component);
+        }
+    }
+    let components = components
+        .into_iter()
+        .map(|component| component.expect("every product coordinate has a component"))
+        .collect();
+    (components, coordinate_groups)
 }
 
 fn build_product_dfa(
@@ -9361,7 +9428,7 @@ fn build_product_dfa(
         || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
     let profile_started_at = Instant::now();
     let component_compile_started_at = Instant::now();
-    let (components, component_cache_hits, component_profiles) =
+    let (logical_components, component_cache_hits, component_profiles, component_indices) =
         compile_product_components_profiled(
             exprs,
             profile_detail,
@@ -9381,8 +9448,8 @@ fn build_product_dfa(
     if profile_detail {
         eprintln!(
             "[glrmask/profile][tokenizer] product_components groups={} unique_components={} cache_hits={} compile_components_ms={:.3}",
-            components.len(),
-            components.len() - component_cache_hits,
+            logical_components.len(),
+            logical_components.len() - component_cache_hits,
             component_cache_hits,
             profile_started_at.elapsed().as_secs_f64() * 1000.0
         );
@@ -9435,7 +9502,17 @@ fn build_product_dfa(
             );
         }
     }
-    let num_groups = components.len();
+    let num_groups = logical_components.len();
+    let collapse_duplicates = component_cache_hits > 0
+        && visible_groups > 1
+        && !capture_trace
+        && !profile_trace;
+    let (components, coordinate_groups) = product_coordinate_layout(
+        logical_components,
+        &component_indices,
+        collapse_duplicates,
+    );
+    let num_coordinates = components.len();
     let direct_single_visible_group = visible_groups == 1
         && num_groups > 1
         && (!exclusions.is_empty() || !intersections.is_empty());
@@ -9472,14 +9549,16 @@ fn build_product_dfa(
     });
 
     assert!(num_groups <= u32::MAX as usize, "too many product DFA groups");
-    let mut start_tuple = ProductStateTuple::with_capacity(num_groups);
-    for group_id in 0..num_groups {
-        start_tuple.push((group_id as u32, 0u32));
+    let mut start_tuple = ProductStateTuple::with_capacity(num_coordinates);
+    for coordinate_id in 0..num_coordinates {
+        start_tuple.push((coordinate_id as u32, 0u32));
     }
     let (start_finalizers, start_future) = if direct_single_visible_group {
         (
-            product_state_single_visible_finalizer(
+            product_state_single_visible_finalizer_with_layout(
                 &components,
+                &coordinate_groups,
+                num_groups,
                 &start_tuple,
                 exclusions,
                 intersections,
@@ -9487,7 +9566,7 @@ fn build_product_dfa(
             BitSet::new(1),
         )
     } else {
-        product_state_metadata(&components, &start_tuple)
+        product_state_metadata_with_layout(&components, &coordinate_groups, num_groups, &start_tuple)
     };
     dfa.overwrite_state_metadata(0, start_finalizers, start_future);
 
@@ -9500,11 +9579,11 @@ fn build_product_dfa(
         .collect();
     let mut class_active = vec![false; num_classes];
     let mut used_classes = Vec::<usize>::new();
-    let mut growth_recorder = profile_trace.then(|| ProductGrowthRecorder::new(num_groups));
+    let mut growth_recorder = profile_trace.then(|| ProductGrowthRecorder::new(num_coordinates));
     let mut state_tuples = capture_trace.then(|| vec![start_tuple.clone()]);
     state_map.insert(start_tuple.clone(), 0);
     if let Some(recorder) = growth_recorder.as_mut() {
-        recorder.record(num_groups, &start_tuple);
+        recorder.record(num_coordinates, &start_tuple);
     }
     worklist.push_back((0, start_tuple));
 
@@ -9591,8 +9670,10 @@ fn build_product_dfa(
                 let new_state = dfa.add_state();
                 let (finalizers, future) = if direct_single_visible_group {
                     (
-                        product_state_single_visible_finalizer(
+                        product_state_single_visible_finalizer_with_layout(
                             &components,
+                            &coordinate_groups,
+                            num_groups,
                             next_tuple,
                             exclusions,
                             intersections,
@@ -9600,7 +9681,7 @@ fn build_product_dfa(
                         BitSet::new(1),
                     )
                 } else {
-                    product_state_metadata(&components, next_tuple)
+                    product_state_metadata_with_layout(&components, &coordinate_groups, num_groups, next_tuple)
                 };
                 dfa.overwrite_state_metadata(new_state, finalizers, future);
                 state_map.insert(next_tuple.clone(), new_state);
@@ -9609,7 +9690,7 @@ fn build_product_dfa(
                     state_tuples.push(next_tuple.clone());
                 }
                 if let Some(recorder) = growth_recorder.as_mut() {
-                    recorder.record(num_groups, next_tuple);
+                    recorder.record(num_coordinates, next_tuple);
                 }
                 pending_class_transitions.push(Vec::new());
                 worklist.push_back((new_state, next_tuple.clone()));
@@ -9719,8 +9800,9 @@ fn build_product_dfa(
 
     if profile_timing {
         eprintln!(
-            "[glrmask/profile][tokenizer] product_phases groups={} classes={} direct_single_visible_group={} component_compile_ms={:.3} equivalence_classes_ms={:.3} class_transition_ms={:.3} product_state_expand_ms={:.3} direct_future_ms={:.3} byte_expand_ms={:.3}",
-            components.len(),
+            "[glrmask/profile][tokenizer] product_phases groups={} coordinates={} classes={} direct_single_visible_group={} component_compile_ms={:.3} equivalence_classes_ms={:.3} class_transition_ms={:.3} product_state_expand_ms={:.3} direct_future_ms={:.3} byte_expand_ms={:.3}",
+            num_groups,
+            num_coordinates,
             num_classes,
             direct_single_visible_group,
             component_compile_ms.unwrap_or_default(),
@@ -10971,7 +11053,7 @@ fn try_compile_with_plan_deferred_dense_min_pair_cells(
     {
         return Ok((DeferredDfa::Ready(dfa), Some(trace)));
     }
-    let (components, component_cache_hits, _) =
+    let (components, component_cache_hits, _, _) =
         compile_product_components_profiled(&plan.compiled_exprs, profile_detail, true, true);
     let pair_cells = components
         .first()
@@ -12313,6 +12395,76 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn duplicate_product_coordinates_collapse_without_changing_observations() {
+        let repeated = Expr::Seq(vec![
+            Expr::U8Class(U8Set::from_bytes(b"ab")),
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"bc"))),
+                min: 1,
+                max: Some(3),
+            },
+        ]);
+        let expressions = vec![
+            repeated.clone(),
+            repeated,
+            Expr::U8Seq(b"ac".to_vec()),
+        ];
+        let exclusions = BTreeMap::new();
+        let intersections = BTreeMap::new();
+        let collapsed = super::build_product_dfa(
+            &expressions,
+            None,
+            expressions.len(),
+            &exclusions,
+            &intersections,
+            false,
+            true,
+        )
+        .0;
+        let uncollapsed = super::build_product_dfa(
+            &expressions,
+            None,
+            expressions.len(),
+            &exclusions,
+            &intersections,
+            true,
+            true,
+        )
+        .0;
+        assert_eq!(collapsed, uncollapsed);
+    }
+
+    #[test]
+    fn duplicate_product_coordinates_preserve_group_operations() {
+        let repeated = Expr::Seq(vec![
+            Expr::U8Class(U8Set::from_bytes(b"ab")),
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"bc"))),
+                min: 1,
+                max: Some(3),
+            },
+        ]);
+        let expressions = vec![
+            Expr::Exclude {
+                expr: Box::new(repeated.clone()),
+                exclude: Box::new(repeated.clone()),
+            },
+            Expr::Choice(vec![repeated, Expr::U8Seq(b"ac".to_vec())]),
+        ];
+        let collapsed = super::compile_with_plan_internal(
+            super::build_exclusion_compile_plan(&expressions),
+            false,
+        )
+        .0;
+        let uncollapsed = super::compile_with_plan_internal(
+            super::build_exclusion_compile_plan(&expressions),
+            true,
+        )
+        .0;
+        assert_eq!(collapsed, uncollapsed);
     }
 
     #[test]
