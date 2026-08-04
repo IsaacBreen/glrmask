@@ -747,7 +747,7 @@ mod huge_parser_top_accept_collapse_tests {
 
 #[cfg(test)]
 mod lexer_partition_plan_tests {
-    use std::collections::BTreeSet;
+    use std::{collections::BTreeSet, ffi::OsString, sync::Mutex};
 
     use super::{
         compile_owned_profiled_with_table_construction, lexer_partition_ids_with_options,
@@ -759,6 +759,22 @@ mod lexer_partition_plan_tests {
     use crate::compiler::glr::table::GlrTableConstruction;
     use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
     use crate::Vocab;
+
+    static DIRECT_TOKEN_QUOTIENT_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarRestore {
+        key: &'static str,
+        original: Option<OsString>,
+    }
+
+    impl Drop for EnvVarRestore {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
 
     fn grammar_with_terminals(count: u32) -> GrammarDef {
         GrammarDef {
@@ -860,6 +876,83 @@ mod lexer_partition_plan_tests {
         assert!(profile.synthetic_candidate_terminals > 0);
         assert!(profile.synthetic_observation_states < profile.tokenizer_final_states);
         assert_eq!(profile.synthetic_compile_states, profile.tokenizer_final_states);
+    }
+
+    #[test]
+    fn direct_token_quotient_compile_matches_full_coordinate_masks_and_commits() {
+        let _lock = DIRECT_TOKEN_QUOTIENT_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let key = "GLRMASK_DIRECT_TOKEN_QUOTIENT_COMPILE";
+        let _restore = EnvVarRestore {
+            key,
+            original: std::env::var_os(key),
+        };
+        let grammar = GrammarDef {
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0)],
+            }],
+            start: 0,
+            terminals: vec![Terminal::Expr {
+                id: 0,
+                expr: Expr::Repeat {
+                    expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+                    min: 1,
+                    max: Some(5_000),
+                },
+            }],
+            ..GrammarDef::default()
+        };
+        let vocab = Vocab::new(vec![
+            (0, b"a".to_vec()),
+            (1, b"aa".to_vec()),
+            (2, b"aaaa".to_vec()),
+            (3, b"x".to_vec()),
+        ]);
+
+        unsafe { std::env::set_var(key, "0") };
+        let (full_coordinate, full_profile) = compile_owned_profiled_with_table_construction(
+            grammar.clone(),
+            &vocab,
+            GlrTableConstruction::ExperimentalCoreMerged,
+        );
+        unsafe { std::env::set_var(key, "1") };
+        let (quotient_coordinate, quotient_profile) =
+            compile_owned_profiled_with_table_construction(
+                grammar,
+                &vocab,
+                GlrTableConstruction::ExperimentalCoreMerged,
+            );
+
+        assert!(full_profile.synthetic_token_quotient_certified);
+        assert!(quotient_profile.synthetic_token_quotient_certified);
+        assert_eq!(full_profile.synthetic_compile_states, full_profile.tokenizer_final_states);
+        assert!(quotient_profile.synthetic_compile_states < quotient_profile.tokenizer_final_states);
+
+        let mut frontier = vec![(full_coordinate.start(), quotient_coordinate.start())];
+        for _depth in 0..7 {
+            let mut next = Vec::new();
+            for (full_state, quotient_state) in frontier {
+                assert_eq!(full_state.mask(), quotient_state.mask());
+                assert_eq!(full_state.is_finished(), quotient_state.is_finished());
+                for token_id in 0..4 {
+                    let mut full_next = full_state.clone();
+                    let mut quotient_next = quotient_state.clone();
+                    let full_result = full_next.commit_token(token_id);
+                    let quotient_result = quotient_next.commit_token(token_id);
+                    assert_eq!(
+                        full_result.is_ok(),
+                        quotient_result.is_ok(),
+                        "token {token_id} differs between compile coordinates",
+                    );
+                    if full_result.is_ok() {
+                        next.push((full_next, quotient_next));
+                    }
+                }
+            }
+            frontier = next;
+        }
     }
 
     #[test]
@@ -2976,7 +3069,15 @@ fn compile_prepared_with_profile_and_table_construction(
                     use_full_tokenizer_for_token_quotient,
                 ) = global_tokenizer_result;
                 let mut initial_state_map = None;
+                let direct_token_quotient_compile = use_full_tokenizer_for_token_quotient
+                    && std::env::var("GLRMASK_DIRECT_TOKEN_QUOTIENT_COMPILE")
+                        .map(|value| {
+                            let value = value.trim().to_ascii_lowercase();
+                            !matches!(value.as_str(), "" | "0" | "false" | "no" | "off")
+                        })
+                        .unwrap_or(false);
                 if use_full_tokenizer_for_token_quotient
+                    && !direct_token_quotient_compile
                     && let (Some(deferred), Some(certified)) = (
                         deferred_runtime_tokenizer.take(),
                         full_to_synthesized_state_map.take(),
@@ -3019,6 +3120,14 @@ fn compile_prepared_with_profile_and_table_construction(
                     tokenizer.isolate_start_state_and_drain_nullable_terminals();
                 }
                 if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some() {
+                    if use_full_tokenizer_for_token_quotient {
+                        eprintln!(
+                            "[glrmask/profile][tokenizer] token_quotient_compile_coordinate={} compile_states={} runtime_deferred={}",
+                            if direct_token_quotient_compile { "quotient" } else { "full" },
+                            tokenizer.num_states(),
+                            deferred_runtime_tokenizer.is_some(),
+                        );
+                    }
                     eprintln!(
                         "[glrmask/profile][tokenizer] construction_vs_isolation construct_ms={:.3} isolate_ms={:.3} total_ms={:.3}",
                         tokenizer_construct_ms,
@@ -3028,8 +3137,8 @@ fn compile_prepared_with_profile_and_table_construction(
                 }
                 let compile_tokenizer_states = tokenizer.num_states() as usize;
                 let compile_tokenizer_transitions = tokenizer.transition_count();
-                let synthetic_token_quotient_certified =
-                    use_full_tokenizer_for_token_quotient && initial_state_map.is_some();
+                let synthetic_token_quotient_certified = use_full_tokenizer_for_token_quotient
+                    && (direct_token_quotient_compile || initial_state_map.is_some());
                 let synthetic_observation_states = initial_state_map.as_ref().map_or(
                     compile_tokenizer_states,
                     |state_map| state_map.num_internal_ids() as usize,
