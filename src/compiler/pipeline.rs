@@ -739,12 +739,14 @@ mod lexer_partition_plan_tests {
     use std::collections::BTreeSet;
 
     use super::{
-        lexer_partition_ids_with_options, prepare_structural_tokenizer_pair,
-        plan_synthetic_tokenizer_enabled, structural_state_reduction_is_profitable,
+        compile_owned_profiled_with_table_construction, lexer_partition_ids_with_options,
+        prepare_structural_tokenizer_pair, plan_synthetic_tokenizer_enabled,
+        structural_state_reduction_is_profitable,
     };
     use crate::automata::lexer::Lexer;
     use crate::automata::regex::Expr;
-    use crate::grammar::flat::{GrammarDef, Terminal};
+    use crate::compiler::glr::table::GlrTableConstruction;
+    use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
     use crate::Vocab;
 
     fn grammar_with_terminals(count: u32) -> GrammarDef {
@@ -809,6 +811,42 @@ mod lexer_partition_plan_tests {
         assert!(structural_state_reduction_is_profitable(1_437_667, 173_832));
         assert!(!structural_state_reduction_is_profitable(1_000_000, 250_001));
         assert!(!structural_state_reduction_is_profitable(1_000_000, 200_000));
+    }
+
+    #[test]
+    fn profiled_compile_installs_vocab_certifier_before_synthetic_planning() {
+        let grammar = GrammarDef {
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0)],
+            }],
+            start: 0,
+            terminals: vec![Terminal::Expr {
+                id: 0,
+                expr: Expr::Repeat {
+                    expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+                    min: 1,
+                    max: Some(5_000),
+                },
+            }],
+            ..GrammarDef::default()
+        };
+        let vocab = Vocab::new(vec![
+            (0, b"a".to_vec()),
+            (1, b"aa".to_vec()),
+            (2, b"aaaa".to_vec()),
+            (3, b"x".to_vec()),
+        ]);
+
+        let (_, profile) = compile_owned_profiled_with_table_construction(
+            grammar,
+            &vocab,
+            GlrTableConstruction::ExperimentalCoreMerged,
+        );
+
+        assert!(profile.synthetic_certified);
+        assert!(profile.synthetic_candidate_terminals > 0);
+        assert!(profile.synthetic_compile_states < profile.tokenizer_final_states);
     }
 
     #[test]
@@ -2733,6 +2771,13 @@ fn compile_prepared_with_profile_and_table_construction(
     default_table_construction: GlrTableConstruction,
     lexer_adaptive_override: Option<bool>,
 ) -> (Constraint, CompilePhaseProfile) {
+    // Synthetic lexer planning may certify a smaller exact tokenizer against
+    // the vocabulary. Install the cross-crate certifier before planning on
+    // every static compilation path, including profiled and explicit table
+    // construction entry points.
+    crate::automata::lexer::compile::install_vocabulary_exact_state_certifier(
+        crate::compiler::stages::id_map_and_terminal_dwa::synthetic_state_map::certify_vocabulary_exact_state_candidates,
+    );
     let synthetic_plan_started_at = Instant::now();
     let synthetic_tokenizer_plan = plan_synthetic_tokenizer(&prepared_grammar, vocab);
     if std::env::var_os("GLRMASK_PROFILE_SYNTHETIC_PLAN").is_some() {
@@ -3973,9 +4018,6 @@ fn compile_prepared_with_profile_and_table_construction(
 }
 
 pub(crate) fn compile_prepared(prepared_grammar: GrammarDef, vocab: &Vocab) -> Constraint {
-    crate::automata::lexer::compile::install_vocabulary_exact_state_certifier(
-        crate::compiler::stages::id_map_and_terminal_dwa::synthetic_state_map::certify_vocabulary_exact_state_candidates,
-    );
     compile_prepared_with_profile(prepared_grammar, vocab).0
 }
 
