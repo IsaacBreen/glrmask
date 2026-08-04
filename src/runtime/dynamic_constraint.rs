@@ -502,6 +502,31 @@ impl DynamicConstraint {
         Ok(Self::from_alternatives(std::mem::take(&mut alternatives)))
     }
 
+
+    fn from_payload_v3_with_vocab(
+        payload: DynamicConstraintPayloadV3,
+        vocab: &Vocab,
+    ) -> crate::Result<Self> {
+        let mut alternatives = payload
+            .alternatives
+            .into_iter()
+            .map(|alternative| {
+                Self::from_payload_v2_with_dynamic_vocab(
+                    alternative,
+                    crate::compiler::constraint_possible_matches::runtime_dynamic_vocab_for_vocab(
+                        vocab,
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        if alternatives.is_empty() {
+            return Err(crate::GlrMaskError::Serialization(
+                "dynamic union artifact has no alternatives".to_owned(),
+            ));
+        }
+        Ok(Self::from_alternatives(std::mem::take(&mut alternatives)))
+    }
+
     /// Serialize this dynamic constraint to a versioned binary artifact.
     pub fn save(&self) -> Vec<u8> {
         if std::env::var_os("GLRMASK_PROFILE_DYNAMIC_ARTIFACT").is_some() {
@@ -575,23 +600,26 @@ impl DynamicConstraint {
             bincode::deserialize(&bytes[DYNAMIC_CONSTRAINT_HEADER_LEN..])
                 .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
         let token_bytes = vocab.entries_arc();
-        Self::from_payload_v3(DynamicConstraintPayloadV3 {
-            alternatives: payload
-                .alternatives
-                .into_iter()
-                .map(|alternative| DynamicConstraintPayloadV2 {
-                    v1: DynamicConstraintPayloadV1 {
-                        table: alternative.table,
-                        terminal_display_names: alternative.terminal_display_names,
-                        tokenizer: alternative.tokenizer,
-                        ignore_terminal: alternative.ignore_terminal,
-                        direct_regular_automaton: alternative.direct_regular_automaton,
-                        token_bytes: Arc::clone(&token_bytes),
-                    },
-                    special_token_terminals: alternative.special_token_terminals,
-                })
-                .collect(),
-        })
+        Self::from_payload_v3_with_vocab(
+            DynamicConstraintPayloadV3 {
+                alternatives: payload
+                    .alternatives
+                    .into_iter()
+                    .map(|alternative| DynamicConstraintPayloadV2 {
+                        v1: DynamicConstraintPayloadV1 {
+                            table: alternative.table,
+                            terminal_display_names: alternative.terminal_display_names,
+                            tokenizer: alternative.tokenizer,
+                            ignore_terminal: alternative.ignore_terminal,
+                            direct_regular_automaton: alternative.direct_regular_automaton,
+                            token_bytes: Arc::clone(&token_bytes),
+                        },
+                        special_token_terminals: alternative.special_token_terminals,
+                    })
+                    .collect(),
+            },
+            vocab,
+        )
     }
 
     /// Load an artifact produced by [`DynamicConstraint::save`].
@@ -878,6 +906,20 @@ mod tests {
         let loaded = DynamicConstraint::load(&constraint.save()).unwrap();
         assert_eq!(constraint.mask_len(), loaded.mask_len());
         assert_eq!(constraint.start().mask(), loaded.start().mask());
+    }
+
+
+    #[test]
+    fn dynamic_transfer_load_uses_prepared_vocab_and_matches_original() {
+        let vocab = vocab();
+        crate::compiler::constraint_possible_matches::prepare_vocab_for_dynamic_mask(&vocab);
+        let original = DynamicConstraint::from_ebnf("start ::= 'a'+ 'b'", &vocab).unwrap();
+        let original_mask = original.start().mask();
+        let transfer = original.into_saved();
+        assert!(transfer.starts_with(&DYNAMIC_TRANSFER_MAGIC));
+
+        let loaded = DynamicConstraint::load_with_vocab(&transfer, &vocab).unwrap();
+        assert_eq!(original_mask, loaded.start().mask());
     }
 
 
