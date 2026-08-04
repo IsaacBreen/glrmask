@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::ds::weight::{SharedTokenSet, Weight, finalize_weight_map, shared_rangeset};
@@ -78,7 +78,8 @@ pub(super) fn reconcile_weight_id_maps_into_forced_common(
     right_weights: &mut [&mut Weight],
     right_id_map: &InternalIdMap,
 ) -> InternalIdMap {
-    let profiling = std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
+    let profiling = std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some();
     let total_started_at = profiling.then(Instant::now);
     let build_started_at = profiling.then(Instant::now);
     let common_id_map = build_common_internal_id_map(&[left_id_map, right_id_map]);
@@ -839,6 +840,39 @@ fn remap_token_set_with_disjoint_runs_uncached(
     Arc::new(mapped)
 }
 
+fn remap_local_token_range_with_disjoint_runs(
+    local_start: u32,
+    local_end: u32,
+    token_map: &DisjointRunLocalMap,
+) -> SharedTokenSet {
+    let mut mapped = RangeSetBlaze::new();
+    for local_token in local_start..=local_end {
+        if let Some(runs) = token_map.runs_by_local.get(local_token as usize) {
+            for &(start, end) in runs {
+                mapped.ranges_insert(start..=end);
+            }
+        }
+    }
+    Arc::new(mapped)
+}
+
+fn remap_token_set_with_precomputed_local_ranges(
+    tokens: &SharedTokenSet,
+    remapped_ranges: &FxHashMap<(u32, u32), SharedTokenSet>,
+) -> SharedTokenSet {
+    let mut mapped = RangeSetBlaze::new();
+    for local_range in tokens.ranges() {
+        let key = (*local_range.start(), *local_range.end());
+        let remapped = remapped_ranges
+            .get(&key)
+            .expect("precomputed token-range remap must cover every source range");
+        for destination in remapped.ranges() {
+            mapped.ranges_insert(*destination.start()..=*destination.end());
+        }
+    }
+    Arc::new(mapped)
+}
+
 fn remap_weight_with_injective_maps(
     weight: &Weight,
     tsid_map: &InjectiveLocalMap,
@@ -975,13 +1009,14 @@ fn remap_weight_with_identity_tsids(
     })
 }
 
-fn remap_weights_with_maps(
+pub(crate) fn remap_weights_with_maps(
     weights: &mut [&mut Weight],
     local_to_common_tsids: &[Vec<u32>],
     local_to_common_tokens: &[Vec<u32>],
     common_tsid_count: usize,
 ) {
-    let profiling = std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
+    let profiling = std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some();
     let total_started_at = profiling.then(Instant::now);
     let tsid_map = InjectiveLocalMap::from_local_to_common(local_to_common_tsids, common_tsid_count);
     let tsid_run_map =
@@ -1025,7 +1060,87 @@ fn remap_weights_with_maps(
             }
         }
         let sources = source_by_ptr.into_iter().collect::<Vec<_>>();
-        let remapped = if sources.len() >= PARALLEL_UNIQUE_WEIGHT_THRESHOLD
+        let total_source_tokens = sources
+            .iter()
+            .map(|(_, tokens)| tokens.len() as usize)
+            .sum::<usize>();
+        let total_source_ranges = sources
+            .iter()
+            .map(|(_, tokens)| tokens.ranges().count())
+            .sum::<usize>();
+        let use_range_cache = total_source_tokens >= 8_192
+            && total_source_ranges.saturating_mul(4) < total_source_tokens;
+        let remapped = if use_range_cache {
+            let mut unique_ranges = FxHashSet::<(u32, u32)>::default();
+            for (_, tokens) in &sources {
+                unique_ranges.extend(
+                    tokens
+                        .ranges()
+                        .map(|range| (*range.start(), *range.end())),
+                );
+            }
+            let unique_ranges = unique_ranges.into_iter().collect::<Vec<_>>();
+            let remapped_ranges = if unique_ranges.len() >= PARALLEL_UNIQUE_WEIGHT_THRESHOLD
+                && rayon::current_num_threads() > 1
+            {
+                unique_ranges
+                    .par_iter()
+                    .map(|&(start, end)| {
+                        (
+                            (start, end),
+                            remap_local_token_range_with_disjoint_runs(
+                                start,
+                                end,
+                                token_run_map,
+                            ),
+                        )
+                    })
+                    .collect::<FxHashMap<_, _>>()
+            } else {
+                unique_ranges
+                    .iter()
+                    .map(|&(start, end)| {
+                        (
+                            (start, end),
+                            remap_local_token_range_with_disjoint_runs(
+                                start,
+                                end,
+                                token_run_map,
+                            ),
+                        )
+                    })
+                    .collect::<FxHashMap<_, _>>()
+            };
+            if sources.len() >= PARALLEL_UNIQUE_WEIGHT_THRESHOLD
+                && rayon::current_num_threads() > 1
+            {
+                sources
+                    .par_iter()
+                    .map(|(key, tokens)| {
+                        (
+                            *key,
+                            remap_token_set_with_precomputed_local_ranges(
+                                tokens,
+                                &remapped_ranges,
+                            ),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                sources
+                    .iter()
+                    .map(|(key, tokens)| {
+                        (
+                            *key,
+                            remap_token_set_with_precomputed_local_ranges(
+                                tokens,
+                                &remapped_ranges,
+                            ),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            }
+        } else if sources.len() >= PARALLEL_UNIQUE_WEIGHT_THRESHOLD
             && rayon::current_num_threads() > 1
         {
             sources

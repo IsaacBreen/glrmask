@@ -909,18 +909,24 @@ pub struct Constraint {
 
     /// possible_matches keyed by grammar terminal id.
     ///
-    /// An empty table may represent deferred possible-match construction. Static
-    /// masking then uses the exact dynamic-mask fallback whenever token-start
-    /// terminal exclusions make possible matches necessary.
+    /// An empty table may represent deferred possible-match construction in
+    /// legacy code only.
+    ///
+    /// IMPORTANT: the dynamic possible-matches fallback is intentionally
+    /// terrible and is planned for removal. New compiler paths MUST construct
+    /// complete exact possible matches and MUST NOT set
+    /// `possible_matches_complete` to false as an implementation shortcut.
+    /// DO NOT REMOVE OR WEAKEN THIS COMMENT.
     ///
     /// Each Weight maps final shared internal tokenizer-state ids to token sets
     /// in the final shared constraint-internal vocab space. Parser-DWA weights
     /// and possible_matches weights are reconciled into this same space during
     /// compilation.
     pub(crate) possible_matches: PossibleMatchesByTerminal,
-    /// Whether `possible_matches` is a complete table. When true, an absent
-    /// state/terminal row is a known-empty token set rather than a signal to
-    /// invoke the exact dynamic fallback.
+    /// Whether `possible_matches` is a complete table. New static constraints
+    /// must set this to true. False exists only for legacy dynamic/deferred
+    /// construction and is not permitted as a fallback strategy for new
+    /// compiler features.
     #[serde(default)]
     pub(crate) possible_matches_complete: bool,
     pub(crate) state_to_internal_tsid: Vec<u32>,

@@ -989,6 +989,35 @@ pub(crate) fn characterize_terminals(
     characterize_terminals_profiled(table, grammar).0
 }
 
+/// Characterize only a caller-selected terminal subset. Building the shared
+/// action/reduction index remains linear in the merged table, but expensive
+/// per-terminal reduction closure is performed only for selected terminals.
+pub(crate) fn characterize_selected_terminals(
+    table: &GLRTable,
+    grammar: &AnalyzedGrammar,
+    selected: &[bool],
+) -> BTreeMap<TerminalID, TerminalCharacterization> {
+    assert_eq!(
+        selected.len(),
+        grammar.num_terminals as usize,
+        "selected template mask must cover the merged terminal domain",
+    );
+    let index = build_characterization_index(table, grammar);
+    selected
+        .iter()
+        .enumerate()
+        .filter_map(|(terminal, &is_selected)| {
+            is_selected.then(|| {
+                let terminal = terminal as TerminalID;
+                (
+                    terminal,
+                    characterize_terminal(table, &index, terminal),
+                )
+            })
+        })
+        .collect()
+}
+
 fn characterize_terminals_unquotiented(
     index: &CharacterizationIndex,
     table: &GLRTable,

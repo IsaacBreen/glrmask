@@ -2245,6 +2245,11 @@ impl<'a> ConstraintState<'a> {
                         *blocked_word |= mask_word;
                     }
                 } else if !self.constraint.possible_matches_complete {
+                    // IMPORTANT: this is a legacy-only escape hatch. The
+                    // dynamic possible-matches fallback is terrible and will
+                    // be removed. New compiler paths MUST provide complete
+                    // exact possible matches instead of reaching this branch.
+                    // DO NOT REMOVE OR WEAKEN THIS COMMENT.
                     missing_pairs.push((continuation_tokenizer_state, terminal_id));
                 }
             }

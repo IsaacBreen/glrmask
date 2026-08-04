@@ -133,6 +133,50 @@ impl Terminal {
 }
 
 impl GrammarDef {
+    /// Whether the source start nonterminal derives epsilon. The ordinary
+    /// compiler later inlines nullable productions and deliberately removes a
+    /// root-only empty generation path, but subgrammar composition must retain
+    /// this source-language fact.
+    pub(crate) fn start_is_nullable(&self) -> bool {
+        if let Some(automaton) = &self.direct_regular_automaton {
+            let mut reachable = automaton.start_states.clone();
+            let mut cursor = 0usize;
+            let mut seen = std::collections::BTreeSet::from_iter(reachable.iter().copied());
+            while cursor < reachable.len() {
+                let state = reachable[cursor] as usize;
+                cursor += 1;
+                let Some(node) = automaton.states.get(state) else {
+                    continue;
+                };
+                if node.is_accepting {
+                    return true;
+                }
+                for &target in &node.epsilons {
+                    if seen.insert(target) {
+                        reachable.push(target);
+                    }
+                }
+            }
+        }
+
+        let mut nullable = std::collections::BTreeSet::<NonterminalID>::new();
+        loop {
+            let before = nullable.len();
+            for rule in &self.rules {
+                if rule.rhs.iter().all(|symbol| match symbol {
+                    Symbol::Nonterminal(nonterminal) => nullable.contains(nonterminal),
+                    Symbol::Terminal(_) => false,
+                }) {
+                    nullable.insert(rule.lhs);
+                }
+            }
+            if nullable.len() == before {
+                break;
+            }
+        }
+        nullable.contains(&self.start)
+    }
+
     pub fn num_terminals(&self) -> u32 {
         self.terminals.len() as u32
     }

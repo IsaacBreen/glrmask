@@ -251,6 +251,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     shared_transition_cache: Option<&std::sync::OnceLock<super::l2p::equivalence_analysis::compat::FlatTransitionCache>>,
     shared_ti_output_cache: Option<&super::l2p::SharedTiTokenizerOutputCache>,
     shared_classify_cache: Option<&super::classify::SharedClassifyCache>,
+    active_terminal_filter: Option<&[bool]>,
 ) -> Option<PartitionTerminalDwas> {
     if vocab.is_empty() {
         return None;
@@ -268,7 +269,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
         pre_classify_setup_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let classify_started_at = Instant::now();
-    let terminal_path_lengths = if force_all_l2p {
+    let mut terminal_path_lengths = if force_all_l2p {
         vec![TerminalPathLength::TwoPlus; num_terminals as usize]
     } else {
         classify_terminal_path_lengths(
@@ -280,6 +281,18 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
             shared_classify_cache,
         )
     };
+    if let Some(active) = active_terminal_filter {
+        assert_eq!(
+            active.len(),
+            terminal_path_lengths.len(),
+            "restricted terminal mask must cover the merged terminal domain",
+        );
+        for (terminal, &is_active) in active.iter().enumerate() {
+            if !is_active {
+                terminal_path_lengths[terminal] = TerminalPathLength::Zero;
+            }
+        }
+    }
     let classify_ms = classify_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let routing_started_at = Instant::now();

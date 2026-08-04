@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
 use std::sync::OnceLock;
 
+use rayon::prelude::*;
 use rustc_hash::FxHashSet;
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -534,7 +535,7 @@ impl DFA {
                 .iter()
                 .copied()
                 .eq(0..total_groups);
-        for state in &mut component.states {
+        let rebase_state = |state: &mut DFAState| {
             for (_, target) in state.transitions.iter_mut() {
                 *target = target
                     .checked_add(offset)
@@ -558,6 +559,14 @@ impl DFA {
                 state.finalizers = finalizers;
                 state.possible_future_group_ids = futures;
             }
+        };
+        if component.states.len() >= 4096
+            && rayon::current_num_threads() > 1
+            && std::env::var_os("GLRMASK_SERIAL_APPEND_REBASE").is_none()
+        {
+            component.states.par_iter_mut().for_each(rebase_state);
+        } else {
+            component.states.iter_mut().for_each(rebase_state);
         }
 
         self.states.append(&mut component.states);

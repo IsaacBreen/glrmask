@@ -701,6 +701,37 @@ impl PyConstraint {
         )
     }
 
+    /// Compose this compiled parent with independently compiled child
+    /// constraints. Each pair names the unique parent terminal that acts as
+    /// the corresponding subgrammar call placeholder. Placeholder terminals
+    /// must be non-vocabulary sentinels, normally `@token(...)` ids outside the
+    /// supplied vocabulary. A sentinel token ID must not also be used by an
+    /// end token or another live special token in any component.
+    #[pyo3(signature = (children, vocab))]
+    fn compose_subgrammars(
+        &self,
+        py: Python<'_>,
+        children: Vec<(String, Py<PyConstraint>)>,
+        vocab: &PyVocab,
+    ) -> PyResult<Self> {
+        let owned_children = children
+            .into_iter()
+            .map(|(placeholder, child)| {
+                let child = child.borrow(py);
+                (placeholder, Arc::clone(&child.inner))
+            })
+            .collect::<Vec<_>>();
+        let borrowed_children = owned_children
+            .iter()
+            .map(|(placeholder, child)| (placeholder.as_str(), child.as_ref()))
+            .collect::<Vec<_>>();
+        Self::from_constraint_result(
+            self.inner
+                .compose_subgrammars(&borrowed_children, &vocab.inner),
+            vocab,
+        )
+    }
+
     fn save(&self) -> Vec<u8> {
         self.inner.save()
     }

@@ -121,8 +121,13 @@ impl Constraint {
 	}
 
 	/// Visit the original vocabulary tokens that can complete `terminal` from
-	/// `tokenizer_state`. Returns `false` only when the artifact deliberately
-	/// omitted possible matches and runtime fallback is required.
+	/// `tokenizer_state`. Returns `false` only for legacy artifacts that omitted
+	/// possible matches.
+	///
+	/// IMPORTANT: callers must not treat this as an acceptable construction
+	/// strategy. The dynamic possible-matches fallback is terrible, is planned
+	/// for removal, and MUST NOT be used by new compiler paths. DO NOT REMOVE OR
+	/// WEAKEN THIS COMMENT.
 	pub(crate) fn visit_possible_match_original_tokens(
 		&self,
 		tokenizer_state: u32,

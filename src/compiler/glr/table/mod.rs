@@ -9,10 +9,13 @@ use crate::grammar::flat::{NonterminalID, Rule, Symbol, TerminalID};
 
 mod action;
 mod build;
+mod compose;
 mod optimize;
 mod row;
 
 pub use action::{Action, GuardedStackShift, StackShift, StackShiftGuard};
+#[allow(unused_imports)]
+pub(crate) use compose::{ComposedTable, SubgrammarTableInput, compose_subgrammar_tables};
 
 use build::{build_table, build_table_with_default_construction, Item, PendingAction};
 use optimize::merge_same_core_lr1_states;
@@ -20,6 +23,8 @@ use optimize::merge_same_core_lr1_states;
 use row::{ActionRow, GotoRow};
 
 const DISABLE_DEFAULT_ACTION_ROWS_ENV: &str = "GLRMASK_DISABLE_DEFAULT_ACTION_ROWS";
+const EMBEDDED_NULLABLE_START_SUFFIX: &str = "\0glrmask:embedded-nullable-start";
+const EMBEDDED_END_TOKEN_IDS_PREFIX: &str = "\0glrmask:embedded-end-token-ids=";
 
 fn default_action_rows_enabled() -> bool {
     !std::env::var(DISABLE_DEFAULT_ACTION_ROWS_ENV)
@@ -198,6 +203,95 @@ fn action_ambiguity(action: &Action) -> Option<(TableAmbiguityKind, usize)> {
 }
 
 impl GLRTable {
+    fn augmented_start_display_name(&self) -> Option<&str> {
+        let augmented_start = self.rules.first()?.lhs;
+        self.nonterminal_display_names
+            .get(augmented_start as usize)
+            .map(String::as_str)
+    }
+
+    fn augmented_start_display_name_mut(&mut self) -> Option<&mut String> {
+        let augmented_start = self.rules.first()?.lhs;
+        self.nonterminal_display_names
+            .get_mut(augmented_start as usize)
+    }
+
+    /// Whether the source grammar's start symbol can derive epsilon when this
+    /// compiled constraint is embedded as a subgrammar. Standalone generation
+    /// intentionally does not finish without committing a token, so this bit
+    /// is retained in augmented-start display metadata rather than execution
+    /// rows. This preserves the existing serialized artifact shape.
+    pub(crate) fn embedded_start_nullable(&self) -> bool {
+        self.augmented_start_display_name()
+            .is_some_and(|name| name.ends_with(EMBEDDED_NULLABLE_START_SUFFIX))
+    }
+
+    pub(crate) fn set_embedded_start_nullable(&mut self, nullable: bool) {
+        let Some(name) = self.augmented_start_display_name_mut() else {
+            return;
+        };
+        if let Some(base_len) = name.len().checked_sub(EMBEDDED_NULLABLE_START_SUFFIX.len())
+            && name[base_len..] == *EMBEDDED_NULLABLE_START_SUFFIX
+        {
+            name.truncate(base_len);
+        }
+        if nullable {
+            name.push_str(EMBEDDED_NULLABLE_START_SUFFIX);
+        }
+    }
+
+    /// Model token IDs that were explicitly appended as grammar-level end
+    /// tokens when this constraint was compiled. This private display-name
+    /// metadata preserves the existing serialized table shape while allowing
+    /// later compiled-constraint composition to distinguish end-token roles
+    /// from an otherwise identical `@token(...)` placeholder terminal.
+    pub(crate) fn embedded_end_token_ids(&self) -> Vec<u32> {
+        let Some(mut name) = self.augmented_start_display_name() else {
+            return Vec::new();
+        };
+        if let Some(base_len) = name.len().checked_sub(EMBEDDED_NULLABLE_START_SUFFIX.len())
+            && name[base_len..] == *EMBEDDED_NULLABLE_START_SUFFIX
+        {
+            name = &name[..base_len];
+        }
+        let Some(marker) = name.rfind(EMBEDDED_END_TOKEN_IDS_PREFIX) else {
+            return Vec::new();
+        };
+        name[marker + EMBEDDED_END_TOKEN_IDS_PREFIX.len()..]
+            .split(',')
+            .filter(|part| !part.is_empty())
+            .filter_map(|part| part.parse::<u32>().ok())
+            .collect()
+    }
+
+    pub(crate) fn set_embedded_end_token_ids(&mut self, token_ids: &[u32]) {
+        let nullable = self.embedded_start_nullable();
+        let Some(name) = self.augmented_start_display_name_mut() else {
+            return;
+        };
+        if nullable {
+            name.truncate(name.len() - EMBEDDED_NULLABLE_START_SUFFIX.len());
+        }
+        if let Some(marker) = name.rfind(EMBEDDED_END_TOKEN_IDS_PREFIX) {
+            name.truncate(marker);
+        }
+        let mut token_ids = token_ids.to_vec();
+        token_ids.sort_unstable();
+        token_ids.dedup();
+        if !token_ids.is_empty() {
+            name.push_str(EMBEDDED_END_TOKEN_IDS_PREFIX);
+            for (index, token_id) in token_ids.iter().enumerate() {
+                if index != 0 {
+                    name.push(',');
+                }
+                name.push_str(&token_id.to_string());
+            }
+        }
+        if nullable {
+            name.push_str(EMBEDDED_NULLABLE_START_SUFFIX);
+        }
+    }
+
     pub fn build(grammar: &AnalyzedGrammar) -> Self {
         build_table(grammar)
     }
@@ -620,6 +714,65 @@ mod ambiguity_tests {
         let grammar = lower(&named).unwrap();
         let analyzed = AnalyzedGrammar::from_grammar_def(&grammar);
         GLRTable::build(&analyzed)
+    }
+
+    #[test]
+    #[ignore]
+    fn dump_tiny_subgrammar_splice_oracle() {
+        fn dump(label: &str, source: &str) {
+            let named = from_glrm(source).unwrap();
+            let grammar = lower(&named).unwrap();
+            let analyzed = AnalyzedGrammar::from_grammar_def(&grammar);
+            let table = GLRTable::build(&analyzed);
+            eprintln!("\n=== {label} ===");
+            eprintln!(
+                "terminals={:?}",
+                analyzed.terminal_display_names,
+            );
+            eprintln!(
+                "nonterminals={:?}",
+                analyzed.nonterminal_display_names,
+            );
+            eprintln!("rules={:?}", table.rules);
+            for state in 0..table.num_states as usize {
+                let actions = table.action[state]
+                    .iter()
+                    .map(|(terminal, action)| (terminal, action.clone()))
+                    .collect::<Vec<_>>();
+                let gotos = table.goto[state]
+                    .iter()
+                    .map(|(nonterminal, target)| (*nonterminal, *target))
+                    .collect::<Vec<_>>();
+                eprintln!("state {state}: action={actions:?} goto={gotos:?}");
+            }
+        }
+
+        dump(
+            "child",
+            r#"
+                start child;
+                nt child ::= "a" "b";
+            "#,
+        );
+        dump(
+            "parent-pseudo",
+            r#"
+                start document;
+                t SUB ::= @token(999);
+                nt document ::= "<" SUB ">";
+            "#,
+        );
+        dump(
+            "flattened",
+            r#"
+                start document;
+                g inner ::= {
+                    start child;
+                    nt child ::= "a" "b";
+                };
+                nt document ::= "<" inner ">";
+            "#,
+        );
     }
 
     fn build_expr_nfa_optional_pair_suffix_grammar_with_value(

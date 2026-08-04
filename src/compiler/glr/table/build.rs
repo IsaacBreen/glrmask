@@ -1028,7 +1028,11 @@ pub(super) fn build_table_with_default_construction(
     let unit_collapse_enabled = unit_collapse_skip_reason == "none";
     let collapse_started_at = std::time::Instant::now();
     let unit_collapse_report = if unit_collapse_enabled {
-        Some(table.collapse_sr_unit_reductions_with_compatible_gotos())
+        Some(
+            table.collapse_sr_unit_reductions_with_compatible_gotos_except(
+                &grammar.protected_shift_terminals,
+            ),
+        )
     } else {
         None
     };
