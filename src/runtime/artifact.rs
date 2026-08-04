@@ -1285,6 +1285,42 @@ impl DynamicMaskVocab {
         }
     }
 
+    /// Create a constraint-local runtime value from a fully initialized,
+    /// vocabulary-only template.
+    ///
+    /// The immutable trie and token indexes are shared. Every cache or
+    /// accelerator whose contents can depend on parser, lexer, or constraint
+    /// state is recreated empty, so repeated schema builds cannot inherit
+    /// schema-derived runtime state.
+    pub(crate) fn fresh_runtime_instance(&self) -> Self {
+        debug_assert!(self.initialized);
+        debug_assert!(self.pending_source.is_none());
+        Self {
+            trie: Arc::clone(&self.trie),
+            token_aliases: self.token_aliases.clone(),
+            canonical_original_token_offsets: Arc::clone(
+                &self.canonical_original_token_offsets,
+            ),
+            canonical_original_tokens: Arc::clone(&self.canonical_original_tokens),
+            node_token_markers: Arc::clone(&self.node_token_markers),
+            subtree_original_token_offsets: Arc::clone(
+                &self.subtree_original_token_offsets,
+            ),
+            subtree_original_tokens: Arc::clone(&self.subtree_original_tokens),
+            pending_source: None,
+            initialized: true,
+            mask_cache: Arc::new(Mutex::new(Vec::new())),
+            direct_regular_frontier_cache: Arc::new(Mutex::new(FxHashMap::default())),
+            direct_regular_wide_frontier_index_cache: Arc::new(Mutex::new(
+                FxHashMap::default(),
+            )),
+            direct_regular_terminal_support: Arc::new(
+                DirectRegularTerminalSupport::default(),
+            ),
+            self_loop_projections: Arc::new(Vec::new()),
+        }
+    }
+
     fn from_source(source: DynamicMaskVocabSource) -> Self {
         Self {
             trie: Arc::new(DynamicMaskTrie::new()),
@@ -1929,4 +1965,65 @@ pub struct Constraint {
     /// Self-contained final internal-token -> original-token bitset materializer.
     #[serde(skip)]
     pub(crate) final_mask_mapping: FinalMaskMapping,
+}
+
+
+#[cfg(test)]
+mod dynamic_mask_vocab_cache_boundary_tests {
+    use super::*;
+
+    #[test]
+    fn fresh_runtime_instance_shares_only_vocab_derived_data() {
+        let template = DynamicMaskVocab::from_materialized_ordered(
+            Arc::new(DynamicMaskTrie::new()),
+            Arc::new(Vec::new()),
+        );
+        let fresh = template.fresh_runtime_instance();
+
+        assert!(Arc::ptr_eq(&template.trie, &fresh.trie));
+        match (&template.token_aliases, &fresh.token_aliases) {
+            (DynamicMaskAliasStore::Ordered(left), DynamicMaskAliasStore::Ordered(right)) => {
+                assert!(Arc::ptr_eq(left, right));
+            }
+            _ => panic!("materialized ordered vocabulary changed alias representation"),
+        }
+        assert!(Arc::ptr_eq(
+            &template.canonical_original_token_offsets,
+            &fresh.canonical_original_token_offsets,
+        ));
+        assert!(Arc::ptr_eq(
+            &template.canonical_original_tokens,
+            &fresh.canonical_original_tokens,
+        ));
+        assert!(Arc::ptr_eq(
+            &template.node_token_markers,
+            &fresh.node_token_markers,
+        ));
+        assert!(Arc::ptr_eq(
+            &template.subtree_original_token_offsets,
+            &fresh.subtree_original_token_offsets,
+        ));
+        assert!(Arc::ptr_eq(
+            &template.subtree_original_tokens,
+            &fresh.subtree_original_tokens,
+        ));
+
+        assert!(!Arc::ptr_eq(&template.mask_cache, &fresh.mask_cache));
+        assert!(!Arc::ptr_eq(
+            &template.direct_regular_frontier_cache,
+            &fresh.direct_regular_frontier_cache,
+        ));
+        assert!(!Arc::ptr_eq(
+            &template.direct_regular_wide_frontier_index_cache,
+            &fresh.direct_regular_wide_frontier_index_cache,
+        ));
+        assert!(!Arc::ptr_eq(
+            &template.direct_regular_terminal_support,
+            &fresh.direct_regular_terminal_support,
+        ));
+        assert!(!Arc::ptr_eq(
+            &template.self_loop_projections,
+            &fresh.self_loop_projections,
+        ));
+    }
 }

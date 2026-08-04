@@ -139,7 +139,9 @@ struct OrderedVocab {
 struct OrderedVocabTrieArtifacts {
     ordered_vocab: Arc<OrderedVocab>,
     trie: Arc<VocabPrefixTree>,
-    runtime_dynamic_trie: Arc<OnceLock<Arc<DynamicMaskTrie>>>,
+    /// Fully materialized vocabulary-only dynamic-mask template. Constraint
+    /// builds clone its immutable indexes into fresh runtime-local caches.
+    runtime_dynamic_vocab: Arc<OnceLock<Arc<DynamicMaskVocab>>>,
 }
 
 impl VocabDerivedArtifact for OrderedVocabTrieArtifacts {}
@@ -149,7 +151,7 @@ impl OrderedVocabTrieArtifacts {
         Self {
             ordered_vocab,
             trie,
-            runtime_dynamic_trie: Arc::new(OnceLock::new()),
+            runtime_dynamic_vocab: Arc::new(OnceLock::new()),
         }
     }
 }
@@ -2884,22 +2886,25 @@ pub(crate) fn compute_constraint_possible_matches(
     )
 }
 
+fn prepared_runtime_dynamic_vocab(
+    artifacts: &OrderedVocabTrieArtifacts,
+) -> &Arc<DynamicMaskVocab> {
+    artifacts.runtime_dynamic_vocab.get_or_init(|| {
+        let runtime_trie = Arc::new(DynamicMaskTrie::from_vocab_prefix_tree(
+            artifacts.trie.as_ref(),
+        ));
+        Arc::new(DynamicMaskVocab::from_materialized_ordered(
+            runtime_trie,
+            Arc::clone(&artifacts.ordered_vocab.ordered_to_originals),
+        ))
+    })
+}
+
 fn runtime_dynamic_vocab_artifacts(
     artifacts: &OrderedVocabTrieArtifacts,
 ) -> RuntimeDynamicMaskVocabArtifacts {
-    let vocab = if let Some(runtime_trie) = artifacts.runtime_dynamic_trie.get() {
-        DynamicMaskVocab::from_materialized_ordered(
-            Arc::clone(runtime_trie),
-            Arc::clone(&artifacts.ordered_vocab.ordered_to_originals),
-        )
-    } else {
-        DynamicMaskVocab::from_compiler_artifacts(
-            Arc::clone(&artifacts.trie),
-            Arc::clone(&artifacts.ordered_vocab.ordered_to_originals),
-        )
-    };
     RuntimeDynamicMaskVocabArtifacts {
-        vocab,
+        vocab: prepared_runtime_dynamic_vocab(artifacts).fresh_runtime_instance(),
     }
 }
 
@@ -2910,11 +2915,7 @@ pub(crate) fn runtime_dynamic_vocab_for_vocab(vocab: &Vocab) -> DynamicMaskVocab
 
 pub(crate) fn prepare_vocab_for_dynamic_mask(vocab: &Vocab) {
     let artifacts = get_ordered_vocab_trie_artifacts_for_vocab(vocab).0;
-    artifacts.runtime_dynamic_trie.get_or_init(|| {
-        Arc::new(DynamicMaskTrie::from_vocab_prefix_tree(
-            artifacts.trie.as_ref(),
-        ))
-    });
+    let _ = prepared_runtime_dynamic_vocab(&artifacts);
 }
 
 /// Neutral PM artifact for the deferred mode. All dimensions are deliberately
