@@ -95,9 +95,8 @@ const CASES: &[BenchCase] = &[
 
 fn close_token_id(vocab: &glrmask::Vocab, close_token_bytes: &[u8]) -> u32 {
     vocab
-        .entries
         .iter()
-        .find_map(|(&token_id, bytes)| (bytes.as_slice() == close_token_bytes).then_some(token_id))
+        .find_map(|(token_id, bytes)| (bytes == close_token_bytes).then_some(token_id))
         .unwrap_or_else(|| panic!("Llama vocab is missing token bytes {:?}", close_token_bytes))
 }
 

@@ -1,0 +1,11 @@
+[package]
+name = "glrmask-invariant"
+version = "0.1.1"
+edition = "2024"
+description = "Cross-thread internal invariant transport for GLRMask"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/IsaacBreen/glrmask"
+
+[features]
+default = []
+internal-api = []

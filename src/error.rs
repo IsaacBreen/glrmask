@@ -1,27 +1,7 @@
 use thiserror::Error as ThisError;
 
-#[derive(Debug)]
-pub(crate) struct InternalInvariantViolation {
-    message: String,
-}
-
-pub(crate) fn fail_internal_invariant(message: impl Into<String>) -> ! {
-    // `resume_unwind` deliberately skips the global panic hook. The payload is
-    // caught at the public compilation boundary and converted into a normal,
-    // structured `Error::InternalInvariant`; unrelated panics still propagate.
-    std::panic::resume_unwind(Box::new(InternalInvariantViolation {
-        message: message.into(),
-    }))
-}
-
 pub(crate) fn catch_internal_invariant<T>(f: impl FnOnce() -> T) -> Result<T> {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
-        Ok(value) => Ok(value),
-        Err(payload) => match payload.downcast::<InternalInvariantViolation>() {
-            Ok(violation) => Err(Error::InternalInvariant(violation.message)),
-            Err(payload) => std::panic::resume_unwind(payload),
-        },
-    }
+    glrmask_invariant::__private::catch_internal_invariant_message(f).map_err(Error::InternalInvariant)
 }
 
 #[derive(ThisError, Debug)]
@@ -43,6 +23,22 @@ pub type GlrMaskError = Error;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+impl From<glrmask_grammar::Error> for Error {
+    fn from(error: glrmask_grammar::Error) -> Self {
+        match error {
+            glrmask_grammar::Error::GrammarParse(message) => Self::GrammarParse(message),
+        }
+    }
+}
+
+impl From<glrmask_weighted_automata::Error> for Error {
+    fn from(error: glrmask_weighted_automata::Error) -> Self {
+        match error {
+            glrmask_weighted_automata::Error::Compilation(message) => Self::Compilation(message),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -51,7 +47,7 @@ mod tests {
     fn internal_invariant_crossing_rayon_is_returned_as_a_normal_error() {
         let error = catch_internal_invariant(|| {
             let _: ((), usize) = rayon::join(
-                || fail_internal_invariant("analysis coordinate escaped its domain"),
+                || glrmask_invariant::__private::fail_internal_invariant("analysis coordinate escaped its domain"),
                 || 1,
             );
         })

@@ -1,0 +1,19 @@
+[package]
+name = "glrmask-weight"
+version = "0.1.1"
+edition = "2024"
+description = "Interned token-set weight algebra used by GLRMask"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/IsaacBreen/glrmask"
+
+[features]
+default = []
+internal-api = []
+
+[dependencies]
+dashmap = "6"
+once_cell = "1"
+range-set-blaze = "0.3.0"
+rustc-hash = "1"
+serde = { version = "1", features = ["derive", "rc"] }
+smallvec = { version = "1", features = ["serde"] }

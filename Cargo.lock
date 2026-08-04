@@ -436,6 +436,18 @@ dependencies = [
  "dashmap",
  "derivre",
  "glrmask",
+ "glrmask-artifact",
+ "glrmask-finite-automata",
+ "glrmask-glr",
+ "glrmask-grammar",
+ "glrmask-invariant",
+ "glrmask-json-schema",
+ "glrmask-lexer",
+ "glrmask-parser-dwa",
+ "glrmask-terminal-dwa",
+ "glrmask-vocab",
+ "glrmask-weight",
+ "glrmask-weighted-automata",
  "hashbrown 0.15.5",
  "im",
  "once_cell",
@@ -451,6 +463,179 @@ dependencies = [
  "smallvec",
  "thiserror",
  "zstd",
+]
+
+[[package]]
+name = "glrmask-artifact"
+version = "0.1.1"
+dependencies = [
+ "glrmask-finite-automata",
+ "glrmask-weight",
+ "glrmask-weighted-automata",
+ "range-set-blaze",
+ "rayon",
+ "rustc-hash 1.1.0",
+ "serde",
+]
+
+[[package]]
+name = "glrmask-dwa-merge"
+version = "0.1.1"
+dependencies = [
+ "glrmask-artifact",
+ "glrmask-glr",
+ "glrmask-weight",
+ "glrmask-weighted-automata",
+ "range-set-blaze",
+ "rustc-hash 1.1.0",
+ "smallvec",
+]
+
+[[package]]
+name = "glrmask-finite-automata"
+version = "0.1.1"
+dependencies = [
+ "rustc-hash 1.1.0",
+ "serde",
+]
+
+[[package]]
+name = "glrmask-glr"
+version = "0.1.1"
+dependencies = [
+ "bincode",
+ "glrmask-grammar",
+ "glrmask-lexer",
+ "glrmask-weight",
+ "im",
+ "rayon",
+ "rustc-hash 1.1.0",
+ "serde",
+ "smallvec",
+]
+
+[[package]]
+name = "glrmask-grammar"
+version = "0.1.1"
+dependencies = [
+ "glrmask-finite-automata",
+ "glrmask-lexer",
+ "rayon",
+ "rustc-hash 1.1.0",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "glrmask-invariant"
+version = "0.1.1"
+
+[[package]]
+name = "glrmask-json-schema"
+version = "0.1.1"
+dependencies = [
+ "derivre",
+ "glrmask-grammar",
+ "glrmask-lexer",
+ "rayon",
+ "regex",
+ "regex-syntax",
+ "rustc-hash 1.1.0",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "glrmask-lexer"
+version = "0.1.1"
+dependencies = [
+ "bincode",
+ "glrmask-finite-automata",
+ "glrmask-vocab",
+ "rand",
+ "range-set-blaze",
+ "rayon",
+ "rustc-hash 1.1.0",
+ "serde",
+ "smallvec",
+]
+
+[[package]]
+name = "glrmask-parser-dwa"
+version = "0.1.1"
+dependencies = [
+ "glrmask-artifact",
+ "glrmask-dwa-merge",
+ "glrmask-finite-automata",
+ "glrmask-glr",
+ "glrmask-grammar",
+ "glrmask-lexer",
+ "glrmask-vocab",
+ "glrmask-weight",
+ "glrmask-weighted-automata",
+ "range-set-blaze",
+ "rayon",
+ "rustc-hash 1.1.0",
+ "smallvec",
+]
+
+[[package]]
+name = "glrmask-terminal-dwa"
+version = "0.1.1"
+dependencies = [
+ "ahash",
+ "blake3",
+ "glrmask-artifact",
+ "glrmask-dwa-merge",
+ "glrmask-finite-automata",
+ "glrmask-glr",
+ "glrmask-grammar",
+ "glrmask-invariant",
+ "glrmask-lexer",
+ "glrmask-vocab",
+ "glrmask-weight",
+ "glrmask-weighted-automata",
+ "hashbrown 0.15.5",
+ "once_cell",
+ "range-set-blaze",
+ "rayon",
+ "rustc-hash 1.1.0",
+ "smallvec",
+ "thiserror",
+]
+
+[[package]]
+name = "glrmask-vocab"
+version = "0.1.1"
+dependencies = [
+ "range-set-blaze",
+ "serde",
+]
+
+[[package]]
+name = "glrmask-weight"
+version = "0.1.1"
+dependencies = [
+ "dashmap",
+ "once_cell",
+ "range-set-blaze",
+ "rustc-hash 1.1.0",
+ "serde",
+ "smallvec",
+]
+
+[[package]]
+name = "glrmask-weighted-automata"
+version = "0.1.1"
+dependencies = [
+ "bincode",
+ "glrmask-weight",
+ "range-set-blaze",
+ "rayon",
+ "rustc-hash 1.1.0",
+ "serde",
+ "smallvec",
+ "thiserror",
 ]
 
 [[package]]

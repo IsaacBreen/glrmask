@@ -1,4 +1,5 @@
-use std::collections::BTreeMap;
+use glrmask_artifact::CommitTemplateDfas;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
 use rayon::prelude::*;
 
@@ -31,6 +32,14 @@ pub(crate) struct DirectRegularWideFrontierAcceptance {
     pub(crate) empty_acc_frontier: ParserGSS,
     pub(crate) acceptance_parts: Arc<[Weight]>,
     pub(crate) dense_by_tsid: Arc<DenseAcceptanceRows>,
+    pub(crate) advance_by_terminal: Arc<[(TerminalID, Arc<[u32]>)]>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DirectRegularDynamicHotFrontier {
+    pub(crate) frontier_states: Arc<[u32]>,
+    pub(crate) empty_acc_frontier: ParserGSS,
+    pub(crate) actionable_terminals: crate::ds::bitset::BitSet,
     pub(crate) advance_by_terminal: Arc<[(TerminalID, Arc<[u32]>)]>,
 }
 
@@ -497,12 +506,25 @@ pub(crate) struct DynamicMaskTrieEdge {
     pub(crate) child: u32,
 }
 
+/// One radix edge in depth-first preorder. `subtree_end` is the first walk
+/// entry after the child subtree, so a failed edge or accepted whole subtree
+/// can be skipped with one index assignment.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct DynamicMaskTrieWalkEdge {
+    pub(crate) byte_start: u32,
+    pub(crate) child: u32,
+    pub(crate) subtree_end: u32,
+    pub(crate) byte_len: u16,
+    pub(crate) parent_depth: u16,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct DynamicMaskTrie {
     pub(crate) nodes: Vec<DynamicMaskTrieNode>,
     pub(crate) edges: Vec<DynamicMaskTrieEdge>,
     edge_bytes: Vec<u8>,
     subtree_tokens: Vec<u32>,
+    walk_edges: Vec<DynamicMaskTrieWalkEdge>,
 }
 
 impl DynamicMaskTrie {
@@ -512,12 +534,18 @@ impl DynamicMaskTrie {
             edges: Vec::new(),
             edge_bytes: Vec::new(),
             subtree_tokens: Vec::new(),
+            walk_edges: Vec::new(),
         }
     }
 
     #[inline]
     pub(crate) fn node(&self, node: u32) -> &DynamicMaskTrieNode {
         &self.nodes[node as usize]
+    }
+
+    #[inline]
+    pub(crate) fn node_count(&self) -> usize {
+        self.nodes.len()
     }
 
     #[inline]
@@ -536,10 +564,33 @@ impl DynamicMaskTrie {
     }
 
     #[inline]
+    pub(crate) fn walk_edges(&self) -> &[DynamicMaskTrieWalkEdge] {
+        &self.walk_edges
+    }
+
+    #[inline]
+    pub(crate) fn walk_edge_bytes(&self, edge: &DynamicMaskTrieWalkEdge) -> &[u8] {
+        let start = edge.byte_start as usize;
+        let end = start + edge.byte_len as usize;
+        &self.edge_bytes[start..end]
+    }
+
+    #[inline]
     pub(crate) fn subtree_tokens(&self, node: u32) -> &[u32] {
         let node = self.node(node);
         &self.subtree_tokens
             [node.subtree_token_start as usize..node.subtree_token_end as usize]
+    }
+
+    #[inline]
+    pub(crate) fn subtree_token_index_range(&self, node: u32) -> std::ops::Range<usize> {
+        let node = self.node(node);
+        node.subtree_token_start as usize..node.subtree_token_end as usize
+    }
+
+    #[inline]
+    fn all_subtree_tokens(&self) -> &[u32] {
+        &self.subtree_tokens
     }
 
     #[inline]
@@ -596,6 +647,41 @@ impl DynamicMaskTrie {
         if !self.nodes.is_empty() {
             self.collect_subtree_metadata(0);
         }
+        self.finalize_walk_edges();
+    }
+
+    fn append_walk_edges(&mut self, node_id: u32, parent_depth: u16) {
+        let first_child = self.nodes[node_id as usize].first_child as usize;
+        let child_len = self.nodes[node_id as usize].child_len as usize;
+        for edge_index in first_child..first_child + child_len {
+            let edge = self.edges[edge_index].clone();
+            let byte_len = u16::try_from(edge.byte_len)
+                .expect("dynamic mask trie radix edge exceeds u16 length");
+            let entry_index = self.walk_edges.len();
+            self.walk_edges.push(DynamicMaskTrieWalkEdge {
+                byte_start: edge.byte_start,
+                child: edge.child,
+                subtree_end: 0,
+                byte_len,
+                parent_depth,
+            });
+            self.append_walk_edges(
+                edge.child,
+                parent_depth
+                    .checked_add(1)
+                    .expect("dynamic mask trie depth exceeds u16"),
+            );
+            self.walk_edges[entry_index].subtree_end = self.walk_edges.len() as u32;
+        }
+    }
+
+    fn finalize_walk_edges(&mut self) {
+        self.walk_edges.clear();
+        self.walk_edges.reserve(self.edges.len());
+        if !self.nodes.is_empty() {
+            self.append_walk_edges(0, 0);
+        }
+        debug_assert_eq!(self.walk_edges.len(), self.edges.len());
     }
 
     fn flatten_vocab_node(node: &VocabPrefixTreeNode, output: &mut Self) -> u32 {
@@ -640,6 +726,7 @@ impl DynamicMaskTrie {
             edges: Vec::new(),
             edge_bytes: Vec::new(),
             subtree_tokens: Vec::new(),
+            walk_edges: Vec::new(),
         };
         let root = Self::flatten_vocab_node(node, &mut output);
         debug_assert_eq!(root, 0);
@@ -678,6 +765,7 @@ impl DynamicMaskTrie {
             edges: Vec::with_capacity(edge_capacity),
             edge_bytes: Vec::with_capacity(byte_capacity),
             subtree_tokens: Vec::with_capacity(node_capacity),
+            walk_edges: Vec::with_capacity(edge_capacity),
         };
         output.nodes.push(DynamicMaskTrieNode {
             token_id: root.has_token().then_some(root.token_id() as u32),
@@ -744,12 +832,458 @@ struct DynamicMaskCacheEntry {
     mask: Arc<[u32]>,
 }
 
+
+#[derive(Debug, Clone, Copy)]
+enum DirectRegularSupportNode {
+    Leaf(u64),
+    Branch(u32, u32),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DirectRegularSmallSupport {
+    len: u8,
+    terminals: [u16; 4],
+}
+
+impl DirectRegularSmallSupport {
+    const UNAVAILABLE: u8 = u8::MAX;
+
+    fn unavailable() -> Self {
+        Self {
+            len: Self::UNAVAILABLE,
+            terminals: [0; 4],
+        }
+    }
+
+    fn from_leaf(mut value: u64) -> Self {
+        if value.count_ones() > 4 {
+            return Self::unavailable();
+        }
+        let mut result = Self {
+            len: 0,
+            terminals: [0; 4],
+        };
+        while value != 0 {
+            result.terminals[result.len as usize] = value.trailing_zeros() as u16;
+            result.len += 1;
+            value &= value - 1;
+        }
+        result
+    }
+
+    fn combine(left: Self, right: Self, right_offset: usize) -> Self {
+        if left.len == Self::UNAVAILABLE
+            || right.len == Self::UNAVAILABLE
+            || usize::from(left.len) + usize::from(right.len) > 4
+            || right_offset > u16::MAX as usize
+        {
+            return Self::unavailable();
+        }
+        let mut result = Self {
+            len: left.len + right.len,
+            terminals: [0; 4],
+        };
+        result.terminals[..left.len as usize]
+            .copy_from_slice(&left.terminals[..left.len as usize]);
+        for (index, &terminal) in right.terminals[..right.len as usize].iter().enumerate() {
+            let Some(terminal) = usize::from(terminal).checked_add(right_offset) else {
+                return Self::unavailable();
+            };
+            let Ok(terminal) = u16::try_from(terminal) else {
+                return Self::unavailable();
+            };
+            result.terminals[left.len as usize + index] = terminal;
+        }
+        result
+    }
+
+    fn terminals(&self) -> Option<&[u16]> {
+        (self.len != Self::UNAVAILABLE).then(|| &self.terminals[..self.len as usize])
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DirectRegularTerminalSupport {
+    roots: Vec<u32>,
+    nodes: Vec<DirectRegularSupportNode>,
+    node_counts: Vec<u16>,
+    node_small_support: Vec<DirectRegularSmallSupport>,
+    dense_state_rows: FxHashMap<u32, Arc<[u64]>>,
+    zero: Vec<u32>,
+    levels: u8,
+    num_terminals: usize,
+}
+
+struct DirectRegularTerminalSupportBuilder {
+    nodes: Vec<DirectRegularSupportNode>,
+    node_counts: Vec<u16>,
+    node_small_support: Vec<DirectRegularSmallSupport>,
+    leaf_intern: FxHashMap<u64, u32>,
+    branch_intern: Vec<FxHashMap<(u32, u32), u32>>,
+    union_memo: Vec<FxHashMap<(u32, u32), u32>>,
+    zero: Vec<u32>,
+}
+
+impl DirectRegularTerminalSupportBuilder {
+    fn new(levels: usize) -> Self {
+        let mut builder = Self {
+            nodes: Vec::new(),
+            node_counts: Vec::new(),
+            node_small_support: Vec::new(),
+            leaf_intern: FxHashMap::default(),
+            branch_intern: (0..=levels).map(|_| FxHashMap::default()).collect(),
+            union_memo: (0..=levels).map(|_| FxHashMap::default()).collect(),
+            zero: Vec::with_capacity(levels + 1),
+        };
+        let leaf = builder.intern_leaf(0);
+        builder.zero.push(leaf);
+        for level in 1..=levels {
+            let child = builder.zero[level - 1];
+            let root = builder.intern_branch(level, child, child);
+            builder.zero.push(root);
+        }
+        builder
+    }
+
+    fn intern_leaf(&mut self, value: u64) -> u32 {
+        if let Some(&id) = self.leaf_intern.get(&value) {
+            return id;
+        }
+        let id = self.nodes.len() as u32;
+        self.nodes.push(DirectRegularSupportNode::Leaf(value));
+        self.node_counts.push(value.count_ones() as u16);
+        self.node_small_support
+            .push(DirectRegularSmallSupport::from_leaf(value));
+        self.leaf_intern.insert(value, id);
+        id
+    }
+
+    fn intern_branch(&mut self, level: usize, left: u32, right: u32) -> u32 {
+        if let Some(&id) = self.branch_intern[level].get(&(left, right)) {
+            return id;
+        }
+        let id = self.nodes.len() as u32;
+        self.nodes
+            .push(DirectRegularSupportNode::Branch(left, right));
+        self.node_counts.push(
+            self.node_counts[left as usize].saturating_add(self.node_counts[right as usize]),
+        );
+        let right_offset = 64usize << (level - 1);
+        self.node_small_support.push(DirectRegularSmallSupport::combine(
+            self.node_small_support[left as usize],
+            self.node_small_support[right as usize],
+            right_offset,
+        ));
+        self.branch_intern[level].insert((left, right), id);
+        id
+    }
+
+    fn union(&mut self, level: usize, left: u32, right: u32) -> u32 {
+        if left == right {
+            return left;
+        }
+        if left == self.zero[level] {
+            return right;
+        }
+        if right == self.zero[level] {
+            return left;
+        }
+        let key = if left < right {
+            (left, right)
+        } else {
+            (right, left)
+        };
+        if let Some(&id) = self.union_memo[level].get(&key) {
+            return id;
+        }
+        let result = if level == 0 {
+            let DirectRegularSupportNode::Leaf(left_value) = self.nodes[left as usize] else {
+                unreachable!()
+            };
+            let DirectRegularSupportNode::Leaf(right_value) = self.nodes[right as usize] else {
+                unreachable!()
+            };
+            self.intern_leaf(left_value | right_value)
+        } else {
+            let DirectRegularSupportNode::Branch(left_a, left_b) = self.nodes[left as usize] else {
+                unreachable!()
+            };
+            let DirectRegularSupportNode::Branch(right_a, right_b) = self.nodes[right as usize]
+            else {
+                unreachable!()
+            };
+            let a = self.union(level - 1, left_a, right_a);
+            let b = self.union(level - 1, left_b, right_b);
+            self.intern_branch(level, a, b)
+        };
+        self.union_memo[level].insert(key, result);
+        result
+    }
+
+    fn singleton(&mut self, levels: usize, terminal: usize) -> u32 {
+        let word = terminal / 64;
+        let mut node = self.intern_leaf(1u64 << (terminal % 64));
+        for level in 1..=levels {
+            let zero = self.zero[level - 1];
+            node = if ((word >> (level - 1)) & 1) == 0 {
+                self.intern_branch(level, node, zero)
+            } else {
+                self.intern_branch(level, zero, node)
+            };
+        }
+        node
+    }
+}
+
+impl DirectRegularTerminalSupport {
+    pub(crate) fn build(automaton: &DirectRegularAutomaton, num_terminals: usize) -> Self {
+        if automaton.states.is_empty() || num_terminals == 0 {
+            return Self::default();
+        }
+        let word_count = num_terminals.div_ceil(64).next_power_of_two();
+        let levels = word_count.trailing_zeros() as usize;
+        let mut builder = DirectRegularTerminalSupportBuilder::new(levels);
+        let singletons = (0..num_terminals)
+            .map(|terminal| builder.singleton(levels, terminal))
+            .collect::<Vec<_>>();
+
+        let mut parents = vec![Vec::<u32>::new(); automaton.states.len()];
+        let mut remaining_children = Vec::<u32>::with_capacity(automaton.states.len());
+        let mut queue = VecDeque::<u32>::new();
+        for (source, state) in automaton.states.iter().enumerate() {
+            remaining_children.push(state.epsilons.len() as u32);
+            if state.epsilons.is_empty() {
+                queue.push_back(source as u32);
+            }
+            for &child in &state.epsilons {
+                parents[child as usize].push(source as u32);
+            }
+        }
+
+        let mut roots = vec![builder.zero[levels]; automaton.states.len()];
+        let mut processed = 0usize;
+        while let Some(raw) = queue.pop_front() {
+            let state = &automaton.states[raw as usize];
+            let mut root = builder.zero[levels];
+            for &terminal in state.transitions.keys() {
+                if (terminal as usize) < num_terminals {
+                    root = builder.union(levels, root, singletons[terminal as usize]);
+                }
+            }
+            for &child in &state.epsilons {
+                root = builder.union(levels, root, roots[child as usize]);
+            }
+            roots[raw as usize] = root;
+            processed += 1;
+            for &parent in &parents[raw as usize] {
+                let remaining = &mut remaining_children[parent as usize];
+                *remaining -= 1;
+                if *remaining == 0 {
+                    queue.push_back(parent);
+                }
+            }
+        }
+        if processed != automaton.states.len() {
+            return Self::default();
+        }
+        let mut support = Self {
+            roots,
+            nodes: builder.nodes,
+            node_counts: builder.node_counts,
+            node_small_support: builder.node_small_support,
+            dense_state_rows: FxHashMap::default(),
+            zero: builder.zero,
+            levels: levels as u8,
+            num_terminals,
+        };
+        let dense_word_count = num_terminals.div_ceil(64);
+        for &raw_state in &automaton.start_states {
+            let mut words = vec![0u64; dense_word_count];
+            support.or_state_into(raw_state, &mut words);
+            support
+                .dense_state_rows
+                .insert(raw_state, Arc::from(words));
+        }
+        support
+    }
+
+    pub(crate) fn is_initialized(&self) -> bool {
+        !self.roots.is_empty()
+    }
+
+    pub(crate) fn for_each_small_state_terminal(
+        &self,
+        raw_state: u32,
+        mut visit: impl FnMut(TerminalID),
+    ) -> bool {
+        let Some(root) = self.root_id(raw_state) else {
+            return false;
+        };
+        let Some(terminals) = self.node_small_support[root as usize].terminals() else {
+            return false;
+        };
+        for &terminal in terminals {
+            let terminal = TerminalID::from(terminal);
+            if (terminal as usize) < self.num_terminals {
+                visit(terminal);
+            }
+        }
+        true
+    }
+
+    #[inline]
+    pub(crate) fn contains(&self, raw_state: u32, terminal: TerminalID) -> bool {
+        let terminal = terminal as usize;
+        if terminal >= self.num_terminals {
+            return false;
+        }
+        let Some(&mut_node) = self.roots.get(raw_state as usize) else {
+            return false;
+        };
+        let mut node = mut_node;
+        let mut level = self.levels as usize;
+        let word = terminal / 64;
+        while level != 0 {
+            let DirectRegularSupportNode::Branch(left, right) = self.nodes[node as usize] else {
+                return false;
+            };
+            node = if ((word >> (level - 1)) & 1) == 0 {
+                left
+            } else {
+                right
+            };
+            level -= 1;
+        }
+        let DirectRegularSupportNode::Leaf(value) = self.nodes[node as usize] else {
+            return false;
+        };
+        value & (1u64 << (terminal % 64)) != 0
+    }
+
+    fn or_node(&self, node: u32, level: usize, word_base: usize, output: &mut [u64]) {
+        if node == self.zero[level] {
+            return;
+        }
+        if level == 0 {
+            let DirectRegularSupportNode::Leaf(value) = self.nodes[node as usize] else {
+                return;
+            };
+            if let Some(word) = output.get_mut(word_base) {
+                *word |= value;
+            }
+            return;
+        }
+        let DirectRegularSupportNode::Branch(left, right) = self.nodes[node as usize] else {
+            return;
+        };
+        let half = 1usize << (level - 1);
+        self.or_node(left, level - 1, word_base, output);
+        self.or_node(right, level - 1, word_base + half, output);
+    }
+
+    pub(crate) fn or_state_into(&self, raw_state: u32, output: &mut [u64]) {
+        if let Some(words) = self.dense_state_rows.get(&raw_state) {
+            for (target, source) in output.iter_mut().zip(words.iter()) {
+                *target |= *source;
+            }
+            return;
+        }
+        if let Some(&root) = self.roots.get(raw_state as usize) {
+            self.or_node(root, self.levels as usize, 0, output);
+        }
+    }
+
+    #[inline]
+    pub(crate) fn root_id(&self, raw_state: u32) -> Option<u32> {
+        self.roots.get(raw_state as usize).copied()
+    }
+
+    #[inline]
+    pub(crate) fn state_terminal_count(&self, raw_state: u32) -> Option<u16> {
+        let root = *self.roots.get(raw_state as usize)?;
+        self.node_counts.get(root as usize).copied()
+    }
+
+    pub(crate) fn singleton_terminal(&self, raw_state: u32) -> Option<TerminalID> {
+        let root = self.root_id(raw_state)?;
+        let terminals = self.node_small_support[root as usize].terminals()?;
+        let [terminal] = terminals else {
+            return None;
+        };
+        Some(TerminalID::from(*terminal))
+    }
+
+    fn intersects_node(
+        &self,
+        node: u32,
+        level: usize,
+        word_base: usize,
+        terminals: &[u64],
+    ) -> bool {
+        if node == self.zero[level] {
+            return false;
+        }
+        if level == 0 {
+            let DirectRegularSupportNode::Leaf(value) = self.nodes[node as usize] else {
+                return false;
+            };
+            return terminals
+                .get(word_base)
+                .is_some_and(|word| (*word & value) != 0);
+        }
+        let DirectRegularSupportNode::Branch(left, right) = self.nodes[node as usize] else {
+            return false;
+        };
+        let half = 1usize << (level - 1);
+        self.intersects_node(left, level - 1, word_base, terminals)
+            || self.intersects_node(right, level - 1, word_base + half, terminals)
+    }
+
+    pub(crate) fn intersects(&self, raw_state: u32, terminals: &[u64]) -> bool {
+        if let Some(words) = self.dense_state_rows.get(&raw_state) {
+            return words
+                .iter()
+                .zip(terminals)
+                .any(|(left, right)| (*left & *right) != 0);
+        }
+        self.roots.get(raw_state as usize).is_some_and(|&root| {
+            self.intersects_node(root, self.levels as usize, 0, terminals)
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DirectRegularDynamicFrontierCacheEntry {
+    /// Retain the source interface so its pointer-derived key cannot be reused
+    /// while this cache entry exists.
+    pub(crate) source: ParserGSS,
+    pub(crate) actionable_terminals: crate::ds::bitset::BitSet,
+    pub(crate) advance_by_terminal: Arc<[(TerminalID, Arc<[u32]>)]>,
+}
+
 /// Canonical semantic snapshot of a dynamic-mask residual. Flattening the GSS
 /// deliberately removes representation-only Arc identities and accumulator
 /// node organization, so equivalent residuals reached after different token
 /// commits share one exact cached mask.
 pub(crate) type DynamicMaskStateKey =
     Vec<(u32, Vec<(Vec<u32>, Vec<(u32, Vec<TerminalID>)>)>)>;
+
+#[derive(Debug, Clone)]
+pub(crate) struct DynamicSelfLoopProjection {
+    pub(crate) source_state: u32,
+    pub(crate) required_terminal: TerminalID,
+    pub(crate) safe_no_match_mask: Arc<[u32]>,
+    pub(crate) safe_subtrees: Arc<[u8]>,
+}
+
+impl DynamicSelfLoopProjection {
+    #[inline]
+    pub(crate) fn subtree_is_safe(&self, node: u32) -> bool {
+        self.safe_subtrees
+            .get(node as usize)
+            .is_some_and(|&safe| safe != 0)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct DynamicMaskVocabSource {
@@ -762,9 +1296,19 @@ pub(crate) struct DynamicMaskVocabSource {
 pub(crate) struct DynamicMaskVocab {
     pub(crate) trie: Arc<DynamicMaskTrie>,
     token_aliases: DynamicMaskAliasStore,
+    canonical_original_token_offsets: Arc<Vec<u32>>,
+    canonical_original_tokens: Arc<Vec<u32>>,
+    node_token_markers: Arc<Vec<u64>>,
+    subtree_original_token_offsets: Arc<Vec<u32>>,
+    subtree_original_tokens: Arc<Vec<u32>>,
     pending_source: Option<DynamicMaskVocabSource>,
     initialized: bool,
     mask_cache: Arc<Mutex<Vec<DynamicMaskCacheEntry>>>,
+    direct_regular_frontier_cache:
+        Arc<Mutex<FxHashMap<usize, DirectRegularDynamicFrontierCacheEntry>>>,
+    direct_regular_wide_frontier_index_cache: Arc<Mutex<FxHashMap<usize, usize>>>,
+    direct_regular_terminal_support: Arc<DirectRegularTerminalSupport>,
+    self_loop_projections: Arc<Vec<DynamicSelfLoopProjection>>,
 }
 
 impl DynamicMaskVocab {
@@ -789,12 +1333,35 @@ impl DynamicMaskVocab {
         trie: Arc<DynamicMaskTrie>,
         token_aliases: Arc<Vec<Vec<u32>>>,
     ) -> Self {
+        let token_aliases = DynamicMaskAliasStore::Ordered(token_aliases);
+        let (canonical_original_token_offsets, canonical_original_tokens) =
+            Self::flatten_canonical_original_tokens(&token_aliases);
+        let node_token_markers = Self::build_node_token_markers(
+            trie.as_ref(),
+            &canonical_original_token_offsets,
+            &canonical_original_tokens,
+        );
+        let (subtree_original_token_offsets, subtree_original_tokens) =
+            Self::flatten_subtree_original_tokens(
+                trie.as_ref(),
+                &canonical_original_token_offsets,
+                &canonical_original_tokens,
+            );
         Self {
             trie,
-            token_aliases: DynamicMaskAliasStore::Ordered(token_aliases),
+            token_aliases,
+            canonical_original_token_offsets,
+            canonical_original_tokens,
+            node_token_markers,
+            subtree_original_token_offsets,
+            subtree_original_tokens,
             pending_source: None,
             initialized: true,
             mask_cache: Arc::new(Mutex::new(Vec::new())),
+            direct_regular_frontier_cache: Arc::new(Mutex::new(FxHashMap::default())),
+            direct_regular_wide_frontier_index_cache: Arc::new(Mutex::new(FxHashMap::default())),
+            direct_regular_terminal_support: Arc::new(DirectRegularTerminalSupport::default()),
+            self_loop_projections: Arc::new(Vec::new()),
         }
     }
 
@@ -802,9 +1369,18 @@ impl DynamicMaskVocab {
         Self {
             trie: Arc::new(DynamicMaskTrie::new()),
             token_aliases: DynamicMaskAliasStore::Packed(Arc::new(Vec::new())),
+            canonical_original_token_offsets: Arc::new(vec![0]),
+            canonical_original_tokens: Arc::new(Vec::new()),
+            node_token_markers: Arc::new(vec![0]),
+            subtree_original_token_offsets: Arc::new(vec![0]),
+            subtree_original_tokens: Arc::new(Vec::new()),
             pending_source: Some(source),
             initialized: false,
             mask_cache: Arc::new(Mutex::new(Vec::new())),
+            direct_regular_frontier_cache: Arc::new(Mutex::new(FxHashMap::default())),
+            direct_regular_wide_frontier_index_cache: Arc::new(Mutex::new(FxHashMap::default())),
+            direct_regular_terminal_support: Arc::new(DirectRegularTerminalSupport::default()),
+            self_loop_projections: Arc::new(Vec::new()),
         }
     }
 
@@ -812,12 +1388,35 @@ impl DynamicMaskVocab {
         trie: Arc<DynamicMaskTrie>,
         token_aliases: Arc<Vec<Option<PackedDynamicMaskTokenAliases>>>,
     ) -> Self {
+        let token_aliases = DynamicMaskAliasStore::Packed(token_aliases);
+        let (canonical_original_token_offsets, canonical_original_tokens) =
+            Self::flatten_canonical_original_tokens(&token_aliases);
+        let node_token_markers = Self::build_node_token_markers(
+            trie.as_ref(),
+            &canonical_original_token_offsets,
+            &canonical_original_tokens,
+        );
+        let (subtree_original_token_offsets, subtree_original_tokens) =
+            Self::flatten_subtree_original_tokens(
+                trie.as_ref(),
+                &canonical_original_token_offsets,
+                &canonical_original_tokens,
+            );
         Self {
             trie,
-            token_aliases: DynamicMaskAliasStore::Packed(token_aliases),
+            token_aliases,
+            canonical_original_token_offsets,
+            canonical_original_tokens,
+            node_token_markers,
+            subtree_original_token_offsets,
+            subtree_original_tokens,
             pending_source: None,
             initialized: true,
             mask_cache: Arc::new(Mutex::new(Vec::new())),
+            direct_regular_frontier_cache: Arc::new(Mutex::new(FxHashMap::default())),
+            direct_regular_wide_frontier_index_cache: Arc::new(Mutex::new(FxHashMap::default())),
+            direct_regular_terminal_support: Arc::new(DirectRegularTerminalSupport::default()),
+            self_loop_projections: Arc::new(Vec::new()),
         }
     }
 
@@ -831,27 +1430,228 @@ impl DynamicMaskVocab {
         };
         self.trie = Arc::new(DynamicMaskTrie::from_vocab_prefix_tree(source.trie.as_ref()));
         self.token_aliases = DynamicMaskAliasStore::Ordered(source.token_aliases);
+        (self.canonical_original_token_offsets, self.canonical_original_tokens) =
+            Self::flatten_canonical_original_tokens(&self.token_aliases);
+        self.node_token_markers = Self::build_node_token_markers(
+            self.trie.as_ref(),
+            &self.canonical_original_token_offsets,
+            &self.canonical_original_tokens,
+        );
+        (self.subtree_original_token_offsets, self.subtree_original_tokens) =
+            Self::flatten_subtree_original_tokens(
+                self.trie.as_ref(),
+                &self.canonical_original_token_offsets,
+                &self.canonical_original_tokens,
+            );
         self.initialized = true;
         true
     }
 
-    #[inline]
-    pub(crate) fn token_ids(&self, canonical_token_id: u32) -> Option<&[u32]> {
-        match &self.token_aliases {
-            DynamicMaskAliasStore::Ordered(token_aliases) => token_aliases
-                .get(canonical_token_id as usize)
-                .map(Vec::as_slice),
-            DynamicMaskAliasStore::Packed(token_aliases) => match token_aliases
-                .get(canonical_token_id as usize)
-                .and_then(Option::as_ref)
-            {
-                Some(PackedDynamicMaskTokenAliases::Single(token_id)) => {
-                    Some(std::slice::from_ref(token_id))
+    fn flatten_canonical_original_tokens(
+        token_aliases: &DynamicMaskAliasStore,
+    ) -> (Arc<Vec<u32>>, Arc<Vec<u32>>) {
+        let alias_slots = match token_aliases {
+            DynamicMaskAliasStore::Ordered(aliases) => aliases.len(),
+            DynamicMaskAliasStore::Packed(aliases) => aliases.len(),
+        };
+        let mut offsets = Vec::with_capacity(alias_slots + 1);
+        let mut originals = Vec::new();
+        offsets.push(0);
+        for canonical_token in 0..alias_slots {
+            match token_aliases {
+                DynamicMaskAliasStore::Ordered(aliases) => {
+                    originals.extend_from_slice(&aliases[canonical_token]);
                 }
-                Some(PackedDynamicMaskTokenAliases::Many(token_ids)) => Some(token_ids),
-                None => None,
-            },
+                DynamicMaskAliasStore::Packed(aliases) => {
+                    if let Some(alias) = aliases[canonical_token].as_ref() {
+                        match alias {
+                            PackedDynamicMaskTokenAliases::Single(token_id) => {
+                                originals.push(*token_id);
+                            }
+                            PackedDynamicMaskTokenAliases::Many(token_ids) => {
+                                originals.extend_from_slice(token_ids);
+                            }
+                        }
+                    }
+                }
+            }
+            offsets.push(originals.len() as u32);
         }
+        (Arc::new(offsets), Arc::new(originals))
+    }
+
+    fn flatten_subtree_original_tokens(
+        trie: &DynamicMaskTrie,
+        canonical_offsets: &[u32],
+        canonical_original_tokens: &[u32],
+    ) -> (Arc<Vec<u32>>, Arc<Vec<u32>>) {
+        let subtree_canonical_tokens = trie.all_subtree_tokens();
+        let mut offsets = Vec::with_capacity(subtree_canonical_tokens.len() + 1);
+        let mut originals = Vec::new();
+        offsets.push(0);
+        for &canonical_token in subtree_canonical_tokens {
+            let index = canonical_token as usize;
+            let start = canonical_offsets[index] as usize;
+            let end = canonical_offsets[index + 1] as usize;
+            originals.extend_from_slice(&canonical_original_tokens[start..end]);
+            offsets.push(originals.len() as u32);
+        }
+        (Arc::new(offsets), Arc::new(originals))
+    }
+
+    fn build_node_token_markers(
+        trie: &DynamicMaskTrie,
+        canonical_offsets: &[u32],
+        canonical_original_tokens: &[u32],
+    ) -> Arc<Vec<u64>> {
+        const FALLBACK_TAG: u64 = 1u64 << 63;
+        let mut markers = Vec::with_capacity(trie.nodes.len());
+        for node in &trie.nodes {
+            let Some(canonical_token) = node.token_id else {
+                markers.push(0);
+                continue;
+            };
+            let index = canonical_token as usize;
+            let start = canonical_offsets[index] as usize;
+            let end = canonical_offsets[index + 1] as usize;
+            let aliases = &canonical_original_tokens[start..end];
+            let Some(&first_token) = aliases.first() else {
+                markers.push(FALLBACK_TAG | (canonical_token as u64 + 1));
+                continue;
+            };
+            let word = first_token / 32;
+            let mut bits = 0u32;
+            let mut one_word = true;
+            for &token_id in aliases {
+                if token_id / 32 != word {
+                    one_word = false;
+                    break;
+                }
+                bits |= 1u32 << (token_id % 32);
+            }
+            if one_word {
+                debug_assert_ne!(bits, 0);
+                debug_assert!(word < (1u32 << 31));
+                markers.push((u64::from(word) << 32) | u64::from(bits));
+            } else {
+                markers.push(FALLBACK_TAG | (canonical_token as u64 + 1));
+            }
+        }
+        Arc::new(markers)
+    }
+
+    #[inline]
+    pub(crate) fn subtree_original_tokens(&self, node: u32) -> &[u32] {
+        let canonical_range = self.trie.subtree_token_index_range(node);
+        let start = self.subtree_original_token_offsets[canonical_range.start] as usize;
+        let end = self.subtree_original_token_offsets[canonical_range.end] as usize;
+        &self.subtree_original_tokens[start..end]
+    }
+
+    #[inline]
+    pub(crate) fn canonical_token_count(&self) -> usize {
+        self.canonical_original_token_offsets.len().saturating_sub(1)
+    }
+
+    pub(crate) fn token_ids(&self, canonical_token_id: u32) -> Option<&[u32]> {
+        let index = canonical_token_id as usize;
+        let end_index = index.checked_add(1)?;
+        let (&start, &end) = self
+            .canonical_original_token_offsets
+            .get(index)
+            .zip(self.canonical_original_token_offsets.get(end_index))?;
+        (start != end).then(|| {
+            &self.canonical_original_tokens[start as usize..end as usize]
+        })
+    }
+
+    #[inline(always)]
+    pub(crate) fn node_token_marker(&self, node: u32) -> u64 {
+        debug_assert!((node as usize) < self.node_token_markers.len());
+        unsafe { *self.node_token_markers.get_unchecked(node as usize) }
+    }
+
+    pub(crate) fn set_direct_regular_terminal_support(
+        &mut self,
+        support: DirectRegularTerminalSupport,
+    ) {
+        self.direct_regular_terminal_support = Arc::new(support);
+    }
+
+    pub(crate) fn direct_regular_terminal_support(&self) -> &DirectRegularTerminalSupport {
+        self.direct_regular_terminal_support.as_ref()
+    }
+
+    pub(crate) fn cached_direct_regular_wide_frontier_index(
+        &self,
+        key: usize,
+    ) -> Option<usize> {
+        self.direct_regular_wide_frontier_index_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&key)
+            .copied()
+    }
+
+    pub(crate) fn cache_direct_regular_wide_frontier_index(
+        &self,
+        key: usize,
+        index: usize,
+    ) {
+        self.direct_regular_wide_frontier_index_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(key, index);
+    }
+
+    pub(crate) fn set_self_loop_projections(
+        &mut self,
+        projections: Vec<DynamicSelfLoopProjection>,
+    ) {
+        self.self_loop_projections = Arc::new(projections);
+    }
+
+    pub(crate) fn self_loop_projection(
+        &self,
+        source_state: u32,
+    ) -> Option<&DynamicSelfLoopProjection> {
+        self.self_loop_projections
+            .iter()
+            .find(|projection| projection.source_state == source_state)
+    }
+
+    pub(crate) fn cached_direct_regular_frontier(
+        &self,
+        key: usize,
+    ) -> Option<DirectRegularDynamicFrontierCacheEntry> {
+        self.direct_regular_frontier_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&key)
+            .cloned()
+    }
+
+    pub(crate) fn cache_direct_regular_frontier(
+        &self,
+        key: usize,
+        entry: DirectRegularDynamicFrontierCacheEntry,
+    ) -> DirectRegularDynamicFrontierCacheEntry {
+        const MAX_FRONTIER_CACHE_ENTRIES: usize = 1024;
+        let mut cache = self
+            .direct_regular_frontier_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(existing) = cache.get(&key) {
+            return existing.clone();
+        }
+        if cache.len() >= MAX_FRONTIER_CACHE_ENTRIES {
+            // Cache entries retain their source GSS interface, making pointer
+            // keys safe. Clearing atomically drops both keys and retained
+            // interfaces before any allocator reuse can produce a new key.
+            cache.clear();
+        }
+        cache.insert(key, entry.clone());
+        entry
     }
 
     pub(crate) fn copy_cached_mask(
@@ -874,7 +1674,18 @@ impl DynamicMaskVocab {
     }
 
     pub(crate) fn cache_mask(&self, state: DynamicMaskStateKey, mask: &[u32]) {
-        const MAX_DYNAMIC_MASK_CACHE_ENTRIES: usize = 64;
+        // Keep enough exact states to cover an ordinary generated sequence.
+        // A fixed 64-entry limit caused long source-specialized sequences to
+        // evict their expensive early masks during the warmup pass, so every
+        // measured pass recomputed them. Bound by bytes instead: Llama-sized
+        // masks retain about 512 states in 8 MiB, while tiny vocabularies may
+        // retain more without material memory cost.
+        const MASK_CACHE_BUDGET_BYTES: usize = 8 * 1024 * 1024;
+        const MIN_MASK_CACHE_ENTRIES: usize = 64;
+        const MAX_MASK_CACHE_ENTRIES: usize = 4096;
+        let mask_bytes = mask.len().saturating_mul(std::mem::size_of::<u32>()).max(1);
+        let max_entries = (MASK_CACHE_BUDGET_BYTES / mask_bytes)
+            .clamp(MIN_MASK_CACHE_ENTRIES, MAX_MASK_CACHE_ENTRIES);
         let mut cache = self
             .mask_cache
             .lock()
@@ -882,7 +1693,7 @@ impl DynamicMaskVocab {
         if cache.iter().any(|entry| entry.state == state) {
             return;
         }
-        if cache.len() == MAX_DYNAMIC_MASK_CACHE_ENTRIES {
+        if cache.len() >= max_entries {
             cache.remove(0);
         }
         cache.push(DynamicMaskCacheEntry {
@@ -897,21 +1708,20 @@ impl Default for DynamicMaskVocab {
         Self {
             trie: Arc::new(DynamicMaskTrie::new()),
             token_aliases: DynamicMaskAliasStore::Packed(Arc::new(Vec::new())),
+            canonical_original_token_offsets: Arc::new(vec![0]),
+            canonical_original_tokens: Arc::new(Vec::new()),
+            node_token_markers: Arc::new(vec![0]),
+            subtree_original_token_offsets: Arc::new(vec![0]),
+            subtree_original_tokens: Arc::new(Vec::new()),
             pending_source: None,
             initialized: false,
             mask_cache: Arc::new(Mutex::new(Vec::new())),
+            direct_regular_frontier_cache: Arc::new(Mutex::new(FxHashMap::default())),
+            direct_regular_wide_frontier_index_cache: Arc::new(Mutex::new(FxHashMap::default())),
+            direct_regular_terminal_support: Arc::new(DirectRegularTerminalSupport::default()),
+            self_loop_projections: Arc::new(Vec::new()),
         }
     }
-}
-
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub(crate) struct CommitTemplateDfas {
-    pub(crate) pop: UnweightedDfa,
-    pub(crate) read: UnweightedDfa,
-    pub(crate) push: UnweightedDfa,
-    pub(crate) pop_to_read: Vec<Option<u32>>,
-    pub(crate) pop_to_push: Vec<Option<u32>>,
-    pub(crate) read_to_push: Vec<Option<u32>>,
 }
 
 #[derive(
@@ -954,6 +1764,12 @@ pub struct Constraint {
     #[serde(skip, default)]
     pub(crate) direct_regular_wide_frontier_acceptance:
         Vec<DirectRegularWideFrontierAcceptance>,
+    /// Runtime-only exact transition maps for the direct automaton's initial
+    /// frontier and its single widest successor frontier. Dynamic masking
+    /// repeatedly queries these two frontiers at token boundaries.
+    #[serde(skip, default)]
+    pub(crate) direct_regular_dynamic_hot_frontiers:
+        Vec<DirectRegularDynamicHotFrontier>,
     /// Runtime-derived exact dense acceptance for the broadest direct-regular
     /// parser row(s). This avoids replaying thousands of L1 terminal weights on
     /// every mask while keeping the cached result source-state exact.

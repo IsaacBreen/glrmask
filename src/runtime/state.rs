@@ -529,7 +529,13 @@ impl<'a> ConstraintState<'a> {
                     .into_iter()
                     .flatten(),
             )
-            .any(|stack| !stack.is_empty() && stacks_finished(&self.constraint.table, stack))
+            .any(|stack| {
+                !stack.is_empty()
+                    && self
+                        .constraint
+                        .sparse_direct_regular_gss_is_complete(stack)
+                        .unwrap_or_else(|| stacks_finished(&self.constraint.table, stack))
+            })
     }
 
     /// Return whether generation has finished.

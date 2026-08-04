@@ -903,7 +903,7 @@ fn boundary_candidate_state_ranges_by_token(
                 for internal_token in internal_tokens.iter() {
                     if constraint.internal_token_to_tokens.is_empty() {
                         if vocab
-                            .entries
+                            .entries_map()
                             .get(&internal_token)
                             .is_some_and(|bytes| bytes.len() >= 2)
                         {
@@ -923,7 +923,7 @@ fn boundary_candidate_state_ranges_by_token(
                     };
                     for &original in originals {
                         if vocab
-                            .entries
+                            .entries_map()
                             .get(&original)
                             .is_some_and(|bytes| bytes.len() >= 2)
                         {
@@ -1192,7 +1192,7 @@ fn boundary_token_prefilter(
                 let first = summaries[global_terminal]
                     .map(|summary| summary.first)
                     .unwrap_or(U8Set::all());
-                candidates.extend(vocab.entries.iter().filter_map(|(&token, bytes)| {
+                candidates.extend(vocab.entries_map().iter().filter_map(|(&token, bytes)| {
                     (bytes.len() >= 2
                         && bytes.first().is_some_and(|byte| first.contains(*byte)))
                     .then_some(token)
@@ -1203,7 +1203,7 @@ fn boundary_token_prefilter(
             let first = summaries[global_terminal]
                 .map(|summary| summary.first)
                 .unwrap_or(U8Set::all());
-            for (&token, bytes) in vocab.entries.iter() {
+            for (&token, bytes) in vocab.entries_map().iter() {
                 if bytes.len() < 2
                     || bytes.first().is_none_or(|byte| !first.contains(*byte))
                 {
@@ -1249,7 +1249,7 @@ fn boundary_token_prefilter(
                 for internal_token in internal_tokens.iter() {
                     if component.internal_token_to_tokens.is_empty() {
                         if vocab
-                            .entries
+                            .entries_map()
                             .get(&internal_token)
                             .is_some_and(|bytes| bytes.len() >= 2)
                         {
@@ -1260,7 +1260,7 @@ fn boundary_token_prefilter(
                     {
                         candidates.extend(originals.iter().copied().filter(|token| {
                             vocab
-                                .entries
+                                .entries_map()
                                 .get(token)
                                 .is_some_and(|bytes| bytes.len() >= 2)
                         }));
@@ -1307,7 +1307,7 @@ fn discover_mixed_owner_terminals(
     let prefilter_ms = prefilter_started_at.elapsed().as_secs_f64() * 1000.0;
     let use_prefilter = std::env::var_os("GLRMASK_COMPOSE_DISABLE_BOUNDARY_PREFILTER").is_none();
     let multi_byte_entries = vocab
-        .entries
+        .entries_map()
         .iter()
         .filter(|&(&token_id, ref bytes)| {
             bytes.len() >= 2 && (!use_prefilter || prefilter.contains(&token_id))
@@ -1522,7 +1522,7 @@ fn collect_one_byte_seed_relations_serial(
 ) -> BTreeMap<Vec<u32>, BTreeMap<u32, BTreeSet<u32>>> {
     let mut relations = BTreeMap::<Vec<u32>, BTreeMap<u32, BTreeSet<u32>>>::new();
     let mut tokens_by_byte = vec![Vec::<u32>::new(); 256];
-    for (&token_id, bytes) in vocab.entries.iter().filter(|(_, bytes)| bytes.len() == 1) {
+    for (&token_id, bytes) in vocab.entries_map().iter().filter(|(_, bytes)| bytes.len() == 1) {
         tokens_by_byte[bytes[0] as usize].push(token_id);
     }
     let closures = tokenizer.all_singleton_epsilon_closures();
@@ -1590,7 +1590,7 @@ fn collect_one_byte_seed_relations_parallel(
     candidate_states: &[u32],
 ) -> BTreeMap<Vec<u32>, BTreeMap<u32, BTreeSet<u32>>> {
     let mut tokens_by_byte = vec![Vec::<u32>::new(); 256];
-    for (&token_id, bytes) in vocab.entries.iter().filter(|(_, bytes)| bytes.len() == 1) {
+    for (&token_id, bytes) in vocab.entries_map().iter().filter(|(_, bytes)| bytes.len() == 1) {
         tokens_by_byte[bytes[0] as usize].push(token_id);
     }
     let seed_terminal_ids = seed_terminals
@@ -1873,7 +1873,7 @@ fn direct_boundary_terminal_automaton(
     if selected_original_tokens.is_empty() {
         return Err("boundary witness construction selected no vocabulary tokens".into());
     }
-    let max_original_token = vocab.entries.keys().next_back().copied().unwrap_or(0);
+    let max_original_token = vocab.entries_map().keys().next_back().copied().unwrap_or(0);
     let mut original_to_internal = vec![u32::MAX; max_original_token as usize + 1];
     let mut internal_to_originals = Vec::with_capacity(selected_original_tokens.len());
     let mut token_representatives = Vec::with_capacity(selected_original_tokens.len());
@@ -3648,6 +3648,7 @@ fn finalize_composed_constraint(
         parser_top_accept_parts: BTreeMap::new(),
         direct_regular_l1_complete_by_terminal: BTreeMap::new(),
         direct_regular_wide_frontier_acceptance: Vec::new(),
+        direct_regular_dynamic_hot_frontiers: Vec::new(),
         direct_regular_parser_state_acceptance: Vec::new(),
         direct_regular_automaton: None,
         table,
@@ -3678,7 +3679,7 @@ fn finalize_composed_constraint(
         fast_template_dfas_by_terminal: Vec::new(),
         original_token_to_internal,
         internal_token_to_tokens,
-        token_bytes: Arc::clone(&vocab.entries),
+        token_bytes: vocab.entries_arc(),
         internal_token_bytes,
         token_bytes_dense: Vec::new(),
         internal_token_buf_masks: Vec::new(),
@@ -3751,7 +3752,7 @@ pub(crate) fn compose_constraints(
         .chain(children.iter().map(|child| child.constraint))
         .enumerate()
     {
-        if constraint.token_bytes.as_ref() != vocab.entries.as_ref() {
+        if constraint.token_bytes.as_ref() != vocab.entries_map() {
             return Err(format!(
                 "component {component_index} was not compiled for the supplied vocabulary",
             ));
@@ -3764,7 +3765,7 @@ pub(crate) fn compose_constraints(
             .is_some_and(|weight| !weight.is_empty());
         let has_exact_token_match = parent.special_token_terminals.iter().any(|special| {
             special.terminal_id == child.placeholder_terminal
-                && vocab.entries.contains_key(&special.token_id)
+                && vocab.entries_map().contains_key(&special.token_id)
         });
         if has_byte_token_matches || has_exact_token_match
         {
@@ -3849,7 +3850,7 @@ pub(crate) fn compose_constraints(
         }
     }
     let original_token_ids = vocab
-        .entries
+        .entries_map()
         .keys()
         .copied()
         .chain(
@@ -4092,7 +4093,7 @@ pub(crate) fn compose_constraints_owned_parent(
         .chain(children.iter().map(|child| child.constraint))
         .enumerate()
     {
-        if constraint.token_bytes.as_ref() != vocab.entries.as_ref() {
+        if constraint.token_bytes.as_ref() != vocab.entries_map() {
             return Err(format!(
                 "component {component_index} was not compiled for the supplied vocabulary",
             ));
@@ -4105,7 +4106,7 @@ pub(crate) fn compose_constraints_owned_parent(
             .is_some_and(|weight| !weight.is_empty());
         let has_exact_token_match = parent_ref.special_token_terminals.iter().any(|special| {
             special.terminal_id == child.placeholder_terminal
-                && vocab.entries.contains_key(&special.token_id)
+                && vocab.entries_map().contains_key(&special.token_id)
         });
         if has_byte_token_matches || has_exact_token_match {
             return Err(format!(
@@ -4182,7 +4183,7 @@ pub(crate) fn compose_constraints_owned_parent(
         }
     }
     let original_token_ids = vocab
-        .entries
+        .entries_map()
         .keys()
         .copied()
         .chain(special_token_terminals.iter().map(|special| special.token_id))
@@ -4679,7 +4680,7 @@ mod tests {
             ],
             &composed_table.terminal_offsets,
             merged_tokenizer.num_states() as usize,
-            &vocab.entries.keys().copied().collect::<Vec<_>>(),
+            &vocab.entries_map().keys().copied().collect::<Vec<_>>(),
         )
         .unwrap();
         assert!(merged.artifact().0.num_states() > 0);
@@ -4714,7 +4715,7 @@ mod tests {
         vocab: &Vocab,
         max_depth: usize,
     ) {
-        let token_ids = vocab.entries.keys().copied().collect::<Vec<_>>();
+        let token_ids = vocab.entries_map().keys().copied().collect::<Vec<_>>();
         let mut frontier = vec![Vec::<u32>::new()];
         for depth in 0..=max_depth {
             let mut next = Vec::new();

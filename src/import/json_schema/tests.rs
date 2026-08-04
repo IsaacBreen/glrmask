@@ -2922,6 +2922,7 @@ fn large_bounded_pattern_string_arrays_use_isolated_terminal_rule() {
 
 #[test]
 fn very_large_fixed_width_pattern_array_uses_contextual_item_terminals() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
     let schema = json!({
         "type": "array",
         "items": {

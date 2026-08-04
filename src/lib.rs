@@ -60,16 +60,16 @@ pub(crate) mod automata;
 pub(crate) mod compiler;
 pub(crate) mod ds;
 mod error;
-pub(crate) mod grammar;
+pub(crate) use glrmask_grammar::__private::grammar;
 pub(crate) mod import;
 pub(crate) mod runtime;
 #[path = "runtime/dynamic_constraint.rs"]
 mod dynamic_constraint;
-mod vocab;
+pub(crate) use glrmask_vocab::__private as vocab;
 
 pub use dynamic_constraint::{DynamicConstraint, DynamicConstraintState};
 pub use runtime::{Constraint, ConstraintState};
-pub use vocab::Vocab;
+pub use glrmask_vocab::Vocab;
 
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, Default)]
@@ -106,6 +106,11 @@ pub fn compiler_cache_stats(vocab: Option<&Vocab>) -> CompilerCacheStats {
         vocab_artifacts: vocab.map_or(0, Vocab::compiler_cache_entry_count),
     }
 }
+
+#[cfg(test)]
+mod grammar_cross_tests;
+#[cfg(test)]
+mod terminal_dwa_cross_tests;
 
 pub(crate) use error::{GlrMaskError, Result};
 
@@ -152,13 +157,7 @@ pub(crate) fn dump_json_schema_grammar_glrm(schema_json: &str) -> Result<String>
 }
 
 pub(crate) fn set_test_compat_mode(enabled: bool) {
-    crate::import::json_schema::string::TEST_COMPAT_MODE.with(|cell| {
-        cell.set(if enabled {
-            crate::import::json_schema::string::JsonStringCompatMode::LlGuidanceNative
-        } else {
-            crate::import::json_schema::string::JsonStringCompatMode::JsonSchema
-        });
-    });
+    glrmask_json_schema::__private::set_test_compat_mode(enabled);
 }
 
 #[cfg(feature = "internal-api")]

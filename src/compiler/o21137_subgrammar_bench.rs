@@ -563,7 +563,7 @@ fn build_terminal_decomposed(grammar: &GrammarDef, vocab: &Vocab) -> DecomposedB
         terminal_to_unique.insert(*terminal, unique);
     }
     let first_sentinel = vocab
-        .entries
+        .entries_map()
         .keys()
         .copied()
         .max()
@@ -725,7 +725,7 @@ fn prepare_nonterminal_decomposed_parts(
         module_to_unique.push(unique);
     }
     let first_sentinel = vocab
-        .entries
+        .entries_map()
         .keys()
         .copied()
         .max()
@@ -874,7 +874,7 @@ fn verify_sampled_reachable_masks(
     max_frontier: usize,
     tokens_per_state: usize,
 ) -> (usize, usize) {
-    let vocab_tokens = vocab.entries.keys().copied().collect::<Vec<_>>();
+    let vocab_tokens = vocab.entries_map().keys().copied().collect::<Vec<_>>();
     let mut frontier = BTreeSet::<Vec<u32>>::from([Vec::new()]);
     let mut checked_prefixes = 0usize;
     let mut checked_commits = 0usize;

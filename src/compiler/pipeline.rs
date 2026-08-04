@@ -8,6 +8,7 @@ use range_set_blaze::RangeSetBlaze;
 
 use crate::Vocab;
 use crate::automata::lexer::compile::{
+    build_exact_partitioned_runtime_tokenizer,
     build_regex,
     build_regex_partitioned,
     build_regex_partitioned_with_adaptive,
@@ -19,6 +20,7 @@ use crate::automata::lexer::compile::{
     build_regex_partitioned_with_residual_isolation,
     build_regex_with_profile_labels,
     compile_terminal_expression_pair_with_structural_map,
+    expression_supports_deferred_dense_runtime,
     factor_regex_expr,
     prepare_partitioned_expression_pair_with_structural_map,
     DeferredPartitionedRegex,
@@ -485,8 +487,67 @@ fn build_dynamic_tokenizer(grammar: &GrammarDef) -> Tokenizer {
 
     let explicit_policy = std::env::var_os("GLRMASK_LEXER_SINGLETONS").is_some()
         || std::env::var_os("GLRMASK_LEXER_ADAPTIVE").is_some();
+    if !explicit_policy {
+        let labels = grammar
+            .terminals
+            .iter()
+            .enumerate()
+            .map(|(index, _)| grammar.terminal_display_name(index as u32))
+            .collect::<Vec<_>>();
+        let expressions = grammar
+            .terminals
+            .iter()
+            .map(terminal_expr)
+            .map(factor_regex_expr)
+            .collect::<Vec<_>>();
+        let mut residual_isolation_classes = lexer_residual_isolation_classes(grammar);
+        let mut next_class = residual_isolation_classes
+            .iter()
+            .flatten()
+            .copied()
+            .max()
+            .map_or(0, |class| class.saturating_add(1));
+        let mut deferred_terminals = 0usize;
+        for (terminal, expression) in expressions.iter().enumerate() {
+            if expression_supports_deferred_dense_runtime(expression) {
+                residual_isolation_classes[terminal] = Some(next_class);
+                next_class = next_class
+                    .checked_add(1)
+                    .expect("residual isolation class id overflow");
+                deferred_terminals += 1;
+            }
+        }
+        if deferred_terminals > 0 {
+            let partition_ids = lexer_partition_ids_with_residual_classes(
+                grammar,
+                false,
+                &residual_isolation_classes,
+            );
+            let tokenizer = build_exact_partitioned_runtime_tokenizer(
+                &expressions,
+                Some(&labels),
+                &partition_ids,
+                &residual_isolation_classes,
+            );
+            if compile_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][dynamic_tokenizer] path=direct_exact_runtime deferred_terminals={} states={}",
+                    deferred_terminals,
+                    tokenizer.num_states(),
+                );
+            }
+            return tokenizer;
+        }
+    }
     if !explicit_policy && grammar.terminals.len() >= LARGE_DYNAMIC_LEXER_TERMINALS {
-        build_tokenizer_with_partition_options(grammar, true, false)
+        // Large source-state grammars often contain thousands of exact-line
+        // terminals with substantial shared prefixes. Keeping each terminal in
+        // a singleton partition duplicates those prefixes in the runtime NFA
+        // and makes dynamic mask generation walk every partition. Build one
+        // combined product tokenizer instead: it preserves terminal identities
+        // while sharing prefix states and gives the runtime a deterministic
+        // transition structure.
+        build_tokenizer_with_partition_options(grammar, false, false)
     } else {
         build_tokenizer(grammar)
     }
@@ -678,12 +739,14 @@ mod lexer_partition_plan_tests {
     use std::collections::BTreeSet;
 
     use super::{
-        lexer_partition_ids_with_options, prepare_structural_tokenizer_pair,
-        plan_synthetic_tokenizer_enabled, structural_state_reduction_is_profitable,
+        compile_owned_profiled_with_table_construction, lexer_partition_ids_with_options,
+        prepare_structural_tokenizer_pair, plan_synthetic_tokenizer_enabled,
+        structural_state_reduction_is_profitable,
     };
     use crate::automata::lexer::Lexer;
     use crate::automata::regex::Expr;
-    use crate::grammar::flat::{GrammarDef, Terminal};
+    use crate::compiler::glr::table::GlrTableConstruction;
+    use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
     use crate::Vocab;
 
     fn grammar_with_terminals(count: u32) -> GrammarDef {
@@ -748,6 +811,42 @@ mod lexer_partition_plan_tests {
         assert!(structural_state_reduction_is_profitable(1_437_667, 173_832));
         assert!(!structural_state_reduction_is_profitable(1_000_000, 250_001));
         assert!(!structural_state_reduction_is_profitable(1_000_000, 200_000));
+    }
+
+    #[test]
+    fn profiled_compile_installs_vocab_certifier_before_synthetic_planning() {
+        let grammar = GrammarDef {
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0)],
+            }],
+            start: 0,
+            terminals: vec![Terminal::Expr {
+                id: 0,
+                expr: Expr::Repeat {
+                    expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+                    min: 1,
+                    max: Some(5_000),
+                },
+            }],
+            ..GrammarDef::default()
+        };
+        let vocab = Vocab::new(vec![
+            (0, b"a".to_vec()),
+            (1, b"aa".to_vec()),
+            (2, b"aaaa".to_vec()),
+            (3, b"x".to_vec()),
+        ]);
+
+        let (_, profile) = compile_owned_profiled_with_table_construction(
+            grammar,
+            &vocab,
+            GlrTableConstruction::ExperimentalCoreMerged,
+        );
+
+        assert!(profile.synthetic_certified);
+        assert!(profile.synthetic_candidate_terminals > 0);
+        assert!(profile.synthetic_compile_states < profile.tokenizer_final_states);
     }
 
     #[test]
@@ -2198,7 +2297,7 @@ fn build_and_merge_parser_dwa_families(
             )
         } else {
             let mapped_dwa =
-                crate::compiler::stages::id_map_and_terminal_dwa::merge::merge_mapped_parser_dwas(
+                glrmask_parser_dwa::__private::merge::merge_mapped_parser_dwas(
                     parser_dwas,
                     tokenizer.num_states() as usize,
                     max_token_id,
@@ -2252,7 +2351,7 @@ fn build_and_merge_parser_dwa_families(
     }
 
     let (mapped_dwa, combined) =
-        crate::compiler::stages::id_map_and_terminal_dwa::merge::merge_mapped_parser_dwas_with_top_accept(
+        glrmask_parser_dwa::__private::merge::merge_mapped_parser_dwas_with_top_accept(
             parser_dwas,
             tokenizer.num_states() as usize,
             max_token_id,
@@ -2673,6 +2772,13 @@ fn compile_prepared_with_profile_and_table_construction(
     default_table_construction: GlrTableConstruction,
     lexer_adaptive_override: Option<bool>,
 ) -> (Constraint, CompilePhaseProfile) {
+    // Synthetic lexer planning may certify a smaller exact tokenizer against
+    // the vocabulary. Install the cross-crate certifier before planning on
+    // every static compilation path, including profiled and explicit table
+    // construction entry points.
+    crate::automata::lexer::compile::install_vocabulary_exact_state_certifier(
+        crate::compiler::stages::id_map_and_terminal_dwa::synthetic_state_map::certify_vocabulary_exact_state_candidates,
+    );
     let synthetic_plan_started_at = Instant::now();
     let synthetic_tokenizer_plan = plan_synthetic_tokenizer(&prepared_grammar, vocab);
     if std::env::var_os("GLRMASK_PROFILE_SYNTHETIC_PLAN").is_some() {
@@ -2706,7 +2812,7 @@ fn compile_prepared_with_profile_and_table_construction(
                 adaptive: lexer_adaptive_override
                     .unwrap_or_else(|| env_flag_enabled_by_default("GLRMASK_LEXER_ADAPTIVE")),
                 global_max_token_len: vocab
-                    .entries
+                    .entries_map()
                     .values()
                     .map(Vec::len)
                     .max()
@@ -3822,7 +3928,7 @@ fn compile_prepared_with_profile_and_table_construction(
         profile.parser_pm_joint_interned_ranges = parser_pm_joint_interned_ranges;
 
         let finalize_started_at = Instant::now();
-        let token_bytes = std::sync::Arc::clone(&vocab.entries);
+        let token_bytes = vocab.entries_arc();
         let special_token_terminals = collect_special_token_terminals(&prepared_grammar);
         let tokenizer = runtime_tokenizer.unwrap_or(tokenizer);
         let constraint = finalize_constraint(Constraint {
@@ -3832,6 +3938,7 @@ fn compile_prepared_with_profile_and_table_construction(
             parser_top_accept_parts,
             direct_regular_l1_complete_by_terminal: direct_l1_complete_by_terminal,
             direct_regular_wide_frontier_acceptance: Vec::new(),
+            direct_regular_dynamic_hot_frontiers: Vec::new(),
             direct_regular_parser_state_acceptance: Vec::new(),
             direct_regular_automaton: analyzed_grammar.direct_regular_automaton.clone(),
             table,
@@ -3938,45 +4045,159 @@ pub(crate) fn compile_dynamic_owned_with_table_construction(
     vocab: &Vocab,
     default_table_construction: GlrTableConstruction,
 ) -> DynamicConstraint {
+    compile_dynamic_owned_impl(grammar, vocab, default_table_construction, true)
+}
+
+pub(crate) fn compile_dynamic_owned_unfinalized_with_table_construction(
+    grammar: GrammarDef,
+    vocab: &Vocab,
+    default_table_construction: GlrTableConstruction,
+) -> DynamicConstraint {
+    compile_dynamic_owned_impl(grammar, vocab, default_table_construction, false)
+}
+
+fn compile_dynamic_owned_impl(
+    grammar: GrammarDef,
+    vocab: &Vocab,
+    default_table_construction: GlrTableConstruction,
+    finalize_runtime: bool,
+) -> DynamicConstraint {
     let start_nullable = grammar.start_is_nullable();
     let profile = compile_profile_enabled();
     let total_started_at = profile.then(Instant::now);
     let prepare_started_at = profile.then(Instant::now);
-    let prepared_grammar = prepare_grammar(grammar);
+    // A direct-regular frontend result already contains the complete parser
+    // language. Generic CFG normalization cannot improve that automaton and is
+    // unnecessary for the dynamic backend, which consumes the retained
+    // automaton directly. Keep the terminal definitions untouched for lexer
+    // construction.
+    let force_cfg_runtime = std::env::var_os("GLRMASK_DYNAMIC_FORCE_CFG_RUNTIME").is_some();
+    if profile {
+        eprintln!(
+            "[glrmask/profile][dynamic_path] input_direct_regular={} force_cfg_runtime={}",
+            grammar.direct_regular_automaton.is_some(),
+            force_cfg_runtime,
+        );
+    }
+    let mut prepared_grammar = if grammar.direct_regular_automaton.is_some() && !force_cfg_runtime {
+        grammar
+    } else {
+        let mut grammar = grammar;
+        if force_cfg_runtime {
+            grammar.direct_regular_automaton = None;
+        }
+        prepare_grammar(grammar)
+    };
     let prepare_ms = prepare_started_at.map_or(0.0, elapsed_ms);
     run_with_compile_thread_pool(|| {
         let analysis_started_at = profile.then(Instant::now);
-        let analyzed_grammar = AnalyzedGrammar::from_grammar_def(&prepared_grammar);
-        if let Err(message) = analyzed_grammar.check_table_build_normal_form() {
-            panic!("[glrmask] grammar precondition violations:\n{}", message);
-        }
+        // Move a complete direct automaton out of the grammar instead of
+        // cloning its 20k-state graph into AnalyzedGrammar and cloning it again
+        // into the runtime artifact. Generic grammars still use full analysis.
+        let direct_regular_automaton = prepared_grammar.direct_regular_automaton.take();
+        let analyzed_grammar = if direct_regular_automaton.is_none() {
+            let analyzed = AnalyzedGrammar::from_grammar_def(&prepared_grammar);
+            if let Err(message) = analyzed.check_table_build_normal_form() {
+                panic!("[glrmask] grammar precondition violations:\n{}", message);
+            }
+            Some(analyzed)
+        } else {
+            None
+        };
+        let num_terminals = prepared_grammar.num_terminals();
+        let terminal_display_names = (0..num_terminals)
+            .map(|terminal| prepared_grammar.terminal_display_name(terminal))
+            .collect::<Vec<_>>();
+        let direct_state_count = direct_regular_automaton
+            .as_ref()
+            .map(|automaton| automaton.states.len());
         let analysis_ms = analysis_started_at.map_or(0.0, elapsed_ms);
 
-        let ((tokenizer, tokenizer_ms), (table, table_ms)) = rayon::join(
+        let ((tokenizer, tokenizer_ms), ((table, table_ms), (dynamic_mask_vocab, dynamic_vocab_ms))) = rayon::join(
             || {
                 let started_at = Instant::now();
                 let mut tokenizer = build_dynamic_tokenizer(&prepared_grammar);
                 tokenizer.isolate_start_state_and_drain_nullable_terminals();
+                if tokenizer.has_epsilon_transitions() {
+                    let source_states = tokenizer.num_states();
+                    let source_transitions = tokenizer.transition_count();
+                    let source_state_limit = std::env::var(
+                        "GLRMASK_DYNAMIC_LEXER_MAX_SOURCE_STATES",
+                    )
+                        .ok()
+                        .and_then(|value| value.trim().parse::<u32>().ok())
+                        .filter(|&value| value > 0)
+                        .unwrap_or(512);
+                    if source_states <= source_state_limit {
+                        let transition_limit = source_transitions.saturating_mul(6).max(1);
+                        let state_limit = std::env::var("GLRMASK_DYNAMIC_LEXER_MAX_STATES")
+                            .ok()
+                            .and_then(|value| value.trim().parse::<usize>().ok())
+                            .filter(|&value| value > 0)
+                            .unwrap_or(8_192);
+                        if let Some(determinized) =
+                            tokenizer.try_full_determinization(state_limit, transition_limit)
+                        {
+                            tokenizer = determinized.tokenizer;
+                        }
+                    }
+                    if profile {
+                        eprintln!(
+                            "[glrmask/profile][dynamic_lexer_determinization] source_states={} source_transitions={} source_state_limit={} attempted={} final_states={} final_transitions={}",
+                            source_states,
+                            source_transitions,
+                            source_state_limit,
+                            source_states <= source_state_limit,
+                            tokenizer.num_states(),
+                            tokenizer.transition_count(),
+                        );
+                    }
+                }
                 (tokenizer, elapsed_ms(started_at))
             },
-            || {
-                let started_at = Instant::now();
-                let table = GLRTable::build_with_default_construction(
-                    &analyzed_grammar,
-                    default_table_construction,
-                );
-                (table, elapsed_ms(started_at))
-            },
+            || rayon::join(
+                || {
+                    let started_at = Instant::now();
+                    let table = if let Some(state_count) = direct_state_count {
+                    GLRTable::direct_regular_runtime_stub(
+                        state_count.saturating_add(1) as u32,
+                        num_terminals,
+                    )
+                } else {
+                    GLRTable::build_with_default_construction(
+                        analyzed_grammar.as_ref().expect("generic grammar was analyzed"),
+                        default_table_construction,
+                    )
+                };
+                    (table, elapsed_ms(started_at))
+                },
+                || {
+                    let started_at = Instant::now();
+                    let dynamic_vocab = if finalize_runtime {
+                        crate::compiler::constraint_possible_matches::runtime_dynamic_vocab_for_vocab(vocab)
+                    } else {
+                        crate::runtime::DynamicMaskVocab::default()
+                    };
+                    (dynamic_vocab, elapsed_ms(started_at))
+                },
+            ),
         );
 
         let finalize_started_at = profile.then(Instant::now);
-        let mut constraint = DynamicConstraint::from_parts(
+        let build_constraint = if finalize_runtime {
+            DynamicConstraint::from_parts_with_dynamic_vocab
+        } else {
+            DynamicConstraint::from_parts_with_dynamic_vocab_unfinalized
+        };
+        let mut constraint = build_constraint(
             table,
-            analyzed_grammar.terminal_display_names.clone(),
+            terminal_display_names,
             tokenizer,
+            direct_regular_automaton,
             prepared_grammar.ignore_terminal,
             collect_special_token_terminals(&prepared_grammar),
             vocab,
+            dynamic_mask_vocab,
         );
         constraint
             .inner
@@ -3984,13 +4205,15 @@ pub(crate) fn compile_dynamic_owned_with_table_construction(
             .set_embedded_start_nullable(start_nullable);
         if let Some(total_started_at) = total_started_at {
             eprintln!(
-                "[glrmask/profile][dynamic_compile] prepare_ms={:.3} analysis_ms={:.3} tokenizer_ms={:.3} table_ms={:.3} finalize_ms={:.3} parallel_core_wall_ms={:.3} total_ms={:.3}",
+                "[glrmask/profile][dynamic_compile] finalize_runtime={} prepare_ms={:.3} analysis_ms={:.3} tokenizer_ms={:.3} table_ms={:.3} dynamic_vocab_ms={:.3} finalize_ms={:.3} parallel_core_wall_ms={:.3} total_ms={:.3}",
+                finalize_runtime,
                 prepare_ms,
                 analysis_ms,
                 tokenizer_ms,
                 table_ms,
+                dynamic_vocab_ms,
                 finalize_started_at.map_or(0.0, elapsed_ms),
-                tokenizer_ms.max(table_ms),
+                tokenizer_ms.max(table_ms.max(dynamic_vocab_ms)),
                 elapsed_ms(total_started_at),
             );
         }

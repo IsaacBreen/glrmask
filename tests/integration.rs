@@ -144,6 +144,32 @@ fn assert_rejects_bytes(constraint: &Constraint, bytes: &[u8]) {
     assert!(state.commit_bytes(bytes).is_err());
 }
 
+#[test]
+fn lark_direct_unicode_uses_original_utf8_bytes() {
+    let vocab = Vocab::new(vec![
+        (0, b" ".to_vec()),
+        (1, b" \xe2".to_vec()),
+        (2, b" \xe2\x80".to_vec()),
+        (3, b" \xe2\x80\x94".to_vec()),
+        (4, b" \xc3".to_vec()),
+        (5, b" \xc3\xa2".to_vec()),
+    ]);
+
+    let static_constraint = Constraint::from_lark(r#"start: " —""#, &vocab).unwrap();
+    let dynamic_constraint = DynamicConstraint::from_lark(r#"start: / —/"#, &vocab).unwrap();
+
+    assert_eq!(allowed(&static_constraint.start().mask()), vec![0, 1, 2, 3]);
+    assert_eq!(allowed(&dynamic_constraint.start().mask()), vec![0, 1, 2, 3]);
+
+    let mut static_state = static_constraint.start();
+    static_state.commit_token(3).unwrap();
+    assert!(static_state.is_finished());
+
+    let mut dynamic_state = dynamic_constraint.start();
+    dynamic_state.commit_token(3).unwrap();
+    assert!(dynamic_state.is_finished());
+}
+
 fn max_paths_and_stacks(constraint: &Constraint, text: &str) -> (usize, usize) {
     let mut state = constraint.start();
     let mut max_paths = state.parser_path_count(1_000_000);
@@ -1614,7 +1640,7 @@ fn assert_partitioned_runtime_matches_dynamic(
             }
 
             let mask = partitioned_state.mask();
-            for &token in vocab.entries.keys() {
+            for (token, _) in vocab.iter() {
                 let word = token as usize / 32;
                 let bit = token % 32;
                 let expected_allowed = mask

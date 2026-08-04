@@ -115,7 +115,7 @@ fn materialize_single_path_seed_intersection(
     precomputed: &DenseTokenMaskCache,
 ) -> bool {
     debug_assert!(!weight.is_full());
-    let Some(token_set) = weight.0.get(internal_tsid) else {
+    let Some(token_set) = weight.token_set_for_tsid_ref(internal_tsid) else {
         dense.clear();
         return false;
     };
@@ -429,7 +429,7 @@ impl DenseMaskAcc {
         let mut result = SmallVec::new();
 
         for (tsid, dense) in &self.0 {
-            let Some(token_set) = weight.0.get(*tsid) else {
+            let Some(token_set) = weight.token_set_for_tsid_ref(*tsid) else {
                 continue;
             };
 
@@ -463,7 +463,7 @@ impl DenseMaskAcc {
         let mut result = SmallVec::new();
 
         for (tsid, dense) in &self.0 {
-            let Some(token_set) = weight.0.get(*tsid) else {
+            let Some(token_set) = weight.token_set_for_tsid_ref(*tsid) else {
                 continue;
             };
             if let Some(intersection) = Self::intersect_dense_with_token_set_cached(
@@ -545,7 +545,7 @@ impl DenseMaskAcc {
 
         let mut result = SmallVec::new();
         for (tsid, dense) in &self.0 {
-            let Some(token_set) = weight.0.get(*tsid) else {
+            let Some(token_set) = weight.token_set_for_tsid_ref(*tsid) else {
                 continue;
             };
             if let Some(intersection) = Self::intersect_dense_with_token_set_small_cached(
@@ -641,7 +641,7 @@ impl DenseMaskAcc {
         }
         let mut entries = SmallVec::new();
         for (tsid, dense) in &self.0 {
-            let Some(token_set) = weight.0.get(*tsid) else {
+            let Some(token_set) = weight.token_set_for_tsid_ref(*tsid) else {
                 continue;
             };
             if let Some(intersection) =
@@ -668,7 +668,7 @@ impl DenseMaskAcc {
         let mut idx = 0usize;
         while idx < self.0.len() {
             let (tsid, dense) = &mut self.0[idx];
-            let Some(token_set) = weight.0.get(*tsid) else {
+            let Some(token_set) = weight.token_set_for_tsid_ref(*tsid) else {
                 self.0.remove(idx);
                 continue;
             };
@@ -771,7 +771,7 @@ impl DenseMaskAcc {
         }
 
         for (tsid, dense) in &self.0 {
-            let Some(token_set) = final_weight.0.get(*tsid) else {
+            let Some(token_set) = final_weight.token_set_for_tsid_ref(*tsid) else {
                 continue;
             };
 
@@ -1610,7 +1610,7 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
         if weight.is_full() {
             return IndexedDagDenseMask::Full;
         }
-        let Some(tokens) = weight.0.get(tsid) else {
+        let Some(tokens) = weight.token_set_for_tsid_ref(tsid) else {
             return IndexedDagDenseMask::Empty;
         };
         let token_key = Arc::as_ptr(tokens) as usize;
@@ -2099,8 +2099,7 @@ fn dense_gss_transition_key(
     gss.for_each_acc(|acc| {
         for (tsid, dense) in &acc.0 {
             let token_set = weight
-                .0
-                .get(*tsid)
+                .token_set_for_tsid_ref(*tsid)
                 .map(|set| Arc::as_ptr(set) as usize)
                 .unwrap_or(0);
             entries.push((*tsid, dense.as_ptr() as usize, dense.len(), token_set));
@@ -2965,7 +2964,7 @@ impl<'a> ConstraintState<'a> {
             return dense.iter().any(|&word| word != 0);
         }
 
-        let Some(token_set) = weight.0.get(internal_tsid) else {
+        let Some(token_set) = weight.token_set_for_tsid_ref(internal_tsid) else {
             dense.fill(0);
             return false;
         };
@@ -3006,7 +3005,7 @@ impl<'a> ConstraintState<'a> {
             return false;
         }
 
-        let Some(token_set) = final_weight.0.get(internal_tsid) else {
+        let Some(token_set) = final_weight.token_set_for_tsid_ref(internal_tsid) else {
             return true;
         };
         if let Some(buf) = direct_buf.as_deref_mut() {
@@ -3091,7 +3090,7 @@ impl<'a> ConstraintState<'a> {
             }
         } else {
             for (tsid, dense) in &acc.0 {
-                let Some(token_set) = final_weight.0.get(*tsid) else {
+                let Some(token_set) = final_weight.token_set_for_tsid_ref(*tsid) else {
                     continue;
                 };
 

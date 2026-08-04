@@ -1,0 +1,15 @@
+[package]
+name = "glrmask-vocab"
+version = "0.1.1"
+edition = "2024"
+description = "Vocabulary representation and derived-artifact cache for GLRMask"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/IsaacBreen/glrmask"
+
+[features]
+default = []
+internal-api = []
+
+[dependencies]
+serde = { version = "1", features = ["derive", "rc"] }
+range-set-blaze = "0.3.0"

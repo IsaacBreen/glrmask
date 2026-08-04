@@ -8,8 +8,9 @@ pub(crate) mod mask_mapping;
 mod serde;
 mod state;
 mod token_space;
+pub(crate) use glrmask_artifact::CommitTemplateDfas;
 pub(crate) use artifact::{
-    CommitTemplateDfas, ConstraintRuntimeBackend, DynamicMaskTrie, DynamicMaskVocab,
+    ConstraintRuntimeBackend, DynamicMaskTrie, DynamicMaskVocab,
     FastCommitTemplateDfas, FastTokenizerTransitions, SpecialTokenTerminal,
 };
 #[allow(unused_imports)]

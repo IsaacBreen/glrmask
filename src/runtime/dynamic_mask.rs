@@ -4,9 +4,11 @@
 //! the vocabulary byte trie while advancing the lexer and GLR parser directly.
 
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 
 use crate::automata::lexer::Lexer;
 use crate::automata::lexer::tokenizer::{
@@ -21,7 +23,10 @@ use crate::ds::leveled_gss::LeveledGSS;
 use crate::ds::u8set::U8Set;
 use crate::grammar::flat::TerminalID;
 
-use super::artifact::{Constraint, DynamicMaskStateKey, DynamicMaskTrie};
+use super::artifact::{
+    Constraint, DynamicMaskStateKey, DynamicMaskTrie, DynamicMaskVocab,
+    DynamicSelfLoopProjection,
+};
 use super::state::ConstraintState;
 
 type ParserStacks = LeveledGSS<u32, ()>;
@@ -29,6 +34,7 @@ type ParserStacks = LeveledGSS<u32, ()>;
 #[derive(Default)]
 struct DynamicTraversalCache {
     admissible_terminals: FxHashMap<usize, (ParserStacks, BitSet)>,
+    terminal_admissible: FxHashMap<(usize, TerminalID), bool>,
     lexer_relevant: FxHashMap<(u32, usize), bool>,
     parser_children: FxHashMap<(usize, TerminalID), (ParserStacks, Option<ParserStacks>)>,
 }
@@ -41,20 +47,321 @@ fn parser_stacks_cache_key(stacks: &ParserStacks) -> usize {
 }
 
 #[derive(Clone)]
-struct TraverseWork {
-    trie_index: usize,
-    node: u32,
-    tokenizer_state: u32,
+struct DynamicBranch {
+    tokenizer_config: u32,
     gss: ParserStacks,
     initial_prune_guard: InitialPruneGuard,
+    /// The lexer was reset by a terminal match on the most recently consumed
+    /// byte. At a compressed-edge boundary that fresh initial state is already
+    /// a valid continuation and must not be stripped as though it were an
+    /// unmatched residual configuration.
+    fresh_reset: bool,
 }
 
-#[derive(Clone)]
+type DynamicBranches = SmallVec<[DynamicBranch; 4]>;
+
+#[derive(Clone, PartialEq, Eq, Hash)]
 enum InitialPruneGuard {
     Passed,
     Pending {
         memories: Arc<[(u32, TerminalID)]>,
     },
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct DynamicBranchKey {
+    tokenizer_config: u32,
+    gss_ptr: usize,
+    initial_prune_guard: InitialPruneGuard,
+    fresh_reset: bool,
+}
+
+const DYNAMIC_RECOGNIZER_UNKNOWN: u32 = u32::MAX;
+const DYNAMIC_RECOGNIZER_DEAD: u32 = u32::MAX - 1;
+
+struct DynamicRecognizerStateCache {
+    state_ids: FxHashMap<Box<[DynamicBranchKey]>, u32>,
+    branches: Vec<DynamicBranches>,
+    transitions: Vec<Option<Box<[u32; 256]>>>,
+    normalized: Vec<u32>,
+    metadata: Vec<Option<DynamicRecognizerStateMetadata>>,
+    transition_misses: usize,
+}
+
+struct DynamicRecognizerStateMetadata {
+    token_boundary_allowed: bool,
+    subtree_loop_bytes: SmallVec<[U8Set; 4]>,
+}
+
+impl DynamicRecognizerStateCache {
+    fn new() -> Self {
+        Self {
+            state_ids: FxHashMap::default(),
+            branches: Vec::new(),
+            transitions: Vec::new(),
+            normalized: Vec::new(),
+            metadata: Vec::new(),
+            transition_misses: 0,
+        }
+    }
+
+    fn branch_key(branch: &DynamicBranch) -> DynamicBranchKey {
+        DynamicBranchKey {
+            tokenizer_config: branch.tokenizer_config,
+            gss_ptr: branch.gss.ptr_key(),
+            initial_prune_guard: branch.initial_prune_guard.clone(),
+            fresh_reset: branch.fresh_reset,
+        }
+    }
+
+    fn intern(&mut self, branches: DynamicBranches) -> u32 {
+        let key = branches
+            .iter()
+            .map(Self::branch_key)
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        if let Some(&state_id) = self.state_ids.get(key.as_ref()) {
+            return state_id;
+        }
+        let state_id = self.branches.len() as u32;
+        debug_assert!(state_id < DYNAMIC_RECOGNIZER_DEAD);
+        self.state_ids.insert(key, state_id);
+        self.branches.push(branches);
+        self.transitions.push(None);
+        self.normalized.push(DYNAMIC_RECOGNIZER_UNKNOWN);
+        self.metadata.push(None);
+        state_id
+    }
+
+    #[inline]
+    fn branches(&self, state_id: u32) -> &DynamicBranches {
+        &self.branches[state_id as usize]
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    fn metadata(
+        &mut self,
+        state_id: u32,
+        constraint: &Constraint,
+        initial_config: u32,
+        lexer_scan_cache: &DynamicNfaScanCache<'_>,
+        raw_self_loop_cache: &mut FxHashMap<u32, U8Set>,
+        config_self_loop_cache: &mut FxHashMap<u32, U8Set>,
+        traversal_cache: &mut DynamicTraversalCache,
+    ) -> &DynamicRecognizerStateMetadata {
+        let state_index = state_id as usize;
+        if self.metadata[state_index].is_none() {
+            self.initialize_metadata(
+                state_index,
+                constraint,
+                initial_config,
+                lexer_scan_cache,
+                raw_self_loop_cache,
+                config_self_loop_cache,
+                traversal_cache,
+            );
+        }
+        // `initialize_metadata` always fills exactly this slot.
+        unsafe {
+            self.metadata
+                .get_unchecked(state_index)
+                .as_ref()
+                .unwrap_unchecked()
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[cold]
+    #[inline(never)]
+    fn initialize_metadata(
+        &mut self,
+        state_index: usize,
+        constraint: &Constraint,
+        initial_config: u32,
+        lexer_scan_cache: &DynamicNfaScanCache<'_>,
+        raw_self_loop_cache: &mut FxHashMap<u32, U8Set>,
+        config_self_loop_cache: &mut FxHashMap<u32, U8Set>,
+        traversal_cache: &mut DynamicTraversalCache,
+    ) {
+        let mut token_boundary_allowed = false;
+        let mut subtree_loop_bytes = SmallVec::<[U8Set; 4]>::new();
+        let collect_subtree_loops = self.branches[state_index].len() == 1
+            || dynamic_multi_branch_subtree_loop_min_tokens() != usize::MAX;
+        for branch in &self.branches[state_index] {
+            if !branch.initial_prune_guard.allows_token_boundary() {
+                continue;
+            }
+
+            let boundary_allowed = branch.tokenizer_config == initial_config
+                || config_token_boundary_allowed_cached(
+                    constraint,
+                    lexer_scan_cache,
+                    branch.tokenizer_config,
+                    &branch.gss,
+                    traversal_cache,
+                );
+            token_boundary_allowed |= boundary_allowed;
+
+            if collect_subtree_loops
+                && boundary_allowed
+                && branch.initial_prune_guard.is_passed()
+                && branch.tokenizer_config != initial_config
+            {
+                let loop_bytes = cached_config_self_loop_bytes(
+                    constraint,
+                    lexer_scan_cache,
+                    branch.tokenizer_config,
+                    raw_self_loop_cache,
+                    config_self_loop_cache,
+                );
+                if !subtree_loop_bytes.contains(&loop_bytes) {
+                    subtree_loop_bytes.push(loop_bytes);
+                }
+            }
+        }
+        self.metadata[state_index] = Some(DynamicRecognizerStateMetadata {
+            token_boundary_allowed,
+            subtree_loop_bytes,
+        });
+    }
+
+
+    #[allow(clippy::too_many_arguments)]
+    fn step(
+        &mut self,
+        state_id: u32,
+        byte: u8,
+        constraint: &Constraint,
+        initial_config: u32,
+        lexer_scan_cache: &mut DynamicNfaScanCache<'_>,
+        traversal_cache: &mut DynamicTraversalCache,
+        stats: &mut DynamicWalkStats,
+    ) -> Result<Option<u32>, String> {
+        stats.branch_steps += self.branches(state_id).len();
+        if let Some(row) = self.transitions[state_id as usize].as_ref() {
+            let cached = row[byte as usize];
+            if cached != DYNAMIC_RECOGNIZER_UNKNOWN {
+                return Ok((cached != DYNAMIC_RECOGNIZER_DEAD).then_some(cached));
+            }
+        }
+
+        self.transition_misses += 1;
+        let mut next = DynamicBranches::new();
+        for branch_index in 0..self.branches(state_id).len() {
+            let branch = self.branches(state_id)[branch_index].clone();
+            let Some(next_config) = lexer_scan_cache.step_config(branch.tokenizer_config, byte)?
+            else {
+                continue;
+            };
+            let Some(advanced_prune_guard) = branch
+                .initial_prune_guard
+                .advance(constraint, std::slice::from_ref(&byte))
+            else {
+                continue;
+            };
+
+            for config_index in 0..lexer_scan_cache.config_len(next_config) {
+                let matched_state = lexer_scan_cache.config_state(next_config, config_index);
+                for terminal in constraint.tokenizer.matched_terminals_iter(matched_state) {
+                    let Some(advanced_parser) = parser_child_cached(
+                        constraint,
+                        &branch.gss,
+                        terminal,
+                        traversal_cache,
+                    ) else {
+                        continue;
+                    };
+                    let matched_prune_guard = if Some(terminal) == constraint.ignore_terminal {
+                        advanced_prune_guard.clone()
+                    } else {
+                        advanced_prune_guard.remember_terminal_match(
+                            constraint,
+                            matched_state,
+                            terminal,
+                        )
+                    };
+                    next.push(DynamicBranch {
+                        tokenizer_config: initial_config,
+                        gss: advanced_parser,
+                        initial_prune_guard: matched_prune_guard,
+                        fresh_reset: true,
+                    });
+                }
+            }
+
+            next.push(DynamicBranch {
+                tokenizer_config: next_config,
+                gss: branch.gss,
+                initial_prune_guard: advanced_prune_guard,
+                fresh_reset: false,
+            });
+        }
+
+        let target = if next.is_empty() {
+            DYNAMIC_RECOGNIZER_DEAD
+        } else {
+            stats.max_branches = stats.max_branches.max(next.len());
+            self.intern(next)
+        };
+        self.transitions[state_id as usize]
+            .get_or_insert_with(|| Box::new([DYNAMIC_RECOGNIZER_UNKNOWN; 256]))[byte as usize] =
+            target;
+        Ok((target != DYNAMIC_RECOGNIZER_DEAD).then_some(target))
+    }
+
+    fn normalize(
+        &mut self,
+        state_id: u32,
+        constraint: &Constraint,
+        lexer_scan_cache: &mut DynamicNfaScanCache<'_>,
+        traversal_cache: &mut DynamicTraversalCache,
+        stats: &mut DynamicWalkStats,
+    ) -> Result<Option<u32>, String> {
+        let cached = self.normalized[state_id as usize];
+        if cached != DYNAMIC_RECOGNIZER_UNKNOWN {
+            return Ok((cached != DYNAMIC_RECOGNIZER_DEAD).then_some(cached));
+        }
+
+        let mut normalized = DynamicBranches::new();
+        for branch_index in 0..self.branches(state_id).len() {
+            let mut branch = self.branches(state_id)[branch_index].clone();
+            let was_fresh_reset = branch.fresh_reset;
+            let end_config = if was_fresh_reset {
+                branch.fresh_reset = false;
+                branch.tokenizer_config
+            } else {
+                let Some(end_config) =
+                    lexer_scan_cache.residual_config(branch.tokenizer_config)?
+                else {
+                    continue;
+                };
+                end_config
+            };
+            if !was_fresh_reset
+                && !lexer_config_relevant_cached(
+                    constraint,
+                    lexer_scan_cache,
+                    end_config,
+                    &branch.gss,
+                    traversal_cache,
+                )
+            {
+                continue;
+            }
+            branch.tokenizer_config = end_config;
+            normalized.push(branch);
+        }
+
+        let target = if normalized.is_empty() {
+            DYNAMIC_RECOGNIZER_DEAD
+        } else {
+            stats.max_branches = stats.max_branches.max(normalized.len());
+            self.intern(normalized)
+        };
+        self.normalized[state_id as usize] = target;
+        Ok((target != DYNAMIC_RECOGNIZER_DEAD).then_some(target))
+    }
 }
 
 #[inline]
@@ -66,28 +373,74 @@ fn set_mask_bit(buf: &mut [u32], token_id: u32) {
     }
 }
 
+#[inline]
+fn set_mask_bit_known_in_range(buf: &mut [u32], token_id: u32) {
+    let word = token_id as usize / 32;
+    let bit = token_id % 32;
+    debug_assert!(word < buf.len());
+    // Dynamic vocabulary ids come from the same Vocab used to size the mask.
+    // Avoid a bounds branch for every accepted token in large subtree marks.
+    unsafe {
+        *buf.get_unchecked_mut(word) |= 1u32 << bit;
+    }
+}
+
+const DYNAMIC_TOKEN_MARKER_FALLBACK: u64 = 1u64 << 63;
+
+#[inline(always)]
+fn mark_dynamic_token_marker(vocab: &DynamicMaskVocab, marker: u64, buf: &mut [u32]) {
+    debug_assert_ne!(marker, 0);
+    if marker & DYNAMIC_TOKEN_MARKER_FALLBACK == 0 {
+        let word = (marker >> 32) as usize;
+        let bits = marker as u32;
+        debug_assert_ne!(bits, 0);
+        debug_assert!(word < buf.len());
+        unsafe {
+            *buf.get_unchecked_mut(word) |= bits;
+        }
+        return;
+    }
+
+    let canonical_token = ((marker & !DYNAMIC_TOKEN_MARKER_FALLBACK) - 1) as u32;
+    let token_ids = vocab
+        .token_ids(canonical_token)
+        .expect("dynamic vocabulary trie node lacks token ids");
+    for &token_id in token_ids {
+        set_mask_bit_known_in_range(buf, token_id);
+    }
+}
+
 const DYNAMIC_NFA_CONFIG_UNKNOWN: u32 = u32::MAX;
 const DYNAMIC_NFA_CONFIG_DEAD: u32 = u32::MAX - 1;
 
 struct DynamicNfaScanCache<'a> {
     constraint: &'a Constraint,
+    deterministic: bool,
     deadline: Option<Instant>,
     max_collection_items: Option<usize>,
     config_ids: FxHashMap<Vec<u32>, u32>,
     configs: Vec<Box<[u32]>>,
     transitions: Vec<Option<Box<[u32; 256]>>>,
+    residual_configs: Vec<u32>,
     raw_start_config: FxHashMap<u32, u32>,
+}
+
+struct DynamicConfigExecResult {
+    end_config: Option<u32>,
+    matches: Vec<TokenizerMatch>,
 }
 
 impl<'a> DynamicNfaScanCache<'a> {
     fn new(constraint: &'a Constraint, deadline: Option<Instant>) -> Self {
         Self {
             constraint,
+            deterministic: !constraint.tokenizer_has_epsilon_transitions,
             deadline,
             max_collection_items: deadline.map(|_| 5_000_000),
             config_ids: FxHashMap::default(),
             configs: Vec::new(),
             transitions: Vec::new(),
+            residual_configs: Vec::new(),
             raw_start_config: FxHashMap::default(),
         }
     }
@@ -118,10 +471,15 @@ impl<'a> DynamicNfaScanCache<'a> {
         self.config_ids.insert(states.clone(), id);
         self.configs.push(states.into_boxed_slice());
         self.transitions.push(None);
+        self.residual_configs.push(DYNAMIC_NFA_CONFIG_UNKNOWN);
         Ok(id)
     }
 
     fn config_for_raw_start(&mut self, state: u32) -> Result<u32, String> {
+        if self.deterministic {
+            self.raw_start_config.entry(state).or_insert(state);
+            return Ok(state);
+        }
         if let Some(&cached) = self.raw_start_config.get(&state) {
             return Ok(cached);
         }
@@ -135,7 +493,54 @@ impl<'a> DynamicNfaScanCache<'a> {
         Ok(config)
     }
 
+    fn config_for_raw_start_restricted(
+        &mut self,
+        state: u32,
+        admitted: &BitSet,
+        ignore_terminal: Option<TerminalID>,
+    ) -> Result<Option<u32>, String> {
+        let relevant = |tokenizer_state: u32| {
+            let matched = self
+                .constraint
+                .tokenizer
+                .matched_terminal_bitset(tokenizer_state);
+            let future = self
+                .constraint
+                .tokenizer
+                .possible_future_terminals(tokenizer_state);
+            !admitted.is_disjoint(matched)
+                || !admitted.is_disjoint(future)
+                || ignore_terminal.is_some_and(|terminal| {
+                    matched.contains(terminal as usize) || future.contains(terminal as usize)
+                })
+        };
+
+        if self.deterministic {
+            return Ok(relevant(state).then_some(state));
+        }
+        let states = self
+            .constraint
+            .tokenizer
+            .singleton_epsilon_closure(state)
+            .iter()
+            .copied()
+            .filter(|&candidate| relevant(candidate))
+            .collect::<Vec<_>>();
+        if states.is_empty() {
+            return Ok(None);
+        }
+        self.intern_config(states).map(Some)
+    }
+
     fn step_config(&mut self, config: u32, byte: u8) -> Result<Option<u32>, String> {
+        if self.deterministic {
+            let target = self.constraint.tokenizer_fast_transitions.transition(
+                &self.constraint.tokenizer,
+                config,
+                byte,
+            );
+            return Ok((target != u32::MAX).then_some(target));
+        }
         let config_index = config as usize;
         if let Some(row) = self.transitions[config_index].as_ref() {
             let cached = row[byte as usize];
@@ -174,23 +579,50 @@ impl<'a> DynamicNfaScanCache<'a> {
         Ok((target != DYNAMIC_NFA_CONFIG_DEAD).then_some(target))
     }
 
-    fn execute_from_state_all_widths(
+    fn residual_config(&mut self, config: u32) -> Result<Option<u32>, String> {
+        if self.deterministic {
+            return Ok((!self.constraint.tokenizer.is_end(config)).then_some(config));
+        }
+        let config_index = config as usize;
+        let cached = self.residual_configs[config_index];
+        if cached != DYNAMIC_NFA_CONFIG_UNKNOWN {
+            return Ok((cached != DYNAMIC_NFA_CONFIG_DEAD).then_some(cached));
+        }
+
+        let residual_states = self.configs[config_index]
+            .iter()
+            .copied()
+            .filter(|&state| !self.constraint.tokenizer.is_end(state))
+            .collect::<Vec<_>>();
+        let residual = if residual_states.is_empty() {
+            DYNAMIC_NFA_CONFIG_DEAD
+        } else if residual_states.len() == self.configs[config_index].len() {
+            config
+        } else {
+            self.intern_config(residual_states)?
+        };
+        self.residual_configs[config_index] = residual;
+        Ok((residual != DYNAMIC_NFA_CONFIG_DEAD).then_some(residual))
+    }
+
+    fn execute_from_config_all_widths(
         &mut self,
         input: &[u8],
-        start: u32,
-    ) -> Result<TokenizerExecResult, String> {
-        let mut config = self.config_for_raw_start(start)?;
+        start_config: u32,
+    ) -> Result<DynamicConfigExecResult, String> {
+        let mut config = start_config;
         let mut matches = Vec::new();
         for (index, &byte) in input.iter().enumerate() {
             let Some(next_config) = self.step_config(config, byte)? else {
-                return Ok(TokenizerExecResult {
-                    end_state: TokenizerStateSet::new(),
+                return Ok(DynamicConfigExecResult {
+                    end_config: None,
                     matches,
                 });
             };
             config = next_config;
             let width = index + 1;
-            for &state in self.configs[config as usize].iter() {
+            for state_index in 0..self.config_len(config) {
+                let state = self.config_state(config, state_index);
                 for id in self.constraint.tokenizer.matched_terminals_iter(state) {
                     self.check_growth(matches.len(), 1)?;
                     matches.push(TokenizerMatch {
@@ -201,14 +633,48 @@ impl<'a> DynamicNfaScanCache<'a> {
                 }
             }
         }
+        Ok(DynamicConfigExecResult {
+            end_config: self.residual_config(config)?,
+            matches,
+        })
+    }
+
+    fn execute_from_state_all_widths(
+        &mut self,
+        input: &[u8],
+        start: u32,
+    ) -> Result<TokenizerExecResult, String> {
+        let start_config = self.config_for_raw_start(start)?;
+        let execution = self.execute_from_config_all_widths(input, start_config)?;
         let mut end_state = TokenizerStateSet::new();
-        end_state.extend(
-            self.configs[config as usize]
-                .iter()
-                .copied()
-                .filter(|&state| !self.constraint.tokenizer.is_end(state)),
-        );
-        Ok(TokenizerExecResult { end_state, matches })
+        if let Some(end_config) = execution.end_config {
+            for state_index in 0..self.config_len(end_config) {
+                end_state.push(self.config_state(end_config, state_index));
+            }
+        }
+        Ok(TokenizerExecResult {
+            end_state,
+            matches: execution.matches,
+        })
+    }
+
+    #[inline]
+    fn config_len(&self, config: u32) -> usize {
+        if self.deterministic {
+            1
+        } else {
+            self.configs[config as usize].len()
+        }
+    }
+
+    #[inline]
+    fn config_state(&self, config: u32, index: usize) -> u32 {
+        if self.deterministic {
+            debug_assert_eq!(index, 0);
+            config
+        } else {
+            self.configs[config as usize][index]
+        }
     }
 }
 
@@ -239,7 +705,8 @@ fn for_each_token_matching_terminal_from_state(
                     break;
                 };
                 config = next_config;
-                matched = scan_cache.configs[config as usize].iter().any(|&state| {
+                matched = (0..scan_cache.config_len(config)).any(|state_index| {
+                    let state = scan_cache.config_state(config, state_index);
                     constraint
                         .tokenizer
                         .matched_terminals_iter(state)
@@ -475,7 +942,10 @@ fn parser_child(
     // The actual structural advance is already the definitive admissibility
     // test. Running exact admission first would duplicate reduction simulation
     // for every terminal branch explored by the dynamic traversal.
-    let advanced = advance_stacks(&constraint.table, &parser_gss, terminal).apply(|_| ());
+    let advanced = constraint
+        .direct_regular_cached_advance(&parser_gss, terminal)
+        .unwrap_or_else(|| advance_stacks(&constraint.table, &parser_gss, terminal))
+        .apply(|_| ());
     (!advanced.is_empty()).then_some(advanced)
 }
 
@@ -512,7 +982,9 @@ fn token_boundary_allowed(
         return true;
     }
     let parser_gss = with_empty_accumulators(stacks);
-    stack_may_advance_on_any(&constraint.table, &parser_gss, accessible)
+    constraint
+        .direct_regular_may_advance_on_any(&parser_gss, accessible)
+        .unwrap_or_else(|| stack_may_advance_on_any(&constraint.table, &parser_gss, accessible))
 }
 
 fn admissible_terminals_cached<'a>(
@@ -523,8 +995,12 @@ fn admissible_terminals_cached<'a>(
     let key = parser_stacks_cache_key(stacks);
     if !cache.admissible_terminals.contains_key(&key) {
         let parser_gss = with_empty_accumulators(stacks);
-        let candidates = BitSet::all(constraint.table.num_terminals as usize);
-        let admitted = stack_admissible_terminals(&constraint.table, &parser_gss, &candidates);
+        let admitted = constraint
+            .direct_regular_admissible_terminals(&parser_gss)
+            .unwrap_or_else(|| {
+                let candidates = BitSet::all(constraint.table.num_terminals as usize);
+                stack_admissible_terminals(&constraint.table, &parser_gss, &candidates)
+            });
         cache
             .admissible_terminals
             .insert(key, (stacks.clone(), admitted));
@@ -544,8 +1020,28 @@ fn parser_terminal_admissible_cached(
     stacks: &ParserStacks,
     cache: &mut DynamicTraversalCache,
 ) -> bool {
-    Some(terminal) == constraint.ignore_terminal
-        || admissible_terminals_cached(constraint, stacks, cache).contains(terminal as usize)
+    if Some(terminal) == constraint.ignore_terminal {
+        return true;
+    }
+    let stack_key = parser_stacks_cache_key(stacks);
+    let key = (stack_key, terminal);
+    if let Some(&result) = cache.terminal_admissible.get(&key) {
+        return result;
+    }
+    if let Some((cached_stacks, admitted)) = cache.admissible_terminals.get(&stack_key) {
+        debug_assert!(same_parser_stack_language(cached_stacks, stacks));
+        let result = admitted.contains(terminal as usize);
+        cache.terminal_admissible.insert(key, result);
+        return result;
+    }
+    let parser_gss = with_empty_accumulators(stacks);
+    let result = constraint
+        .direct_regular_may_advance_on(&parser_gss, terminal)
+        .unwrap_or_else(|| {
+            admissible_terminals_cached(constraint, stacks, cache).contains(terminal as usize)
+        });
+    cache.terminal_admissible.insert(key, result);
+    result
 }
 
 fn token_boundary_allowed_cached(
@@ -564,7 +1060,30 @@ fn token_boundary_allowed_cached(
         return true;
     }
 
+    if accessible.count_ones() <= 8 {
+        return accessible
+            .iter()
+            .any(|terminal| parser_terminal_admissible_cached(
+                constraint,
+                terminal as TerminalID,
+                stacks,
+                cache,
+            ));
+    }
     !admissible_terminals_cached(constraint, stacks, cache).is_disjoint(accessible)
+}
+
+fn config_token_boundary_allowed_cached(
+    constraint: &Constraint,
+    scan_cache: &DynamicNfaScanCache<'_>,
+    tokenizer_config: u32,
+    stacks: &ParserStacks,
+    cache: &mut DynamicTraversalCache,
+) -> bool {
+    (0..scan_cache.config_len(tokenizer_config)).any(|state_index| {
+        let tokenizer_state = scan_cache.config_state(tokenizer_config, state_index);
+            token_boundary_allowed_cached(constraint, tokenizer_state, stacks, cache)
+    })
 }
 
 fn lexer_state_relevant_cached(
@@ -589,34 +1108,119 @@ fn lexer_state_relevant_cached(
     let result = if ignore_relevant {
         true
     } else {
-        let admitted = admissible_terminals_cached(constraint, stacks, cache);
-        !admitted.is_disjoint(accessible) || !admitted.is_disjoint(matched)
+        let mut candidates = accessible.clone();
+        candidates.union_with(matched);
+        if candidates.count_ones() <= 8 {
+            candidates.iter().any(|terminal| {
+                parser_terminal_admissible_cached(
+                    constraint,
+                    terminal as TerminalID,
+                    stacks,
+                    cache,
+                )
+            })
+        } else {
+            !admissible_terminals_cached(constraint, stacks, cache).is_disjoint(&candidates)
+        }
     };
     cache.lexer_relevant.insert(key, result);
     result
 }
 
+fn lexer_config_relevant_cached(
+    constraint: &Constraint,
+    scan_cache: &DynamicNfaScanCache<'_>,
+    tokenizer_config: u32,
+    stacks: &ParserStacks,
+    cache: &mut DynamicTraversalCache,
+) -> bool {
+    (0..scan_cache.config_len(tokenizer_config)).any(|state_index| {
+        let tokenizer_state = scan_cache.config_state(tokenizer_config, state_index);
+            lexer_state_relevant_cached(constraint, tokenizer_state, stacks, cache)
+    })
+}
+
 #[inline]
 fn mark_subtree_tokens(
-    constraint: &Constraint,
+    vocab: &DynamicMaskVocab,
     trie: &DynamicMaskTrie,
     node: u32,
     buf: &mut [u32],
 ) {
-    for &canonical_token_id in trie.subtree_tokens(node) {
-        let token_ids = constraint
-            .dynamic_mask_vocab_for_runtime()
-            .token_ids(canonical_token_id)
-            .expect("dynamic vocabulary trie node lacks token ids");
-        for &token_id in token_ids {
-            set_mask_bit(buf, token_id);
-        }
+    for &token_id in vocab.subtree_original_tokens(node) {
+        set_mask_bit_known_in_range(buf, token_id);
     }
 }
 
 enum RawSelfLoopSubtree {
     CannotSkip,
     MarkAllTokens,
+}
+
+fn dynamic_subtree_loop_min_tokens() -> usize {
+    static MIN_TOKENS: OnceLock<usize> = OnceLock::new();
+    *MIN_TOKENS.get_or_init(|| {
+        std::env::var("GLRMASK_DYNAMIC_SUBTREE_MIN_TOKENS")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|&value| value >= 2)
+            .unwrap_or(2)
+    })
+}
+
+fn dynamic_multi_branch_subtree_loop_min_tokens() -> usize {
+    static MIN_TOKENS: OnceLock<usize> = OnceLock::new();
+    *MIN_TOKENS.get_or_init(|| {
+        std::env::var("GLRMASK_DYNAMIC_MULTI_BRANCH_SUBTREE_MIN_TOKENS")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|&value| value >= 2)
+            .unwrap_or(usize::MAX)
+    })
+}
+
+struct DynamicDeadlinePoll {
+    deadline: Option<Instant>,
+    remaining: u16,
+}
+
+#[derive(Default)]
+struct DynamicWalkStats {
+    work_items: usize,
+    trie_edges: usize,
+    branch_steps: usize,
+    duplicate_branches: usize,
+    max_branches: usize,
+    subtree_marks: usize,
+    subtree_mark_tokens: usize,
+    recognizer_states: usize,
+    recognizer_transition_misses: usize,
+}
+
+impl DynamicDeadlinePoll {
+    fn new(deadline: Option<Instant>) -> Self {
+        Self {
+            deadline,
+            remaining: 0,
+        }
+    }
+
+    #[inline]
+    fn check(&mut self) -> Result<(), String> {
+        let Some(deadline) = self.deadline else {
+            return Ok(());
+        };
+        if self.remaining != 0 {
+            self.remaining -= 1;
+            return Ok(());
+        }
+        self.remaining = 1_023;
+        if Instant::now() >= deadline {
+            Err("glrmask_dynamic mask generation timed out".to_owned())
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[inline]
@@ -628,6 +1232,25 @@ fn cached_self_loop_bytes(
     *cache
         .entry(tokenizer_state)
         .or_insert_with(|| constraint.tokenizer.self_loop_bytes(tokenizer_state))
+}
+
+fn cached_config_self_loop_bytes(
+    constraint: &Constraint,
+    scan_cache: &DynamicNfaScanCache<'_>,
+    tokenizer_config: u32,
+    raw_cache: &mut FxHashMap<u32, U8Set>,
+    config_cache: &mut FxHashMap<u32, U8Set>,
+) -> U8Set {
+    if let Some(&cached) = config_cache.get(&tokenizer_config) {
+        return cached;
+    }
+    let mut bytes = U8Set::all();
+    for state_index in 0..scan_cache.config_len(tokenizer_config) {
+        let tokenizer_state = scan_cache.config_state(tokenizer_config, state_index);
+        bytes &= cached_self_loop_bytes(constraint, tokenizer_state, raw_cache);
+    }
+    config_cache.insert(tokenizer_config, bytes);
+    bytes
 }
 
 /// A raw tokenizer-state self-loop is a particularly strong residual-language
@@ -643,28 +1266,51 @@ fn raw_self_loop_subtree(
     constraint: &Constraint,
     trie: &DynamicMaskTrie,
     node: u32,
-    tokenizer_state: u32,
+    scan_cache: &DynamicNfaScanCache<'_>,
+    tokenizer_config: u32,
     stacks: &ParserStacks,
     initial_prune_guard: &InitialPruneGuard,
-    initial_tsid: u32,
-    self_loop_cache: &mut FxHashMap<u32, U8Set>,
+    initial_config: u32,
+    raw_self_loop_cache: &mut FxHashMap<u32, U8Set>,
+    config_self_loop_cache: &mut FxHashMap<u32, U8Set>,
     traversal_cache: &mut DynamicTraversalCache,
 ) -> RawSelfLoopSubtree {
     if !initial_prune_guard.is_passed() {
         return RawSelfLoopSubtree::CannotSkip;
     }
 
+    // A one-token subtree has no traversal work to eliminate. Running the
+    // self-loop certificate there merely replaces the ordinary boundary check
+    // with multiple hash lookups and a 256-bit subset test. Large vocabularies
+    // contain tens of thousands of such leaves, so reserve this shortcut for
+    // actual multi-token subtrees.
+    if trie.subtree_tokens(node).len() < dynamic_subtree_loop_min_tokens() {
+        return RawSelfLoopSubtree::CannotSkip;
+    }
+
     // Work at the initial state may represent either an untouched lexer or a
     // lexer reset after an in-token terminal match. The current work item does
     // not distinguish those cases, so keep this optimization conservative.
-    if tokenizer_state == initial_tsid {
+    if tokenizer_config == initial_config {
         return RawSelfLoopSubtree::CannotSkip;
     }
 
     let subtree_bytes = U8Set::from_words(trie.subtree_bytes(node));
-    let loop_bytes = cached_self_loop_bytes(constraint, tokenizer_state, self_loop_cache);
+    let loop_bytes = cached_config_self_loop_bytes(
+        constraint,
+        scan_cache,
+        tokenizer_config,
+        raw_self_loop_cache,
+        config_self_loop_cache,
+    );
     if !subtree_bytes.is_subset(&loop_bytes)
-        || !token_boundary_allowed_cached(constraint, tokenizer_state, stacks, traversal_cache)
+        || !config_token_boundary_allowed_cached(
+            constraint,
+            scan_cache,
+            tokenizer_config,
+            stacks,
+            traversal_cache,
+        )
     {
         return RawSelfLoopSubtree::CannotSkip;
     }
@@ -672,8 +1318,169 @@ fn raw_self_loop_subtree(
     RawSelfLoopSubtree::MarkAllTokens
 }
 
+#[allow(clippy::too_many_arguments)]
+fn process_dynamic_trie_node(
+    state: &ConstraintState<'_>,
+    vocab: &DynamicMaskVocab,
+    trie: &DynamicMaskTrie,
+    node_id: u32,
+    branches: &DynamicBranches,
+    initial_config: u32,
+    lexer_scan_cache: &mut DynamicNfaScanCache<'_>,
+    raw_self_loop_cache: &mut FxHashMap<u32, U8Set>,
+    config_self_loop_cache: &mut FxHashMap<u32, U8Set>,
+    traversal_cache: &mut DynamicTraversalCache,
+    buf: &mut [u32],
+    subtree_marks: &mut usize,
+    subtree_mark_tokens: &mut usize,
+) -> bool {
+    for branch in branches {
+        if matches!(
+            raw_self_loop_subtree(
+                state.constraint,
+                trie,
+                node_id,
+                lexer_scan_cache,
+                branch.tokenizer_config,
+                &branch.gss,
+                &branch.initial_prune_guard,
+                initial_config,
+                raw_self_loop_cache,
+                config_self_loop_cache,
+                traversal_cache,
+            ),
+            RawSelfLoopSubtree::MarkAllTokens
+        ) {
+            *subtree_marks += 1;
+            *subtree_mark_tokens += trie.subtree_tokens(node_id).len();
+            mark_subtree_tokens(vocab, trie, node_id, buf);
+            return true;
+        }
+    }
+
+    let token_marker = vocab.node_token_marker(node_id);
+    if token_marker == 0 {
+        return false;
+    }
+    let allowed = branches.iter().any(|branch| {
+        branch.initial_prune_guard.allows_token_boundary()
+            && (branch.tokenizer_config == initial_config
+                || config_token_boundary_allowed_cached(
+                    state.constraint,
+                    lexer_scan_cache,
+                    branch.tokenizer_config,
+                    &branch.gss,
+                    traversal_cache,
+                ))
+    });
+    if allowed {
+        mark_dynamic_token_marker(vocab, token_marker, buf);
+    }
+    false
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn process_interned_dynamic_trie_node(
+    state: &ConstraintState<'_>,
+    vocab: &DynamicMaskVocab,
+    trie: &DynamicMaskTrie,
+    node_id: u32,
+    recognizer: &mut DynamicRecognizerStateCache,
+    recognizer_state: u32,
+    initial_config: u32,
+    lexer_scan_cache: &DynamicNfaScanCache<'_>,
+    raw_self_loop_cache: &mut FxHashMap<u32, U8Set>,
+    config_self_loop_cache: &mut FxHashMap<u32, U8Set>,
+    traversal_cache: &mut DynamicTraversalCache,
+    buf: &mut [u32],
+    stats: &mut DynamicWalkStats,
+) -> bool {
+    let branch_count = recognizer.branches(recognizer_state).len();
+    let metadata = recognizer.metadata(
+        recognizer_state,
+        state.constraint,
+        initial_config,
+        lexer_scan_cache,
+        raw_self_loop_cache,
+        config_self_loop_cache,
+        traversal_cache,
+    );
+
+    // Most recognizer states have no exact self-loop certificate. Keep that
+    // overwhelmingly common node path independent of subtree metadata: only a
+    // token-bearing node can change the mask, and non-token radix nodes need
+    // no work at all.
+    if metadata.subtree_loop_bytes.is_empty() {
+        if metadata.token_boundary_allowed {
+            let token_marker = vocab.node_token_marker(node_id);
+            if token_marker != 0 {
+                mark_dynamic_token_marker(vocab, token_marker, buf);
+            }
+        }
+        return false;
+    }
+
+    process_interned_dynamic_trie_node_with_loops(
+        state,
+        vocab,
+        trie,
+        node_id,
+        branch_count,
+        metadata,
+        buf,
+        stats,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn process_interned_dynamic_trie_node_with_loops(
+    state: &ConstraintState<'_>,
+    vocab: &DynamicMaskVocab,
+    trie: &DynamicMaskTrie,
+    node_id: u32,
+    branch_count: usize,
+    metadata: &DynamicRecognizerStateMetadata,
+    buf: &mut [u32],
+    stats: &mut DynamicWalkStats,
+) -> bool {
+    let subtree_tokens = trie.subtree_tokens(node_id);
+    let min_subtree_tokens = if branch_count == 1 {
+        dynamic_subtree_loop_min_tokens()
+    } else {
+        dynamic_multi_branch_subtree_loop_min_tokens()
+    };
+    if subtree_tokens.len() >= min_subtree_tokens {
+        let subtree_bytes = U8Set::from_words(trie.subtree_bytes(node_id));
+        if metadata
+            .subtree_loop_bytes
+            .iter()
+            .any(|loop_bytes| subtree_bytes.is_subset(loop_bytes))
+        {
+            stats.subtree_marks += 1;
+            stats.subtree_mark_tokens += subtree_tokens.len();
+            mark_subtree_tokens(vocab, trie, node_id, buf);
+            return true;
+        }
+    }
+
+    if metadata.token_boundary_allowed {
+        let token_marker = vocab.node_token_marker(node_id);
+        if token_marker != 0 {
+            mark_dynamic_token_marker(vocab, token_marker, buf);
+        }
+    }
+    false
+}
+
 const DYNAMIC_MASK_CACHE_MAX_STACKS: usize = 4_096;
 const DYNAMIC_MASK_CACHE_MAX_DEPTH: u32 = 256;
+
+fn dynamic_mask_cache_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("GLRMASK_DISABLE_DYNAMIC_MASK_CACHE").is_none())
+}
 
 fn dynamic_mask_state_key(state: &ConstraintState<'_>) -> Option<DynamicMaskStateKey> {
     let mut remaining = DYNAMIC_MASK_CACHE_MAX_STACKS;
@@ -728,6 +1535,697 @@ fn same_parser_stack_language(left: &ParserStacks, right: &ParserStacks) -> bool
             .is_some_and(|(left, right)| left == right)
 }
 
+fn push_unique_dynamic_branch(
+    branches: &mut DynamicBranches,
+    branch: DynamicBranch,
+) -> bool {
+    branches.push(branch);
+    true
+}
+
+fn try_advance_scalar_branch_over_segment(
+    constraint: &Constraint,
+    input: &DynamicBranches,
+    segment: &[u8],
+    lexer_scan_cache: &mut DynamicNfaScanCache<'_>,
+    traversal_cache: &mut DynamicTraversalCache,
+    branch_steps: &mut usize,
+) -> Result<Option<DynamicBranches>, String> {
+    let [branch] = input.as_slice() else {
+        return Ok(None);
+    };
+    if branch.fresh_reset
+        || !matches!(branch.initial_prune_guard, InitialPruneGuard::Passed)
+    {
+        return Ok(None);
+    }
+
+    let mut tokenizer_config = branch.tokenizer_config;
+    for &byte in segment {
+        *branch_steps += 1;
+        let Some(next_config) = lexer_scan_cache.step_config(tokenizer_config, byte)? else {
+            return Ok(Some(DynamicBranches::new()));
+        };
+        for state_index in 0..lexer_scan_cache.config_len(next_config) {
+            let state = lexer_scan_cache.config_state(next_config, state_index);
+            for terminal in constraint.tokenizer.matched_terminals_iter(state) {
+                if parser_terminal_admissible_cached(
+                    constraint,
+                    terminal,
+                    &branch.gss,
+                    traversal_cache,
+                ) {
+                    // A parser-actionable match forks a reset branch from this
+                    // byte. Re-run the uncommon edge through the exact general
+                    // branch engine rather than burdening the scalar loop.
+                    return Ok(None);
+                }
+            }
+        }
+        tokenizer_config = next_config;
+    }
+
+    let Some(tokenizer_config) = lexer_scan_cache.residual_config(tokenizer_config)? else {
+        return Ok(Some(DynamicBranches::new()));
+    };
+    if !lexer_config_relevant_cached(
+        constraint,
+        lexer_scan_cache,
+        tokenizer_config,
+        &branch.gss,
+        traversal_cache,
+    ) {
+        return Ok(Some(DynamicBranches::new()));
+    }
+
+    let mut result = DynamicBranches::new();
+    result.push(DynamicBranch {
+        tokenizer_config,
+        gss: branch.gss.clone(),
+        initial_prune_guard: InitialPruneGuard::Passed,
+        fresh_reset: false,
+    });
+    Ok(Some(result))
+}
+
+fn advance_dynamic_branches_over_segment(
+    constraint: &Constraint,
+    input: &DynamicBranches,
+    segment: &[u8],
+    initial_config: u32,
+    lexer_scan_cache: &mut DynamicNfaScanCache<'_>,
+    traversal_cache: &mut DynamicTraversalCache,
+    branch_steps: &mut usize,
+    duplicate_branches: &mut usize,
+    max_branches: &mut usize,
+) -> Result<DynamicBranches, String> {
+    if let Some(result) = try_advance_scalar_branch_over_segment(
+        constraint,
+        input,
+        segment,
+        lexer_scan_cache,
+        traversal_cache,
+        branch_steps,
+    )? {
+        *max_branches = (*max_branches).max(result.len());
+        return Ok(result);
+    }
+
+    let mut current = input.clone();
+    let mut next = DynamicBranches::new();
+
+    for &byte in segment {
+        next.clear();
+        for branch in current.drain(..) {
+            *branch_steps += 1;
+            let Some(next_config) = lexer_scan_cache.step_config(branch.tokenizer_config, byte)?
+            else {
+                continue;
+            };
+            let Some(advanced_prune_guard) = branch
+                .initial_prune_guard
+                .advance(constraint, std::slice::from_ref(&byte))
+            else {
+                continue;
+            };
+
+            let config_len = lexer_scan_cache.config_len(next_config);
+            for state_index in 0..config_len {
+                let matched_state = lexer_scan_cache.config_state(next_config, state_index);
+                for terminal in constraint.tokenizer.matched_terminals_iter(matched_state) {
+                    let Some(advanced_parser) = parser_child_cached(
+                        constraint,
+                        &branch.gss,
+                        terminal,
+                        traversal_cache,
+                    ) else {
+                        continue;
+                    };
+                    let matched_prune_guard = if Some(terminal) == constraint.ignore_terminal {
+                        advanced_prune_guard.clone()
+                    } else {
+                        advanced_prune_guard.remember_terminal_match(
+                            constraint,
+                            matched_state,
+                            terminal,
+                        )
+                    };
+                    if !push_unique_dynamic_branch(
+                        &mut next,
+                        DynamicBranch {
+                            tokenizer_config: initial_config,
+                            gss: advanced_parser,
+                            initial_prune_guard: matched_prune_guard,
+                            fresh_reset: true,
+                        },
+                    ) {
+                        *duplicate_branches += 1;
+                    }
+                }
+            }
+
+            if !push_unique_dynamic_branch(
+                &mut next,
+                DynamicBranch {
+                    tokenizer_config: next_config,
+                    gss: branch.gss,
+                    initial_prune_guard: advanced_prune_guard,
+                    fresh_reset: false,
+                },
+            ) {
+                *duplicate_branches += 1;
+            }
+        }
+        std::mem::swap(&mut current, &mut next);
+        *max_branches = (*max_branches).max(current.len());
+        if current.is_empty() {
+            return Ok(current);
+        }
+    }
+
+    next.clear();
+    for mut branch in current.drain(..) {
+        let was_fresh_reset = branch.fresh_reset;
+        let end_config = if was_fresh_reset {
+            branch.fresh_reset = false;
+            branch.tokenizer_config
+        } else {
+            let Some(end_config) = lexer_scan_cache.residual_config(branch.tokenizer_config)? else {
+                continue;
+            };
+            end_config
+        };
+        if !was_fresh_reset
+            && !lexer_config_relevant_cached(
+            constraint,
+            lexer_scan_cache,
+            end_config,
+            &branch.gss,
+            traversal_cache,
+        )
+        {
+            continue;
+        }
+        if !push_unique_dynamic_branch(
+            &mut next,
+            DynamicBranch {
+                tokenizer_config: end_config,
+                gss: branch.gss,
+                initial_prune_guard: branch.initial_prune_guard,
+                fresh_reset: false,
+            },
+        ) {
+            *duplicate_branches += 1;
+        }
+    }
+    *max_branches = (*max_branches).max(next.len());
+    Ok(next)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_scalar_dynamic_trie_node(
+    state: &ConstraintState<'_>,
+    vocab: &DynamicMaskVocab,
+    trie: &DynamicMaskTrie,
+    node_id: u32,
+    tokenizer_config: u32,
+    stacks: &ParserStacks,
+    initial_config: u32,
+    lexer_scan_cache: &DynamicNfaScanCache<'_>,
+    raw_self_loop_cache: &mut FxHashMap<u32, U8Set>,
+    config_self_loop_cache: &mut FxHashMap<u32, U8Set>,
+    traversal_cache: &mut DynamicTraversalCache,
+    buf: &mut [u32],
+    stats: &mut DynamicWalkStats,
+) -> bool {
+    if matches!(
+        raw_self_loop_subtree(
+            state.constraint,
+            trie,
+            node_id,
+            lexer_scan_cache,
+            tokenizer_config,
+            stacks,
+            &InitialPruneGuard::Passed,
+            initial_config,
+            raw_self_loop_cache,
+            config_self_loop_cache,
+            traversal_cache,
+        ),
+        RawSelfLoopSubtree::MarkAllTokens
+    ) {
+        stats.subtree_marks += 1;
+        stats.subtree_mark_tokens += trie.subtree_tokens(node_id).len();
+        mark_subtree_tokens(vocab, trie, node_id, buf);
+        return true;
+    }
+
+    let token_marker = vocab.node_token_marker(node_id);
+    if token_marker == 0 {
+        return false;
+    }
+    if tokenizer_config == initial_config
+        || config_token_boundary_allowed_cached(
+            state.constraint,
+            lexer_scan_cache,
+            tokenizer_config,
+            stacks,
+            traversal_cache,
+    )
+    {
+        mark_dynamic_token_marker(vocab, token_marker, buf);
+    }
+    false
+}
+
+#[allow(clippy::too_many_arguments)]
+fn walk_scalar_dynamic_subtree(
+    state: &ConstraintState<'_>,
+    vocab: &DynamicMaskVocab,
+    trie: &DynamicMaskTrie,
+    root_depth: u16,
+    walk_start: usize,
+    walk_end: usize,
+    root_config: u32,
+    stacks: &ParserStacks,
+    initial_config: u32,
+    lexer_scan_cache: &mut DynamicNfaScanCache<'_>,
+    traversal_cache: &mut DynamicTraversalCache,
+    raw_self_loop_cache: &mut FxHashMap<u32, U8Set>,
+    config_self_loop_cache: &mut FxHashMap<u32, U8Set>,
+    deadline_poll: &mut DynamicDeadlinePoll,
+    buf: &mut [u32],
+    stats: &mut DynamicWalkStats,
+) -> Result<(), String> {
+    let mut config_stack = Vec::<u32>::with_capacity(64);
+    config_stack.push(root_config);
+    let walk_edges = trie.walk_edges();
+    let mut walk_index = walk_start;
+
+    while walk_index < walk_end {
+        deadline_poll.check()?;
+        let edge = walk_edges[walk_index];
+        let parent_index = usize::from(
+            edge.parent_depth
+                .checked_sub(root_depth)
+                .expect("scalar trie walk escaped its subtree root"),
+        );
+        debug_assert!(parent_index < config_stack.len());
+        config_stack.truncate(parent_index + 1);
+        let parent_config = config_stack[parent_index];
+        stats.trie_edges += 1;
+
+        let mut tokenizer_config = parent_config;
+        let mut needs_general = false;
+        let mut dead = false;
+        for &byte in trie.walk_edge_bytes(&edge) {
+            stats.branch_steps += 1;
+            let Some(next_config) = lexer_scan_cache.step_config(tokenizer_config, byte)? else {
+                dead = true;
+                break;
+            };
+            for state_index in 0..lexer_scan_cache.config_len(next_config) {
+                let matched_state = lexer_scan_cache.config_state(next_config, state_index);
+                if state
+                    .constraint
+                    .tokenizer
+                    .matched_terminals_iter(matched_state)
+                    .any(|terminal| {
+                        parser_terminal_admissible_cached(
+                            state.constraint,
+                            terminal,
+                            stacks,
+                            traversal_cache,
+                        )
+                    })
+                {
+                    needs_general = true;
+                    break;
+                }
+            }
+            if needs_general {
+                break;
+            }
+            tokenizer_config = next_config;
+        }
+
+        if dead {
+            walk_index = edge.subtree_end as usize;
+            continue;
+        }
+
+        if needs_general {
+            let mut parent_branches = DynamicBranches::new();
+            parent_branches.push(DynamicBranch {
+                tokenizer_config: parent_config,
+                gss: stacks.clone(),
+                initial_prune_guard: InitialPruneGuard::Passed,
+                fresh_reset: false,
+            });
+            let child_branches = advance_dynamic_branches_over_segment(
+                state.constraint,
+                &parent_branches,
+                trie.walk_edge_bytes(&edge),
+                initial_config,
+                lexer_scan_cache,
+                traversal_cache,
+                &mut stats.branch_steps,
+                &mut stats.duplicate_branches,
+                &mut stats.max_branches,
+            )?;
+            if !child_branches.is_empty() {
+                walk_dynamic_subtree(
+                    state,
+                    vocab,
+                    trie,
+                    edge.child,
+                    edge.parent_depth + 1,
+                    walk_index + 1,
+                    edge.subtree_end as usize,
+                    child_branches,
+                    initial_config,
+                    lexer_scan_cache,
+                    traversal_cache,
+                    raw_self_loop_cache,
+                    config_self_loop_cache,
+                    deadline_poll,
+                    buf,
+                    stats,
+                )?;
+            }
+            walk_index = edge.subtree_end as usize;
+            continue;
+        }
+
+        let Some(tokenizer_config) = lexer_scan_cache.residual_config(tokenizer_config)? else {
+            walk_index = edge.subtree_end as usize;
+            continue;
+        };
+        if !lexer_config_relevant_cached(
+            state.constraint,
+            lexer_scan_cache,
+            tokenizer_config,
+            stacks,
+            traversal_cache,
+        ) {
+            walk_index = edge.subtree_end as usize;
+            continue;
+        }
+
+        stats.work_items += 1;
+        if process_scalar_dynamic_trie_node(
+            state,
+            vocab,
+            trie,
+            edge.child,
+            tokenizer_config,
+            stacks,
+            initial_config,
+            lexer_scan_cache,
+            raw_self_loop_cache,
+            config_self_loop_cache,
+            traversal_cache,
+            buf,
+            stats,
+        ) {
+            walk_index = edge.subtree_end as usize;
+            continue;
+        }
+
+        config_stack.push(tokenizer_config);
+        walk_index += 1;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn walk_dynamic_subtree(
+    state: &ConstraintState<'_>,
+    vocab: &DynamicMaskVocab,
+    trie: &DynamicMaskTrie,
+    root_node: u32,
+    root_depth: u16,
+    walk_start: usize,
+    walk_end: usize,
+    root_branches: DynamicBranches,
+    initial_config: u32,
+    lexer_scan_cache: &mut DynamicNfaScanCache<'_>,
+    traversal_cache: &mut DynamicTraversalCache,
+    raw_self_loop_cache: &mut FxHashMap<u32, U8Set>,
+    config_self_loop_cache: &mut FxHashMap<u32, U8Set>,
+    deadline_poll: &mut DynamicDeadlinePoll,
+    buf: &mut [u32],
+    stats: &mut DynamicWalkStats,
+) -> Result<(), String> {
+    stats.work_items += 1;
+    stats.max_branches = stats.max_branches.max(root_branches.len());
+    if process_dynamic_trie_node(
+        state,
+        vocab,
+        trie,
+        root_node,
+        &root_branches,
+        initial_config,
+        lexer_scan_cache,
+        raw_self_loop_cache,
+        config_self_loop_cache,
+        traversal_cache,
+        buf,
+        &mut stats.subtree_marks,
+        &mut stats.subtree_mark_tokens,
+    ) {
+        return Ok(());
+    }
+
+    if let [branch] = root_branches.as_slice()
+        && !branch.fresh_reset
+        && matches!(branch.initial_prune_guard, InitialPruneGuard::Passed)
+    {
+        return walk_scalar_dynamic_subtree(
+            state,
+            vocab,
+            trie,
+            root_depth,
+            walk_start,
+            walk_end,
+            branch.tokenizer_config,
+            &branch.gss,
+            initial_config,
+            lexer_scan_cache,
+            traversal_cache,
+            raw_self_loop_cache,
+            config_self_loop_cache,
+            deadline_poll,
+            buf,
+            stats,
+        );
+    }
+
+    let mut branch_stack = Vec::<DynamicBranches>::with_capacity(64);
+    branch_stack.push(root_branches);
+    let walk_edges = trie.walk_edges();
+    let mut walk_index = walk_start;
+    while walk_index < walk_end {
+        deadline_poll.check()?;
+        let edge = walk_edges[walk_index];
+        let parent_index = usize::from(
+            edge.parent_depth
+                .checked_sub(root_depth)
+                .expect("dynamic trie walk escaped its subtree root"),
+        );
+        debug_assert!(parent_index < branch_stack.len());
+        branch_stack.truncate(parent_index + 1);
+        stats.trie_edges += 1;
+        let child_branches = advance_dynamic_branches_over_segment(
+            state.constraint,
+            &branch_stack[parent_index],
+            trie.walk_edge_bytes(&edge),
+            initial_config,
+            lexer_scan_cache,
+            traversal_cache,
+            &mut stats.branch_steps,
+            &mut stats.duplicate_branches,
+            &mut stats.max_branches,
+        )?;
+        if child_branches.is_empty() {
+            walk_index = edge.subtree_end as usize;
+            continue;
+        }
+
+        stats.work_items += 1;
+        if process_dynamic_trie_node(
+            state,
+            vocab,
+            trie,
+            edge.child,
+            &child_branches,
+            initial_config,
+            lexer_scan_cache,
+            raw_self_loop_cache,
+            config_self_loop_cache,
+            traversal_cache,
+            buf,
+            &mut stats.subtree_marks,
+            &mut stats.subtree_mark_tokens,
+        ) {
+            walk_index = edge.subtree_end as usize;
+            continue;
+        }
+
+        if let [branch] = child_branches.as_slice()
+            && !branch.fresh_reset
+            && matches!(branch.initial_prune_guard, InitialPruneGuard::Passed)
+        {
+            walk_scalar_dynamic_subtree(
+                state,
+                vocab,
+                trie,
+                edge.parent_depth + 1,
+                walk_index + 1,
+                edge.subtree_end as usize,
+                branch.tokenizer_config,
+                &branch.gss,
+                initial_config,
+                lexer_scan_cache,
+                traversal_cache,
+                raw_self_loop_cache,
+                config_self_loop_cache,
+                deadline_poll,
+                buf,
+                stats,
+            )?;
+            walk_index = edge.subtree_end as usize;
+            continue;
+        }
+
+        branch_stack.push(child_branches);
+        walk_index += 1;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn walk_interned_dynamic_trie(
+    state: &ConstraintState<'_>,
+    vocab: &DynamicMaskVocab,
+    trie: &DynamicMaskTrie,
+    projection: Option<&DynamicSelfLoopProjection>,
+    root_branches: DynamicBranches,
+    initial_config: u32,
+    lexer_scan_cache: &mut DynamicNfaScanCache<'_>,
+    traversal_cache: &mut DynamicTraversalCache,
+    raw_self_loop_cache: &mut FxHashMap<u32, U8Set>,
+    config_self_loop_cache: &mut FxHashMap<u32, U8Set>,
+    deadline_poll: &mut DynamicDeadlinePoll,
+    buf: &mut [u32],
+    stats: &mut DynamicWalkStats,
+) -> Result<(), String> {
+    let mut recognizer = DynamicRecognizerStateCache::new();
+    let root_state = recognizer.intern(root_branches);
+    stats.max_branches = stats.max_branches.max(recognizer.branches(root_state).len());
+    stats.work_items += 1;
+    let root_processed = process_interned_dynamic_trie_node(
+        state,
+        vocab,
+        trie,
+        0,
+        &mut recognizer,
+        root_state,
+        initial_config,
+        lexer_scan_cache,
+        raw_self_loop_cache,
+        config_self_loop_cache,
+        traversal_cache,
+        buf,
+        stats,
+    );
+    if root_processed {
+        stats.recognizer_states = recognizer.branches.len();
+        stats.recognizer_transition_misses = recognizer.transition_misses;
+        return Ok(());
+    }
+
+    let mut state_stack = Vec::<u32>::with_capacity(64);
+    state_stack.push(root_state);
+    let walk_edges = trie.walk_edges();
+    let mut walk_index = 0usize;
+    while walk_index < walk_edges.len() {
+        deadline_poll.check()?;
+        let edge = walk_edges[walk_index];
+        if projection.is_some_and(|projection| projection.subtree_is_safe(edge.child)) {
+            stats.subtree_marks += 1;
+            stats.subtree_mark_tokens += trie.subtree_tokens(edge.child).len();
+            walk_index = edge.subtree_end as usize;
+            continue;
+        }
+        let parent_depth = edge.parent_depth as usize;
+        debug_assert!(parent_depth < state_stack.len());
+        state_stack.truncate(parent_depth + 1);
+        let mut recognizer_state = state_stack[parent_depth];
+        stats.trie_edges += 1;
+        let mut alive = true;
+        for &byte in trie.walk_edge_bytes(&edge) {
+            let Some(next_state) = recognizer.step(
+                recognizer_state,
+                byte,
+                state.constraint,
+                initial_config,
+                lexer_scan_cache,
+                traversal_cache,
+                stats,
+            )? else {
+                alive = false;
+                break;
+            };
+            recognizer_state = next_state;
+        }
+        if !alive {
+            walk_index = edge.subtree_end as usize;
+            continue;
+        }
+
+        let normalized = recognizer.normalize(
+            recognizer_state,
+            state.constraint,
+            lexer_scan_cache,
+            traversal_cache,
+            stats,
+        )?;
+        let Some(recognizer_state) = normalized else {
+            walk_index = edge.subtree_end as usize;
+            continue;
+        };
+
+        stats.work_items += 1;
+        let processed = process_interned_dynamic_trie_node(
+            state,
+            vocab,
+            trie,
+            edge.child,
+            &mut recognizer,
+            recognizer_state,
+            initial_config,
+            lexer_scan_cache,
+            raw_self_loop_cache,
+            config_self_loop_cache,
+            traversal_cache,
+            buf,
+            stats,
+        );
+        if processed {
+            walk_index = edge.subtree_end as usize;
+            continue;
+        }
+
+        state_stack.push(recognizer_state);
+        walk_index += 1;
+    }
+
+    stats.recognizer_states = recognizer.branches.len();
+    stats.recognizer_transition_misses = recognizer.transition_misses;
+    Ok(())
+}
+
 fn fill_mask_dynamic_impl(
     state: &ConstraintState<'_>,
     buf: &mut [u32],
@@ -737,18 +2235,14 @@ fn fill_mask_dynamic_impl(
     assert!(buf.len() >= required, "mask buffer is smaller than constraint mask");
     let (buf, tail) = buf.split_at_mut(required);
     tail.fill(0);
-    let check_deadline = || {
-        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            Err("glrmask_dynamic mask generation timed out".to_owned())
-        } else {
-            Ok(())
-        }
-    };
+    let mut deadline_poll = DynamicDeadlinePoll::new(deadline);
     let vocab = state.constraint.dynamic_mask_vocab_for_runtime();
     let profile = std::env::var_os("GLRMASK_PROFILE_DYNAMIC_MASK").is_some();
     let total_started_at = profile.then(std::time::Instant::now);
     let key_started_at = profile.then(std::time::Instant::now);
-    let cache_key = dynamic_mask_state_key(state);
+    let cache_key = dynamic_mask_cache_enabled()
+        .then(|| dynamic_mask_state_key(state))
+        .flatten();
     let key_ms = key_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
     if cache_key
@@ -768,18 +2262,14 @@ fn fill_mask_dynamic_impl(
 
     buf.fill(0);
     let initial_tsid = state.constraint.tokenizer.initial_state();
-    let mut traversal = Vec::<TraverseWork>::with_capacity(4096);
-    let mut segment_stack =
-        Vec::<(usize, u32, ParserStacks, InitialPruneGuard)>::with_capacity(8);
-    let mut self_loop_cache = FxHashMap::<u32, U8Set>::default();
+    let mut root_branches = DynamicBranches::new();
+    let mut raw_self_loop_cache = FxHashMap::<u32, U8Set>::default();
+    let mut config_self_loop_cache = FxHashMap::<u32, U8Set>::default();
     let mut traversal_cache = DynamicTraversalCache::default();
     let mut lexer_scan_cache = DynamicNfaScanCache::new(state.constraint, deadline);
-    let tries = [vocab.trie.clone()];
-    let mut work_items = 0usize;
-    let mut trie_edges = 0usize;
-    let mut lexer_executions = 0usize;
-    let mut subtree_marks = 0usize;
-    let mut subtree_mark_tokens = 0usize;
+    let initial_config = lexer_scan_cache.config_for_raw_start(initial_tsid)?;
+    let trie = vocab.trie.as_ref();
+    let mut stats = DynamicWalkStats::default();
     if profile {
         eprintln!(
             "[glrmask/profile][dynamic_mask_config] tokenizer_states={} epsilon={} fast_transition_rows={}",
@@ -790,9 +2280,9 @@ fn fill_mask_dynamic_impl(
     }
 
     for (&tokenizer_state, gss) in &state.state {
-        check_deadline()?;
+        deadline_poll.check()?;
         for (stacks, terminals_disallowed) in gss.partition_by_accumulator() {
-            check_deadline()?;
+            deadline_poll.check()?;
             let initial_prune_guard = InitialPruneGuard::new(
                 state.constraint,
                 tokenizer_state,
@@ -803,7 +2293,7 @@ fn fill_mask_dynamic_impl(
                 let loop_bytes = cached_self_loop_bytes(
                     state.constraint,
                     tokenizer_state,
-                    &mut self_loop_cache,
+                    &mut raw_self_loop_cache,
                 );
                 eprintln!(
                     "[glrmask/profile][dynamic_seed] generation={} tokenizer_state={} initial={} stack_paths={} exclusions={} transitions={} matched={} futures={} loop_bytes={} boundary_allowed={}",
@@ -835,148 +2325,70 @@ fn fill_mask_dynamic_impl(
                     ),
                 );
             }
-            traversal.push(TraverseWork {
-                trie_index: 0,
-                node: 0,
-                tokenizer_state,
-                gss: stacks,
-                initial_prune_guard,
-            });
+            let tokenizer_config = lexer_scan_cache.config_for_raw_start(tokenizer_state)?;
+            if !push_unique_dynamic_branch(
+                &mut root_branches,
+                DynamicBranch {
+                    tokenizer_config,
+                    gss: stacks,
+                    initial_prune_guard,
+                    fresh_reset: false,
+                },
+            ) {
+                stats.duplicate_branches += 1;
+            }
         }
     }
-
-    while let Some(current) = traversal.pop() {
-        check_deadline()?;
-        work_items += 1;
-        let trie = &tries[current.trie_index];
-        let node = trie.node(current.node);
-        let subtree_action = raw_self_loop_subtree(
-            state.constraint,
+    let projection = if let [branch] = root_branches.as_slice()
+        && !branch.fresh_reset
+        && branch.initial_prune_guard.is_passed()
+        && lexer_scan_cache.config_len(branch.tokenizer_config) == 1
+    {
+        let source_state = lexer_scan_cache.config_state(branch.tokenizer_config, 0);
+        vocab.self_loop_projection(source_state).filter(|projection| {
+            parser_terminal_admissible_cached(
+                state.constraint,
+                projection.required_terminal,
+                &branch.gss,
+                &mut traversal_cache,
+            )
+        })
+    } else {
+        None
+    };
+    if let Some(projection) = projection {
+        for (target, source) in buf.iter_mut().zip(projection.safe_no_match_mask.iter()) {
+            *target |= *source;
+        }
+        if profile {
+            eprintln!(
+                "[glrmask/profile][dynamic_self_loop_projection] source_state={} terminal={} safe_tokens={}",
+                projection.source_state,
+                projection.required_terminal,
+                projection
+                    .safe_no_match_mask
+                    .iter()
+                    .map(|word| word.count_ones() as usize)
+                    .sum::<usize>(),
+            );
+        }
+    }
+    if !root_branches.is_empty() {
+        walk_interned_dynamic_trie(
+            state,
+            vocab,
             trie,
-            current.node,
-            current.tokenizer_state,
-            &current.gss,
-            &current.initial_prune_guard,
-            initial_tsid,
-            &mut self_loop_cache,
+            projection,
+            root_branches,
+            initial_config,
+            &mut lexer_scan_cache,
             &mut traversal_cache,
-        );
-        if matches!(subtree_action, RawSelfLoopSubtree::MarkAllTokens) {
-            subtree_marks += 1;
-            subtree_mark_tokens += trie.subtree_tokens(current.node).len();
-            mark_subtree_tokens(state.constraint, trie, current.node, buf);
-            continue;
-        }
-
-        if node.token_id.is_some()
-            && current.initial_prune_guard.allows_token_boundary()
-            && (current.tokenizer_state == initial_tsid
-                || token_boundary_allowed_cached(
-                    state.constraint,
-                    current.tokenizer_state,
-                    &current.gss,
-                    &mut traversal_cache,
-                ))
-        {
-            let canonical_token_id = node.token_id.expect("token leaf checked");
-            let token_ids = vocab
-                .token_ids(canonical_token_id)
-                .expect("dynamic vocabulary trie node lacks token ids");
-            for &token_id in token_ids {
-                set_mask_bit(buf, token_id);
-            }
-        }
-
-        for edge in trie.children(current.node) {
-            check_deadline()?;
-            trie_edges += 1;            trie_edges += 1;
-            let segment = trie.edge_bytes(edge);
-            segment_stack.clear();
-            segment_stack.push((
-                0usize,
-                current.tokenizer_state,
-                current.gss.clone(),
-                current.initial_prune_guard.clone(),
-            ));
-
-            while let Some((position, tokenizer_state, gss, prune_guard)) = segment_stack.pop() {
-                check_deadline()?;
-                lexer_executions += 1;
-                let execution = lexer_scan_cache
-                    .execute_from_state_all_widths(&segment[position..], tokenizer_state)?;
-                check_deadline()?;
-
-                for matched in &execution.matches {
-                    debug_assert!(matched.width > 0);
-                    let next_position = position + matched.width;
-                    let Some(advanced_prune_guard) = prune_guard
-                        .advance(state.constraint, &segment[position..next_position])
-                    else {
-                        continue;
-                    };
-                    let Some(advanced_parser) = parser_child_cached(
-                        state.constraint,
-                        &gss,
-                        matched.id,
-                        &mut traversal_cache,
-                    )
-                    else {
-                        continue;
-                    };
-
-                    let advanced_prune_guard = if Some(matched.id)
-                        == state.constraint.ignore_terminal
-                    {
-                        advanced_prune_guard
-                    } else {
-                        advanced_prune_guard.remember_terminal_match(
-                            state.constraint,
-                            matched.end_state,
-                            matched.id,
-                        )
-                    };
-                    if next_position == segment.len() {
-                        traversal.push(TraverseWork {
-                            trie_index: current.trie_index,
-                            node: edge.child,
-                            tokenizer_state: initial_tsid,
-                            gss: advanced_parser,
-                            initial_prune_guard: advanced_prune_guard,
-                        });
-                    } else {
-                        segment_stack.push((
-                            next_position,
-                            initial_tsid,
-                            advanced_parser,
-                            advanced_prune_guard,
-                        ));
-                    }
-                }
-
-                let Some(residual_prune_guard) = prune_guard
-                    .advance(state.constraint, &segment[position..])
-                else {
-                    continue;
-                };
-                for &end_state in &execution.end_state {
-                    if !lexer_state_relevant_cached(
-                        state.constraint,
-                        end_state,
-                        &gss,
-                        &mut traversal_cache,
-                    ) {
-                        continue;
-                    }
-                    traversal.push(TraverseWork {
-                        trie_index: current.trie_index,
-                        node: edge.child,
-                        tokenizer_state: end_state,
-                        gss: gss.clone(),
-                        initial_prune_guard: residual_prune_guard.clone(),
-                    });
-                }
-            }
-        }
+            &mut raw_self_loop_cache,
+            &mut config_self_loop_cache,
+            &mut deadline_poll,
+            buf,
+            &mut stats,
+        )?;
     }
 
     update_special_token_mask(state, buf);
@@ -985,14 +2397,18 @@ fn fill_mask_dynamic_impl(
     }
     if let Some(total_started_at) = total_started_at {
         eprintln!(
-            "[glrmask/profile][dynamic_mask] generation={} cache_hit=false key_ms={:.3} work_items={} trie_edges={} lexer_execs={} subtree_marks={} subtree_tokens={} boundary_cache={} relevant_cache={} child_cache={} total_ms={:.3}",
+            "[glrmask/profile][dynamic_mask] generation={} cache_hit=false key_ms={:.3} work_items={} trie_edges={} branch_steps={} duplicate_branches={} max_branches={} subtree_marks={} subtree_tokens={} recognizer_states={} recognizer_transition_misses={} boundary_cache={} relevant_cache={} child_cache={} total_ms={:.3}",
             state.generation,
             key_ms,
-            work_items,
-            trie_edges,
-            lexer_executions,
-            subtree_marks,
-            subtree_mark_tokens,
+            stats.work_items,
+            stats.trie_edges,
+            stats.branch_steps,
+            stats.duplicate_branches,
+            stats.max_branches,
+            stats.subtree_marks,
+            stats.subtree_mark_tokens,
+            stats.recognizer_states,
+            stats.recognizer_transition_misses,
             traversal_cache.admissible_terminals.len(),
             traversal_cache.lexer_relevant.len(),
             traversal_cache.parser_children.len(),

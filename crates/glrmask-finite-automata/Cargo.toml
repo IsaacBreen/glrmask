@@ -1,0 +1,11 @@
+[package]
+name = "glrmask-finite-automata"
+version = "0.1.1"
+edition = "2024"
+description = "Finite-automata primitives used by GLRMask"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/IsaacBreen/glrmask"
+
+[dependencies]
+rustc-hash = "1"
+serde = { version = "1", features = ["derive"] }
