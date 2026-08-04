@@ -156,14 +156,14 @@ pub struct NamedGrammar {
     /// Name of the terminal rule whose body should be used as the ignore pattern.
     /// Set by Lark's `%ignore` directive.
     pub ignore: Option<String>,
-    /// Optional terminal-name → lexer-partition name assignments.
+    /// Optional terminal-name â†’ lexer-partition name assignments.
     ///
     /// Terminals in the same named partition are jointly determinized.
     /// Different partitions are combined by epsilon transitions, preventing
     /// cross-partition DFA blow-ups. Unassigned terminals follow the active
     /// tokenizer partition policy.
     pub lexer_partitions: BTreeMap<String, String>,
-    /// Exact anonymous literal bytes → lexer-partition name assignments.
+    /// Exact anonymous literal bytes â†’ lexer-partition name assignments.
     ///
     /// This applies to inline literals such as `"{"` used directly in
     /// nonterminal productions, not to named terminal rules whose bodies happen
@@ -1385,7 +1385,7 @@ impl<'a> Lowerer<'a> {
     }
 
     /// Returns a nonterminal matching exactly 1..=max occurrences of `symbol`.
-    /// Defined as: `symbol repeat_max_{max-1}` — the first element is mandatory,
+    /// Defined as: `symbol repeat_max_{max-1}` â€” the first element is mandatory,
     /// the rest (0..max-1) are handled by `repeat_max`.
     fn repeat_min1_max_nonterminal(&mut self, symbol: &Symbol, max: usize) -> NonterminalID {
         debug_assert!(max >= 1);
@@ -1670,12 +1670,12 @@ impl<'a> Lowerer<'a> {
             rhs: Vec::new(),
         });
 
-        // A transition label can occur on many DFA edges. Re-lowering simple
-        // labels repeats terminal-map work and, for literals, reconstructs the
-        // regex spelling. Cache only labels whose lowering is already a pure
-        // symbol lookup/registration; compound expressions deliberately keep
-        // their existing fresh-nonterminal behavior.
-        let mut reusable_symbols: Vec<Option<Symbol>> = vec![None; expr_nfa.symbols.len()];
+        // A transition label can occur on many DFA edges. Lower it exactly once
+        // and reuse the resulting symbol sequence. Compound labels are immutable
+        // grammar fragments just like literals and references; recreating their
+        // wrapper nonterminals per edge can multiply a compact object automaton
+        // into tens of thousands of equivalent productions.
+        let mut reusable_symbols: Vec<Option<Vec<Symbol>>> = vec![None; expr_nfa.symbols.len()];
         let mut reusable_symbol_cache_hits = 0usize;
         let mut transition_count = 0usize;
         for (state_index, state) in dfa.states.iter().enumerate() {
@@ -1692,32 +1692,22 @@ impl<'a> Lowerer<'a> {
                         "ExprNFA transition label {label} is not a valid symbol index"
                     ))
                 })?;
-                let cacheable = matches!(
-                    symbol_expr,
-                    GrammarExpr::Ref(_)
-                        | GrammarExpr::Literal(_)
-                        | GrammarExpr::CharClass { .. }
-                        | GrammarExpr::RawRegex(_)
-                        | GrammarExpr::AnyByte
-                );
-                let symbols = if cacheable {
-                    let cache_slot = reusable_symbols.get_mut(*label as usize).ok_or_else(|| {
-                        GlrMaskError::GrammarParse(format!(
-                            "ExprNFA transition label {label} is not a valid symbol index"
-                        ))
-                    })?;
-                    if let Some(symbol) = cache_slot {
-                        reusable_symbol_cache_hits += 1;
-                        vec![symbol.clone()]
-                    } else {
-                        let symbol = self.lower_expr_terminalish(symbol_expr)?;
-                        *cache_slot = Some(symbol.clone());
-                        vec![symbol]
-                    }
-                } else if flatten_sequence_transitions {
-                    self.lower_expr_nfa_transition_symbols(symbol_expr)?
+                let cache_slot = reusable_symbols.get_mut(*label as usize).ok_or_else(|| {
+                    GlrMaskError::GrammarParse(format!(
+                        "ExprNFA transition label {label} is not a valid symbol index"
+                    ))
+                })?;
+                let symbols = if let Some(symbols) = cache_slot.as_ref() {
+                    reusable_symbol_cache_hits += 1;
+                    symbols.clone()
                 } else {
-                    vec![self.lower_expr_terminalish(symbol_expr)?]
+                    let symbols = if flatten_sequence_transitions {
+                        self.lower_expr_nfa_transition_symbols(symbol_expr)?
+                    } else {
+                        vec![self.lower_expr_terminalish(symbol_expr)?]
+                    };
+                    *cache_slot = Some(symbols.clone());
+                    symbols
                 };
                 let mut rhs = Vec::with_capacity(1 + symbols.len());
                 rhs.push(Symbol::Nonterminal(nts[state_index]));
@@ -1775,7 +1765,7 @@ impl<'a> Lowerer<'a> {
             rhs: Vec::new(),
         });
 
-        let mut reusable_symbols: Vec<Option<Symbol>> = vec![None; expr_nfa.symbols.len()];
+        let mut reusable_symbols: Vec<Option<Vec<Symbol>>> = vec![None; expr_nfa.symbols.len()];
         let mut reusable_symbol_cache_hits = 0usize;
         let mut transition_count = 0usize;
         for (state_index, &old_state) in reindex.old_states_in_new_order.iter().enumerate() {
@@ -1794,32 +1784,22 @@ impl<'a> Lowerer<'a> {
                         "ExprNFA transition label {label} is not a valid symbol index"
                     ))
                 })?;
-                let cacheable = matches!(
-                    symbol_expr,
-                    GrammarExpr::Ref(_)
-                        | GrammarExpr::Literal(_)
-                        | GrammarExpr::CharClass { .. }
-                        | GrammarExpr::RawRegex(_)
-                        | GrammarExpr::AnyByte
-                );
-                let symbols = if cacheable {
-                    let cache_slot = reusable_symbols.get_mut(*label as usize).ok_or_else(|| {
-                        GlrMaskError::GrammarParse(format!(
-                            "ExprNFA transition label {label} is not a valid symbol index"
-                        ))
-                    })?;
-                    if let Some(symbol) = cache_slot {
-                        reusable_symbol_cache_hits += 1;
-                        vec![symbol.clone()]
-                    } else {
-                        let symbol = self.lower_expr_terminalish(symbol_expr)?;
-                        *cache_slot = Some(symbol.clone());
-                        vec![symbol]
-                    }
-                } else if flatten_sequence_transitions {
-                    self.lower_expr_nfa_transition_symbols(symbol_expr)?
+                let cache_slot = reusable_symbols.get_mut(*label as usize).ok_or_else(|| {
+                    GlrMaskError::GrammarParse(format!(
+                        "ExprNFA transition label {label} is not a valid symbol index"
+                    ))
+                })?;
+                let symbols = if let Some(symbols) = cache_slot.as_ref() {
+                    reusable_symbol_cache_hits += 1;
+                    symbols.clone()
                 } else {
-                    vec![self.lower_expr_terminalish(symbol_expr)?]
+                    let symbols = if flatten_sequence_transitions {
+                        self.lower_expr_nfa_transition_symbols(symbol_expr)?
+                    } else {
+                        vec![self.lower_expr_terminalish(symbol_expr)?]
+                    };
+                    *cache_slot = Some(symbols.clone());
+                    symbols
                 };
                 let mut rhs = Vec::with_capacity(1 + symbols.len());
                 rhs.push(Symbol::Nonterminal(nts[state_index]));
@@ -2580,7 +2560,7 @@ impl<'a> Lowerer<'a> {
             let item_sym = self.lower_sepseq_item_nonempty_symbol(item_expr, item_quantifier.as_ref(), separator)?;
             // Return can_be_empty=true for optional items as a signal to the parent to add
             // a "without this item and its preceding separator" alternative.  We do NOT emit
-            // an epsilon rule here — that would create dangling separators in the parent rule
+            // an epsilon rule here â€” that would create dangling separators in the parent rule
             // (e.g. "key": , ).  The caller of lower_separated_sequence_inner handles the
             // all-optional empty case via an explicit separate alternative (e.g. "{}").
             let can_be_empty = item_quantifier.as_ref().is_some_and(Quantifier::is_nullable)
@@ -2633,7 +2613,7 @@ impl<'a> Lowerer<'a> {
         }
 
         // Both sides can be empty: propagate the flag upward so the grandparent can add a
-        // "without this subtree and its separator" alternative.  Do NOT emit nt -> ε here;
+        // "without this subtree and its separator" alternative.  Do NOT emit nt -> Îµ here;
         // that would produce dangling separators in the enclosing rule.
         let can_be_empty = left_can_be_empty && right_can_be_empty;
 
@@ -2805,7 +2785,7 @@ fn grammar_expr_to_expr(
             if let Some(cached) = terminal_expr_cache.get(name) {
                 return Ok(Expr::Shared(cached.clone()));
             }
-            // Must be a terminal rule — look up its body and resolve it
+            // Must be a terminal rule â€” look up its body and resolve it
             if let Some(&body) = terminal_bodies.get(name) {
                 if !visiting.insert(name.clone()) {
                     return Err(GlrMaskError::GrammarParse(format!(
@@ -2819,7 +2799,7 @@ fn grammar_expr_to_expr(
                 Expr::Shared(arc)
             } else {
                 return Err(GlrMaskError::GrammarParse(format!(
-                    "unresolved Ref({name}) in terminal body — not found in terminal rules"
+                    "unresolved Ref({name}) in terminal body â€” not found in terminal rules"
                 )));
             }
         }
@@ -3718,6 +3698,70 @@ mod tests {
         lower(&grammar).unwrap();
     }
 
+    fn repeated_compound_label_expr_nfa(canonical: bool) -> GrammarExpr {
+        let mut builder = ExprNfaBuilder::new();
+        let middle = builder.add_state();
+        let accept = builder.add_state();
+        let label = GrammarExpr::Sequence(vec![
+            literal("a"),
+            GrammarExpr::Ref("item".to_string()),
+        ]);
+        builder.add_transition(builder.start_state(), label.clone(), middle);
+        builder.add_transition(middle, label, accept);
+        builder.set_accepting(accept);
+        let expr_nfa = builder.build();
+        GrammarExpr::ExprNFA(Box::new(if canonical {
+            expr_nfa.into_determinized_and_minimized()
+        } else {
+            expr_nfa
+        }))
+    }
+
+    fn assert_repeated_compound_label_is_shared(canonical: bool) {
+        let grammar = NamedGrammar {
+            rules: vec![
+                nonterminal("item", literal("b")),
+                nonterminal("start", repeated_compound_label_expr_nfa(canonical)),
+            ],
+            start: "start".to_string(),
+            ignore: None,
+            lexer_partitions: Default::default(),
+            lexer_literal_partitions: Default::default(),
+            default_lexer_partition: None,
+        };
+        let gdef = lower(&grammar).unwrap();
+        let a_terminal = gdef
+            .terminals
+            .iter()
+            .position(|terminal| terminal.name() == "a")
+            .expect("literal a terminal") as u32;
+        let wrapper_rules = gdef
+            .rules
+            .iter()
+            .filter(|rule| {
+                matches!(
+                    rule.rhs.first(),
+                    Some(crate::grammar::flat::Symbol::Terminal(tid)) if *tid == a_terminal
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            wrapper_rules.len(),
+            1,
+            "one immutable wrapper should serve every edge carrying the same compound label"
+        );
+    }
+
+    #[test]
+    fn expr_nfa_dfa_edges_reuse_compound_labels() {
+        assert_repeated_compound_label_is_shared(false);
+    }
+
+    #[test]
+    fn canonical_expr_nfa_dfa_edges_reuse_compound_labels() {
+        assert_repeated_compound_label_is_shared(true);
+    }
+
     #[test]
     fn lower_deduplicates_identical_rules() {
         let grammar = NamedGrammar {
@@ -3788,3 +3832,4 @@ mod tests {
         );
     }
 }
+
