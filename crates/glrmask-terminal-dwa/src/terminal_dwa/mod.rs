@@ -29,6 +29,7 @@ use std::time::Instant;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::regex::Expr;
 use crate::automata::weighted::dwa::DWA;
+use crate::automata::weighted::nwa::NWA;
 use crate::automata::weighted::terminal_automaton::TerminalAutomaton;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap, MappedArtifact};
@@ -1400,6 +1401,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length(
     >,
     partition_local_synthesis_plan: Option<&PartitionLocalSynthesisPlan>,
     prepared_partition_local_tokenizers: Option<&PreparedPartitionLocalTokenizers>,
+    active_terminal_filter: Option<&[bool]>,
 ) -> (TerminalDwaFamilies, TerminalDwaPhaseProfile) {
     let total_started_at = Instant::now();
     let mut profile = TerminalDwaPhaseProfile::default();
@@ -1733,6 +1735,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length(
                 Some(&local_transition_cache),
                 Some(&local_ti_output_cache),
                 Some(&ready.classify_cache),
+                active_terminal_filter,
             );
             if let Some(parts) = local_result.as_mut()
                 && lift_partition_terminal_dwas_to_global(parts, &local.global_to_local).is_some()
@@ -1789,6 +1792,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length(
             Some(shared_transition_cache),
             Some(&shared_ti_output_cache),
             Some(&shared_classify_cache),
+            active_terminal_filter,
         )
         .map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0));
         (result, idx)
@@ -2029,6 +2033,37 @@ pub fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
     global_max_length_state_map: &ManyToOneIdMap,
     external_classify_cache: Option<&classify::SharedClassifyCache>,
 ) -> (MappedArtifact<TerminalAutomaton>, TerminalDwaPhaseProfile) {
+    build_restricted_id_map_and_terminal_dwa_with_precomputed_global_max_length(
+        tokenizer,
+        vocab,
+        terminal_coloring,
+        use_terminal_coloring,
+        ignore_terminal,
+        grammar,
+        disallowed_follows,
+        flat_trans,
+        global_max_length_state_map,
+        external_classify_cache,
+        None,
+    )
+}
+
+/// Compatibility merge for a caller-supplied terminal subset. Inactive
+/// terminals are removed before partition routing and therefore incur no
+/// weighted terminal-DWA or parser-template work.
+pub fn build_restricted_id_map_and_terminal_dwa_with_precomputed_global_max_length(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    terminal_coloring: &TerminalColoring,
+    use_terminal_coloring: bool,
+    ignore_terminal: Option<TerminalID>,
+    grammar: &AnalyzedGrammar,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    flat_trans: Arc<[u32]>,
+    global_max_length_state_map: &ManyToOneIdMap,
+    external_classify_cache: Option<&classify::SharedClassifyCache>,
+    active_terminal_filter: Option<&[bool]>,
+) -> (MappedArtifact<TerminalAutomaton>, TerminalDwaPhaseProfile) {
     let (families, mut profile) =
         build_terminal_dwa_families_with_precomputed_global_max_length(
             tokenizer,
@@ -2045,6 +2080,7 @@ pub fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
             None,
             None,
             None,
+            active_terminal_filter,
         );
     let family_count = families.len();
     let final_merge_started_at = Instant::now();
@@ -2064,11 +2100,30 @@ pub fn build_id_map_and_terminal_dwa_with_precomputed_global_max_length(
             MappedArtifact::new(dwa, id_map)
         })
         .collect();
-    let merged = merge::merge_mapped_dwas(
-        mapped_dwas,
-        tokenizer.num_states() as usize,
-        vocab.max_token_id(),
-    );
+    let merged = if active_terminal_filter.is_some() {
+        // Restricted families are sparse in the raw tokenizer-state domain.
+        // The generic optimized merger now handles unmapped classes exactly,
+        // but direct reconciliation plus one small NWA union is materially
+        // faster for this composition-only shape.
+        let reconciled = MappedArtifact::reconcile_vec(mapped_dwas);
+        let (dwas, id_map) = reconciled.into_parts();
+        let mut union = NWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
+        let mut starts = Vec::new();
+        for dwa in dwas {
+            let body = union.append_with_body(&dwa.to_nwa());
+            starts.extend(body.start_states);
+        }
+        union.set_start_states(starts);
+        let dwa = crate::automata::weighted::determinize::determinize(&union)
+            .expect("restricted terminal family union must be acyclic");
+        MappedArtifact::new(dwa, id_map)
+    } else {
+        merge::merge_mapped_dwas(
+            mapped_dwas,
+            tokenizer.num_states() as usize,
+            vocab.max_token_id(),
+        )
+    };
     let final_merge_ms = if family_count > 1 {
         final_merge_started_at.elapsed().as_secs_f64() * 1000.0
     } else {

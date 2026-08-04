@@ -178,6 +178,11 @@ pub mod __private {
 
     pub type Result<T> = std::result::Result<T, Error>;
 
+    /// Internal release-only benchmark for exact o21137 subgrammar decomposition.
+    pub fn run_o21137_subgrammar_benchmark(mode: &str) {
+        crate::compiler::o21137_subgrammar_bench::run(mode);
+    }
+
     pub trait ConstraintExt: Sized {
         fn compile_grammar_def_json(grammar_def_json: &str, vocab: &Vocab) -> Result<Self>;
         fn dump_json_schema_grammar_glrm(schema_json: &str) -> Result<String>;

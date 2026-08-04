@@ -99,6 +99,34 @@ constraint = glrmask.Constraint.from_ebnf(grammar, vocab)
 
 Each constructor accepts an optional `end_token_ids=[...]` argument.
 
+Already-compiled constraints can be composed without recompiling their full
+grammars. The parent uses uniquely named `@token(...)` terminals as call
+placeholders, and each pair supplies the compiled child that replaces one
+placeholder. Placeholder token IDs must be outside the supplied vocabulary so
+they are true non-vocabulary sentinels. Each sentinel ID must also be distinct
+from end-token IDs and other live special-token IDs used by the components:
+
+```python
+parent = glrmask.Constraint.from_glrm_grammar(
+    '''
+    start document;
+    t PAYLOAD ::= @token(1000000);
+    nt document ::= "{" PAYLOAD "}";
+    ''',
+    vocab,
+)
+payload = glrmask.Constraint.from_json_schema(payload_schema, vocab)
+
+constraint = parent.compose_subgrammars(
+    [("PAYLOAD", payload)],
+    vocab,
+)
+```
+
+Composition remains exact when one model token contains bytes from both the
+parent and child grammars. Every component must have been compiled for the same
+vocabulary contents.
+
 ### Decode
 
 Create one state per generated sequence:

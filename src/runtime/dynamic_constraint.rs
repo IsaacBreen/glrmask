@@ -332,6 +332,7 @@ impl DynamicConstraint {
             possible_matches_complete: false,
             state_to_internal_tsid: Vec::new(),
             internal_tsid_to_states: Vec::new(),
+            terminal_live_states: Vec::new(),
             state_internal_tsid_offsets: Vec::new(),
             state_internal_tsids: Vec::new(),
             runtime_source_state_offset: None,

@@ -1,4 +1,7 @@
 pub mod compile;
+pub(crate) mod constraint_compose;
+#[cfg(feature = "internal-api")]
+pub(crate) mod o21137_subgrammar_bench;
 pub(crate) mod constraint_possible_matches;
 pub(crate) use glrmask_glr::__private::glr;
 pub mod grammar;
