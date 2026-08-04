@@ -79,6 +79,17 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    fn push_utf8_char_from(&mut self, start: usize, output: &mut String) {
+        let remaining = std::str::from_utf8(&self.input[start..])
+            .expect("Lark source originated from valid UTF-8");
+        let character = remaining
+            .chars()
+            .next()
+            .expect("non-ASCII byte must begin a UTF-8 character");
+        self.pos = start + character.len_utf8();
+        output.push(character);
+    }
+
     fn lex_string(&mut self, quote: u8) -> Result<String, GlrMaskError> {
         let mut s = String::new();
         loop {
@@ -107,11 +118,16 @@ impl<'a> Lexer<'a> {
                     }
                     Some(c) => {
                         s.push('\\');
-                        s.push(c as char);
+                        if c.is_ascii() {
+                            s.push(c as char);
+                        } else {
+                            self.push_utf8_char_from(self.pos - 1, &mut s);
+                        }
                     }
                     None => return Err(GlrMaskError::GrammarParse("unterminated escape".into())),
                 },
-                Some(b) => s.push(b as char),
+                Some(b) if b.is_ascii() => s.push(b as char),
+                Some(_) => self.push_utf8_char_from(self.pos - 1, &mut s),
                 None => return Err(GlrMaskError::GrammarParse("unterminated string".into())),
             }
         }
@@ -125,10 +141,15 @@ impl<'a> Lexer<'a> {
                 Some(b'\\') => {
                     s.push('\\');
                     if let Some(b) = self.advance() {
-                        s.push(b as char);
+                        if b.is_ascii() {
+                            s.push(b as char);
+                        } else {
+                            self.push_utf8_char_from(self.pos - 1, &mut s);
+                        }
                     }
                 }
-                Some(b) => s.push(b as char),
+                Some(b) if b.is_ascii() => s.push(b as char),
+                Some(_) => self.push_utf8_char_from(self.pos - 1, &mut s),
                 None => return Err(GlrMaskError::GrammarParse("unterminated regex".into())),
             }
         }
@@ -1159,6 +1180,22 @@ pub fn parse_lark_to_named(input: &str) -> Result<NamedGrammar, GlrMaskError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_unicode_is_preserved_in_lark_literals_and_regexes() {
+        let mut lexer = Lexer::new("start: \" —\" / →/\n");
+        let tokens = lexer.tokenize().unwrap();
+        assert!(tokens.contains(&Token::Literal(" —".to_string())));
+        assert!(tokens.contains(&Token::Regex(" →".to_string())));
+
+        let named = parse_lark_to_named_uncompressed("start: \" —\"\n").unwrap();
+        let start = named.rules.iter().find(|rule| rule.name == "start").unwrap();
+        assert_eq!(start.expr, GrammarExpr::Literal(" —".as_bytes().to_vec()));
+
+        let named = parse_lark_to_named_uncompressed("start: / →/\n").unwrap();
+        let start = named.rules.iter().find(|rule| rule.name == "start").unwrap();
+        assert_eq!(start.expr, GrammarExpr::RawRegex(" →".to_string()));
+    }
 
     fn large_right_linear_terminal_grammar(states: usize) -> String {
         assert!(states >= MIN_LARK_TERMINAL_GRAPH_RULES + 16);
