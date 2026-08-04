@@ -5,7 +5,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::automata::lexer::Lexer;
-use crate::automata::lexer::tokenizer::Tokenizer;
+use crate::automata::lexer::tokenizer::{SingletonEpsilonClosures, Tokenizer};
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 
 use super::super::compat::{FlatDfa, FlatDfaState, TokenizerView};
@@ -1166,7 +1166,7 @@ fn ensure_config_transition(
     transitions: &mut Vec<u32>,
     known_transitions: &mut Vec<u8>,
     preseeded_raw_closures: Option<&[u32]>,
-    singleton_closures: &[Box<[u32]>],
+    singleton_closures: &SingletonEpsilonClosures,
     active_language: Option<&[bool]>,
     target_marks: &mut [u32],
     target_generation: &mut u32,
@@ -1223,7 +1223,7 @@ fn step_epsilon_closed_config_cached(
     raw_transitions: Option<&[u32]>,
     config: &[u32],
     byte: u8,
-    singleton_closures: &[Box<[u32]>],
+    singleton_closures: &SingletonEpsilonClosures,
     active_language: Option<&[bool]>,
     target_marks: &mut [u32],
     target_generation: &mut u32,
@@ -1269,7 +1269,7 @@ fn expand_trie_from_config(
     known_transitions: &mut Vec<u8>,
     visited: &mut rustc_hash::FxHashSet<(u32, usize)>,
     preseeded_raw_closures: Option<&[u32]>,
-    singleton_closures: &[Box<[u32]>],
+    singleton_closures: &SingletonEpsilonClosures,
     active_language: Option<&[bool]>,
     target_marks: &mut [u32],
     target_generation: &mut u32,
@@ -1313,7 +1313,7 @@ fn expand_trie_from_config_budgeted(
     known_transitions: &mut Vec<u8>,
     visited: &mut rustc_hash::FxHashSet<(u32, usize)>,
     preseeded_raw_closures: Option<&[u32]>,
-    singleton_closures: &[Box<[u32]>],
+    singleton_closures: &SingletonEpsilonClosures,
     active_language: Option<&[bool]>,
     target_marks: &mut [u32],
     target_generation: &mut u32,
@@ -1383,7 +1383,7 @@ fn expand_trie_frontiers(
     transitions: &mut Vec<u32>,
     known_transitions: &mut Vec<u8>,
     preseeded_raw_closures: Option<&[u32]>,
-    singleton_closures: &[Box<[u32]>],
+    singleton_closures: &SingletonEpsilonClosures,
     active_language: Option<&[bool]>,
     target_marks: &mut [u32],
     target_generation: &mut u32,

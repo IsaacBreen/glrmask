@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use crate::automata::lexer::compile::{
     compile_terminal_expr_dfa, extract_augmented_singleton_dispatch_components,
 };
-use crate::automata::lexer::tokenizer::Tokenizer;
+use crate::automata::lexer::tokenizer::{SingletonEpsilonClosures, Tokenizer};
 use crate::automata::lexer::{DFA, Lexer};
 use crate::automata::regex::Expr;
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
@@ -735,7 +735,7 @@ fn report_virtual_definition_scanner(
     active_mask: &[bool],
     analysis: &GenericPartitionAnalysis,
     raw_configurations: &[Vec<(u32, u32)>],
-    epsilon_closures: &[Box<[u32]>],
+    epsilon_closures: &SingletonEpsilonClosures,
 ) {
     let total_started_at = Instant::now();
     let raw_states = tokenizer.num_states() as usize;

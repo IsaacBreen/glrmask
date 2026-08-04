@@ -82,6 +82,10 @@ impl NWA {
         }
     }
 
+    pub(crate) fn into_parts(self) -> (Vec<NWAState>, Vec<u32>) {
+        (self.states, self.start_states)
+    }
+
     pub fn set_start_states(&mut self, states: Vec<u32>) {
         self.start_states = states;
     }

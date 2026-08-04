@@ -153,7 +153,7 @@ fn selected_modules(grammar: &GrammarDef) -> Vec<Candidate> {
     let max_modules = std::env::var("O21137_SUBGRAMMAR_MAX_MODULES")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(usize::MAX);
+        .unwrap_or(16);
     let mut candidates = all_closed_candidates(grammar)
         .into_iter()
         .filter(|candidate| {
@@ -593,9 +593,10 @@ fn build_terminal_decomposed(grammar: &GrammarDef, vocab: &Vocab) -> DecomposedB
         .zip(constraints.iter())
         .map(|(name, constraint)| (name.as_str(), constraint))
         .collect::<Vec<_>>();
+    profile_owned_parent_tokenizer(&parent, &child_bindings);
     let composition_started = Instant::now();
     let constraint = parent
-        .compose_subgrammars(&child_bindings, vocab)
+        .compose_subgrammars_owned(&child_bindings, vocab)
         .expect("compose extracted o21137 terminal subgrammars");
     let composition_ms = elapsed_ms(composition_started);
     DecomposedBuild {
@@ -607,6 +608,58 @@ fn build_terminal_decomposed(grammar: &GrammarDef, vocab: &Vocab) -> DecomposedB
         parent_ms,
         composition_ms,
     }
+}
+
+fn profile_owned_parent_tokenizer(
+    parent: &Constraint,
+    child_bindings: &[(&str, &Constraint)],
+) {
+    if std::env::var_os("O21137_PROFILE_OWNED_PARENT_TOKENIZER").is_none() {
+        return;
+    }
+    let table_inputs = child_bindings
+        .iter()
+        .map(|(name, child)| {
+            let placeholder_terminal = parent
+                .terminal_display_names
+                .iter()
+                .position(|candidate| candidate == name)
+                .expect("benchmark placeholder terminal") as u32;
+            crate::compiler::glr::table::SubgrammarTableInput {
+                placeholder_terminal,
+                table: &child.table,
+                start_nullable: child.table.embedded_start_nullable(),
+            }
+        })
+        .collect::<Vec<_>>();
+    let composed_table = crate::compiler::glr::table::compose_subgrammar_tables(
+        &parent.table,
+        &table_inputs,
+    )
+    .expect("benchmark table composition");
+    // Clone outside the measured interval. The production fast path consumes
+    // the freshly compiled parent and therefore does not pay this clone.
+    let owned_parent = parent.tokenizer.clone();
+    let child_tokenizers = child_bindings
+        .iter()
+        .enumerate()
+        .map(|(index, (_, child))| {
+            (&child.tokenizer, composed_table.terminal_offsets[index + 1])
+        })
+        .collect::<Vec<_>>();
+    let started_at = Instant::now();
+    let (merged, offsets) =
+        crate::automata::lexer::tokenizer::Tokenizer::disjoint_union_with_owned_parent(
+            owned_parent,
+            composed_table.terminal_offsets[0],
+            &child_tokenizers,
+        );
+    eprintln!(
+        "O21137_OWNED_PARENT_TOKENIZER ms={:.3} states={} offsets={:?}",
+        elapsed_ms(started_at),
+        merged.num_states(),
+        offsets,
+    );
 }
 
 fn semantic_key(grammar: &GrammarDef) -> Vec<u8> {
@@ -636,7 +689,20 @@ struct DecomposedBuild {
     composition_ms: f64,
 }
 
-fn build_nonterminal_decomposed(grammar: &GrammarDef, vocab: &Vocab) -> DecomposedBuild {
+struct NonterminalDecomposedParts {
+    parent: Constraint,
+    children: Vec<Constraint>,
+    placeholder_names: Vec<String>,
+    modules: usize,
+    planning_ms: f64,
+    child_ms: Vec<f64>,
+    parent_ms: f64,
+}
+
+fn prepare_nonterminal_decomposed_parts(
+    grammar: &GrammarDef,
+    vocab: &Vocab,
+) -> NonterminalDecomposedParts {
     let planning_started = Instant::now();
     let modules = selected_modules(grammar);
     let extracted = modules
@@ -674,33 +740,79 @@ fn build_nonterminal_decomposed(grammar: &GrammarDef, vocab: &Vocab) -> Decompos
     );
     let planning_ms = elapsed_ms(planning_started);
 
-    let mut constraints = Vec::<Constraint>::with_capacity(unique_grammars.len());
+    let profile_setup = std::env::var_os("O21137_PROFILE_SETUP").is_some();
+    let mut children = Vec::<Constraint>::with_capacity(unique_grammars.len());
     let mut child_ms = Vec::with_capacity(unique_grammars.len());
-    for child in unique_grammars {
+    for (child_index, child) in unique_grammars.into_iter().enumerate() {
+        if profile_setup {
+            eprintln!(
+                "O21137_SETUP_CHILD_START index={child_index} rules={} terminals={} nonterminals={}",
+                child.rules.len(),
+                child.terminals.len(),
+                child.num_nonterminals(),
+            );
+        }
         let started = Instant::now();
-        constraints.push(compile_grammar(child, vocab));
-        child_ms.push(elapsed_ms(started));
+        children.push(compile_grammar(child, vocab));
+        let child_elapsed = elapsed_ms(started);
+        if profile_setup {
+            eprintln!("O21137_SETUP_CHILD_DONE index={child_index} ms={child_elapsed:.3}");
+        }
+        child_ms.push(child_elapsed);
+    }
+    if profile_setup {
+        eprintln!(
+            "O21137_SETUP_PARENT_START rules={} terminals={} nonterminals={}",
+            parent_grammar.rules.len(),
+            parent_grammar.terminals.len(),
+            parent_grammar.num_nonterminals(),
+        );
     }
     let parent_started = Instant::now();
     let parent = compile_grammar(parent_grammar, vocab);
     let parent_ms = elapsed_ms(parent_started);
-    let child_bindings = placeholder_names
+    if profile_setup {
+        eprintln!("O21137_SETUP_PARENT_DONE ms={parent_ms:.3}");
+    }
+    NonterminalDecomposedParts {
+        parent,
+        children,
+        placeholder_names,
+        modules: modules.len(),
+        planning_ms,
+        child_ms,
+        parent_ms,
+    }
+}
+
+fn child_bindings<'a>(
+    placeholder_names: &'a [String],
+    children: &'a [Constraint],
+) -> Vec<(&'a str, &'a Constraint)> {
+    placeholder_names
         .iter()
-        .zip(constraints.iter())
+        .zip(children)
         .map(|(name, constraint)| (name.as_str(), constraint))
-        .collect::<Vec<_>>();
+        .collect()
+}
+
+fn build_nonterminal_decomposed(grammar: &GrammarDef, vocab: &Vocab) -> DecomposedBuild {
+    let parts = prepare_nonterminal_decomposed_parts(grammar, vocab);
+    let bindings = child_bindings(&parts.placeholder_names, &parts.children);
+    profile_owned_parent_tokenizer(&parts.parent, &bindings);
     let composition_started = Instant::now();
-    let constraint = parent
-        .compose_subgrammars(&child_bindings, vocab)
+    let constraint = parts
+        .parent
+        .compose_subgrammars_owned(&bindings, vocab)
         .expect("compose extracted o21137 subgrammars");
     let composition_ms = elapsed_ms(composition_started);
     DecomposedBuild {
         constraint,
-        modules: modules.len(),
-        unique_modules: constraints.len(),
-        planning_ms,
-        child_ms,
-        parent_ms,
+        modules: parts.modules,
+        unique_modules: parts.children.len(),
+        planning_ms: parts.planning_ms,
+        child_ms: parts.child_ms,
+        parent_ms: parts.parent_ms,
         composition_ms,
     }
 }
@@ -891,6 +1003,52 @@ pub(crate) fn run(mode: &str) {
             std::hint::black_box(constraint);
             eprintln!(
                 "O21137_MONOLITHIC vocab_ms={vocab_ms:.3} vocab_prepare_ms={vocab_prepare_ms:.3} import_ms={import_ms:.3} compile_ms={compile_ms:.3} total_ms={:.3}",
+                elapsed_ms(total_started),
+            );
+        }
+        "compose-only" => {
+            let parts = prepare_nonterminal_decomposed_parts(&grammar, &vocab);
+            let repeats = std::env::var("O21137_COMPOSE_REPEATS")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(5)
+                .max(1);
+            let mut clone_samples = Vec::with_capacity(repeats);
+            let mut compose_samples = Vec::with_capacity(repeats);
+            for sample in 0..repeats {
+                let clone_started = Instant::now();
+                let parent = parts.parent.clone();
+                let clone_ms = elapsed_ms(clone_started);
+                let bindings = child_bindings(&parts.placeholder_names, &parts.children);
+                let compose_started = Instant::now();
+                let composed = parent
+                    .compose_subgrammars_owned(&bindings, &vocab)
+                    .expect("compose extracted o21137 subgrammars");
+                let compose_ms = elapsed_ms(compose_started);
+                eprintln!(
+                    "O21137_COMPOSE_SAMPLE sample={sample} clone_ms={clone_ms:.3} compose_ms={compose_ms:.3} tokenizer_states={} parser_dwa_states={}",
+                    composed.tokenizer.num_states(),
+                    composed.parser_dwa.num_states(),
+                );
+                clone_samples.push(clone_ms);
+                compose_samples.push(compose_ms);
+                std::hint::black_box(composed);
+            }
+            clone_samples.sort_by(f64::total_cmp);
+            compose_samples.sort_by(f64::total_cmp);
+            let child_total_ms = parts.child_ms.iter().sum::<f64>();
+            eprintln!(
+                "O21137_COMPOSE_ONLY modules={} unique_modules={} repeats={} planning_ms={:.3} child_total_ms={child_total_ms:.3} child_ms={:?} parent_ms={:.3} clone_median_ms={:.3} compose_min_ms={:.3} compose_median_ms={:.3} compose_max_ms={:.3} total_ms={:.3}",
+                parts.modules,
+                parts.children.len(),
+                repeats,
+                parts.planning_ms,
+                parts.child_ms,
+                parts.parent_ms,
+                clone_samples[repeats / 2],
+                compose_samples[0],
+                compose_samples[repeats / 2],
+                compose_samples[repeats - 1],
                 elapsed_ms(total_started),
             );
         }

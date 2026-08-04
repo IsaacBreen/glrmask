@@ -3846,6 +3846,7 @@ fn compile_prepared_with_profile_and_table_construction(
             possible_matches_complete,
             state_to_internal_tsid: runtime_tokenizer_state_map.original_to_internal.clone(),
             internal_tsid_to_states: runtime_internal_tsid_to_states,
+            terminal_live_states: Vec::new(),
             state_internal_tsid_offsets: Vec::new(),
             state_internal_tsids: Vec::new(),
             runtime_source_state_offset,

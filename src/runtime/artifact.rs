@@ -276,6 +276,86 @@ impl FastTokenizerTransitions {
             } => state_to_dense_row.len(),
         }
     }
+
+    /// Reuse the consumed parent's fast transition rows and append rebased
+    /// child rows. Compressed child states remain sparse and fall back to the
+    /// merged tokenizer, whose compressed segments have already been rebased.
+    pub(crate) fn append_rebased_children(
+        self,
+        children: &[(&FastTokenizerTransitions, u32)],
+    ) -> Option<Self> {
+        fn rebased_row(row: &[u32; 256], offset: u32) -> Box<[u32; 256]> {
+            let mut rebased = Box::new(*row);
+            for target in rebased.iter_mut() {
+                if *target != u32::MAX {
+                    *target = target.checked_add(offset)
+                        .expect("composed tokenizer fast-transition target overflow");
+                }
+            }
+            rebased
+        }
+
+        let all_dense = children
+            .iter()
+            .all(|(child, _)| matches!(child, FastTokenizerTransitions::Dense(_)));
+        match self {
+            Self::Dense(mut rows) if all_dense => {
+                for (child, offset) in children {
+                    if *offset as usize != rows.len() {
+                        return None;
+                    }
+                    let Self::Dense(child_rows) = child else { unreachable!() };
+                    rows.extend(child_rows.iter().map(|row| rebased_row(row, *offset)));
+                }
+                Some(Self::Dense(rows))
+            }
+            parent => {
+                let (mut state_to_dense_row, mut dense_rows) = match parent {
+                    Self::Dense(rows) => {
+                        let state_to_dense_row = (0..rows.len() as u32).collect::<Vec<_>>();
+                        (state_to_dense_row, rows)
+                    }
+                    Self::Hybrid {
+                        state_to_dense_row,
+                        dense_rows,
+                    } => (state_to_dense_row, dense_rows),
+                };
+                for (child, offset) in children {
+                    if *offset as usize != state_to_dense_row.len() {
+                        return None;
+                    }
+                    match child {
+                        Self::Dense(rows) => {
+                            for row in rows {
+                                let dense = dense_rows.len() as u32;
+                                dense_rows.push(rebased_row(row, *offset));
+                                state_to_dense_row.push(dense);
+                            }
+                        }
+                        Self::Hybrid {
+                            state_to_dense_row: child_mapping,
+                            dense_rows: child_rows,
+                        } => {
+                            for &child_dense in child_mapping {
+                                if child_dense == u32::MAX {
+                                    state_to_dense_row.push(u32::MAX);
+                                } else {
+                                    let row = child_rows.get(child_dense as usize)?;
+                                    let dense = dense_rows.len() as u32;
+                                    dense_rows.push(rebased_row(row, *offset));
+                                    state_to_dense_row.push(dense);
+                                }
+                            }
+                        }
+                    }
+                }
+                Some(Self::Hybrid {
+                    state_to_dense_row,
+                    dense_rows,
+                })
+            }
+        }
+    }
 }
 pub(crate) type TemplateDfasByTerminal = Vec<Option<Arc<CommitTemplateDfas>>>;
 pub(crate) type FastTemplateDfasByTerminal = Vec<Option<Arc<FastCommitTemplateDfas>>>;
@@ -931,6 +1011,11 @@ pub struct Constraint {
     pub(crate) possible_matches_complete: bool,
     pub(crate) state_to_internal_tsid: Vec<u32>,
     pub(crate) internal_tsid_to_states: Vec<Vec<u32>>,
+    /// Runtime-only inverse lexer-metadata index used by compiled-constraint
+    /// composition. Row `t` lists exactly the raw tokenizer states whose
+    /// epsilon closure has terminal `t` matched or still reachable.
+    #[serde(skip, default)]
+    pub(crate) terminal_live_states: Vec<Vec<u32>>,
     /// Runtime-only CSR view of the exact state -> internal-TSID relation.
     /// Ordinary tokenizers have one entry per state. A fully determinized
     /// runtime lexer may represent several old lexer states and therefore

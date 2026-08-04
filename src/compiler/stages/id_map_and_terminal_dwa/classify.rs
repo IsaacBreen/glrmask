@@ -212,6 +212,7 @@ impl crate::vocab::VocabDerivedArtifact for VocabClassificationFacts {}
 #[derive(Debug)]
 struct VocabAdjacentPairIndex {
     pair_offsets: Box<[u32]>,
+    entry_token_ids: Box<[u32]> ,
     /// `(entry_index << 32) | split_after`, grouped by adjacent byte pair.
     /// Entry indices let hot classification loops address a precollected slice
     /// directly instead of performing one ordered-map lookup per occurrence.
@@ -268,6 +269,7 @@ fn vocab_adjacent_pair_index(vocab: &Vocab) -> Arc<VocabAdjacentPairIndex> {
 
     let index = Arc::new(VocabAdjacentPairIndex {
         pair_offsets: pair_offsets.into_boxed_slice(),
+        entry_token_ids: vocab.entries.keys().copied().collect::<Vec<_>>().into_boxed_slice(),
         occurrences: occurrences.into_boxed_slice(),
         entry_split_offsets: entry_split_offsets.into_boxed_slice(),
         total_splits,
@@ -312,6 +314,26 @@ pub(crate) fn cache_vocab_classification_facts(
 
 fn vocab_byte_set(vocab: &Vocab) -> U8Set {
     vocab_classification_facts(vocab).bytes
+}
+
+pub(crate) fn vocab_tokens_with_adjacent_pairs(
+    vocab: &Vocab,
+    allowed_pairs: &[U8Set; 256],
+) -> Vec<u32> {
+    let index = vocab_adjacent_pair_index(vocab);
+    let mut selected = vec![false; index.entry_token_ids.len()];
+    for (left, rights) in allowed_pairs.iter().enumerate() {
+        for right in rights.iter() {
+            for &occurrence in index.occurrences_for_pair(left as u8, right) {
+                selected[(occurrence >> 32) as usize] = true;
+            }
+        }
+    }
+    selected
+        .into_iter()
+        .enumerate()
+        .filter_map(|(entry, selected)| selected.then_some(index.entry_token_ids[entry]))
+        .collect()
 }
 
 pub(crate) fn prepare_vocab_for_terminal_classification(vocab: &Vocab) {

@@ -368,6 +368,9 @@ impl Constraint {
         let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
         let total_started_at = profile.then(std::time::Instant::now);
+        if self.terminal_live_states.len() != self.tokenizer.num_terminals() as usize {
+            self.terminal_live_states = self.compute_terminal_live_states();
+        }
         let started_at = profile.then(std::time::Instant::now);
         if self.table.guarded_shift_index.len() != self.table.num_states as usize {
             if self.table.num_rules == 0 {
@@ -1121,11 +1124,60 @@ impl Constraint {
         .collect()
     }
 
+    fn compute_terminal_live_states(&self) -> Vec<Vec<u32>> {
+        let terminal_count = self.tokenizer.num_terminals() as usize;
+        if terminal_count == 0 {
+            return Vec::new();
+        }
+        let closures = self.tokenizer.all_singleton_epsilon_closures();
+        let state_count = self.tokenizer.num_states() as usize;
+        let build_state = |mut rows: Vec<Vec<u32>>, state: usize| {
+            let mut terminals = SmallVec::<[u32; 8]>::new();
+            for &closure_state in closures[state].iter() {
+                terminals.extend(self.tokenizer.matched_terminals_iter(closure_state));
+                terminals.extend(self.tokenizer.possible_future_terminals_iter(closure_state));
+            }
+            terminals.sort_unstable();
+            terminals.dedup();
+            for terminal in terminals {
+                if let Some(row) = rows.get_mut(terminal as usize) {
+                    row.push(state as u32);
+                }
+            }
+            rows
+        };
+        let empty = || (0..terminal_count).map(|_| Vec::<u32>::new()).collect::<Vec<_>>();
+        let mut rows = if rayon::current_num_threads() == 1 || state_count < 4096 {
+            (0..state_count).fold(empty(), build_state)
+        } else {
+            (0..state_count)
+                .into_par_iter()
+                .fold(empty, build_state)
+                .reduce(empty, |mut left, mut right| {
+                    for (left_row, right_row) in left.iter_mut().zip(&mut right) {
+                        left_row.append(right_row);
+                    }
+                    left
+                })
+        };
+        for row in &mut rows {
+            row.sort_unstable();
+            row.dedup();
+        }
+        rows
+    }
+
     pub(crate) fn rebuild_runtime_caches_impl(&mut self) {
         self.tokenizer_has_epsilon_transitions = self.tokenizer.has_epsilon_transitions();
         let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
         let total_started_at = profile.then(std::time::Instant::now);
+        let terminal_live_started_at = profile.then(std::time::Instant::now);
+        if self.terminal_live_states.len() != self.tokenizer.num_terminals() as usize {
+            self.terminal_live_states = self.compute_terminal_live_states();
+        }
+        let terminal_live_ms = terminal_live_started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let wide_frontier_started_at = profile.then(std::time::Instant::now);
         self.direct_regular_wide_frontier_acceptance =
             self.compute_direct_regular_wide_frontier_acceptance();
@@ -1155,7 +1207,15 @@ impl Constraint {
                 self.table.rebuild_guarded_shift_index();
             }
         }
-        self.rebuild_state_internal_tsid_relation();
+        let state_count = self.tokenizer.num_states() as usize;
+        let state_relation_ready = self.state_internal_tsid_offsets.len() == state_count + 1
+            && self
+                .state_internal_tsid_offsets
+                .last()
+                .is_some_and(|&end| end as usize == self.state_internal_tsids.len());
+        if !state_relation_ready {
+            self.rebuild_state_internal_tsid_relation();
+        }
         self.rebuild_runtime_product_state_lookup();
         let fast_template_dfas_by_terminal = self.compute_fast_template_dfas();
         let guarded_shift_ms = guarded_shift_started_at
@@ -1170,6 +1230,9 @@ impl Constraint {
         let dynamic_vocab_reused = false;
         let dynamic_vocab_ms = 0.0;
         let primary_started_at = profile.then(std::time::Instant::now);
+        let mut prebuilt_tokenizer_fast_transitions =
+            (self.tokenizer_fast_transitions.len() == self.tokenizer.num_states() as usize)
+                .then(|| std::mem::take(&mut self.tokenizer_fast_transitions));
         let (
             internal_token_buf_masks,
             internal_token_buf_masks_ms,
@@ -1195,9 +1258,15 @@ impl Constraint {
             let prebuilt_weight_sparse_ms =
                 started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
             let started = profile.then(std::time::Instant::now);
-            let tokenizer_fast_transitions = self.compute_tokenizer_fast_transitions();
-            let tokenizer_fast_transitions_ms =
-                started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+            let reused_tokenizer_fast_transitions = prebuilt_tokenizer_fast_transitions.is_some();
+            let tokenizer_fast_transitions = prebuilt_tokenizer_fast_transitions
+                .take()
+                .unwrap_or_else(|| self.compute_tokenizer_fast_transitions());
+            let tokenizer_fast_transitions_ms = if reused_tokenizer_fast_transitions {
+                0.0
+            } else {
+                started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0)
+            };
             let started = profile.then(std::time::Instant::now);
             let dense_masks = self.compute_dense_token_masks_excluding_direct_final(
                 &prebuilt_weight_caches.eligible,
@@ -1229,6 +1298,9 @@ impl Constraint {
                 || {
                     let build_tokenizer_fast_transitions = || {
                         let started = profile.then(std::time::Instant::now);
+                        if let Some(prebuilt) = prebuilt_tokenizer_fast_transitions.take() {
+                            return (prebuilt, 0.0);
+                        }
                         let result = self.compute_tokenizer_fast_transitions();
                         let ms = started
                             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
@@ -1551,7 +1623,8 @@ impl Constraint {
                 self.direct_sparse_weight_token_sets.len(),
             );
             eprintln!(
-                "[glrmask/profile][runtime_finalize] guarded_shift_ms={:.3} dynamic_mask_vocab_ms={:.3} dynamic_mask_vocab_reused={} internal_token_buf_masks_ms={:.3} tokenizer_fast_transitions_ms={:.3} dense_token_masks_ms={:.3} dwa_fast_transitions_ms={:.3} primary_ms={:.3} word_block_masks_ms={:.3} quad_word_block_masks_ms={:.3} byte_block_masks_ms={:.3} block_masks_ms={:.3} derived_masks_ms={:.3} seed_dense_ms={:.3} tokenizer_closures_ms={:.3} initial_commit_prime_ms={:.3} total_ms={:.3}",
+                "[glrmask/profile][runtime_finalize] terminal_live_ms={:.3} guarded_shift_ms={:.3} dynamic_mask_vocab_ms={:.3} dynamic_mask_vocab_reused={} internal_token_buf_masks_ms={:.3} tokenizer_fast_transitions_ms={:.3} dense_token_masks_ms={:.3} dwa_fast_transitions_ms={:.3} primary_ms={:.3} word_block_masks_ms={:.3} quad_word_block_masks_ms={:.3} byte_block_masks_ms={:.3} block_masks_ms={:.3} derived_masks_ms={:.3} seed_dense_ms={:.3} tokenizer_closures_ms={:.3} initial_commit_prime_ms={:.3} total_ms={:.3}",
+                terminal_live_ms,
                 guarded_shift_ms,
                 dynamic_vocab_ms,
                 dynamic_vocab_reused,

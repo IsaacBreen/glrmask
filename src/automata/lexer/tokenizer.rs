@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize, Serializer};
 use smallvec::SmallVec;
 
 use super::dfa::DFA;
+pub(crate) use super::dfa::SingletonEpsilonClosures;
 use crate::automata::regex::Expr;
 use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
@@ -33,7 +34,7 @@ pub struct Tokenizer {
     /// this cache each lane independently walks the same epsilon DAG for every
     /// raw state.
     #[serde(default, skip)]
-    pub(super) singleton_epsilon_closures: OnceLock<Arc<[Box<[u32]>]>>,
+    pub(super) singleton_epsilon_closures: OnceLock<Arc<SingletonEpsilonClosures>>,
     /// Per-state byte sets whose transitions loop to the same raw tokenizer
     /// state. Compiler partitions reuse this table instead of rescanning every
     /// transition row independently.
@@ -499,6 +500,122 @@ impl Tokenizer {
     ///
     /// The returned state offsets map each source raw tokenizer state into the
     /// merged raw-state domain.
+    /// Form one ordinary flattened tokenizer by consuming the parent as the
+    /// destination and appending borrowed child components. Parent state IDs and
+    /// transition buffers remain unchanged; only child states are cloned and
+    /// rebased. Terminal IDs in the parent remain identity-mapped from zero.
+    pub(crate) fn disjoint_union_with_owned_parent(
+        mut parent: Tokenizer,
+        parent_terminal_offset: TerminalID,
+        children: &[(&Tokenizer, TerminalID)],
+    ) -> (Tokenizer, Vec<u32>) {
+        assert_eq!(
+            parent_terminal_offset, 0,
+            "owned-parent tokenizer composition requires the parent terminal domain to start at zero",
+        );
+        let total_terminals = std::iter::once((&parent, parent_terminal_offset))
+            .chain(children.iter().copied())
+            .map(|(tokenizer, terminal_offset)| {
+                terminal_offset
+                    .checked_add(tokenizer.num_terminals)
+                    .expect("merged tokenizer terminal ID overflow")
+            })
+            .max()
+            .unwrap_or(0);
+
+        parent
+            .dfa
+            .ensure_group_mapping_capacity(total_terminals as usize);
+        let parent_closures = std::mem::take(&mut parent.singleton_epsilon_closures)
+            .into_inner()
+            .and_then(|closures| Arc::try_unwrap(closures).ok());
+        let mut child_closures = Vec::with_capacity(children.len());
+        let mut state_offsets = Vec::with_capacity(children.len() + 1);
+        state_offsets.push(0);
+        let mut compressed_segments = parent
+            .compressed_transition_segments
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut root_finalizers = BitSet::new(total_terminals as usize);
+        for terminal in parent.dfa.finalizers(parent.start_state()).iter() {
+            root_finalizers.set(terminal);
+        }
+        let mut root_futures = BitSet::new(total_terminals as usize);
+        for terminal in parent
+            .dfa
+            .possible_future_group_ids(parent.start_state())
+            .iter()
+        {
+            root_futures.set(terminal);
+        }
+
+        for &(tokenizer, terminal_offset) in children {
+            let component = tokenizer.dfa.clone();
+            let global_groups = (0..tokenizer.num_terminals)
+                .map(|terminal| (terminal_offset + terminal) as usize)
+                .collect::<Vec<_>>();
+            let state_offset = parent
+                .dfa
+                .append_rebased_component(component, &global_groups);
+            state_offsets.push(state_offset);
+            child_closures.push((
+                tokenizer.all_singleton_epsilon_closures(),
+                state_offset,
+                tokenizer.start_state(),
+            ));
+            parent
+                .dfa
+                .add_epsilon_transition(parent.start_state(), state_offset + tokenizer.start_state());
+            for terminal in tokenizer.dfa.finalizers(tokenizer.start_state()).iter() {
+                root_finalizers.set(terminal_offset as usize + terminal);
+            }
+            for terminal in tokenizer
+                .dfa
+                .possible_future_group_ids(tokenizer.start_state())
+                .iter()
+            {
+                root_futures.set(terminal_offset as usize + terminal);
+            }
+            compressed_segments.extend(
+                tokenizer
+                    .compressed_transition_segments
+                    .iter()
+                    .cloned()
+                    .map(|mut segment| {
+                        segment.state_offset = segment
+                            .state_offset
+                            .checked_add(state_offset)
+                            .expect("merged compressed tokenizer state offset overflow");
+                        segment
+                    }),
+            );
+        }
+        parent
+            .dfa
+            .overwrite_state_metadata(parent.start_state(), root_finalizers, root_futures);
+        parent.num_terminals = total_terminals;
+        parent.compressed_transition_segments =
+            Arc::from(compressed_segments.into_boxed_slice());
+        parent.exprs = None;
+        parent.singleton_epsilon_closures = OnceLock::new();
+        if let Some(closures) = parent_closures.and_then(|closures| {
+            closures.append_rebased_children(
+                parent.start_state(),
+                &child_closures,
+            )
+        }) {
+            let _ = parent
+                .singleton_epsilon_closures
+                .set(Arc::new(closures));
+        }
+        parent.all_self_loop_bytes_cache = OnceLock::new();
+        parent.transition_count_cache = OnceLock::new();
+        parent.forced_minimized_state_count_cache = OnceLock::new();
+        parent.scalar_deterministic_dispatch_cache = OnceLock::new();
+        (parent, state_offsets)
+    }
+
     pub(crate) fn disjoint_union_with_terminal_offsets(
         tokenizers: &[(&Tokenizer, TerminalID)],
     ) -> (Tokenizer, Vec<u32>) {
@@ -684,10 +801,13 @@ impl Tokenizer {
         // Prefer the true initial state when another raw state happens to have
         // the same closure: accumulator state keys are observable at commit.
         let initial = self.initial_state_id();
-        source_by_closure.insert(closures[initial as usize].clone(), initial);
+        source_by_closure.insert(
+            closures[initial as usize].to_vec().into_boxed_slice(),
+            initial,
+        );
         for (state, closure) in closures.iter().enumerate() {
             source_by_closure
-                .entry(closure.clone())
+                .entry(closure.to_vec().into_boxed_slice())
                 .or_insert(state as u32);
         }
         let exact_source_states = source_subsets
@@ -1627,10 +1747,13 @@ impl Tokenizer {
             .collect()
     }
 
-    pub(crate) fn all_singleton_epsilon_closures(&self) -> Arc<[Box<[u32]>]> {
-        Arc::clone(self.singleton_epsilon_closures.get_or_init(|| {
-            Arc::from(self.dfa.all_singleton_epsilon_closures())
-        }))
+    pub(crate) fn all_singleton_epsilon_closures(
+        &self,
+    ) -> Arc<SingletonEpsilonClosures> {
+        Arc::clone(
+            self.singleton_epsilon_closures
+                .get_or_init(|| Arc::new(self.dfa.all_singleton_epsilon_closures())),
+        )
     }
 
     /// Return one exact self-loop byte set per raw tokenizer state.

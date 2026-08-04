@@ -667,6 +667,30 @@ struct InjectiveLocalMap {
 struct DisjointRunLocalMap {
     runs_by_local: Vec<Vec<(u32, u32)>>,
     destination_order_is_monotone: bool,
+    /// When all non-empty local classes occupy adjacent destination spans in
+    /// local-ID order, any inclusive local interval maps to at most one
+    /// destination interval.  These prefix/suffix lookups make that mapping
+    /// constant-time.
+    contiguous_interval_lookup: Option<ContiguousIntervalLookup>,
+}
+
+#[derive(Debug)]
+struct ContiguousIntervalLookup {
+    first_destination_at_or_after: Vec<u32>,
+    last_destination_at_or_before: Vec<u32>,
+}
+
+impl ContiguousIntervalLookup {
+    #[inline]
+    fn remap(&self, local_start: u32, local_end: u32) -> Option<(u32, u32)> {
+        let start = *self
+            .first_destination_at_or_after
+            .get(local_start as usize)?;
+        let end = *self
+            .last_destination_at_or_before
+            .get(local_end as usize)?;
+        (start != u32::MAX && end != u32::MAX && start <= end).then_some((start, end))
+    }
 }
 
 impl DisjointRunLocalMap {
@@ -713,9 +737,53 @@ impl DisjointRunLocalMap {
             runs_by_local.push(runs);
         }
 
+        let contiguous_interval_lookup = if destination_order_is_monotone
+            && runs_by_local.iter().all(|runs| runs.len() <= 1)
+        {
+            let mut expected_next = None;
+            let mut adjacent = true;
+            for runs in &runs_by_local {
+                let Some(&(start, end)) = runs.first() else {
+                    continue;
+                };
+                if let Some(expected) = expected_next
+                    && start != expected
+                {
+                    adjacent = false;
+                    break;
+                }
+                expected_next = end.checked_add(1);
+            }
+            adjacent.then(|| {
+                let mut first_destination_at_or_after = vec![u32::MAX; runs_by_local.len()];
+                let mut next = u32::MAX;
+                for (local, runs) in runs_by_local.iter().enumerate().rev() {
+                    if let Some(&(start, _)) = runs.first() {
+                        next = start;
+                    }
+                    first_destination_at_or_after[local] = next;
+                }
+                let mut last_destination_at_or_before = vec![u32::MAX; runs_by_local.len()];
+                let mut previous = u32::MAX;
+                for (local, runs) in runs_by_local.iter().enumerate() {
+                    if let Some(&(_, end)) = runs.first() {
+                        previous = end;
+                    }
+                    last_destination_at_or_before[local] = previous;
+                }
+                ContiguousIntervalLookup {
+                    first_destination_at_or_after,
+                    last_destination_at_or_before,
+                }
+            })
+        } else {
+            None
+        };
+
         Some(Self {
             runs_by_local,
             destination_order_is_monotone,
+            contiguous_interval_lookup,
         })
     }
 }
@@ -825,15 +893,22 @@ fn remap_token_set_with_disjoint_runs_uncached(
     tokens: &SharedTokenSet,
     token_map: &DisjointRunLocalMap,
 ) -> SharedTokenSet {
-    // A common refinement partitions each local token class into disjoint
-    // destination runs. Insert those runs directly instead of inserting every
-    // destination token one at a time. RangeSetBlaze canonicalizes adjacency
-    // and, for non-monotone maps, the final destination order.
+    // Parent-major common coordinates make the dominant map interval-preserving:
+    // a whole local range becomes one global range.  Fall back to exact local
+    // class expansion for child/non-monotone maps.
     let mut mapped = RangeSetBlaze::new();
-    for local_token in tokens.iter() {
-        if let Some(runs) = token_map.runs_by_local.get(local_token as usize) {
-            for &(start, end) in runs {
+    if let Some(lookup) = token_map.contiguous_interval_lookup.as_ref() {
+        for local_range in tokens.ranges() {
+            if let Some((start, end)) = lookup.remap(*local_range.start(), *local_range.end()) {
                 mapped.ranges_insert(start..=end);
+            }
+        }
+    } else {
+        for local_token in tokens.iter() {
+            if let Some(runs) = token_map.runs_by_local.get(local_token as usize) {
+                for &(start, end) in runs {
+                    mapped.ranges_insert(start..=end);
+                }
             }
         }
     }
@@ -846,10 +921,16 @@ fn remap_local_token_range_with_disjoint_runs(
     token_map: &DisjointRunLocalMap,
 ) -> SharedTokenSet {
     let mut mapped = RangeSetBlaze::new();
-    for local_token in local_start..=local_end {
-        if let Some(runs) = token_map.runs_by_local.get(local_token as usize) {
-            for &(start, end) in runs {
-                mapped.ranges_insert(start..=end);
+    if let Some(lookup) = token_map.contiguous_interval_lookup.as_ref() {
+        if let Some((start, end)) = lookup.remap(local_start, local_end) {
+            mapped.ranges_insert(start..=end);
+        }
+    } else {
+        for local_token in local_start..=local_end {
+            if let Some(runs) = token_map.runs_by_local.get(local_token as usize) {
+                for &(start, end) in runs {
+                    mapped.ranges_insert(start..=end);
+                }
             }
         }
     }
