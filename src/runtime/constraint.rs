@@ -12,6 +12,7 @@ use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::compiler::glr::labels::{encode_positive_label, DEFAULT_LABEL};
 use crate::compiler::glr::parser::ParserGSS;
 use crate::compiler::glr::table::{Action, TableAmbiguity};
+use crate::ds::u8set::U8Set;
 use crate::ds::weight::Weight;
 use crate::grammar::flat::TerminalID;
 
@@ -378,7 +379,13 @@ impl Constraint {
     ) -> Vec<(u32, TerminalID)> {
         let max_projections = if self.tokenizer.num_states() < 50_000 { 2 } else { 3 };
         const MAX_BASE_PROJECTIONS: usize = 2;
-        if self.tokenizer.num_states() < 256 {
+        // Small and medium tokenizers traverse cheaply enough that speculative
+        // projection construction does not pay for itself. Measurements across
+        // ordinary JSON schemas showed no runtime benefit at 357 and 567 states,
+        // while a 924-state tokenizer amortized the projection within a short
+        // output. Keep this a structural heuristic, independent of schema form.
+        const MIN_PROJECTION_TOKENIZER_STATES: u32 = 768;
+        if self.tokenizer.num_states() < MIN_PROJECTION_TOKENIZER_STATES {
             return Vec::new();
         }
         let mut best_by_terminal = BTreeMap::<TerminalID, (usize, u32)>::new();
@@ -521,6 +528,15 @@ impl Constraint {
                 Some(state)
             }
 
+            fn mark_token_ids(mask: &mut [u32], token_ids: &[u32]) {
+                for &token_id in token_ids {
+                    let word = token_id as usize / 32;
+                    if let Some(mask_word) = mask.get_mut(word) {
+                        *mask_word |= 1u32 << (token_id % 32);
+                    }
+                }
+            }
+
             fn visit(
                 constraint: &Constraint,
                 vocab: &DynamicMaskVocab,
@@ -528,6 +544,8 @@ impl Constraint {
                 trie: &DynamicMaskTrie,
                 node: u32,
                 tokenizer_state: u32,
+                source_state: u32,
+                source_loop_bytes: U8Set,
                 required_terminal: TerminalID,
                 safe_subtrees: &mut [u8],
                 safe_no_match_mask: &mut [u32],
@@ -540,15 +558,18 @@ impl Constraint {
                 let node_data = trie.node(node);
                 let token_safe = node_data.token_id.is_none() || state_remains_live;
                 if state_remains_live {
+                    if tokenizer_state == source_state
+                        && U8Set::from_words(trie.subtree_bytes(node))
+                            .is_subset(&source_loop_bytes)
+                    {
+                        mark_token_ids(safe_no_match_mask, vocab.subtree_original_tokens(node));
+                        safe_subtrees[node as usize] = 1;
+                        return true;
+                    }
                     if let Some(canonical_token) = node_data.token_id
                         && let Some(token_ids) = vocab.token_ids(canonical_token)
                     {
-                        for &token_id in token_ids {
-                            let word = token_id as usize / 32;
-                            if let Some(mask_word) = safe_no_match_mask.get_mut(word) {
-                                *mask_word |= 1u32 << (token_id % 32);
-                            }
-                        }
+                        mark_token_ids(safe_no_match_mask, token_ids);
                     }
                 }
 
@@ -568,6 +589,8 @@ impl Constraint {
                             trie,
                             edge.child,
                             end_state,
+                            source_state,
+                            source_loop_bytes,
                             required_terminal,
                             safe_subtrees,
                             safe_no_match_mask,
@@ -580,6 +603,7 @@ impl Constraint {
                 subtree_safe
             }
 
+            let source_loop_bytes = constraint.tokenizer.self_loop_bytes(source_state);
             visit(
                 constraint,
                 vocab,
@@ -587,10 +611,32 @@ impl Constraint {
                 trie,
                 0,
                 source_state,
+                source_state,
+                source_loop_bytes,
                 required_terminal,
                 &mut safe_subtrees,
                 &mut safe_no_match_mask,
             );
+            if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+                || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+            {
+                let safe_tokens = safe_no_match_mask
+                    .iter()
+                    .map(|word| word.count_ones() as usize)
+                    .sum::<usize>();
+                let safe_subtree_count = safe_subtrees
+                    .iter()
+                    .filter(|&&safe| safe != 0)
+                    .count();
+                eprintln!(
+                    "[glrmask/profile][dynamic_self_loop_projection_build] source_state={} terminal={} loop_bytes={} safe_tokens={} safe_subtrees={}",
+                    source_state,
+                    required_terminal,
+                    source_loop_bytes.len(),
+                    safe_tokens,
+                    safe_subtree_count,
+                );
+            }
             DynamicSelfLoopProjection {
                 source_state,
                 required_terminal,
@@ -693,10 +739,24 @@ impl Constraint {
             direct_regular_terminal_support,
         );
         let projection_started_at = profile.then(std::time::Instant::now);
-        let self_loop_projections = self.build_dynamic_self_loop_projections(
-            &dynamic_mask_vocab,
-            &tokenizer_fast_transitions,
-        );
+        let build_self_loop_projections = std::env::var("GLRMASK_DYNAMIC_SELF_LOOP_PROJECTIONS")
+            .map(|value| {
+                let value = value.trim();
+                value.is_empty()
+                    || (value != "0"
+                        && !value.eq_ignore_ascii_case("false")
+                        && !value.eq_ignore_ascii_case("no")
+                        && !value.eq_ignore_ascii_case("off"))
+            })
+            .unwrap_or(true);
+        let self_loop_projections = if build_self_loop_projections {
+            self.build_dynamic_self_loop_projections(
+                &dynamic_mask_vocab,
+                &tokenizer_fast_transitions,
+            )
+        } else {
+            Vec::new()
+        };
         let projection_ms = projection_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let projection_count = self_loop_projections.len();
