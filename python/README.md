@@ -127,6 +127,12 @@ Composition remains exact when one model token contains bytes from both the
 parent and child grammars. Every component must have been compiled for the same
 vocabulary contents.
 
+Parent and child constraints may use different `ignore` terminals. Composition
+unions all of their lexical languages into one transparent ignore terminal in
+the flattened constraint. For example, a parent can ignore spaces while a child
+ignores tabs or comments; all remain accepted across subgrammar boundaries and
+inside fused model tokens.
+
 ### Decode
 
 Create one state per generated sequence:

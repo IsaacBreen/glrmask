@@ -767,6 +767,26 @@ fn group_matches_by_width(matches: Vec<TokenizerMatch>) -> Vec<(usize, BTreeSet<
 }
 
 impl Tokenizer {
+    pub fn canonicalize_terminal_aliases(
+        &mut self,
+        canonical: TerminalID,
+        aliases: &[TerminalID],
+    ) {
+        let aliases = aliases
+            .iter()
+            .copied()
+            .filter(|&alias| alias != canonical)
+            .map(|alias| alias as usize)
+            .collect::<Vec<_>>();
+        self.dfa
+            .canonicalize_group_aliases(canonical as usize, &aliases);
+        self.singleton_epsilon_closures = OnceLock::new();
+        self.all_self_loop_bytes_cache = OnceLock::new();
+        self.transition_count_cache = OnceLock::new();
+        self.forced_minimized_state_count_cache = OnceLock::new();
+        self.scalar_deterministic_dispatch_cache = OnceLock::new();
+    }
+
     /// Form an exact disjoint union of independently compiled tokenizers while
     /// keeping every terminal ID distinct.
     ///

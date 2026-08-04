@@ -743,10 +743,10 @@ fn transition_mixed_key(
     next_offset: usize,
     owners: &[u32],
     seed_terminals: &[bool],
-    ignore_terminal: Option<u32>,
+    ignore_terminals: &BitSet,
     disallowed_follows: &BTreeMap<u32, BitSet>,
 ) -> Option<MixedTokenNodeKey> {
-    if Some(terminal) == ignore_terminal {
+    if ignore_terminals.contains(terminal as usize) {
         return Some(MixedTokenNodeKey {
             offset: next_offset,
             started: true,
@@ -787,7 +787,7 @@ fn build_boundary_token_graph(
     reset_scans: &[&ResidualScanResult],
     owners: &[u32],
     seed_terminals: &[bool],
-    ignore_terminal: Option<u32>,
+    ignore_terminals: &BitSet,
     disallowed_follows: &BTreeMap<u32, BitSet>,
 ) -> Option<(Vec<MixedTokenNode>, Vec<bool>, Vec<bool>)> {
     let mut nodes = Vec::<MixedTokenNode>::new();
@@ -834,7 +834,7 @@ fn build_boundary_token_graph(
                 next_offset,
                 owners,
                 seed_terminals,
-                ignore_terminal,
+                ignore_terminals,
                 disallowed_follows,
             ) else {
                 continue;
@@ -868,7 +868,7 @@ fn build_boundary_token_graph(
                 bytes.len(),
                 owners,
                 seed_terminals,
-                ignore_terminal,
+                ignore_terminals,
                 disallowed_follows,
             ) else {
                 continue;
@@ -1126,7 +1126,7 @@ fn boundary_token_prefilter(
     components: &[&Constraint],
     terminal_offsets: &[u32],
     seed_terminals: &[bool],
-    ignore_terminal: Option<u32>,
+    ignore_terminals: &BitSet,
     disallowed_follows: &BTreeMap<u32, BitSet>,
 ) -> BTreeSet<u32> {
     let num_terminals = terminal_offsets
@@ -1159,7 +1159,7 @@ fn boundary_token_prefilter(
     let mut allowed_pairs = [U8Set::empty(); 256];
     let mut boundary_terminals = vec![false; num_terminals];
     for terminal in 0..num_terminals {
-        if Some(terminal as u32) == ignore_terminal {
+        if ignore_terminals.contains(terminal) {
             continue;
         }
         let Some(left) = summaries[terminal] else {
@@ -1167,7 +1167,7 @@ fn boundary_token_prefilter(
         };
         let blocked = disallowed_follows.get(&(terminal as u32));
         for follow in 0..num_terminals {
-            if Some(follow as u32) == ignore_terminal
+            if ignore_terminals.contains(follow)
                 || blocked.is_some_and(|blocked| blocked.contains(follow))
             {
                 continue;
@@ -1312,7 +1312,7 @@ fn discover_mixed_owner_terminals(
     tokenizer_state_offsets: &[u32],
     terminal_offsets: &[u32],
     seed_terminals: &[bool],
-    ignore_terminal: Option<u32>,
+    ignore_terminals: &BitSet,
     disallowed_follows: &BTreeMap<u32, BitSet>,
 ) -> MixedOwnerDiscovery {
     let num_terminals = components
@@ -1335,7 +1335,7 @@ fn discover_mixed_owner_terminals(
         components,
         terminal_offsets,
         seed_terminals,
-        ignore_terminal,
+        ignore_terminals,
         disallowed_follows,
     );
     prefilter.extend(candidate_ranges.keys().copied());
@@ -1470,7 +1470,7 @@ fn discover_mixed_owner_terminals(
                     &reset_scans,
                     &owners,
                     seed_terminals,
-                    ignore_terminal,
+                    ignore_terminals,
                     disallowed_follows,
                 ) else {
                     continue;
@@ -1942,7 +1942,7 @@ fn direct_boundary_terminal_automaton(
     seed_relations: BTreeMap<Vec<u32>, BTreeMap<u32, BTreeSet<u32>>>,
     one_byte_ms: f64,
     discovery: &MixedOwnerDiscovery,
-    ignore_terminal: Option<u32>,
+    ignore_terminals: &BitSet,
 ) -> Result<MappedArtifact<TerminalAutomaton>, String> {
     let total_started_at = Instant::now();
 
@@ -2123,7 +2123,7 @@ fn direct_boundary_terminal_automaton(
             {
                 let target = local_to_canonical[edge.target];
                 debug_assert_ne!(target, usize::MAX);
-                if Some(edge.terminal) == ignore_terminal {
+                if ignore_terminals.contains(edge.terminal as usize) {
                     // Ignore bytes advance the token-local lexer path but have
                     // no parser-stack effect. The generic terminal-DWA pipeline
                     // erases ignore labels in exactly this way; exposing the
@@ -3589,7 +3589,7 @@ fn build_boundary_repair(
     merged_tokenizer: Option<&Tokenizer>,
     merged_tokenizer_state_count: usize,
     terminal_display_names: Vec<String>,
-    ignore_terminal: Option<u32>,
+    ignore_terminals: &BitSet,
     vocab: &Vocab,
     components: &[&Constraint],
     tokenizer_state_offsets: &[u32],
@@ -3604,10 +3604,10 @@ fn build_boundary_repair(
             *slot = true;
         }
     }
-    if let Some(ignore_terminal) = ignore_terminal
-        && let Some(slot) = seed_terminals.get_mut(ignore_terminal as usize)
-    {
-        *slot = true;
+    for ignore_terminal in ignore_terminals.iter() {
+        if let Some(slot) = seed_terminals.get_mut(ignore_terminal) {
+            *slot = true;
+        }
     }
 
     let augmented_start = composed_table
@@ -3662,7 +3662,7 @@ fn build_boundary_repair(
                             tokenizer_state_offsets,
                             &composed_table.terminal_offsets,
                             &seed_terminals,
-                            ignore_terminal,
+                            ignore_terminals,
                             &disallowed_follows,
                         );
                         (mixed_owner, started_at.elapsed().as_secs_f64() * 1000.0)
@@ -3835,7 +3835,7 @@ fn build_boundary_repair(
                                         vocab,
                                         &coloring,
                                         false,
-                                        ignore_terminal,
+                                        ignore_terminals.iter().next().map(|terminal| terminal as u32),
                                         &analyzed,
                                         &disallowed_follows,
                                         flat_trans,
@@ -3859,7 +3859,7 @@ fn build_boundary_repair(
                         seed_relations,
                         one_byte_ms,
                         &mixed_owner,
-                        ignore_terminal,
+                        ignore_terminals,
                     )
                 };
                 (result, started_at.elapsed().as_secs_f64() * 1000.0)
@@ -3987,11 +3987,18 @@ fn merged_special_token_terminals(
     merged
 }
 
-fn merged_ignore_terminal(
+#[derive(Debug, Clone)]
+struct MergedIgnoreTerminals {
+    canonical: Option<u32>,
+    all: BitSet,
+    aliases: Vec<u32>,
+}
+
+fn merged_ignore_terminals(
     parent: &Constraint,
     children: &[CompiledSubgrammarInput<'_>],
     terminal_offsets: &[u32],
-) -> Option<u32> {
+) -> MergedIgnoreTerminals {
     let ignores = std::iter::once(parent)
         .chain(children.iter().map(|child| child.constraint))
         .enumerate()
@@ -4001,12 +4008,31 @@ fn merged_ignore_terminal(
                 .map(|terminal| terminal_offsets[component_index] + terminal)
         })
         .collect::<Vec<_>>();
-    match ignores.as_slice() {
-        [] => None,
-        [ignore] => Some(*ignore),
-        _ => panic!(
-            "constraint composition currently supports at most one component ignore terminal; conflicting remapped ignore terminals: {ignores:?}"
-        ),
+    let canonical = ignores.first().copied();
+    let mut all = BitSet::new(
+        terminal_offsets
+            .iter()
+            .copied()
+            .zip(std::iter::once(parent).chain(children.iter().map(|child| child.constraint)))
+            .map(|(offset, constraint)| offset + constraint.tokenizer.num_terminals())
+            .max()
+            .unwrap_or(0) as usize,
+    );
+    for &ignore in &ignores {
+        all.set(ignore as usize);
+    }
+    let aliases = canonical
+        .map(|canonical| {
+            ignores
+                .into_iter()
+                .filter(|&ignore| ignore != canonical)
+                .collect()
+        })
+        .unwrap_or_default();
+    MergedIgnoreTerminals {
+        canonical,
+        all,
+        aliases,
     }
 }
 
@@ -4044,6 +4070,56 @@ fn merged_terminal_live_states(
         states.dedup();
     }
     merged
+}
+
+fn canonicalize_terminal_live_states(
+    states: &mut [Vec<u32>],
+    canonical: Option<u32>,
+    aliases: &[u32],
+) {
+    let Some(canonical) = canonical else {
+        return;
+    };
+    let canonical = canonical as usize;
+    for &alias in aliases {
+        let alias = alias as usize;
+        if alias >= states.len() || canonical >= states.len() {
+            continue;
+        }
+        let alias_states = std::mem::take(&mut states[alias]);
+        states[canonical].extend(alias_states);
+    }
+    states[canonical].sort_unstable();
+    states[canonical].dedup();
+}
+
+fn canonicalize_possible_matches(
+    possible_matches: &mut PossibleMatches,
+    canonical: Option<u32>,
+    aliases: &[u32],
+) {
+    let Some(canonical) = canonical else {
+        return;
+    };
+    for &alias in aliases {
+        let Some(alias_weight) = possible_matches.remove(&alias) else {
+            continue;
+        };
+        possible_matches
+            .entry(canonical)
+            .and_modify(|weight| *weight = weight.union(&alias_weight))
+            .or_insert(alias_weight);
+    }
+}
+
+fn canonicalize_parser_artifact_ignore(
+    artifact: MappedArtifact<(DWA, PossibleMatches)>,
+    canonical: Option<u32>,
+    aliases: &[u32],
+) -> MappedArtifact<(DWA, PossibleMatches)> {
+    let ((dwa, mut possible_matches), id_map) = artifact.into_parts();
+    canonicalize_possible_matches(&mut possible_matches, canonical, aliases);
+    MappedArtifact::new((dwa, possible_matches), id_map)
 }
 
 fn merged_terminal_live_states_owned_parent(
@@ -4400,18 +4476,19 @@ pub(crate) fn compose_constraints(
         .into_iter()
         .collect::<Vec<_>>();
     let terminal_display_names = merged_terminal_display_names(parent, children);
-    let ignore_terminal = merged_ignore_terminal(
+    let merged_ignores = merged_ignore_terminals(
         parent,
         children,
         &composed_table.terminal_offsets,
     );
+    let ignore_terminal = merged_ignores.canonical;
 
     let needs_materialized_boundary_reference =
         std::env::var_os("GLRMASK_COMPOSE_GENERIC_BOUNDARY_REFERENCE").is_some()
             || std::env::var_os("GLRMASK_VALIDATE_COMPOSE_COMPONENT_BOUNDARY_VIEW").is_some();
 
     let (
-        (tokenizer, tokenizer_state_offsets),
+        (mut tokenizer, tokenizer_state_offsets),
         tokenizer_ms,
         (parser_artifacts, reuse_ms),
         (boundary_repair, boundary_ms),
@@ -4467,7 +4544,7 @@ pub(crate) fn compose_constraints(
                     Some(&tokenizer_result.0),
                     merged_tokenizer_state_count,
                     terminal_display_names.clone(),
-                    ignore_terminal,
+                    &merged_ignores.all,
                     vocab,
                     &component_constraints,
                     &expected_tokenizer_state_offsets,
@@ -4516,7 +4593,7 @@ pub(crate) fn compose_constraints(
                                 None,
                                 merged_tokenizer_state_count,
                                 terminal_display_names.clone(),
-                                ignore_terminal,
+                                &merged_ignores.all,
                                 vocab,
                                 &component_constraints,
                                 &expected_tokenizer_state_offsets,
@@ -4574,15 +4651,28 @@ pub(crate) fn compose_constraints(
         },
     );
     let (parser_artifacts, template_dfas_by_terminal) = parser_union_result?;
+    let parser_artifacts = canonicalize_parser_artifact_ignore(
+        parser_artifacts,
+        merged_ignores.canonical,
+        &merged_ignores.aliases,
+    );
     let union_ms = union_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let finalize_started_at = Instant::now();
-    let terminal_live_states = merged_terminal_live_states(
+    if let Some(canonical) = merged_ignores.canonical {
+        tokenizer.canonicalize_terminal_aliases(canonical, &merged_ignores.aliases);
+    }
+    let mut terminal_live_states = merged_terminal_live_states(
         parent,
         children,
         &composed_table.terminal_offsets,
         &tokenizer_state_offsets,
         composed_table.table.num_terminals as usize,
+    );
+    canonicalize_terminal_live_states(
+        &mut terminal_live_states,
+        merged_ignores.canonical,
+        &merged_ignores.aliases,
     );
     let result = finalize_composed_constraint(
         composed_table,
@@ -4735,11 +4825,12 @@ pub(crate) fn compose_constraints_owned_parent(
     let token_ids_ms = token_ids_started_at.elapsed().as_secs_f64() * 1000.0;
     let names_started_at = Instant::now();
     let terminal_display_names = merged_terminal_display_names(&parent, children);
-    let ignore_terminal = merged_ignore_terminal(
+    let merged_ignores = merged_ignore_terminals(
         &parent,
         children,
         &composed_table.terminal_offsets,
     );
+    let ignore_terminal = merged_ignores.canonical;
     let names_ms = names_started_at.elapsed().as_secs_f64() * 1000.0;
     let metadata_ms = metadata_started_at.elapsed().as_secs_f64() * 1000.0;
     if compose_profile_enabled() {
@@ -4870,7 +4961,7 @@ pub(crate) fn compose_constraints_owned_parent(
                     None,
                     merged_tokenizer_state_count,
                     terminal_display_names.clone(),
-                    ignore_terminal,
+                    &merged_ignores.all,
                     vocab,
                     &component_constraints,
                     &expected_tokenizer_state_offsets,
@@ -4897,12 +4988,17 @@ pub(crate) fn compose_constraints_owned_parent(
     let preparation_ms = preparation_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let terminal_live_started_at = Instant::now();
-    let terminal_live_states = merged_terminal_live_states_owned_parent(
+    let mut terminal_live_states = merged_terminal_live_states_owned_parent(
         &mut parent,
         children,
         &composed_table.terminal_offsets,
         &expected_tokenizer_state_offsets,
         composed_table.table.num_terminals as usize,
+    );
+    canonicalize_terminal_live_states(
+        &mut terminal_live_states,
+        merged_ignores.canonical,
+        &merged_ignores.aliases,
     );
     let terminal_live_ms = terminal_live_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -4932,12 +5028,15 @@ pub(crate) fn compose_constraints_owned_parent(
         &mut parent.tokenizer,
         Tokenizer::disjoint_union_with_terminal_offsets(&[]).0,
     );
-    let (tokenizer, tokenizer_state_offsets) =
+    let (mut tokenizer, tokenizer_state_offsets) =
         Tokenizer::disjoint_union_with_owned_parent(
             parent_tokenizer,
             composed_table.terminal_offsets[0],
             &child_tokenizers,
         );
+    if let Some(canonical) = merged_ignores.canonical {
+        tokenizer.canonicalize_terminal_aliases(canonical, &merged_ignores.aliases);
+    }
     let tokenizer_ms = tokenizer_started_at.elapsed().as_secs_f64() * 1000.0;
     assert_eq!(
         tokenizer_state_offsets, expected_tokenizer_state_offsets,
@@ -4949,12 +5048,17 @@ pub(crate) fn compose_constraints_owned_parent(
     let num_terminals = composed_table.table.num_terminals as usize;
     let PreparedOwnedComponentArtifacts {
         automata,
-        possible_matches,
+        mut possible_matches,
         id_map,
         boundary_tsid_map,
         boundary_token_map,
         remap_ms: component_remap_ms,
     } = prepared_components;
+    canonicalize_possible_matches(
+        &mut possible_matches,
+        merged_ignores.canonical,
+        &merged_ignores.aliases,
+    );
     let id_num_tsids = id_map.num_tsids();
     let id_max_internal_token = id_map.max_internal_token_id();
     let (boundary_work, template_dfas_by_terminal) = match boundary_repair {
@@ -5764,6 +5868,62 @@ mod tests {
                 start document;
                 ignore WS;
                 t WS ::= " "+;
+                nt document ::= "X" "a" "!";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let composed = parent
+            .compose_subgrammars(&[("SUB", &child)], &vocab)
+            .unwrap();
+
+        assert_constraints_equivalent_on_reachable_prefixes(
+            &composed,
+            &monolithic,
+            &vocab,
+            5,
+        );
+    }
+
+    #[test]
+    fn distinct_parent_and_child_ignore_terminals_are_unioned() {
+        let vocab = Vocab::new(vec![
+            (0, b"X \ta!".to_vec()),
+            (1, b"X\ta!".to_vec()),
+            (2, b"X".to_vec()),
+            (3, b" ".to_vec()),
+            (4, b"\t".to_vec()),
+            (5, b"a".to_vec()),
+            (6, b"!".to_vec()),
+            (7, b" \ta".to_vec()),
+            (8, b"a!".to_vec()),
+        ]);
+        let parent = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                ignore PARENT_WS;
+                t PARENT_WS ::= " "+;
+                t SUB ::= @token(999);
+                nt document ::= "X" SUB "!";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child = Constraint::from_glrm_grammar(
+            r#"
+                start child;
+                ignore CHILD_WS;
+                t CHILD_WS ::= "\t"+;
+                nt child ::= "a";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let monolithic = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                ignore WS;
+                t WS ::= /[ \t]+/;
                 nt document ::= "X" "a" "!";
             "#,
             &vocab,

@@ -1087,6 +1087,35 @@ impl DFA {
         }
     }
 
+    pub(super) fn canonicalize_group_aliases(&mut self, canonical: usize, aliases: &[usize]) {
+        if aliases.is_empty() {
+            return;
+        }
+        let alias_set = aliases.iter().copied().collect::<std::collections::BTreeSet<_>>();
+        for state in &mut self.states {
+            let finalizes_alias = state.finalizers.iter().any(|group| alias_set.contains(&group));
+            let futures_alias = state
+                .possible_future_group_ids
+                .iter()
+                .any(|group| alias_set.contains(&group));
+            for &alias in aliases {
+                state.finalizers.clear(alias);
+                state.possible_future_group_ids.clear(alias);
+            }
+            if finalizes_alias {
+                state.finalizers.set(canonical);
+            }
+            if futures_alias {
+                state.possible_future_group_ids.set(canonical);
+            }
+        }
+        let mut bytes = self.group_id_to_u8set(canonical as u32).clone();
+        for &alias in aliases {
+            bytes |= *self.group_id_to_u8set(alias as u32);
+        }
+        self.set_group_u8set(canonical as u32, bytes);
+    }
+
     pub(super) fn set_group_u8set(&mut self, group_id: GroupId, set: U8Set) {
         if let Some(entry) = self.group_id_to_u8set.get_mut(group_id as usize) {
             *entry = set;

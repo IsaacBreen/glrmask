@@ -399,6 +399,10 @@ impl Constraint {
     /// Expensive component lexer/parser artifacts are reused. Composition
     /// compiles only the restricted cross-component boundary repair and the
     /// commit-template DFAs for terminals selected by that repair.
+    /// Components may declare different ignore terminals. Their lexical
+    /// languages are unioned into one transparent ignore terminal in the
+    /// flattened result, so parent whitespace and child whitespace/comments
+    /// remain valid on either side of and inside fused model tokens.
     pub fn compose_subgrammars(
         &self,
         children: &[(&str, &Constraint)],
