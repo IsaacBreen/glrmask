@@ -15,6 +15,7 @@ glrmask-finite-automata = { version = "=0.1.1", path = "../glrmask-finite-automa
 glrmask-vocab = { version = "=0.1.1", path = "../glrmask-vocab", features = ["internal-api"] }
 rayon = "1"
 range-set-blaze = "0.3.0"
+regex-syntax = "0.8"
 rustc-hash = "1"
 serde = { version = "1", features = ["derive", "rc"] }
 smallvec = { version = "1", features = ["serde"] }

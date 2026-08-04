@@ -4,6 +4,8 @@
 //! `Expr` AST. Tokenizer construction and expression analysis live under the
 //! compiler module (`compiler::compile`).
 
+use regex_syntax::utf8::Utf8Sequences;
+
 use crate::automata::regex::Expr;
 use crate::ds::u8set::U8Set;
 
@@ -179,6 +181,55 @@ fn parse_usize(input: &[u8], pos: usize) -> (usize, usize) {
     (value, pos)
 }
 
+fn parse_unicode_hex(input: &[u8], start: usize, digits: usize) -> Option<(u32, usize)> {
+    let end = start.checked_add(digits)?;
+    let mut value = 0u32;
+    for &byte in input.get(start..end)? {
+        let digit = match byte {
+            b'0'..=b'9' => u32::from(byte - b'0'),
+            b'a'..=b'f' => 10 + u32::from(byte - b'a'),
+            b'A'..=b'F' => 10 + u32::from(byte - b'A'),
+            _ => return None,
+        };
+        value = value.checked_mul(16)?.checked_add(digit)?;
+    }
+    Some((value, end))
+}
+
+/// Decode a standard `\\uXXXX` or `\\UXXXXXXXX` escape at `pos`.
+/// Adjacent UTF-16 high/low surrogate escapes are combined into one scalar.
+pub fn decode_unicode_escape(input: &[u8], pos: usize) -> Option<(char, usize)> {
+    if input.get(pos) != Some(&b'\\') {
+        return None;
+    }
+    let (value, next, short) = match input.get(pos + 1).copied()? {
+        b'u' => {
+            let (value, next) = parse_unicode_hex(input, pos + 2, 4)?;
+            (value, next, true)
+        }
+        b'U' => {
+            let (value, next) = parse_unicode_hex(input, pos + 2, 8)?;
+            (value, next, false)
+        }
+        _ => return None,
+    };
+    if short && (0xD800..=0xDBFF).contains(&value) {
+        if input.get(next..next + 2)? != b"\\u" {
+            return None;
+        }
+        let (low, end) = parse_unicode_hex(input, next + 2, 4)?;
+        if !(0xDC00..=0xDFFF).contains(&low) {
+            return None;
+        }
+        let scalar = 0x1_0000 + ((value - 0xD800) << 10) + (low - 0xDC00);
+        return char::from_u32(scalar).map(|character| (character, end));
+    }
+    if (0xD800..=0xDFFF).contains(&value) {
+        return None;
+    }
+    char::from_u32(value).map(|character| (character, next))
+}
+
 fn parse_atom(input: &[u8], pos: usize, utf8: bool) -> (Expr, usize) {
     if pos >= input.len() {
         return (Expr::Epsilon, pos);
@@ -194,6 +245,10 @@ fn parse_atom(input: &[u8], pos: usize, utf8: bool) -> (Expr, usize) {
                 Expr::U8Class(U8Set::all())
             };
             (expr, pos + 1)
+        }
+        byte if utf8 && !byte.is_ascii() => {
+            let next = utf8_char_end(input, pos);
+            (Expr::U8Seq(input[pos..next].to_vec()), next)
         }
         byte => (Expr::U8Seq(vec![byte]), pos + 1),
     }
@@ -240,6 +295,67 @@ fn consume_named_group_name(input: &[u8], mut pos: usize) -> Option<usize> {
     None
 }
 
+fn utf8_char_end(input: &[u8], pos: usize) -> usize {
+    let remaining = std::str::from_utf8(&input[pos..])
+        .expect("regex pattern originated from valid UTF-8");
+    pos + remaining
+        .chars()
+        .next()
+        .expect("position must contain a UTF-8 character")
+        .len_utf8()
+}
+
+fn utf8_char_at(input: &[u8], pos: usize) -> (char, usize) {
+    let remaining = std::str::from_utf8(&input[pos..])
+        .expect("regex pattern originated from valid UTF-8");
+    let character = remaining
+        .chars()
+        .next()
+        .expect("position must contain a UTF-8 character");
+    (character, pos + character.len_utf8())
+}
+
+fn utf8_sequence_expr(sequence: &regex_syntax::utf8::Utf8Sequence) -> Expr {
+    sequence_or_single(
+        sequence
+            .as_slice()
+            .iter()
+            .map(|range| Expr::U8Class(U8Set::from_range(range.start, range.end)))
+            .collect(),
+    )
+}
+
+fn utf8_range_expr(start: char, end: char) -> Expr {
+    choice_or_single(
+        Utf8Sequences::new(start, end)
+            .map(|sequence| utf8_sequence_expr(&sequence))
+            .collect(),
+    )
+}
+
+fn char_class_contains_direct_unicode(input: &[u8], pos: usize) -> bool {
+    let mut cursor = pos + 1;
+    if cursor < input.len() && input[cursor] == b'^' {
+        cursor += 1;
+    }
+    while cursor < input.len() && input[cursor] != b']' {
+        if input[cursor] == b'\\' {
+            if decode_unicode_escape(input, cursor).is_some() {
+                return true;
+            }
+            cursor += 1;
+            if cursor >= input.len() {
+                break;
+            }
+        }
+        if !input[cursor].is_ascii() {
+            return true;
+        }
+        cursor += 1;
+    }
+    false
+}
+
 fn parse_char_class_byte(input: &[u8], pos: usize) -> Option<(u8, usize)> {
     if pos >= input.len() {
         return None;
@@ -252,7 +368,7 @@ fn parse_char_class_byte(input: &[u8], pos: usize) -> Option<(u8, usize)> {
     }
 }
 
-fn parse_char_class(input: &[u8], pos: usize, utf8: bool) -> (Expr, usize) {
+fn parse_byte_char_class(input: &[u8], pos: usize, utf8: bool) -> (Expr, usize) {
     let mut pos = pos + 1;
     let mut negate = false;
     if pos < input.len() && input[pos] == b'^' {
@@ -296,6 +412,160 @@ fn parse_char_class(input: &[u8], pos: usize, utf8: bool) -> (Expr, usize) {
         }
     }
     (Expr::U8Class(if negate { !set } else { set }), pos)
+}
+
+#[derive(Clone, Copy)]
+enum Utf8ClassAtom {
+    Byte(u8),
+    Unicode(char),
+}
+
+fn parse_utf8_class_atom(input: &[u8], pos: usize) -> Option<(Utf8ClassAtom, usize)> {
+    if pos >= input.len() || input[pos] == b']' {
+        return None;
+    }
+    if input[pos] == b'\\' {
+        if let Some((character, next)) = decode_unicode_escape(input, pos) {
+            return Some((Utf8ClassAtom::Unicode(character), next));
+        }
+        if pos + 1 >= input.len() {
+            return Some((Utf8ClassAtom::Byte(b'\\'), pos + 1));
+        }
+        if !input[pos + 1].is_ascii() {
+            let (character, next) = utf8_char_at(input, pos + 1);
+            return Some((Utf8ClassAtom::Unicode(character), next));
+        }
+        return Some((
+            Utf8ClassAtom::Byte(parse_escape_byte(input, pos)),
+            pos + escape_len(input, pos),
+        ));
+    }
+    if input[pos].is_ascii() {
+        Some((Utf8ClassAtom::Byte(input[pos]), pos + 1))
+    } else {
+        let (character, next) = utf8_char_at(input, pos);
+        Some((Utf8ClassAtom::Unicode(character), next))
+    }
+}
+
+fn add_utf8_class_atom(
+    atom: Utf8ClassAtom,
+    byte_set: &mut U8Set,
+    unicode_ranges: &mut Vec<(char, char)>,
+) {
+    match atom {
+        Utf8ClassAtom::Byte(byte) => {
+            byte_set.insert(byte);
+        }
+        Utf8ClassAtom::Unicode(character) => unicode_ranges.push((character, character)),
+    }
+}
+
+fn add_utf8_class_range(
+    start: Utf8ClassAtom,
+    end: Utf8ClassAtom,
+    byte_set: &mut U8Set,
+    unicode_ranges: &mut Vec<(char, char)>,
+) {
+    match (start, end) {
+        (Utf8ClassAtom::Byte(start), Utf8ClassAtom::Byte(end)) => {
+            for byte in start..=end {
+                byte_set.insert(byte);
+            }
+        }
+        (Utf8ClassAtom::Unicode(start), Utf8ClassAtom::Unicode(end)) if start <= end => {
+            unicode_ranges.push((start, end));
+        }
+        (Utf8ClassAtom::Byte(start), Utf8ClassAtom::Unicode(end))
+            if start.is_ascii() && (start as char) <= end =>
+        {
+            unicode_ranges.push((start as char, end));
+        }
+        (Utf8ClassAtom::Unicode(start), Utf8ClassAtom::Byte(end))
+            if end.is_ascii() && start <= end as char =>
+        {
+            unicode_ranges.push((start, end as char));
+        }
+        (start, end) => {
+            add_utf8_class_atom(start, byte_set, unicode_ranges);
+            byte_set.insert(b'-');
+            add_utf8_class_atom(end, byte_set, unicode_ranges);
+        }
+    }
+}
+
+fn positive_utf8_class_expr(byte_set: U8Set, unicode_ranges: Vec<(char, char)>) -> Expr {
+    let mut options = Vec::new();
+    if !byte_set.is_empty() {
+        options.push(Expr::U8Class(byte_set));
+    }
+    options.extend(
+        unicode_ranges
+            .into_iter()
+            .map(|(start, end)| utf8_range_expr(start, end)),
+    );
+    choice_or_single(options)
+}
+
+fn parse_unicode_char_class(input: &[u8], pos: usize) -> (Expr, usize) {
+    let mut cursor = pos + 1;
+    let mut negate = false;
+    if cursor < input.len() && input[cursor] == b'^' {
+        negate = true;
+        cursor += 1;
+    }
+
+    let mut byte_set = U8Set::empty();
+    let mut unicode_ranges = Vec::new();
+    while cursor < input.len() && input[cursor] != b']' {
+        if input[cursor] == b'\\' {
+            if let Some((escape_set, next)) = parse_escape_class_set(input, cursor) {
+                byte_set = byte_set.union(&escape_set);
+                cursor = next;
+                continue;
+            }
+        }
+
+        let Some((start, next)) = parse_utf8_class_atom(input, cursor) else {
+            break;
+        };
+        cursor = next;
+        if cursor + 1 < input.len()
+            && input[cursor] == b'-'
+            && input[cursor + 1] != b']'
+        {
+            if let Some((end, next)) = parse_utf8_class_atom(input, cursor + 1) {
+                add_utf8_class_range(start, end, &mut byte_set, &mut unicode_ranges);
+                cursor = next;
+                continue;
+            }
+        }
+        add_utf8_class_atom(start, &mut byte_set, &mut unicode_ranges);
+    }
+    if cursor < input.len() && input[cursor] == b']' {
+        cursor += 1;
+    }
+
+    let excluded_or_allowed = positive_utf8_class_expr(byte_set, unicode_ranges);
+    if negate {
+        (
+            Expr::Exclude {
+                expr: Box::new(utf8_aware_negated_ascii_class(U8Set::empty())),
+                exclude: Box::new(excluded_or_allowed),
+            },
+            cursor,
+        )
+    } else {
+        (excluded_or_allowed, cursor)
+    }
+}
+
+fn parse_char_class(input: &[u8], pos: usize, utf8: bool) -> (Expr, usize) {
+    if utf8 && char_class_contains_direct_unicode(input, pos) {
+        parse_unicode_char_class(input, pos)
+    } else {
+        parse_byte_char_class(input, pos, utf8)
+    }
 }
 
 fn parse_escape_class_set(input: &[u8], pos: usize) -> Option<(U8Set, usize)> {
@@ -368,7 +638,18 @@ fn parse_escape(input: &[u8], pos: usize, utf8: bool) -> (Expr, usize) {
     if pos + 1 >= input.len() {
         return (Expr::U8Seq(vec![b'\\']), pos + 1);
     }
+    if utf8 && let Some((character, next)) = decode_unicode_escape(input, pos) {
+        let mut encoded = [0u8; 4];
+        return (
+            Expr::U8Seq(character.encode_utf8(&mut encoded).as_bytes().to_vec()),
+            next,
+        );
+    }
     let escaped = input[pos + 1];
+    if utf8 && !escaped.is_ascii() {
+        let next = utf8_char_end(input, pos + 1);
+        return (Expr::U8Seq(input[pos + 1..next].to_vec()), next);
+    }
     match escaped {
         b'd' => (Expr::U8Class(ascii_digit_set()), pos + 2),
         b's' => (Expr::U8Class(ascii_space_set()), pos + 2),
@@ -420,3 +701,166 @@ fn hex_digit(b: u8) -> u8 {
     }
 }
 
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn expression_matches(expr: Expr, input: &[u8]) -> bool {
+        use std::sync::Arc;
+
+        use crate::automata::lexer::tokenizer::Lexer as _;
+
+        let tokenizer = expr.clone().build().into_tokenizer(1, Some(Arc::from([expr])));
+        tokenizer
+            .execute_from_state(input, tokenizer.initial_state())
+            .matches
+            .iter()
+            .any(|matched| matched.id == 0 && matched.width == input.len())
+    }
+
+    #[test]
+    fn direct_unicode_atom_quantifier_applies_to_the_whole_scalar() {
+        assert_eq!(
+            parse_regex("—+", true),
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Seq("—".as_bytes().to_vec())),
+                min: 1,
+                max: None,
+            }
+        );
+    }
+
+    #[test]
+    fn direct_unicode_classes_lower_to_utf8_sequences() {
+        let singleton = parse_regex("[—]", true);
+        assert_eq!(
+            singleton,
+            Expr::Seq(vec![
+                Expr::U8Class(U8Set::from_range(0xE2, 0xE2)),
+                Expr::U8Class(U8Set::from_range(0x80, 0x80)),
+                Expr::U8Class(U8Set::from_range(0x94, 0x94)),
+            ])
+        );
+
+        let range = parse_regex("[é-ê]", true);
+        assert_eq!(
+            range,
+            Expr::Seq(vec![
+                Expr::U8Class(U8Set::from_range(0xC3, 0xC3)),
+                Expr::U8Class(U8Set::from_range(0xA9, 0xAA)),
+            ])
+        );
+
+        let byte_escape = parse_regex(r"[\xE2]", true);
+        assert_eq!(byte_escape, Expr::U8Class(U8Set::from_range(0xE2, 0xE2)));
+    }
+
+    #[test]
+    fn direct_unicode_singletons_cover_utf8_scalar_boundaries() {
+        let scalars = [
+            '\u{80}',
+            '\u{7ff}',
+            '\u{800}',
+            '\u{d7ff}',
+            '\u{e000}',
+            '\u{ffff}',
+            '\u{10000}',
+            '\u{10ffff}',
+            'é',
+            '—',
+            '😀',
+        ];
+        for scalar in scalars {
+            let pattern = format!("[{scalar}]");
+            let expr = parse_regex(&pattern, true);
+            let mut encoded = [0u8; 4];
+            let exact = scalar.encode_utf8(&mut encoded).as_bytes();
+            assert!(expression_matches(expr.clone(), exact), "{pattern}");
+            for prefix_len in 0..exact.len() {
+                assert!(
+                    !expression_matches(expr.clone(), &exact[..prefix_len]),
+                    "{pattern} accepted prefix length {prefix_len}"
+                );
+            }
+            assert!(!expression_matches(expr, b"a"), "{pattern}");
+        }
+    }
+
+    #[test]
+    fn direct_unicode_ranges_and_negation_match_scalar_semantics() {
+        let cases = [
+            ("[é-ê]", vec!['é', 'ê'], vec!['è', 'ë', 'a']),
+            ("[\u{7ff}-\u{800}]", vec!['\u{7ff}', '\u{800}'], vec!['\u{7fe}', '\u{801}']),
+            ("[\u{d7ff}-\u{e000}]", vec!['\u{d7ff}', '\u{e000}'], vec!['a']),
+            ("[\u{ffff}-\u{10000}]", vec!['\u{ffff}', '\u{10000}'], vec!['\u{fffe}', '\u{10001}']),
+            ("[😀-😃]", vec!['😀', '😁', '😂', '😃'], vec!['😄', 'a']),
+        ];
+        for (pattern, accepted, rejected) in cases {
+            let expr = parse_regex(pattern, true);
+            for scalar in accepted {
+                let mut encoded = [0u8; 4];
+                assert!(
+                    expression_matches(expr.clone(), scalar.encode_utf8(&mut encoded).as_bytes()),
+                    "{pattern} rejected {scalar:?}"
+                );
+            }
+            for scalar in rejected {
+                let mut encoded = [0u8; 4];
+                assert!(
+                    !expression_matches(expr.clone(), scalar.encode_utf8(&mut encoded).as_bytes()),
+                    "{pattern} accepted {scalar:?}"
+                );
+            }
+        }
+
+        let negated = parse_regex("[^—😀]", true);
+        for accepted in ['a', 'é', '😃'] {
+            let mut encoded = [0u8; 4];
+            assert!(expression_matches(
+                negated.clone(),
+                accepted.encode_utf8(&mut encoded).as_bytes()
+            ));
+        }
+        for rejected in ['—', '😀'] {
+            let mut encoded = [0u8; 4];
+            assert!(!expression_matches(
+                negated.clone(),
+                rejected.encode_utf8(&mut encoded).as_bytes()
+            ));
+        }
+    }
+
+    #[test]
+    fn mixed_byte_escapes_and_direct_unicode_remain_distinct() {
+        let mixed = parse_regex(r"[A-Z\xE2—]", true);
+        for accepted in [b"A".as_slice(), b"Z".as_slice(), &[0xE2], "—".as_bytes()] {
+            assert!(expression_matches(mixed.clone(), accepted), "{accepted:?}");
+        }
+        for rejected in [b"a".as_slice(), &[0x80], "–".as_bytes()] {
+            assert!(!expression_matches(mixed.clone(), rejected), "{rejected:?}");
+        }
+    }
+
+
+    #[test]
+    fn standard_unicode_escape_ast_is_one_scalar() {
+        assert_eq!(
+            parse_regex(r" \u2014", true),
+            Expr::Seq(vec![
+                Expr::U8Seq(vec![b' ']),
+                Expr::U8Seq("—".as_bytes().to_vec()),
+            ])
+        );
+        assert_eq!(
+            parse_regex(r"[\u2014]", true),
+            Expr::Seq(vec![
+                Expr::U8Class(U8Set::from_range(0xE2, 0xE2)),
+                Expr::U8Class(U8Set::from_range(0x80, 0x80)),
+                Expr::U8Class(U8Set::from_range(0x94, 0x94)),
+            ])
+        );
+    }
+
+}

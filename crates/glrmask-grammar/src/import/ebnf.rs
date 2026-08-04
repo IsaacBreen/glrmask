@@ -1,5 +1,6 @@
 use super::{choice_or_single, sequence_or_single};
 use crate::GlrMaskError;
+use crate::automata::lexer::regex::decode_unicode_escape;
 use crate::grammar::flat::GrammarDef;
 use crate::grammar::factoring::factor_named_grammar;
 use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule, Quantifier, lower};
@@ -71,39 +72,63 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    fn push_utf8_char_from(&mut self, start: usize, output: &mut String) {
+        let remaining = std::str::from_utf8(&self.input[start..])
+            .expect("EBNF source originated from valid UTF-8");
+        let character = remaining
+            .chars()
+            .next()
+            .expect("non-ASCII byte must begin a UTF-8 character");
+        self.pos = start + character.len_utf8();
+        output.push(character);
+    }
+
     fn lex_string(&mut self, quote: u8) -> Result<String, GlrMaskError> {
         let mut s = String::new();
         loop {
             match self.advance() {
                 Some(b) if b == quote => return Ok(s),
-                Some(b'\\') => match self.advance() {
-                    Some(b'n') => s.push('\n'),
-                    Some(b't') => s.push('\t'),
-                    Some(b'r') => s.push('\r'),
-                    Some(b'\\') => s.push('\\'),
-                    Some(b'"') => s.push('"'),
-                    Some(b'\'') => s.push('\''),
-                    Some(b'x') => {
-                        let hi = self.advance().ok_or_else(|| {
-                            GlrMaskError::GrammarParse("incomplete hex escape".into())
-                        })?;
-                        let lo = self.advance().ok_or_else(|| {
-                            GlrMaskError::GrammarParse("incomplete hex escape".into())
-                        })?;
-                        let value = (hex_digit(hi)? << 4) | hex_digit(lo)?;
-                        s.push(value as char);
+                Some(b'\\') => {
+                    let escape_start = self.pos - 1;
+                    if let Some((character, next)) = decode_unicode_escape(self.input, escape_start) {
+                        self.pos = next;
+                        s.push(character);
+                        continue;
                     }
-                    Some(c) => {
-                        s.push('\\');
-                        s.push(c as char);
+                    match self.advance() {
+                        Some(b'n') => s.push('\n'),
+                        Some(b't') => s.push('\t'),
+                        Some(b'r') => s.push('\r'),
+                        Some(b'\\') => s.push('\\'),
+                        Some(b'"') => s.push('"'),
+                        Some(b'\'') => s.push('\''),
+                        Some(b'x') => {
+                            let hi = self.advance().ok_or_else(|| {
+                                GlrMaskError::GrammarParse("incomplete hex escape".into())
+                            })?;
+                            let lo = self.advance().ok_or_else(|| {
+                                GlrMaskError::GrammarParse("incomplete hex escape".into())
+                            })?;
+                            let value = (hex_digit(hi)? << 4) | hex_digit(lo)?;
+                            s.push(value as char);
+                        }
+                        Some(c) => {
+                            s.push('\\');
+                            if c.is_ascii() {
+                                s.push(c as char);
+                            } else {
+                                self.push_utf8_char_from(self.pos - 1, &mut s);
+                            }
+                        }
+                        None => {
+                            return Err(GlrMaskError::GrammarParse(
+                                "unexpected end of input in string escape".into(),
+                            ));
+                        }
                     }
-                    None => {
-                        return Err(GlrMaskError::GrammarParse(
-                            "unexpected end of input in string escape".into(),
-                        ));
-                    }
-                },
-                Some(b) => s.push(b as char),
+                }
+                Some(b) if b.is_ascii() => s.push(b as char),
+                Some(_) => self.push_utf8_char_from(self.pos - 1, &mut s),
                 None => {
                     return Err(GlrMaskError::GrammarParse(
                         "unterminated string literal".into(),
@@ -130,9 +155,15 @@ impl<'a> Lexer<'a> {
                     GlrMaskError::GrammarParse("unterminated char class escape".into())
                 })?;
                 def.push('\\');
-                def.push(escaped as char);
-            } else {
+                if escaped.is_ascii() {
+                    def.push(escaped as char);
+                } else {
+                    self.push_utf8_char_from(self.pos - 1, &mut def);
+                }
+            } else if byte.is_ascii() {
                 def.push(byte as char);
+            } else {
+                self.push_utf8_char_from(self.pos - 1, &mut def);
             }
         }
         Err(GlrMaskError::GrammarParse("unterminated char class".into()))
@@ -424,4 +455,46 @@ pub fn parse_ebnf_to_named(input: &str) -> Result<NamedGrammar, GlrMaskError> {
     let tokens = lexer.tokenize()?;
     let mut parser = Parser::new(tokens);
     parser.parse_grammar()
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn direct_unicode_is_preserved_in_ebnf_literals_and_classes() {
+        let mut lexer = Lexer::new(r#"start ::= "é — 😀" [é—😀]
+"#);
+        let tokens = lexer.tokenize().unwrap();
+        assert!(tokens.contains(&Token::Literal("é — 😀".to_string())));
+        assert!(tokens.contains(&Token::CharClass {
+            def: "é—😀".to_string(),
+            negate: false,
+        }));
+
+        let named = parse_ebnf_to_named(r#"start ::= " —"
+"#).unwrap();
+        let start = named.rules.iter().find(|rule| rule.name == "start").unwrap();
+        assert_eq!(start.expr, GrammarExpr::Literal(" —".as_bytes().to_vec()));
+
+        let named = parse_ebnf_to_named(r#"start ::= " \u2014 \U0001F600 \uD83D\uDE00"
+"#).unwrap();
+        let start = named.rules.iter().find(|rule| rule.name == "start").unwrap();
+        assert_eq!(
+            start.expr,
+            GrammarExpr::Literal(" — 😀 😀".as_bytes().to_vec())
+        );
+
+        let named = parse_ebnf_to_named("start ::= [—]\n").unwrap();
+        let start = named.rules.iter().find(|rule| rule.name == "start").unwrap();
+        assert_eq!(
+            start.expr,
+            GrammarExpr::CharClass {
+                def: "—".to_string(),
+                negate: false,
+                utf8: true,
+            }
+        );
+    }
 }

@@ -170,6 +170,196 @@ fn lark_direct_unicode_uses_original_utf8_bytes() {
     assert!(dynamic_state.is_finished());
 }
 
+#[test]
+fn ebnf_and_glrm_direct_unicode_use_original_utf8_bytes() {
+    let vocab = Vocab::new(vec![
+        (0, b" ".to_vec()),
+        (1, b" \xe2".to_vec()),
+        (2, b" \xe2\x80".to_vec()),
+        (3, b" \xe2\x80\x94".to_vec()),
+        (4, b" \xc3".to_vec()),
+        (5, b" \xc3\xa2".to_vec()),
+        (6, b"\xe2".to_vec()),
+        (7, b"\xe2\x80".to_vec()),
+        (8, b"\xe2\x80\x94".to_vec()),
+        (9, b"\xc3".to_vec()),
+        (10, b"\xc3\xa2".to_vec()),
+    ]);
+
+    let constraints = [
+        Constraint::from_ebnf(r#"start ::= " —""#, &vocab).unwrap(),
+        Constraint::from_ebnf(r#"start ::= " " [—]"#, &vocab).unwrap(),
+        Constraint::from_glrm_grammar(
+            r#"start start; t RX ::= / —/; nt start ::= RX;"#,
+            &vocab,
+        )
+        .unwrap(),
+        Constraint::from_glrm_grammar(
+            r#"start start; t CLASS ::= [—]/utf8; nt start ::= " " CLASS;"#,
+            &vocab,
+        )
+        .unwrap(),
+    ];
+    for (index, constraint) in constraints.iter().enumerate() {
+        assert_eq!(
+            allowed(&constraint.start().mask()),
+            vec![0, 1, 2, 3],
+            "static constraint {index}",
+        );
+        let mut state = constraint.start();
+        state.commit_token(3).unwrap();
+        assert!(state.is_finished());
+    }
+
+    let dynamic_constraints = [
+        DynamicConstraint::from_ebnf(r#"start ::= " —""#, &vocab).unwrap(),
+        DynamicConstraint::from_glrm_grammar(
+            r#"start start; t RX ::= / —/; nt start ::= RX;"#,
+            &vocab,
+        )
+        .unwrap(),
+    ];
+    for (index, constraint) in dynamic_constraints.iter().enumerate() {
+        assert_eq!(
+            allowed(&constraint.start().mask()),
+            vec![0, 1, 2, 3],
+            "dynamic constraint {index}",
+        );
+        let mut state = constraint.start();
+        state.commit_token(3).unwrap();
+        assert!(state.is_finished());
+    }
+}
+
+#[test]
+fn unicode_regex_scalars_ranges_and_classes_are_runtime_safe() {
+    let vocab = Vocab::new(vec![
+        (0, b"\xe2".to_vec()),
+        (1, b"\xe2\x80".to_vec()),
+        (2, b"\xe2\x80\x94".to_vec()),
+        (3, b"\xf0".to_vec()),
+        (4, b"\xf0\x9f".to_vec()),
+        (5, b"\xf0\x9f\x98".to_vec()),
+        (6, b"\xf0\x9f\x98\x80".to_vec()),
+        (7, b"a".to_vec()),
+        (8, b"\xc3".to_vec()),
+        (9, b"\xc3\xa9".to_vec()),
+        (10, b"\xc3\xaa".to_vec()),
+        (11, b"\xc3\xab".to_vec()),
+    ]);
+
+    for constraint in [
+        Constraint::from_lark("start: /—+/", &vocab).unwrap(),
+        Constraint::from_glrm_grammar(
+            r#"start start; t RX ::= /—+/; nt start ::= RX;"#,
+            &vocab,
+        )
+        .unwrap(),
+    ] {
+        assert_eq!(allowed(&constraint.start().mask()), vec![0, 1, 2]);
+        let mut state = constraint.start();
+        state.commit_token(2).unwrap();
+        assert!(state.is_finished());
+    }
+
+    for constraint in [
+        Constraint::from_ebnf("start ::= [😀]", &vocab).unwrap(),
+        Constraint::from_glrm_grammar(
+            r#"start start; t FACE ::= [😀]/utf8; nt start ::= FACE;"#,
+            &vocab,
+        )
+        .unwrap(),
+    ] {
+        assert_eq!(allowed(&constraint.start().mask()), vec![3, 4, 5, 6]);
+        let mut state = constraint.start();
+        state.commit_token(6).unwrap();
+        assert!(state.is_finished());
+    }
+
+    let range = Constraint::from_lark("start: /[é-ê]/", &vocab).unwrap();
+    assert_eq!(allowed(&range.start().mask()), vec![8, 9, 10]);
+    assert_accepts_tokens(&range, &[9]);
+    assert_accepts_tokens(&range, &[10]);
+    assert_rejects_token(&range, &[], 11);
+
+    let negated = Constraint::from_lark("start: /[^—]/", &vocab).unwrap();
+    assert_accepts_tokens(&negated, &[7]);
+    assert_accepts_tokens(&negated, &[6]);
+    assert_rejects_token(&negated, &[], 2);
+
+    let dynamic = DynamicConstraint::from_lark("start: /[😀]|—+/", &vocab).unwrap();
+    assert_eq!(allowed(&dynamic.start().mask()), vec![0, 1, 2, 3, 4, 5, 6]);
+    let mut state = dynamic.start();
+    state.commit_token(6).unwrap();
+    assert!(state.is_finished());
+}
+
+#[test]
+fn unicode_escape_spellings_preserve_runtime_prefixes() {
+    let vocab = Vocab::new(vec![
+        (0, b" ".to_vec()),
+        (1, b" \xe2".to_vec()),
+        (2, b" \xe2\x80".to_vec()),
+        (3, b" \xe2\x80\x94".to_vec()),
+        (4, b" \xf0".to_vec()),
+        (5, b" \xf0\x9f".to_vec()),
+        (6, b" \xf0\x9f\x98".to_vec()),
+        (7, b" \xf0\x9f\x98\x80".to_vec()),
+        (8, b"\xe2".to_vec()),
+        (9, b"\xe2\x80".to_vec()),
+        (10, b"\xe2\x80\x94".to_vec()),
+        (11, b"\xf0".to_vec()),
+        (12, b"\xf0\x9f".to_vec()),
+        (13, b"\xf0\x9f\x98".to_vec()),
+        (14, b"\xf0\x9f\x98\x80".to_vec()),
+    ]);
+
+    let static_constraints = [
+        Constraint::from_lark(r#"start: " \u2014""#, &vocab).unwrap(),
+        Constraint::from_lark(r#"start: / \u2014/"#, &vocab).unwrap(),
+        Constraint::from_lark(r#"start: / \U00002014/"#, &vocab).unwrap(),
+        Constraint::from_ebnf(r#"start ::= " \u2014""#, &vocab).unwrap(),
+        Constraint::from_ebnf(r#"start ::= " " [\u2014]"#, &vocab).unwrap(),
+        Constraint::from_glrm_grammar(
+            r#"start start; t RX ::= / \u2014/; nt start ::= RX;"#,
+            &vocab,
+        )
+        .unwrap(),
+    ];
+    for (index, constraint) in static_constraints.iter().enumerate() {
+        assert_eq!(
+            allowed(&constraint.start().mask()),
+            vec![0, 1, 2, 3],
+            "static escape constraint {index}",
+        );
+        assert_accepts_tokens(constraint, &[3]);
+    }
+
+    let emoji_constraints = [
+        Constraint::from_lark(r#"start: " \U0001F600""#, &vocab).unwrap(),
+        Constraint::from_lark(r#"start: " \uD83D\uDE00""#, &vocab).unwrap(),
+        Constraint::from_lark(r#"start: / \uD83D\uDE00/"#, &vocab).unwrap(),
+        Constraint::from_ebnf(r#"start ::= " \uD83D\uDE00""#, &vocab).unwrap(),
+    ];
+    for (index, constraint) in emoji_constraints.iter().enumerate() {
+        assert_eq!(
+            allowed(&constraint.start().mask()),
+            vec![0, 4, 5, 6, 7],
+            "emoji escape constraint {index}",
+        );
+        assert_accepts_tokens(constraint, &[7]);
+    }
+
+    let dynamic = DynamicConstraint::from_lark(r#"start: /[\u2014\U0001F600]/"#, &vocab).unwrap();
+    assert_eq!(
+        allowed(&dynamic.start().mask()),
+        vec![8, 9, 10, 11, 12, 13, 14]
+    );
+    let mut state = dynamic.start();
+    state.commit_token(14).unwrap();
+    assert!(state.is_finished());
+}
+
 fn max_paths_and_stacks(constraint: &Constraint, text: &str) -> (usize, usize) {
     let mut state = constraint.start();
     let mut max_paths = state.parser_path_count(1_000_000);

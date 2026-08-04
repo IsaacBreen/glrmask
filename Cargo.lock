@@ -555,6 +555,7 @@ dependencies = [
  "rand",
  "range-set-blaze",
  "rayon",
+ "regex-syntax",
  "rustc-hash 1.1.0",
  "serde",
  "smallvec",

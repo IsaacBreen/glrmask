@@ -5,7 +5,11 @@ use std::{
 
 use super::{choice_or_single, sequence_or_single};
 use crate::GlrMaskError;
-use crate::automata::lexer::{DFA as LexerDfa, compile::compile_expression_labeled_nfa};
+use crate::automata::lexer::{
+    DFA as LexerDfa,
+    compile::compile_expression_labeled_nfa,
+    regex::decode_unicode_escape,
+};
 use crate::grammar::ast::resolve_terminal_subexpressions;
 use crate::grammar::flat::GrammarDef;
 use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule, Quantifier, lower};
@@ -95,37 +99,49 @@ impl<'a> Lexer<'a> {
         loop {
             match self.advance() {
                 Some(b) if b == quote => return Ok(s),
-                Some(b'\\') => match self.advance() {
-                    Some(b'n') => s.push('\n'),
-                    Some(b't') => s.push('\t'),
-                    Some(b'r') => s.push('\r'),
-                    Some(b'\\') => s.push('\\'),
-                    Some(c) if c == quote => s.push(c as char),
-                    Some(b'"') => s.push('"'),
-                    Some(b'\'') => s.push('\''),
-                    Some(b'x') => {
-                        let h1 = self.advance().ok_or_else(|| {
-                            GlrMaskError::GrammarParse("unterminated \\x escape".into())
-                        })?;
-                        let h2 = self.advance().ok_or_else(|| {
-                            GlrMaskError::GrammarParse("unterminated \\x escape".into())
-                        })?;
-                        let hex_str = format!("{}{}", h1 as char, h2 as char);
-                        let byte = u8::from_str_radix(&hex_str, 16).map_err(|_| {
-                            GlrMaskError::GrammarParse(format!("invalid \\x escape: \\x{hex_str}"))
-                        })?;
-                        s.push(byte as char);
+                Some(b'\\') => {
+                    let escape_start = self.pos - 1;
+                    if let Some((character, next)) = decode_unicode_escape(self.input, escape_start) {
+                        self.pos = next;
+                        s.push(character);
+                        continue;
                     }
-                    Some(c) => {
-                        s.push('\\');
-                        if c.is_ascii() {
-                            s.push(c as char);
-                        } else {
-                            self.push_utf8_char_from(self.pos - 1, &mut s);
+                    match self.advance() {
+                        Some(b'n') => s.push('\n'),
+                        Some(b't') => s.push('\t'),
+                        Some(b'r') => s.push('\r'),
+                        Some(b'\\') => s.push('\\'),
+                        Some(c) if c == quote => s.push(c as char),
+                        Some(b'"') => s.push('"'),
+                        Some(b'\'') => s.push('\''),
+                        Some(b'x') => {
+                            let h1 = self.advance().ok_or_else(|| {
+                                GlrMaskError::GrammarParse("unterminated \\x escape".into())
+                            })?;
+                            let h2 = self.advance().ok_or_else(|| {
+                                GlrMaskError::GrammarParse("unterminated \\x escape".into())
+                            })?;
+                            let hex_str = format!("{}{}", h1 as char, h2 as char);
+                            let byte = u8::from_str_radix(&hex_str, 16).map_err(|_| {
+                                GlrMaskError::GrammarParse(format!(
+                                    "invalid \\x escape: \\x{hex_str}"
+                                ))
+                            })?;
+                            s.push(byte as char);
+                        }
+                        Some(c) => {
+                            s.push('\\');
+                            if c.is_ascii() {
+                                s.push(c as char);
+                            } else {
+                                self.push_utf8_char_from(self.pos - 1, &mut s);
+                            }
+                        }
+                        None => {
+                            return Err(GlrMaskError::GrammarParse("unterminated escape".into()));
                         }
                     }
-                    None => return Err(GlrMaskError::GrammarParse("unterminated escape".into())),
-                },
+                }
                 Some(b) if b.is_ascii() => s.push(b as char),
                 Some(_) => self.push_utf8_char_from(self.pos - 1, &mut s),
                 None => return Err(GlrMaskError::GrammarParse("unterminated string".into())),
@@ -1195,6 +1211,15 @@ mod tests {
         let named = parse_lark_to_named_uncompressed("start: / →/\n").unwrap();
         let start = named.rules.iter().find(|rule| rule.name == "start").unwrap();
         assert_eq!(start.expr, GrammarExpr::RawRegex(" →".to_string()));
+
+
+        let named = parse_lark_to_named_uncompressed(r#"start: " \u2014 \U0001F600 \uD83D\uDE00"
+"#).unwrap();
+        let start = named.rules.iter().find(|rule| rule.name == "start").unwrap();
+        assert_eq!(
+            start.expr,
+            GrammarExpr::Literal(" — 😀 😀".as_bytes().to_vec())
+        );
     }
 
     fn large_right_linear_terminal_grammar(states: usize) -> String {

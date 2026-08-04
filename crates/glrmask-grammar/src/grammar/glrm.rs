@@ -471,6 +471,17 @@ impl<'a> Lexer<'a> {
         Some(b)
     }
 
+    fn push_utf8_char_from(&mut self, start: usize, output: &mut String) {
+        let remaining = std::str::from_utf8(&self.src[start..])
+            .expect("GLRM source originated from valid UTF-8");
+        let character = remaining
+            .chars()
+            .next()
+            .expect("non-ASCII byte must begin a UTF-8 character");
+        self.pos = start + character.len_utf8();
+        output.push(character);
+    }
+
     fn skip_whitespace_and_comments(&mut self) {
         loop {
             // Skip whitespace
@@ -543,12 +554,17 @@ impl<'a> Lexer<'a> {
                         Some(b'/') => pat.push('/'),  // escaped slash
                         Some(c) => {
                             pat.push('\\');
-                            pat.push(c as char);
+                            if c.is_ascii() {
+                                pat.push(c as char);
+                            } else {
+                                self.push_utf8_char_from(self.pos - 1, &mut pat);
+                            }
                         }
                         None => return Err(err("unexpected EOF in regex escape")),
                     }
                 }
-                Some(b) => pat.push(b as char),
+                Some(b) if b.is_ascii() => pat.push(b as char),
+                Some(_) => self.push_utf8_char_from(self.pos - 1, &mut pat),
                 None => return Err(err("unterminated regex literal")),
             }
         }
@@ -567,9 +583,14 @@ impl<'a> Lexer<'a> {
                 Some(b'\\') => {
                     let c = self.advance().ok_or_else(|| err("unterminated char class escape"))?;
                     def.push('\\');
-                    def.push(c as char);
+                    if c.is_ascii() {
+                        def.push(c as char);
+                    } else {
+                        self.push_utf8_char_from(self.pos - 1, &mut def);
+                    }
                 }
-                Some(b) => def.push(b as char),
+                Some(b) if b.is_ascii() => def.push(b as char),
+                Some(_) => self.push_utf8_char_from(self.pos - 1, &mut def),
                 None => return Err(err("unterminated char class")),
             }
         }
@@ -1342,6 +1363,31 @@ fn err(msg: &str) -> GlrMaskError {
 mod tests {
     use super::*;
     use crate::grammar::ast::lower;
+
+    #[test]
+    fn direct_unicode_is_preserved_in_glrm_regexes_and_classes() {
+        let tokens = Lexer::new("t RX ::= /é — 😀/; t CLASS ::= [é—😀]/utf8;")
+            .tokenize()
+            .unwrap();
+        assert!(tokens.contains(&Tok::RegexLit("é — 😀".to_string())));
+        assert!(tokens.contains(&Tok::CharClass("é—😀".to_string(), true)));
+
+        let grammar = from_glrm("start start; t RX ::= / —/; nt start ::= RX;").unwrap();
+        let rx = grammar.rules.iter().find(|rule| rule.name == "RX").unwrap();
+        assert_eq!(rx.expr, GrammarExpr::RawRegex(" —".to_string()));
+
+        let grammar = from_glrm("start start; t CLASS ::= [—]/utf8; nt start ::= CLASS;").unwrap();
+        let class = grammar.rules.iter().find(|rule| rule.name == "CLASS").unwrap();
+        assert_eq!(
+            class.expr,
+            GrammarExpr::CharClass {
+                def: "—".to_string(),
+                negate: false,
+                utf8: true,
+            }
+        );
+    }
+
     use crate::grammar::flat::Symbol;
 
     fn single_path_terminal_names(
