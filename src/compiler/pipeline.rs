@@ -257,7 +257,14 @@ pub(crate) struct CompilePhaseProfile {
     pub(crate) tokenizer_final_states: usize,
     pub(crate) tokenizer_final_transitions: usize,
     pub(crate) synthetic_candidate_terminals: usize,
+    /// A synthesized tokenizer replaced the raw compile/runtime coordinate
+    /// under a full byte-transition homomorphism.
     pub(crate) synthetic_certified: bool,
+    /// A whole-vocabulary-exact quotient was certified and used only as the
+    /// initial terminal-DWA observation partition while retaining the full
+    /// raw tokenizer.
+    pub(crate) synthetic_token_quotient_certified: bool,
+    pub(crate) synthetic_observation_states: usize,
     pub(crate) synthetic_compile_states: usize,
     pub(crate) synthetic_compile_transitions: usize,
     pub(crate) synthetic_certification_ms: f64,
@@ -308,7 +315,7 @@ pub(crate) fn emit_compile_profile_summary(
         .unwrap_or_default();
 
     eprintln!(
-        "[glrmask/profile][compile] source={}{} prepare_ms={:.3} tokenizer_build_ms={:.3} tokenizer_final_states={} tokenizer_final_transitions={} synthetic_candidate_terminals={} synthetic_certified={} synthetic_compile_states={} synthetic_compile_transitions={} synthetic_certification_ms={:.3} analyze_grammar_ms={:.3} glr_table_ms={:.3} terminal_coloring_ms={:.3} disallowed_follows_ms={:.3} analysis_wall_ms={:.3} classify_ms={:.3} id_map_ms={:.3} terminal_dwa_ms={:.3} split_terminal_dwa_total_ms={:.3} global_merge_ms={:.3} templates_ms={:.3} compact_ms={:.3} possible_matches_vocab_equiv_ms={:.3} possible_matches_collect_ms={:.3} possible_matches_materialize_ms={:.3} shared_id_reconcile_ms={:.3} possible_matches_pipeline_ms={:.3} terminal_dwa_interned_ranges_before_pm_reconcile={} possible_matches_interned_ranges_before_pm_reconcile={} terminal_pm_joint_interned_ranges_before_reconcile={} terminal_pm_joint_interned_ranges={} internal_token_bytes_ms={:.3} terminal_run_collapse_ms={:.3} parser_dwa_ms={:.3} parser_dwa_interned_ranges={} possible_matches_interned_ranges={} parser_pm_joint_interned_ranges={} finalize_ms={:.3} compile_ms={:.3} total_ms={:.3}",
+        "[glrmask/profile][compile] source={}{} prepare_ms={:.3} tokenizer_build_ms={:.3} tokenizer_final_states={} tokenizer_final_transitions={} synthetic_candidate_terminals={} synthetic_certified={} synthetic_token_quotient_certified={} synthetic_observation_states={} synthetic_compile_states={} synthetic_compile_transitions={} synthetic_certification_ms={:.3} analyze_grammar_ms={:.3} glr_table_ms={:.3} terminal_coloring_ms={:.3} disallowed_follows_ms={:.3} analysis_wall_ms={:.3} classify_ms={:.3} id_map_ms={:.3} terminal_dwa_ms={:.3} split_terminal_dwa_total_ms={:.3} global_merge_ms={:.3} templates_ms={:.3} compact_ms={:.3} possible_matches_vocab_equiv_ms={:.3} possible_matches_collect_ms={:.3} possible_matches_materialize_ms={:.3} shared_id_reconcile_ms={:.3} possible_matches_pipeline_ms={:.3} terminal_dwa_interned_ranges_before_pm_reconcile={} possible_matches_interned_ranges_before_pm_reconcile={} terminal_pm_joint_interned_ranges_before_reconcile={} terminal_pm_joint_interned_ranges={} internal_token_bytes_ms={:.3} terminal_run_collapse_ms={:.3} parser_dwa_ms={:.3} parser_dwa_interned_ranges={} possible_matches_interned_ranges={} parser_pm_joint_interned_ranges={} finalize_ms={:.3} compile_ms={:.3} total_ms={:.3}",
         source,
         import_fragment,
         profile.prepare_ms,
@@ -317,6 +324,8 @@ pub(crate) fn emit_compile_profile_summary(
         profile.tokenizer_final_transitions,
         profile.synthetic_candidate_terminals,
         profile.synthetic_certified,
+        profile.synthetic_token_quotient_certified,
+        profile.synthetic_observation_states,
         profile.synthetic_compile_states,
         profile.synthetic_compile_transitions,
         profile.synthetic_certification_ms,
@@ -741,12 +750,14 @@ mod lexer_partition_plan_tests {
     use std::collections::BTreeSet;
 
     use super::{
-        lexer_partition_ids_with_options, prepare_structural_tokenizer_pair,
-        plan_synthetic_tokenizer_enabled, structural_state_reduction_is_profitable,
+        compile_owned_profiled_with_table_construction, lexer_partition_ids_with_options,
+        prepare_structural_tokenizer_pair, plan_synthetic_tokenizer_enabled,
+        structural_state_reduction_is_profitable,
     };
     use crate::automata::lexer::Lexer;
     use crate::automata::regex::Expr;
-    use crate::grammar::flat::{GrammarDef, Terminal};
+    use crate::compiler::glr::table::GlrTableConstruction;
+    use crate::grammar::flat::{GrammarDef, Rule, Symbol, Terminal};
     use crate::Vocab;
 
     fn grammar_with_terminals(count: u32) -> GrammarDef {
@@ -811,6 +822,44 @@ mod lexer_partition_plan_tests {
         assert!(structural_state_reduction_is_profitable(1_437_667, 173_832));
         assert!(!structural_state_reduction_is_profitable(1_000_000, 250_001));
         assert!(!structural_state_reduction_is_profitable(1_000_000, 200_000));
+    }
+
+    #[test]
+    fn profiled_compile_installs_vocab_certifier_before_synthetic_planning() {
+        let grammar = GrammarDef {
+            rules: vec![Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Terminal(0)],
+            }],
+            start: 0,
+            terminals: vec![Terminal::Expr {
+                id: 0,
+                expr: Expr::Repeat {
+                    expr: Box::new(Expr::U8Seq(b"a".to_vec())),
+                    min: 1,
+                    max: Some(5_000),
+                },
+            }],
+            ..GrammarDef::default()
+        };
+        let vocab = Vocab::new(vec![
+            (0, b"a".to_vec()),
+            (1, b"aa".to_vec()),
+            (2, b"aaaa".to_vec()),
+            (3, b"x".to_vec()),
+        ]);
+
+        let (_, profile) = compile_owned_profiled_with_table_construction(
+            grammar,
+            &vocab,
+            GlrTableConstruction::ExperimentalCoreMerged,
+        );
+
+        assert!(!profile.synthetic_certified);
+        assert!(profile.synthetic_token_quotient_certified);
+        assert!(profile.synthetic_candidate_terminals > 0);
+        assert!(profile.synthetic_observation_states < profile.tokenizer_final_states);
+        assert_eq!(profile.synthetic_compile_states, profile.tokenizer_final_states);
     }
 
     #[test]
@@ -1840,6 +1889,8 @@ struct TokenizerDagLane {
         crate::compiler::stages::id_map_and_terminal_dwa::PreparedPartitionLocalTokenizers,
     >>,
     synthetic_candidate_terminals: usize,
+    synthetic_token_quotient_certified: bool,
+    synthetic_observation_states: usize,
     synthetic_certification_ms: f64,
     compile_tokenizer_states: usize,
     compile_tokenizer_transitions: usize,
@@ -1939,6 +1990,8 @@ struct ParserDagJoinState {
 struct CompileDagResult {
     tokenizer: Arc<Tokenizer>,
     synthetic_candidate_terminals: usize,
+    synthetic_token_quotient_certified: bool,
+    synthetic_observation_states: usize,
     synthetic_certification_ms: f64,
     compile_tokenizer_states: usize,
     compile_tokenizer_transitions: usize,
@@ -2544,6 +2597,8 @@ fn launch_parser_dag_if_ready<'scope>(
         *result.lock().expect("compile DAG result poisoned") = Some(CompileDagResult {
             tokenizer: tokenizer.tokenizer,
             synthetic_candidate_terminals: tokenizer.synthetic_candidate_terminals,
+            synthetic_token_quotient_certified: tokenizer.synthetic_token_quotient_certified,
+            synthetic_observation_states: tokenizer.synthetic_observation_states,
             synthetic_certification_ms: tokenizer.synthetic_certification_ms,
             compile_tokenizer_states: tokenizer.compile_tokenizer_states,
             compile_tokenizer_transitions: tokenizer.compile_tokenizer_transitions,
@@ -2767,6 +2822,13 @@ fn compile_prepared_with_profile_and_table_construction(
     default_table_construction: GlrTableConstruction,
     lexer_adaptive_override: Option<bool>,
 ) -> (Constraint, CompilePhaseProfile) {
+    // Synthetic lexer planning may certify a smaller exact tokenizer against
+    // the vocabulary. Install the cross-crate certifier before planning on
+    // every static compilation path, including profiled and explicit table
+    // construction entry points.
+    crate::automata::lexer::compile::install_vocabulary_exact_state_certifier(
+        crate::compiler::stages::id_map_and_terminal_dwa::synthetic_state_map::certify_vocabulary_exact_state_candidates,
+    );
     let synthetic_plan_started_at = Instant::now();
     let synthetic_tokenizer_plan = plan_synthetic_tokenizer(&prepared_grammar, vocab);
     if std::env::var_os("GLRMASK_PROFILE_SYNTHETIC_PLAN").is_some() {
@@ -2966,6 +3028,12 @@ fn compile_prepared_with_profile_and_table_construction(
                 }
                 let compile_tokenizer_states = tokenizer.num_states() as usize;
                 let compile_tokenizer_transitions = tokenizer.transition_count();
+                let synthetic_token_quotient_certified =
+                    use_full_tokenizer_for_token_quotient && initial_state_map.is_some();
+                let synthetic_observation_states = initial_state_map.as_ref().map_or(
+                    compile_tokenizer_states,
+                    |state_map| state_map.num_internal_ids() as usize,
+                );
                 let partition_local_synthesis_plan = deferred_runtime_tokenizer
                     .is_some()
                     .then(|| partition_local_synthesis_plan_ref.cloned())
@@ -3033,6 +3101,8 @@ fn compile_prepared_with_profile_and_table_construction(
                     prepared_partition_local_tokenizers,
                     synthetic_candidate_terminals: synthetic_tokenizer_plan_ref
                         .map_or(0, |plan| plan.changed_terminal_count),
+                    synthetic_token_quotient_certified,
+                    synthetic_observation_states,
                     synthetic_certification_ms,
                     compile_tokenizer_states,
                     compile_tokenizer_transitions,
@@ -3347,6 +3417,8 @@ fn compile_prepared_with_profile_and_table_construction(
         let CompileDagResult {
             tokenizer,
             synthetic_candidate_terminals,
+            synthetic_token_quotient_certified,
+            synthetic_observation_states,
             synthetic_certification_ms,
             compile_tokenizer_states,
             compile_tokenizer_transitions,
@@ -3417,6 +3489,8 @@ fn compile_prepared_with_profile_and_table_construction(
         profile.tokenizer_final_transitions = final_tokenizer.transition_count();
         profile.synthetic_candidate_terminals = synthetic_candidate_terminals;
         profile.synthetic_certified = runtime_tokenizer.is_some();
+        profile.synthetic_token_quotient_certified = synthetic_token_quotient_certified;
+        profile.synthetic_observation_states = synthetic_observation_states;
         profile.synthetic_compile_states = compile_tokenizer_states;
         profile.synthetic_compile_transitions = compile_tokenizer_transitions;
         profile.synthetic_certification_ms = synthetic_certification_ms;
@@ -3974,9 +4048,6 @@ fn compile_prepared_with_profile_and_table_construction(
 }
 
 pub(crate) fn compile_prepared(prepared_grammar: GrammarDef, vocab: &Vocab) -> Constraint {
-    crate::automata::lexer::compile::install_vocabulary_exact_state_certifier(
-        crate::compiler::stages::id_map_and_terminal_dwa::synthetic_state_map::certify_vocabulary_exact_state_candidates,
-    );
     compile_prepared_with_profile(prepared_grammar, vocab).0
 }
 
