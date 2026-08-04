@@ -3837,7 +3837,6 @@ fn compile_with_plan_internal(
     let group_set_ms = profile_plan
         .then(|| group_set_started_at.elapsed().as_secs_f64() * 1000.0);
     let used_product_dfa = plan.compiled_exprs.len() > 1;
-
     let dfa_build_started_at = Instant::now();
     let (mut dfa, product_group_ops_applied, mut product_trace) = if plan.compiled_exprs.is_empty() {
         // A grammar can lower to the empty language, for example when a const
@@ -10860,41 +10859,115 @@ fn refine_u8_partitions(partitions: Vec<U8Set>, split: U8Set) -> Vec<U8Set> {
 
 /// Compile multiple expressions into a single NFA (without determinization).
 ///
-/// Each expression's index becomes its group ID.
+/// Each expression's index becomes its group ID. Equal literal/class prefixes
+/// are shared recursively. The previous implementation factored at most one
+/// prefix common to *every* terminal, which left large families of line-like
+/// terminals as thousands of duplicated suffix chains after their first byte.
 fn build_regex_nfa(exprs: &[Expr]) -> NFA {
     build_regex_nfa_impl(exprs)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum DeterministicPrefixAtom {
+    Byte(u8),
+    Class(U8Set),
+}
+
+fn deterministic_prefix(expr: &Expr) -> (Vec<DeterministicPrefixAtom>, Expr) {
+    fn collect(expr: &Expr, atoms: &mut Vec<DeterministicPrefixAtom>) -> Expr {
+        match expr {
+            Expr::Shared(inner) => collect(inner, atoms),
+            Expr::U8Seq(bytes) => {
+                atoms.extend(bytes.iter().copied().map(DeterministicPrefixAtom::Byte));
+                Expr::Epsilon
+            }
+            Expr::U8Class(bytes) => {
+                atoms.push(DeterministicPrefixAtom::Class(*bytes));
+                Expr::Epsilon
+            }
+            Expr::Seq(parts) => {
+                for (index, part) in parts.iter().enumerate() {
+                    let remainder = collect(part, atoms);
+                    if !matches!(remainder, Expr::Epsilon) {
+                        let mut tail = Vec::with_capacity(parts.len() - index);
+                        tail.push(remainder);
+                        tail.extend_from_slice(&parts[index + 1..]);
+                        return seq_from_parts(tail);
+                    }
+                }
+                Expr::Epsilon
+            }
+            Expr::Dfa(_)
+            | Expr::Intersect { .. }
+            | Expr::Choice(_)
+            | Expr::Exclude { .. }
+            | Expr::Repeat { .. }
+            | Expr::Epsilon => expr.clone(),
+        }
+    }
+
+    let mut atoms = Vec::new();
+    let remainder = collect(expr, &mut atoms);
+    (atoms, remainder)
+}
+
+fn append_prefix_shared_expressions(
+    nfa: &mut NFA,
+    expressions: Vec<(u32, Expr)>,
+) {
+    let mut transitions = FxHashMap::<(u32, DeterministicPrefixAtom), u32>::default();
+    let mut finals = Vec::<(u32, u32)>::new();
+    let mut opaque = Vec::<(u32, u32, Expr)>::new();
+
+    for (group_id, expr) in expressions {
+        let (prefix, remainder) = deterministic_prefix(&expr);
+        let mut state = 0u32;
+        for atom in prefix {
+            let key = (state, atom.clone());
+            state = if let Some(&target) = transitions.get(&key) {
+                target
+            } else {
+                let target = nfa.add_state();
+                match &atom {
+                    DeterministicPrefixAtom::Byte(byte) => {
+                        append_compiled_expr(&Expr::U8Seq(vec![*byte]), nfa, state, target);
+                    }
+                    DeterministicPrefixAtom::Class(bytes) => {
+                        append_compiled_expr(&Expr::U8Class(*bytes), nfa, state, target);
+                    }
+                }
+                transitions.insert(key, target);
+                target
+            };
+        }
+        if matches!(remainder, Expr::Epsilon) {
+            finals.push((state, group_id));
+        } else {
+            opaque.push((state, group_id, remainder));
+        }
+    }
+
+    for (state, group_id) in finals {
+        nfa.add_finalizer(state, group_id);
+    }
+    for (state, group_id, expr) in opaque {
+        let accept = nfa.add_state();
+        append_compiled_expr(&expr, nfa, state, accept);
+        nfa.add_finalizer(accept, group_id);
+    }
+}
+
 fn build_regex_nfa_impl(exprs: &[Expr]) -> NFA {
-    let optimized_exprs: Vec<Expr> = exprs.iter().cloned().map(Expr::optimize).collect();
+    let optimized_exprs = exprs
+        .iter()
+        .cloned()
+        .map(Expr::optimize)
+        .enumerate()
+        .map(|(group_id, expr)| (group_id as u32, expr))
+        .collect::<Vec<_>>();
 
     let mut nfa = NFA::new(1);
-
-    if let Some((prefix, remainders)) = common_prefix_factor(&optimized_exprs) {
-        let split = nfa.add_state();
-        append_compiled_expr(&prefix, &mut nfa, 0, split);
-
-        for (group_id, remainder) in remainders.iter().enumerate() {
-            match remainder {
-                _ => {
-                    let accept = nfa.add_state();
-                    append_compiled_expr(remainder, &mut nfa, split, accept);
-                    nfa.add_finalizer(accept, group_id as u32);
-                }
-            }
-        }
-        return nfa;
-    }
-
-    for (group_id, expr) in optimized_exprs.iter().enumerate() {
-        match expr {
-            _ => {
-                let accept = nfa.add_state();
-                append_compiled_expr(expr, &mut nfa, 0, accept);
-                nfa.add_finalizer(accept, group_id as u32);
-            }
-        }
-    }
+    append_prefix_shared_expressions(&mut nfa, optimized_exprs);
     nfa
 }
 

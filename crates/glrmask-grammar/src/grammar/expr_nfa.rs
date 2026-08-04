@@ -27,6 +27,10 @@ pub struct ExprNFA {
     /// than determinizing its label graph during AST lowering. This is
     /// performance metadata and does not affect expression identity.
     pub prefer_direct_nfa_emission: bool,
+    /// Whether this automaton denotes the complete parser language. Embedded
+    /// right-linear regions use direct NFA lowering too, but must not install
+    /// themselves as the grammar-wide direct-regular runtime.
+    pub complete_parser_language: bool,
     /// The exact DFA produced by the first minimization, when available.
     /// This is performance metadata only: equality and hashing deliberately
     /// ignore it, and any graph or symbol rewrite must clear it.
@@ -55,6 +59,7 @@ impl ExprNFA {
             symbols,
             is_determinized_and_minimized: false,
             prefer_direct_nfa_emission: false,
+            complete_parser_language: false,
             canonical_dfa: None,
         }
     }
@@ -82,12 +87,20 @@ impl ExprNFA {
             symbols,
             is_determinized_and_minimized: true,
             prefer_direct_nfa_emission: false,
+            complete_parser_language: false,
             canonical_dfa: Some(dfa),
         }
     }
 
     pub fn with_direct_nfa_emission(mut self) -> Self {
         self.prefer_direct_nfa_emission = true;
+        self.complete_parser_language = true;
+        self
+    }
+
+    pub fn with_embedded_direct_nfa_emission(mut self) -> Self {
+        self.prefer_direct_nfa_emission = true;
+        self.complete_parser_language = false;
         self
     }
 
@@ -533,6 +546,7 @@ mod tests {
             symbols: canonical.symbols.clone(),
             is_determinized_and_minimized: false,
             prefer_direct_nfa_emission: false,
+            complete_parser_language: false,
             canonical_dfa: None,
         };
         assert_eq!(canonical, unmarked);

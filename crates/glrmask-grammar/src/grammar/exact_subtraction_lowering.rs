@@ -243,6 +243,7 @@ impl<'a> ExactSubtractionResolver<'a> {
                     // Rewritten labels may admit further state merges.
                     is_determinized_and_minimized: false,
                     prefer_direct_nfa_emission: false,
+                    complete_parser_language: false,
                     canonical_dfa: None,
                 },
             )),

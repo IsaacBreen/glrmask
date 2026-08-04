@@ -525,13 +525,43 @@ fn advance_parser_stacks_profiled(
 /// Advance once when admission requires exact simulation. Row-presence tables
 /// retain their cheap precheck; exact-simulation tables must not execute the
 /// same reduction closure once for admission and again for the actual advance.
+#[inline]
+fn parser_may_advance_on(constraint: &Constraint, stack: &ParserGSS, terminal: u32) -> bool {
+    constraint
+        .direct_regular_admissible_terminals(stack)
+        .map_or_else(
+            || stack_may_advance_on(&constraint.table, stack, terminal),
+            |terminals| terminals.contains(terminal as usize),
+        )
+}
+
+#[inline]
+fn parser_may_advance_on_any(
+    constraint: &Constraint,
+    stack: &ParserGSS,
+    terminals: &crate::ds::bitset::BitSet,
+) -> bool {
+    constraint
+        .direct_regular_admissible_terminals(stack)
+        .map_or_else(
+            || stack_may_advance_on_any(&constraint.table, stack, terminals),
+            |admitted| {
+                admitted
+                    .words()
+                    .iter()
+                    .zip(terminals.words())
+                    .any(|(left, right)| (*left & *right) != 0)
+            },
+        )
+}
+
 fn advance_parser_stacks_if_possible(
     constraint: &Constraint,
     stack: &ParserGSS,
     terminal: u32,
 ) -> Option<ParserGSS> {
     if constraint.table.admission_policy == AdmissionPolicy::RowPresenceExact
-        && !stack_may_advance_on(&constraint.table, stack, terminal)
+        && !parser_may_advance_on(constraint, stack, terminal)
     {
         return None;
     }
@@ -556,7 +586,7 @@ fn advance_parser_stacks_profiled_if_possible(
     let mut may_ns = 0;
     if constraint.table.admission_policy == AdmissionPolicy::RowPresenceExact {
         let may_started_at = Instant::now();
-        let admitted = stack_may_advance_on(&constraint.table, stack, terminal);
+        let admitted = parser_may_advance_on(constraint, stack, terminal);
         may_ns = may_started_at.elapsed().as_nanos() as u64;
         if !admitted {
             return ProfiledAdvanceAttempt {
@@ -1209,8 +1239,8 @@ fn assert_commit_fast_path_equivalence(
 #[inline]
 fn end_state_may_advance(constraint: &Constraint, gss: &ParserGSS, end_state: u32) -> bool {
     end_state == constraint.runtime_commit_initial_state()
-        || stack_may_advance_on_any(
-            &constraint.table,
+        || parser_may_advance_on_any(
+            constraint,
             gss,
             constraint.tokenizer.possible_future_terminals(end_state),
         )
@@ -1234,6 +1264,7 @@ fn wide_frontier_end_state_may_advance(
 }
 
 enum ActionableTerminals {
+    DirectDynamic(crate::ds::bitset::BitSet),
     SingleState(u32),
     WideFrontier(usize),
     ManyStates(SmallVec<[u32; 8]>),
@@ -1241,6 +1272,9 @@ enum ActionableTerminals {
 
 impl ActionableTerminals {
     fn from_gss(constraint: &Constraint, gss: &ParserGSS) -> Option<Self> {
+        if let Some(terminals) = constraint.direct_regular_admissible_terminals(gss) {
+            return Some(Self::DirectDynamic(terminals));
+        }
         if let Some(state_id) = gss.single_top_value() {
             return Some(Self::SingleState(state_id));
         }
@@ -1256,8 +1290,9 @@ impl ActionableTerminals {
         }
     }
 
-    fn bitset<'a>(&self, constraint: &'a Constraint) -> Option<&'a crate::ds::bitset::BitSet> {
+    fn bitset<'a>(&'a self, constraint: &'a Constraint) -> Option<&'a crate::ds::bitset::BitSet> {
         match self {
+            Self::DirectDynamic(terminals) => Some(terminals),
             Self::SingleState(state_id) => constraint.table.advance_row(*state_id),
             Self::WideFrontier(index) => constraint
                 .direct_regular_wide_frontier_acceptance
@@ -1269,6 +1304,7 @@ impl ActionableTerminals {
 
     fn contains(&self, constraint: &Constraint, terminal: u32) -> bool {
         match self {
+            Self::DirectDynamic(terminals) => terminals.contains(terminal as usize),
             Self::SingleState(state_id) => constraint.table.advance_row_allows(*state_id, terminal),
             Self::WideFrontier(index) => constraint
                 .direct_regular_wide_frontier_acceptance
@@ -2061,7 +2097,7 @@ fn commit_bytes_fast_path(
         if is_ignored_terminal(ignore_terminal, matched.id) {
             return None;
         }
-        if !stack_may_advance_on(&constraint.table, gss, matched.id) {
+        if !parser_may_advance_on(constraint, gss, matched.id) {
             continue;
         }
         if sole_terminal.is_some() {
@@ -3559,7 +3595,7 @@ fn commit_bytes_fast_path_profiled(
             profile.failed_fast_path_probe_ns += total_start.elapsed().as_nanos() as u64;
             return None;
         }
-        if !stack_may_advance_on(&constraint.table, gss, matched.id) {
+        if !parser_may_advance_on(constraint, gss, matched.id) {
             continue;
         }
         if sole_terminal.is_some() {
@@ -5767,6 +5803,8 @@ fn commit_bytes_impl_inner(
         );
     }
     let ignore_terminal = constraint.ignore_terminal;
+    let direct_dynamic = constraint.uses_dynamic_runtime()
+        && constraint.direct_regular_automaton.is_some();
 
     // A wide direct-regular frontier already carries its exact actionable
     // terminal support. Scan only that support instead of materializing every
@@ -5803,7 +5841,8 @@ fn commit_bytes_impl_inner(
         }
     }
 
-    if state.len() == 1
+    if !direct_dynamic
+        && state.len() == 1
         && let Some(result) = try_commit_direct_linear_in_place(
             constraint,
             state,
@@ -5820,7 +5859,8 @@ fn commit_bytes_impl_inner(
         return result;
     }
 
-    if let Some(result) = try_commit_multi_state_lexer_only(
+    if !direct_dynamic
+        && let Some(result) = try_commit_multi_state_lexer_only(
         constraint,
         state,
         bytes,
@@ -5834,7 +5874,8 @@ fn commit_bytes_impl_inner(
         }
         return result;
     }
-    if state.len() <= FLAT_FRONTIER_MAX_BRANCHES
+    if !direct_dynamic
+        && state.len() <= FLAT_FRONTIER_MAX_BRANCHES
         && let Some(result) = try_commit_flat_frontier_in_place(
             constraint,
             state,
@@ -5903,7 +5944,7 @@ fn commit_bytes_impl_inner(
                 && bufs.reusable_tokenizer_exec.matches.iter().all(|matched| {
                     !is_ignored_terminal(ignore_terminal, matched.id)
                         && wide_frontier.map_or_else(
-                            || !stack_may_advance_on(&constraint.table, &gss, matched.id),
+                            || !parser_may_advance_on(constraint, &gss, matched.id),
                             |summary| {
                                 !summary
                                     .actionable_terminals
@@ -5928,9 +5969,7 @@ fn commit_bytes_impl_inner(
                 // The parser frontier is unchanged. Re-key its existing Arc
                 // directly instead of decomposing, rebuilding, and fusing the
                 // represented stack language.
-                if wide_frontier.is_some()
-                    && state.replace_single_keys(&bufs.reusable_tokenizer_exec.states)
-                {
+                if state.replace_single_keys(&bufs.reusable_tokenizer_exec.states) {
                     return Ok(());
                 }
 

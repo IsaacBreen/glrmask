@@ -16,11 +16,13 @@ use crate::ds::weight::Weight;
 use crate::grammar::flat::TerminalID;
 
 use super::artifact::{
-    empty_dense_words, DenseAcceptanceRows, DirectRegularParserStateAcceptance,
-    DirectRegularWideFrontierAcceptance,
+    empty_dense_words, DenseAcceptanceRows, DirectRegularDynamicFrontierCacheEntry,
+    DirectRegularDynamicHotFrontier, DirectRegularTerminalSupport,
+    DirectRegularParserStateAcceptance, DirectRegularWideFrontierAcceptance,
     DenseWeightBufMaskCache,
     DenseWeightMaskCache,
     DenseWords,
+    DynamicSelfLoopProjection,
     DirectSparseWeightTokenSetCache,
     PackedDynamicMaskTokenAliases,
     DynamicMaskTrie,
@@ -220,6 +222,13 @@ impl Constraint {
         )
     }
 
+    #[inline]
+    pub(crate) fn uses_sparse_direct_regular_runtime(&self) -> bool {
+        self.direct_regular_automaton.is_some()
+            && self.table.num_rules == 0
+            && self.table.action.is_empty()
+    }
+
     #[cold]
     fn prime_initial_commit_hot_path(&self) {
         let mut state = ConstraintState {
@@ -363,6 +372,261 @@ impl Constraint {
         DynamicMaskVocab::from_packed(Arc::new(trie), Arc::new(token_aliases))
     }
 
+    fn dynamic_self_loop_projection_candidates(
+        &self,
+        vocab: &DynamicMaskVocab,
+    ) -> Vec<(u32, TerminalID)> {
+        let max_projections = if self.tokenizer.num_states() < 50_000 { 2 } else { 3 };
+        const MAX_BASE_PROJECTIONS: usize = 2;
+        if self.tokenizer.num_states() < 256 {
+            return Vec::new();
+        }
+        let mut best_by_terminal = BTreeMap::<TerminalID, (usize, u32)>::new();
+        for state in 0..self.tokenizer.num_states() {
+            if self.tokenizer.matched_terminals_iter(state).next().is_some()
+                || self.tokenizer.transitions_from(state).count() < 100
+            {
+                continue;
+            }
+            let mut futures = self.tokenizer.possible_future_terminals_iter(state);
+            let Some(required_terminal) = futures.next() else {
+                continue;
+            };
+            if futures.next().is_some() {
+                continue;
+            }
+            let loop_len = self.tokenizer.self_loop_bytes(state).len();
+            if loop_len < 64 {
+                continue;
+            }
+            let entry = best_by_terminal
+                .entry(required_terminal)
+                .or_insert((loop_len, state));
+            if (loop_len, std::cmp::Reverse(state))
+                > (entry.0, std::cmp::Reverse(entry.1))
+            {
+                *entry = (loop_len, state);
+            }
+        }
+        let mut ranked = best_by_terminal
+            .into_iter()
+            .map(|(terminal, (loop_len, state))| (loop_len, state, terminal))
+            .collect::<Vec<_>>();
+        ranked.sort_unstable_by_key(|&(loop_len, state, terminal)| {
+            (std::cmp::Reverse(loop_len), state, terminal)
+        });
+        ranked.truncate(MAX_BASE_PROJECTIONS);
+        let mut selected = ranked
+            .into_iter()
+            .map(|(_, state, terminal)| (state, terminal))
+            .collect::<Vec<_>>();
+
+        if selected.len() < max_projections {
+            let selected_targets = selected
+                .iter()
+                .copied()
+                .collect::<FxHashMap<u32, TerminalID>>();
+            let root_byte_sizes = vocab
+                .trie
+                .children(0)
+                .iter()
+                .filter_map(|edge| {
+                    vocab
+                        .trie
+                        .edge_bytes(edge)
+                        .first()
+                        .copied()
+                        .map(|byte| (byte, vocab.trie.subtree_tokens(edge.child).len()))
+                })
+                .collect::<FxHashMap<u8, usize>>();
+            let mut predecessors = Vec::<(usize, u32, TerminalID)>::new();
+            for state in 0..self.tokenizer.num_states() {
+                if selected.iter().any(|&(selected_state, _)| selected_state == state)
+                    || self.tokenizer.matched_terminals_iter(state).next().is_some()
+                {
+                    continue;
+                }
+                let mut futures = self.tokenizer.possible_future_terminals_iter(state);
+                let Some(required_terminal) = futures.next() else {
+                    continue;
+                };
+                if futures.next().is_some() {
+                    continue;
+                }
+                let mut transitions = self.tokenizer.transitions_from(state);
+                let Some((byte, target)) = transitions.next() else {
+                    continue;
+                };
+                if transitions.next().is_some()
+                    || selected_targets.get(&target).copied() != Some(required_terminal)
+                {
+                    continue;
+                }
+                let score = root_byte_sizes.get(&byte).copied().unwrap_or(0);
+                predecessors.push((score, state, required_terminal));
+            }
+            predecessors.sort_unstable_by_key(|&(score, state, terminal)| {
+                (std::cmp::Reverse(score), state, terminal)
+            });
+            for (_, state, terminal) in predecessors {
+                selected.push((state, terminal));
+                if selected.len() == max_projections {
+                    break;
+                }
+            }
+        }
+        selected
+    }
+
+    fn build_dynamic_self_loop_projections(
+        &self,
+        vocab: &DynamicMaskVocab,
+        fast_transitions: &FastTokenizerTransitions,
+    ) -> Vec<DynamicSelfLoopProjection> {
+        fn build_one(
+            constraint: &Constraint,
+            vocab: &DynamicMaskVocab,
+            fast_transitions: &FastTokenizerTransitions,
+            source_state: u32,
+            required_terminal: TerminalID,
+        ) -> DynamicSelfLoopProjection {
+            let trie = vocab.trie.as_ref();
+            let mut safe_subtrees = vec![0u8; trie.node_count()];
+            let mut safe_no_match_mask = vec![0u32; constraint.mask_len()];
+            fn advance_no_match_deterministic(
+                constraint: &Constraint,
+                fast_transitions: &FastTokenizerTransitions,
+                mut state: u32,
+                bytes: &[u8],
+            ) -> Option<u32> {
+                if constraint.tokenizer.state_has_epsilon_transitions(state) {
+                    return None;
+                }
+                for &byte in bytes {
+                    let target = fast_transitions.transition(&constraint.tokenizer, state, byte);
+                    if target == u32::MAX {
+                        return None;
+                    }
+                    if constraint.tokenizer.state_has_epsilon_transitions(target)
+                        || constraint
+                            .tokenizer
+                            .matched_terminals_iter(target)
+                            .next()
+                            .is_some()
+                    {
+                        return None;
+                    }
+                    state = target;
+                }
+                Some(state)
+            }
+
+            fn visit(
+                constraint: &Constraint,
+                vocab: &DynamicMaskVocab,
+                fast_transitions: &FastTokenizerTransitions,
+                trie: &DynamicMaskTrie,
+                node: u32,
+                tokenizer_state: u32,
+                required_terminal: TerminalID,
+                safe_subtrees: &mut [u8],
+                safe_no_match_mask: &mut [u32],
+            ) -> bool {
+                let mut futures = constraint
+                    .tokenizer
+                    .possible_future_terminals_iter(tokenizer_state);
+                let state_remains_live = futures.next() == Some(required_terminal)
+                    && futures.next().is_none();
+                let node_data = trie.node(node);
+                let token_safe = node_data.token_id.is_none() || state_remains_live;
+                if state_remains_live {
+                    if let Some(canonical_token) = node_data.token_id
+                        && let Some(token_ids) = vocab.token_ids(canonical_token)
+                    {
+                        for &token_id in token_ids {
+                            let word = token_id as usize / 32;
+                            if let Some(mask_word) = safe_no_match_mask.get_mut(word) {
+                                *mask_word |= 1u32 << (token_id % 32);
+                            }
+                        }
+                    }
+                }
+
+                let mut all_children_safe = true;
+                for edge in trie.children(node) {
+                    let child_safe = advance_no_match_deterministic(
+                        constraint,
+                        fast_transitions,
+                        tokenizer_state,
+                        trie.edge_bytes(edge),
+                    )
+                    .is_some_and(|end_state| {
+                        visit(
+                            constraint,
+                            vocab,
+                            fast_transitions,
+                            trie,
+                            edge.child,
+                            end_state,
+                            required_terminal,
+                            safe_subtrees,
+                            safe_no_match_mask,
+                        )
+                    });
+                    all_children_safe &= child_safe;
+                }
+                let subtree_safe = token_safe && all_children_safe;
+                safe_subtrees[node as usize] = u8::from(subtree_safe);
+                subtree_safe
+            }
+
+            visit(
+                constraint,
+                vocab,
+                fast_transitions,
+                trie,
+                0,
+                source_state,
+                required_terminal,
+                &mut safe_subtrees,
+                &mut safe_no_match_mask,
+            );
+            DynamicSelfLoopProjection {
+                source_state,
+                required_terminal,
+                safe_no_match_mask: Arc::from(safe_no_match_mask),
+                safe_subtrees: Arc::from(safe_subtrees),
+            }
+        }
+
+        let candidates = self.dynamic_self_loop_projection_candidates(vocab);
+        if candidates.len() <= 1 {
+            return candidates
+                .into_iter()
+                .map(|(source_state, required_terminal)| {
+                    build_one(self, vocab, fast_transitions, source_state, required_terminal)
+                })
+                .collect();
+        }
+        std::thread::scope(|scope| {
+            candidates
+                .into_iter()
+                .map(|(source_state, required_terminal)| {
+                    scope.spawn(move || {
+                        build_one(self, vocab, fast_transitions, source_state, required_terminal)
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|handle| {
+                    handle
+                        .join()
+                        .expect("dynamic self-loop projection worker panicked")
+                })
+                .collect()
+        })
+    }
+
     pub(crate) fn rebuild_dynamic_runtime_caches(&mut self) {
         self.tokenizer_has_epsilon_transitions = self.tokenizer.has_epsilon_transitions();
         let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
@@ -379,22 +643,85 @@ impl Constraint {
         }
         let guarded_shift_ms = started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-        let started_at = profile.then(std::time::Instant::now);
-        if !self.dynamic_mask_vocab.is_initialized() {
-            self.dynamic_mask_vocab = self.build_dynamic_mask_vocab();
-        }
-        let dynamic_vocab_ms = started_at
+        let mut dynamic_mask_vocab = std::mem::take(&mut self.dynamic_mask_vocab);
+        let build_vocab = || {
+            let started_at = profile.then(std::time::Instant::now);
+            if !dynamic_mask_vocab.is_initialized() {
+                let _ = dynamic_mask_vocab.materialize_pending_source();
+            }
+            if !dynamic_mask_vocab.is_initialized() {
+                dynamic_mask_vocab = self.build_dynamic_mask_vocab();
+            }
+            let elapsed = started_at
+                .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+            (dynamic_mask_vocab, elapsed)
+        };
+        let build_fast = || {
+            let started_at = profile.then(std::time::Instant::now);
+            let transitions = self.compute_tokenizer_fast_transitions();
+            let elapsed = started_at
+                .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+            (transitions, elapsed)
+        };
+        let build_support = || {
+            let started_at = profile.then(std::time::Instant::now);
+            let support = if self.uses_sparse_direct_regular_runtime() {
+                self.direct_regular_automaton
+                    .as_ref()
+                    .map_or_else(DirectRegularTerminalSupport::default, |automaton| {
+                        DirectRegularTerminalSupport::build(
+                            automaton,
+                            self.table.num_terminals as usize,
+                        )
+                    })
+            } else {
+                DirectRegularTerminalSupport::default()
+            };
+            let elapsed = started_at
+                .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+            (support, elapsed)
+        };
+        let (
+            ((mut dynamic_mask_vocab, dynamic_vocab_ms), (tokenizer_fast_transitions, tokenizer_fast_ms)),
+            (direct_regular_terminal_support, support_ms),
+        ) = if rayon::current_num_threads() == 1 {
+            ((build_vocab(), build_fast()), build_support())
+        } else {
+            rayon::join(|| rayon::join(build_vocab, build_fast), build_support)
+        };
+        dynamic_mask_vocab.set_direct_regular_terminal_support(
+            direct_regular_terminal_support,
+        );
+        let projection_started_at = profile.then(std::time::Instant::now);
+        let self_loop_projections = self.build_dynamic_self_loop_projections(
+            &dynamic_mask_vocab,
+            &tokenizer_fast_transitions,
+        );
+        let projection_ms = projection_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-        let started_at = profile.then(std::time::Instant::now);
-        self.tokenizer_fast_transitions = self.compute_tokenizer_fast_transitions();
-        let tokenizer_fast_ms = started_at
+        let projection_count = self_loop_projections.len();
+        dynamic_mask_vocab.set_self_loop_projections(self_loop_projections);
+        let hot_frontier_started_at = profile.then(std::time::Instant::now);
+        self.direct_regular_dynamic_hot_frontiers = self
+            .compute_direct_regular_dynamic_hot_frontiers(
+                dynamic_mask_vocab.direct_regular_terminal_support(),
+            );
+        let hot_frontier_ms = hot_frontier_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let hot_frontier_count = self.direct_regular_dynamic_hot_frontiers.len();
+        self.dynamic_mask_vocab = dynamic_mask_vocab;
+        self.tokenizer_fast_transitions = tokenizer_fast_transitions;
         if let Some(total_started_at) = total_started_at {
             eprintln!(
-                "[glrmask/profile][dynamic_runtime_finalize] guarded_shift_ms={:.3} dynamic_vocab_ms={:.3} tokenizer_fast_ms={:.3} total_ms={:.3}",
+                "[glrmask/profile][dynamic_runtime_finalize] guarded_shift_ms={:.3} dynamic_vocab_ms={:.3} tokenizer_fast_ms={:.3} direct_regular_support_ms={:.3} self_loop_projection_ms={:.3} self_loop_projections={} hot_frontier_ms={:.3} hot_frontiers={} total_ms={:.3}",
                 guarded_shift_ms,
                 dynamic_vocab_ms,
                 tokenizer_fast_ms,
+                support_ms,
+                projection_ms,
+                projection_count,
+                hot_frontier_ms,
+                hot_frontier_count,
                 total_started_at.elapsed().as_secs_f64() * 1000.0,
             );
         }
@@ -826,6 +1153,178 @@ impl Constraint {
             .into()
     }
 
+    fn direct_regular_dynamic_hot_frontier_summary(
+        &self,
+        frontier_states: Arc<[u32]>,
+        advance_by_terminal: Arc<[(TerminalID, Arc<[u32]>)]>,
+    ) -> DirectRegularDynamicHotFrontier {
+        let mut actionable_terminals =
+            crate::ds::bitset::BitSet::new(self.table.num_terminals as usize);
+        for &(terminal, _) in advance_by_terminal.iter() {
+            actionable_terminals.set(terminal as usize);
+        }
+        let empty_acc_frontier = ParserGSS::from_sorted_unique_single_value_stacks(
+            &frontier_states,
+            TerminalsDisallowed::new(),
+        );
+        DirectRegularDynamicHotFrontier {
+            frontier_states,
+            empty_acc_frontier,
+            actionable_terminals,
+            advance_by_terminal,
+        }
+    }
+
+    fn compute_direct_regular_dynamic_hot_frontiers(
+        &self,
+        support: &DirectRegularTerminalSupport,
+    ) -> Vec<DirectRegularDynamicHotFrontier> {
+        const MIN_AUTOMATON_STATES: usize = 16_384;
+        const MIN_PRIMARY_WORK: u64 = 64;
+        const MIN_SECONDARY_FRONTIER_STATES: usize = 64;
+        if !self.uses_sparse_direct_regular_runtime() {
+            return Vec::new();
+        }
+        let Some(automaton) = self.direct_regular_automaton.as_ref() else {
+            return Vec::new();
+        };
+        if automaton.states.len() < MIN_AUTOMATON_STATES {
+            return Vec::new();
+        }
+
+        let mut parents = vec![Vec::<u32>::new(); automaton.states.len()];
+        let mut remaining_children = Vec::<u32>::with_capacity(automaton.states.len());
+        let mut queue = std::collections::VecDeque::<u32>::new();
+        for (source, state) in automaton.states.iter().enumerate() {
+            remaining_children.push(state.epsilons.len() as u32);
+            if state.epsilons.is_empty() {
+                queue.push_back(source as u32);
+            }
+            for &child in &state.epsilons {
+                parents[child as usize].push(source as u32);
+            }
+        }
+        let mut transition_work = vec![0u64; automaton.states.len()];
+        let mut processed = 0usize;
+        while let Some(raw) = queue.pop_front() {
+            let state = &automaton.states[raw as usize];
+            let own = state
+                .transitions
+                .values()
+                .map(|targets| targets.len() as u64)
+                .sum::<u64>();
+            transition_work[raw as usize] = state.epsilons.iter().fold(own, |work, child| {
+                work.saturating_add(transition_work[*child as usize])
+            });
+            processed += 1;
+            for &parent in &parents[raw as usize] {
+                let remaining = &mut remaining_children[parent as usize];
+                *remaining -= 1;
+                if *remaining == 0 {
+                    queue.push_back(parent);
+                }
+            }
+        }
+        if processed != automaton.states.len() {
+            return Vec::new();
+        }
+        let Some((primary_raw, primary_work)) = transition_work
+            .iter()
+            .copied()
+            .enumerate()
+            .max_by_key(|&(state, work)| {
+                (
+                    support.state_terminal_count(state as u32).unwrap_or(0),
+                    work,
+                    state,
+                )
+            })
+        else {
+            return Vec::new();
+        };
+        if primary_work < MIN_PRIMARY_WORK {
+            return Vec::new();
+        }
+        let primary_states: Arc<[u32]> = Arc::from([primary_raw as u32 + 1]);
+        let primary_advances = self.direct_regular_frontier_advances(&primary_states);
+        let widest_frontier = primary_advances
+            .iter()
+            .map(|(_, targets)| Arc::clone(targets))
+            .filter(|targets| targets.len() >= MIN_SECONDARY_FRONTIER_STATES)
+            .max_by_key(|targets| targets.len());
+
+        let mut summaries = Vec::with_capacity(2);
+        summaries.push(self.direct_regular_dynamic_hot_frontier_summary(
+            Arc::clone(&primary_states),
+            primary_advances,
+        ));
+        if let Some(widest_frontier) = widest_frontier
+            && widest_frontier.as_ref() != primary_states.as_ref()
+        {
+            let advances = self.direct_regular_frontier_advances(&widest_frontier);
+            summaries.push(self.direct_regular_dynamic_hot_frontier_summary(
+                widest_frontier,
+                advances,
+            ));
+        }
+        if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+        {
+            eprintln!(
+                "[glrmask/profile][dynamic_hot_frontiers] primary_state={} primary_support={} primary_work={} summaries={} widths={:?}",
+                primary_raw + 1,
+                support.state_terminal_count(primary_raw as u32).unwrap_or(0),
+                primary_work,
+                summaries.len(),
+                summaries
+                    .iter()
+                    .map(|summary| summary.frontier_states.len())
+                    .collect::<Vec<_>>(),
+            );
+        }
+        summaries
+    }
+
+    fn direct_regular_dynamic_hot_frontier_for_gss(
+        &self,
+        gss: &ParserGSS,
+    ) -> Option<&DirectRegularDynamicHotFrontier> {
+        if self.direct_regular_dynamic_hot_frontiers.is_empty() || gss.max_depth() != 1 {
+            return None;
+        }
+        let top_count = gss.top_value_count();
+        if top_count == 1 {
+            let state = gss.single_top_value()?;
+            return self
+                .direct_regular_dynamic_hot_frontiers
+                .iter()
+                .find(|summary| summary.frontier_states.as_ref() == [state]);
+        }
+        if let Some(lower_id) = gss.single_interface_lower_id()
+            && let Some(summary) = self
+                .direct_regular_dynamic_hot_frontiers
+                .iter()
+                .find(|summary| {
+                    summary.frontier_states.len() == top_count
+                        && summary.empty_acc_frontier.single_interface_lower_id() == Some(lower_id)
+                })
+        {
+            return Some(summary);
+        }
+        if !self
+            .direct_regular_dynamic_hot_frontiers
+            .iter()
+            .any(|summary| summary.frontier_states.len() == top_count)
+        {
+            return None;
+        }
+        let mut top_values = gss.peek_values();
+        top_values.sort_unstable();
+        self.direct_regular_dynamic_hot_frontiers
+            .iter()
+            .find(|summary| summary.frontier_states.as_ref() == top_values.as_slice())
+    }
+
     fn compute_direct_regular_wide_frontier_acceptance(
         &self,
     ) -> Vec<DirectRegularWideFrontierAcceptance> {
@@ -838,30 +1337,29 @@ impl Constraint {
         let mut parts_cache = FxHashMap::<Vec<usize>, Arc<[Weight]>>::default();
         let mut summaries = Vec::<DirectRegularWideFrontierAcceptance>::new();
         for descriptor in &self.table.direct_regular_wide_frontiers {
-            let Some(action) = self
+            let action = self
                 .table
-                .action(descriptor.source_state, descriptor.terminal)
-            else {
-                continue;
-            };
-            let (action_origin, mut action_states) = match action {
+                .action(descriptor.source_state, descriptor.terminal);
+            let action_origin_and_states = action.and_then(|action| match action {
                 Action::ReplaceShifts(targets) => {
-                    (targets.as_ptr() as usize, targets.to_vec())
+                    Some((targets.as_ptr() as usize, targets.to_vec()))
                 }
                 Action::StackShifts(shifts)
                     if shifts
                         .iter()
                         .all(|shift| shift.pop == 1 && shift.pushes.len() == 1) =>
                 {
-                    (
+                    Some((
                         shifts.as_ptr() as usize,
                         shifts.iter().map(|shift| shift.pushes[0]).collect(),
-                    )
+                    ))
                 }
-                _ => continue,
-            };
-            action_states.sort_unstable();
-            action_states.dedup();
+                _ => None,
+            });
+            if action.is_some() && action_origin_and_states.is_none() {
+                continue;
+            }
+            let action_origin = action_origin_and_states.as_ref().map(|(origin, _)| *origin);
 
             let mut states = descriptor.target_states.clone();
             states.sort_unstable();
@@ -869,14 +1367,22 @@ impl Constraint {
             if states.len() < MIN_FRONTIER_STATES {
                 continue;
             }
-            debug_assert_eq!(
-                states,
-                action_states,
-                "direct-regular frontier descriptor drifted from the live table action",
-            );
+            if let Some((_, mut action_states)) = action_origin_and_states {
+                action_states.sort_unstable();
+                action_states.dedup();
+                debug_assert_eq!(
+                    states,
+                    action_states,
+                    "direct-regular frontier descriptor drifted from the live table action",
+                );
+            } else if !self.uses_sparse_direct_regular_runtime() {
+                continue;
+            }
 
             if let Some(&summary_index) = seen_frontiers.get(&states) {
-                summaries[summary_index].action_origins.push(action_origin);
+                if let Some(action_origin) = action_origin {
+                    summaries[summary_index].action_origins.push(action_origin);
+                }
                 continue;
             }
             seen_frontiers.insert(states.clone(), summaries.len());
@@ -932,7 +1438,7 @@ impl Constraint {
             );
             let advance_by_terminal = self.direct_regular_frontier_advances(&frontier_states);
             summaries.push(DirectRegularWideFrontierAcceptance {
-                action_origins: vec![action_origin],
+                action_origins: action_origin.into_iter().collect(),
                 state_count,
                 actionable_terminals,
                 frontier_states,
@@ -1126,6 +1632,19 @@ impl Constraint {
         let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
         let total_started_at = profile.then(std::time::Instant::now);
+        if self.uses_sparse_direct_regular_runtime() {
+            let support = self
+                .direct_regular_automaton
+                .as_ref()
+                .map_or_else(DirectRegularTerminalSupport::default, |automaton| {
+                    DirectRegularTerminalSupport::build(
+                        automaton,
+                        self.table.num_terminals as usize,
+                    )
+                });
+            self.dynamic_mask_vocab
+                .set_direct_regular_terminal_support(support);
+        }
         let wide_frontier_started_at = profile.then(std::time::Instant::now);
         self.direct_regular_wide_frontier_acceptance =
             self.compute_direct_regular_wide_frontier_acceptance();
@@ -2919,11 +3438,36 @@ impl Constraint {
         gss: &ParserGSS,
     ) -> Option<usize> {
         let lower_id = gss.single_interface_lower_id()?;
-        self.direct_regular_wide_frontier_acceptance
+        if let Some(index) = self
+            .direct_regular_wide_frontier_acceptance
             .iter()
             .position(|summary| {
                 summary.empty_acc_frontier.single_interface_lower_id() == Some(lower_id)
             })
+        {
+            return Some(index);
+        }
+        if let Some(index) = self
+            .dynamic_mask_vocab_for_runtime()
+            .cached_direct_regular_wide_frontier_index(lower_id)
+        {
+            return Some(index);
+        }
+        if gss.max_depth() != 1 {
+            return None;
+        }
+        let mut top_values = gss.peek_values();
+        top_values.sort_unstable();
+        let index = self
+            .direct_regular_wide_frontier_acceptance
+            .iter()
+            .position(|summary| {
+                summary.state_count == top_values.len()
+                    && summary.frontier_states.as_ref() == top_values.as_slice()
+            })?;
+        self.dynamic_mask_vocab_for_runtime()
+            .cache_direct_regular_wide_frontier_index(lower_id, index);
+        Some(index)
     }
 
     #[inline]
@@ -2941,12 +3485,8 @@ impl Constraint {
         &self,
         gss: &ParserGSS,
     ) -> Option<&DirectRegularWideFrontierAcceptance> {
-        let lower_id = gss.single_interface_lower_id()?;
-        self.direct_regular_wide_frontier_acceptance
-            .iter()
-            .find(|summary| {
-                summary.empty_acc_frontier.single_interface_lower_id() == Some(lower_id)
-            })
+        let index = self.direct_regular_wide_frontier_index_for_gss(gss)?;
+        self.direct_regular_wide_frontier_acceptance.get(index)
     }
 
     pub(crate) fn for_each_direct_regular_l1_acceptance(
@@ -2957,11 +3497,47 @@ impl Constraint {
         if self.direct_regular_l1_complete_by_terminal.is_empty() {
             return false;
         }
-        let Some(row) = self.table.advance.get(parser_state as usize) else {
+        if let Some(row) = self.table.advance.get(parser_state as usize) {
+            let mut found = false;
+            for terminal in row.iter_ones() {
+                if let Some(weight) = self
+                    .direct_regular_l1_complete_by_terminal
+                    .get(&(terminal as TerminalID))
+                {
+                    found = true;
+                    visit(weight);
+                }
+            }
+            return found;
+        }
+        if !self.uses_sparse_direct_regular_runtime() {
+            return false;
+        }
+        let Some(automaton) = self.direct_regular_automaton.as_ref() else {
             return false;
         };
+        let mut stack = Vec::new();
+        if parser_state == 0 {
+            stack.extend(automaton.start_states.iter().copied());
+        } else if let Some(raw) = parser_state.checked_sub(1) {
+            stack.push(raw);
+        }
+        let mut seen = vec![false; automaton.states.len()];
+        let mut terminals = crate::ds::bitset::BitSet::new(self.table.num_terminals as usize);
+        while let Some(raw) = stack.pop() {
+            let Some(state) = automaton.states.get(raw as usize) else {
+                return false;
+            };
+            if std::mem::replace(&mut seen[raw as usize], true) {
+                continue;
+            }
+            stack.extend(state.epsilons.iter().copied());
+            for &terminal in state.transitions.keys() {
+                terminals.set(terminal as usize);
+            }
+        }
         let mut found = false;
-        for terminal in row.iter_ones() {
+        for terminal in terminals.iter_ones() {
             if let Some(weight) = self
                 .direct_regular_l1_complete_by_terminal
                 .get(&(terminal as TerminalID))
@@ -2973,11 +3549,312 @@ impl Constraint {
         found
     }
 
+    pub(crate) fn sparse_direct_regular_gss_is_complete(&self, gss: &ParserGSS) -> Option<bool> {
+        if !self.uses_sparse_direct_regular_runtime() || gss.max_depth() != 1 {
+            return None;
+        }
+        let automaton = self.direct_regular_automaton.as_ref()?;
+        let mut stack = Vec::new();
+        gss.for_each_top_value(|state| {
+            if state == 0 {
+                stack.extend(automaton.start_states.iter().copied());
+            } else if let Some(raw) = state.checked_sub(1) {
+                stack.push(raw);
+            }
+        });
+        let mut seen = vec![false; automaton.states.len()];
+        while let Some(raw) = stack.pop() {
+            let state = automaton.states.get(raw as usize)?;
+            if std::mem::replace(&mut seen[raw as usize], true) {
+                continue;
+            }
+            if state.is_accepting {
+                return Some(true);
+            }
+            stack.extend(state.epsilons.iter().copied());
+        }
+        Some(false)
+    }
+
+    fn direct_regular_dynamic_frontier(
+        &self,
+        gss: &ParserGSS,
+    ) -> Option<DirectRegularDynamicFrontierCacheEntry> {
+        if !self.uses_sparse_direct_regular_runtime() || gss.max_depth() != 1 {
+            return None;
+        }
+        let automaton = self.direct_regular_automaton.as_ref()?;
+        let cache_key = gss.single_interface_lower_id();
+        if let Some(key) = cache_key
+            && let Some(cached) = self
+                .dynamic_mask_vocab_for_runtime()
+                .cached_direct_regular_frontier(key)
+        {
+            return Some(cached);
+        }
+
+        let mut roots = Vec::new();
+        gss.for_each_top_value(|state| {
+            if state == 0 {
+                roots.extend(automaton.start_states.iter().copied());
+            } else if let Some(raw) = state.checked_sub(1) {
+                roots.push(raw);
+            }
+        });
+        let mut seen = vec![false; automaton.states.len()];
+        let mut stack = roots;
+        let mut targets_by_terminal = BTreeMap::<TerminalID, Vec<u32>>::new();
+        while let Some(raw) = stack.pop() {
+            let state = automaton.states.get(raw as usize)?;
+            if std::mem::replace(&mut seen[raw as usize], true) {
+                continue;
+            }
+            stack.extend(state.epsilons.iter().copied());
+            for (&terminal, targets) in &state.transitions {
+                if (terminal as usize) >= self.table.num_terminals as usize {
+                    continue;
+                }
+                targets_by_terminal
+                    .entry(terminal)
+                    .or_default()
+                    .extend(targets.iter().map(|target| target + 1));
+            }
+        }
+
+        let mut actionable_terminals =
+            crate::ds::bitset::BitSet::new(self.table.num_terminals as usize);
+        let advance_by_terminal = targets_by_terminal
+            .into_iter()
+            .filter_map(|(terminal, mut targets)| {
+                targets.sort_unstable();
+                targets.dedup();
+                if targets.is_empty() {
+                    return None;
+                }
+                actionable_terminals.set(terminal as usize);
+                Some((terminal, Arc::<[u32]>::from(targets)))
+            })
+            .collect::<Vec<_>>();
+        let entry = DirectRegularDynamicFrontierCacheEntry {
+            source: gss.clone(),
+            actionable_terminals,
+            advance_by_terminal: Arc::from(advance_by_terminal),
+        };
+        Some(cache_key.map_or(entry.clone(), |key| {
+            self.dynamic_mask_vocab_for_runtime()
+                .cache_direct_regular_frontier(key, entry)
+        }))
+    }
+
+    pub(crate) fn direct_regular_may_advance_on(
+        &self,
+        gss: &ParserGSS,
+        terminal: TerminalID,
+    ) -> Option<bool> {
+        if !self.uses_sparse_direct_regular_runtime() || gss.max_depth() != 1 {
+            return None;
+        }
+        let automaton = self.direct_regular_automaton.as_ref()?;
+        let support = self.dynamic_mask_vocab.direct_regular_terminal_support();
+        if support.is_initialized() {
+            let mut found = false;
+            gss.for_each_top_value(|state| {
+                if found {
+                    return;
+                }
+                if state == 0 {
+                    found = automaton
+                        .start_states
+                        .iter()
+                        .any(|&raw| support.contains(raw, terminal));
+                } else if let Some(raw) = state.checked_sub(1) {
+                    found = support.contains(raw, terminal);
+                }
+            });
+            return Some(found);
+        }
+
+        let mut stack = Vec::new();
+        gss.for_each_top_value(|state| {
+            if state == 0 {
+                stack.extend(automaton.start_states.iter().copied());
+            } else if let Some(raw) = state.checked_sub(1) {
+                stack.push(raw);
+            }
+        });
+        let mut seen = vec![false; automaton.states.len()];
+        while let Some(raw) = stack.pop() {
+            let state = automaton.states.get(raw as usize)?;
+            if std::mem::replace(&mut seen[raw as usize], true) {
+                continue;
+            }
+            if state.transitions.contains_key(&terminal) {
+                return Some(true);
+            }
+            stack.extend(state.epsilons.iter().copied());
+        }
+        Some(false)
+    }
+
+    pub(crate) fn direct_regular_may_advance_on_any(
+        &self,
+        gss: &ParserGSS,
+        terminals: &crate::ds::bitset::BitSet,
+    ) -> Option<bool> {
+        if !self.uses_sparse_direct_regular_runtime() || gss.max_depth() != 1 {
+            return None;
+        }
+        let automaton = self.direct_regular_automaton.as_ref()?;
+        let support = self.dynamic_mask_vocab.direct_regular_terminal_support();
+        let sparse_terminals = (terminals.count_ones() <= 8).then(|| {
+            terminals
+                .iter()
+                .map(|terminal| terminal as TerminalID)
+                .collect::<SmallVec<[TerminalID; 8]>>()
+        });
+        if support.is_initialized() {
+            let mut found = false;
+            gss.for_each_top_value(|state| {
+                if found {
+                    return;
+                }
+                let state_supports = |raw| {
+                    sparse_terminals.as_ref().map_or_else(
+                        || support.intersects(raw, terminals.words()),
+                        |candidates| {
+                            candidates
+                                .iter()
+                                .any(|&terminal| support.contains(raw, terminal))
+                        },
+                    )
+                };
+                if state == 0 {
+                    found = automaton.start_states.iter().copied().any(state_supports);
+                } else if let Some(raw) = state.checked_sub(1) {
+                    found = state_supports(raw);
+                }
+            });
+            return Some(found);
+        }
+
+        let sparse_terminals = sparse_terminals.map(|terminals| {
+            terminals
+                .into_iter()
+                .map(|terminal| terminal as u32)
+                .collect::<SmallVec<[u32; 8]>>()
+        });
+        let mut stack = Vec::new();
+        gss.for_each_top_value(|state| {
+            if state == 0 {
+                stack.extend(automaton.start_states.iter().copied());
+            } else if let Some(raw) = state.checked_sub(1) {
+                stack.push(raw);
+            }
+        });
+        let mut seen = vec![false; automaton.states.len()];
+        while let Some(raw) = stack.pop() {
+            let state = automaton.states.get(raw as usize)?;
+            if std::mem::replace(&mut seen[raw as usize], true) {
+                continue;
+            }
+            let found = sparse_terminals.as_ref().map_or_else(
+                || {
+                    state
+                        .transitions
+                        .keys()
+                        .any(|terminal| terminals.contains(*terminal as usize))
+                },
+                |candidates| {
+                    candidates
+                        .iter()
+                        .any(|terminal| state.transitions.contains_key(terminal))
+                },
+            );
+            if found {
+                return Some(true);
+            }
+            stack.extend(state.epsilons.iter().copied());
+        }
+        Some(false)
+    }
+
+    pub(crate) fn direct_regular_admissible_terminals(
+        &self,
+        gss: &ParserGSS,
+    ) -> Option<crate::ds::bitset::BitSet> {
+        if !self.uses_sparse_direct_regular_runtime() || gss.max_depth() != 1 {
+            return None;
+        }
+        let automaton = self.direct_regular_automaton.as_ref()?;
+        if let Some(summary) = self.direct_regular_dynamic_hot_frontier_for_gss(gss) {
+            return Some(summary.actionable_terminals.clone());
+        }
+        if !self.direct_regular_wide_frontier_acceptance.is_empty()
+            && let Some(summary) = self.direct_regular_wide_frontier_for_gss(gss)
+        {
+            return Some(summary.actionable_terminals.clone());
+        }
+        let support = self.dynamic_mask_vocab.direct_regular_terminal_support();
+        if support.is_initialized() {
+            let mut terminals =
+                crate::ds::bitset::BitSet::new(self.table.num_terminals as usize);
+            gss.for_each_top_value(|state| {
+                let mut add_state = |raw| {
+                    if !support.for_each_small_state_terminal(raw, |terminal| {
+                        terminals.set(terminal as usize);
+                    }) {
+                        support.or_state_into(raw, terminals.words_mut());
+                    }
+                };
+                if state == 0 {
+                    for &raw in &automaton.start_states {
+                        add_state(raw);
+                    }
+                } else if let Some(raw) = state.checked_sub(1) {
+                    add_state(raw);
+                }
+            });
+            return Some(terminals);
+        }
+        self.direct_regular_dynamic_frontier(gss)
+            .map(|frontier| frontier.actionable_terminals)
+    }
+
     pub(crate) fn direct_regular_cached_advance(
         &self,
         gss: &ParserGSS,
         terminal: TerminalID,
     ) -> Option<ParserGSS> {
+        if let Some(summary) = self.direct_regular_dynamic_hot_frontier_for_gss(gss) {
+            let acc = gss.uniform_accumulator()?;
+            let Ok(index) = summary
+                .advance_by_terminal
+                .binary_search_by_key(&terminal, |(candidate, _)| *candidate)
+            else {
+                return Some(ParserGSS::empty());
+            };
+            let targets = &summary.advance_by_terminal[index].1;
+            if Arc::ptr_eq(targets, &summary.frontier_states) {
+                return summary.empty_acc_frontier.with_uniform_accumulator(acc);
+            }
+            if let Some(target_summary) = self
+                .direct_regular_dynamic_hot_frontiers
+                .iter()
+                .find(|candidate| {
+                    Arc::ptr_eq(&candidate.frontier_states, targets)
+                        || candidate.frontier_states.as_ref() == targets.as_ref()
+                })
+            {
+                return target_summary.empty_acc_frontier.with_uniform_accumulator(acc);
+            }
+            if let [target] = targets.as_ref() {
+                return Some(ParserGSS::from_single_stack(vec![*target], acc));
+            }
+            return Some(ParserGSS::from_sorted_unique_single_value_stacks(
+                targets,
+                acc,
+            ));
+        }
         if let Some(summary) = self.direct_regular_wide_frontier_for_gss(gss) {
             let acc = gss.uniform_accumulator()?;
             let index = summary
@@ -2988,6 +3865,109 @@ impl Constraint {
             if Arc::ptr_eq(targets, &summary.frontier_states) {
                 return summary.empty_acc_frontier.with_uniform_accumulator(acc);
             }
+            if let [target] = targets.as_ref() {
+                return Some(ParserGSS::from_single_stack(vec![*target], acc));
+            }
+            return Some(ParserGSS::from_sorted_unique_single_value_stacks(
+                targets,
+                acc,
+            ));
+        }
+        if self.uses_sparse_direct_regular_runtime() {
+            if gss.max_depth() != 1 {
+                return None;
+            }
+            let acc = gss.uniform_accumulator()?;
+            let automaton = self.direct_regular_automaton.as_ref()?;
+            let support = self.dynamic_mask_vocab.direct_regular_terminal_support();
+            if support.is_initialized() {
+                let mut stack = Vec::<u32>::new();
+                gss.for_each_top_value(|state| {
+                    if state == 0 {
+                        stack.extend(
+                            automaton
+                                .start_states
+                                .iter()
+                                .copied()
+                                .filter(|&raw| support.contains(raw, terminal)),
+                        );
+                    } else if let Some(raw) = state.checked_sub(1)
+                        && support.contains(raw, terminal)
+                    {
+                        stack.push(raw);
+                    }
+                });
+                let mut seen = crate::ds::bitset::BitSet::new(automaton.states.len());
+                let mut target_bits =
+                    crate::ds::bitset::BitSet::new(automaton.states.len() + 1);
+                while let Some(raw) = stack.pop() {
+                    let raw_index = raw as usize;
+                    if seen.contains(raw_index) {
+                        continue;
+                    }
+                    seen.set(raw_index);
+                    let state = automaton.states.get(raw_index)?;
+                    if let Some(state_targets) = state.transitions.get(&terminal) {
+                        for &target in state_targets {
+                            target_bits.set(target as usize + 1);
+                        }
+                    }
+                    stack.extend(
+                        state
+                            .epsilons
+                            .iter()
+                            .copied()
+                            .filter(|&child| support.contains(child, terminal)),
+                    );
+                }
+                let target_count = target_bits.count_ones();
+                if target_count == 0 {
+                    return Some(ParserGSS::empty());
+                }
+                if target_count == 1 {
+                    let target = target_bits
+                        .iter_ones()
+                        .next()
+                        .expect("one target bit must be present") as u32;
+                    return Some(ParserGSS::from_single_stack(vec![target], acc));
+                }
+                let targets = target_bits
+                    .iter_ones()
+                    .map(|target| target as u32)
+                    .collect::<Vec<_>>();
+                let source_is_target = target_count == gss.top_value_count() && {
+                    let mut same = true;
+                    gss.for_each_top_value(|state| {
+                        same &= target_bits.contains(state as usize);
+                    });
+                    same
+                };
+                if source_is_target {
+                    return Some(gss.clone());
+                }
+                if let Some(summary) = self
+                    .direct_regular_wide_frontier_acceptance
+                    .iter()
+                    .find(|summary| summary.frontier_states.as_ref() == targets.as_slice())
+                    && let Some(canonical) = summary
+                        .empty_acc_frontier
+                        .with_uniform_accumulator(acc.clone())
+                {
+                    return Some(canonical);
+                }
+                return Some(ParserGSS::from_sorted_unique_single_value_stacks(
+                    &targets, acc,
+                ));
+            }
+
+            let frontier = self.direct_regular_dynamic_frontier(gss)?;
+            let Ok(index) = frontier
+                .advance_by_terminal
+                .binary_search_by_key(&terminal, |(candidate, _)| *candidate)
+            else {
+                return Some(ParserGSS::empty());
+            };
+            let targets = &frontier.advance_by_terminal[index].1;
             if let [target] = targets.as_ref() {
                 return Some(ParserGSS::from_single_stack(vec![*target], acc));
             }

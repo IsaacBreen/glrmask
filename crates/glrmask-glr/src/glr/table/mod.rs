@@ -198,6 +198,27 @@ fn action_ambiguity(action: &Action) -> Option<(TableAmbiguityKind, usize)> {
 }
 
 impl GLRTable {
+    /// Minimal table metadata for a runtime that executes a retained direct-regular
+    /// automaton instead of materialized LR action rows.
+    pub fn direct_regular_runtime_stub(num_states: u32, num_terminals: u32) -> Self {
+        Self {
+            action: Vec::new(),
+            goto: Vec::new(),
+            num_states,
+            num_terminals,
+            num_rules: 0,
+            rules: Vec::new(),
+            nonterminal_display_names: Vec::new(),
+            construction: GlrTableConstruction::LegacyRowBisim,
+            admission_policy: AdmissionPolicy::RowPresenceExact,
+            advance: Vec::new(),
+            forwarded_shifts: FxHashSet::default(),
+            guarded_shift_index: Vec::new(),
+            direct_regular_wide_frontiers: Vec::new(),
+        }
+    }
+
+
     pub fn build(grammar: &AnalyzedGrammar) -> Self {
         build_table(grammar)
     }

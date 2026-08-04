@@ -447,6 +447,201 @@ impl<'a> RightLinearBuilder<'a> {
     }
 }
 
+
+pub fn retain_reachable_rules(grammar: &mut NamedGrammar) {
+    fn referenced_names(expr: &GrammarExpr, output: &mut HashSet<String>) {
+        match expr {
+            GrammarExpr::Ref(name) => { output.insert(name.clone()); }
+            GrammarExpr::Grouped(inner) | GrammarExpr::Quantified(inner, _) => referenced_names(inner, output),
+            GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
+                for part in parts { referenced_names(part, output); }
+            }
+            GrammarExpr::Exclude { expr, exclude } => {
+                referenced_names(expr, output); referenced_names(exclude, output);
+            }
+            GrammarExpr::Intersect { expr, intersect } => {
+                referenced_names(expr, output); referenced_names(intersect, output);
+            }
+            GrammarExpr::SeparatedSequence { items, separator, .. } => {
+                for (item, _) in items { referenced_names(item, output); }
+                referenced_names(separator, output);
+            }
+            GrammarExpr::ExprNFA(expr_nfa) => {
+                for symbol in &expr_nfa.symbols { referenced_names(symbol, output); }
+            }
+            GrammarExpr::Epsilon | GrammarExpr::Literal(_) | GrammarExpr::SpecialToken(_)
+            | GrammarExpr::CharClass { .. } | GrammarExpr::RawRegex(_)
+            | GrammarExpr::LexerDfa(_) | GrammarExpr::AnyByte => {}
+        }
+    }
+
+    let by_name = grammar.rules.iter().map(|rule| (rule.name.clone(), rule.expr.clone())).collect::<HashMap<_, _>>();
+    let mut reachable = HashSet::new();
+    let mut queue = VecDeque::from([grammar.start.clone()]);
+    while let Some(name) = queue.pop_front() {
+        if !reachable.insert(name.clone()) { continue; }
+        let Some(expr) = by_name.get(&name) else { continue; };
+        let mut dependencies = HashSet::new();
+        referenced_names(expr, &mut dependencies);
+        let mut dependencies = dependencies.into_iter().collect::<Vec<_>>();
+        dependencies.sort_unstable();
+        queue.extend(dependencies);
+    }
+    grammar.rules.retain(|rule| reachable.contains(&rule.name));
+}
+
+fn regular_dependency_closure(
+    root: &GrammarExpr,
+    rule_map: &HashMap<String, &NamedRule>,
+    terminals: &HashSet<String>,
+    macros: &HashMap<String, ExpandedMacro>,
+) -> Option<HashSet<String>> {
+    let mut closure = HashSet::new();
+    let mut initial = nonterminal_dependencies(root, terminals)
+        .into_iter()
+        .collect::<Vec<_>>();
+    initial.sort_unstable();
+    let mut queue = VecDeque::from(initial);
+    while let Some(name) = queue.pop_front() {
+        if macros.contains_key(&name) || !closure.insert(name.clone()) {
+            continue;
+        }
+        let rule = rule_map.get(&name)?;
+        let rewritten = rewrite_macros(&rule.expr, terminals, macros);
+        let mut dependencies = nonterminal_dependencies(&rewritten, terminals)
+            .into_iter()
+            .collect::<Vec<_>>();
+        dependencies.sort_unstable();
+        queue.extend(dependencies);
+    }
+    Some(closure)
+}
+
+/// Compress one large right-linear alternative embedded in an otherwise
+/// context-free start rule. This preserves a finite-state island when a small
+/// nonregular alternative would otherwise disable whole-grammar compression.
+fn compress_partial_right_linear_start_alternative(
+    grammar: &mut NamedGrammar,
+    min_parser_rules: usize,
+    emit_profile: bool,
+) -> bool {
+    if grammar.ignore.is_some()
+        || !grammar.lexer_partitions.is_empty()
+        || !grammar.lexer_literal_partitions.is_empty()
+        || grammar.default_lexer_partition.is_some()
+    {
+        return false;
+    }
+
+    let rule_map = grammar
+        .rules
+        .iter()
+        .map(|rule| (rule.name.clone(), rule))
+        .collect::<HashMap<_, _>>();
+    let terminals = grammar
+        .rules
+        .iter()
+        .filter(|rule| rule.is_terminal)
+        .map(|rule| rule.name.clone())
+        .collect::<HashSet<_>>();
+    let parser_names_all = grammar
+        .rules
+        .iter()
+        .filter(|rule| !rule.is_terminal)
+        .map(|rule| rule.name.clone())
+        .collect::<Vec<_>>();
+    let macros = discover_macros(&rule_map, &terminals, &parser_names_all, &grammar.start);
+    let start_rule = rule_map.get(&grammar.start).copied();
+    let options = match start_rule.map(|rule| &rule.expr) {
+        Some(GrammarExpr::Choice(options)) => options,
+        _ => return false,
+    };
+
+    let mut selected = None;
+    for (option_index, option) in options.iter().enumerate() {
+        let rewritten_root = rewrite_macros(option, &terminals, &macros);
+        let Some(closure) = regular_dependency_closure(
+            &rewritten_root,
+            &rule_map,
+            &terminals,
+            &macros,
+        ) else {
+            continue;
+        };
+        if closure.len() < min_parser_rules {
+            continue;
+        }
+
+        let synthetic_name = (0usize..)
+            .map(|suffix| format!("__glrmask_regular_region_{suffix}"))
+            .find(|name| !rule_map.contains_key(name))
+            .expect("finite grammar must admit a fresh regular-region name");
+        let mut parser_names = closure.clone();
+        parser_names.insert(synthetic_name.clone());
+        let Some(mut builder) = RightLinearBuilder::new(&parser_names, &synthetic_name) else {
+            continue;
+        };
+        let root_state = builder.parser_states[&synthetic_name];
+        if !builder.compile(&rewritten_root, root_state, builder.accept) {
+            continue;
+        }
+        let mut names = closure.iter().collect::<Vec<_>>();
+        names.sort_unstable();
+        let mut valid = true;
+        for name in names {
+            let Some(rule) = rule_map.get(name) else {
+                valid = false;
+                break;
+            };
+            let rewritten = rewrite_macros(&rule.expr, &terminals, &macros);
+            let from = builder.parser_states[name];
+            if !builder.compile(&rewritten, from, builder.accept) {
+                valid = false;
+                break;
+            }
+        }
+        if !valid {
+            continue;
+        }
+        selected = Some((option_index, synthetic_name, closure.len(), builder.builder.build()));
+        break;
+    }
+
+    let Some((option_index, synthetic_name, compressed_rules, expr_nfa)) = selected else {
+        return false;
+    };
+    let start_rule = grammar
+        .rules
+        .iter_mut()
+        .find(|rule| !rule.is_terminal && rule.name == grammar.start)
+        .expect("start rule existed during partial right-linear discovery");
+    let GrammarExpr::Choice(options) = &mut start_rule.expr else {
+        unreachable!("start rule shape changed during partial compression");
+    };
+    options[option_index] = GrammarExpr::Ref(synthetic_name.clone());
+    grammar.rules.push(NamedRule {
+        name: synthetic_name,
+        expr: GrammarExpr::ExprNFA(Box::new(
+            expr_nfa.with_embedded_direct_nfa_emission(),
+        )),
+        is_terminal: false,
+        is_internal: true,
+    });
+    retain_reachable_rules(grammar);
+
+    if emit_profile
+        && (std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some())
+    {
+        eprintln!(
+            "[glrmask/profile][right_linear_partial_compression] selected=true compressed_rules={} remaining_parser_rules={}",
+            compressed_rules,
+            grammar.rules.iter().filter(|rule| !rule.is_terminal).count(),
+        );
+    }
+    true
+}
+
 /// Replace a large exact right-linear parser-rule graph by one ExprNFA rule.
 ///
 /// Returns `true` when compression was selected. The pass is deliberately
@@ -557,8 +752,11 @@ pub fn compress_right_linear_grammar_unchecked(
 }
 
 pub fn compress_large_right_linear_grammar(grammar: &mut NamedGrammar) -> bool {
-    enabled()
-        && compress_right_linear_grammar_impl(grammar, MIN_PARSER_RULES, true)
+    if !enabled() {
+        return false;
+    }
+    compress_right_linear_grammar_impl(grammar, MIN_PARSER_RULES, true)
+        || compress_partial_right_linear_start_alternative(grammar, MIN_PARSER_RULES, true)
 }
 
 #[cfg(test)]

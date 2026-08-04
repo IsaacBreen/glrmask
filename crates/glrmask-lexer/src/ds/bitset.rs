@@ -199,6 +199,11 @@ impl BitSet {
         &self.words
     }
 
+    #[doc(hidden)]
+    pub fn words_mut(&mut self) -> &mut [u64] {
+        &mut self.words
+    }
+
     pub fn fill_u32_mask(&self, buf: &mut [u32]) {
         for (i, &word) in self.words.iter().enumerate() {
             let base = i * 2;

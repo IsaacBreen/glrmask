@@ -1181,6 +1181,7 @@ impl<'a> Lowerer<'a> {
                     symbols,
                     is_determinized_and_minimized,
                     prefer_direct_nfa_emission,
+                    complete_parser_language,
                     canonical_dfa,
                 } = *expr_nfa;
                 let preserves_canonical_dfa = is_determinized_and_minimized
@@ -1196,6 +1197,7 @@ impl<'a> Lowerer<'a> {
                     symbols,
                     is_determinized_and_minimized: preserves_canonical_dfa,
                     prefer_direct_nfa_emission,
+                    complete_parser_language,
                     canonical_dfa: preserves_canonical_dfa.then_some(canonical_dfa).flatten(),
                 }))
             }
@@ -1255,6 +1257,7 @@ impl<'a> Lowerer<'a> {
                     symbols,
                     is_determinized_and_minimized,
                     prefer_direct_nfa_emission,
+                    complete_parser_language,
                     canonical_dfa,
                 } = *expr_nfa;
                 let preserves_canonical_dfa = is_determinized_and_minimized
@@ -1270,6 +1273,7 @@ impl<'a> Lowerer<'a> {
                     symbols,
                     is_determinized_and_minimized: preserves_canonical_dfa,
                     prefer_direct_nfa_emission,
+                    complete_parser_language,
                     canonical_dfa: preserves_canonical_dfa.then_some(canonical_dfa).flatten(),
                 }))
             }

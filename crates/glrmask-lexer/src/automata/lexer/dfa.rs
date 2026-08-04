@@ -77,7 +77,7 @@ fn intersection_missing_group_indices(
 pub(super) struct DFAState {
     pub(super) transitions: CharTransitions<u32>,
     pub(super) finalizers: BitSet,
-    possible_future_group_ids: BitSet,
+    pub(super) possible_future_group_ids: BitSet,
     /// Epsilon transitions are the only source of lexer nondeterminism. Byte
     /// transitions remain deterministic within an individual physical state.
     pub(super) epsilon_transitions: Vec<u32>,

@@ -1751,7 +1751,7 @@ fn nullable_prefix_len(rhs: &[Symbol], nullable: &BTreeSet<NonterminalID>) -> us
 
 /// Remove rules for nonterminals not reachable from the start symbol.
 fn remove_unreachable_rules(rules: &[Rule], start: NonterminalID) -> Vec<Rule> {
-    let num_nonterminals = max_nt_id(rules) as usize + 1;
+    let num_nonterminals = usize::max(max_nt_id(rules) as usize, start as usize) + 1;
     let mut rules_by_lhs = vec![Vec::<usize>::new(); num_nonterminals];
     for (index, rule) in rules.iter().enumerate() {
         rules_by_lhs[rule.lhs as usize].push(index);

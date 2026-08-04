@@ -189,6 +189,192 @@ impl DirectRegularActionInterner {
 
 }
 
+
+#[derive(Clone, Copy)]
+enum DirectRegularPersistentTargetNode {
+    Leaf { bits: u64, count: u32 },
+    Branch { left: u32, right: u32, count: u32 },
+}
+
+struct DirectRegularPersistentTargetSets {
+    nodes: Vec<DirectRegularPersistentTargetNode>,
+    leaf_intern: FxHashMap<u64, u32>,
+    branch_intern: Vec<FxHashMap<(u32, u32), u32>>,
+    union_memo: Vec<FxHashMap<(u32, u32), u32>>,
+    zero: Vec<u32>,
+    levels: usize,
+}
+
+impl DirectRegularPersistentTargetSets {
+    fn new(target_count: usize) -> Self {
+        let word_count = target_count.div_ceil(64).max(1).next_power_of_two();
+        let levels = word_count.trailing_zeros() as usize;
+        let mut result = Self {
+            nodes: Vec::new(),
+            leaf_intern: FxHashMap::default(),
+            branch_intern: (0..=levels).map(|_| FxHashMap::default()).collect(),
+            union_memo: (0..=levels).map(|_| FxHashMap::default()).collect(),
+            zero: Vec::with_capacity(levels + 1),
+            levels,
+        };
+        let zero_leaf = result.intern_leaf(0);
+        result.zero.push(zero_leaf);
+        for level in 1..=levels {
+            let child = result.zero[level - 1];
+            let root = result.intern_branch(level, child, child);
+            result.zero.push(root);
+        }
+        result
+    }
+
+    #[inline]
+    fn empty(&self) -> u32 {
+        self.zero[self.levels]
+    }
+
+    #[inline]
+    fn count(&self, node: u32) -> usize {
+        match self.nodes[node as usize] {
+            DirectRegularPersistentTargetNode::Leaf { count, .. }
+            | DirectRegularPersistentTargetNode::Branch { count, .. } => count as usize,
+        }
+    }
+
+    fn intern_leaf(&mut self, bits: u64) -> u32 {
+        if let Some(&existing) = self.leaf_intern.get(&bits) {
+            return existing;
+        }
+        let id = self.nodes.len() as u32;
+        self.nodes.push(DirectRegularPersistentTargetNode::Leaf {
+            bits,
+            count: bits.count_ones(),
+        });
+        self.leaf_intern.insert(bits, id);
+        id
+    }
+
+    fn intern_branch(&mut self, level: usize, left: u32, right: u32) -> u32 {
+        if let Some(&existing) = self.branch_intern[level].get(&(left, right)) {
+            return existing;
+        }
+        let count = self.count(left).saturating_add(self.count(right)) as u32;
+        let id = self.nodes.len() as u32;
+        self.nodes
+            .push(DirectRegularPersistentTargetNode::Branch { left, right, count });
+        self.branch_intern[level].insert((left, right), id);
+        id
+    }
+
+    fn singleton(&mut self, target: usize) -> u32 {
+        let leaf_word = target / 64;
+        let mut node = self.intern_leaf(1u64 << (target % 64));
+        for level in 1..=self.levels {
+            let zero = self.zero[level - 1];
+            node = if ((leaf_word >> (level - 1)) & 1) == 0 {
+                self.intern_branch(level, node, zero)
+            } else {
+                self.intern_branch(level, zero, node)
+            };
+        }
+        node
+    }
+
+    fn union(&mut self, level: usize, left: u32, right: u32) -> u32 {
+        if left == right {
+            return left;
+        }
+        if left == self.zero[level] {
+            return right;
+        }
+        if right == self.zero[level] {
+            return left;
+        }
+        let key = if left < right {
+            (left, right)
+        } else {
+            (right, left)
+        };
+        if let Some(&existing) = self.union_memo[level].get(&key) {
+            return existing;
+        }
+        let result = if level == 0 {
+            let DirectRegularPersistentTargetNode::Leaf { bits: left, .. } =
+                self.nodes[left as usize]
+            else {
+                unreachable!("level-zero persistent target node must be a leaf")
+            };
+            let DirectRegularPersistentTargetNode::Leaf { bits: right, .. } =
+                self.nodes[right as usize]
+            else {
+                unreachable!("level-zero persistent target node must be a leaf")
+            };
+            self.intern_leaf(left | right)
+        } else {
+            let DirectRegularPersistentTargetNode::Branch {
+                left: left_a,
+                right: left_b,
+                ..
+            } = self.nodes[left as usize]
+            else {
+                unreachable!("persistent target node level mismatch")
+            };
+            let DirectRegularPersistentTargetNode::Branch {
+                left: right_a,
+                right: right_b,
+                ..
+            } = self.nodes[right as usize]
+            else {
+                unreachable!("persistent target node level mismatch")
+            };
+            let a = self.union(level - 1, left_a, right_a);
+            let b = self.union(level - 1, left_b, right_b);
+            self.intern_branch(level, a, b)
+        };
+        self.union_memo[level].insert(key, result);
+        result
+    }
+
+    #[inline]
+    fn union_roots(&mut self, left: u32, right: u32) -> u32 {
+        self.union(self.levels, left, right)
+    }
+
+    fn materialize(&self, root: u32) -> Vec<u32> {
+        fn visit(
+            sets: &DirectRegularPersistentTargetSets,
+            node: u32,
+            level: usize,
+            base_word: usize,
+            output: &mut Vec<u32>,
+        ) {
+            match sets.nodes[node as usize] {
+                DirectRegularPersistentTargetNode::Leaf { mut bits, .. } => {
+                    while bits != 0 {
+                        let bit = bits.trailing_zeros() as usize;
+                        output.push((base_word * 64 + bit) as u32);
+                        bits &= bits - 1;
+                    }
+                }
+                DirectRegularPersistentTargetNode::Branch { left, right, .. } => {
+                    debug_assert_ne!(level, 0);
+                    visit(sets, left, level - 1, base_word, output);
+                    visit(
+                        sets,
+                        right,
+                        level - 1,
+                        base_word + (1usize << (level - 1)),
+                        output,
+                    );
+                }
+            }
+        }
+
+        let mut output = Vec::with_capacity(self.count(root));
+        visit(self, root, self.levels, 0, &mut output);
+        output
+    }
+}
+
 struct DirectRegularClosureWorkspace {
     seen_epoch: Vec<u32>,
     epoch: u32,
@@ -650,6 +836,204 @@ fn direct_regular_action_row_for_roots(
         .map(|(row, _, _)| row)
 }
 
+
+fn direct_regular_compact_table_enabled() -> bool {
+    std::env::var("GLRMASK_DISABLE_STATIC_DIRECT_REGULAR_COMPACT_TABLE")
+        .map(|value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(true)
+}
+
+/// Build the exact direct-regular admission relation without materializing the
+/// epsilon-closed action rows. The retained parser automaton executes commits;
+/// static masks need only the terminal-support bitset for each parser top.
+fn try_build_compact_direct_regular_table(grammar: &AnalyzedGrammar) -> Option<GLRTable> {
+    const WIDE_FRONTIER_MIN_TARGETS: usize = 64;
+
+    let automaton = grammar.direct_regular_automaton.as_ref()?;
+    if automaton.states.is_empty() || automaton.start_states.is_empty() {
+        return None;
+    }
+    let started_at = std::time::Instant::now();
+    let mut parents = vec![Vec::<u32>::new(); automaton.states.len()];
+    let mut remaining_children = Vec::<u32>::with_capacity(automaton.states.len());
+    let mut ready = VecDeque::<u32>::new();
+    let mut target_refs_by_terminal = vec![0usize; grammar.num_terminals as usize];
+    for (source, state) in automaton.states.iter().enumerate() {
+        remaining_children.push(state.epsilons.len() as u32);
+        if state.epsilons.is_empty() {
+            ready.push_back(source as u32);
+        }
+        for &target in &state.epsilons {
+            parents.get_mut(target as usize)?.push(source as u32);
+        }
+        for (&terminal, targets) in &state.transitions {
+            if terminal >= grammar.num_terminals
+                || targets
+                    .iter()
+                    .any(|&target| target as usize >= automaton.states.len())
+            {
+                return None;
+            }
+            target_refs_by_terminal[terminal as usize] = target_refs_by_terminal
+                [terminal as usize]
+                .saturating_add(targets.len());
+        }
+    }
+
+    let mut support = (0..automaton.states.len())
+        .map(|_| BitSet::new(grammar.num_terminals as usize + 1))
+        .collect::<Vec<_>>();
+    let mut bottom_up_order = Vec::with_capacity(automaton.states.len());
+    while let Some(raw) = ready.pop_front() {
+        let state = &automaton.states[raw as usize];
+        let mut row = BitSet::new(grammar.num_terminals as usize + 1);
+        for &terminal in state.transitions.keys() {
+            row.set(terminal as usize);
+        }
+        if state.is_accepting {
+            row.set(grammar.num_terminals as usize);
+        }
+        for &child in &state.epsilons {
+            row.union_with(&support[child as usize]);
+        }
+        support[raw as usize] = row;
+        bottom_up_order.push(raw);
+        for &parent in &parents[raw as usize] {
+            let remaining = &mut remaining_children[parent as usize];
+            *remaining -= 1;
+            if *remaining == 0 {
+                ready.push_back(parent);
+            }
+        }
+    }
+    if bottom_up_order.len() != automaton.states.len() {
+        return None;
+    }
+
+    let mut initial = BitSet::new(grammar.num_terminals as usize + 1);
+    for &start in &automaton.start_states {
+        initial.union_with(support.get(start as usize)?);
+    }
+    let mut advance = Vec::with_capacity(support.len() + 1);
+    advance.push(initial);
+    advance.extend(support);
+
+    // A terminal whose complete automaton contains fewer than 64 target
+    // references cannot produce a 64-state epsilon-closed frontier. Restrict
+    // exact target-set propagation to the few terminals that can matter to the
+    // wide-frontier runtime fast path.
+    let wide_candidate_terminals = target_refs_by_terminal
+        .iter()
+        .enumerate()
+        .filter_map(|(terminal, &target_refs)| {
+            (target_refs >= WIDE_FRONTIER_MIN_TARGETS).then_some(terminal as TerminalID)
+        })
+        .collect::<Vec<_>>();
+    let mut target_sets =
+        DirectRegularPersistentTargetSets::new(automaton.states.len().saturating_add(1));
+    let mut singleton_roots = vec![None::<u32>; automaton.states.len().saturating_add(1)];
+    let mut maximum_frontier = 0usize;
+    let mut maximum_frontiers = FxHashMap::<u32, (u32, TerminalID)>::default();
+    for terminal in wide_candidate_terminals.iter().copied() {
+        let empty = target_sets.empty();
+        let mut roots = vec![empty; automaton.states.len()];
+        for &raw in &bottom_up_order {
+            let state = &automaton.states[raw as usize];
+            let mut root = empty;
+            if let Some(targets) = state.transitions.get(&terminal) {
+                for &target in targets {
+                    let parser_target = target as usize + 1;
+                    let singleton = if let Some(root) = singleton_roots[parser_target] {
+                        root
+                    } else {
+                        let root = target_sets.singleton(parser_target);
+                        singleton_roots[parser_target] = Some(root);
+                        root
+                    };
+                    root = target_sets.union_roots(root, singleton);
+                }
+            }
+            for &child in &state.epsilons {
+                root = target_sets.union_roots(root, roots[child as usize]);
+            }
+            roots[raw as usize] = root;
+            let width = target_sets.count(root);
+            if width > maximum_frontier {
+                maximum_frontier = width;
+                maximum_frontiers.clear();
+            }
+            if width == maximum_frontier && width >= WIDE_FRONTIER_MIN_TARGETS {
+                maximum_frontiers
+                    .entry(root)
+                    .or_insert((raw + 1, terminal));
+            }
+        }
+        let mut initial_root = empty;
+        for &start in &automaton.start_states {
+            initial_root = target_sets.union_roots(initial_root, roots[start as usize]);
+        }
+        let width = target_sets.count(initial_root);
+        if width > maximum_frontier {
+            maximum_frontier = width;
+            maximum_frontiers.clear();
+        }
+        if width == maximum_frontier && width >= WIDE_FRONTIER_MIN_TARGETS {
+            maximum_frontiers
+                .entry(initial_root)
+                .or_insert((0, terminal));
+        }
+    }
+    let mut direct_regular_wide_frontiers = maximum_frontiers
+        .into_iter()
+        .map(|(root, (source_state, terminal))| DirectRegularWideFrontierDescriptor {
+            source_state,
+            terminal,
+            target_states: target_sets.materialize(root),
+        })
+        .collect::<Vec<_>>();
+    direct_regular_wide_frontiers.sort_unstable_by_key(|descriptor| {
+        (descriptor.source_state, descriptor.terminal)
+    });
+
+    let num_states = u32::try_from(advance.len()).ok()?;
+    let table = GLRTable {
+        action: Vec::new(),
+        goto: vec![SparseRow::default(); advance.len()],
+        num_states,
+        num_terminals: grammar.num_terminals,
+        num_rules: 0,
+        rules: Vec::new(),
+        nonterminal_display_names: Vec::new(),
+        construction: GlrTableConstruction::LegacyRowBisim,
+        admission_policy: AdmissionPolicy::RowPresenceExact,
+        advance,
+        forwarded_shifts: FxHashSet::default(),
+        guarded_shift_index: Vec::new(),
+        direct_regular_wide_frontiers,
+    };
+    if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+    {
+        eprintln!(
+            "[glrmask/profile][direct_regular_compact_table] states={} support_words={} wide_candidate_terminals={} maximum_frontier={} wide_frontiers={} persistent_nodes={} union_memo={} total_ms={:.3}",
+            table.num_states,
+            table.advance.iter().map(|row| row.words().len()).sum::<usize>(),
+            wide_candidate_terminals.len(),
+            maximum_frontier,
+            table.direct_regular_wide_frontiers.len(),
+            target_sets.nodes.len(),
+            target_sets.union_memo.iter().map(FxHashMap::len).sum::<usize>(),
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    Some(table)
+}
+
 fn try_build_direct_regular_table(grammar: &AnalyzedGrammar) -> Option<GLRTable> {
     let automaton = grammar.direct_regular_automaton.as_ref()?;
     if automaton.states.is_empty() || automaton.start_states.is_empty() {
@@ -952,6 +1336,22 @@ pub(super) fn build_table_with_default_construction(
 ) -> GLRTable {
     let t1 = std::time::Instant::now();
     let construction_override = glr_table_construction_override();
+    if construction_override.is_none()
+        && direct_regular_compact_table_enabled()
+        && let Some(table) = try_build_compact_direct_regular_table(grammar)
+    {
+        if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+        {
+            eprintln!(
+                "[glrmask/profile][glr_table] construction=DirectRegularCompact construction_ms={:.3} pre_merge_states={} post_merge_states={} direct_regular=true",
+                t1.elapsed().as_secs_f64() * 1000.0,
+                table.num_states,
+                table.num_states,
+            );
+        }
+        return table;
+    }
     if construction_override.is_none()
         && let Some(table) = try_build_direct_regular_table(grammar)
     {

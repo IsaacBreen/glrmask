@@ -2847,6 +2847,7 @@ impl<'a> Lowerer<'a> {
                 symbols: symbols.clone(),
                 is_determinized_and_minimized: template_nfa.is_determinized_and_minimized,
                 prefer_direct_nfa_emission: template_nfa.prefer_direct_nfa_emission,
+                complete_parser_language: template_nfa.complete_parser_language,
                 canonical_dfa: template_nfa.canonical_dfa,
             }));
             self.add_nonterminal_rule(&rule_name, body);

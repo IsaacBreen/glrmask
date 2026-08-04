@@ -3892,6 +3892,7 @@ fn compile_prepared_with_profile_and_table_construction(
             parser_top_accept_parts,
             direct_regular_l1_complete_by_terminal: direct_l1_complete_by_terminal,
             direct_regular_wide_frontier_acceptance: Vec::new(),
+            direct_regular_dynamic_hot_frontiers: Vec::new(),
             direct_regular_parser_state_acceptance: Vec::new(),
             direct_regular_automaton: analyzed_grammar.direct_regular_automaton.clone(),
             table,
@@ -3995,20 +3996,74 @@ pub(crate) fn compile_dynamic_owned_with_table_construction(
     vocab: &Vocab,
     default_table_construction: GlrTableConstruction,
 ) -> DynamicConstraint {
+    compile_dynamic_owned_impl(grammar, vocab, default_table_construction, true)
+}
+
+pub(crate) fn compile_dynamic_owned_unfinalized_with_table_construction(
+    grammar: GrammarDef,
+    vocab: &Vocab,
+    default_table_construction: GlrTableConstruction,
+) -> DynamicConstraint {
+    compile_dynamic_owned_impl(grammar, vocab, default_table_construction, false)
+}
+
+fn compile_dynamic_owned_impl(
+    grammar: GrammarDef,
+    vocab: &Vocab,
+    default_table_construction: GlrTableConstruction,
+    finalize_runtime: bool,
+) -> DynamicConstraint {
     let profile = compile_profile_enabled();
     let total_started_at = profile.then(Instant::now);
     let prepare_started_at = profile.then(Instant::now);
-    let prepared_grammar = prepare_grammar(grammar);
+    // A direct-regular frontend result already contains the complete parser
+    // language. Generic CFG normalization cannot improve that automaton and is
+    // unnecessary for the dynamic backend, which consumes the retained
+    // automaton directly. Keep the terminal definitions untouched for lexer
+    // construction.
+    let force_cfg_runtime = std::env::var_os("GLRMASK_DYNAMIC_FORCE_CFG_RUNTIME").is_some();
+    if profile {
+        eprintln!(
+            "[glrmask/profile][dynamic_path] input_direct_regular={} force_cfg_runtime={}",
+            grammar.direct_regular_automaton.is_some(),
+            force_cfg_runtime,
+        );
+    }
+    let mut prepared_grammar = if grammar.direct_regular_automaton.is_some() && !force_cfg_runtime {
+        grammar
+    } else {
+        let mut grammar = grammar;
+        if force_cfg_runtime {
+            grammar.direct_regular_automaton = None;
+        }
+        prepare_grammar(grammar)
+    };
     let prepare_ms = prepare_started_at.map_or(0.0, elapsed_ms);
     run_with_compile_thread_pool(|| {
         let analysis_started_at = profile.then(Instant::now);
-        let analyzed_grammar = AnalyzedGrammar::from_grammar_def(&prepared_grammar);
-        if let Err(message) = analyzed_grammar.check_table_build_normal_form() {
-            panic!("[glrmask] grammar precondition violations:\n{}", message);
-        }
+        // Move a complete direct automaton out of the grammar instead of
+        // cloning its 20k-state graph into AnalyzedGrammar and cloning it again
+        // into the runtime artifact. Generic grammars still use full analysis.
+        let direct_regular_automaton = prepared_grammar.direct_regular_automaton.take();
+        let analyzed_grammar = if direct_regular_automaton.is_none() {
+            let analyzed = AnalyzedGrammar::from_grammar_def(&prepared_grammar);
+            if let Err(message) = analyzed.check_table_build_normal_form() {
+                panic!("[glrmask] grammar precondition violations:\n{}", message);
+            }
+            Some(analyzed)
+        } else {
+            None
+        };
+        let num_terminals = prepared_grammar.num_terminals();
+        let terminal_display_names = (0..num_terminals)
+            .map(|terminal| prepared_grammar.terminal_display_name(terminal))
+            .collect::<Vec<_>>();
+        let direct_state_count = direct_regular_automaton
+            .as_ref()
+            .map(|automaton| automaton.states.len());
         let analysis_ms = analysis_started_at.map_or(0.0, elapsed_ms);
 
-        let ((tokenizer, tokenizer_ms), (table, table_ms)) = rayon::join(
+        let ((tokenizer, tokenizer_ms), ((table, table_ms), (dynamic_mask_vocab, dynamic_vocab_ms))) = rayon::join(
             || {
                 let started_at = Instant::now();
                 let mut tokenizer = build_dynamic_tokenizer(&prepared_grammar);
@@ -4050,34 +4105,61 @@ pub(crate) fn compile_dynamic_owned_with_table_construction(
                 }
                 (tokenizer, elapsed_ms(started_at))
             },
-            || {
-                let started_at = Instant::now();
-                let table = GLRTable::build_with_default_construction(
-                    &analyzed_grammar,
-                    default_table_construction,
-                );
-                (table, elapsed_ms(started_at))
-            },
+            || rayon::join(
+                || {
+                    let started_at = Instant::now();
+                    let table = if let Some(state_count) = direct_state_count {
+                    GLRTable::direct_regular_runtime_stub(
+                        state_count.saturating_add(1) as u32,
+                        num_terminals,
+                    )
+                } else {
+                    GLRTable::build_with_default_construction(
+                        analyzed_grammar.as_ref().expect("generic grammar was analyzed"),
+                        default_table_construction,
+                    )
+                };
+                    (table, elapsed_ms(started_at))
+                },
+                || {
+                    let started_at = Instant::now();
+                    let dynamic_vocab = if finalize_runtime {
+                        crate::compiler::constraint_possible_matches::runtime_dynamic_vocab_for_vocab(vocab)
+                    } else {
+                        crate::runtime::DynamicMaskVocab::default()
+                    };
+                    (dynamic_vocab, elapsed_ms(started_at))
+                },
+            ),
         );
 
         let finalize_started_at = profile.then(Instant::now);
-        let constraint = DynamicConstraint::from_parts(
+        let build_constraint = if finalize_runtime {
+            DynamicConstraint::from_parts_with_dynamic_vocab
+        } else {
+            DynamicConstraint::from_parts_with_dynamic_vocab_unfinalized
+        };
+        let constraint = build_constraint(
             table,
-            analyzed_grammar.terminal_display_names.clone(),
+            terminal_display_names,
             tokenizer,
+            direct_regular_automaton,
             prepared_grammar.ignore_terminal,
             collect_special_token_terminals(&prepared_grammar),
             vocab,
+            dynamic_mask_vocab,
         );
         if let Some(total_started_at) = total_started_at {
             eprintln!(
-                "[glrmask/profile][dynamic_compile] prepare_ms={:.3} analysis_ms={:.3} tokenizer_ms={:.3} table_ms={:.3} finalize_ms={:.3} parallel_core_wall_ms={:.3} total_ms={:.3}",
+                "[glrmask/profile][dynamic_compile] finalize_runtime={} prepare_ms={:.3} analysis_ms={:.3} tokenizer_ms={:.3} table_ms={:.3} dynamic_vocab_ms={:.3} finalize_ms={:.3} parallel_core_wall_ms={:.3} total_ms={:.3}",
+                finalize_runtime,
                 prepare_ms,
                 analysis_ms,
                 tokenizer_ms,
                 table_ms,
+                dynamic_vocab_ms,
                 finalize_started_at.map_or(0.0, elapsed_ms),
-                tokenizer_ms.max(table_ms),
+                tokenizer_ms.max(table_ms.max(dynamic_vocab_ms)),
                 elapsed_ms(total_started_at),
             );
         }

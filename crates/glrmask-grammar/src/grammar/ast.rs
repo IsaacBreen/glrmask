@@ -906,6 +906,7 @@ impl<'a> Lowerer<'a> {
                 // so conservatively re-run minimization before lowering.
                 is_determinized_and_minimized: false,
                 prefer_direct_nfa_emission: expr_nfa.prefer_direct_nfa_emission,
+                complete_parser_language: expr_nfa.complete_parser_language,
                 canonical_dfa: None,
             })),
             GrammarExpr::Epsilon
@@ -2142,11 +2143,17 @@ impl<'a> Lowerer<'a> {
         lhs: NonterminalID,
         expr_nfa: &ExprNFA,
     ) -> Result<(), GlrMaskError> {
-        let direct_automaton = self.lower_direct_regular_automaton(expr_nfa)?;
-        if self.direct_regular_automaton.replace(direct_automaton).is_some() {
-            return Err(GlrMaskError::GrammarParse(
-                "multiple direct regular parser automata in one grammar".into(),
-            ));
+        if expr_nfa.complete_parser_language {
+            let direct_automaton = self.lower_direct_regular_automaton(expr_nfa)?;
+            if self.direct_regular_automaton.replace(direct_automaton).is_some() {
+                return Err(GlrMaskError::GrammarParse(
+                    "multiple direct regular parser automata in one grammar".into(),
+                ));
+            }
+            // The retained automaton is the complete parser language. Emitting
+            // its states again as tens of thousands of CFG rules only creates
+            // data that direct table/runtime paths immediately ignore.
+            return Ok(());
         }
         let state_count = expr_nfa.nfa.states.len();
         if state_count == 0 || expr_nfa.nfa.start_states.is_empty() {
