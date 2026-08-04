@@ -1,8 +1,7 @@
 pub use crate::grammar::ast as ast;
-pub mod ebnf;
+pub(crate) use glrmask_grammar::__private::import::ebnf;
 pub mod json_schema;
-pub mod lark;
-pub mod numeric_range;
+pub(crate) use glrmask_grammar::__private::import::lark;
 
 use std::collections::BTreeSet;
 
@@ -13,12 +12,31 @@ use crate::compiler::compile::{
     compile_top_profile_enabled,
     emit_compile_profile_summary,
 };
-use crate::compiler::pipeline::compile_dynamic_owned_with_table_construction;
+use crate::compiler::pipeline::{
+    compile_dynamic_owned_unfinalized_with_table_construction,
+    compile_dynamic_owned_with_table_construction,
+};
 use crate::grammar::factoring::factor_named_grammar;
 use crate::grammar::flat::GrammarDef;
 use crate::compiler::glr::table::GlrTableConstruction;
 use crate::runtime::Constraint;
 use crate::DynamicConstraint;
+
+fn parse_ebnf_to_named(source: &str) -> crate::Result<ast::NamedGrammar> {
+    Ok(ebnf::parse_ebnf_to_named(source)?)
+}
+
+fn parse_lark_to_named(source: &str) -> crate::Result<ast::NamedGrammar> {
+    Ok(lark::parse_lark_to_named(source)?)
+}
+
+fn parse_glrm_to_named(source: &str) -> crate::Result<ast::NamedGrammar> {
+    Ok(crate::grammar::glrm::from_glrm(source)?)
+}
+
+fn prepare_json_schema_named(grammar: &mut ast::NamedGrammar) -> crate::Result<()> {
+    Ok(json_schema::prepare_named_grammar(grammar)?)
+}
 
 type GrammarParser = fn(&str) -> crate::Result<GrammarDef>;
 type NamedGrammarParser = fn(&str) -> crate::Result<ast::NamedGrammar>;
@@ -147,7 +165,7 @@ fn lower_factored_named_grammar(
     let grammar = ast::lower(&factored);
     emit_import_phase_end("ast_lower", ast_lower_started_at);
     emit_import_phase_end("lower_factored_named_grammar", lower_started_at);
-    grammar
+    Ok(grammar?)
 }
 
 fn compile_from_source(
@@ -184,6 +202,62 @@ fn compile_from_source(
     Ok(constraint)
 }
 
+fn dynamic_named_alternatives(
+    source: &str,
+    parse: NamedGrammarParser,
+    transform: Option<NamedGrammarTransform>,
+    end_token_ids: &[u32],
+) -> crate::Result<Vec<ast::NamedGrammar>> {
+    let mut factored = factor_named_grammar(parse(source)?);
+    if let Some(transform) = transform {
+        transform(&mut factored)?;
+    }
+
+    let start_index = factored
+        .rules
+        .iter()
+        .position(|rule| !rule.is_terminal && rule.name == factored.start);
+    let options = start_index.and_then(|index| match &factored.rules[index].expr {
+        ast::GrammarExpr::Choice(options) if options.len() > 1 => Some(options.clone()),
+        _ => None,
+    });
+    let has_embedded_region = factored.rules.iter().any(|rule| {
+        !rule.is_terminal
+            && matches!(
+                &rule.expr,
+                ast::GrammarExpr::ExprNFA(expr_nfa)
+                    if expr_nfa.prefer_direct_nfa_emission
+                        && !expr_nfa.complete_parser_language
+            )
+    });
+
+    if !has_embedded_region || options.is_none() {
+        append_end_token_choice(&mut factored, end_token_ids);
+        return Ok(vec![factored]);
+    }
+
+    let start_index = start_index.expect("start choice index was resolved");
+    let mut alternatives = Vec::new();
+    for option in options.expect("start choice options were resolved") {
+        let mut alternative = factored.clone();
+        alternative.rules[start_index].expr = option.clone();
+        if let ast::GrammarExpr::Ref(region_name) = &option
+            && let Some(region_rule) = alternative.rules.iter_mut().find(|rule| {
+                !rule.is_terminal && rule.name == *region_name
+            })
+            && let ast::GrammarExpr::ExprNFA(expr_nfa) = &mut region_rule.expr
+            && expr_nfa.prefer_direct_nfa_emission
+        {
+            expr_nfa.complete_parser_language = true;
+            alternative.start = region_name.clone();
+        }
+        crate::grammar::right_linear::retain_reachable_rules(&mut alternative);
+        append_end_token_choice(&mut alternative, end_token_ids);
+        alternatives.push(alternative);
+    }
+    Ok(alternatives)
+}
+
 fn compile_dynamic_from_source(
     source: &str,
     vocab: &crate::Vocab,
@@ -192,12 +266,91 @@ fn compile_dynamic_from_source(
     transform: Option<NamedGrammarTransform>,
     end_token_ids: &[u32],
 ) -> crate::Result<DynamicConstraint> {
-    let grammar = lower_factored_named_grammar(source, parse, transform, end_token_ids)?;
-    Ok(compile_dynamic_owned_with_table_construction(
-        grammar,
+    let alternatives = dynamic_named_alternatives(source, parse, transform, end_token_ids)?;
+    let mut compiled = Vec::with_capacity(alternatives.len());
+    for alternative in alternatives {
+        let grammar = ast::lower(&alternative)?;
+        compiled.push(compile_dynamic_owned_with_table_construction(
+            grammar,
+            vocab,
+            default_table_construction,
+        ));
+    }
+    Ok(DynamicConstraint::from_alternatives(compiled))
+}
+
+fn compile_dynamic_serialized_from_source_profiled(
+    source: &str,
+    vocab: &crate::Vocab,
+    default_table_construction: GlrTableConstruction,
+    parse: NamedGrammarParser,
+    transform: Option<NamedGrammarTransform>,
+    end_token_ids: &[u32],
+) -> crate::Result<(Vec<u8>, u64, u64)> {
+    let wall_started = std::time::Instant::now();
+    let profile = compile_profile_enabled() || compile_top_profile_enabled();
+    let total_started = profile.then(std::time::Instant::now);
+    let import_started = profile.then(std::time::Instant::now);
+    let alternatives = dynamic_named_alternatives(source, parse, transform, end_token_ids)?;
+    let import_ms = import_started
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    let compile_started = profile.then(std::time::Instant::now);
+    let mut compiled = Vec::with_capacity(alternatives.len());
+    let mut lower_ms = 0.0;
+    for alternative in alternatives {
+        let lower_started = profile.then(std::time::Instant::now);
+        let grammar = ast::lower(&alternative)?;
+        lower_ms += lower_started
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        compiled.push(compile_dynamic_owned_unfinalized_with_table_construction(
+            grammar,
+            vocab,
+            default_table_construction,
+        ));
+    }
+    let compile_ms = compile_started
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    let compile_ns = wall_started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
+    let serialize_wall_started = std::time::Instant::now();
+    let serialize_started = profile.then(std::time::Instant::now);
+    let bytes = DynamicConstraint::from_alternatives(compiled).into_saved();
+    let serialize_ns = serialize_wall_started
+        .elapsed()
+        .as_nanos()
+        .min(u128::from(u64::MAX)) as u64;
+    let serialize_ms = serialize_started
+        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    if let Some(total_started) = total_started {
+        eprintln!(
+            "[glrmask/profile][dynamic_serialized_source] import_ms={:.3} lower_ms={:.3} compile_with_lower_ms={:.3} serialize_ms={:.3} bytes={} total_ms={:.3}",
+            import_ms,
+            lower_ms,
+            compile_ms,
+            serialize_ms,
+            bytes.len(),
+            total_started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    Ok((bytes, compile_ns, serialize_ns))
+}
+
+fn compile_dynamic_serialized_from_source(
+    source: &str,
+    vocab: &crate::Vocab,
+    default_table_construction: GlrTableConstruction,
+    parse: NamedGrammarParser,
+    transform: Option<NamedGrammarTransform>,
+    end_token_ids: &[u32],
+) -> crate::Result<Vec<u8>> {
+    compile_dynamic_serialized_from_source_profiled(
+        source,
         vocab,
         default_table_construction,
-    ))
+        parse,
+        transform,
+        end_token_ids,
+    )
+    .map(|(bytes, _, _)| bytes)
 }
 
 /// Profiling-only entry point: runs the JSON-schema import pipeline
@@ -208,7 +361,7 @@ pub fn __profile_json_schema_import(schema_json: &str) -> crate::Result<()> {
     let grammar = lower_factored_named_grammar(
         schema_json,
         parse_json_schema_to_named,
-        Some(json_schema::prepare_named_grammar),
+        Some(prepare_json_schema_named),
         &[],
     )?;
     std::hint::black_box(&grammar);
@@ -224,7 +377,7 @@ fn parse_json_schema_to_named(schema_json: &str) -> crate::Result<ast::NamedGram
     let schema_to_named_started_at = emit_import_phase_start("schema_to_named_grammar");
     let named = json_schema::schema_to_named_grammar(&schema);
     emit_import_phase_end("schema_to_named_grammar", schema_to_named_started_at);
-    named
+    Ok(named?)
 }
 
 impl Constraint {
@@ -245,7 +398,7 @@ impl Constraint {
                 vocab,
                 "ebnf",
                 GlrTableConstruction::ExperimentalCoreMerged,
-                ebnf::parse_ebnf_to_named,
+                parse_ebnf_to_named,
                 None,
                 end_token_ids,
             )
@@ -269,7 +422,7 @@ impl Constraint {
                 vocab,
                 "lark",
                 GlrTableConstruction::ExperimentalCoreMerged,
-                lark::parse_lark_to_named,
+                parse_lark_to_named,
                 None,
                 end_token_ids,
             )
@@ -295,7 +448,7 @@ impl Constraint {
                     "json_schema",
                     GlrTableConstruction::LegacyRowBisim,
                     parse_json_schema_to_named,
-                    Some(json_schema::prepare_named_grammar),
+                    Some(prepare_json_schema_named),
                     end_token_ids,
                 )
             })
@@ -319,7 +472,7 @@ impl Constraint {
                 vocab,
                 "glrm",
                 GlrTableConstruction::ExperimentalCoreMerged,
-                crate::grammar::glrm::from_glrm,
+                parse_glrm_to_named,
                 None,
                 end_token_ids,
             )
@@ -328,6 +481,155 @@ impl Constraint {
 }
 
 impl DynamicConstraint {
+    #[doc(hidden)]
+    pub fn compile_ebnf_serialized_profiled_with_end_tokens(
+        ebnf: &str,
+        vocab: &crate::Vocab,
+        end_token_ids: &[u32],
+    ) -> crate::Result<(Vec<u8>, u64, u64)> {
+        with_large_import_stack(ebnf.len(), || {
+            compile_dynamic_serialized_from_source_profiled(
+                ebnf,
+                vocab,
+                GlrTableConstruction::ExperimentalCoreMerged,
+                parse_ebnf_to_named,
+                None,
+                end_token_ids,
+            )
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn compile_lark_serialized_profiled_with_end_tokens(
+        lark: &str,
+        vocab: &crate::Vocab,
+        end_token_ids: &[u32],
+    ) -> crate::Result<(Vec<u8>, u64, u64)> {
+        with_large_import_stack(lark.len(), || {
+            compile_dynamic_serialized_from_source_profiled(
+                lark,
+                vocab,
+                GlrTableConstruction::ExperimentalCoreMerged,
+                parse_lark_to_named,
+                None,
+                end_token_ids,
+            )
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn compile_json_schema_serialized_profiled_with_end_tokens(
+        schema: &str,
+        vocab: &crate::Vocab,
+        end_token_ids: &[u32],
+    ) -> crate::Result<(Vec<u8>, u64, u64)> {
+        with_large_import_stack(schema.len(), || {
+            compile_dynamic_serialized_from_source_profiled(
+                schema,
+                vocab,
+                GlrTableConstruction::Lalr,
+                parse_json_schema_to_named,
+                Some(prepare_json_schema_named),
+                end_token_ids,
+            )
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn compile_glrm_serialized_profiled_with_end_tokens(
+        glrm: &str,
+        vocab: &crate::Vocab,
+        end_token_ids: &[u32],
+    ) -> crate::Result<(Vec<u8>, u64, u64)> {
+        with_large_import_stack(glrm.len(), || {
+            compile_dynamic_serialized_from_source_profiled(
+                glrm,
+                vocab,
+                GlrTableConstruction::ExperimentalCoreMerged,
+                parse_glrm_to_named,
+                None,
+                end_token_ids,
+            )
+        })
+    }
+
+    /// Compile EBNF directly to a serialized dynamic artifact without building
+    /// runtime-only caches in the producing process.
+    #[doc(hidden)]
+    pub fn compile_ebnf_serialized_with_end_tokens(
+        ebnf: &str,
+        vocab: &crate::Vocab,
+        end_token_ids: &[u32],
+    ) -> crate::Result<Vec<u8>> {
+        with_large_import_stack(ebnf.len(), || {
+            compile_dynamic_serialized_from_source(
+                ebnf,
+                vocab,
+                GlrTableConstruction::ExperimentalCoreMerged,
+                parse_ebnf_to_named,
+                None,
+                end_token_ids,
+            )
+        })
+    }
+
+    /// Compile Lark directly to a serialized dynamic artifact.
+    #[doc(hidden)]
+    pub fn compile_lark_serialized_with_end_tokens(
+        lark: &str,
+        vocab: &crate::Vocab,
+        end_token_ids: &[u32],
+    ) -> crate::Result<Vec<u8>> {
+        with_large_import_stack(lark.len(), || {
+            compile_dynamic_serialized_from_source(
+                lark,
+                vocab,
+                GlrTableConstruction::ExperimentalCoreMerged,
+                parse_lark_to_named,
+                None,
+                end_token_ids,
+            )
+        })
+    }
+
+    /// Compile JSON Schema directly to a serialized dynamic artifact.
+    #[doc(hidden)]
+    pub fn compile_json_schema_serialized_with_end_tokens(
+        schema: &str,
+        vocab: &crate::Vocab,
+        end_token_ids: &[u32],
+    ) -> crate::Result<Vec<u8>> {
+        with_large_import_stack(schema.len(), || {
+            compile_dynamic_serialized_from_source(
+                schema,
+                vocab,
+                GlrTableConstruction::Lalr,
+                parse_json_schema_to_named,
+                Some(prepare_json_schema_named),
+                end_token_ids,
+            )
+        })
+    }
+
+    /// Compile GLRM directly to a serialized dynamic artifact.
+    #[doc(hidden)]
+    pub fn compile_glrm_serialized_with_end_tokens(
+        glrm: &str,
+        vocab: &crate::Vocab,
+        end_token_ids: &[u32],
+    ) -> crate::Result<Vec<u8>> {
+        with_large_import_stack(glrm.len(), || {
+            compile_dynamic_serialized_from_source(
+                glrm,
+                vocab,
+                GlrTableConstruction::ExperimentalCoreMerged,
+                parse_glrm_to_named,
+                None,
+                end_token_ids,
+            )
+        })
+    }
+
     /// Compile an EBNF grammar with reduced compilation latency.
     pub fn from_ebnf(ebnf: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
         Self::from_ebnf_with_end_tokens(ebnf, vocab, &[])
@@ -344,7 +646,7 @@ impl DynamicConstraint {
                 ebnf,
                 vocab,
                 GlrTableConstruction::ExperimentalCoreMerged,
-                ebnf::parse_ebnf_to_named,
+                parse_ebnf_to_named,
                 None,
                 end_token_ids,
             )
@@ -367,7 +669,7 @@ impl DynamicConstraint {
                 lark,
                 vocab,
                 GlrTableConstruction::ExperimentalCoreMerged,
-                lark::parse_lark_to_named,
+                parse_lark_to_named,
                 None,
                 end_token_ids,
             )
@@ -391,7 +693,7 @@ impl DynamicConstraint {
                 vocab,
                 GlrTableConstruction::Lalr,
                 parse_json_schema_to_named,
-                Some(json_schema::prepare_named_grammar),
+                Some(prepare_json_schema_named),
                 end_token_ids,
             )
         })
@@ -413,7 +715,7 @@ impl DynamicConstraint {
                 glrm,
                 vocab,
                 GlrTableConstruction::ExperimentalCoreMerged,
-                crate::grammar::glrm::from_glrm,
+                parse_glrm_to_named,
                 None,
                 end_token_ids,
             )

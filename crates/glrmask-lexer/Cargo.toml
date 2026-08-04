@@ -1,0 +1,24 @@
+[package]
+name = "glrmask-lexer"
+version = "0.1.1"
+edition = "2024"
+description = "Lexer and tokenizer automata used by GLRMask"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/IsaacBreen/glrmask"
+
+[features]
+default = []
+internal-api = []
+
+[dependencies]
+glrmask-finite-automata = { version = "=0.1.1", path = "../glrmask-finite-automata" }
+glrmask-vocab = { version = "=0.1.1", path = "../glrmask-vocab", features = ["internal-api"] }
+rayon = "1"
+range-set-blaze = "0.3.0"
+rustc-hash = "1"
+serde = { version = "1", features = ["derive", "rc"] }
+smallvec = { version = "1", features = ["serde"] }
+
+[dev-dependencies]
+bincode = "1"
+rand = "0.8"

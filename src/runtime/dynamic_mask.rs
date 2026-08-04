@@ -23,7 +23,10 @@ use crate::ds::leveled_gss::LeveledGSS;
 use crate::ds::u8set::U8Set;
 use crate::grammar::flat::TerminalID;
 
-use super::artifact::{Constraint, DynamicMaskStateKey, DynamicMaskTrie, DynamicMaskVocab};
+use super::artifact::{
+    Constraint, DynamicMaskStateKey, DynamicMaskTrie, DynamicMaskVocab,
+    DynamicSelfLoopProjection,
+};
 use super::state::ConstraintState;
 
 type ParserStacks = LeveledGSS<u32, ()>;
@@ -31,6 +34,7 @@ type ParserStacks = LeveledGSS<u32, ()>;
 #[derive(Default)]
 struct DynamicTraversalCache {
     admissible_terminals: FxHashMap<usize, (ParserStacks, BitSet)>,
+    terminal_admissible: FxHashMap<(usize, TerminalID), bool>,
     lexer_relevant: FxHashMap<(u32, usize), bool>,
     parser_children: FxHashMap<(usize, TerminalID), (ParserStacks, Option<ParserStacks>)>,
 }
@@ -938,7 +942,10 @@ fn parser_child(
     // The actual structural advance is already the definitive admissibility
     // test. Running exact admission first would duplicate reduction simulation
     // for every terminal branch explored by the dynamic traversal.
-    let advanced = advance_stacks(&constraint.table, &parser_gss, terminal).apply(|_| ());
+    let advanced = constraint
+        .direct_regular_cached_advance(&parser_gss, terminal)
+        .unwrap_or_else(|| advance_stacks(&constraint.table, &parser_gss, terminal))
+        .apply(|_| ());
     (!advanced.is_empty()).then_some(advanced)
 }
 
@@ -975,7 +982,9 @@ fn token_boundary_allowed(
         return true;
     }
     let parser_gss = with_empty_accumulators(stacks);
-    stack_may_advance_on_any(&constraint.table, &parser_gss, accessible)
+    constraint
+        .direct_regular_may_advance_on_any(&parser_gss, accessible)
+        .unwrap_or_else(|| stack_may_advance_on_any(&constraint.table, &parser_gss, accessible))
 }
 
 fn admissible_terminals_cached<'a>(
@@ -986,8 +995,12 @@ fn admissible_terminals_cached<'a>(
     let key = parser_stacks_cache_key(stacks);
     if !cache.admissible_terminals.contains_key(&key) {
         let parser_gss = with_empty_accumulators(stacks);
-        let candidates = BitSet::all(constraint.table.num_terminals as usize);
-        let admitted = stack_admissible_terminals(&constraint.table, &parser_gss, &candidates);
+        let admitted = constraint
+            .direct_regular_admissible_terminals(&parser_gss)
+            .unwrap_or_else(|| {
+                let candidates = BitSet::all(constraint.table.num_terminals as usize);
+                stack_admissible_terminals(&constraint.table, &parser_gss, &candidates)
+            });
         cache
             .admissible_terminals
             .insert(key, (stacks.clone(), admitted));
@@ -1007,8 +1020,28 @@ fn parser_terminal_admissible_cached(
     stacks: &ParserStacks,
     cache: &mut DynamicTraversalCache,
 ) -> bool {
-    Some(terminal) == constraint.ignore_terminal
-        || admissible_terminals_cached(constraint, stacks, cache).contains(terminal as usize)
+    if Some(terminal) == constraint.ignore_terminal {
+        return true;
+    }
+    let stack_key = parser_stacks_cache_key(stacks);
+    let key = (stack_key, terminal);
+    if let Some(&result) = cache.terminal_admissible.get(&key) {
+        return result;
+    }
+    if let Some((cached_stacks, admitted)) = cache.admissible_terminals.get(&stack_key) {
+        debug_assert!(same_parser_stack_language(cached_stacks, stacks));
+        let result = admitted.contains(terminal as usize);
+        cache.terminal_admissible.insert(key, result);
+        return result;
+    }
+    let parser_gss = with_empty_accumulators(stacks);
+    let result = constraint
+        .direct_regular_may_advance_on(&parser_gss, terminal)
+        .unwrap_or_else(|| {
+            admissible_terminals_cached(constraint, stacks, cache).contains(terminal as usize)
+        });
+    cache.terminal_admissible.insert(key, result);
+    result
 }
 
 fn token_boundary_allowed_cached(
@@ -1027,6 +1060,16 @@ fn token_boundary_allowed_cached(
         return true;
     }
 
+    if accessible.count_ones() <= 8 {
+        return accessible
+            .iter()
+            .any(|terminal| parser_terminal_admissible_cached(
+                constraint,
+                terminal as TerminalID,
+                stacks,
+                cache,
+            ));
+    }
     !admissible_terminals_cached(constraint, stacks, cache).is_disjoint(accessible)
 }
 
@@ -1065,8 +1108,20 @@ fn lexer_state_relevant_cached(
     let result = if ignore_relevant {
         true
     } else {
-        let admitted = admissible_terminals_cached(constraint, stacks, cache);
-        !admitted.is_disjoint(accessible) || !admitted.is_disjoint(matched)
+        let mut candidates = accessible.clone();
+        candidates.union_with(matched);
+        if candidates.count_ones() <= 8 {
+            candidates.iter().any(|terminal| {
+                parser_terminal_admissible_cached(
+                    constraint,
+                    terminal as TerminalID,
+                    stacks,
+                    cache,
+                )
+            })
+        } else {
+            !admissible_terminals_cached(constraint, stacks, cache).is_disjoint(&candidates)
+        }
     };
     cache.lexer_relevant.insert(key, result);
     result
@@ -1088,6 +1143,7 @@ fn lexer_config_relevant_cached(
 #[inline]
 fn mark_subtree_tokens(
     vocab: &DynamicMaskVocab,
+    trie: &DynamicMaskTrie,
     node: u32,
     buf: &mut [u32],
 ) {
@@ -1297,7 +1353,7 @@ fn process_dynamic_trie_node(
         ) {
             *subtree_marks += 1;
             *subtree_mark_tokens += trie.subtree_tokens(node_id).len();
-            mark_subtree_tokens(vocab, node_id, buf);
+            mark_subtree_tokens(vocab, trie, node_id, buf);
             return true;
         }
     }
@@ -1404,7 +1460,7 @@ fn process_interned_dynamic_trie_node_with_loops(
         {
             stats.subtree_marks += 1;
             stats.subtree_mark_tokens += subtree_tokens.len();
-            mark_subtree_tokens(vocab, node_id, buf);
+            mark_subtree_tokens(vocab, trie, node_id, buf);
             return true;
         }
     }
@@ -1720,7 +1776,7 @@ fn process_scalar_dynamic_trie_node(
     ) {
         stats.subtree_marks += 1;
         stats.subtree_mark_tokens += trie.subtree_tokens(node_id).len();
-        mark_subtree_tokens(vocab, node_id, buf);
+        mark_subtree_tokens(vocab, trie, node_id, buf);
         return true;
     }
 
@@ -2053,6 +2109,7 @@ fn walk_interned_dynamic_trie(
     state: &ConstraintState<'_>,
     vocab: &DynamicMaskVocab,
     trie: &DynamicMaskTrie,
+    projection: Option<&DynamicSelfLoopProjection>,
     root_branches: DynamicBranches,
     initial_config: u32,
     lexer_scan_cache: &mut DynamicNfaScanCache<'_>,
@@ -2067,7 +2124,7 @@ fn walk_interned_dynamic_trie(
     let root_state = recognizer.intern(root_branches);
     stats.max_branches = stats.max_branches.max(recognizer.branches(root_state).len());
     stats.work_items += 1;
-    if process_interned_dynamic_trie_node(
+    let root_processed = process_interned_dynamic_trie_node(
         state,
         vocab,
         trie,
@@ -2081,7 +2138,8 @@ fn walk_interned_dynamic_trie(
         traversal_cache,
         buf,
         stats,
-    ) {
+    );
+    if root_processed {
         stats.recognizer_states = recognizer.branches.len();
         stats.recognizer_transition_misses = recognizer.transition_misses;
         return Ok(());
@@ -2094,6 +2152,12 @@ fn walk_interned_dynamic_trie(
     while walk_index < walk_edges.len() {
         deadline_poll.check()?;
         let edge = walk_edges[walk_index];
+        if projection.is_some_and(|projection| projection.subtree_is_safe(edge.child)) {
+            stats.subtree_marks += 1;
+            stats.subtree_mark_tokens += trie.subtree_tokens(edge.child).len();
+            walk_index = edge.subtree_end as usize;
+            continue;
+        }
         let parent_depth = edge.parent_depth as usize;
         debug_assert!(parent_depth < state_stack.len());
         state_stack.truncate(parent_depth + 1);
@@ -2120,19 +2184,20 @@ fn walk_interned_dynamic_trie(
             continue;
         }
 
-        let Some(recognizer_state) = recognizer.normalize(
+        let normalized = recognizer.normalize(
             recognizer_state,
             state.constraint,
             lexer_scan_cache,
             traversal_cache,
             stats,
-        )? else {
+        )?;
+        let Some(recognizer_state) = normalized else {
             walk_index = edge.subtree_end as usize;
             continue;
         };
 
         stats.work_items += 1;
-        if process_interned_dynamic_trie_node(
+        let processed = process_interned_dynamic_trie_node(
             state,
             vocab,
             trie,
@@ -2146,7 +2211,8 @@ fn walk_interned_dynamic_trie(
             traversal_cache,
             buf,
             stats,
-        ) {
+        );
+        if processed {
             walk_index = edge.subtree_end as usize;
             continue;
         }
@@ -2273,11 +2339,46 @@ fn fill_mask_dynamic_impl(
             }
         }
     }
+    let projection = if let [branch] = root_branches.as_slice()
+        && !branch.fresh_reset
+        && branch.initial_prune_guard.is_passed()
+        && lexer_scan_cache.config_len(branch.tokenizer_config) == 1
+    {
+        let source_state = lexer_scan_cache.config_state(branch.tokenizer_config, 0);
+        vocab.self_loop_projection(source_state).filter(|projection| {
+            parser_terminal_admissible_cached(
+                state.constraint,
+                projection.required_terminal,
+                &branch.gss,
+                &mut traversal_cache,
+            )
+        })
+    } else {
+        None
+    };
+    if let Some(projection) = projection {
+        for (target, source) in buf.iter_mut().zip(projection.safe_no_match_mask.iter()) {
+            *target |= *source;
+        }
+        if profile {
+            eprintln!(
+                "[glrmask/profile][dynamic_self_loop_projection] source_state={} terminal={} safe_tokens={}",
+                projection.source_state,
+                projection.required_terminal,
+                projection
+                    .safe_no_match_mask
+                    .iter()
+                    .map(|word| word.count_ones() as usize)
+                    .sum::<usize>(),
+            );
+        }
+    }
     if !root_branches.is_empty() {
         walk_interned_dynamic_trie(
             state,
             vocab,
             trie,
+            projection,
             root_branches,
             initial_config,
             &mut lexer_scan_cache,

@@ -223,7 +223,7 @@ pub(crate) fn build_internal_token_bytes_from_groups(
     internal_to_originals: &[Vec<u32>],
 ) -> BTreeMap<u32, Vec<u8>> {
     internal_to_originals.iter().enumerate().filter_map(|(internal_token_id, originals)| {
-        let bytes = originals.iter().find_map(|original| vocab.entries.get(original))?.clone();
+        let bytes = originals.iter().find_map(|original| vocab.entries_map().get(original))?.clone();
         Some((internal_token_id as u32, bytes))
     }).collect()
 }
@@ -508,7 +508,7 @@ fn get_ordered_vocab_trie_artifacts_for_vocab(
 ) -> (OrderedVocabTrieArtifacts, OrderedVocabCacheProfile) {
     let capacity = ordered_vocab_cache_capacity();
     if !ordered_vocab_cache_enabled() || capacity == 0 {
-        return get_ordered_vocab_trie_artifacts(&*vocab.entries);
+        return get_ordered_vocab_trie_artifacts(vocab.entries_map());
     }
 
     let probe_started_at = Instant::now();
@@ -528,7 +528,7 @@ fn get_ordered_vocab_trie_artifacts_for_vocab(
     }
 
     let ordered_vocab_started_at = Instant::now();
-    let ordered_vocab = Arc::new(build_ordered_vocab(&*vocab.entries));
+    let ordered_vocab = Arc::new(build_ordered_vocab(vocab.entries_map()));
     let ordered_vocab_build_ns = ordered_vocab_started_at.elapsed().as_nanos();
     let trie_started_at = Instant::now();
     let trie = Arc::new(build_ordered_vocab_prefix_tree(ordered_vocab.as_ref()));
@@ -3228,7 +3228,7 @@ fn compute_constraint_possible_matches_for_vocab_impl(
         let runtime_dynamic_vocab = runtime_dynamic_vocab_artifacts(&full_artifacts);
         return empty_possible_matches_computation(
             tokenizer,
-            vocab.entries.len(),
+            vocab.entries_map().len(),
             runtime_dynamic_vocab,
         );
     }
@@ -3255,7 +3255,7 @@ fn compute_constraint_possible_matches_for_vocab_impl(
         {
             eprintln!(
                 "[glrmask/profile][pm_vocab_equiv] original_tokens={} pm_vocab_classes={} mode={} ms={:.3}",
-                vocab.entries.len(),
+                vocab.entries_map().len(),
                 pm_vocab_map.internal_to_originals.len(),
                 if tokenizer.has_epsilon_transitions() {
                     "nfa_exact"
@@ -3272,7 +3272,7 @@ fn compute_constraint_possible_matches_for_vocab_impl(
         let vocab_equiv_ms = elapsed_ms(vocab_equiv_started_at);
         let mut computation = compute_constraint_possible_matches_with_artifacts(
             tokenizer,
-            vocab.entries.len(),
+            vocab.entries_map().len(),
             get_ordered_vocab_trie_artifacts(&compact_token_bytes),
             Some(&pm_vocab_map),
             raw_byte_to_class,
@@ -3284,7 +3284,7 @@ fn compute_constraint_possible_matches_for_vocab_impl(
 
     compute_constraint_possible_matches_with_artifacts(
         tokenizer,
-        vocab.entries.len(),
+        vocab.entries_map().len(),
         get_ordered_vocab_trie_artifacts_for_vocab(vocab),
         None,
         raw_byte_to_class,

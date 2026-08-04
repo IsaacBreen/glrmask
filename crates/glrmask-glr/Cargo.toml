@@ -1,0 +1,24 @@
+[package]
+name = "glrmask-glr"
+version = "0.1.1"
+edition = "2024"
+description = "GLR table construction and parser execution engine for GLRMask"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/IsaacBreen/glrmask"
+
+[features]
+default = []
+internal-api = []
+
+[dependencies]
+glrmask-grammar = { version = "=0.1.1", path = "../glrmask-grammar", features = ["internal-api"] }
+glrmask-lexer = { version = "=0.1.1", path = "../glrmask-lexer", features = ["internal-api"] }
+glrmask-weight = { version = "=0.1.1", path = "../glrmask-weight" }
+im = "15"
+rayon = "1"
+rustc-hash = "1"
+serde = { version = "1", features = ["derive", "rc"] }
+smallvec = { version = "1", features = ["serde"] }
+
+[dev-dependencies]
+bincode = "1"

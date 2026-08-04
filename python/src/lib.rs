@@ -1,3 +1,4 @@
+#![recursion_limit = "512"]
 //! PyO3 Python bindings for glrmask.
 //!
 //! Exposes `Constraint` and `ConstraintState` to Python, matching the interface
@@ -820,8 +821,131 @@ impl PyDynamicConstraint {
     }
 
     #[staticmethod]
+    #[pyo3(signature = (ebnf_source, vocab, end_token_ids=None))]
+    fn compile_ebnf_serialized_profiled(
+        ebnf_source: &str,
+        vocab: &PyVocab,
+        end_token_ids: Option<Vec<u32>>,
+    ) -> PyResult<(Vec<u8>, u64, u64)> {
+        constraint_result(
+            glrmask::DynamicConstraint::compile_ebnf_serialized_profiled_with_end_tokens(
+                ebnf_source,
+                &vocab.inner,
+                end_token_ids.as_deref().unwrap_or(&[]),
+            ),
+        )
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (lark_source, vocab, end_token_ids=None))]
+    fn compile_lark_serialized_profiled(
+        lark_source: &str,
+        vocab: &PyVocab,
+        end_token_ids: Option<Vec<u32>>,
+    ) -> PyResult<(Vec<u8>, u64, u64)> {
+        constraint_result(
+            glrmask::DynamicConstraint::compile_lark_serialized_profiled_with_end_tokens(
+                lark_source,
+                &vocab.inner,
+                end_token_ids.as_deref().unwrap_or(&[]),
+            ),
+        )
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (schema, vocab, end_token_ids=None))]
+    fn compile_json_schema_serialized_profiled(
+        schema: &str,
+        vocab: &PyVocab,
+        end_token_ids: Option<Vec<u32>>,
+    ) -> PyResult<(Vec<u8>, u64, u64)> {
+        constraint_result(
+            glrmask::DynamicConstraint::compile_json_schema_serialized_profiled_with_end_tokens(
+                schema,
+                &vocab.inner,
+                end_token_ids.as_deref().unwrap_or(&[]),
+            ),
+        )
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (glrm_source, vocab, end_token_ids=None))]
+    fn compile_glrm_serialized_profiled(
+        glrm_source: &str,
+        vocab: &PyVocab,
+        end_token_ids: Option<Vec<u32>>,
+    ) -> PyResult<(Vec<u8>, u64, u64)> {
+        constraint_result(
+            glrmask::DynamicConstraint::compile_glrm_serialized_profiled_with_end_tokens(
+                glrm_source,
+                &vocab.inner,
+                end_token_ids.as_deref().unwrap_or(&[]),
+            ),
+        )
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (ebnf_source, vocab, end_token_ids=None))]
+    fn compile_ebnf_serialized(
+        ebnf_source: &str,
+        vocab: &PyVocab,
+        end_token_ids: Option<Vec<u32>>,
+    ) -> PyResult<Vec<u8>> {
+        constraint_result(glrmask::DynamicConstraint::compile_ebnf_serialized_with_end_tokens(
+            ebnf_source,
+            &vocab.inner,
+            end_token_ids.as_deref().unwrap_or(&[]),
+        ))
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (lark_source, vocab, end_token_ids=None))]
+    fn compile_lark_serialized(
+        lark_source: &str,
+        vocab: &PyVocab,
+        end_token_ids: Option<Vec<u32>>,
+    ) -> PyResult<Vec<u8>> {
+        constraint_result(glrmask::DynamicConstraint::compile_lark_serialized_with_end_tokens(
+            lark_source,
+            &vocab.inner,
+            end_token_ids.as_deref().unwrap_or(&[]),
+        ))
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (schema, vocab, end_token_ids=None))]
+    fn compile_json_schema_serialized(
+        schema: &str,
+        vocab: &PyVocab,
+        end_token_ids: Option<Vec<u32>>,
+    ) -> PyResult<Vec<u8>> {
+        constraint_result(glrmask::DynamicConstraint::compile_json_schema_serialized_with_end_tokens(
+            schema,
+            &vocab.inner,
+            end_token_ids.as_deref().unwrap_or(&[]),
+        ))
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (glrm_source, vocab, end_token_ids=None))]
+    fn compile_glrm_serialized(
+        glrm_source: &str,
+        vocab: &PyVocab,
+        end_token_ids: Option<Vec<u32>>,
+    ) -> PyResult<Vec<u8>> {
+        constraint_result(glrmask::DynamicConstraint::compile_glrm_serialized_with_end_tokens(
+            glrm_source,
+            &vocab.inner,
+            end_token_ids.as_deref().unwrap_or(&[]),
+        ))
+    }
+
+    #[staticmethod]
     fn load(data: &[u8], vocab: &PyVocab) -> PyResult<Self> {
-        Self::from_constraint_result(glrmask::DynamicConstraint::load(data), vocab)
+        Self::from_constraint_result(
+            glrmask::DynamicConstraint::load_with_vocab(data, &vocab.inner),
+            vocab,
+        )
     }
 
     fn save(&self) -> Vec<u8> {

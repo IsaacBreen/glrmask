@@ -1,11 +1,11 @@
 pub mod compile;
 pub(crate) mod constraint_possible_matches;
-pub mod glr;
+pub(crate) use glrmask_glr::__private::glr;
 pub mod grammar;
 pub(crate) mod pipeline;
 pub(crate) mod terminal_run_collapse;
 pub(crate) mod pm_profile;
-pub(crate) mod possible_matches;
+pub(crate) use glrmask_lexer::__private::possible_matches;
 pub mod stages;
 
 pub(crate) use compile::compile_owned;
