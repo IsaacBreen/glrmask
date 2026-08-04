@@ -2467,6 +2467,30 @@ fn dfa_is_nonnullable_and_prefix_free(dfa: &DFA) -> bool {
     true
 }
 
+type RepeatBaseDfaCache = FxHashMap<Expr, Arc<DFA>>;
+
+fn cached_direct_bounded_repeat_base_dfa_unconditionally(
+    expr: &Expr,
+    cache: Option<&RepeatBaseDfaCache>,
+) -> Option<Arc<DFA>> {
+    let expr = unwrap_shared(expr);
+    if let Some(cached) = cache.and_then(|cache| cache.get(expr)) {
+        return Some(Arc::clone(cached));
+    }
+    compile_direct_bounded_repeat_base_dfa_unconditionally(expr).map(Arc::new)
+}
+
+fn cached_direct_bounded_repeat_base_dfa(
+    expr: &Expr,
+    max: usize,
+    cache: Option<&RepeatBaseDfaCache>,
+) -> Option<Arc<DFA>> {
+    if max < DIRECT_BOUNDED_REPEAT_THRESHOLD {
+        return None;
+    }
+    cached_direct_bounded_repeat_base_dfa_unconditionally(expr, cache)
+}
+
 fn compile_direct_bounded_repeat_base_dfa_unconditionally(expr: &Expr) -> Option<DFA> {
     let base_dfa = compile_expr_to_dfa(expr);
     if base_dfa.num_states() == 0 || !dfa_is_nonnullable_and_prefix_free(&base_dfa) {
@@ -2483,9 +2507,18 @@ fn compile_direct_bounded_repeat_base_dfa(expr: &Expr, max: usize) -> Option<DFA
     compile_direct_bounded_repeat_base_dfa_unconditionally(expr)
 }
 
+fn build_bounded_repeat_dfa_with_cache(
+    expr: &Expr,
+    min: usize,
+    max: usize,
+    cache: Option<&RepeatBaseDfaCache>,
+) -> Option<DFA> {
+    let base_dfa = cached_direct_bounded_repeat_base_dfa(expr, max, cache)?;
+    build_bounded_repeat_dfa_from_base(base_dfa.as_ref(), min, max)
+}
+
 fn build_bounded_repeat_dfa(expr: &Expr, min: usize, max: usize) -> Option<DFA> {
-    let base_dfa = compile_direct_bounded_repeat_base_dfa(expr, max)?;
-    build_bounded_repeat_dfa_from_base(&base_dfa, min, max)
+    build_bounded_repeat_dfa_with_cache(expr, min, max, None)
 }
 
 fn build_bounded_repeat_dfa_from_base(base_dfa: &DFA, min: usize, max: usize) -> Option<DFA> {
@@ -2550,7 +2583,10 @@ fn collect_suffix_bytes(exprs: &[Expr]) -> Option<Vec<u8>> {
 /// avoiding NFA→DFA determinization. Works when the first suffix byte does not
 /// overlap with the repeat expression's start-state transitions (e.g., closing
 /// quote `"` after JSON string chars that exclude `"`).
-fn build_bounded_repeat_with_suffix_dfa(parts: &[Expr]) -> Option<(DFA, bool)> {
+fn build_bounded_repeat_with_suffix_dfa_with_cache(
+    parts: &[Expr],
+    cache: Option<&RepeatBaseDfaCache>,
+) -> Option<(DFA, bool)> {
     if parts.len() < 2 {
         return None;
     }
@@ -2570,7 +2606,7 @@ fn build_bounded_repeat_with_suffix_dfa(parts: &[Expr]) -> Option<(DFA, bool)> {
     };
 
     let suffix_bytes = collect_suffix_bytes(&parts[1..])?;
-    let base_dfa = compile_direct_bounded_repeat_base_dfa_unconditionally(repeat_expr)?;
+    let base_dfa = cached_direct_bounded_repeat_base_dfa_unconditionally(repeat_expr, cache)?;
 
     let base_states = base_dfa.states();
     let base_state_count = base_states.len();
@@ -2662,6 +2698,10 @@ fn build_bounded_repeat_with_suffix_dfa(parts: &[Expr]) -> Option<(DFA, bool)> {
     }
 
     Some((dfa, false))
+}
+
+fn build_bounded_repeat_with_suffix_dfa(parts: &[Expr]) -> Option<(DFA, bool)> {
+    build_bounded_repeat_with_suffix_dfa_with_cache(parts, None)
 }
 
 /// TODO: replace this compact product with an exact subset construction if we
@@ -3243,9 +3283,10 @@ fn build_zero_min_repeat_suffix_dominance_dfa(
     .map(|built| built.dfa)
 }
 
-fn build_bounded_repeat_with_regex_suffix_with_options(
+fn build_bounded_repeat_with_regex_suffix_with_options_and_cache(
     parts: &[Expr],
     preserve_coordinates: bool,
+    cache: Option<&RepeatBaseDfaCache>,
 ) -> Option<(DFA, bool)> {
     let profile_timing = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
     let total_started_at = profile_timing.then(Instant::now);
@@ -3295,7 +3336,10 @@ fn build_bounded_repeat_with_regex_suffix_with_options(
     }
 
     let body_started_at = profile_timing.then(Instant::now);
-    let body_dfa = compile_expr_to_dfa(repeat_expr);
+    let body_dfa = cache
+        .and_then(|cache| cache.get(unwrap_shared(repeat_expr)))
+        .map(|dfa| dfa.as_ref().clone())
+        .unwrap_or_else(|| compile_expr_to_dfa(repeat_expr));
     let body_ms = body_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     if body_dfa.num_states() == 0 || !body_dfa.finalizers(0).is_empty() {
         return None;
@@ -3575,9 +3619,21 @@ fn prepend_literal_prefix_to_dfa(prefix_bytes: &[u8], tail_dfa: DFA) -> Option<D
     Some(dfa)
 }
 
-fn build_prefixed_bounded_repeat_with_suffix_dfa_with_options(
+fn build_bounded_repeat_with_regex_suffix_with_options(
     parts: &[Expr],
     preserve_coordinates: bool,
+) -> Option<(DFA, bool)> {
+    build_bounded_repeat_with_regex_suffix_with_options_and_cache(
+        parts,
+        preserve_coordinates,
+        None,
+    )
+}
+
+fn build_prefixed_bounded_repeat_with_suffix_dfa_with_options_and_cache(
+    parts: &[Expr],
+    preserve_coordinates: bool,
+    cache: Option<&RepeatBaseDfaCache>,
 ) -> Option<(DFA, bool)> {
     let mut flat_parts = Vec::new();
     for part in parts {
@@ -3596,6 +3652,27 @@ fn build_prefixed_bounded_repeat_with_suffix_dfa_with_options(
         return None;
     }
 
+    // A literal prefix followed directly by a bounded repeat is the same
+    // structural family as the suffix-bearing forms below, but it has no
+    // boundary ambiguity to resolve. Compile the repeat directly and prepend
+    // the fixed bytes instead of falling back through an unrolled NFA.
+    let final_part = match parts.last()? {
+        Expr::Shared(inner) => inner.as_ref(),
+        other => other,
+    };
+    if let Expr::Repeat {
+        expr,
+        min,
+        max: Some(max),
+    } = final_part
+    {
+        let prefix_bytes = collect_suffix_bytes(&parts[..parts.len() - 1])?;
+        let base_dfa = cached_direct_bounded_repeat_base_dfa_unconditionally(expr, cache)?;
+        let tail_dfa = build_bounded_repeat_dfa_from_base(base_dfa.as_ref(), *min, *max)?;
+        return prepend_literal_prefix_to_dfa(&prefix_bytes, tail_dfa)
+            .map(|dfa| (dfa, false));
+    }
+
     for repeat_index in 1..parts.len() - 1 {
         let repeat_expr = match &parts[repeat_index] {
             Expr::Shared(inner) => inner.as_ref(),
@@ -3608,11 +3685,12 @@ fn build_prefixed_bounded_repeat_with_suffix_dfa_with_options(
         let prefix_bytes = collect_suffix_bytes(&parts[..repeat_index])?;
         let tail_parts: Vec<Expr> = parts[repeat_index..].to_vec();
         let (tail_dfa, needs_future_recompute) =
-            build_bounded_repeat_with_suffix_dfa(&tail_parts)
+            build_bounded_repeat_with_suffix_dfa_with_cache(&tail_parts, cache)
                 .or_else(|| {
-                    build_bounded_repeat_with_regex_suffix_with_options(
+                    build_bounded_repeat_with_regex_suffix_with_options_and_cache(
                         &tail_parts,
                         preserve_coordinates,
+                        cache,
                     )
                 })?;
         let dfa = prepend_literal_prefix_to_dfa(&prefix_bytes, tail_dfa)?;
@@ -3624,11 +3702,12 @@ fn build_prefixed_bounded_repeat_with_suffix_dfa_with_options(
         let tail_parts = optional_tail_parts(&parts[1])?;
         if tail_parts.len() >= 2 {
             let (tail_dfa, needs_future_recompute) =
-                build_bounded_repeat_with_suffix_dfa(&tail_parts)
+                build_bounded_repeat_with_suffix_dfa_with_cache(&tail_parts, cache)
                     .or_else(|| {
-                        build_bounded_repeat_with_regex_suffix_with_options(
+                        build_bounded_repeat_with_regex_suffix_with_options_and_cache(
                             &tail_parts,
                             preserve_coordinates,
+                            cache,
                         )
                     })?;
             let mut dfa = prepend_literal_prefix_to_dfa(&prefix_bytes, tail_dfa)?;
@@ -6276,50 +6355,52 @@ pub fn compile_partitioned_expression_pair_with_structural_map(
     .map(PreparedPartitionedExpressionPair::finish_full)
 }
 
-fn product_state_metadata(
+fn product_component_state_flags(component: &ProductComponent, state: u32) -> (bool, bool) {
+    match component {
+        ProductComponent::Materialized(dfa)
+        | ProductComponent::MaterializedZeroMinRepeatSuffix { dfa, .. } => (
+            dfa.finalizers(state).contains(0),
+            dfa.possible_future_group_ids(state).contains(0),
+        ),
+        ProductComponent::VirtualFixedSequence {
+            byte_sets,
+            suffix_live,
+        } => {
+            let position = state as usize;
+            (
+                position == byte_sets.len(),
+                position < byte_sets.len()
+                    && suffix_live.get(position).copied().unwrap_or(false),
+            )
+        }
+        ProductComponent::VirtualBoundedRepeat { base_dfa, min, max } => {
+            let base_state_count = base_dfa.num_states() as u32;
+            let copy_count = state / base_state_count;
+            let base_state = state % base_state_count;
+            (base_state == 0 && copy_count >= *min, copy_count < *max)
+        }
+    }
+}
+
+fn product_state_metadata_with_layout(
     components: &[ProductComponent],
+    coordinate_groups: &[Vec<usize>],
+    num_groups: usize,
     state_tuple: &ProductStateTuple,
 ) -> (BitSet, BitSet) {
-    let num_groups = components.len();
     let mut finalizers = BitSet::new(num_groups);
     let mut future = BitSet::new(num_groups);
 
-    for &(group_id, state) in state_tuple {
-        let group_id = group_id as usize;
-        match &components[group_id] {
-            ProductComponent::Materialized(dfa)
-            | ProductComponent::MaterializedZeroMinRepeatSuffix { dfa, .. } => {
-                if dfa.finalizers(state).contains(0) {
-                    finalizers.set(group_id);
-                }
-                if dfa.possible_future_group_ids(state).contains(0) {
-                    future.set(group_id);
-                }
+    for &(coordinate_id, state) in state_tuple {
+        let coordinate = coordinate_id as usize;
+        let (accepting, can_continue) =
+            product_component_state_flags(&components[coordinate], state);
+        for &group in &coordinate_groups[coordinate] {
+            if accepting {
+                finalizers.set(group);
             }
-            ProductComponent::VirtualFixedSequence {
-                byte_sets,
-                suffix_live,
-            } => {
-                let position = state as usize;
-                if position == byte_sets.len() {
-                    finalizers.set(group_id);
-                }
-                if position < byte_sets.len()
-                    && suffix_live.get(position).copied().unwrap_or(false)
-                {
-                    future.set(group_id);
-                }
-            }
-            ProductComponent::VirtualBoundedRepeat { base_dfa, min, max } => {
-                let base_state_count = base_dfa.num_states() as u32;
-                let copy_count = state / base_state_count;
-                let base_state = state % base_state_count;
-                if base_state == 0 && copy_count >= *min {
-                    finalizers.set(group_id);
-                }
-                if copy_count < *max {
-                    future.set(group_id);
-                }
+            if can_continue {
+                future.set(group);
             }
         }
     }
@@ -6327,28 +6408,21 @@ fn product_state_metadata(
     (finalizers, future)
 }
 
-fn product_state_single_visible_finalizer(
+fn product_state_single_visible_finalizer_with_layout(
     components: &[ProductComponent],
+    coordinate_groups: &[Vec<usize>],
+    num_groups: usize,
     state_tuple: &ProductStateTuple,
     exclusions: &BTreeMap<u32, BTreeSet<u32>>,
     intersections: &BTreeMap<u32, BTreeSet<u32>>,
 ) -> BitSet {
-    let mut accepting = vec![false; components.len()];
-    for &(group_id, state) in state_tuple {
-        let group = group_id as usize;
-        accepting[group] = match &components[group] {
-            ProductComponent::Materialized(dfa)
-            | ProductComponent::MaterializedZeroMinRepeatSuffix { dfa, .. } => {
-                dfa.finalizers(state).contains(0)
-            }
-            ProductComponent::VirtualFixedSequence { byte_sets, .. } => {
-                state as usize == byte_sets.len()
-            }
-            ProductComponent::VirtualBoundedRepeat { base_dfa, min, .. } => {
-                let base_state_count = base_dfa.num_states() as u32;
-                state % base_state_count == 0 && state / base_state_count >= *min
-            }
-        };
+    let mut accepting = vec![false; num_groups];
+    for &(coordinate_id, state) in state_tuple {
+        let coordinate = coordinate_id as usize;
+        let is_accepting = product_component_state_flags(&components[coordinate], state).0;
+        for &group in &coordinate_groups[coordinate] {
+            accepting[group] = is_accepting;
+        }
     }
 
     let mut visible_accepting = accepting.first().copied().unwrap_or(false);
@@ -6372,6 +6446,40 @@ fn product_state_single_visible_finalizer(
         finalizers.set(0);
     }
     finalizers
+}
+
+fn identity_product_coordinate_groups(num_groups: usize) -> Vec<Vec<usize>> {
+    (0..num_groups).map(|group| vec![group]).collect()
+}
+
+fn product_state_metadata(
+    components: &[ProductComponent],
+    state_tuple: &ProductStateTuple,
+) -> (BitSet, BitSet) {
+    let coordinate_groups = identity_product_coordinate_groups(components.len());
+    product_state_metadata_with_layout(
+        components,
+        &coordinate_groups,
+        components.len(),
+        state_tuple,
+    )
+}
+
+fn product_state_single_visible_finalizer(
+    components: &[ProductComponent],
+    state_tuple: &ProductStateTuple,
+    exclusions: &BTreeMap<u32, BTreeSet<u32>>,
+    intersections: &BTreeMap<u32, BTreeSet<u32>>,
+) -> BitSet {
+    let coordinate_groups = identity_product_coordinate_groups(components.len());
+    product_state_single_visible_finalizer_with_layout(
+        components,
+        &coordinate_groups,
+        components.len(),
+        state_tuple,
+        exclusions,
+        intersections,
+    )
 }
 
 fn set_single_group_futures_from_class_graph(
@@ -6567,6 +6675,17 @@ fn explicit_dead_sink_state(dfa: &DFA) -> Option<u32> {
     None
 }
 
+fn build_prefixed_bounded_repeat_with_suffix_dfa_with_options(
+    parts: &[Expr],
+    preserve_coordinates: bool,
+) -> Option<(DFA, bool)> {
+    build_prefixed_bounded_repeat_with_suffix_dfa_with_options_and_cache(
+        parts,
+        preserve_coordinates,
+        None,
+    )
+}
+
 fn expr_is_epsilon_only(expr: &Expr) -> bool {
     match expr {
         Expr::Epsilon => true,
@@ -6662,13 +6781,18 @@ fn build_fixed_sequence_dfa(expr: &Expr) -> Option<DFA> {
     })
 }
 
-fn compile_product_component_dfa_direct_with_options(
+fn compile_product_component_dfa_direct_with_options_and_cache(
     expr: &Expr,
     preserve_coordinates: bool,
+    cache: Option<&RepeatBaseDfaCache>,
 ) -> Option<(DFA, bool)> {
     match expr {
         Expr::Shared(inner) => {
-            compile_product_component_dfa_direct_with_options(inner, preserve_coordinates)
+            compile_product_component_dfa_direct_with_options_and_cache(
+                inner,
+                preserve_coordinates,
+                cache,
+            )
         }
         Expr::U8Seq(bytes) => {
             let mut dfa = DFA::new(bytes.len() + 1);
@@ -6705,9 +6829,10 @@ fn compile_product_component_dfa_direct_with_options(
         Expr::Choice(_) => {
             let non_epsilon = optional_choice_non_epsilon(expr)?;
             let (mut dfa, needs_future_recompute) =
-                compile_product_component_dfa_direct_with_options(
+                compile_product_component_dfa_direct_with_options_and_cache(
                     non_epsilon,
                     preserve_coordinates,
+                    cache,
                 )?;
             mark_state_accepting(&mut dfa, 0);
             Some((dfa, needs_future_recompute))
@@ -6716,24 +6841,38 @@ fn compile_product_component_dfa_direct_with_options(
             expr,
             min,
             max: Some(max),
-        } => build_bounded_repeat_dfa(expr, *min, *max).map(|dfa| (dfa, false)),
+        } => build_bounded_repeat_dfa_with_cache(expr, *min, *max, cache)
+            .map(|dfa| (dfa, false)),
         Expr::Seq(parts) => build_fixed_sequence_dfa(expr)
             .map(|dfa| (dfa, false))
-            .or_else(|| build_bounded_repeat_with_suffix_dfa(parts))
+            .or_else(|| build_bounded_repeat_with_suffix_dfa_with_cache(parts, cache))
             .or_else(|| {
-                build_bounded_repeat_with_regex_suffix_with_options(
+                build_bounded_repeat_with_regex_suffix_with_options_and_cache(
                     parts,
                     preserve_coordinates,
+                    cache,
                 )
             })
             .or_else(|| {
-                build_prefixed_bounded_repeat_with_suffix_dfa_with_options(
+                build_prefixed_bounded_repeat_with_suffix_dfa_with_options_and_cache(
                     parts,
                     preserve_coordinates,
+                    cache,
                 )
             }),
         _ => None,
     }
+}
+
+fn compile_product_component_dfa_direct_with_options(
+    expr: &Expr,
+    preserve_coordinates: bool,
+) -> Option<(DFA, bool)> {
+    compile_product_component_dfa_direct_with_options_and_cache(
+        expr,
+        preserve_coordinates,
+        None,
+    )
 }
 
 fn compile_product_component_dfa_direct(expr: &Expr) -> Option<(DFA, bool)> {
@@ -6754,14 +6893,19 @@ pub fn compile_terminal_expr_dfa(expr: &Expr) -> DFA {
     compile_product_component_dfa(expr)
 }
 
-fn compile_product_component_materialized_dfa_with_options(
+fn compile_product_component_materialized_dfa_with_options_and_cache(
     expr: &Expr,
     preserve_coordinates: bool,
+    cache: Option<&RepeatBaseDfaCache>,
 ) -> DFA {
     let profile_timing = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
     let direct_started_at = profile_timing.then(Instant::now);
     if let Some((mut dfa, needs_future_recompute)) =
-        compile_product_component_dfa_direct_with_options(expr, preserve_coordinates)
+        compile_product_component_dfa_direct_with_options_and_cache(
+            expr,
+            preserve_coordinates,
+            cache,
+        )
     {
         let direct_ms = direct_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         dfa.ensure_group_capacity(1);
@@ -6797,6 +6941,17 @@ fn compile_product_component_materialized_dfa_with_options(
         }
         dfa
     }
+}
+
+fn compile_product_component_materialized_dfa_with_options(
+    expr: &Expr,
+    preserve_coordinates: bool,
+) -> DFA {
+    compile_product_component_materialized_dfa_with_options_and_cache(
+        expr,
+        preserve_coordinates,
+        None,
+    )
 }
 
 fn compile_product_component_materialized_dfa(expr: &Expr) -> DFA {
@@ -8958,6 +9113,7 @@ fn compile_product_component_with_options(
     expr: &Expr,
     preserve_coordinates: bool,
     virtual_fixed_sequences: bool,
+    repeat_base_cache: Option<&RepeatBaseDfaCache>,
 ) -> ProductComponent {
     if preserve_coordinates
         && let Some(trace) = zero_min_repeat_suffix_component_trace(expr)
@@ -8987,38 +9143,45 @@ fn compile_product_component_with_options(
             inner,
             preserve_coordinates,
             virtual_fixed_sequences,
+            repeat_base_cache,
         ),
         Expr::Repeat {
             expr: repeat_expr,
             min,
             max: Some(max),
         } => {
-            if let Some(base_dfa) = compile_direct_bounded_repeat_base_dfa(repeat_expr, *max) {
+            if let Some(base_dfa) = cached_direct_bounded_repeat_base_dfa(
+                repeat_expr,
+                *max,
+                repeat_base_cache,
+            ) {
                 return ProductComponent::VirtualBoundedRepeat {
-                    base_dfa: Arc::new(base_dfa),
+                    base_dfa,
                     min: *min as u32,
                     max: *max as u32,
                 };
             }
 
             ProductComponent::Materialized(Arc::new(
-                compile_product_component_materialized_dfa_with_options(
+                compile_product_component_materialized_dfa_with_options_and_cache(
                     expr,
                     preserve_coordinates,
+                    repeat_base_cache,
                 ),
             ))
         }
         _ => ProductComponent::Materialized(Arc::new(
-            compile_product_component_materialized_dfa_with_options(
+            compile_product_component_materialized_dfa_with_options_and_cache(
                 expr,
                 preserve_coordinates,
+                repeat_base_cache,
             ),
         )),
     }
 }
 
 fn compile_product_component(expr: &Expr) -> ProductComponent {
-    compile_product_component_with_options(expr, false, true)
+    compile_product_component_with_options(expr, false, true, None)
 }
 
 fn deterministic_component_homomorphism_state_map(
@@ -9060,6 +9223,55 @@ fn deterministic_component_homomorphism_state_map(
     mapping.iter().all(|&state| state != u32::MAX).then_some(mapping)
 }
 
+fn count_bounded_repeat_base_uses(expr: &Expr, counts: &mut FxHashMap<Expr, usize>) {
+    match unwrap_shared(expr) {
+        Expr::Repeat {
+            expr,
+            max: Some(_),
+            ..
+        } => {
+            let body = unwrap_shared(expr);
+            *counts.entry(body.clone()).or_default() += 1;
+            count_bounded_repeat_base_uses(body, counts);
+        }
+        Expr::Seq(parts) | Expr::Choice(parts) => {
+            for part in parts {
+                count_bounded_repeat_base_uses(part, counts);
+            }
+        }
+        Expr::Exclude { expr, exclude } => {
+            count_bounded_repeat_base_uses(expr, counts);
+            count_bounded_repeat_base_uses(exclude, counts);
+        }
+        Expr::Intersect { expr, intersect } => {
+            count_bounded_repeat_base_uses(expr, counts);
+            count_bounded_repeat_base_uses(intersect, counts);
+        }
+        Expr::Shared(_) => unreachable!("unwrap_shared removes Shared"),
+        Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Dfa(_) | Expr::Epsilon => {}
+        Expr::Repeat { max: None, expr, .. } => {
+            count_bounded_repeat_base_uses(expr, counts);
+        }
+    }
+}
+
+fn build_repeat_base_dfa_cache(exprs: &[&Expr]) -> RepeatBaseDfaCache {
+    let mut counts = FxHashMap::<Expr, usize>::default();
+    for expr in exprs {
+        count_bounded_repeat_base_uses(expr, &mut counts);
+    }
+    counts
+        .into_iter()
+        .filter_map(|(expr, uses)| (uses >= 2).then_some(expr))
+        .collect::<Vec<_>>()
+        .into_par_iter()
+        .filter_map(|expr| {
+            compile_direct_bounded_repeat_base_dfa_unconditionally(&expr)
+                .map(|dfa| (expr, Arc::new(dfa)))
+        })
+        .collect()
+}
+
 #[derive(Debug)]
 struct ProductComponentCompileProfile {
     first_group_index: usize,
@@ -9078,6 +9290,7 @@ fn compile_product_components_profiled(
     Vec<ProductComponent>,
     usize,
     Option<Vec<ProductComponentCompileProfile>>,
+    Vec<usize>,
 ) {
     let mut unique_exprs = Vec::<&Expr>::new();
     let mut unique_first_group_indices = Vec::<usize>::new();
@@ -9098,6 +9311,9 @@ fn compile_product_components_profiled(
         component_indices.push(index);
     }
 
+    let repeat_base_cache = build_repeat_base_dfa_cache(&unique_exprs);
+    let repeat_base_cache = (!repeat_base_cache.is_empty()).then_some(&repeat_base_cache);
+
     let compiled: Vec<(ProductComponent, Option<f64>)> = unique_exprs
         .par_iter()
         .map(|expr| {
@@ -9107,6 +9323,7 @@ fn compile_product_components_profiled(
                     expr,
                     preserve_coordinates,
                     virtual_fixed_sequences,
+                    repeat_base_cache,
                 );
                 (
                     component,
@@ -9118,6 +9335,7 @@ fn compile_product_components_profiled(
                         expr,
                         preserve_coordinates,
                         virtual_fixed_sequences,
+                        repeat_base_cache,
                     ),
                     None,
                 )
@@ -9145,16 +9363,53 @@ fn compile_product_components_profiled(
             .collect::<Vec<_>>()
     });
     let components = component_indices
-        .into_iter()
+        .iter()
+        .copied()
         .map(|index| unique_components[index].clone())
         .collect();
-    (components, cache_hits, profiles)
+    (components, cache_hits, profiles, component_indices)
 }
 
 fn compile_product_components(exprs: &[Expr]) -> (Vec<ProductComponent>, usize) {
-    let (components, cache_hits, _) =
+    let (components, cache_hits, _, _) =
         compile_product_components_profiled(exprs, false, false, true);
     (components, cache_hits)
+}
+
+fn product_coordinate_layout(
+    logical_components: Vec<ProductComponent>,
+    component_indices: &[usize],
+    collapse_duplicates: bool,
+) -> (Vec<ProductComponent>, Vec<Vec<usize>>) {
+    if !collapse_duplicates {
+        let coordinate_groups = (0..logical_components.len())
+            .map(|group| vec![group])
+            .collect();
+        return (logical_components, coordinate_groups);
+    }
+
+    let coordinate_count = component_indices
+        .iter()
+        .copied()
+        .max()
+        .map_or(0, |max_index| max_index + 1);
+    let mut components = vec![None; coordinate_count];
+    let mut coordinate_groups = vec![Vec::new(); coordinate_count];
+    for (group, (component, &coordinate)) in logical_components
+        .into_iter()
+        .zip(component_indices)
+        .enumerate()
+    {
+        coordinate_groups[coordinate].push(group);
+        if components[coordinate].is_none() {
+            components[coordinate] = Some(component);
+        }
+    }
+    let components = components
+        .into_iter()
+        .map(|component| component.expect("every product coordinate has a component"))
+        .collect();
+    (components, coordinate_groups)
 }
 
 fn build_product_dfa(
@@ -9173,7 +9428,7 @@ fn build_product_dfa(
         || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
     let profile_started_at = Instant::now();
     let component_compile_started_at = Instant::now();
-    let (components, component_cache_hits, component_profiles) =
+    let (logical_components, component_cache_hits, component_profiles, component_indices) =
         compile_product_components_profiled(
             exprs,
             profile_detail,
@@ -9193,8 +9448,8 @@ fn build_product_dfa(
     if profile_detail {
         eprintln!(
             "[glrmask/profile][tokenizer] product_components groups={} unique_components={} cache_hits={} compile_components_ms={:.3}",
-            components.len(),
-            components.len() - component_cache_hits,
+            logical_components.len(),
+            logical_components.len() - component_cache_hits,
             component_cache_hits,
             profile_started_at.elapsed().as_secs_f64() * 1000.0
         );
@@ -9247,7 +9502,17 @@ fn build_product_dfa(
             );
         }
     }
-    let num_groups = components.len();
+    let num_groups = logical_components.len();
+    let collapse_duplicates = component_cache_hits > 0
+        && visible_groups > 1
+        && !capture_trace
+        && !profile_trace;
+    let (components, coordinate_groups) = product_coordinate_layout(
+        logical_components,
+        &component_indices,
+        collapse_duplicates,
+    );
+    let num_coordinates = components.len();
     let direct_single_visible_group = visible_groups == 1
         && num_groups > 1
         && (!exclusions.is_empty() || !intersections.is_empty());
@@ -9284,14 +9549,16 @@ fn build_product_dfa(
     });
 
     assert!(num_groups <= u32::MAX as usize, "too many product DFA groups");
-    let mut start_tuple = ProductStateTuple::with_capacity(num_groups);
-    for group_id in 0..num_groups {
-        start_tuple.push((group_id as u32, 0u32));
+    let mut start_tuple = ProductStateTuple::with_capacity(num_coordinates);
+    for coordinate_id in 0..num_coordinates {
+        start_tuple.push((coordinate_id as u32, 0u32));
     }
     let (start_finalizers, start_future) = if direct_single_visible_group {
         (
-            product_state_single_visible_finalizer(
+            product_state_single_visible_finalizer_with_layout(
                 &components,
+                &coordinate_groups,
+                num_groups,
                 &start_tuple,
                 exclusions,
                 intersections,
@@ -9299,7 +9566,7 @@ fn build_product_dfa(
             BitSet::new(1),
         )
     } else {
-        product_state_metadata(&components, &start_tuple)
+        product_state_metadata_with_layout(&components, &coordinate_groups, num_groups, &start_tuple)
     };
     dfa.overwrite_state_metadata(0, start_finalizers, start_future);
 
@@ -9312,11 +9579,11 @@ fn build_product_dfa(
         .collect();
     let mut class_active = vec![false; num_classes];
     let mut used_classes = Vec::<usize>::new();
-    let mut growth_recorder = profile_trace.then(|| ProductGrowthRecorder::new(num_groups));
+    let mut growth_recorder = profile_trace.then(|| ProductGrowthRecorder::new(num_coordinates));
     let mut state_tuples = capture_trace.then(|| vec![start_tuple.clone()]);
     state_map.insert(start_tuple.clone(), 0);
     if let Some(recorder) = growth_recorder.as_mut() {
-        recorder.record(num_groups, &start_tuple);
+        recorder.record(num_coordinates, &start_tuple);
     }
     worklist.push_back((0, start_tuple));
 
@@ -9403,8 +9670,10 @@ fn build_product_dfa(
                 let new_state = dfa.add_state();
                 let (finalizers, future) = if direct_single_visible_group {
                     (
-                        product_state_single_visible_finalizer(
+                        product_state_single_visible_finalizer_with_layout(
                             &components,
+                            &coordinate_groups,
+                            num_groups,
                             next_tuple,
                             exclusions,
                             intersections,
@@ -9412,7 +9681,7 @@ fn build_product_dfa(
                         BitSet::new(1),
                     )
                 } else {
-                    product_state_metadata(&components, next_tuple)
+                    product_state_metadata_with_layout(&components, &coordinate_groups, num_groups, next_tuple)
                 };
                 dfa.overwrite_state_metadata(new_state, finalizers, future);
                 state_map.insert(next_tuple.clone(), new_state);
@@ -9421,7 +9690,7 @@ fn build_product_dfa(
                     state_tuples.push(next_tuple.clone());
                 }
                 if let Some(recorder) = growth_recorder.as_mut() {
-                    recorder.record(num_groups, next_tuple);
+                    recorder.record(num_coordinates, next_tuple);
                 }
                 pending_class_transitions.push(Vec::new());
                 worklist.push_back((new_state, next_tuple.clone()));
@@ -9531,8 +9800,9 @@ fn build_product_dfa(
 
     if profile_timing {
         eprintln!(
-            "[glrmask/profile][tokenizer] product_phases groups={} classes={} direct_single_visible_group={} component_compile_ms={:.3} equivalence_classes_ms={:.3} class_transition_ms={:.3} product_state_expand_ms={:.3} direct_future_ms={:.3} byte_expand_ms={:.3}",
-            components.len(),
+            "[glrmask/profile][tokenizer] product_phases groups={} coordinates={} classes={} direct_single_visible_group={} component_compile_ms={:.3} equivalence_classes_ms={:.3} class_transition_ms={:.3} product_state_expand_ms={:.3} direct_future_ms={:.3} byte_expand_ms={:.3}",
+            num_groups,
+            num_coordinates,
             num_classes,
             direct_single_visible_group,
             component_compile_ms.unwrap_or_default(),
@@ -10434,7 +10704,7 @@ fn try_compile_compact_zero_min_repeat_intersection_runtime(
         })?;
     let other_index = 1 - lazy_index;
     let other_component =
-        compile_product_component_with_options(&plan.compiled_exprs[other_index], false, true);
+        compile_product_component_with_options(&plan.compiled_exprs[other_index], false, true, None);
     let other_dfa = other_component.materialized_dfa()?;
     let other_dead = other_component.dead_state();
     let (class_map, class_members) =
@@ -10570,7 +10840,7 @@ fn try_compile_lazy_zero_min_repeat_intersection(
         })?;
     let other_index = 1 - lazy_index;
     let other_component =
-        compile_product_component_with_options(&plan.compiled_exprs[other_index], true, true);
+        compile_product_component_with_options(&plan.compiled_exprs[other_index], true, true, None);
     let other_dfa = other_component.materialized_dfa()?;
     let other_dead = other_component.dead_state();
 
@@ -10783,7 +11053,7 @@ fn try_compile_with_plan_deferred_dense_min_pair_cells(
     {
         return Ok((DeferredDfa::Ready(dfa), Some(trace)));
     }
-    let (components, component_cache_hits, _) =
+    let (components, component_cache_hits, _, _) =
         compile_product_components_profiled(&plan.compiled_exprs, profile_detail, true, true);
     let pair_cells = components
         .first()
@@ -12128,6 +12398,76 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_product_coordinates_collapse_without_changing_observations() {
+        let repeated = Expr::Seq(vec![
+            Expr::U8Class(U8Set::from_bytes(b"ab")),
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"bc"))),
+                min: 1,
+                max: Some(3),
+            },
+        ]);
+        let expressions = vec![
+            repeated.clone(),
+            repeated,
+            Expr::U8Seq(b"ac".to_vec()),
+        ];
+        let exclusions = BTreeMap::new();
+        let intersections = BTreeMap::new();
+        let collapsed = super::build_product_dfa(
+            &expressions,
+            None,
+            expressions.len(),
+            &exclusions,
+            &intersections,
+            false,
+            true,
+        )
+        .0;
+        let uncollapsed = super::build_product_dfa(
+            &expressions,
+            None,
+            expressions.len(),
+            &exclusions,
+            &intersections,
+            true,
+            true,
+        )
+        .0;
+        assert_eq!(collapsed, uncollapsed);
+    }
+
+    #[test]
+    fn duplicate_product_coordinates_preserve_group_operations() {
+        let repeated = Expr::Seq(vec![
+            Expr::U8Class(U8Set::from_bytes(b"ab")),
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"bc"))),
+                min: 1,
+                max: Some(3),
+            },
+        ]);
+        let expressions = vec![
+            Expr::Exclude {
+                expr: Box::new(repeated.clone()),
+                exclude: Box::new(repeated.clone()),
+            },
+            Expr::Choice(vec![repeated, Expr::U8Seq(b"ac".to_vec())]),
+        ];
+        let collapsed = super::compile_with_plan_internal(
+            super::build_exclusion_compile_plan(&expressions),
+            false,
+        )
+        .0;
+        let uncollapsed = super::compile_with_plan_internal(
+            super::build_exclusion_compile_plan(&expressions),
+            true,
+        )
+        .0;
+        assert_eq!(collapsed, uncollapsed);
+    }
+
+    #[test]
     fn duplicate_product_components_share_the_same_dfa() {
         let expr = Expr::Seq(vec![
             Expr::U8Seq(vec![b'"']),
@@ -12437,6 +12777,63 @@ mod tests {
             "GLRM family exact repeat did not match at len 16: {:?}",
             exec.matches,
         );
+    }
+
+    #[test]
+    fn product_vbr_with_literal_prefix_and_no_suffix_uses_direct_path() {
+        let expression = Expr::Seq(vec![
+            Expr::U8Seq(b"pre".to_vec()),
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"ab"))),
+                min: 2,
+                max: Some(5),
+            },
+        ]);
+
+        let direct = super::compile_product_component_dfa_direct(&expression)
+            .expect("literal prefix followed by bounded repeat should compile directly")
+            .0;
+        let generic = super::compile_product_component_dfa(&expression);
+        assert_dfa_observation_equivalent(&direct, &generic);
+        assert_eq!(direct.num_states(), 3 + (5 + 1) * 2);
+    }
+
+    #[test]
+    fn repeated_bounded_repeat_bodies_share_one_local_base_dfa() {
+        let body = Expr::Seq(vec![
+            Expr::U8Class(U8Set::from_bytes(b"ab")),
+            Expr::U8Class(U8Set::from_bytes(b"cd")),
+        ]);
+        let expressions = vec![
+            Expr::Repeat {
+                expr: Box::new(body.clone()),
+                min: 1,
+                max: Some(4),
+            },
+            Expr::Seq(vec![
+                Expr::U8Seq(b"pre".to_vec()),
+                Expr::Repeat {
+                    expr: Box::new(body.clone()),
+                    min: 2,
+                    max: Some(5),
+                },
+            ]),
+        ];
+        let expression_refs = expressions.iter().collect::<Vec<_>>();
+        let cache = super::build_repeat_base_dfa_cache(&expression_refs);
+        assert_eq!(cache.len(), 1);
+        assert!(cache.contains_key(&body));
+
+        for expression in &expressions {
+            let cached = super::compile_product_component_materialized_dfa_with_options_and_cache(
+                expression,
+                false,
+                Some(&cache),
+            );
+            let uncached =
+                super::compile_product_component_materialized_dfa_with_options(expression, false);
+            assert_dfa_observation_equivalent(&cached, &uncached);
+        }
     }
 
     #[test]
