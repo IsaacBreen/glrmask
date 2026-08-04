@@ -842,6 +842,16 @@ mod lexer_partition_plan_tests {
 
     #[test]
     fn profiled_compile_installs_vocab_certifier_before_synthetic_planning() {
+        let _lock = DIRECT_TOKEN_QUOTIENT_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let key = "GLRMASK_DIRECT_TOKEN_QUOTIENT_COMPILE";
+        let _restore = EnvVarRestore {
+            key,
+            original: std::env::var_os(key),
+        };
+        unsafe { std::env::remove_var(key) };
+
         let grammar = GrammarDef {
             rules: vec![Rule {
                 lhs: 0,
@@ -875,7 +885,7 @@ mod lexer_partition_plan_tests {
         assert!(profile.synthetic_token_quotient_certified);
         assert!(profile.synthetic_candidate_terminals > 0);
         assert!(profile.synthetic_observation_states < profile.tokenizer_final_states);
-        assert_eq!(profile.synthetic_compile_states, profile.tokenizer_final_states);
+        assert!(profile.synthetic_compile_states < profile.tokenizer_final_states);
     }
 
     #[test]
@@ -3075,7 +3085,7 @@ fn compile_prepared_with_profile_and_table_construction(
                             let value = value.trim().to_ascii_lowercase();
                             !matches!(value.as_str(), "" | "0" | "false" | "no" | "off")
                         })
-                        .unwrap_or(false);
+                        .unwrap_or(true);
                 if use_full_tokenizer_for_token_quotient
                     && !direct_token_quotient_compile
                     && let (Some(deferred), Some(certified)) = (
