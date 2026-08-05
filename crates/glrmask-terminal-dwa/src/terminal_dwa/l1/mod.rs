@@ -29,6 +29,7 @@ type L1WalkProfile = Arc<[(u32, Arc<[(u32, u32)]>)]>;
 /// very large exact L1 quotients. Below this size the established per-state
 /// allocation path is cheaper.
 const LARGE_EXACT_L1_ASSEMBLY_MIN_STATES: usize = 50_000;
+const PARALLEL_L1_GROUP_ASSEMBLY_MIN_VISITS: usize = 20_000;
 
 fn freeze_l1_walk_profile(runs: &[(u32, u32, u32)]) -> L1WalkProfile {
     let mut grouped = Vec::<(u32, Vec<(u32, u32)>)>::new();
@@ -835,16 +836,24 @@ fn l1_remaining_horizon_target_probe_supports_quotients(raw_unique_targets: usiz
     raw_unique_targets >= 20_000
 }
 
-fn l1_sequential_group_assembly_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
+fn l1_sequential_group_assembly_override() -> Option<bool> {
+    static OVERRIDE: OnceLock<Option<bool>> = OnceLock::new();
+    *OVERRIDE.get_or_init(|| {
         std::env::var("GLRMASK_L1_SEQUENTIAL_GROUP_ASSEMBLY")
+            .ok()
             .map(|value| {
                 let trimmed = value.trim();
                 trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
             })
-            .unwrap_or(true)
     })
+}
+
+#[inline]
+fn auto_use_sequential_l1_group_assembly(
+    contribution_group_visits: usize,
+    rayon_threads: usize,
+) -> bool {
+    rayon_threads <= 1 || contribution_group_visits < PARALLEL_L1_GROUP_ASSEMBLY_MIN_VISITS
 }
 
 fn l1_prefers_flat_utf8_lead_bucket(
@@ -3464,8 +3473,13 @@ fn find_l1_exact_state_equivalence_by_components_with_first_target_cache(
             }
         }
     };
-    let parallel_key_fill = std::env::var_os("GLRMASK_DISABLE_PARALLEL_L1_STATE_KEYS")
-        .is_none()
+    // Finite-horizon quotients already spend parallel work constructing their
+    // canonical state maps, and this key fill runs inside an outer parallel
+    // partition. Fanning out again here competes with sibling partitions and
+    // lengthens the build tail. Ordinary exact-profile rows do not have that
+    // prior quotient cost and retain the profitable parallel fill.
+    let parallel_key_fill = horizon_maps.is_none()
+        && std::env::var_os("GLRMASK_DISABLE_PARALLEL_L1_STATE_KEYS").is_none()
         && rayon::current_num_threads() > 1
         && row_width > 0
         && num_states_in.saturating_mul(row_width) >= 1_000_000;
@@ -6115,8 +6129,18 @@ fn build_l1_terminal_dwa(
     }
 
     let contribution_seed_ms = contribution_seed_started_at.elapsed().as_secs_f64() * 1000.0;
+    let contribution_group_visits = tsid_group_contributions
+        .iter()
+        .flat_map(|contributions| contributions.iter())
+        .map(|(sig_id, _)| signature_groups[*sig_id].len())
+        .sum::<usize>();
     let per_tsid_group_entries_started_at = Instant::now();
-    let direct_group_assembly = l1_sequential_group_assembly_enabled();
+    let direct_group_assembly = l1_sequential_group_assembly_override().unwrap_or_else(|| {
+        auto_use_sequential_l1_group_assembly(
+            contribution_group_visits,
+            rayon::current_num_threads(),
+        )
+    });
     let group_weight_entries: Vec<Vec<(u32, Arc<RangeSetBlaze<u32>>)>> =
         if direct_group_assembly {
             // In the single-threaded case, avoid allocating `num_groups` fresh
@@ -6435,7 +6459,11 @@ fn build_l1_terminal_dwa(
     let merge_ms = merge_started_at.elapsed().as_secs_f64() * 1000.0;
     if compile_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][l1_terminal_assembly] start_collect_ms={:.3} token_intern_ms={:.3} full_ranges_ms={:.3} terminal_group_ms={:.3} contribution_seed_ms={:.3} per_tsid_group_entries_ms={:.3} group_weight_entries_ms={:.3} dwa_build_ms={:.3} total_direct_ms={:.3}",
+            "[glrmask/profile][l1_terminal_assembly] mode={} num_tsids={} num_groups={} contribution_group_visits={} start_collect_ms={:.3} token_intern_ms={:.3} full_ranges_ms={:.3} terminal_group_ms={:.3} contribution_seed_ms={:.3} per_tsid_group_entries_ms={:.3} group_weight_entries_ms={:.3} dwa_build_ms={:.3} total_direct_ms={:.3}",
+            if direct_group_assembly { "sequential" } else { "parallel" },
+            num_tsids,
+            num_groups,
+            contribution_group_visits,
             start_state_collect_ms,
             token_set_intern_ms,
             full_ranges_ms,
@@ -7894,6 +7922,22 @@ mod packed_suffix_product_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn large_group_assembly_uses_parallel_crossover_only_with_workers() {
+        assert!(auto_use_sequential_l1_group_assembly(
+            PARALLEL_L1_GROUP_ASSEMBLY_MIN_VISITS - 1,
+            8,
+        ));
+        assert!(!auto_use_sequential_l1_group_assembly(
+            PARALLEL_L1_GROUP_ASSEMBLY_MIN_VISITS,
+            8,
+        ));
+        assert!(auto_use_sequential_l1_group_assembly(
+            PARALLEL_L1_GROUP_ASSEMBLY_MIN_VISITS,
+            1,
+        ));
     }
 
     #[test]

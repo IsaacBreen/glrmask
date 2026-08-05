@@ -196,6 +196,8 @@ fn elapsed_ms(started_at: Instant) -> f64 {
     started_at.elapsed().as_secs_f64() * 1000.0
 }
 
+const DEFAULT_COMPILE_THREAD_CAP: usize = 10;
+
 fn compile_thread_count() -> Option<usize> {
     if let Some(value) = std::env::var("GLRMASK_COMPILE_THREADS")
         .ok()
@@ -217,7 +219,7 @@ fn compile_thread_count() -> Option<usize> {
     {
         return std::thread::available_parallelism()
             .ok()
-            .map(|parallelism| parallelism.get().min(8))
+            .map(|parallelism| parallelism.get().min(DEFAULT_COMPILE_THREAD_CAP))
             .filter(|&value| value > 1);
     }
 
@@ -225,7 +227,7 @@ fn compile_thread_count() -> Option<usize> {
     {
         return std::thread::available_parallelism()
             .ok()
-            .map(|parallelism| parallelism.get().min(8))
+            .map(|parallelism| parallelism.get().min(DEFAULT_COMPILE_THREAD_CAP))
             .filter(|&value| value > 1);
     }
 }
