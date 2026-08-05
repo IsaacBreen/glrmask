@@ -15,7 +15,10 @@ pub(crate) mod row;
 
 pub use action::{Action, GuardedStackShift, StackShift, StackShiftGuard};
 #[allow(unused_imports)]
-pub use compose::{ComposedTable, SubgrammarTableInput, compose_subgrammar_tables};
+pub use compose::{
+    ComposedTable, SubgrammarTableInput, compose_subgrammar_tables,
+    compose_subgrammar_tables_explicit,
+};
 
 use build::{build_table, build_table_with_default_construction, Item, PendingAction};
 use optimize::merge_same_core_lr1_states;
@@ -100,6 +103,16 @@ pub struct GLRTable {
     /// transfer mechanism. The characterization should treat these as
     /// non-replace to avoid creating pop-0 reduces in the template NFA.
     pub forwarded_shifts: FxHashSet<(u32, TerminalID)>,
+    /// Linker-internal zero-width terminal labels. These are never emitted by
+    /// the lexer; parser execution computes their closure before and after a
+    /// real terminal.
+    #[serde(default)]
+    pub control_terminals: BTreeSet<TerminalID>,
+    /// Terminals whose table action is parser identity in a subset of states.
+    /// This metadata preserves scoped ignore ownership across nested compiled
+    /// composition; the actions themselves remain the execution authority.
+    #[serde(default)]
+    pub skip_terminals: BTreeSet<TerminalID>,
     #[serde(skip)]
     pub guarded_shift_index: Vec<FxHashMap<TerminalID, GuardedShiftCellIndex>>,
     /// Maximum-width direct-regular frontier descriptors captured while rows
@@ -306,6 +319,8 @@ impl GLRTable {
             admission_policy: AdmissionPolicy::RowPresenceExact,
             advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
+            control_terminals: Default::default(),
+            skip_terminals: Default::default(),
             guarded_shift_index: Vec::new(),
             direct_regular_wide_frontiers: Vec::new(),
         }
@@ -709,6 +724,8 @@ pub mod testing {
             admission_policy: AdmissionPolicy::RowPresenceExact,
             advance,
             forwarded_shifts: Default::default(),
+            control_terminals: Default::default(),
+            skip_terminals: Default::default(),
             guarded_shift_index: Vec::new(),
             direct_regular_wide_frontiers: Vec::new(),
         }

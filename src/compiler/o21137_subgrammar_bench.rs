@@ -628,6 +628,7 @@ fn profile_owned_parent_tokenizer(
             crate::compiler::glr::table::SubgrammarTableInput {
                 placeholder_terminal,
                 table: &child.table,
+                ignore_terminal: child.ignore_terminal,
                 start_nullable: child.table.embedded_start_nullable(),
             }
         })

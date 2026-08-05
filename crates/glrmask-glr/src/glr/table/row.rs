@@ -828,6 +828,8 @@ mod tests {
             admission_policy: AdmissionPolicy::RowPresenceExact,
             advance: Vec::new(),
             forwarded_shifts: Default::default(),
+            control_terminals: Default::default(),
+            skip_terminals: Default::default(),
             guarded_shift_index: Vec::new(),
             direct_regular_wide_frontiers: Vec::new(),
         };
@@ -865,6 +867,8 @@ mod tests {
             admission_policy: AdmissionPolicy::RowPresenceExact,
             advance: Vec::new(),
             forwarded_shifts: Default::default(),
+            control_terminals: Default::default(),
+            skip_terminals: Default::default(),
             guarded_shift_index: Vec::new(),
             direct_regular_wide_frontiers: Vec::new(),
         };

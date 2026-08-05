@@ -3,7 +3,7 @@ use std::io::{BufWriter, Read, Write};
 
 const CONSTRAINT_MAGIC: [u8; 8] = *b"GLRCONS\0";
 const LEGACY_CONSTRAINT_VERSION: u16 = 7;
-const CONSTRAINT_VERSION: u16 = 8;
+const CONSTRAINT_VERSION: u16 = 9;
 const CONSTRAINT_HEADER_LEN: usize = CONSTRAINT_MAGIC.len() + 2 + 8;
 const COMPRESSED_PAYLOAD_HEADER_LEN: usize = 8;
 const CONSTRAINT_COMPRESSION_LEVEL: i32 = 1;
@@ -223,6 +223,13 @@ mod tests {
         let mut previous_version = saved;
         previous_version[8..10].copy_from_slice(&2u16.to_le_bytes());
         assert!(Constraint::load(&previous_version)
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported"));
+
+        let mut previous_schema = constraint.save();
+        previous_schema[8..10].copy_from_slice(&8u16.to_le_bytes());
+        assert!(Constraint::load(&previous_schema)
             .unwrap_err()
             .to_string()
             .contains("unsupported"));

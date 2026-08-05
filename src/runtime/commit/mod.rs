@@ -11,12 +11,16 @@ use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::compiler::glr::parser::{
     ParserGSS,
     apply_guarded_stack_shifts_fast,
+    advance_control_closed_stacks,
+    advance_control_closed_stacks_owned,
     advance_stacks,
     advance_stacks_profiled,
     advance_stacks_owned,
     AdvanceProfile,
     stack_may_advance_on,
+    stack_may_advance_on_control_closed,
     stack_may_advance_on_any,
+    stack_may_advance_on_any_control_closed,
 };
 use crate::compiler::glr::table::{Action, AdmissionPolicy, GLRTable};
 use crate::runtime::constraint::Constraint;
@@ -440,7 +444,11 @@ fn advance_parser_stacks(
         return template_advanced;
     }
 
-    advance_stacks(&constraint.table, stack, terminal)
+    if constraint.table.control_terminals.is_empty() {
+        advance_stacks(&constraint.table, stack, terminal)
+    } else {
+        advance_control_closed_stacks(&constraint.table, stack, terminal)
+    }
 }
 
 fn advance_parser_stacks_owned(
@@ -467,7 +475,11 @@ fn advance_parser_stacks_owned(
         return template_advanced;
     }
 
-    advance_stacks_owned(&constraint.table, stack, terminal)
+    if constraint.table.control_terminals.is_empty() {
+        advance_stacks_owned(&constraint.table, stack, terminal)
+    } else {
+        advance_control_closed_stacks_owned(&constraint.table, stack, terminal)
+    }
 }
 
 fn advance_parser_stacks_profiled(
@@ -530,7 +542,13 @@ fn parser_may_advance_on(constraint: &Constraint, stack: &ParserGSS, terminal: u
     constraint
         .direct_regular_admissible_terminals(stack)
         .map_or_else(
-            || stack_may_advance_on(&constraint.table, stack, terminal),
+            || {
+                if constraint.table.control_terminals.is_empty() {
+                    stack_may_advance_on(&constraint.table, stack, terminal)
+                } else {
+                    stack_may_advance_on_control_closed(&constraint.table, stack, terminal)
+                }
+            },
             |terminals| terminals.contains(terminal as usize),
         )
 }
@@ -544,7 +562,13 @@ fn parser_may_advance_on_any(
     constraint
         .direct_regular_admissible_terminals(stack)
         .map_or_else(
-            || stack_may_advance_on_any(&constraint.table, stack, terminals),
+            || {
+                if constraint.table.control_terminals.is_empty() {
+                    stack_may_advance_on_any(&constraint.table, stack, terminals)
+                } else {
+                    stack_may_advance_on_any_control_closed(&constraint.table, stack, terminals)
+                }
+            },
             |admitted| {
                 admitted
                     .words()
@@ -2087,6 +2111,7 @@ fn commit_bytes_fast_path(
 ) -> Option<Result<(), String>> {
     let gss = state.values().next().unwrap();
     let ignore_terminal = constraint.ignore_terminal;
+    let has_linker_controls = !constraint.table.control_terminals.is_empty();
 
     // Find exactly 1 non-ignored, actionable terminal match consuming all bytes
     let mut sole_terminal: Option<u32> = None;
@@ -2121,7 +2146,7 @@ fn commit_bytes_fast_path(
 
     // Ultra-fast path: single Interface, empty accs, no end_state, pure shift.
     // Inlines the entire advance + prune + fuse to avoid all function call overhead.
-    if all_accs_empty && !template_advance_enabled() {
+    if !has_linker_controls && all_accs_empty && !template_advance_enabled() {
         let top_state = gss.single_exclusive_top_value();
         if let Some(top_state) = top_state {
             if let Some(action) = constraint.table.action(top_state, terminal) {
@@ -2175,7 +2200,8 @@ fn commit_bytes_fast_path(
 
     // The terminal and tokenizer end-state continuations are independent.
     // Preserve either branch if it produces viable parser state.
-    let advanced = if !template_advance_enabled()
+    let advanced = if !has_linker_controls
+        && !template_advance_enabled()
         && let Some(top_state) = pruned_gss.single_exclusive_top_value()
         && let Some(action) = constraint.table.action(top_state, terminal)
         && let Some(advanced) = apply_single_top_action_fast(
@@ -2226,6 +2252,7 @@ fn commit_bytes_full_width_fast_path(
     state: &mut ParserStateMap,
     bytes: &[u8],
 ) -> Option<Result<(), String>> {
+    let has_linker_controls = !constraint.table.control_terminals.is_empty();
     if constraint.tokenizer_has_epsilon_transitions
         && state_has_nonempty_accumulators(state)
     {
@@ -2241,7 +2268,9 @@ fn commit_bytes_full_width_fast_path(
     let mut output = ParserStatesByTokenizer::default();
     for (&tokenizer_state, gss) in state.iter() {
         let exec_result = execute_tokenizer_from_state_small(constraint, bytes, tokenizer_state);
-        let actionable_terminals = ActionableTerminals::from_gss(constraint, gss);
+        let actionable_terminals = (!has_linker_controls)
+            .then(|| ActionableTerminals::from_gss(constraint, gss))
+            .flatten();
         let mut terminal = None;
 
         for matched in &exec_result.matches {
@@ -2276,7 +2305,8 @@ fn commit_bytes_full_width_fast_path(
         };
 
         if let Some(terminal) = terminal {
-            let advanced = if !template_advance_enabled()
+            let advanced = if !has_linker_controls
+                && !template_advance_enabled()
                 && let Some(top_state) = pruned_gss.single_exclusive_top_value()
                 && let Some(action) = constraint.table.action(top_state, terminal)
                 && let Some(advanced) =
@@ -2980,6 +3010,7 @@ fn commit_bytes_small_queue_fast_path(
     tokenizer_scratch: &mut tokenizer_scan::ReusableTokenizerExecScratch,
     queue_scratch: &mut SmallCommitQueueScratch,
 ) -> Option<Result<(), String>> {
+    let has_linker_controls = !constraint.table.control_terminals.is_empty();
     if bytes.len() > 8 || state.len() > 2 {
         return None;
     }
@@ -3027,7 +3058,9 @@ fn commit_bytes_small_queue_fast_path(
                 }
             }
 
-            let actionable_terminals = ActionableTerminals::from_gss(constraint, &gss_at_offset);
+            let actionable_terminals = (!has_linker_controls)
+                .then(|| ActionableTerminals::from_gss(constraint, &gss_at_offset))
+                .flatten();
             let normalized_matches = collect_unique_actionable_matches(
                 constraint,
                 actionable_terminals.as_ref(),
@@ -3060,7 +3093,8 @@ fn commit_bytes_small_queue_fast_path(
                     continue;
                 }
 
-                let advanced = if !template_advance_enabled()
+                let advanced = if !has_linker_controls
+                    && !template_advance_enabled()
                     && let Some(top_state) = gss_at_offset.single_exclusive_top_value()
                     && let Some(action) = constraint.table.action(top_state, matched.terminal_id)
                     && let Some(advanced) = apply_single_top_action_fast(
@@ -5803,6 +5837,13 @@ fn commit_bytes_impl_inner(
         );
     }
     let ignore_terminal = constraint.ignore_terminal;
+    // Linker control terminals are zero-width parser transitions.  The
+    // allocation-free commit fast paths assume that every parser transition is
+    // driven by a completed lexer terminal and therefore cannot yet preserve
+    // control closure between lexemes.  Keep explicit-control tables on the
+    // authoritative queue path until each fast path has its own equivalence
+    // proof/implementation.
+    let has_linker_controls = !constraint.table.control_terminals.is_empty();
     let direct_dynamic = constraint.uses_dynamic_runtime()
         && constraint.direct_regular_automaton.is_some();
 
@@ -5810,7 +5851,10 @@ fn commit_bytes_impl_inner(
     // terminal support. Scan only that support instead of materializing every
     // tokenizer finalizer, which can be proportional to the remaining source
     // file in project-scale diff grammars.
-    if state.len() == 1 && !constraint.tokenizer_has_epsilon_transitions {
+    if !has_linker_controls
+        && state.len() == 1
+        && !constraint.tokenizer_has_epsilon_transitions
+    {
         let (&start_tokenizer_state, gss) = state.iter().next().unwrap();
         if let Some(summary) = constraint.direct_regular_wide_frontier_for_gss(gss)
             && let Some(accumulator) = gss.uniform_accumulator()
@@ -5841,7 +5885,8 @@ fn commit_bytes_impl_inner(
         }
     }
 
-    if !direct_dynamic
+    if !has_linker_controls
+        && !direct_dynamic
         && state.len() == 1
         && let Some(result) = try_commit_direct_linear_in_place(
             constraint,
@@ -5859,7 +5904,8 @@ fn commit_bytes_impl_inner(
         return result;
     }
 
-    if !direct_dynamic
+    if !has_linker_controls
+        && !direct_dynamic
         && let Some(result) = try_commit_multi_state_lexer_only(
         constraint,
         state,
@@ -5874,7 +5920,8 @@ fn commit_bytes_impl_inner(
         }
         return result;
     }
-    if !direct_dynamic
+    if !has_linker_controls
+        && !direct_dynamic
         && state.len() <= FLAT_FRONTIER_MAX_BRANCHES
         && let Some(result) = try_commit_flat_frontier_in_place(
             constraint,
@@ -5898,7 +5945,10 @@ fn commit_bytes_impl_inner(
 
     // Exact no-match self-loops are the simplest lexer-only case: neither the
     // tokenizer key nor the parser GSS changes.
-    if !constraint.tokenizer_has_epsilon_transitions && state.len() == 1 {
+    if !has_linker_controls
+        && !constraint.tokenizer_has_epsilon_transitions
+        && state.len() == 1
+    {
         let (&start_tokenizer_state, _) = state.iter().next().unwrap();
         let mut tokenizer_state = start_tokenizer_state;
         let mut no_matches = true;
@@ -5993,7 +6043,7 @@ fn commit_bytes_impl_inner(
     // happen before mutation, so declining this path leaves the old fallback
     // semantics untouched. A plain shift is exact regardless of whether the
     // equivalent template-DFA advance is enabled.
-    if state.len() == 1 {
+    if !has_linker_controls && state.len() == 1 {
         let initial_tokenizer_state = constraint.runtime_commit_initial_state();
         let (&tokenizer_state, gss) = state.iter().next().unwrap();
         if tokenizer_state == initial_tokenizer_state
@@ -6030,7 +6080,7 @@ fn commit_bytes_impl_inner(
         }
     }
 
-    if state.len() == 1 {
+    if !has_linker_controls && state.len() == 1 {
         let (&tokenizer_state, _) = state.iter().next().unwrap();
         let exec_result = execute_tokenizer_from_state_small(constraint, bytes, tokenizer_state);
         if let Some(result) = commit_bytes_fast_path(
@@ -6045,7 +6095,7 @@ fn commit_bytes_impl_inner(
     }
 
     // Single tokenizer state: execute tokenizer ONCE, try fast path, reuse result
-    if state.len() == 1 {
+    if !has_linker_controls && state.len() == 1 {
         let (&tokenizer_state, parser_gss) = state.iter().next().unwrap();
         if parser_gss.single_exclusive_top_value().is_some() {
             if let Some(result) = commit_bytes_direct_linear_fast_path(
@@ -6075,17 +6125,19 @@ fn commit_bytes_impl_inner(
         }
     }
 
-    let language_small_queue_result = commit_bytes_language_small_queue_fast_path(
-        constraint,
-        state,
-        bytes,
-        &mut bufs.reusable_tokenizer_exec,
-        &mut bufs.small_queue,
-        &mut bufs.template_advance_runtime,
-        false,
-    );
-    if let Some(result) = language_small_queue_result {
-        return result;
+    if !has_linker_controls {
+        let language_small_queue_result = commit_bytes_language_small_queue_fast_path(
+            constraint,
+            state,
+            bytes,
+            &mut bufs.reusable_tokenizer_exec,
+            &mut bufs.small_queue,
+            &mut bufs.template_advance_runtime,
+            false,
+        );
+        if let Some(result) = language_small_queue_result {
+            return result;
+        }
     }
 
     let small_queue_result = commit_bytes_small_queue_fast_path(
@@ -6096,14 +6148,23 @@ fn commit_bytes_impl_inner(
         &mut bufs.small_queue,
     );
     if let Some(result) = small_queue_result {
+        if debug_path {
+            eprintln!("[glrmask/debug][commit_path] small_queue states={}", state.len());
+        }
         return result;
     }
 
     if let Some(result) = commit_bytes_full_width_fast_path(constraint, state, bytes) {
+        if debug_path {
+            eprintln!("[glrmask/debug][commit_path] full_width states={}", state.len());
+        }
         return result;
     }
 
-    if !constraint.tokenizer_has_epsilon_transitions && state.len() == 1 {
+    if !has_linker_controls
+        && !constraint.tokenizer_has_epsilon_transitions
+        && state.len() == 1
+    {
         let (&tokenizer_state, _) = state.iter().next().unwrap();
         let exec_result = execute_tokenizer_from_state_small(constraint, bytes, tokenizer_state);
 

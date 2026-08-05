@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use range_set_blaze::RangeSetBlaze;
 
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
-use crate::compiler::glr::parser::ParserGSS;
+use crate::compiler::glr::parser::{ParserGSS, close_control_stacks};
 use crate::grammar::flat::TerminalID;
 
 use super::artifact::Constraint;
@@ -186,6 +186,11 @@ impl Constraint {
 	pub(crate) fn initial_state_map(&self) -> crate::runtime::state::ParserStateMap {
 		let initial_tok_state = self.tokenizer.initial_state();
 		let parser_gss = ParserGSS::from_stacks(&[(vec![0u32], TerminalsDisallowed::new())]);
+		let parser_gss = if self.table.control_terminals.is_empty() {
+			parser_gss
+		} else {
+			close_control_stacks(&self.table, &parser_gss)
+		};
 		crate::runtime::state::ParserStateMap::singleton(initial_tok_state, parser_gss)
 	}
 

@@ -4470,6 +4470,8 @@ mod tests {
             admission_policy: AdmissionPolicy::RowPresenceExact,
             advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
+            control_terminals: Default::default(),
+            skip_terminals: Default::default(),
             guarded_shift_index: Vec::new(),
             direct_regular_wide_frontiers: Vec::new(),
         }
@@ -4652,6 +4654,8 @@ mod tests {
                 admission_policy: AdmissionPolicy::RowPresenceExact,
                 advance: Vec::new(),
                 forwarded_shifts: FxHashSet::default(),
+                control_terminals: Default::default(),
+                skip_terminals: Default::default(),
                 guarded_shift_index: Vec::new(),
                 direct_regular_wide_frontiers: Vec::new(),
             };
@@ -4723,6 +4727,8 @@ mod tests {
             admission_policy: AdmissionPolicy::RowPresenceExact,
             advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
+            control_terminals: Default::default(),
+            skip_terminals: Default::default(),
             guarded_shift_index: Vec::new(),
             direct_regular_wide_frontiers: Vec::new(),
         };
@@ -4806,6 +4812,8 @@ mod tests {
             admission_policy: AdmissionPolicy::RowPresenceExact,
             advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
+            control_terminals: Default::default(),
+            skip_terminals: Default::default(),
             guarded_shift_index: Vec::new(),
             direct_regular_wide_frontiers: Vec::new(),
         };
@@ -5183,6 +5191,8 @@ mod tests {
             admission_policy: AdmissionPolicy::RowPresenceExact,
             advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
+            control_terminals: Default::default(),
+            skip_terminals: Default::default(),
             guarded_shift_index: Vec::new(),
             direct_regular_wide_frontiers: Vec::new(),
         };
@@ -5236,6 +5246,8 @@ mod tests {
             admission_policy: AdmissionPolicy::RowPresenceExact,
             advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
+            control_terminals: Default::default(),
+            skip_terminals: Default::default(),
             guarded_shift_index: Vec::new(),
             direct_regular_wide_frontiers: Vec::new(),
         };
@@ -5279,6 +5291,8 @@ mod tests {
             admission_policy: AdmissionPolicy::RowPresenceExact,
             advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
+            control_terminals: Default::default(),
+            skip_terminals: Default::default(),
             guarded_shift_index: Vec::new(),
             direct_regular_wide_frontiers: Vec::new(),
         };
@@ -5344,6 +5358,8 @@ mod tests {
             admission_policy: AdmissionPolicy::RowPresenceExact,
             advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
+            control_terminals: Default::default(),
+            skip_terminals: Default::default(),
             guarded_shift_index: Vec::new(),
             direct_regular_wide_frontiers: Vec::new(),
         };
@@ -5404,6 +5420,8 @@ mod tests {
             admission_policy: AdmissionPolicy::RowPresenceExact,
             advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
+            control_terminals: Default::default(),
+            skip_terminals: Default::default(),
             guarded_shift_index: Vec::new(),
             direct_regular_wide_frontiers: Vec::new(),
         };
@@ -5463,6 +5481,8 @@ mod tests {
             admission_policy: AdmissionPolicy::RowPresenceExact,
             advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
+            control_terminals: Default::default(),
+            skip_terminals: Default::default(),
             guarded_shift_index: Vec::new(),
             direct_regular_wide_frontiers: Vec::new(),
         };
@@ -5489,6 +5509,8 @@ mod tests {
             admission_policy: AdmissionPolicy::RowPresenceExact,
             advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
+            control_terminals: Default::default(),
+            skip_terminals: Default::default(),
             guarded_shift_index: Vec::new(),
             direct_regular_wide_frontiers: Vec::new(),
         };
@@ -5549,6 +5571,8 @@ mod tests {
             admission_policy: AdmissionPolicy::RowPresenceExact,
             advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
+            control_terminals: Default::default(),
+            skip_terminals: Default::default(),
             guarded_shift_index: Vec::new(),
             direct_regular_wide_frontiers: Vec::new(),
         };
@@ -5598,6 +5622,8 @@ mod tests {
             admission_policy: AdmissionPolicy::RowPresenceExact,
             advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
+            control_terminals: Default::default(),
+            skip_terminals: Default::default(),
             guarded_shift_index: Vec::new(),
             direct_regular_wide_frontiers: Vec::new(),
         };
@@ -5664,6 +5690,8 @@ mod tests {
             admission_policy: AdmissionPolicy::RowPresenceExact,
             advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
+            control_terminals: Default::default(),
+            skip_terminals: Default::default(),
             guarded_shift_index: Vec::new(),
             direct_regular_wide_frontiers: Vec::new(),
         };
@@ -5703,6 +5731,8 @@ mod tests {
             admission_policy: AdmissionPolicy::RowPresenceExact,
             advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
+            control_terminals: Default::default(),
+            skip_terminals: Default::default(),
             guarded_shift_index: Vec::new(),
             direct_regular_wide_frontiers: Vec::new(),
         };
@@ -5759,6 +5789,8 @@ mod tests {
             admission_policy: AdmissionPolicy::RowPresenceExact,
             advance: Vec::new(),
             forwarded_shifts: FxHashSet::default(),
+            control_terminals: Default::default(),
+            skip_terminals: Default::default(),
             guarded_shift_index: Vec::new(),
             direct_regular_wide_frontiers: Vec::new(),
         };
@@ -6359,6 +6391,8 @@ pub(super) fn merge_same_core_lr1_states(table: GLRTable, core_keys: &[Vec<Item>
         admission_policy: table.admission_policy,
         advance,
         forwarded_shifts,
+        control_terminals: table.control_terminals,
+        skip_terminals: table.skip_terminals,
         guarded_shift_index: Vec::new(),
         direct_regular_wide_frontiers,
     }

@@ -1013,6 +1013,8 @@ fn try_build_compact_direct_regular_table(grammar: &AnalyzedGrammar) -> Option<G
         admission_policy: AdmissionPolicy::RowPresenceExact,
         advance,
         forwarded_shifts: FxHashSet::default(),
+        control_terminals: Default::default(),
+        skip_terminals: Default::default(),
         guarded_shift_index: Vec::new(),
         direct_regular_wide_frontiers,
     };
@@ -1231,6 +1233,8 @@ fn try_build_direct_regular_table(grammar: &AnalyzedGrammar) -> Option<GLRTable>
         admission_policy: AdmissionPolicy::RowPresenceExact,
         advance,
         forwarded_shifts: FxHashSet::default(),
+        control_terminals: Default::default(),
+        skip_terminals: Default::default(),
         guarded_shift_index: Vec::new(),
         direct_regular_wide_frontiers,
     };
@@ -1317,6 +1321,8 @@ fn try_build_direct_regular_table_reference(grammar: &AnalyzedGrammar) -> Option
         admission_policy: AdmissionPolicy::RowPresenceExact,
         advance: Vec::new(),
         forwarded_shifts: FxHashSet::default(),
+        control_terminals: Default::default(),
+        skip_terminals: Default::default(),
         guarded_shift_index: Vec::new(),
         direct_regular_wide_frontiers: Vec::new(),
     };
@@ -1709,6 +1715,8 @@ fn finish_table(
         admission_policy,
         advance: Vec::new(),
         forwarded_shifts,
+        control_terminals: Default::default(),
+        skip_terminals: Default::default(),
         guarded_shift_index: Vec::new(),
         direct_regular_wide_frontiers: Vec::new(),
     }
@@ -3033,6 +3041,8 @@ fn union_experimental_core_rows(table: GLRTable, partition: &[u32]) -> Option<GL
         admission_policy: table.admission_policy,
         advance: Vec::new(),
         forwarded_shifts,
+        control_terminals: table.control_terminals,
+        skip_terminals: table.skip_terminals,
         guarded_shift_index: Vec::new(),
         direct_regular_wide_frontiers,
     })
