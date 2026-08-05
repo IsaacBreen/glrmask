@@ -1017,6 +1017,130 @@ mod tests {
     }
 
     #[test]
+    fn glrm_uniform_subgrammar_ignore_uses_global_terminal_dwa_path() {
+        let vocab = vocab(&[" ", "<", ">", "a", "b"]);
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                ignore OUTER_WS;
+                t OUTER_WS ::= " "+;
+
+                g inner ::= {
+                    start value;
+                    ignore INNER_WS;
+                    t INNER_WS ::= " "+;
+                    nt value ::= "a" "b";
+                };
+
+                nt document ::= "<" inner ">";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+
+        assert!(
+            constraint.ignore_terminal.is_some(),
+            "uniform scoped ignore should remain a global ignore terminal",
+        );
+        let mut state = constraint.start();
+        state.commit_bytes(b"  < a   b >  ").unwrap();
+        assert!(state.is_complete());
+    }
+
+    #[test]
+    fn glrm_nested_uniform_subgrammar_ignore_uses_global_terminal_dwa_path() {
+        let vocab = vocab(&[" ", "<", ">", "[", "]", "x"]);
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                ignore ROOT_WS;
+                t ROOT_WS ::= " "+;
+
+                g middle ::= {
+                    start wrapped;
+                    ignore MIDDLE_WS;
+                    t MIDDLE_WS ::= " "+;
+
+                    g leaf ::= {
+                        start value;
+                        ignore LEAF_WS;
+                        t LEAF_WS ::= " "+;
+                        nt value ::= "x";
+                    };
+
+                    nt wrapped ::= "[" leaf "]";
+                };
+
+                nt document ::= "<" middle ">";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+
+        assert!(constraint.ignore_terminal.is_some());
+        let mut state = constraint.start();
+        state.commit_bytes(b" < [ x ] > ").unwrap();
+        assert!(state.is_complete());
+    }
+
+    #[test]
+    fn glrm_mixed_subgrammar_ignore_keeps_scoped_grammar_lowering() {
+        let vocab = vocab(&[" ", "\t", "<", ">", "a", "b"]);
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                ignore OUTER_WS;
+                t OUTER_WS ::= " "+;
+
+                g inner ::= {
+                    start value;
+                    ignore INNER_WS;
+                    t INNER_WS ::= "\t"+;
+                    nt value ::= "a" "b";
+                };
+
+                nt document ::= "<" inner ">";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+
+        assert!(
+            constraint.ignore_terminal.is_none(),
+            "different scoped ignores must retain explicit scope-local lowering",
+        );
+        let mut state = constraint.start();
+        state.commit_bytes(b" <\ta\t\tb\t> ").unwrap();
+        assert!(state.is_complete());
+    }
+
+    #[test]
+    fn glrm_child_without_ignore_keeps_scoped_grammar_lowering() {
+        let vocab = vocab(&[" ", "<", ">", "a", "b"]);
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                ignore OUTER_WS;
+                t OUTER_WS ::= " "+;
+
+                g inner ::= {
+                    start value;
+                    nt value ::= "a" "b";
+                };
+
+                nt document ::= "<" inner ">";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+
+        assert!(constraint.ignore_terminal.is_none());
+        let mut state = constraint.start();
+        state.commit_bytes(b" <ab> ").unwrap();
+        assert!(state.is_complete());
+    }
+
+    #[test]
     fn ebnf_import_uses_core_merged_table_by_default() {
         let constraint = Constraint::from_ebnf("start ::= 'a'", &vocab(&["a"])).unwrap();
 

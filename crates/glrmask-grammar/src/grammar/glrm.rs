@@ -59,6 +59,7 @@
 //! | `sep ~ ( i1? i2 i3? )`           | SeparatedSequence                    |
 
 use crate::GlrMaskError;
+use crate::automata::lexer::ast::Expr;
 use crate::automata::unweighted_u32::dfa::Label;
 use crate::automata::unweighted_u32::nfa::NFA;
 use crate::grammar::ast::{
@@ -791,7 +792,8 @@ impl GlrmParser {
             validate_ignore_terminal(&grammar, "grammar")?;
             return Ok(grammar);
         }
-        flatten_scoped_grammar(scope)
+        let preserve_global_ignore = scopes_share_one_ignore_language(&scope, "grammar")?;
+        flatten_scoped_grammar(scope, preserve_global_ignore)
     }
 
     fn parse_scope(
@@ -1609,7 +1611,68 @@ impl FlattenContext {
     }
 }
 
-fn flatten_scoped_grammar(scope: ParsedGlrmScope) -> Result<NamedGrammar, GlrMaskError> {
+/// Return true when every scope declares an ignore terminal with the same
+/// fully resolved terminal expression.
+///
+/// In that case scope-local ignore semantics are exactly equivalent to one
+/// global ignore terminal, so flattening can retain the compiler's original
+/// terminal-DWA ignore path instead of materialising skip productions in the
+/// GLR grammar. This is deliberately conservative: syntactically different
+/// expressions that happen to denote the same byte language use the scoped
+/// fallback until we have a language-equivalence check here.
+fn scopes_share_one_ignore_language(
+    scope: &ParsedGlrmScope,
+    scope_label: &str,
+) -> Result<bool, GlrMaskError> {
+    let grammar = named_grammar_for_scope(scope)?;
+    validate_ignore_terminal(&grammar, scope_label)?;
+    let Some(ignore_name) = grammar.ignore.as_deref() else {
+        return Ok(false);
+    };
+    let resolved = resolved_named_terminal_exprs(&grammar)?;
+    let expected = resolved.get(ignore_name).ok_or_else(|| {
+        err(&format!(
+            "ignore terminal '{ignore_name}' could not be resolved in {scope_label}",
+        ))
+    })?;
+    scopes_match_ignore_language(scope, expected, scope_label)
+}
+
+fn scopes_match_ignore_language(
+    scope: &ParsedGlrmScope,
+    expected: &Expr,
+    scope_label: &str,
+) -> Result<bool, GlrMaskError> {
+    let grammar = named_grammar_for_scope(scope)?;
+    validate_ignore_terminal(&grammar, scope_label)?;
+    let Some(ignore_name) = grammar.ignore.as_deref() else {
+        return Ok(false);
+    };
+    let resolved = resolved_named_terminal_exprs(&grammar)?;
+    let Some(actual) = resolved.get(ignore_name) else {
+        return Err(err(&format!(
+            "ignore terminal '{ignore_name}' could not be resolved in {scope_label}",
+        )));
+    };
+    if actual != expected {
+        return Ok(false);
+    }
+    for subgrammar in &scope.subgrammars {
+        let child_label = format!("{scope_label}::{}", subgrammar.name);
+        if !scopes_match_ignore_language(&subgrammar.scope, expected, &child_label)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn flatten_scoped_grammar(
+    scope: ParsedGlrmScope,
+    preserve_global_ignore: bool,
+) -> Result<NamedGrammar, GlrMaskError> {
+    let global_ignore = preserve_global_ignore
+        .then(|| scope.ignore.clone())
+        .flatten();
     let mut context = FlattenContext {
         next_scope_id: 0,
         used_names: HashSet::new(),
@@ -1618,7 +1681,13 @@ fn flatten_scoped_grammar(scope: ParsedGlrmScope) -> Result<NamedGrammar, GlrMas
         lexer_partitions: BTreeMap::new(),
         lexer_literal_partition_constraints: Vec::new(),
     };
-    let start = flatten_scope(&scope, true, "grammar", &mut context)?;
+    let start = flatten_scope(
+        &scope,
+        true,
+        "grammar",
+        preserve_global_ignore,
+        &mut context,
+    )?;
     let (lexer_partitions, lexer_literal_partitions) = canonicalize_flattened_lexer_partitions(
         &context.rules,
         &start,
@@ -1628,7 +1697,7 @@ fn flatten_scoped_grammar(scope: ParsedGlrmScope) -> Result<NamedGrammar, GlrMas
     Ok(NamedGrammar {
         rules: context.rules,
         start,
-        ignore: None,
+        ignore: global_ignore,
         lexer_partitions,
         lexer_literal_partitions,
         default_lexer_partition: None,
@@ -1729,6 +1798,7 @@ fn flatten_scope(
     scope: &ParsedGlrmScope,
     top_level: bool,
     scope_label: &str,
+    preserve_global_ignore: bool,
     context: &mut FlattenContext,
 ) -> Result<String, GlrMaskError> {
     let symbol_kinds = scope_symbol_kinds(scope, scope_label)?;
@@ -1784,7 +1854,9 @@ fn flatten_scope(
         .map(|rule| rule.name.clone())
         .collect::<HashSet<_>>();
 
-    if let Some(ignore_name) = scope.ignore.as_deref() {
+    if !preserve_global_ignore
+        && let Some(ignore_name) = scope.ignore.as_deref()
+    {
         let skip_local_name = fresh_local_name(&mut local_existing_names, "__glrm_ignore_skip");
         working_rules.push(NamedRule {
             name: skip_local_name.clone(),
@@ -1869,7 +1941,13 @@ fn flatten_scope(
 
     for subgrammar in &scope.subgrammars {
         let child_label = format!("{scope_label}::{}", subgrammar.name);
-        let child_entry = flatten_scope(&subgrammar.scope, false, &child_label, context)?;
+        let child_entry = flatten_scope(
+            &subgrammar.scope,
+            false,
+            &child_label,
+            preserve_global_ignore,
+            context,
+        )?;
         let alias_name = name_map
             .get(&subgrammar.name)
             .expect("subgrammar name must be allocated")
