@@ -3072,7 +3072,10 @@ fn add_remapped_action_to_pending(
                 pending.push_accept();
             }
         }
-        Action::StackShifts(_) | Action::ReplaceShifts(_) | Action::GuardedStackShifts(_) => return None,
+        Action::StackShifts(_)
+        | Action::ReplaceShifts(_)
+        | Action::GuardedStackShifts(_)
+        | Action::Skip => return None,
     }
     Some(())
 }

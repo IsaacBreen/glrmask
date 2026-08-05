@@ -7,6 +7,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
 use crate::automata::lexer::{Lexer, tokenizer::Tokenizer};
+use crate::automata::regex::Expr;
 use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
 use crate::automata::weighted::dwa::DWA;
 use crate::compiler::glr::labels::DEFAULT_LABEL;
@@ -2056,6 +2057,14 @@ pub struct Constraint {
     /// Self-contained final internal-token -> original-token bitset materializer.
     #[serde(skip)]
     pub(crate) final_mask_mapping: FinalMaskMapping,
+    /// Exact source expression for the globally erasable ignore terminal.
+    ///
+    /// Tokenizer source expressions are compile-time data and are normally
+    /// omitted from artifacts. Retaining this one expression lets a loaded
+    /// compiled constraint participate in later subgrammar composition without
+    /// conservatively degrading an identical global ignore into scoped skips.
+    #[serde(skip, default)]
+    pub(crate) ignore_expr: Option<Expr>,
 }
 
 

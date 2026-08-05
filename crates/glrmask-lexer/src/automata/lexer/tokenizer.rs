@@ -786,6 +786,30 @@ fn group_matches_by_width(matches: Vec<TokenizerMatch>) -> Vec<(usize, BTreeSet<
 }
 
 impl Tokenizer {
+    fn merged_terminal_exprs(
+        tokenizers: &[(&Tokenizer, TerminalID)],
+        total_terminals: TerminalID,
+    ) -> Option<Arc<[Expr]>> {
+        let mut merged = vec![None::<Expr>; total_terminals as usize];
+        for &(tokenizer, terminal_offset) in tokenizers {
+            let exprs = tokenizer.exprs.as_deref()?;
+            if exprs.len() != tokenizer.num_terminals as usize {
+                return None;
+            }
+            for (terminal, expr) in exprs.iter().enumerate() {
+                let slot = merged.get_mut(terminal_offset as usize + terminal)?;
+                if slot.is_some() {
+                    return None;
+                }
+                *slot = Some(expr.clone());
+            }
+        }
+        merged
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .map(Arc::from)
+    }
+
     pub fn canonicalize_terminal_aliases(
         &mut self,
         canonical: TerminalID,
@@ -837,6 +861,10 @@ impl Tokenizer {
             })
             .max()
             .unwrap_or(0);
+        let expr_components = std::iter::once((&parent, parent_terminal_offset))
+            .chain(children.iter().copied())
+            .collect::<Vec<_>>();
+        let merged_exprs = Self::merged_terminal_exprs(&expr_components, total_terminals);
 
         let mut merged_byte_transition_count = parent.dfa.transition_count();
         let mut merged_epsilon_transition_count = parent.dfa.epsilon_transition_count();
@@ -931,7 +959,7 @@ impl Tokenizer {
         parent.num_terminals = total_terminals;
         parent.compressed_transition_segments =
             Arc::from(compressed_segments.into_boxed_slice());
-        parent.exprs = None;
+        parent.exprs = merged_exprs;
         parent.singleton_epsilon_closures = OnceLock::new();
         if let Some(closures) = parent_closures.and_then(|closures| {
             closures.append_rebased_children(
@@ -962,6 +990,7 @@ impl Tokenizer {
             })
             .max()
             .unwrap_or(0);
+        let merged_exprs = Self::merged_terminal_exprs(tokenizers, total_terminals);
 
         let total_states = 1usize.saturating_add(
             tokenizers
@@ -1020,7 +1049,7 @@ impl Tokenizer {
             Tokenizer::from_parts_with_compressed_transitions(
                 merged,
                 total_terminals,
-                None,
+                merged_exprs,
                 compressed_segments,
             ),
             state_offsets,

@@ -98,6 +98,7 @@ fn trace_action_kind(action: Option<&Action>) -> &'static str {
         Some(Action::Split { accept: true, .. }) => "split-accept",
         Some(Action::Split { .. }) => "split",
         Some(Action::Accept) => "accept",
+        Some(Action::Skip) => "skip",
         None => "none",
     }
 }
@@ -154,6 +155,7 @@ fn trace_action_summary(
         Some(Action::StackShifts(..))
         | Some(Action::ReplaceShifts(..))
         | Some(Action::GuardedStackShifts(..))
+        | Some(Action::Skip)
         | Some(Action::Accept)
         | None => {
             AdvanceTraceStep {
@@ -434,6 +436,9 @@ fn advance_concrete_stacks_reference(
         };
 
         match action {
+            Action::Skip => {
+                merge_concrete_path_accumulator(&mut shifted, stack, acc);
+            }
             Action::Shift(target, is_replace) => {
                 let pop = usize::from(*is_replace);
                 if let Some(next) = apply_concrete_stack_effect(&stack, pop, &[*target]) {
@@ -2856,6 +2861,9 @@ fn advance_deterministically_from_vstack_raw(
         };
 
         match table.action(state, token) {
+            Some(Action::Skip) => {
+                return (AdvancedBranch::Stack(stack), true);
+            }
             Some(Action::Reduce(nt, len)) => {
                 let rhs_len = *len as usize;
                 if rhs_len < stack.len() {
@@ -3053,6 +3061,11 @@ fn advance_deterministically_profiled(
                 .push(trace_action_summary(table, state, &trace_gss, action));
         }
         match action {
+            Some(Action::Skip) => {
+                *gss = stack.into_gss();
+                profile.det_exit_reason = 1;
+                return true;
+            }
             Some(Action::Reduce(nt, len)) => {
                 let rhs_len = *len as usize;
                 if rhs_len < stack.len() {
@@ -3661,6 +3674,10 @@ fn advance_deterministically(
         };
 
         match table.action(state, token) {
+            Some(Action::Skip) => {
+                *gss = stack.into_gss();
+                return true;
+            }
             Some(Action::Reduce(nt, len)) => {
                 let rhs_len = *len as usize;
                 if rhs_len < stack.len() {
@@ -3830,7 +3847,7 @@ fn exact_admission_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: Te
                 continue;
             };
             match action {
-                Action::Shift(..) | Action::ReplaceShifts(_) => return true,
+                Action::Shift(..) | Action::ReplaceShifts(_) | Action::Skip => return true,
                 Action::StackShifts(shifts) => {
                     if !apply_stack_shifts(isolated.clone(), shifts).is_empty() {
                         return true;
@@ -4088,7 +4105,7 @@ fn exact_admission_process_action_any(
     pending_reduces: &mut SmallVec<[(u32, u32, BitSet); 8]>,
 ) -> bool {
     match action {
-        Action::Shift(..) | Action::ReplaceShifts(_) => true,
+        Action::Shift(..) | Action::ReplaceShifts(_) | Action::Skip => true,
         Action::StackShifts(shifts) => {
             !apply_stack_shifts(isolated.clone(), shifts).is_empty()
         }
