@@ -199,7 +199,10 @@ impl AdvancedBranch {
 }
 
 pub fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> ParserGSS {
-    let advanced = advance_stacks_core(table, stack.clone(), token);
+    let advanced = advance_stacks_with_control_closure(table, stack.clone(), token);
+    if !table.control_terminals.is_empty() {
+        return advanced;
+    }
     assert_advance_oracles(
         advance_assertion_flags(),
         table,
@@ -213,6 +216,9 @@ pub fn advance_stacks(table: &GLRTable, stack: &ParserGSS, token: TerminalID) ->
 /// Like `advance_stacks` but takes ownership of the GSS, avoiding an
 /// unnecessary Arc clone when the caller doesn't need the original.
 pub fn advance_stacks_owned(table: &GLRTable, stack: ParserGSS, token: TerminalID) -> ParserGSS {
+    if !table.control_terminals.is_empty() {
+        return advance_stacks_with_control_closure(table, stack, token);
+    }
     let assertion_flags = advance_assertion_flags();
     if assertion_flags != 0 {
         let before = stack.clone();
@@ -222,6 +228,91 @@ pub fn advance_stacks_owned(table: &GLRTable, stack: ParserGSS, token: TerminalI
     } else {
         advance_stacks_core(table, stack, token)
     }
+}
+
+/// Compute the reflexive-transitive closure of linker-internal zero-width
+/// terminals. The original frontier remains live: at a subgrammar call site a
+/// parser may consume parent trivia before entering, or enter first and consume
+/// child trivia. Control actions are compiler generated and must reach a finite
+/// fixed point; a positive stack-growth cycle is an invalid composed table.
+fn control_closure(table: &GLRTable, stack: &ParserGSS) -> ParserGSS {
+    if table.control_terminals.is_empty() || stack.is_empty() {
+        return stack.clone();
+    }
+
+    let mut closure = stack.clone();
+    let pass_limit = (table.num_states as usize)
+        .saturating_mul(table.control_terminals.len().max(1))
+        .saturating_add(2);
+    for _ in 0..pass_limit {
+        let mut additions = ParserGSS::empty();
+        for &control in &table.control_terminals {
+            merge_into(
+                &mut additions,
+                advance_stacks_core(table, closure.clone(), control),
+            );
+        }
+        if additions.is_empty() {
+            return closure;
+        }
+        let next = closure.merge(&additions);
+        if next == closure {
+            return closure;
+        }
+        closure = next;
+    }
+    panic!(
+        "linker control closure did not converge: states={} controls={:?}",
+        table.num_states, table.control_terminals,
+    );
+}
+
+fn advance_stacks_with_control_closure(
+    table: &GLRTable,
+    stack: ParserGSS,
+    token: TerminalID,
+) -> ParserGSS {
+    if table.control_terminals.is_empty() {
+        return advance_stacks_core(table, stack, token);
+    }
+    let before = control_closure(table, &stack);
+    let advanced = advance_stacks_core(table, before, token);
+    control_closure(table, &advanced)
+}
+
+/// Close a runtime parser frontier under linker-internal zero-width controls.
+/// Ordinary callers should use [`advance_stacks`]; this is exposed for runtimes
+/// which maintain control-closed frontiers as a persistent invariant.
+pub fn close_control_stacks(table: &GLRTable, stack: &ParserGSS) -> ParserGSS {
+    control_closure(table, stack)
+}
+
+/// Advance a frontier which is already closed under linker controls, then
+/// restore the invariant. This avoids recomputing the pre-terminal closure on
+/// every lexeme in composed-constraint runtime commit.
+pub fn advance_control_closed_stacks(
+    table: &GLRTable,
+    stack: &ParserGSS,
+    token: TerminalID,
+) -> ParserGSS {
+    if table.control_terminals.is_empty() {
+        return advance_stacks_core(table, stack.clone(), token);
+    }
+    let advanced = advance_stacks_core(table, stack.clone(), token);
+    control_closure(table, &advanced)
+}
+
+/// Owned variant of [`advance_control_closed_stacks`].
+pub fn advance_control_closed_stacks_owned(
+    table: &GLRTable,
+    stack: ParserGSS,
+    token: TerminalID,
+) -> ParserGSS {
+    if table.control_terminals.is_empty() {
+        return advance_stacks_core(table, stack, token);
+    }
+    let advanced = advance_stacks_core(table, stack, token);
+    control_closure(table, &advanced)
 }
 
 fn normalized_concrete_stacks(
@@ -496,6 +587,11 @@ pub fn advance_stacks_profiled(
     stack: &ParserGSS,
     token: TerminalID,
 ) -> (ParserGSS, AdvanceProfile) {
+    if !table.control_terminals.is_empty() {
+        let before = control_closure(table, stack);
+        let (advanced, profile) = advance_stacks_profiled_core(table, &before, token);
+        return (control_closure(table, &advanced), profile);
+    }
     let (advanced, profile) = advance_stacks_profiled_core(table, stack, token);
     assert_advance_oracles(
         advance_assertion_flags(),
@@ -3673,6 +3769,18 @@ fn advance_deterministically(
 /// `may_advance` name sounds like a speculative approximation, but this is an
 /// exact applicability predicate.
 pub fn stack_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> bool {
+    let control_closed = (!table.control_terminals.is_empty())
+        .then(|| control_closure(table, stack));
+    let stack = control_closed.as_ref().unwrap_or(stack);
+    stack_may_advance_on_control_closed(table, stack, token)
+}
+
+/// Exact admission for a frontier already closed under linker controls.
+pub fn stack_may_advance_on_control_closed(
+    table: &GLRTable,
+    stack: &ParserGSS,
+    token: TerminalID,
+) -> bool {
     if table.admission_policy == AdmissionPolicy::ExactSimulation {
         return exact_admission_may_advance_on(table, stack, token);
     }
@@ -5916,6 +6024,9 @@ pub fn stack_admissible_terminals(
     stack: &ParserGSS,
     terminals: &BitSet,
 ) -> BitSet {
+    let control_closed = (!table.control_terminals.is_empty())
+        .then(|| control_closure(table, stack));
+    let stack = control_closed.as_ref().unwrap_or(stack);
     if table.admission_policy == AdmissionPolicy::ExactSimulation {
         return exact_admission_admissible_terminals(table, stack, terminals);
     }
@@ -5977,6 +6088,18 @@ pub fn stack_may_advance_on_any(
     stack: &ParserGSS,
     terminals: &BitSet,
 ) -> bool {
+    let control_closed = (!table.control_terminals.is_empty())
+        .then(|| control_closure(table, stack));
+    let stack = control_closed.as_ref().unwrap_or(stack);
+    stack_may_advance_on_any_control_closed(table, stack, terminals)
+}
+
+/// Exact set admission for a frontier already closed under linker controls.
+pub fn stack_may_advance_on_any_control_closed(
+    table: &GLRTable,
+    stack: &ParserGSS,
+    terminals: &BitSet,
+) -> bool {
     if table.admission_policy == AdmissionPolicy::ExactSimulation {
         return exact_admission_may_advance_on_any(table, stack, terminals);
     }
@@ -6000,6 +6123,19 @@ pub fn stack_may_advance_on_any(
 }
 
 pub fn stacks_finished(table: &GLRTable, stack: &ParserGSS) -> bool {
+    if stack.is_empty() {
+        return false;
+    }
+
+    let control_closed = (!table.control_terminals.is_empty())
+        .then(|| control_closure(table, stack));
+    let stack = control_closed.as_ref().unwrap_or(stack);
+
+    stacks_finished_control_closed(table, stack)
+}
+
+/// Completion predicate for a frontier already closed under linker controls.
+pub fn stacks_finished_control_closed(table: &GLRTable, stack: &ParserGSS) -> bool {
     if stack.is_empty() {
         return false;
     }

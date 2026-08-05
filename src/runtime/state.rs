@@ -3,7 +3,9 @@ use std::sync::Mutex;
 use std::collections::VecDeque;
 
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
-use crate::compiler::glr::parser::{ParserGSS, stacks_finished};
+use crate::compiler::glr::parser::{
+    ParserGSS, stacks_finished, stacks_finished_control_closed,
+};
 use crate::ds::leveled_gss::GssSemanticKeyInterner;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
@@ -534,7 +536,13 @@ impl<'a> ConstraintState<'a> {
                     && self
                         .constraint
                         .sparse_direct_regular_gss_is_complete(stack)
-                        .unwrap_or_else(|| stacks_finished(&self.constraint.table, stack))
+                        .unwrap_or_else(|| {
+                            if self.constraint.table.control_terminals.is_empty() {
+                                stacks_finished(&self.constraint.table, stack)
+                            } else {
+                                stacks_finished_control_closed(&self.constraint.table, stack)
+                            }
+                        })
             })
     }
 
