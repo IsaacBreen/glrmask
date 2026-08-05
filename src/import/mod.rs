@@ -182,22 +182,24 @@ fn compile_from_source(
         let parse_started_at = std::time::Instant::now();
         let grammar = lower_factored_named_grammar(source, parse, transform, end_token_ids)?;
         let import_ms = parse_started_at.elapsed().as_secs_f64() * 1000.0;
-        let (constraint, profile) = crate::error::catch_internal_invariant(|| {
+        let (mut constraint, profile) = crate::error::catch_internal_invariant(|| {
             compile_owned_profiled_with_table_construction(
                 grammar,
                 vocab,
                 default_table_construction,
             )
         })?;
+        constraint.table.set_embedded_end_token_ids(end_token_ids);
         emit_compile_profile_summary(Some(source_kind), Some(import_ms), &profile);
         emit_import_phase_end("compile_from_source", compile_from_source_started_at);
         return Ok(constraint);
     }
 
     let grammar = lower_factored_named_grammar(source, parse, transform, end_token_ids)?;
-    let constraint = crate::error::catch_internal_invariant(|| {
+    let mut constraint = crate::error::catch_internal_invariant(|| {
         compile_owned_with_table_construction(grammar, vocab, default_table_construction)
     })?;
+    constraint.table.set_embedded_end_token_ids(end_token_ids);
     emit_import_phase_end("compile_from_source", compile_from_source_started_at);
     Ok(constraint)
 }
@@ -381,6 +383,123 @@ fn parse_json_schema_to_named(schema_json: &str) -> crate::Result<ast::NamedGram
 }
 
 impl Constraint {
+    /// Compose this already-compiled parent constraint with independently
+    /// compiled child constraints.
+    ///
+    /// Each tuple names a unique terminal in the parent grammar whose shift is
+    /// a manual subgrammar call placeholder. The placeholder terminal is
+    /// removed from the reachable merged lexer/table and replaced by the
+    /// corresponding child's start table. A placeholder must be a
+    /// non-vocabulary sentinel: it must have no possible model-token matches in
+    /// the compiled parent (normally use an `@token(...)` id outside `vocab`).
+    /// Its token ID must also be distinct from every grammar-level end token
+    /// and other live special token retained by the composed constraint.
+    /// All constraints must have been compiled for exactly `vocab`.
+    ///
+    /// Expensive component lexer/parser artifacts are reused. Composition
+    /// compiles only the restricted cross-component boundary repair and the
+    /// commit-template DFAs for terminals selected by that repair.
+    /// Components may declare different ignore terminals. Their lexical
+    /// languages are unioned into one transparent ignore terminal in the
+    /// flattened result, so parent whitespace and child whitespace/comments
+    /// remain valid on either side of and inside fused model tokens.
+    pub fn compose_subgrammars(
+        &self,
+        children: &[(&str, &Constraint)],
+        vocab: &crate::Vocab,
+    ) -> crate::Result<Self> {
+        let mut inputs = Vec::with_capacity(children.len());
+        let mut seen_placeholders = std::collections::BTreeSet::<u32>::new();
+        for &(placeholder_name, child) in children {
+            let matches = self
+                .terminal_display_names
+                .iter()
+                .enumerate()
+                .filter_map(|(terminal, name)| {
+                    (name == placeholder_name).then_some(terminal as u32)
+                })
+                .collect::<Vec<_>>();
+            let placeholder_terminal = match matches.as_slice() {
+                [terminal] => *terminal,
+                [] => {
+                    return Err(crate::GlrMaskError::Compilation(format!(
+                        "parent constraint has no terminal named {placeholder_name:?}",
+                    )));
+                }
+                _ => {
+                    return Err(crate::GlrMaskError::Compilation(format!(
+                        "parent constraint has multiple terminals named {placeholder_name:?}; placeholder names must be unique",
+                    )));
+                }
+            };
+            if !seen_placeholders.insert(placeholder_terminal) {
+                return Err(crate::GlrMaskError::Compilation(format!(
+                    "parent placeholder terminal {placeholder_name:?} was supplied more than once",
+                )));
+            }
+            inputs.push(crate::compiler::constraint_compose::CompiledSubgrammarInput {
+                placeholder_terminal,
+                constraint: child,
+            });
+        }
+        crate::compiler::constraint_compose::compose_constraints(self, &inputs, vocab)
+            .map(|composition| composition.constraint)
+            .map_err(crate::GlrMaskError::Compilation)
+    }
+
+    /// Consume this compiled parent while composing independently compiled
+    /// children. The returned value is the same ordinary flattened
+    /// `Constraint` as [`Constraint::compose_subgrammars`], but the parent's
+    /// large tokenizer storage is moved into the result instead of cloned and
+    /// rebased. Use this when the original parent is no longer needed.
+    pub fn compose_subgrammars_owned(
+        self,
+        children: &[(&str, &Constraint)],
+        vocab: &crate::Vocab,
+    ) -> crate::Result<Self> {
+        let mut inputs = Vec::with_capacity(children.len());
+        let mut seen_placeholders = std::collections::BTreeSet::<u32>::new();
+        for &(placeholder_name, child) in children {
+            let matches = self
+                .terminal_display_names
+                .iter()
+                .enumerate()
+                .filter_map(|(terminal, name)| {
+                    (name == placeholder_name).then_some(terminal as u32)
+                })
+                .collect::<Vec<_>>();
+            let placeholder_terminal = match matches.as_slice() {
+                [terminal] => *terminal,
+                [] => {
+                    return Err(crate::GlrMaskError::Compilation(format!(
+                        "parent constraint has no terminal named {placeholder_name:?}",
+                    )));
+                }
+                _ => {
+                    return Err(crate::GlrMaskError::Compilation(format!(
+                        "parent constraint has multiple terminals named {placeholder_name:?}; placeholder names must be unique",
+                    )));
+                }
+            };
+            if !seen_placeholders.insert(placeholder_terminal) {
+                return Err(crate::GlrMaskError::Compilation(format!(
+                    "parent placeholder terminal {placeholder_name:?} was supplied more than once",
+                )));
+            }
+            inputs.push(crate::compiler::constraint_compose::CompiledSubgrammarInput {
+                placeholder_terminal,
+                constraint: child,
+            });
+        }
+        crate::compiler::constraint_compose::compose_constraints_owned_parent(
+            self,
+            &inputs,
+            vocab,
+        )
+        .map(|composition| composition.constraint)
+        .map_err(crate::GlrMaskError::Compilation)
+    }
+
     /// Compile an EBNF grammar for `vocab`.
     pub fn from_ebnf(ebnf: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
         Self::from_ebnf_with_end_tokens(ebnf, vocab, &[])
@@ -870,6 +989,31 @@ mod tests {
             GlrTableConstruction::ExperimentalCoreMerged
         );
         assert_eq!(constraint.table.admission_policy, AdmissionPolicy::ExactSimulation);
+    }
+
+    #[test]
+    fn glrm_import_merges_partially_mapped_terminal_families() {
+        let mut entries = (0u32..=255)
+            .map(|byte| (byte, vec![byte as u8]))
+            .collect::<Vec<_>>();
+        entries.extend([
+            (256, b"{\"value\": ".to_vec()),
+            (257, b"left".to_vec()),
+            (258, b"right".to_vec()),
+            (259, b"}".to_vec()),
+        ]);
+        let vocab = Vocab::new(entries);
+
+        Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t LEFT ::= @token(1000000);
+                t RIGHT ::= @token(1000001);
+                nt document ::= "{" "\"value\": " (LEFT | RIGHT) "}";
+            "#,
+            &vocab,
+        )
+        .expect("partial terminal-family maps should merge without indexing the unmapped sentinel");
     }
 
     #[test]

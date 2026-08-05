@@ -1177,7 +1177,12 @@ impl GLRTable {
             abort_code: AtomicU8::new(ABORT_NONE),
         };
         let mut undo = UnitInlineUndo::new(self);
-        self.collapse_sr_unit_reductions_with_compatible_gotos_inner(&budget, &mut undo);
+        let protected = BitSet::new(self.num_terminals as usize);
+        self.collapse_sr_unit_reductions_with_compatible_gotos_inner(
+            &budget,
+            &mut undo,
+            &protected,
+        );
         let mut report = budget.report();
         if report.aborted {
             undo.rollback(self);
@@ -1190,6 +1195,15 @@ impl GLRTable {
     pub(super) fn collapse_sr_unit_reductions_with_compatible_gotos(
         &mut self,
     ) -> UnitReductionInliningReport {
+        let protected = BitSet::new(self.num_terminals as usize);
+        self.collapse_sr_unit_reductions_with_compatible_gotos_except(&protected)
+    }
+
+    pub(super) fn collapse_sr_unit_reductions_with_compatible_gotos_except(
+        &mut self,
+        protected_terminals: &BitSet,
+    ) -> UnitReductionInliningReport {
+        debug_assert_eq!(protected_terminals.len(), self.num_terminals as usize);
         let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
         let journal_started_at = profile_enabled.then(std::time::Instant::now);
@@ -1198,7 +1212,11 @@ impl GLRTable {
             .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
         let inner_started_at = profile_enabled.then(std::time::Instant::now);
         let budget = UnitInlineBudget::from_env();
-        self.collapse_sr_unit_reductions_with_compatible_gotos_inner(&budget, &mut undo);
+        self.collapse_sr_unit_reductions_with_compatible_gotos_inner(
+            &budget,
+            &mut undo,
+            protected_terminals,
+        );
         let mut report = budget.report();
         let inner_ms = inner_started_at
             .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0);
@@ -1233,6 +1251,7 @@ impl GLRTable {
         &mut self,
         budget: &UnitInlineBudget,
         undo: &mut UnitInlineUndo,
+        protected_terminals: &BitSet,
     ) {
         let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
@@ -1326,7 +1345,10 @@ impl GLRTable {
                     .filter(|&state| {
                         self.action[state]
                             .iter()
-                            .any(|(_, action)| action_has_inlinable_reductions(action))
+                            .any(|(terminal, action)| {
+                                !protected_terminals.contains(terminal as usize)
+                                    && action_has_inlinable_reductions(action)
+                            })
                     })
                     .collect::<Vec<_>>()
             };
@@ -1358,7 +1380,8 @@ impl GLRTable {
                         let rows = table.action[state]
                             .iter()
                             .filter(|(tid, action)| {
-                                action_has_inlinable_reductions(action)
+                                !protected_terminals.contains(*tid as usize)
+                                    && action_has_inlinable_reductions(action)
                                     && worklist_cells.as_ref().is_none_or(|cells| {
                                         cells.contains(&(state as u32, *tid))
                                     })

@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize, Serializer};
 use smallvec::SmallVec;
 
 use super::dfa::DFA;
+pub use super::dfa::SingletonEpsilonClosures;
 use crate::automata::regex::Expr;
 use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
@@ -33,7 +34,7 @@ pub struct Tokenizer {
     /// this cache each lane independently walks the same epsilon DAG for every
     /// raw state.
     #[serde(default, skip)]
-    pub(super) singleton_epsilon_closures: OnceLock<Arc<[Box<[u32]>]>>,
+    pub(super) singleton_epsilon_closures: OnceLock<Arc<SingletonEpsilonClosures>>,
     /// Per-state byte sets whose transitions loop to the same raw tokenizer
     /// state. Compiler partitions reuse this table instead of rescanning every
     /// transition row independently.
@@ -785,6 +786,247 @@ fn group_matches_by_width(matches: Vec<TokenizerMatch>) -> Vec<(usize, BTreeSet<
 }
 
 impl Tokenizer {
+    pub fn canonicalize_terminal_aliases(
+        &mut self,
+        canonical: TerminalID,
+        aliases: &[TerminalID],
+    ) {
+        let aliases = aliases
+            .iter()
+            .copied()
+            .filter(|&alias| alias != canonical)
+            .map(|alias| alias as usize)
+            .collect::<Vec<_>>();
+        self.dfa
+            .canonicalize_group_aliases(canonical as usize, &aliases);
+        self.singleton_epsilon_closures = OnceLock::new();
+        self.all_self_loop_bytes_cache = OnceLock::new();
+        self.transition_count_cache = OnceLock::new();
+        self.forced_minimized_state_count_cache = OnceLock::new();
+        self.scalar_deterministic_dispatch_cache = OnceLock::new();
+    }
+
+    /// Form an exact disjoint union of independently compiled tokenizers while
+    /// keeping every terminal ID distinct.
+    ///
+    /// `terminal_offsets[i]` is added to every terminal/group ID in
+    /// `tokenizers[i]`. A fresh epsilon root dispatches to each source start
+    /// state. No DFA states or terminals are identified across inputs.
+    ///
+    /// The returned state offsets map each source raw tokenizer state into the
+    /// merged raw-state domain.
+    /// Form one ordinary flattened tokenizer by consuming the parent as the
+    /// destination and appending borrowed child components. Parent state IDs and
+    /// transition buffers remain unchanged; only child states are cloned and
+    /// rebased. Terminal IDs in the parent remain identity-mapped from zero.
+    pub fn disjoint_union_with_owned_parent(
+        mut parent: Tokenizer,
+        parent_terminal_offset: TerminalID,
+        children: &[(&Tokenizer, TerminalID)],
+    ) -> (Tokenizer, Vec<u32>) {
+        assert_eq!(
+            parent_terminal_offset, 0,
+            "owned-parent tokenizer composition requires the parent terminal domain to start at zero",
+        );
+        let total_terminals = std::iter::once((&parent, parent_terminal_offset))
+            .chain(children.iter().copied())
+            .map(|(tokenizer, terminal_offset)| {
+                terminal_offset
+                    .checked_add(tokenizer.num_terminals)
+                    .expect("merged tokenizer terminal ID overflow")
+            })
+            .max()
+            .unwrap_or(0);
+
+        let mut merged_byte_transition_count = parent.dfa.transition_count();
+        let mut merged_epsilon_transition_count = parent.dfa.epsilon_transition_count();
+        let mut merged_has_self_loops = parent.dfa.has_self_loops();
+        for &(tokenizer, _) in children {
+            merged_byte_transition_count = merged_byte_transition_count
+                .checked_add(tokenizer.dfa.transition_count())
+                .expect("merged tokenizer byte-transition count overflow");
+            merged_epsilon_transition_count = merged_epsilon_transition_count
+                .checked_add(tokenizer.dfa.epsilon_transition_count())
+                .and_then(|count| count.checked_add(1))
+                .expect("merged tokenizer epsilon-transition count overflow");
+            merged_has_self_loops |= tokenizer.dfa.has_self_loops();
+        }
+
+        parent
+            .dfa
+            .ensure_group_mapping_capacity(total_terminals as usize);
+        let parent_closures = std::mem::take(&mut parent.singleton_epsilon_closures)
+            .into_inner()
+            .and_then(|closures| Arc::try_unwrap(closures).ok());
+        let mut child_closures = Vec::with_capacity(children.len());
+        let mut state_offsets = Vec::with_capacity(children.len() + 1);
+        state_offsets.push(0);
+        let mut compressed_segments = parent
+            .compressed_transition_segments
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut root_finalizers = BitSet::new(total_terminals as usize);
+        for terminal in parent.dfa.finalizers(parent.start_state()).iter() {
+            root_finalizers.set(terminal);
+        }
+        let mut root_futures = BitSet::new(total_terminals as usize);
+        for terminal in parent
+            .dfa
+            .possible_future_group_ids(parent.start_state())
+            .iter()
+        {
+            root_futures.set(terminal);
+        }
+
+        for &(tokenizer, terminal_offset) in children {
+            let component = tokenizer.dfa.clone();
+            let global_groups = (0..tokenizer.num_terminals)
+                .map(|terminal| (terminal_offset + terminal) as usize)
+                .collect::<Vec<_>>();
+            let state_offset = parent
+                .dfa
+                .append_rebased_component(component, &global_groups);
+            state_offsets.push(state_offset);
+            child_closures.push((
+                tokenizer.all_singleton_epsilon_closures(),
+                state_offset,
+                tokenizer.start_state(),
+            ));
+            parent
+                .dfa
+                .add_epsilon_transition(parent.start_state(), state_offset + tokenizer.start_state());
+            for terminal in tokenizer.dfa.finalizers(tokenizer.start_state()).iter() {
+                root_finalizers.set(terminal_offset as usize + terminal);
+            }
+            for terminal in tokenizer
+                .dfa
+                .possible_future_group_ids(tokenizer.start_state())
+                .iter()
+            {
+                root_futures.set(terminal_offset as usize + terminal);
+            }
+            compressed_segments.extend(
+                tokenizer
+                    .compressed_transition_segments
+                    .iter()
+                    .cloned()
+                    .map(|mut segment| {
+                        segment.state_offset = segment
+                            .state_offset
+                            .checked_add(state_offset)
+                            .expect("merged compressed tokenizer state offset overflow");
+                        segment
+                    }),
+            );
+        }
+        parent
+            .dfa
+            .overwrite_state_metadata(parent.start_state(), root_finalizers, root_futures);
+        parent.dfa.set_derived_stats(
+            merged_byte_transition_count,
+            merged_epsilon_transition_count,
+            merged_has_self_loops,
+        );
+        parent.num_terminals = total_terminals;
+        parent.compressed_transition_segments =
+            Arc::from(compressed_segments.into_boxed_slice());
+        parent.exprs = None;
+        parent.singleton_epsilon_closures = OnceLock::new();
+        if let Some(closures) = parent_closures.and_then(|closures| {
+            closures.append_rebased_children(
+                parent.start_state(),
+                &child_closures,
+            )
+        }) {
+            let _ = parent
+                .singleton_epsilon_closures
+                .set(Arc::new(closures));
+        }
+        parent.all_self_loop_bytes_cache = OnceLock::new();
+        parent.transition_count_cache = OnceLock::new();
+        parent.forced_minimized_state_count_cache = OnceLock::new();
+        parent.scalar_deterministic_dispatch_cache = OnceLock::new();
+        (parent, state_offsets)
+    }
+
+    pub fn disjoint_union_with_terminal_offsets(
+        tokenizers: &[(&Tokenizer, TerminalID)],
+    ) -> (Tokenizer, Vec<u32>) {
+        let total_terminals = tokenizers
+            .iter()
+            .map(|(tokenizer, terminal_offset)| {
+                terminal_offset
+                    .checked_add(tokenizer.num_terminals)
+                    .expect("merged tokenizer terminal ID overflow")
+            })
+            .max()
+            .unwrap_or(0);
+
+        let total_states = 1usize.saturating_add(
+            tokenizers
+                .iter()
+                .map(|(tokenizer, _)| tokenizer.dfa.num_states())
+                .sum::<usize>(),
+        );
+        let mut merged = DFA::new(total_states.min(1));
+        merged.ensure_group_capacity(total_terminals as usize);
+        let mut state_offsets = Vec::with_capacity(tokenizers.len());
+        let mut compressed_segments = Vec::<CompressedTransitionSegment>::new();
+        let mut root_finalizers = BitSet::new(total_terminals as usize);
+        let mut root_futures = BitSet::new(total_terminals as usize);
+
+        for &(tokenizer, terminal_offset) in tokenizers {
+            // Preserve compact runtime transition segments. Materializing them
+            // here expands every byte-class row before immediately rebuilding
+            // equivalent runtime caches, which is catastrophic for million-state
+            // composed tokenizers. Segment targets are local to the segment, so
+            // rebasing only its state offset is exact.
+            let component = tokenizer.dfa.clone();
+            let global_groups = (0..tokenizer.num_terminals)
+                .map(|terminal| (terminal_offset + terminal) as usize)
+                .collect::<Vec<_>>();
+            let state_offset = merged.append_rebased_component(component, &global_groups);
+            compressed_segments.extend(
+                tokenizer
+                    .compressed_transition_segments
+                    .iter()
+                    .cloned()
+                    .map(|mut segment| {
+                        segment.state_offset = segment
+                            .state_offset
+                            .checked_add(state_offset)
+                            .expect("merged compressed tokenizer state offset overflow");
+                        segment
+                    }),
+            );
+            state_offsets.push(state_offset);
+            merged.add_epsilon_transition(0, state_offset + tokenizer.start_state());
+
+            for terminal in tokenizer.dfa.finalizers(tokenizer.start_state()).iter() {
+                root_finalizers.set(terminal_offset as usize + terminal);
+            }
+            for terminal in tokenizer
+                .dfa
+                .possible_future_group_ids(tokenizer.start_state())
+                .iter()
+            {
+                root_futures.set(terminal_offset as usize + terminal);
+            }
+        }
+        merged.overwrite_state_metadata(0, root_finalizers, root_futures);
+
+        (
+            Tokenizer::from_parts_with_compressed_transitions(
+                merged,
+                total_terminals,
+                None,
+                compressed_segments,
+            ),
+            state_offsets,
+        )
+    }
+
     #[inline]
     fn invalidate_derived_caches(&mut self) {
         let _ = self.singleton_epsilon_closures.take();
@@ -893,10 +1135,13 @@ impl Tokenizer {
         // Prefer the true initial state when another raw state happens to have
         // the same closure: accumulator state keys are observable at commit.
         let initial = self.initial_state_id();
-        source_by_closure.insert(closures[initial as usize].clone(), initial);
+        source_by_closure.insert(
+            closures[initial as usize].to_vec().into_boxed_slice(),
+            initial,
+        );
         for (state, closure) in closures.iter().enumerate() {
             source_by_closure
-                .entry(closure.clone())
+                .entry(closure.to_vec().into_boxed_slice())
                 .or_insert(state as u32);
         }
         let exact_source_states = source_subsets
@@ -1938,15 +2183,17 @@ impl Tokenizer {
             .collect()
     }
 
-    pub fn all_singleton_epsilon_closures(&self) -> Arc<[Box<[u32]>]> {
-        Arc::clone(self.singleton_epsilon_closures.get_or_init(|| {
-            Arc::from(self.dfa.all_singleton_epsilon_closures())
-        }))
+    pub fn all_singleton_epsilon_closures(&self) -> Arc<SingletonEpsilonClosures> {
+        Arc::clone(
+            self.singleton_epsilon_closures
+                .get_or_init(|| Arc::new(self.dfa.all_singleton_epsilon_closures())),
+        )
+
     }
 
     pub fn cached_singleton_epsilon_closures(
         &self,
-    ) -> Option<&Arc<[Box<[u32]>]>> {
+    ) -> Option<&Arc<SingletonEpsilonClosures>> {
         self.singleton_epsilon_closures.get()
     }
 
@@ -2039,6 +2286,37 @@ impl Tokenizer {
             end_state: end_states,
             matches: into_longest_matches(matches),
         }
+    }
+
+    /// Exact compact residual scan for compiler analyses that need only each
+    /// terminal's longest width and the live states after the complete input.
+    /// Unlike `execute_from_state`, this does not retain one matching end-state
+    /// set per terminal only to discard it afterward.
+    pub fn execute_summary_from_state(
+        &self,
+        input: &[u8],
+        start: u32,
+    ) -> (TokenizerStateSet, SmallVec<[(TerminalID, usize); 4]>) {
+        let mut matches = SmallVec::<[(TerminalID, usize); 4]>::new();
+        let end_states = self.scan_input(
+            input,
+            start,
+            &mut matches,
+            |tokenizer, matches, state, width| {
+                for terminal in tokenizer.matched_terminals_iter(state) {
+                    if let Some((_, longest)) = matches
+                        .iter_mut()
+                        .find(|(candidate, _)| *candidate == terminal)
+                    {
+                        *longest = (*longest).max(width);
+                    } else {
+                        matches.push((terminal, width));
+                    }
+                }
+            },
+        );
+        matches.sort_unstable_by_key(|(terminal, _)| *terminal);
+        (end_states, matches)
     }
 
     fn execute_from_state_end_only(&self, input: &[u8], start: u32) -> TokenizerStateSet {
@@ -2256,6 +2534,137 @@ pub fn arbitrary_epsilon_l1_test_tokenizer() -> Tokenizer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compiler::pipeline::build_tokenizer;
+    use crate::grammar::ast::lower;
+    use crate::grammar::glrm::from_glrm;
+
+    fn tokenizer_from_glrm(source: &str) -> Tokenizer {
+        let named = from_glrm(source).unwrap();
+        let grammar = lower(&named).unwrap();
+        build_tokenizer(&grammar)
+    }
+
+    fn normalized_exec(
+        tokenizer: &Tokenizer,
+        input: &[u8],
+        start: u32,
+    ) -> (Vec<u32>, Vec<(u32, usize, u32)>) {
+        let result = tokenizer.execute_from_state_all_widths(input, start);
+        let mut end_states = result.end_state.into_vec();
+        end_states.sort_unstable();
+        let mut matches = result
+            .matches
+            .into_iter()
+            .map(|matched| (matched.id, matched.width, matched.end_state))
+            .collect::<Vec<_>>();
+        matches.sort_unstable();
+        (end_states, matches)
+    }
+
+    fn enumerate_bytes(
+        alphabet: &[u8],
+        max_len: usize,
+        mut visit: impl FnMut(&[u8]),
+    ) {
+        fn rec(
+            alphabet: &[u8],
+            remaining: usize,
+            word: &mut Vec<u8>,
+            visit: &mut impl FnMut(&[u8]),
+        ) {
+            visit(word);
+            if remaining == 0 {
+                return;
+            }
+            for &byte in alphabet {
+                word.push(byte);
+                rec(alphabet, remaining - 1, word, visit);
+                word.pop();
+            }
+        }
+        rec(alphabet, max_len, &mut Vec::new(), &mut visit);
+    }
+
+    #[test]
+    fn disjoint_union_preserves_every_source_residual_and_unions_resets() {
+        let left = tokenizer_from_glrm(
+            r#"
+                start value;
+                t AB ::= "ab";
+                t XS ::= "x"+;
+                nt value ::= AB | XS;
+            "#,
+        );
+        let right = tokenizer_from_glrm(
+            r#"
+                start value;
+                t BC ::= "bc";
+                t YS ::= "y"+;
+                nt value ::= BC | YS;
+            "#,
+        );
+        let right_terminal_offset = left.num_terminals();
+        let (merged, state_offsets) = Tokenizer::disjoint_union_with_terminal_offsets(&[
+            (&left, 0),
+            (&right, right_terminal_offset),
+        ]);
+        assert_eq!(state_offsets.len(), 2);
+
+        enumerate_bytes(b"abcxy", 3, |input| {
+            for (source, terminal_offset, state_offset) in [
+                (&left, 0u32, state_offsets[0]),
+                (&right, right_terminal_offset, state_offsets[1]),
+            ] {
+                for source_state in 0..source.num_states() {
+                    let (source_end, source_matches) =
+                        normalized_exec(source, input, source_state);
+                    let expected_end = source_end
+                        .into_iter()
+                        .map(|state| state_offset + state)
+                        .collect::<Vec<_>>();
+                    let expected_matches = source_matches
+                        .into_iter()
+                        .map(|(terminal, width, state)| {
+                            (terminal_offset + terminal, width, state_offset + state)
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        normalized_exec(&merged, input, state_offset + source_state),
+                        (expected_end, expected_matches),
+                        "residual mismatch from source state {source_state} on {input:?}",
+                    );
+                }
+            }
+
+            let mut expected_end = Vec::new();
+            let mut expected_matches = Vec::new();
+            for (source, terminal_offset, state_offset) in [
+                (&left, 0u32, state_offsets[0]),
+                (&right, right_terminal_offset, state_offsets[1]),
+            ] {
+                let (end, matches) = normalized_exec(source, input, source.start_state());
+                expected_end.extend(end.into_iter().map(|state| state_offset + state));
+                expected_matches.extend(matches.into_iter().map(|(terminal, width, state)| {
+                    (terminal_offset + terminal, width, state_offset + state)
+                }));
+            }
+            if input.is_empty() {
+                // The fresh epsilon dispatcher is a real physical state but
+                // contributes no finalizer of its own. It remains in the empty
+                // execution closure and disappears after the first byte.
+                expected_end.push(merged.start_state());
+            }
+            expected_end.sort_unstable();
+            expected_end.dedup();
+            expected_matches.sort_unstable();
+            expected_matches.dedup();
+            assert_eq!(
+                normalized_exec(&merged, input, merged.start_state()),
+                (expected_end, expected_matches),
+                "reset-union mismatch on {input:?}",
+            );
+        });
+    }
     use crate::automata::lexer::dfa::DFA;
 
     #[test]

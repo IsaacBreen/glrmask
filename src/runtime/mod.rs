@@ -11,7 +11,7 @@ mod token_space;
 pub(crate) use glrmask_artifact::CommitTemplateDfas;
 pub(crate) use artifact::{
     ConstraintRuntimeBackend, DynamicMaskTrie, DynamicMaskVocab,
-    FastCommitTemplateDfas, SpecialTokenTerminal,
+    FastCommitTemplateDfas, FastTokenizerTransitions, SpecialTokenTerminal,
 };
 #[allow(unused_imports)]
 pub use crate::compiler::glr::parser::{AdvanceTrace, AdvanceTraceStep};

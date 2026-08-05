@@ -2735,7 +2735,22 @@ fn build_local_to_global_tsid_map(
         .enumerate()
     {
         let local_tsid = local_id_map.tokenizer_states.original_to_internal
-            [representative_state as usize] as usize;
+            [representative_state as usize];
+        if local_tsid == u32::MAX {
+            #[cfg(debug_assertions)]
+            for &original_state in
+                &global_id_map.tokenizer_states.internal_to_originals[global_tsid]
+            {
+                debug_assert_eq!(
+                    local_id_map.tokenizer_states.original_to_internal
+                        [original_state as usize],
+                    u32::MAX,
+                    "a global composite TSID must refine the local unmapped sentinel",
+                );
+            }
+            continue;
+        }
+        let local_tsid = local_tsid as usize;
         local_to_global[local_tsid].push(global_tsid as u32);
 
         #[cfg(debug_assertions)]
@@ -3158,6 +3173,9 @@ mod tests {
             .iter()
             .enumerate()
         {
+            if local_tsid == u32::MAX {
+                continue;
+            }
             result[local_tsid as usize]
                 .insert(global_id_map.tokenizer_states.original_to_internal[original_state]);
         }
@@ -3261,6 +3279,24 @@ mod tests {
         let global = id_map_with_tsid_partition(vec![0, 0, 1, 1, 2, 2], vec![0, 2, 4]);
         let local = id_map_with_tsid_partition(vec![0, 0, 1, 1, 0, 0], vec![0, 2]);
 
+        assert_eq!(
+            build_local_to_global_tsid_map(&local, &global),
+            reference_local_to_global_tsid_map(&local, &global),
+        );
+    }
+
+    #[test]
+    fn representative_tsid_map_skips_global_classes_unmapped_locally() {
+        let global = id_map_with_tsid_partition(vec![0, 0, 1, 1, 2, 2], vec![0, 2, 4]);
+        let local = id_map_with_tsid_partition(
+            vec![0, 0, u32::MAX, u32::MAX, 1, 1],
+            vec![0, 4],
+        );
+
+        assert_eq!(
+            build_local_to_global_tsid_map(&local, &global),
+            vec![vec![0], vec![2]],
+        );
         assert_eq!(
             build_local_to_global_tsid_map(&local, &global),
             reference_local_to_global_tsid_map(&local, &global),

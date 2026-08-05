@@ -2696,6 +2696,7 @@ fn launch_terminal_dag_if_ready<'scope>(
                 Some(flat_global.shared_transition_cache.as_ref()),
                 tokenizer.partition_local_synthesis_plan.as_deref(),
                 tokenizer.prepared_partition_local_tokenizers.as_deref(),
+                None,
             );
         let special_started_at = Instant::now();
         let special_token_terminals = collect_special_token_terminals(prepared_grammar);
@@ -3982,6 +3983,7 @@ fn compile_prepared_with_profile_and_table_construction(
             possible_matches_complete,
             state_to_internal_tsid: runtime_tokenizer_state_map.original_to_internal.clone(),
             internal_tsid_to_states: runtime_internal_tsid_to_states,
+            terminal_live_states: Vec::new(),
             state_internal_tsid_offsets: Vec::new(),
             state_internal_tsids: Vec::new(),
             runtime_source_state_offset,
@@ -4048,7 +4050,12 @@ fn compile_prepared_with_profile_and_table_construction(
 }
 
 pub(crate) fn compile_prepared(prepared_grammar: GrammarDef, vocab: &Vocab) -> Constraint {
-    compile_prepared_with_profile(prepared_grammar, vocab).0
+    let start_nullable = prepared_grammar.start_is_nullable();
+    let mut constraint = compile_prepared_with_profile(prepared_grammar, vocab).0;
+    constraint
+        .table
+        .set_embedded_start_nullable(start_nullable);
+    constraint
 }
 
 fn prepare_grammar(grammar: GrammarDef) -> GrammarDef {
@@ -4085,6 +4092,7 @@ fn compile_dynamic_owned_impl(
     default_table_construction: GlrTableConstruction,
     finalize_runtime: bool,
 ) -> DynamicConstraint {
+    let start_nullable = grammar.start_is_nullable();
     let profile = compile_profile_enabled();
     let total_started_at = profile.then(Instant::now);
     let prepare_started_at = profile.then(Instant::now);
@@ -4211,7 +4219,7 @@ fn compile_dynamic_owned_impl(
         } else {
             DynamicConstraint::from_parts_with_dynamic_vocab_unfinalized
         };
-        let constraint = build_constraint(
+        let mut constraint = build_constraint(
             table,
             terminal_display_names,
             tokenizer,
@@ -4221,6 +4229,10 @@ fn compile_dynamic_owned_impl(
             vocab,
             dynamic_mask_vocab,
         );
+        constraint
+            .inner
+            .table
+            .set_embedded_start_nullable(start_nullable);
         if let Some(total_started_at) = total_started_at {
             eprintln!(
                 "[glrmask/profile][dynamic_compile] finalize_runtime={} prepare_ms={:.3} analysis_ms={:.3} tokenizer_ms={:.3} table_ms={:.3} dynamic_vocab_ms={:.3} finalize_ms={:.3} parallel_core_wall_ms={:.3} total_ms={:.3}",
@@ -4244,15 +4256,24 @@ pub(crate) fn compile_owned_with_table_construction(
     vocab: &Vocab,
     default_table_construction: GlrTableConstruction,
 ) -> Constraint {
+    let start_nullable = grammar.start_is_nullable();
     if compile_profile_summary_enabled() || compile_top_profile_enabled() {
-        let (constraint, profile) =
+        let (mut constraint, profile) =
             compile_owned_profiled_with_table_construction(grammar, vocab, default_table_construction);
+        constraint
+            .table
+            .set_embedded_start_nullable(start_nullable);
         emit_compile_profile_summary(None, None, &profile);
         return constraint;
     }
 
     let prepared_grammar = prepare_grammar(grammar);
-    compile_prepared_with_table_construction(prepared_grammar, vocab, default_table_construction)
+    let mut constraint =
+        compile_prepared_with_table_construction(prepared_grammar, vocab, default_table_construction);
+    constraint
+        .table
+        .set_embedded_start_nullable(start_nullable);
+    constraint
 }
 
 pub(crate) fn compile_prepared_with_table_construction(
@@ -4260,13 +4281,18 @@ pub(crate) fn compile_prepared_with_table_construction(
     vocab: &Vocab,
     default_table_construction: GlrTableConstruction,
 ) -> Constraint {
-    compile_prepared_with_profile_and_table_construction(
+    let start_nullable = prepared_grammar.start_is_nullable();
+    let mut constraint = compile_prepared_with_profile_and_table_construction(
         prepared_grammar,
         vocab,
         default_table_construction,
         None,
     )
-    .0
+    .0;
+    constraint
+        .table
+        .set_embedded_start_nullable(start_nullable);
+    constraint
 }
 
 #[cfg(test)]
@@ -4275,14 +4301,19 @@ pub(crate) fn compile_owned_with_lexer_adaptive(
     vocab: &Vocab,
     adaptive: bool,
 ) -> Constraint {
+    let start_nullable = grammar.start_is_nullable();
     let prepared_grammar = prepare_grammar(grammar);
-    compile_prepared_with_profile_and_table_construction(
+    let mut constraint = compile_prepared_with_profile_and_table_construction(
         prepared_grammar,
         vocab,
         GlrTableConstruction::ExperimentalCoreMerged,
         Some(adaptive),
     )
-    .0
+    .0;
+    constraint
+        .table
+        .set_embedded_start_nullable(start_nullable);
+    constraint
 }
 
 pub(crate) fn compile_owned_profiled(
@@ -4301,17 +4332,21 @@ pub(crate) fn compile_owned_profiled_with_table_construction(
     vocab: &Vocab,
     default_table_construction: GlrTableConstruction,
 ) -> (Constraint, CompilePhaseProfile) {
+    let start_nullable = grammar.start_is_nullable();
     let total_started_at = Instant::now();
     let prepare_started_at = Instant::now();
     let prepared_grammar = prepare_grammar(grammar);
     let prepare_ms = elapsed_ms(prepare_started_at);
 
-    let (constraint, mut profile) = compile_prepared_with_profile_and_table_construction(
+    let (mut constraint, mut profile) = compile_prepared_with_profile_and_table_construction(
         prepared_grammar,
         vocab,
         default_table_construction,
         None,
     );
+    constraint
+        .table
+        .set_embedded_start_nullable(start_nullable);
     profile.prepare_ms = prepare_ms;
     profile.total_ms = elapsed_ms(total_started_at);
     (constraint, profile)

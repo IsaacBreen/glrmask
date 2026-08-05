@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
+use std::ops::Index;
 use std::sync::OnceLock;
 
 use rustc_hash::FxHashSet;
@@ -16,6 +17,154 @@ use crate::ds::u8set::U8Set;
 
 pub(super) type GroupId = u32;
 pub(super) const DEAD: u32 = u32::MAX;
+
+/// Exact singleton epsilon closures with a compact identity representation for
+/// the overwhelmingly common case where only a dispatch state has a
+/// non-singleton closure.  This avoids one heap allocation per raw tokenizer
+/// state while preserving the slice-based caller API.
+#[derive(Debug)]
+pub enum SingletonEpsilonClosures {
+    Dense(Box<[Box<[u32]>]>),
+    IdentityWithOverrides {
+        identities: Box<[u32]>,
+        overrides: Box<[Option<Box<[u32]>>]>,
+    },
+}
+
+impl SingletonEpsilonClosures {
+    #[inline]
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Dense(rows) => rows.len(),
+            Self::IdentityWithOverrides { identities, .. } => identities.len(),
+        }
+    }
+
+    #[inline]
+    pub fn get(&self, state: usize) -> Option<&[u32]> {
+        match self {
+            Self::Dense(rows) => rows.get(state).map(Box::as_ref),
+            Self::IdentityWithOverrides {
+                identities,
+                overrides,
+            } => {
+                if state >= identities.len() {
+                    None
+                } else if let Some(closure) = overrides[state].as_deref() {
+                    Some(closure)
+                } else {
+                    Some(&identities[state..state + 1])
+                }
+            }
+        }
+    }
+
+    #[inline]
+    pub fn iter(&self) -> SingletonEpsilonClosuresIter<'_> {
+        SingletonEpsilonClosuresIter {
+            closures: self,
+            next: 0,
+        }
+    }
+
+    /// Reuse an owned parent closure table while appending rebased child
+    /// tables. This is exact for disjoint tokenizer composition: parent state
+    /// IDs are unchanged, child state IDs receive fixed offsets, and only the
+    /// retained parent reset state's closure gains the child start closures.
+    pub fn append_rebased_children(
+        self,
+        parent_start: u32,
+        children: &[(std::sync::Arc<SingletonEpsilonClosures>, u32, u32)],
+    ) -> Option<Self> {
+        let Self::IdentityWithOverrides {
+            identities,
+            overrides,
+        } = self
+        else {
+            return None;
+        };
+        let mut identities = identities.into_vec();
+        let mut overrides = overrides.into_vec();
+        let parent_start_index = parent_start as usize;
+        if parent_start_index >= identities.len() {
+            return None;
+        }
+        let mut merged_start = overrides[parent_start_index]
+            .as_deref()
+            .unwrap_or(&identities[parent_start_index..parent_start_index + 1])
+            .to_vec();
+
+        for (child, state_offset, child_start) in children {
+            if *state_offset as usize != identities.len() {
+                return None;
+            }
+            let child_len = child.len();
+            identities.extend(*state_offset..state_offset.saturating_add(child_len as u32));
+            for local_state in 0..child_len {
+                let closure = child.get(local_state)?;
+                if closure.len() == 1 && closure[0] == local_state as u32 {
+                    overrides.push(None);
+                } else {
+                    overrides.push(Some(
+                        closure
+                            .iter()
+                            .map(|state| state_offset.saturating_add(*state))
+                            .collect::<Vec<_>>()
+                            .into_boxed_slice(),
+                    ));
+                }
+            }
+            let child_start_closure = child.get(*child_start as usize)?;
+            merged_start.extend(
+                child_start_closure
+                    .iter()
+                    .map(|state| state_offset.saturating_add(*state)),
+            );
+        }
+        merged_start.sort_unstable();
+        merged_start.dedup();
+        overrides[parent_start_index] = Some(merged_start.into_boxed_slice());
+        Some(Self::IdentityWithOverrides {
+            identities: identities.into_boxed_slice(),
+            overrides: overrides.into_boxed_slice(),
+        })
+    }
+}
+
+impl Index<usize> for SingletonEpsilonClosures {
+    type Output = [u32];
+
+    #[inline]
+    fn index(&self, index: usize) -> &Self::Output {
+        self.get(index)
+            .expect("singleton epsilon closure state out of range")
+    }
+}
+
+pub struct SingletonEpsilonClosuresIter<'a> {
+    closures: &'a SingletonEpsilonClosures,
+    next: usize,
+}
+
+impl<'a> Iterator for SingletonEpsilonClosuresIter<'a> {
+    type Item = &'a [u32];
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        let state = self.next;
+        let closure = self.closures.get(state)?;
+        self.next += 1;
+        Some(closure)
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.closures.len().saturating_sub(self.next);
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for SingletonEpsilonClosuresIter<'_> {}
 
 fn resized_bitset(bits: &BitSet, num_groups: usize) -> BitSet {
     let mut resized = BitSet::new(num_groups);
@@ -510,6 +659,22 @@ impl DFA {
         self.derived_stats().epsilon_transition_count
     }
 
+    pub(super) fn set_derived_stats(
+        &mut self,
+        byte_transition_count: usize,
+        epsilon_transition_count: usize,
+        has_self_loops: bool,
+    ) {
+        let _ = self.derived_stats.take();
+        self.derived_stats
+            .set(DfaDerivedStats {
+                byte_transition_count,
+                epsilon_transition_count,
+                has_self_loops,
+            })
+            .expect("DFA derived stats were unexpectedly initialized");
+    }
+
     pub fn has_self_loops(&self) -> bool {
         self.derived_stats().has_self_loops
     }
@@ -529,6 +694,16 @@ impl DFA {
             epsilon_transitions: Vec::new(),
         });
         id
+    }
+
+    /// Extend the global group metadata without resizing existing state bitsets.
+    /// Existing states keep identity group IDs in their current shorter bitsets;
+    /// out-of-range membership queries are false. This is exact for immutable
+    /// disjoint composition and avoids rewriting every state in a large parent.
+    pub(super) fn ensure_group_mapping_capacity(&mut self, num_groups: usize) {
+        if self.group_id_to_u8set.len() < num_groups {
+            self.group_id_to_u8set.resize(num_groups, U8Set::empty());
+        }
     }
 
     pub(super) fn ensure_group_capacity(&mut self, num_groups: usize) {
@@ -587,7 +762,7 @@ impl DFA {
                 .iter()
                 .copied()
                 .eq(0..total_groups);
-        for state in &mut component.states {
+        let rebase_state = |state: &mut DFAState| {
             for (_, target) in state.transitions.iter_mut() {
                 *target = target
                     .checked_add(offset)
@@ -611,6 +786,14 @@ impl DFA {
                 state.finalizers = finalizers;
                 state.possible_future_group_ids = futures;
             }
+        };
+        if component.states.len() >= 4096
+            && rayon::current_num_threads() > 1
+            && std::env::var_os("GLRMASK_SERIAL_APPEND_REBASE").is_none()
+        {
+            component.states.par_iter_mut().for_each(rebase_state);
+        } else {
+            component.states.iter_mut().for_each(rebase_state);
         }
 
         self.states.append(&mut component.states);
@@ -710,8 +893,61 @@ impl DFA {
     /// fresh `seen` vector and walking the same tails once per source state.
     /// Persisted/debug automata may contain epsilon cycles; retain the exact
     /// scalar closure as a defensive fallback when Kahn's order detects one.
-    pub(super) fn all_singleton_epsilon_closures(&self) -> Vec<Box<[u32]>> {
+    pub(super) fn all_singleton_epsilon_closures(&self) -> SingletonEpsilonClosures {
         let state_count = self.states.len();
+
+        // Disjoint tokenizer composition creates one epsilon dispatcher whose
+        // targets have no further epsilon edges.  In that common million-state
+        // shape, every non-dispatch closure is the singleton `[state]`.  The
+        // generic topological builder below allocates those rows serially; do
+        // the exact independent construction in parallel instead.
+        let mut epsilon_source = None;
+        let mut shallow_dispatch = true;
+        for (state, row) in self.states.iter().enumerate() {
+            if row.epsilon_transitions.is_empty() {
+                continue;
+            }
+            if epsilon_source.replace(state).is_some() {
+                shallow_dispatch = false;
+                break;
+            }
+            if row.epsilon_transitions.iter().any(|&target| {
+                self.states
+                    .get(target as usize)
+                    .is_none_or(|target| !target.epsilon_transitions.is_empty())
+            }) {
+                shallow_dispatch = false;
+                break;
+            }
+        }
+        if shallow_dispatch
+            && let Some(dispatch) = epsilon_source
+        {
+            let mut dispatch_closure = Vec::with_capacity(
+                self.states[dispatch].epsilon_transitions.len() + 1,
+            );
+            dispatch_closure.push(dispatch as u32);
+            dispatch_closure.extend(
+                self.states[dispatch]
+                    .epsilon_transitions
+                    .iter()
+                    .copied(),
+            );
+            dispatch_closure.sort_unstable();
+            dispatch_closure.dedup();
+            let identities = (0..state_count as u32)
+                .collect::<Vec<_>>()
+                .into_boxed_slice();
+            let mut overrides = (0..state_count)
+                .map(|_| None)
+                .collect::<Vec<Option<Box<[u32]>>>>();
+            overrides[dispatch] = Some(dispatch_closure.into_boxed_slice());
+            return SingletonEpsilonClosures::IdentityWithOverrides {
+                identities,
+                overrides: overrides.into_boxed_slice(),
+            };
+        }
+
         let mut indegree = vec![0usize; state_count];
         for state in &self.states {
             for &target in &state.epsilon_transitions {
@@ -736,19 +972,31 @@ impl DFA {
             }
         }
         if topo.len() != state_count {
-            return (0..state_count)
-                .map(|state| {
-                    self.epsilon_closure(&[state as u32])
-                        .into_vec()
-                        .into_boxed_slice()
-                })
-                .collect();
+            return SingletonEpsilonClosures::Dense(
+                (0..state_count)
+                    .map(|state| {
+                        self.epsilon_closure(&[state as u32])
+                            .into_vec()
+                            .into_boxed_slice()
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            );
         }
 
-        let mut closures = vec![Box::<[u32]>::default(); state_count];
+        let identities = (0..state_count as u32)
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        let mut overrides = (0..state_count)
+            .map(|_| None)
+            .collect::<Vec<Option<Box<[u32]>>>>();
         let mut marks = vec![0u32; state_count];
         let mut generation = 0u32;
         for &state in topo.iter().rev() {
+            let epsilon_targets = &self.states[state as usize].epsilon_transitions;
+            if epsilon_targets.is_empty() {
+                continue;
+            }
             generation = generation.wrapping_add(1);
             if generation == 0 {
                 marks.fill(0);
@@ -757,8 +1005,11 @@ impl DFA {
             let mut closure = Vec::<u32>::new();
             marks[state as usize] = generation;
             closure.push(state);
-            for &target in &self.states[state as usize].epsilon_transitions {
-                for &reachable in closures[target as usize].iter() {
+            for &target in epsilon_targets {
+                let target_closure = overrides[target as usize]
+                    .as_deref()
+                    .unwrap_or(&identities[target as usize..target as usize + 1]);
+                for &reachable in target_closure {
                     let slot = &mut marks[reachable as usize];
                     if *slot != generation {
                         *slot = generation;
@@ -767,9 +1018,12 @@ impl DFA {
                 }
             }
             closure.sort_unstable();
-            closures[state as usize] = closure.into_boxed_slice();
+            overrides[state as usize] = Some(closure.into_boxed_slice());
         }
-        closures
+        SingletonEpsilonClosures::IdentityWithOverrides {
+            identities,
+            overrides: overrides.into_boxed_slice(),
+        }
     }
 
     pub(super) fn step_all(&self, states: &[u32], byte: u8) -> SmallVec<[u32; 1]> {
@@ -831,6 +1085,35 @@ impl DFA {
             entry.finalizers = finalizers;
             entry.possible_future_group_ids = possible_future_group_ids;
         }
+    }
+
+    pub(super) fn canonicalize_group_aliases(&mut self, canonical: usize, aliases: &[usize]) {
+        if aliases.is_empty() {
+            return;
+        }
+        let alias_set = aliases.iter().copied().collect::<std::collections::BTreeSet<_>>();
+        for state in &mut self.states {
+            let finalizes_alias = state.finalizers.iter().any(|group| alias_set.contains(&group));
+            let futures_alias = state
+                .possible_future_group_ids
+                .iter()
+                .any(|group| alias_set.contains(&group));
+            for &alias in aliases {
+                state.finalizers.clear(alias);
+                state.possible_future_group_ids.clear(alias);
+            }
+            if finalizes_alias {
+                state.finalizers.set(canonical);
+            }
+            if futures_alias {
+                state.possible_future_group_ids.set(canonical);
+            }
+        }
+        let mut bytes = self.group_id_to_u8set(canonical as u32).clone();
+        for &alias in aliases {
+            bytes |= *self.group_id_to_u8set(alias as u32);
+        }
+        self.set_group_u8set(canonical as u32, bytes);
     }
 
     pub(super) fn set_group_u8set(&mut self, group_id: GroupId, set: U8Set) {

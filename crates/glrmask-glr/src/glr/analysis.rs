@@ -5,7 +5,7 @@ use std::time::Instant;
 use rustc_hash::FxHashSet;
 
 use crate::ds::bitset::BitSet;
-use crate::grammar::flat::{GrammarDef, NonterminalID, Rule, Symbol, TerminalID};
+use crate::grammar::flat::{GrammarDef, NonterminalID, Rule, Symbol, Terminal, TerminalID};
 
 pub const EOF: TerminalID = u32::MAX;
 
@@ -70,6 +70,11 @@ pub struct AnalyzedGrammar {
     pub rules: Vec<Rule>,
     pub num_terminals: u32,
     pub terminal_display_names: Vec<String>,
+    /// Terminal columns whose original LR shift/reduce form must remain intact.
+    /// Special-token columns can be subgrammar call sentinels or EOS controls,
+    /// so lowering them into origin-dependent stack effects would destroy the
+    /// composable call-site boundary.
+    pub protected_shift_terminals: BitSet,
     pub num_nonterminals: u32,
     pub nonterminal_display_names: Vec<String>,
     pub residual_isolation_classes: BTreeMap<TerminalID, u32>,
@@ -89,6 +94,12 @@ impl AnalyzedGrammar {
         }
 
         let num_terminals = g.num_terminals();
+        let mut protected_shift_terminals = BitSet::new(num_terminals as usize);
+        for terminal in &g.terminals {
+            if let Terminal::SpecialToken { id, .. } = terminal {
+                protected_shift_terminals.set(*id as usize);
+            }
+        }
         let mut rules = Vec::with_capacity(g.rules.len() + 1);
         let augmented_start = g.num_nonterminals();
         rules.push(Rule {
@@ -122,6 +133,7 @@ impl AnalyzedGrammar {
             terminal_display_names: (0..num_terminals)
                 .map(|terminal| g.terminal_display_name(terminal))
                 .collect(),
+            protected_shift_terminals,
             num_nonterminals,
             nonterminal_display_names: (0..num_nonterminals)
                 .map(|nonterminal| {
@@ -145,14 +157,70 @@ impl AnalyzedGrammar {
         }
     }
 
+    /// Reconstruct the grammar analysis needed by terminal/template/parser-DWA
+    /// construction from an already-composed parse table. `rules` must include
+    /// the parent's augmented-start rule and `augmented_start` must name its
+    /// LHS. This deliberately omits direct-regular shortcuts: composition
+    /// reuses the component parser artifacts and builds only the boundary
+    /// repair against the ordinary merged table semantics.
+    pub fn from_composed_rules(
+        rules: Vec<Rule>,
+        num_terminals: u32,
+        terminal_display_names: Vec<String>,
+        nonterminal_display_names: Vec<String>,
+        augmented_start: NonterminalID,
+    ) -> Self {
+        let num_nonterminals = nonterminal_display_names.len() as u32;
+        let nullable = compute_nullable(&rules, num_nonterminals);
+        let first = compute_first(&rules, num_nonterminals, num_terminals, &nullable);
+        let follow = compute_follow(
+            &rules,
+            num_nonterminals,
+            num_terminals,
+            augmented_start,
+            &first,
+            &nullable,
+        );
+        let mut rules_by_lhs = vec![Vec::new(); num_nonterminals as usize];
+        for (index, rule) in rules.iter().enumerate() {
+            if let Some(bucket) = rules_by_lhs.get_mut(rule.lhs as usize) {
+                bucket.push(index as u32);
+            }
+        }
+        Self {
+            rules,
+            num_terminals,
+            terminal_display_names,
+            protected_shift_terminals: BitSet::new(num_terminals as usize),
+            num_nonterminals,
+            nonterminal_display_names,
+            residual_isolation_classes: BTreeMap::new(),
+            // The boundary compiler must preserve every component residual. A
+            // global observation request is conservative and exact.
+            requires_global_terminal_observation: true,
+            direct_regular_automaton: None,
+            nullable,
+            first,
+            follow,
+            rules_by_lhs,
+        }
+    }
+
     fn from_direct_regular_grammar_def(g: &GrammarDef) -> Self {
         let num_terminals = g.num_terminals();
+        let mut protected_shift_terminals = BitSet::new(num_terminals as usize);
+        for terminal in &g.terminals {
+            if let Terminal::SpecialToken { id, .. } = terminal {
+                protected_shift_terminals.set(*id as usize);
+            }
+        }
         Self {
             rules: Vec::new(),
             num_terminals,
             terminal_display_names: (0..num_terminals)
                 .map(|terminal| g.terminal_display_name(terminal))
                 .collect(),
+            protected_shift_terminals,
             num_nonterminals: 0,
             nonterminal_display_names: Vec::new(),
             residual_isolation_classes: g.residual_isolation_classes.clone(),
