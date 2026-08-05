@@ -1781,6 +1781,7 @@ fn apply_future_terminal_disallow_for_states(
 #[inline]
 fn try_apply_single_top_action_in_place(gss: &mut ParserGSS, action: &Action) -> bool {
     match action {
+        Action::Skip => true,
         Action::Shift(target, replace) => {
             let pushes = [*target];
             gss.try_apply_single_segment_stack_effect_in_place(usize::from(*replace), &pushes)
@@ -1814,6 +1815,7 @@ fn apply_single_top_action_fast(
     }
     let table = &constraint.table;
     match action {
+        Action::Skip => Some(gss.clone()),
         Action::Shift(target, is_replace) => {
             if let Some(mut stack) = gss.try_virtual_stack() {
                 if *is_replace && stack.pop(1) != 0 {
@@ -1924,6 +1926,7 @@ fn try_apply_action_to_carried_virtual_stack(
     action: &Action,
 ) -> bool {
     match action {
+        Action::Skip => true,
         Action::Shift(target, is_replace) => {
             if *is_replace {
                 stack.replace_top(*target)
@@ -1968,6 +1971,9 @@ fn apply_single_path_reduce_chain_fast(
     loop {
         let state = *stack.last()?;
         match table.action(state, terminal)? {
+            Action::Skip => {
+                return Some(ParserGSS::from_single_stack(stack, acc));
+            }
             Action::Reduce(nt, len) => {
                 let rhs_len = *len as usize;
                 if rhs_len >= stack.len() {
@@ -2033,6 +2039,9 @@ fn apply_single_path_reduce_chain_fast(
 
                     let follow_state = *branch.last()?;
                     match table.action(follow_state, terminal)? {
+                        Action::Skip => {
+                            out.push((branch, acc.clone()));
+                        }
                         Action::Shift(target, is_replace) => {
                             if *is_replace {
                                 *branch.last_mut()? = *target;
@@ -4935,6 +4944,11 @@ fn apply_terminal_to_flat_stacks(
         }
         let top = *stack.last()?;
         match constraint.table.action(top, terminal)? {
+            Action::Skip => {
+                if !scratch.push_complete(stack) {
+                    return None;
+                }
+            }
             Action::Shift(target, replace) => {
                 if apply_flat_shift(&mut stack, *target, *replace)?
                     && !scratch.push_complete(stack)

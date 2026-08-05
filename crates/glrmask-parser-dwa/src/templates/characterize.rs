@@ -771,6 +771,9 @@ fn process_action_from_config(
                 );
             }
         }
+        Action::Skip => {
+            emit_stack_effect_from_config(source, config, 0, &[], &[], output);
+        }
         Action::Reduce(lhs, len) => {
             process_reduce_from_config(
                 table,

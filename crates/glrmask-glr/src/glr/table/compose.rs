@@ -225,6 +225,7 @@ fn remap_action(
                 .collect::<Result<Vec<_>, String>>()?
                 .into(),
         ),
+        Action::Skip => Action::Skip,
     })
 }
 
@@ -265,6 +266,10 @@ impl ActionAlternatives {
                 self.accept |= accept;
             }
             Action::Accept => self.accept = true,
+            Action::Skip => self.shifts.push(StackShift {
+                pop: 0,
+                pushes: Vec::new(),
+            }),
             Action::GuardedStackShifts(_) => {
                 return Err(
                     "cannot yet merge a guarded stack-shift cell at a subgrammar entry boundary"
@@ -758,10 +763,7 @@ pub fn compose_subgrammar_tables(
 }
 
 fn identity_skip_action() -> Action {
-    Action::StackShifts(vec![StackShift {
-        pop: 0,
-        pushes: Vec::new(),
-    }])
+    Action::Skip
 }
 
 /// Reference subgrammar linker which preserves call and return boundaries as
@@ -784,7 +786,7 @@ fn identity_skip_action() -> Action {
 /// validated.
 pub fn compose_subgrammar_tables_explicit(
     parent: &GLRTable,
-    parent_ignore_terminal: Option<TerminalID>,
+    parent_scoped_ignore_terminal: Option<TerminalID>,
     children: &[SubgrammarTableInput<'_>],
 ) -> Result<ComposedTable, String> {
     let mut terminal_offsets = Vec::with_capacity(children.len() + 1);
@@ -809,7 +811,7 @@ pub fn compose_subgrammar_tables_explicit(
 
     let mut action = parent.action.clone();
     let mut goto = parent.goto.clone();
-    if let Some(ignore) = parent_ignore_terminal {
+    if let Some(ignore) = parent_scoped_ignore_terminal {
         for row in &mut action {
             merge_action_cell(row, ignore, identity_skip_action())?;
         }
@@ -835,7 +837,7 @@ pub fn compose_subgrammar_tables_explicit(
     let mut boundary_nonterminals = BTreeSet::<NonterminalID>::new();
     let mut control_terminals = parent.control_terminals.clone();
     let mut skip_terminals = parent.skip_terminals.clone();
-    if let Some(ignore) = parent_ignore_terminal {
+    if let Some(ignore) = parent_scoped_ignore_terminal {
         skip_terminals.insert(ignore);
     }
 
@@ -1124,6 +1126,9 @@ mod tests {
                 pending.push_back(reduced);
             };
             match action {
+                Action::Skip => {
+                    shifted.insert(stack.clone());
+                }
                 Action::Shift(target, replace) => {
                     if let Some(next) = apply_stack_shift(
                         &stack,
@@ -1506,6 +1511,14 @@ mod tests {
         let a = child_offset + terminal(&child_analysis, "A");
         let l = terminal(&parent_analysis, "L");
         let r = terminal(&parent_analysis, "R");
+
+        assert_eq!(composed.table.skip_terminals, BTreeSet::from([parent_ws, child_ws]));
+        assert!(composed.table.action.iter().all(|row| {
+            row.iter().all(|(terminal, action)| {
+                !composed.table.skip_terminals.contains(&terminal)
+                    || matches!(action, Action::Skip)
+            })
+        }));
 
         assert!(accepts(
             &composed.table,

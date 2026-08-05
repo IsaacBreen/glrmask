@@ -37,6 +37,12 @@ pub enum Action {
     Accept,
     /// Alternative pop-one/push-one replacements, stored compactly as targets.
     ReplaceShifts(Arc<[u32]>),
+    /// Consume the terminal while leaving the parser stack exactly unchanged.
+    ///
+    /// This is used for scoped ignore terminals. A globally valid ignore is
+    /// erased earlier by terminal-DWA construction and therefore never needs a
+    /// parser-table action.
+    Skip,
 }
 
 impl Action {
@@ -51,7 +57,7 @@ impl Action {
                 Some(shifts[0].pushes[0])
             }
             Action::ReplaceShifts(targets) if targets.len() == 1 => Some(targets[0]),
-            Action::GuardedStackShifts(_) | Action::ReplaceShifts(_) => None,
+            Action::GuardedStackShifts(_) | Action::ReplaceShifts(_) | Action::Skip => None,
             _ => None,
         }
     }
@@ -65,7 +71,7 @@ impl Action {
                 shifts[0].pop == 1 && shifts[0].pushes.len() == 1
             }
             Action::ReplaceShifts(targets) => targets.len() == 1,
-            Action::GuardedStackShifts(_) => false,
+            Action::GuardedStackShifts(_) | Action::Skip => false,
             _ => false,
         }
     }
@@ -86,6 +92,7 @@ impl Action {
                 }
             }
             Action::GuardedStackShifts(_) => {}
+            Action::Skip => f(0, &[]),
             Action::Split { shift: Some((target, false)), .. } => {
                 f(0, std::slice::from_ref(target));
             }
@@ -165,6 +172,7 @@ mod tests {
             },
             Action::Accept,
             Action::ReplaceShifts(Arc::from([1, 3, 5, 8])),
+            Action::Skip,
         ];
 
         for (discriminant, action) in actions.into_iter().enumerate() {

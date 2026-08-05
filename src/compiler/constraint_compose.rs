@@ -1176,16 +1176,21 @@ fn boundary_token_prefilter(
     let mut allowed_pairs = [U8Set::empty(); 256];
     let mut boundary_terminals = vec![false; num_terminals];
     for terminal in 0..num_terminals {
-        if ignore_terminals.contains(terminal) {
-            continue;
-        }
         let Some(left) = summaries[terminal] else {
             continue;
         };
+        let terminal_is_ignore = ignore_terminals.contains(terminal);
         let blocked = disallowed_follows.get(&(terminal as u32));
         for follow in 0..num_terminals {
-            if ignore_terminals.contains(follow)
-                || blocked.is_some_and(|blocked| blocked.contains(follow))
+            let follow_is_ignore = ignore_terminals.contains(follow);
+            // Ignores do not appear in the grammar's ever-follow relation.
+            // Keep byte pairs on either side of them whenever the other end is
+            // a boundary seed; otherwise a fused token such as `X WS child`
+            // would be filtered out before exact path discovery sees the child
+            // beginning after the ignored bytes.
+            if !terminal_is_ignore
+                && !follow_is_ignore
+                && blocked.is_some_and(|blocked| blocked.contains(follow))
             {
                 continue;
             }
@@ -1957,7 +1962,7 @@ fn direct_boundary_terminal_automaton(
     seed_relations: BTreeMap<Vec<u32>, BTreeMap<u32, BTreeSet<u32>>>,
     one_byte_ms: f64,
     discovery: &BoundaryTokenDiscovery,
-    ignore_terminals: &BitSet,
+    globally_erasable_ignore_terminals: &BitSet,
     control_terminals: &BTreeSet<u32>,
 ) -> Result<MappedArtifact<TerminalAutomaton>, String> {
     let total_started_at = Instant::now();
@@ -2139,15 +2144,12 @@ fn direct_boundary_terminal_automaton(
             {
                 let target = local_to_canonical[edge.target];
                 debug_assert_ne!(target, usize::MAX);
-                if control_terminals.is_empty()
-                    && ignore_terminals.contains(edge.terminal as usize)
-                {
+                if globally_erasable_ignore_terminals.contains(edge.terminal as usize) {
                     // Ignore bytes advance the token-local lexer path but have
-                    // no parser-stack effect. The generic terminal-DWA pipeline
-                    // erases ignore labels in exactly this way; exposing the
-                    // ignore terminal here would route the path through its
-                    // deliberately non-accepting parser template and lose fused
-                    // tokens such as `X a!`.
+                    // no parser-stack effect in every scope. Explicit child
+                    // controls do not change that fact: a genuinely global
+                    // ignore commutes with entry and return and is erased by the
+                    // ordinary terminal-DWA pipeline in exactly this way.
                     epsilons.push(target);
                 } else {
                     transitions.push((edge.terminal, target));
@@ -3671,7 +3673,7 @@ fn build_boundary_repair(
     merged_tokenizer: Option<&Tokenizer>,
     merged_tokenizer_state_count: usize,
     terminal_display_names: Vec<String>,
-    ignore_terminals: &BitSet,
+    ignore_terminals: &MergedIgnoreTerminals,
     vocab: &Vocab,
     components: &[&Constraint],
     tokenizer_state_offsets: &[u32],
@@ -3724,7 +3726,7 @@ fn build_boundary_repair(
             }
         }
     }
-    for ignore_terminal in ignore_terminals.iter() {
+    for ignore_terminal in ignore_terminals.scoped.iter() {
         if let Some(slot) = seed_terminals.get_mut(ignore_terminal) {
             *slot = true;
         }
@@ -3768,7 +3770,7 @@ fn build_boundary_repair(
                             tokenizer_state_offsets,
                             &composed_table.terminal_offsets,
                             &seed_terminals,
-                            ignore_terminals,
+                            &ignore_terminals.all,
                             &disallowed_follows,
                         );
                         (boundary_paths, started_at.elapsed().as_secs_f64() * 1000.0)
@@ -3930,6 +3932,15 @@ fn build_boundary_repair(
                 {
                     match merged_tokenizer {
                         Some(tokenizer) => {
+                            let canonicalized_tokenizer = ignore_terminals.canonical.map(|canonical| {
+                                let mut canonicalized = tokenizer.clone();
+                                canonicalized.canonicalize_terminal_aliases(
+                                    canonical,
+                                    &ignore_terminals.aliases,
+                                );
+                                canonicalized
+                            });
+                            let tokenizer = canonicalized_tokenizer.as_ref().unwrap_or(tokenizer);
                             let flat_trans: Arc<[u32]> = Arc::from(
                                 crate::compiler::stages::id_map_and_terminal_dwa::l1::
                                     build_flat_transition_table(tokenizer),
@@ -3946,16 +3957,7 @@ fn build_boundary_repair(
                                         vocab,
                                         &coloring,
                                         false,
-                                        composed_table
-                                            .control_terminals
-                                            .is_empty()
-                                            .then(|| {
-                                                ignore_terminals
-                                                    .iter()
-                                                    .next()
-                                                    .map(|terminal| terminal as u32)
-                                            })
-                                            .flatten(),
+                                        ignore_terminals.canonical,
                                         &analyzed,
                                         &disallowed_follows,
                                         flat_trans,
@@ -3982,7 +3984,7 @@ fn build_boundary_repair(
                         seed_relations,
                         one_byte_ms,
                         &boundary_paths,
-                        ignore_terminals,
+                        &ignore_terminals.global,
                         &composed_table.control_terminals,
                     )
                 };
@@ -4076,7 +4078,8 @@ fn merged_special_token_terminals(
             | Action::StackShifts(_)
             | Action::GuardedStackShifts(_)
             | Action::Accept
-            | Action::ReplaceShifts(_) => true,
+            | Action::ReplaceShifts(_)
+            | Action::Skip => true,
         }
     }
 
@@ -4118,21 +4121,45 @@ fn merged_special_token_terminals(
 #[derive(Debug, Clone)]
 struct MergedIgnoreTerminals {
     canonical: Option<u32>,
+    canonical_expr: Option<crate::automata::regex::Expr>,
     all: BitSet,
+    /// Ignore terminals whose identity effect depends on the active parser
+    /// scope. These remain visible to the boundary terminal/parser DWA.
+    scoped: BitSet,
+    /// Equivalent component-local ignore terminals which can be erased before
+    /// parser interpretation. They are canonicalized to `canonical` in the
+    /// final composed tokenizer/artifacts.
+    global: BitSet,
     aliases: Vec<u32>,
 }
 
-fn component_ignore_languages_are_uniform(
+fn constraint_ignore_expr(constraint: &Constraint) -> Option<&crate::automata::regex::Expr> {
+    constraint.ignore_expr.as_ref().or_else(|| {
+        constraint
+            .ignore_terminal
+            .and_then(|terminal| constraint.tokenizer.terminal_expr(terminal))
+    })
+}
+
+/// Whether every parser scope accepts the same ignore language globally.
+///
+/// Existing scoped `Skip` actions are proof that a component already contains
+/// non-global ignore ownership, so such a component cannot be flattened back
+/// into one global ignore merely because its public `ignore_terminal` happens
+/// to match another component. Explicit control terminals themselves are not a
+/// problem: adjacent/nested children can retain explicit calls while sharing a
+/// single globally erased ignore.
+fn component_ignores_are_globally_erasable(
     parent: &Constraint,
     children: &[CompiledSubgrammarInput<'_>],
 ) -> bool {
     let components = std::iter::once(parent)
         .chain(children.iter().map(|child| child.constraint))
         .collect::<Vec<_>>();
-    if components.iter().any(|component| {
-        !component.table.control_terminals.is_empty()
-            || !component.table.skip_terminals.is_empty()
-    }) {
+    if components
+        .iter()
+        .any(|component| !component.table.skip_terminals.is_empty())
+    {
         return false;
     }
     let Some(first) = components.first() else {
@@ -4143,20 +4170,26 @@ fn component_ignore_languages_are_uniform(
             .iter()
             .all(|component| component.ignore_terminal.is_none()),
         Some(first_ignore) => {
-            let Some(expected) = first.tokenizer.terminal_expr(first_ignore) else {
+            let Some(expected) = constraint_ignore_expr(first) else {
                 return false;
             };
             components.iter().skip(1).all(|component| {
-                let Some(ignore) = component.ignore_terminal else {
+                let Some(_ignore) = component.ignore_terminal else {
                     return false;
                 };
-                component
-                    .tokenizer
-                    .terminal_expr(ignore)
-                    .is_some_and(|actual| actual == expected)
+                constraint_ignore_expr(component).is_some_and(|actual| actual == expected)
             })
         }
     }
+}
+
+fn components_have_no_explicit_controls(
+    parent: &Constraint,
+    children: &[CompiledSubgrammarInput<'_>],
+) -> bool {
+    std::iter::once(parent)
+        .chain(children.iter().map(|child| child.constraint))
+        .all(|component| component.table.control_terminals.is_empty())
 }
 
 /// The legacy splice identifies child start/accept states with parent
@@ -4208,7 +4241,7 @@ fn merged_ignore_terminals(
     parent: &Constraint,
     children: &[CompiledSubgrammarInput<'_>],
     terminal_offsets: &[u32],
-    canonicalize: bool,
+    globally_erasable: bool,
 ) -> MergedIgnoreTerminals {
     let ignores = std::iter::once(parent)
         .chain(children.iter().map(|child| child.constraint))
@@ -4219,7 +4252,10 @@ fn merged_ignore_terminals(
                 .map(|terminal| terminal_offsets[component_index] + terminal)
         })
         .collect::<Vec<_>>();
-    let canonical = canonicalize.then(|| ignores.first().copied()).flatten();
+    let canonical = globally_erasable
+        .then(|| ignores.first().copied())
+        .flatten();
+    let canonical_expr = canonical.and_then(|_| constraint_ignore_expr(parent).cloned());
     let mut all = BitSet::new(
         terminal_offsets
             .iter()
@@ -4241,6 +4277,11 @@ fn merged_ignore_terminals(
             all.set(terminal_offset + skip as usize);
         }
     }
+    let (global, scoped) = if canonical.is_some() {
+        (all.clone(), BitSet::new(all.len()))
+    } else {
+        (BitSet::new(all.len()), all.clone())
+    };
     let aliases = canonical
         .map(|canonical| {
             ignores
@@ -4251,7 +4292,10 @@ fn merged_ignore_terminals(
         .unwrap_or_default();
     MergedIgnoreTerminals {
         canonical,
+        canonical_expr,
         all,
+        scoped,
+        global,
         aliases,
     }
 }
@@ -4394,6 +4438,7 @@ fn build_composed_constraint_unfinalized(
     embedded_end_token_ids: Vec<u32>,
     terminal_display_names: Vec<String>,
     ignore_terminal: Option<u32>,
+    ignore_expr: Option<crate::automata::regex::Expr>,
     terminal_live_states: Vec<Vec<u32>>,
     tokenizer_fast_transitions: crate::runtime::FastTokenizerTransitions,
     defer_internal_token_bytes: bool,
@@ -4517,6 +4562,7 @@ fn build_composed_constraint_unfinalized(
         internal_token_buf_op_costs: Vec::new(),
         word_group_buf_op_costs: Vec::new(),
         final_mask_mapping: crate::runtime::mask_mapping::FinalMaskMapping::default(),
+        ignore_expr,
     };
     ConstraintComposition {
         constraint,
@@ -4536,6 +4582,7 @@ fn finalize_composed_constraint(
     embedded_end_token_ids: Vec<u32>,
     terminal_display_names: Vec<String>,
     ignore_terminal: Option<u32>,
+    ignore_expr: Option<crate::automata::regex::Expr>,
     terminal_live_states: Vec<Vec<u32>>,
     tokenizer_fast_transitions: crate::runtime::FastTokenizerTransitions,
     vocab: &Vocab,
@@ -4553,6 +4600,7 @@ fn finalize_composed_constraint(
         embedded_end_token_ids,
         terminal_display_names,
         ignore_terminal,
+        ignore_expr,
         terminal_live_states,
         tokenizer_fast_transitions,
         false,
@@ -4621,25 +4669,31 @@ pub(crate) fn compose_constraints(
             }
         }
     }
+    let global_ignores = component_ignores_are_globally_erasable(parent, children);
     let table_inputs = children
         .iter()
         .map(|child| SubgrammarTableInput {
             placeholder_terminal: child.placeholder_terminal,
             table: &child.constraint.table,
-            ignore_terminal: child.constraint.ignore_terminal,
+            ignore_terminal: (!global_ignores)
+                .then_some(child.constraint.ignore_terminal)
+                .flatten(),
             start_nullable: child.constraint.table.embedded_start_nullable(),
         })
         .collect::<Vec<_>>();
-    let uniform_ignores = component_ignore_languages_are_uniform(parent, children);
     let use_legacy_splice =
-        uniform_ignores && legacy_splice_has_no_adjacent_subgrammar_calls(parent, children);
+        global_ignores
+            && components_have_no_explicit_controls(parent, children)
+            && legacy_splice_has_no_adjacent_subgrammar_calls(parent, children);
     let table_started_at = Instant::now();
     let composed_table = if use_legacy_splice {
         compose_subgrammar_tables(&parent.table, &table_inputs)?
     } else {
         compose_subgrammar_tables_explicit(
             &parent.table,
-            parent.ignore_terminal,
+            (!global_ignores)
+                .then_some(parent.ignore_terminal)
+                .flatten(),
             &table_inputs,
         )?
     };
@@ -4713,7 +4767,7 @@ pub(crate) fn compose_constraints(
         parent,
         children,
         &composed_table.terminal_offsets,
-        use_legacy_splice,
+        global_ignores,
     );
     let ignore_terminal = merged_ignores.canonical;
 
@@ -4768,7 +4822,7 @@ pub(crate) fn compose_constraints(
                     &composed_table.terminal_offsets,
                     merged_tokenizer_state_count,
                     &original_token_ids,
-                    !use_legacy_splice,
+                    !global_ignores,
                 );
                 (result, started_at.elapsed().as_secs_f64() * 1000.0)
             },
@@ -4779,7 +4833,7 @@ pub(crate) fn compose_constraints(
                     Some(&tokenizer_result.0),
                     merged_tokenizer_state_count,
                     terminal_display_names.clone(),
-                    &merged_ignores.all,
+                    &merged_ignores,
                     vocab,
                     &component_constraints,
                     &expected_tokenizer_state_offsets,
@@ -4818,7 +4872,7 @@ pub(crate) fn compose_constraints(
                                 &composed_table.terminal_offsets,
                                 merged_tokenizer_state_count,
                                 &original_token_ids,
-                                !use_legacy_splice,
+                                !global_ignores,
                             );
                             (result, started_at.elapsed().as_secs_f64() * 1000.0)
                         },
@@ -4829,7 +4883,7 @@ pub(crate) fn compose_constraints(
                                 None,
                                 merged_tokenizer_state_count,
                                 terminal_display_names.clone(),
-                                &merged_ignores.all,
+                                &merged_ignores,
                                 vocab,
                                 &component_constraints,
                                 &expected_tokenizer_state_offsets,
@@ -4920,6 +4974,7 @@ pub(crate) fn compose_constraints(
         embedded_end_token_ids,
         terminal_display_names,
         ignore_terminal,
+        merged_ignores.canonical_expr.clone(),
         terminal_live_states,
         Default::default(),
         vocab,
@@ -4998,25 +5053,31 @@ pub(crate) fn compose_constraints_owned_parent(
         }
     }
 
+    let global_ignores = component_ignores_are_globally_erasable(&parent, children);
     let table_inputs = children
         .iter()
         .map(|child| SubgrammarTableInput {
             placeholder_terminal: child.placeholder_terminal,
             table: &child.constraint.table,
-            ignore_terminal: child.constraint.ignore_terminal,
+            ignore_terminal: (!global_ignores)
+                .then_some(child.constraint.ignore_terminal)
+                .flatten(),
             start_nullable: child.constraint.table.embedded_start_nullable(),
         })
         .collect::<Vec<_>>();
-    let uniform_ignores = component_ignore_languages_are_uniform(&parent, children);
     let use_legacy_splice =
-        uniform_ignores && legacy_splice_has_no_adjacent_subgrammar_calls(&parent, children);
+        global_ignores
+            && components_have_no_explicit_controls(&parent, children)
+            && legacy_splice_has_no_adjacent_subgrammar_calls(&parent, children);
     let table_started_at = Instant::now();
     let composed_table = if use_legacy_splice {
         compose_subgrammar_tables(&parent.table, &table_inputs)?
     } else {
         compose_subgrammar_tables_explicit(
             &parent.table,
-            parent.ignore_terminal,
+            (!global_ignores)
+                .then_some(parent.ignore_terminal)
+                .flatten(),
             &table_inputs,
         )?
     };
@@ -5078,7 +5139,7 @@ pub(crate) fn compose_constraints_owned_parent(
         &parent,
         children,
         &composed_table.terminal_offsets,
-        use_legacy_splice,
+        global_ignores,
     );
     let ignore_terminal = merged_ignores.canonical;
     let names_ms = names_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -5128,7 +5189,7 @@ pub(crate) fn compose_constraints_owned_parent(
                             let result = prepare_unmapped_component_parser_artifacts(
                                 &parser_components,
                                 &composed_table.terminal_offsets,
-                                !use_legacy_splice,
+                                !global_ignores,
                             );
                             (result, started_at.elapsed().as_secs_f64() * 1000.0)
                         },
@@ -5212,7 +5273,7 @@ pub(crate) fn compose_constraints_owned_parent(
                     None,
                     merged_tokenizer_state_count,
                     terminal_display_names.clone(),
-                    &merged_ignores.all,
+                    &merged_ignores,
                     vocab,
                     &component_constraints,
                     &expected_tokenizer_state_offsets,
@@ -5344,6 +5405,7 @@ pub(crate) fn compose_constraints_owned_parent(
         embedded_end_token_ids,
         terminal_display_names,
         ignore_terminal,
+        merged_ignores.canonical_expr.clone(),
         terminal_live_states,
         tokenizer_fast_transitions,
         true,
@@ -6169,6 +6231,21 @@ mod tests {
             .compose_subgrammars(&[("SUB", &child)], &vocab)
             .unwrap();
 
+        assert!(composed.ignore_terminal.is_none());
+        assert!(!composed.table.skip_terminals.is_empty());
+        assert!(composed.table.action.iter().any(|row| {
+            row.iter().any(|(terminal, action)| {
+                composed.table.skip_terminals.contains(&terminal)
+                    && matches!(action, Action::Skip)
+            })
+        }));
+        assert!(composed.table.action.iter().all(|row| {
+            row.iter().all(|(terminal, action)| {
+                !composed.table.skip_terminals.contains(&terminal)
+                    || matches!(action, Action::Skip)
+            })
+        }));
+
         assert_constraints_equivalent_on_reachable_prefixes(
             &composed,
             &monolithic,
@@ -6246,6 +6323,17 @@ mod tests {
             .compose_subgrammars(&[("SUB", &child)], &vocab)
             .unwrap();
         let loaded = Constraint::load(&composed.save()).unwrap();
+
+        for constraint in [&composed, &loaded] {
+            assert!(constraint.ignore_terminal.is_none());
+            assert_eq!(constraint.table.skip_terminals.len(), 2);
+            assert!(constraint.table.action.iter().all(|row| {
+                row.iter().all(|(terminal, action)| {
+                    !constraint.table.skip_terminals.contains(&terminal)
+                        || matches!(action, Action::Skip)
+                })
+            }));
+        }
 
         // The current inline scoped-ignore lowering materialises nullable skip
         // productions. Its `is_complete()` predicate can report a
@@ -6480,6 +6568,165 @@ mod tests {
             &vocab,
             4,
         );
+    }
+
+    #[test]
+    fn adjacent_children_with_uniform_ignore_use_global_ignore_and_explicit_controls() {
+        let vocab = Vocab::new(vec![
+            (0, b"X a".to_vec()),
+            (1, b" a".to_vec()),
+            (2, b" !".to_vec()),
+            (3, b" X a a ! ".to_vec()),
+            (4, b"X".to_vec()),
+            (5, b" ".to_vec()),
+            (6, b"a".to_vec()),
+            (7, b"!".to_vec()),
+            (8, b"<".to_vec()),
+            (9, b">".to_vec()),
+            (10, b"< X a a ! >".to_vec()),
+        ]);
+        let parent = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                ignore WS;
+                t WS ::= " "+;
+                t SUB ::= @token(999);
+                nt document ::= "X" SUB SUB "!";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child = Constraint::from_glrm_grammar(
+            r#"
+                start child;
+                ignore WS;
+                t WS ::= " "+;
+                nt child ::= "a";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let monolithic = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                ignore WS;
+                t WS ::= " "+;
+                nt child ::= "a";
+                nt document ::= "X" child child "!";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let composed = parent
+            .compose_subgrammars(&[("SUB", &child)], &vocab)
+            .unwrap();
+        let loaded = Constraint::load(&composed.save()).unwrap();
+
+        for constraint in [&composed, &loaded] {
+            assert!(constraint.ignore_terminal.is_some());
+            assert!(
+                !constraint.table.control_terminals.is_empty(),
+                "adjacent calls must retain explicit entry/return controls"
+            );
+            assert!(
+                constraint.table.skip_terminals.is_empty(),
+                "a globally erasable ignore must not be materialized in parser rows"
+            );
+            assert!(constraint.table.action.iter().all(|row| {
+                row.iter().all(|(_, action)| !matches!(action, Action::Skip))
+            }));
+        }
+
+        for sequence in [vec![0, 1, 2], vec![3], vec![4, 5, 6, 5, 6, 5, 7, 5]] {
+            let mut actual = composed.start();
+            let mut restored = loaded.start();
+            let mut expected = monolithic.start();
+            for token in sequence {
+                assert_eq!(actual.mask(), expected.mask(), "mask mismatch before token {token}");
+                assert_eq!(restored.mask(), expected.mask(), "loaded mask mismatch before token {token}");
+                actual.commit_token(token).unwrap();
+                restored.commit_token(token).unwrap();
+                expected.commit_token(token).unwrap();
+            }
+            assert!(actual.is_complete());
+            assert!(restored.is_complete());
+            assert!(expected.is_complete());
+        }
+
+        assert_constraints_equivalent_on_reachable_prefixes(
+            &composed,
+            &monolithic,
+            &vocab,
+            4,
+        );
+        assert_constraints_equivalent_on_reachable_prefixes(
+            &loaded,
+            &composed,
+            &vocab,
+            4,
+        );
+
+        // Existing explicit controls do not make the common ignore scoped.
+        // They only prohibit the legacy table splice: the outer composition
+        // must retain the nested controls while continuing to erase WS
+        // globally.
+        let outer_parent = Constraint::from_glrm_grammar(
+            r#"
+                start outer;
+                ignore WS;
+                t WS ::= " "+;
+                t INNER ::= @token(1000);
+                nt outer ::= "<" INNER ">";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let outer_monolithic = Constraint::from_glrm_grammar(
+            r#"
+                start outer;
+                ignore WS;
+                t WS ::= " "+;
+                nt child ::= "a";
+                nt outer ::= "<" "X" child child "!" ">";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let outer = outer_parent
+            .clone()
+            .compose_subgrammars(&[("INNER", &composed)], &vocab)
+            .unwrap();
+        let outer_from_loaded = outer_parent
+            .compose_subgrammars(&[("INNER", &loaded)], &vocab)
+            .unwrap();
+        for constraint in [&outer, &outer_from_loaded] {
+            assert!(constraint.ignore_terminal.is_some());
+            assert!(constraint.ignore_expr.is_some());
+            assert!(!constraint.table.control_terminals.is_empty());
+            assert!(constraint.table.skip_terminals.is_empty());
+            assert!(constraint.table.action.iter().all(|row| {
+                row.iter().all(|(_, action)| !matches!(action, Action::Skip))
+            }));
+        }
+        for sequence in [vec![10], vec![8, 3, 9]] {
+            let mut actual = outer.start();
+            let mut restored_actual = outer_from_loaded.start();
+            let mut expected = outer_monolithic.start();
+            for token in sequence {
+                assert_eq!(actual.mask(), expected.mask(), "nested mask mismatch before token {token}");
+                assert_eq!(
+                    restored_actual.mask(),
+                    expected.mask(),
+                    "loaded-child nested mask mismatch before token {token}"
+                );
+                actual.commit_token(token).unwrap();
+                restored_actual.commit_token(token).unwrap();
+                expected.commit_token(token).unwrap();
+            }
+            assert!(actual.is_complete());
+            assert!(restored_actual.is_complete());
+            assert!(expected.is_complete());
+        }
     }
 
     #[test]
