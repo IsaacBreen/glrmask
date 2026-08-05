@@ -825,7 +825,7 @@ mod lexer_partition_plan_tests {
     }
 
     #[test]
-    fn profiled_compile_installs_vocab_certifier_before_synthetic_planning() {
+    fn profiled_compile_uses_a_certified_synthetic_coordinate() {
         let grammar = GrammarDef {
             rules: vec![Rule {
                 lhs: 0,
@@ -855,11 +855,13 @@ mod lexer_partition_plan_tests {
             GlrTableConstruction::ExperimentalCoreMerged,
         );
 
-        assert!(!profile.synthetic_certified);
-        assert!(profile.synthetic_token_quotient_certified);
+        assert!(
+            profile.synthetic_certified || profile.synthetic_token_quotient_certified,
+            "synthetic planning must retain either the raw or vocabulary-token certificate",
+        );
         assert!(profile.synthetic_candidate_terminals > 0);
         assert!(profile.synthetic_observation_states < profile.tokenizer_final_states);
-        assert_eq!(profile.synthetic_compile_states, profile.tokenizer_final_states);
+        assert!(profile.synthetic_compile_states < profile.tokenizer_final_states);
     }
 
     #[test]
@@ -2923,13 +2925,13 @@ fn compile_prepared_with_profile_and_table_construction(
                             })
                         };
 
-                        if let Some((synthesized, full, certified)) = select_pair(false) {
-                            (synthesized, Some(full), Some(certified), 0.0, false)
-                        } else if let Some((synthesized, full, certified)) = select_pair(true) {
-                            // The map is exact for every complete vocabulary token,
-                            // but not necessarily a raw-byte transition congruence.
-                            // Keep the full tokenizer for compile/runtime semantics;
-                            // use the quotient only to seed terminal-DWA observation.
+                        if let Some((synthesized, full, certified)) = select_pair(true) {
+                            // The compile coordinate is a complete-vocabulary-token
+                            // quotient. Constructing the same pair first under the
+                            // stricter raw-byte proof only to reject and rebuild it
+                            // doubles the dominant tokenizer planning work for the
+                            // slow cohort. Runtime commits still use the exact full
+                            // tokenizer below.
                             (synthesized, Some(full), Some(certified), 0.0, true)
                         } else {
                             (
@@ -2977,7 +2979,14 @@ fn compile_prepared_with_profile_and_table_construction(
                     use_full_tokenizer_for_token_quotient,
                 ) = global_tokenizer_result;
                 let mut initial_state_map = None;
+                // The certified vocabulary-token quotient is the compile
+                // coordinate by default. Keep the full-coordinate route as a
+                // diagnostic kill switch while still constructing the exact
+                // tokenizer for runtime commits.
+                let direct_token_quotient_compile = use_full_tokenizer_for_token_quotient
+                    && env_flag_enabled_by_default("GLRMASK_DIRECT_TOKEN_QUOTIENT_COMPILE");
                 if use_full_tokenizer_for_token_quotient
+                    && !direct_token_quotient_compile
                     && let (Some(deferred), Some(certified)) = (
                         deferred_runtime_tokenizer.take(),
                         full_to_synthesized_state_map.take(),
@@ -3020,6 +3029,18 @@ fn compile_prepared_with_profile_and_table_construction(
                     tokenizer.isolate_start_state_and_drain_nullable_terminals();
                 }
                 if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some() {
+                    if use_full_tokenizer_for_token_quotient {
+                        eprintln!(
+                            "[glrmask/profile][tokenizer] token_quotient_compile_coordinate={} compile_states={} runtime_deferred={}",
+                            if direct_token_quotient_compile {
+                                "synthesized"
+                            } else {
+                                "full"
+                            },
+                            tokenizer.num_states(),
+                            deferred_runtime_tokenizer.is_some(),
+                        );
+                    }
                     eprintln!(
                         "[glrmask/profile][tokenizer] construction_vs_isolation construct_ms={:.3} isolate_ms={:.3} total_ms={:.3}",
                         tokenizer_construct_ms,
@@ -3029,8 +3050,8 @@ fn compile_prepared_with_profile_and_table_construction(
                 }
                 let compile_tokenizer_states = tokenizer.num_states() as usize;
                 let compile_tokenizer_transitions = tokenizer.transition_count();
-                let synthetic_token_quotient_certified =
-                    use_full_tokenizer_for_token_quotient && initial_state_map.is_some();
+                let synthetic_token_quotient_certified = use_full_tokenizer_for_token_quotient
+                    && (direct_token_quotient_compile || initial_state_map.is_some());
                 let synthetic_observation_states = initial_state_map.as_ref().map_or(
                     compile_tokenizer_states,
                     |state_map| state_map.num_internal_ids() as usize,

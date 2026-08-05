@@ -2534,14 +2534,15 @@ pub fn arbitrary_epsilon_l1_test_tokenizer() -> Tokenizer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::pipeline::build_tokenizer;
-    use crate::grammar::ast::lower;
-    use crate::grammar::glrm::from_glrm;
+    use crate::automata::lexer::ast::{bytes, plus};
+    use crate::automata::lexer::compile::build_regex;
 
-    fn tokenizer_from_glrm(source: &str) -> Tokenizer {
-        let named = from_glrm(source).unwrap();
-        let grammar = lower(&named).unwrap();
-        build_tokenizer(&grammar)
+    fn tokenizer_from_exprs(exprs: Vec<Expr>) -> Tokenizer {
+        let num_terminals = exprs.len() as u32;
+        build_regex(&exprs).into_tokenizer(
+            num_terminals,
+            Some(Arc::from(exprs.into_boxed_slice())),
+        )
     }
 
     fn normalized_exec(
@@ -2587,22 +2588,8 @@ mod tests {
 
     #[test]
     fn disjoint_union_preserves_every_source_residual_and_unions_resets() {
-        let left = tokenizer_from_glrm(
-            r#"
-                start value;
-                t AB ::= "ab";
-                t XS ::= "x"+;
-                nt value ::= AB | XS;
-            "#,
-        );
-        let right = tokenizer_from_glrm(
-            r#"
-                start value;
-                t BC ::= "bc";
-                t YS ::= "y"+;
-                nt value ::= BC | YS;
-            "#,
-        );
+        let left = tokenizer_from_exprs(vec![bytes(b"ab"), plus(bytes(b"x"))]);
+        let right = tokenizer_from_exprs(vec![bytes(b"bc"), plus(bytes(b"y"))]);
         let right_terminal_offset = left.num_terminals();
         let (merged, state_offsets) = Tokenizer::disjoint_union_with_terminal_offsets(&[
             (&left, 0),
