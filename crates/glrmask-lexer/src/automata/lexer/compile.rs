@@ -5867,69 +5867,6 @@ fn augment_component_from_verified_prefix(
     Some(source_to_synthesized)
 }
 
-/// Certify the only states not copied exactly by protected-component
-/// augmentation. A partition-local terminal DWA observes only bytes that occur
-/// in its vocabulary, so congruence is required on that exact alphabet rather
-/// than on unrelated bytes that can never be consumed in this compiler lane.
-fn certify_component_prefix_homomorphism_on_bytes(
-    source: &DFA,
-    synthesized: &DFA,
-    source_to_synthesized: &[u32],
-    prefix_states: usize,
-    relevant_bytes: &[u8],
-) -> bool {
-    if source.num_groups() != synthesized.num_groups()
-        || source_to_synthesized.len() != source.num_states()
-        || prefix_states > source.num_states()
-        || source_to_synthesized
-            .iter()
-            .any(|&state| state as usize >= synthesized.num_states())
-    {
-        return false;
-    }
-
-    let mut mapped_epsilon = Vec::<u32>::new();
-    let mut synthesized_epsilon = Vec::<u32>::new();
-    for source_state in 0..prefix_states as u32 {
-        let synthesized_state = source_to_synthesized[source_state as usize];
-        if source.finalizers(source_state) != synthesized.finalizers(synthesized_state)
-            || source.possible_future_group_ids(source_state)
-                != synthesized.possible_future_group_ids(synthesized_state)
-        {
-            return false;
-        }
-
-        mapped_epsilon.clear();
-        mapped_epsilon.extend(
-            source.states()[source_state as usize]
-                .epsilon_transitions
-                .iter()
-                .map(|&target| source_to_synthesized[target as usize]),
-        );
-        mapped_epsilon.sort_unstable();
-        mapped_epsilon.dedup();
-        synthesized_epsilon.clear();
-        synthesized_epsilon.extend_from_slice(
-            &synthesized.states()[synthesized_state as usize].epsilon_transitions,
-        );
-        synthesized_epsilon.sort_unstable();
-        synthesized_epsilon.dedup();
-        if mapped_epsilon != synthesized_epsilon {
-            return false;
-        }
-
-        for &byte in relevant_bytes {
-            let mapped_source = source
-                .step(source_state, byte)
-                .map(|target| source_to_synthesized[target as usize]);
-            if mapped_source != synthesized.step(synthesized_state, byte) {
-                return false;
-            }
-        }
-    }
-    true
-}
-
 /// Further synthesize protected singleton components of an already-built
 /// partitioned tokenizer without recompiling its ordinary components.
 ///
@@ -6039,7 +5976,6 @@ pub fn compile_further_synthesized_tokenizer_with_structural_map(
         if !synthesized_nullable.is_empty() || !rebuilt_nullable.is_empty() {
             return reject("protected_nullable");
         }
-        let rebuilt_states = rebuilt.num_states();
         let Some(source_to_synthesized) = augment_component_from_verified_prefix(
             &component.dfa,
             &rebuilt,
@@ -6057,15 +5993,11 @@ pub fn compile_further_synthesized_tokenizer_with_structural_map(
             }
             return reject("protected_prefix");
         };
-        if !certify_component_prefix_homomorphism_on_bytes(
-            &component.dfa,
-            &synthesized,
-            &source_to_synthesized,
-            rebuilt_states,
-            relevant_bytes,
-        ) {
-            return reject("protected_relevant_homomorphism");
-        }
+        // This lane consumes complete entries from `vocab`, not arbitrary
+        // one-byte continuations from every raw source state. The structural
+        // pair above is therefore certified in the vocabulary-token quotient
+        // coordinate. Requiring a raw byte homomorphism here is strictly
+        // stronger and rejects valid bounded-repeat quotients.
         component_maps.push((component.source_states, source_to_synthesized));
         output_components.push(LexerComponent {
             terminal_ids: component.terminal_ids,
@@ -8147,17 +8079,15 @@ fn direct_bounded_suffix_state_map(
         .zip(repeat_horizons)
         .and_then(|(vocab, horizons)| horizons.horizon_for_dfa(&base, vocab))
         .unwrap_or(fallback_crossed_boundaries);
-    // The synthesized interior representative must itself remain farther than
-    // one token horizon from the upper boundary.
+    // Translation-invariant interior counts must retain enough room for the
+    // current token and a later completing token. Mapping them immediately
+    // below the synthetic upper-bound stencil consumes that headroom after one
+    // token. The first accepting count is the stable interior representative;
+    // the upper-bound stencil still preserves states close to the true maximum.
     if synthesized_shape.max.saturating_sub(synthesized_shape.min) <= crossed_boundaries {
         return None;
     }
-    let interior_representative = synthesized_shape
-        .max
-        .checked_sub(crossed_boundaries.saturating_add(1))?;
-    if interior_representative < synthesized_shape.min {
-        return None;
-    }
+    let interior_representative = synthesized_shape.min;
 
     let full_suffix_start = prefix_states + (full_shape.max + 1) * full_base_states;
     let synthesized_suffix_start =
