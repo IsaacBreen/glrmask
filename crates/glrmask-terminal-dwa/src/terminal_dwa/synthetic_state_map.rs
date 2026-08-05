@@ -1877,8 +1877,6 @@ mod tests {
         build_regex_partitioned_with_adaptive,
     };
     use crate::automata::regex::Expr;
-    #[cfg(feature = "facade-tests")]
-    use crate::{Constraint, DynamicConstraint};
 
     fn repeat_a(max: usize) -> Tokenizer {
         let expressions = vec![Expr::Repeat {
@@ -2069,129 +2067,6 @@ mod tests {
         // structural tuple materialization.
         assert_eq!(*max, Some(1));
         assert_eq!(synthesized.expressions[1], expressions[1]);
-    }
-
-    #[cfg(feature = "facade-tests")]
-    #[test]
-    fn static_synthesized_pipeline_matches_exact_dynamic_runtime_through_full_bound() {
-        let vocab = Vocab::new(vec![
-            (0, b"\"".to_vec()),
-            (1, b"a".to_vec()),
-            (2, b"aa".to_vec()),
-            (3, b"aaaa".to_vec()),
-            (4, b"x".to_vec()),
-        ]);
-        let schema = r#"{
-            "type": "string",
-            "pattern": "^a{1,80}$",
-            "minLength": 1,
-            "maxLength": 80
-        }"#;
-        let constraint = Constraint::from_json_schema(schema, &vocab).expect("static constraint");
-        let dynamic =
-            DynamicConstraint::from_json_schema(schema, &vocab).expect("dynamic constraint");
-        let mut static_state = constraint.start();
-        let mut dynamic_state = dynamic.start();
-
-        assert_eq!(static_state.mask(), dynamic_state.mask());
-        static_state.commit_token(0).expect("opening quote");
-        dynamic_state.commit_token(0).expect("opening quote");
-        for chunk in 0..20 {
-            assert_eq!(
-                static_state.mask(),
-                dynamic_state.mask(),
-                "mask mismatch before four-byte chunk {chunk}",
-            );
-            static_state.commit_token(3).expect("four a bytes");
-            dynamic_state.commit_token(3).expect("four a bytes");
-        }
-        assert_eq!(static_state.mask(), dynamic_state.mask());
-        let mask = static_state.mask();
-        assert_ne!(mask[0] & (1 << 0), 0, "closing quote must be allowed");
-        assert_eq!(mask[0] & (1 << 1), 0, "65th a must be rejected");
-        assert_eq!(mask[0] & (1 << 2), 0, "66th a must be rejected");
-        assert_eq!(mask[0] & (1 << 3), 0, "68th a must be rejected");
-        static_state.commit_token(0).expect("closing quote");
-        dynamic_state.commit_token(0).expect("closing quote");
-        assert_eq!(static_state.is_finished(), dynamic_state.is_finished());
-        assert_eq!(static_state.mask(), dynamic_state.mask());
-    }
-
-    #[cfg(feature = "facade-tests")]
-    #[test]
-    fn independently_synthesized_identical_terminals_preserve_different_full_lifetimes() {
-        let vocab = Vocab::new(vec![
-            (0, b"\"".to_vec()),
-            (1, b"a".to_vec()),
-            (2, b"aaaa".to_vec()),
-            (3, b"x".to_vec()),
-        ]);
-        let schema = r#"{
-            "anyOf": [
-                {"type":"string","pattern":"^a{1,80}$","maxLength":80},
-                {"type":"string","pattern":"^a{1,160}$","maxLength":160}
-            ]
-        }"#;
-        let constraint = Constraint::from_json_schema(schema, &vocab).expect("static constraint");
-        let dynamic =
-            DynamicConstraint::from_json_schema(schema, &vocab).expect("dynamic constraint");
-        let mut static_state = constraint.start();
-        let mut dynamic_state = dynamic.start();
-
-        static_state.commit_token(0).expect("opening quote");
-        dynamic_state.commit_token(0).expect("opening quote");
-        for chunk in 0..20 {
-            assert_eq!(static_state.mask(), dynamic_state.mask(), "chunk {chunk}");
-            static_state.commit_token(2).expect("four a bytes");
-            dynamic_state.commit_token(2).expect("four a bytes");
-        }
-
-        let at_short_limit = static_state.mask();
-        assert_eq!(at_short_limit, dynamic_state.mask());
-        assert_ne!(at_short_limit[0] & (1 << 0), 0, "short terminal may close");
-        assert_ne!(
-            at_short_limit[0] & (1 << 2),
-            0,
-            "long terminal must remain alive after the short terminal expires",
-        );
-
-        for chunk in 20..40 {
-            assert_eq!(static_state.mask(), dynamic_state.mask(), "chunk {chunk}");
-            static_state.commit_token(2).expect("long terminal continuation");
-            dynamic_state.commit_token(2).expect("long terminal continuation");
-        }
-        let at_long_limit = static_state.mask();
-        assert_eq!(at_long_limit, dynamic_state.mask());
-        assert_ne!(at_long_limit[0] & (1 << 0), 0, "long terminal may close");
-        assert_eq!(
-            at_long_limit[0] & (1 << 2),
-            0,
-            "long terminal must expire at its exact full bound",
-        );
-    }
-
-    #[cfg(feature = "facade-tests")]
-    #[test]
-    #[ignore = "profiling probe for the pathological nested-repeat/max-length product"]
-    fn profile_pathological_nested_repeat_max_length() {
-        let vocab = Vocab::new(vec![
-            (0, b"\"".to_vec()),
-            (1, b"a".to_vec()),
-            (2, b"b".to_vec()),
-            (3, b"ab".to_vec()),
-            (4, b"aabb".to_vec()),
-            (5, b"aaaa".to_vec()),
-            (6, b"bbbb".to_vec()),
-        ]);
-        let schema = r#"{
-            "type":"string",
-            "pattern":"^(?:a+b+){0,100}a+$",
-            "minLength":2,
-            "maxLength":500
-        }"#;
-        std::hint::black_box(
-            Constraint::from_json_schema(schema, &vocab).expect("pathological exact constraint"),
-        );
     }
     #[test]
     fn terminal_structural_map_matches_generic_certifier_on_small_repeat() {

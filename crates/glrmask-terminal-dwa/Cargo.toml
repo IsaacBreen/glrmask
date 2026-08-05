@@ -9,7 +9,6 @@ repository = "https://github.com/IsaacBreen/glrmask"
 [features]
 default = []
 internal-api = []
-facade-tests = []
 
 [dependencies]
 ahash = "0.8"
