@@ -1478,6 +1478,26 @@ fn estimated_synthesis_reduction_is_profitable(full: &Expr, synthesized: &Expr) 
             <= full_estimate.saturating_mul(MAX_SYNTHESIZED_RATIO_NUMERATOR)
 }
 
+/// Conservative-pathological discovery can propose a finite-horizon stencil
+/// without observing any vocabulary-specific reduction. Whole-grammar
+/// certification for those candidates is comparatively expensive, and a
+/// merely moderate estimate reduction can disappear once product tuples are
+/// augmented for exact raw-state coverage. Require a substantially smaller
+/// stencil before paying that certification cost. Vocabulary-derived and
+/// guarded structural candidates already have stronger evidence and retain the
+/// ordinary 3/4 profitability gate above.
+fn conservative_non_vocabulary_reduction_is_strong(
+    conservative_pathological: bool,
+    used_vocab: bool,
+    full_estimate: u128,
+    synthesized_estimate: u128,
+) -> bool {
+    const MIN_REDUCTION_FACTOR: u128 = 4;
+    !conservative_pathological
+        || used_vocab
+        || synthesized_estimate.saturating_mul(MIN_REDUCTION_FACTOR) <= full_estimate
+}
+
 /// Build a finite-token-horizon stencil without applying the global
 /// pathological-candidate threshold. This is used for partition-local
 /// analysis lexers: a terminal whose exact bound is observable by the longest
@@ -1573,13 +1593,22 @@ pub fn synthesize_bounded_terminal_expressions(
                 || conservative_pathological
                 || structural_pair_component_count(expression, &candidate)
                     .is_some_and(|components| components >= 2);
+            let synthesized_estimate = estimated_expression_state_volume(&candidate);
+            let conservative_reduction_is_strong =
+                conservative_non_vocabulary_reduction_is_strong(
+                    conservative_pathological,
+                    used_vocab,
+                    full_estimate,
+                    synthesized_estimate,
+                );
             let profitable = changed
                 && (conservative_pathological || used_vocab || guarded_large_candidate)
                 && vocabulary_shape_supported
+                && conservative_reduction_is_strong
                 && estimated_synthesis_reduction_is_profitable(expression, &candidate);
             if std::env::var_os("GLRMASK_PROFILE_SYNTHETIC_PLAN").is_some() {
                 eprintln!(
-                    "[glrmask/profile][synthetic_candidate] terminal={} changed={} selected={} conservative_pathological={} guarded_large_candidate={} used_vocab={} vocabulary_shape_supported={} full_estimate={} synthesized_estimate={}",
+                    "[glrmask/profile][synthetic_candidate] terminal={} changed={} selected={} conservative_pathological={} guarded_large_candidate={} used_vocab={} vocabulary_shape_supported={} conservative_reduction_is_strong={} full_estimate={} synthesized_estimate={}",
                     terminal,
                     changed,
                     profitable,
@@ -1587,8 +1616,9 @@ pub fn synthesize_bounded_terminal_expressions(
                     guarded_large_candidate,
                     used_vocab,
                     vocabulary_shape_supported,
+                    conservative_reduction_is_strong,
                     full_estimate,
-                    estimated_expression_state_volume(&candidate),
+                    synthesized_estimate,
                 );
             }
             if profitable {
@@ -1890,6 +1920,22 @@ mod tests {
             1,
             Some(Arc::from(expressions.into_boxed_slice())),
         )
+    }
+
+    #[test]
+    fn conservative_non_vocabulary_candidates_require_a_fourfold_estimated_reduction() {
+        assert!(!conservative_non_vocabulary_reduction_is_strong(
+            true, false, 60_598_980, 18_897_780,
+        ));
+        assert!(conservative_non_vocabulary_reduction_is_strong(
+            true, false, 365_694_720, 1_465_800,
+        ));
+        assert!(conservative_non_vocabulary_reduction_is_strong(
+            true, true, 60_598_980, 18_897_780,
+        ));
+        assert!(conservative_non_vocabulary_reduction_is_strong(
+            false, false, 60_598_980, 18_897_780,
+        ));
     }
 
     #[test]
