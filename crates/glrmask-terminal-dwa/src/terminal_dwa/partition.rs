@@ -293,7 +293,7 @@ pub fn build_partition_id_map_and_terminal_dwa(
             shared_classify_cache,
         )
     };
-    if let Some(active) = active_terminal_filter {
+    if let Some(active) = terminal_filter {
         assert_eq!(
             active.len(),
             terminal_path_lengths.len(),
