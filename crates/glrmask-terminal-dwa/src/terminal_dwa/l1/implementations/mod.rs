@@ -1,12 +1,12 @@
 //! Swappable L1 builders and exact cross-checking machinery.
 //!
 //! Controls:
-//! - `GLRMASK_L1_IMPLEMENTATION=production|auto|scalar|trie|bulk|dense|frontier|single`
-//! - `GLRMASK_L1_CHECK_AGAINST=none|production|auto|scalar|trie|bulk|dense|frontier|single|other`
+//! - `GLRMASK_L1_IMPLEMENTATION=single|production|scalar|trie|bulk|dense|frontier`
+//! - `GLRMASK_L1_CHECK_AGAINST=none|single|production|scalar|trie|bulk|dense|frontier|other`
 //! - `GLRMASK_L1_EXPERIMENT_PARTITIONS=p2,p5` scopes both controls.
 //! - `GLRMASK_PROFILE_L1_IMPLEMENTATIONS=1` prints per-implementation timings.
 //!
-//! Defaults are production, no checker, all partitions.
+//! Defaults are single, no checker, all partitions.
 
 mod bulk;
 mod common;
@@ -35,7 +35,6 @@ use crate::{Vocab, compiler::glr::analysis::AnalyzedGrammar};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Implementation {
     Production,
-    Auto,
     Scalar,
     Trie,
     Bulk,
@@ -48,33 +47,20 @@ impl Implementation {
     fn parse(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
             "production" | "prod" | "existing" => Self::Production,
-            "auto" | "adaptive" => Self::Auto,
             "scalar" | "reference" | "ref" => Self::Scalar,
             "trie" | "optimized" | "opt" => Self::Trie,
             "bulk" | "dag" => Self::Bulk,
             "dense" | "chunked" => Self::Dense,
             "frontier" | "weighted" => Self::Frontier,
             "single" | "single-group" | "prefix-dfa" => Self::Single,
-            other => panic!("unknown L1 implementation {other:?}; expected production, auto, scalar, trie, bulk, dense, frontier, or single"),
+            other => panic!("unknown L1 implementation {other:?}; expected single, production, scalar, trie, bulk, dense, or frontier"),
         }
     }
 
-
-    fn resolve(self, input: BuildInput<'_>) -> Self {
-        if self != Self::Auto {
-            return self;
-        }
-        let active = input.active_terminals.iter().filter(|&&active| active).count();
-        if input.vocab.len() >= 20_000 && active <= 128 {
-            Self::Single
-        } else {
-            Self::Production
-        }
-    }
     fn other(self) -> Self {
         match self {
-            Self::Production => Self::Scalar,
-            Self::Auto | Self::Scalar | Self::Trie | Self::Bulk | Self::Dense | Self::Frontier | Self::Single => Self::Production,
+            Self::Production => Self::Single,
+            Self::Scalar | Self::Trie | Self::Bulk | Self::Dense | Self::Frontier | Self::Single => Self::Production,
         }
     }
 }
@@ -87,7 +73,7 @@ pub struct Plan {
 
 impl Default for Plan {
     fn default() -> Self {
-        Self { use_implementation: Implementation::Production, check_against: None }
+        Self { use_implementation: Implementation::Single, check_against: None }
     }
 }
 
@@ -100,7 +86,7 @@ impl Plan {
             }
         }
         let use_implementation = std::env::var("GLRMASK_L1_IMPLEMENTATION")
-            .ok().map_or(Implementation::Production, |value| Implementation::parse(&value));
+            .ok().map_or(Implementation::Single, |value| Implementation::parse(&value));
         let check_against = std::env::var("GLRMASK_L1_CHECK_AGAINST").ok().and_then(|value| {
             match value.trim().to_ascii_lowercase().as_str() {
                 "" | "0" | "false" | "none" => None,
@@ -133,7 +119,6 @@ pub struct BuildInput<'a> {
 
 fn run(implementation: Implementation, input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
     match implementation {
-        Implementation::Auto => unreachable!("auto implementation must be resolved first"),
         Implementation::Production => production::build(input),
         Implementation::Scalar => scalar::build(input),
         Implementation::Trie => trie::build(input),
@@ -145,13 +130,13 @@ fn run(implementation: Implementation, input: BuildInput<'_>) -> Option<LocalIdM
 }
 
 pub fn build_with_plan(input: BuildInput<'_>, plan: Plan) -> Option<LocalIdMapTerminalDwa> {
-    let resolved = plan.use_implementation.resolve(input);
+    let resolved = plan.use_implementation;
     let selected_started = Instant::now();
     let selected = run(resolved, input);
     let selected_ms = selected_started.elapsed().as_secs_f64() * 1000.0;
 
     let mut check_ms = 0.0;
-    let resolved_checker = plan.check_against.map(|checker| checker.resolve(input));
+    let resolved_checker = plan.check_against;
     if let Some(checker) = resolved_checker.filter(|&checker| checker != resolved) {
         let check_started = Instant::now();
         let expected = run(checker, input);

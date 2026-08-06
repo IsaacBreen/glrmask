@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::time::Instant;
 
 use range_set_blaze::RangeSetBlaze;
@@ -118,28 +117,36 @@ pub(super) fn finish_compacted(
     );
 
     let build_started = Instant::now();
-    let mut by_terminal = BTreeMap::<u32, Vec<Vec<u32>>>::new();
+    let num_terminals = input.grammar.num_terminals as usize;
+    let mut by_terminal = vec![Vec::<(u32, Vec<u32>)>::new(); num_terminals];
+    let mut pending = vec![Vec::<u32>::new(); num_terminals];
+    let mut touched = Vec::<usize>::new();
     for (state, row) in rows.iter().enumerate() {
         for (token, &signature) in row.iter().enumerate() {
             for &terminal in &signatures[signature as usize] {
-                by_terminal
-                    .entry(terminal)
-                    .or_insert_with(|| vec![Vec::new(); rows.len()])[state]
-                    .push(token as u32);
+                let terminal = terminal as usize;
+                if pending[terminal].is_empty() {
+                    touched.push(terminal);
+                }
+                pending[terminal].push(token as u32);
             }
+        }
+        for terminal in touched.drain(..) {
+            by_terminal[terminal].push((state as u32, std::mem::take(&mut pending[terminal])));
         }
     }
     let mut dwa = DWA::new(rows.len() as u32, token_classes.saturating_sub(1));
     let final_state = dwa.add_state();
     dwa.set_final_weight(final_state, Weight::all());
-    for (terminal, per_state) in by_terminal {
-        let weight = Weight::from_per_tsid_token_sets(per_state.into_iter().enumerate().filter_map(
-            |(state, tokens)| {
-                (!tokens.is_empty()).then(|| {
-                    (state as u32, tokens.into_iter().collect::<RangeSetBlaze<u32>>())
-                })
-            },
-        ));
+    for (terminal, per_state) in by_terminal.into_iter().enumerate() {
+        if per_state.is_empty() {
+            continue;
+        }
+        let weight = Weight::from_per_tsid_token_sets(
+            per_state
+                .into_iter()
+                .map(|(state, tokens)| (state, tokens.into_iter().collect::<RangeSetBlaze<u32>>())),
+        );
         if !weight.is_empty() {
             dwa.add_transition(dwa.start_state(), terminal as i32, final_state, weight);
         }
