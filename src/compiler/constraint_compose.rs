@@ -41,7 +41,10 @@ use crate::compiler::stages::mapped_artifact::{
 };
 use crate::compiler::stages::id_map_and_terminal_dwa::types::TerminalColoring;
 use crate::compiler::stages::parser_dwa::build_parser_dwa_from_terminal_dwa_with_precomputed_templates;
-use crate::compiler::stages::templates::characterize::characterize_selected_terminals_profiled;
+use crate::compiler::stages::templates::characterize::{
+    InitialEscape, InitialReduce, NtEscape, NtRereduce, StackMatcher,
+    TerminalCharacterization, characterize_selected_terminals_profiled,
+};
 use crate::compiler::stages::templates::compile_dfa::{
     specialize_template_dfa_defaults_for_commit_split_input,
     try_split_commit_template_dfas,
@@ -4878,6 +4881,352 @@ fn union_boundary_parser_dwa(
     ))
 }
 
+
+fn remap_template_label(label: i32, state_relation: &[Vec<u32>]) -> Option<i32> {
+    if label == DEFAULT_LABEL {
+        return Some(label);
+    }
+    let (local_state, negative) = if is_negative_label(label) {
+        (negative_to_positive_label(label) as u32, true)
+    } else if label >= 0 {
+        (label as u32, false)
+    } else {
+        return None;
+    };
+    let mapped = state_relation.get(local_state as usize)?;
+    if mapped.len() != 1 {
+        return None;
+    }
+    Some(if negative {
+        encode_negative_label(mapped[0])
+    } else {
+        encode_positive_label(mapped[0])
+    })
+}
+
+fn transport_template_dfa(
+    mut dfa: UnweightedDfa,
+    state_relation: &[Vec<u32>],
+) -> Option<UnweightedDfa> {
+    for state in &mut dfa.states {
+        let old = std::mem::take(&mut state.transitions);
+        let mut mapped = BTreeMap::new();
+        for (label, target) in old {
+            let label = remap_template_label(label, state_relation)?;
+            if let Some(previous) = mapped.insert(label, target)
+                && previous != target
+            {
+                return None;
+            }
+        }
+        state.transitions = mapped;
+    }
+    Some(dfa)
+}
+
+fn transport_template_nwa(mut nwa: NWA, state_relation: &[Vec<u32>]) -> Option<NWA> {
+    for state in nwa.states_mut() {
+        let old = std::mem::take(&mut state.transitions);
+        let mut mapped = BTreeMap::<i32, Vec<(u32, Weight)>>::new();
+        for (label, targets) in old {
+            let label = remap_template_label(label, state_relation)?;
+            mapped.entry(label).or_default().extend(targets);
+        }
+        for targets in mapped.values_mut() {
+            targets.sort_unstable_by_key(|(target, weight)| (*target, weight.ptr_key()));
+            targets.dedup_by(|left, right| {
+                left.0 == right.0 && left.1.ptr_key() == right.1.ptr_key()
+            });
+        }
+        state.transitions = mapped;
+    }
+    Some(nwa)
+}
+
+fn map_characterization_state(state: u32, state_relation: &[Vec<u32>]) -> Option<u32> {
+    let mapped = state_relation.get(state as usize)?;
+    (mapped.len() == 1).then_some(mapped[0])
+}
+
+fn map_stack_matcher(
+    matcher: &StackMatcher,
+    state_relation: &[Vec<u32>],
+) -> Option<StackMatcher> {
+    Some(match matcher {
+        StackMatcher::Any => StackMatcher::Any,
+        StackMatcher::State(state) => {
+            StackMatcher::State(map_characterization_state(*state, state_relation)?)
+        }
+        StackMatcher::States(states) => {
+            let mut mapped = states
+                .iter()
+                .map(|&state| map_characterization_state(state, state_relation))
+                .collect::<Option<Vec<_>>>()?;
+            mapped.sort_unstable();
+            mapped.dedup();
+            match mapped.as_slice() {
+                [] => return None,
+                [state] => StackMatcher::State(*state),
+                _ => StackMatcher::States(mapped),
+            }
+        }
+    })
+}
+
+fn map_stack_matchers(
+    matchers: &[StackMatcher],
+    state_relation: &[Vec<u32>],
+) -> Option<Vec<StackMatcher>> {
+    matchers
+        .iter()
+        .map(|matcher| map_stack_matcher(matcher, state_relation))
+        .collect()
+}
+
+fn map_characterization_pushes(
+    pushes: &[u32],
+    state_relation: &[Vec<u32>],
+) -> Option<Vec<u32>> {
+    pushes
+        .iter()
+        .map(|&state| map_characterization_state(state, state_relation))
+        .collect()
+}
+
+fn transport_terminal_characterization(
+    characterization: &TerminalCharacterization,
+    state_relation: &[Vec<u32>],
+    nonterminal_offset: u32,
+) -> Option<TerminalCharacterization> {
+    Some(TerminalCharacterization {
+        escapes: characterization
+            .escapes
+            .iter()
+            .map(|escape| {
+                Some(InitialEscape {
+                    pop: map_stack_matchers(&escape.pop, state_relation)?,
+                    pushes: map_characterization_pushes(&escape.pushes, state_relation)?,
+                })
+            })
+            .collect::<Option<Vec<_>>>()?,
+        reduces: characterization
+            .reduces
+            .iter()
+            .map(|reduce| {
+                Some(InitialReduce {
+                    pop: map_stack_matchers(&reduce.pop, state_relation)?,
+                    nonterminal: reduce.nonterminal + nonterminal_offset,
+                })
+            })
+            .collect::<Option<Vec<_>>>()?,
+        nt_escapes: characterization
+            .nt_escapes
+            .iter()
+            .map(|escape| {
+                Some(NtEscape {
+                    source_nonterminal: escape.source_nonterminal + nonterminal_offset,
+                    pop: map_stack_matchers(&escape.pop, state_relation)?,
+                    pushes: map_characterization_pushes(&escape.pushes, state_relation)?,
+                })
+            })
+            .collect::<Option<Vec<_>>>()?,
+        nt_rereduces: characterization
+            .nt_rereduces
+            .iter()
+            .map(|reduce| {
+                Some(NtRereduce {
+                    source_nonterminal: reduce.source_nonterminal + nonterminal_offset,
+                    pop: map_stack_matchers(&reduce.pop, state_relation)?,
+                    target_nonterminal: reduce.target_nonterminal + nonterminal_offset,
+                })
+            })
+            .collect::<Option<Vec<_>>>()?,
+        all_nts: characterization
+            .all_nts
+            .iter()
+            .map(|nonterminal| nonterminal + nonterminal_offset)
+            .collect(),
+    })
+}
+
+fn build_transported_composition_templates(
+    composed_table: &ComposedTable,
+    analyzed: &AnalyzedGrammar,
+    active: &[bool],
+    control_changed_terminals: &[u32],
+    components: &[&Constraint],
+) -> (Templates, f64) {
+    let started_at = Instant::now();
+    let changed = control_changed_terminals
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let mut nonterminal_offsets = Vec::with_capacity(components.len());
+    let mut next_nonterminal = 0u32;
+    for component in components {
+        nonterminal_offsets.push(next_nonterminal);
+        next_nonterminal += component.table.nonterminal_display_names.len() as u32;
+    }
+
+    struct LocalTemplateResult {
+        terminal_offset: u32,
+        state_relation_index: usize,
+        nonterminal_offset: u32,
+        characterizations: BTreeMap<u32, TerminalCharacterization>,
+        templates: Templates,
+        wall_ms: f64,
+    }
+
+    let ((composed_characterizations, composed_profile), local_results) = rayon::join(
+        || characterize_selected_terminals_profiled(&composed_table.table, analyzed, active),
+        || {
+            components
+                .par_iter()
+                .enumerate()
+                .filter_map(|(component_index, component)| {
+                    let terminal_offset = composed_table.terminal_offsets[component_index];
+                    let mut selected = vec![false; component.table.num_terminals as usize];
+                    for (local_terminal, slot) in selected.iter_mut().enumerate() {
+                        let global = terminal_offset + local_terminal as u32;
+                        *slot = active.get(global as usize).copied().unwrap_or(false)
+                            && !changed.contains(&global);
+                    }
+                    if !selected.iter().any(|&value| value) {
+                        return None;
+                    }
+                    let augmented_start = component.table.rules.first()?.lhs;
+                    let local_analyzed = AnalyzedGrammar::from_composed_rules(
+                        component.table.rules.clone(),
+                        component.table.num_terminals,
+                        component.terminal_display_names.clone(),
+                        component.table.nonterminal_display_names.clone(),
+                        augmented_start,
+                    );
+                    let local_started_at = Instant::now();
+                    let (characterizations, _) = characterize_selected_terminals_profiled(
+                        &component.table,
+                        &local_analyzed,
+                        &selected,
+                    );
+                    let (templates, _) =
+                        Templates::from_characterizations_profiled(&characterizations);
+                    Some(LocalTemplateResult {
+                        terminal_offset,
+                        state_relation_index: component_index,
+                        nonterminal_offset: nonterminal_offsets[component_index],
+                        characterizations,
+                        templates,
+                        wall_ms: local_started_at.elapsed().as_secs_f64() * 1000.0,
+                    })
+                })
+                .collect::<Vec<_>>()
+        },
+    );
+
+    let mut templates = Templates::default();
+    let mut fallback_characterizations = BTreeMap::<u32, TerminalCharacterization>::new();
+    let mut transported_count = 0usize;
+    let mut local_wall_ms = 0.0f64;
+    for local in local_results {
+        let LocalTemplateResult {
+            terminal_offset,
+            state_relation_index,
+            nonterminal_offset,
+            characterizations,
+            templates: mut local_templates,
+            wall_ms,
+        } = local;
+        local_wall_ms = local_wall_ms.max(wall_ms);
+        let relation = &composed_table.state_relations[state_relation_index];
+        for (local_terminal, local_characterization) in characterizations {
+            let global_terminal = terminal_offset + local_terminal;
+            let transported_characterization = transport_terminal_characterization(
+                &local_characterization,
+                relation,
+                nonterminal_offset,
+            );
+            let exact = transported_characterization
+                .as_ref()
+                .zip(composed_characterizations.get(&global_terminal))
+                .is_some_and(|(transported, composed)| transported == composed);
+            if !exact {
+                if let Some(composed) = composed_characterizations.get(&global_terminal) {
+                    fallback_characterizations.insert(global_terminal, composed.clone());
+                }
+                continue;
+            }
+            let Some(dfa) = local_templates.by_terminal.remove(&local_terminal) else {
+                fallback_characterizations
+                    .insert(global_terminal, composed_characterizations[&global_terminal].clone());
+                continue;
+            };
+            let Some(nwa) = local_templates.by_terminal_nwa.remove(&local_terminal) else {
+                fallback_characterizations
+                    .insert(global_terminal, composed_characterizations[&global_terminal].clone());
+                continue;
+            };
+            let (Some(dfa), Some(nwa)) = (
+                transport_template_dfa(dfa, relation),
+                transport_template_nwa(nwa, relation),
+            ) else {
+                fallback_characterizations
+                    .insert(global_terminal, composed_characterizations[&global_terminal].clone());
+                continue;
+            };
+            templates.by_terminal.insert(global_terminal, dfa);
+            templates.by_terminal_nwa.insert(global_terminal, nwa);
+            transported_count += 1;
+        }
+    }
+    for (&terminal, characterization) in &composed_characterizations {
+        if active.get(terminal as usize).copied().unwrap_or(false)
+            && !templates.by_terminal.contains_key(&terminal)
+        {
+            fallback_characterizations
+                .entry(terminal)
+                .or_insert_with(|| characterization.clone());
+        }
+    }
+    let fallback_count = fallback_characterizations.len();
+    let fallback_started_at = Instant::now();
+    let (fallback_templates, _) =
+        Templates::from_characterizations_profiled(&fallback_characterizations);
+    let fallback_ms = fallback_started_at.elapsed().as_secs_f64() * 1000.0;
+    templates.by_terminal.extend(fallback_templates.by_terminal);
+    templates
+        .by_terminal_nwa
+        .extend(fallback_templates.by_terminal_nwa);
+
+    if std::env::var_os("GLRMASK_VALIDATE_COMPOSE_TEMPLATE_TRANSPORT").is_some() {
+        let (reference, _) = Templates::from_characterizations_profiled(&composed_characterizations);
+        assert_eq!(templates.by_terminal, reference.by_terminal);
+        assert_eq!(
+            templates.by_terminal_nwa.keys().collect::<Vec<_>>(),
+            reference.by_terminal_nwa.keys().collect::<Vec<_>>(),
+        );
+        for (terminal, candidate) in &templates.by_terminal_nwa {
+            let expected = &reference.by_terminal_nwa[terminal];
+            assert_eq!(candidate.states(), expected.states());
+            assert_eq!(candidate.start_states(), expected.start_states());
+        }
+        eprintln!(
+            "[glrmask/validate][compose_template_transport] transported={} fallback={} exact=true",
+            transported_count,
+            fallback_count,
+        );
+    }
+    let wall_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+    if compose_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][constraint_boundary_template_transport] transported={} fallback={} composed_characterize_ms={:.3} local_ms={local_wall_ms:.3} fallback_ms={fallback_ms:.3} total_ms={wall_ms:.3}",
+            transported_count,
+            fallback_count,
+            composed_profile.total_ms,
+        );
+    }
+    (templates, wall_ms)
+}
+
 fn build_composition_templates(
     table: &crate::compiler::glr::table::GLRTable,
     analyzed: &AnalyzedGrammar,
@@ -5466,11 +5815,21 @@ fn build_boundary_repair(
         rayon::join(
             || {
                 let (mut templates, templates_ms) = eager_templates.unwrap_or_else(|| {
-                    build_composition_templates(
-                        &composed_table.table,
-                        &analyzed,
-                        &active_terminals,
-                    )
+                    if std::env::var_os("GLRMASK_COMPOSE_DISABLE_TEMPLATE_TRANSPORT").is_some() {
+                        build_composition_templates(
+                            &composed_table.table,
+                            &analyzed,
+                            &active_terminals,
+                        )
+                    } else {
+                        build_transported_composition_templates(
+                            composed_table,
+                            &analyzed,
+                            &active_terminals,
+                            control_changed_terminals,
+                            components,
+                        )
+                    }
                 });
                 if eager_all_templates {
                     templates.by_terminal.retain(|terminal, _| {
@@ -6912,7 +7271,8 @@ pub(crate) fn compose_constraints_owned_parent(
     let control_overlap_ms = control_overlap_started_at.elapsed().as_secs_f64() * 1000.0;
     if compose_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][constraint_control_lexical_overlap] control_ms={control_elimination_ms:.3} lexical_ms={lexical_discovery_ms:.3} wall_ms={control_overlap_ms:.3}",
+            "[glrmask/profile][constraint_control_lexical_overlap] control_ms={control_elimination_ms:.3} lexical_ms={lexical_discovery_ms:.3} changed_terminals={} wall_ms={control_overlap_ms:.3}",
+            control_changed_terminals.len(),
         );
     }
 
