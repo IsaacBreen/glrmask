@@ -6918,7 +6918,7 @@ pub(crate) fn compose_constraints_owned_parent(
     let transport_top_accept_directly =
         std::env::var_os("GLRMASK_COMPOSE_LEGACY_TOP_ACCEPT_BRANCH").is_none();
     let preparation_started_at = Instant::now();
-    let prepared_components_result = {
+    let prepare_components = || {
             let state_started_at = Instant::now();
             let state_result = build_direct_component_state_coordinates(
                 &parser_components,
@@ -7029,8 +7029,8 @@ pub(crate) fn compose_constraints_owned_parent(
                 component_state_ms + token_coordinate_ms,
                 parser_extract_ms,
             ))
-        };
-    let (boundary_result, boundary_ms) = {
+    };
+    let finish_boundary = || {
         let started_at = Instant::now();
             let result = match lexical_prepass {
                 Some(lexical_prepass) => build_boundary_repair(
@@ -7054,6 +7054,12 @@ pub(crate) fn compose_constraints_owned_parent(
                 None => Ok(None),
             };
             (result, started_at.elapsed().as_secs_f64() * 1000.0)
+    };
+    let (prepared_components_result, (boundary_result, boundary_ms)) =
+        if std::env::var_os("GLRMASK_COMPOSE_PARALLEL_COMPONENT_BOUNDARY").is_some() {
+            rayon::join(prepare_components, finish_boundary)
+        } else {
+            (prepare_components(), finish_boundary())
         };
     let (prepared_components, coordinate_ms, parser_extract_ms) = prepared_components_result?;
     let boundary_repair = boundary_result?;
