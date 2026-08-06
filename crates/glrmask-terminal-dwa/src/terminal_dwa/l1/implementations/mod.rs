@@ -1,16 +1,19 @@
 //! Swappable L1 builders and exact cross-checking machinery.
 //!
 //! Controls:
-//! - `GLRMASK_L1_IMPLEMENTATION=production|scalar|trie`
-//! - `GLRMASK_L1_CHECK_AGAINST=none|production|scalar|trie|other`
+//! - `GLRMASK_L1_IMPLEMENTATION=production|scalar|trie|bulk|dense`
+//! - `GLRMASK_L1_CHECK_AGAINST=none|production|scalar|trie|bulk|dense|other`
 //! - `GLRMASK_L1_EXPERIMENT_PARTITIONS=p2,p5` scopes both controls.
 //! - `GLRMASK_PROFILE_L1_IMPLEMENTATIONS=1` prints per-implementation timings.
 //!
 //! Defaults are production, no checker, all partitions.
 
+mod bulk;
 mod common;
+mod dense;
 mod production;
 pub mod scalar;
+mod support;
 mod trie;
 mod verify;
 
@@ -32,6 +35,8 @@ pub enum Implementation {
     Production,
     Scalar,
     Trie,
+    Bulk,
+    Dense,
 }
 
 impl Implementation {
@@ -40,14 +45,16 @@ impl Implementation {
             "production" | "prod" | "existing" => Self::Production,
             "scalar" | "reference" | "ref" => Self::Scalar,
             "trie" | "optimized" | "opt" => Self::Trie,
-            other => panic!("unknown L1 implementation {other:?}; expected production, scalar, or trie"),
+            "bulk" | "frontier" => Self::Bulk,
+            "dense" | "chunked" => Self::Dense,
+            other => panic!("unknown L1 implementation {other:?}; expected production, scalar, trie, bulk, or dense"),
         }
     }
 
     fn other(self) -> Self {
         match self {
             Self::Production => Self::Scalar,
-            Self::Scalar | Self::Trie => Self::Production,
+            Self::Scalar | Self::Trie | Self::Bulk | Self::Dense => Self::Production,
         }
     }
 }
@@ -109,6 +116,8 @@ fn run(implementation: Implementation, input: BuildInput<'_>) -> Option<LocalIdM
         Implementation::Production => production::build(input),
         Implementation::Scalar => scalar::build(input),
         Implementation::Trie => trie::build(input),
+        Implementation::Bulk => bulk::build(input),
+        Implementation::Dense => dense::build(input),
     }
 }
 
