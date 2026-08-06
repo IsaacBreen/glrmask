@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 use range_set_blaze::RangeSetBlaze;
-use rustc_hash::FxHashMap;
 
 use super::{BuildInput, LocalIdMapTerminalDwa};
 use crate::automata::lexer::Lexer;
@@ -19,8 +18,8 @@ pub(super) struct Finished {
     pub token_classes: usize,
 }
 
-fn compact<T: std::hash::Hash + Eq>(values: impl IntoIterator<Item = T>) -> (Vec<u32>, Vec<usize>) {
-    let mut ids = FxHashMap::default();
+fn compact<T: Ord>(values: impl IntoIterator<Item = T>) -> (Vec<u32>, Vec<usize>) {
+    let mut ids = BTreeMap::new();
     let mut reps = Vec::new();
     let classes = values.into_iter().enumerate().map(|(i, value)| match ids.get(&value) {
         Some(&id) => id,

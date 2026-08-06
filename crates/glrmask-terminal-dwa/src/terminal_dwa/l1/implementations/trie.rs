@@ -108,7 +108,7 @@ pub(super) fn build(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
     let (aliases, trie) = vocab(input);
     let scan = Instant::now();
     let mut scanner = Scanner::new(input);
-    let mut starts = FxHashMap::<u32, Vec<u32>>::default();
+    let mut starts = std::collections::BTreeMap::<u32, Vec<u32>>::new();
     for state in 0..input.tokenizer.num_states() { starts.entry(scanner.start(state)).or_default().push(state); }
     let mut state_class = vec![0; input.tokenizer.num_states() as usize];
     let mut rows = Vec::<Vec<u32>>::new();
