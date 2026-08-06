@@ -2,6 +2,7 @@
 //! length ≤ 1.
 
 use crate::automata::lexer::Lexer;
+pub mod implementations;
 pub mod max_length;
 
 use std::hash::{Hash, Hasher};
@@ -29,6 +30,7 @@ type L1WalkProfile = Arc<[(u32, Arc<[(u32, u32)]>)]>;
 /// very large exact L1 quotients. Below this size the established per-state
 /// allocation path is cheaper.
 const LARGE_EXACT_L1_ASSEMBLY_MIN_STATES: usize = 50_000;
+const PARALLEL_L1_GROUP_ASSEMBLY_MIN_VISITS: usize = 20_000;
 
 fn freeze_l1_walk_profile(runs: &[(u32, u32, u32)]) -> L1WalkProfile {
     let mut grouped = Vec::<(u32, Vec<(u32, u32)>)>::new();
@@ -835,16 +837,24 @@ fn l1_remaining_horizon_target_probe_supports_quotients(raw_unique_targets: usiz
     raw_unique_targets >= 20_000
 }
 
-fn l1_sequential_group_assembly_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
+fn l1_sequential_group_assembly_override() -> Option<bool> {
+    static OVERRIDE: OnceLock<Option<bool>> = OnceLock::new();
+    *OVERRIDE.get_or_init(|| {
         std::env::var("GLRMASK_L1_SEQUENTIAL_GROUP_ASSEMBLY")
+            .ok()
             .map(|value| {
                 let trimmed = value.trim();
                 trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
             })
-            .unwrap_or(true)
     })
+}
+
+#[inline]
+fn auto_use_sequential_l1_group_assembly(
+    contribution_group_visits: usize,
+    rayon_threads: usize,
+) -> bool {
+    rayon_threads <= 1 || contribution_group_visits < PARALLEL_L1_GROUP_ASSEMBLY_MIN_VISITS
 }
 
 fn l1_prefers_flat_utf8_lead_bucket(
@@ -934,6 +944,31 @@ pub fn count_l1_equivalence_classes(
         .len()
 }
 
+/// Build an L1 id map and terminal DWA using the configured implementation plan.
+pub fn build_l1_id_map_and_terminal_dwa(
+    partition_label: &str,
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    terminal_coloring: &TerminalColoring,
+    use_terminal_coloring: bool,
+    ignore_terminal: Option<TerminalID>,
+    grammar: &AnalyzedGrammar,
+    active_terminals: &[bool],
+    flat_trans: &Arc<[u32]>,
+    transitions_by_byte: Option<&[u32]>,
+    initial_state_map: Option<&ManyToOneIdMap>,
+    shared_generic_nfa_topology: Option<&super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTopology>,
+    shared_generic_nfa_trie: Option<&super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTrie>,
+    subset_parent_order: Option<&L1IdentityVocabOrder>,
+) -> Option<LocalIdMapTerminalDwa> {
+    implementations::build_from_env(implementations::BuildInput {
+        partition_label, tokenizer, vocab, terminal_coloring, use_terminal_coloring,
+        ignore_terminal, grammar, active_terminals, flat_trans, transitions_by_byte,
+        initial_state_map, shared_generic_nfa_topology, shared_generic_nfa_trie,
+        subset_parent_order,
+    })
+}
+
 /// Build an L1 id_map and terminal DWA for the given vocab and terminal set.
 ///
 /// Uses max-length state equivalence and an identity vocab map, then traverses
@@ -943,7 +978,7 @@ pub fn count_l1_equivalence_classes(
 /// Returns `None` if the vocab is empty or no terminal matches exist.
 /// The caller should pre-check `count_l1_equivalence_classes()` and merge
 /// L1 terminals into L2+ when the count exceeds `MAX_L1_TSIDS`.
-pub fn build_l1_id_map_and_terminal_dwa(
+pub(super) fn build_l1_id_map_and_terminal_dwa_production(
     partition_label: &str,
     tokenizer: &Tokenizer,
     vocab: &Vocab,
@@ -1153,8 +1188,27 @@ const L1_GENERIC_NFA_TOKEN_BOUNDED_LARGE_WORK_BUDGET:
     super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisWorkBudget =
     super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisWorkBudget {
         max_configurations: 64_000,
-        max_trie_visits: 1_000_000,
+        max_trie_visits: 1_050_000,
     };
+
+fn l1_generic_nfa_token_bounded_large_work_budget_with_override(
+    max_trie_visits: Option<usize>,
+) -> super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisWorkBudget {
+    let mut budget = L1_GENERIC_NFA_TOKEN_BOUNDED_LARGE_WORK_BUDGET;
+    if let Some(max_trie_visits) = max_trie_visits {
+        budget.max_trie_visits = max_trie_visits;
+    }
+    budget
+}
+
+fn l1_generic_nfa_token_bounded_large_work_budget(
+) -> super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisWorkBudget {
+    l1_generic_nfa_token_bounded_large_work_budget_with_override(
+        std::env::var("GLRMASK_L1_TOKEN_BOUNDED_MAX_TRIE_VISITS")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok()),
+    )
+}
 const L1_GENERIC_NFA_RELEVANT_POWERSET_PROBE_MIN_VOCAB: usize = 20_000;
 const L1_GENERIC_NFA_RELEVANT_POWERSET_PROBE_MAX_STATES: usize = 4_096;
 const L1_GENERIC_NFA_TINY_VOCAB_POWERSET_MIN_RAW_STATES: usize = 60_000;
@@ -1477,7 +1531,7 @@ fn build_l1_generic_nfa_exact_id_map<'a>(
         flat_trans,
         shared_topology,
         shared_token_trie,
-        L1_GENERIC_NFA_TOKEN_BOUNDED_LARGE_WORK_BUDGET,
+        l1_generic_nfa_token_bounded_large_work_budget(),
     );
     let view_build_ms = view_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -3464,8 +3518,13 @@ fn find_l1_exact_state_equivalence_by_components_with_first_target_cache(
             }
         }
     };
-    let parallel_key_fill = std::env::var_os("GLRMASK_DISABLE_PARALLEL_L1_STATE_KEYS")
-        .is_none()
+    // Finite-horizon quotients already spend parallel work constructing their
+    // canonical state maps, and this key fill runs inside an outer parallel
+    // partition. Fanning out again here competes with sibling partitions and
+    // lengthens the build tail. Ordinary exact-profile rows do not have that
+    // prior quotient cost and retain the profitable parallel fill.
+    let parallel_key_fill = horizon_maps.is_none()
+        && std::env::var_os("GLRMASK_DISABLE_PARALLEL_L1_STATE_KEYS").is_none()
         && rayon::current_num_threads() > 1
         && row_width > 0
         && num_states_in.saturating_mul(row_width) >= 1_000_000;
@@ -6115,8 +6174,18 @@ fn build_l1_terminal_dwa(
     }
 
     let contribution_seed_ms = contribution_seed_started_at.elapsed().as_secs_f64() * 1000.0;
+    let contribution_group_visits = tsid_group_contributions
+        .iter()
+        .flat_map(|contributions| contributions.iter())
+        .map(|(sig_id, _)| signature_groups[*sig_id].len())
+        .sum::<usize>();
     let per_tsid_group_entries_started_at = Instant::now();
-    let direct_group_assembly = l1_sequential_group_assembly_enabled();
+    let direct_group_assembly = l1_sequential_group_assembly_override().unwrap_or_else(|| {
+        auto_use_sequential_l1_group_assembly(
+            contribution_group_visits,
+            rayon::current_num_threads(),
+        )
+    });
     let group_weight_entries: Vec<Vec<(u32, Arc<RangeSetBlaze<u32>>)>> =
         if direct_group_assembly {
             // In the single-threaded case, avoid allocating `num_groups` fresh
@@ -6435,7 +6504,11 @@ fn build_l1_terminal_dwa(
     let merge_ms = merge_started_at.elapsed().as_secs_f64() * 1000.0;
     if compile_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][l1_terminal_assembly] start_collect_ms={:.3} token_intern_ms={:.3} full_ranges_ms={:.3} terminal_group_ms={:.3} contribution_seed_ms={:.3} per_tsid_group_entries_ms={:.3} group_weight_entries_ms={:.3} dwa_build_ms={:.3} total_direct_ms={:.3}",
+            "[glrmask/profile][l1_terminal_assembly] mode={} num_tsids={} num_groups={} contribution_group_visits={} start_collect_ms={:.3} token_intern_ms={:.3} full_ranges_ms={:.3} terminal_group_ms={:.3} contribution_seed_ms={:.3} per_tsid_group_entries_ms={:.3} group_weight_entries_ms={:.3} dwa_build_ms={:.3} total_direct_ms={:.3}",
+            if direct_group_assembly { "sequential" } else { "parallel" },
+            num_tsids,
+            num_groups,
+            contribution_group_visits,
             start_state_collect_ms,
             token_set_intern_ms,
             full_ranges_ms,
@@ -6930,6 +7003,18 @@ mod generic_nfa_tests {
             },
         );
         assert_eq!(analysis_view, "relevant_powerset_probe");
+    }
+
+    #[test]
+    fn token_bounded_large_work_budget_keeps_small_completion_headroom() {
+        let default = l1_generic_nfa_token_bounded_large_work_budget_with_override(None);
+        assert_eq!(default.max_configurations, 64_000);
+        assert_eq!(default.max_trie_visits, 1_050_000);
+
+        let overridden =
+            l1_generic_nfa_token_bounded_large_work_budget_with_override(Some(1_234_567));
+        assert_eq!(overridden.max_configurations, 64_000);
+        assert_eq!(overridden.max_trie_visits, 1_234_567);
     }
 
     #[test]
@@ -7894,6 +7979,22 @@ mod packed_suffix_product_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn large_group_assembly_uses_parallel_crossover_only_with_workers() {
+        assert!(auto_use_sequential_l1_group_assembly(
+            PARALLEL_L1_GROUP_ASSEMBLY_MIN_VISITS - 1,
+            8,
+        ));
+        assert!(!auto_use_sequential_l1_group_assembly(
+            PARALLEL_L1_GROUP_ASSEMBLY_MIN_VISITS,
+            8,
+        ));
+        assert!(auto_use_sequential_l1_group_assembly(
+            PARALLEL_L1_GROUP_ASSEMBLY_MIN_VISITS,
+            1,
+        ));
     }
 
     #[test]
