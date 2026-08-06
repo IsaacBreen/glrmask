@@ -2348,6 +2348,94 @@ impl Tokenizer {
         (end_states, matches)
     }
 
+    /// Execute the same exact compact residual scan for many starting states,
+    /// merging starts as soon as their live lexer states and accumulated
+    /// longest matches become identical.
+    ///
+    /// The returned tuple is `(end_states, longest_matches, starts)`. Expanding
+    /// `starts` and comparing each entry with [`Self::execute_summary_from_state`]
+    /// yields identical results. This is intended for compiler analyses where
+    /// thousands of residual states are tested against the same byte string and
+    /// rapidly converge after the first few bytes.
+    pub fn execute_summary_groups_from_states(
+        &self,
+        input: &[u8],
+        starts: &[u32],
+    ) -> Vec<(
+        TokenizerStateSet,
+        SmallVec<[(TerminalID, usize); 4]>,
+        Vec<u32>,
+    )> {
+        type ScanKey = (
+            TokenizerStateSet,
+            SmallVec<[(TerminalID, usize); 4]>,
+        );
+
+        let mut active = FxHashMap::<ScanKey, Vec<u32>>::default();
+        for &start in starts {
+            let states = self.dfa.epsilon_closure(&[start]);
+            active
+                .entry((states, SmallVec::new()))
+                .or_default()
+                .push(start);
+        }
+        let mut finished = FxHashMap::<ScanKey, Vec<u32>>::default();
+
+        for (index, &byte) in input.iter().enumerate() {
+            let width = index + 1;
+            let mut next = FxHashMap::<ScanKey, Vec<u32>>::default();
+            for ((states, mut matches), support) in active {
+                let end_states = self.step_all(&states, byte);
+                if end_states.is_empty() {
+                    finished
+                        .entry((end_states, matches))
+                        .or_default()
+                        .extend(support);
+                    continue;
+                }
+                for &state in &end_states {
+                    for terminal in self.matched_terminals_iter(state) {
+                        if let Some((_, longest)) = matches
+                            .iter_mut()
+                            .find(|(candidate, _)| *candidate == terminal)
+                        {
+                            *longest = (*longest).max(width);
+                        } else {
+                            matches.push((terminal, width));
+                        }
+                    }
+                }
+                matches.sort_unstable_by_key(|(terminal, _)| *terminal);
+                next.entry((end_states, matches))
+                    .or_default()
+                    .extend(support);
+            }
+            active = next;
+            if active.is_empty() {
+                break;
+            }
+        }
+        for (key, support) in active {
+            finished.entry(key).or_default().extend(support);
+        }
+
+        let mut groups = finished
+            .into_iter()
+            .map(|((states, matches), mut support)| {
+                support.sort_unstable();
+                support.dedup();
+                (states, matches, support)
+            })
+            .collect::<Vec<_>>();
+        groups.sort_unstable_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| left.1.cmp(&right.1))
+                .then_with(|| left.2.cmp(&right.2))
+        });
+        groups
+    }
+
     fn execute_from_state_end_only(&self, input: &[u8], start: u32) -> TokenizerStateSet {
         self.scan_input(input, start, &mut (), |_, _, _, _| {})
     }
@@ -2613,6 +2701,39 @@ mod tests {
             }
         }
         rec(alphabet, max_len, &mut Vec::new(), &mut visit);
+    }
+
+    #[test]
+    fn grouped_summary_execution_matches_independent_scans() {
+        let tokenizer = tokenizer_from_exprs(vec![
+            bytes(b"ab"),
+            plus(bytes(b"a")),
+            bytes(b"ba"),
+        ]);
+        let starts = (0..tokenizer.num_states()).collect::<Vec<_>>();
+
+        enumerate_bytes(b"abx", 4, |input| {
+            let groups = tokenizer.execute_summary_groups_from_states(input, &starts);
+            let mut grouped_by_start = std::collections::BTreeMap::new();
+            for (end_states, matches, support) in groups {
+                for start in support {
+                    assert!(
+                        grouped_by_start
+                            .insert(start, (end_states.clone(), matches.clone()))
+                            .is_none(),
+                        "start state {start} appeared in more than one summary group for {input:?}",
+                    );
+                }
+            }
+            assert_eq!(grouped_by_start.len(), starts.len());
+            for &start in &starts {
+                assert_eq!(
+                    grouped_by_start.get(&start),
+                    Some(&tokenizer.execute_summary_from_state(input, start)),
+                    "grouped residual scan differs for start state {start}, input {input:?}",
+                );
+            }
+        });
     }
 
     #[test]

@@ -752,18 +752,113 @@ fn scan_component_residual_starts(
     result
 }
 
-fn terminal_owners(num_terminals: usize, terminal_offsets: &[u32]) -> Vec<u32> {
-    let mut owners = vec![u32::MAX; num_terminals];
-    for (owner, &start) in terminal_offsets.iter().enumerate() {
-        let end = terminal_offsets
-            .get(owner + 1)
-            .copied()
-            .unwrap_or(num_terminals as u32);
-        for terminal in start..end.min(num_terminals as u32) {
-            owners[terminal as usize] = owner as u32;
+fn scan_component_residual_start_groups(
+    components: &[&Constraint],
+    tokenizer_state_offsets: &[u32],
+    terminal_offsets: &[u32],
+    reset_live_bytes: &[U8Set],
+    bytes: &[u8],
+    candidate_groups: &[(u32, Vec<u32>)],
+) -> FxHashMap<ResidualScanResult, Vec<u32>> {
+    let validate =
+        std::env::var_os("GLRMASK_VALIDATE_COMPOSE_TSID_REPRESENTATIVE_SCAN").is_some();
+    let mut starts_by_scan = FxHashMap::<ResidualScanResult, Vec<u32>>::default();
+    let mut by_component = vec![Vec::<(u32, &[u32])>::new(); components.len()];
+
+    for (representative, support_states) in candidate_groups {
+        if *representative == 0 {
+            let scan = scan_component_residual_starts(
+                components,
+                tokenizer_state_offsets,
+                terminal_offsets,
+                reset_live_bytes,
+                bytes,
+                &[*representative],
+            );
+            starts_by_scan
+                .entry(scan)
+                .or_default()
+                .extend(support_states);
+            continue;
+        }
+        let component_index = tokenizer_state_offsets
+            .partition_point(|&offset| offset <= *representative)
+            .saturating_sub(1);
+        let Some(component) = components.get(component_index) else {
+            continue;
+        };
+        let offset = tokenizer_state_offsets[component_index];
+        let local_start = *representative - offset;
+        if local_start < component.tokenizer.num_states() {
+            by_component[component_index].push((local_start, support_states));
         }
     }
-    owners
+
+    for (component_index, starts) in by_component.into_iter().enumerate() {
+        if starts.is_empty() {
+            continue;
+        }
+        let component = components[component_index];
+        let state_offset = tokenizer_state_offsets[component_index];
+        let terminal_offset = terminal_offsets[component_index];
+        let local_starts = starts.iter().map(|(start, _)| *start).collect::<Vec<_>>();
+        let support_by_start = starts.into_iter().collect::<FxHashMap<_, _>>();
+
+        for (end_states, matches, grouped_starts) in component
+            .tokenizer
+            .execute_summary_groups_from_states(bytes, &local_starts)
+        {
+            let mut scan = ResidualScanResult::default();
+            scan.matches.extend(
+                matches
+                    .into_iter()
+                    .filter(|(_, width)| *width > 0)
+                    .map(|(terminal, width)| (terminal_offset + terminal, width)),
+            );
+            for end_state in end_states {
+                scan.future_terminals.extend(
+                    component
+                        .tokenizer
+                        .possible_future_terminals_iter(end_state)
+                        .map(|terminal| terminal_offset + terminal),
+                );
+            }
+            scan.matches.sort_unstable();
+            scan.matches.dedup();
+            scan.future_terminals.sort_unstable();
+            scan.future_terminals.dedup();
+
+            let output_support = starts_by_scan.entry(scan.clone()).or_default();
+            for local_start in grouped_starts {
+                let Some(support) = support_by_start.get(&local_start) else {
+                    continue;
+                };
+                if validate {
+                    for &global_state in *support {
+                        let reference = scan_component_residual_starts(
+                            components,
+                            tokenizer_state_offsets,
+                            terminal_offsets,
+                            reset_live_bytes,
+                            bytes,
+                            &[global_state],
+                        );
+                        assert_eq!(
+                            scan, reference,
+                            "batched component residual scan differs for state {global_state} (component {component_index}, local start {local_start}, offset {state_offset})",
+                        );
+                    }
+                }
+                output_support.extend_from_slice(support);
+            }
+        }
+    }
+
+    for states in starts_by_scan.values_mut() {
+        states.sort_unstable();
+        states.dedup();
+    }
+    starts_by_scan
 }
 
 fn transition_boundary_key(
@@ -934,6 +1029,7 @@ fn boundary_candidate_state_ranges_by_token(
     components: &[&Constraint],
     tokenizer_state_offsets: &[u32],
     vocab: &Vocab,
+    candidate_tokens: &BTreeSet<u32>,
 ) -> BTreeMap<u32, Vec<(usize, u32, u32)>> {
     debug_assert_eq!(components.len(), tokenizer_state_offsets.len());
     let mut by_token = BTreeMap::<u32, Vec<(usize, u32, u32)>>::new();
@@ -943,7 +1039,8 @@ fn boundary_candidate_state_ranges_by_token(
             for (start_tsid, end_tsid, internal_tokens) in weight.range_entries() {
                 for internal_token in internal_tokens.iter() {
                     if constraint.internal_token_to_tokens.is_empty() {
-                        if vocab
+                        if candidate_tokens.contains(&internal_token)
+                            && vocab
                             .entries_map()
                             .get(&internal_token)
                             .is_some_and(|bytes| bytes.len() >= 2)
@@ -963,7 +1060,8 @@ fn boundary_candidate_state_ranges_by_token(
                         continue;
                     };
                     for &original in originals {
-                        if vocab
+                        if candidate_tokens.contains(&original)
+                            && vocab
                             .entries_map()
                             .get(&original)
                             .is_some_and(|bytes| bytes.len() >= 2)
@@ -1143,8 +1241,6 @@ fn boundary_token_prefilter(
     components: &[&Constraint],
     terminal_offsets: &[u32],
     seed_terminals: &[bool],
-    ignore_terminals: &BitSet,
-    disallowed_follows: &BTreeMap<u32, BitSet>,
 ) -> BTreeSet<u32> {
     let num_terminals = terminal_offsets
         .iter()
@@ -1153,7 +1249,6 @@ fn boundary_token_prefilter(
         .map(|(offset, component)| offset + component.tokenizer.num_terminals())
         .max()
         .unwrap_or(0) as usize;
-    let owners = terminal_owners(num_terminals, terminal_offsets);
     let mut summaries = vec![None::<ExprByteSummary>; num_terminals];
     for (component_index, component) in components.iter().enumerate() {
         let terminal_offset = terminal_offsets[component_index] as usize;
@@ -1173,55 +1268,11 @@ fn boundary_token_prefilter(
         }
     }
 
-    let mut allowed_pairs = [U8Set::empty(); 256];
-    let mut boundary_terminals = vec![false; num_terminals];
-    for terminal in 0..num_terminals {
-        let Some(left) = summaries[terminal] else {
-            continue;
-        };
-        let terminal_is_ignore = ignore_terminals.contains(terminal);
-        let blocked = disallowed_follows.get(&(terminal as u32));
-        for follow in 0..num_terminals {
-            let follow_is_ignore = ignore_terminals.contains(follow);
-            // Ignores do not appear in the grammar's ever-follow relation.
-            // Keep byte pairs on either side of them whenever the other end is
-            // a boundary seed; otherwise a fused token such as `X WS child`
-            // would be filtered out before exact path discovery sees the child
-            // beginning after the ignored bytes.
-            if !terminal_is_ignore
-                && !follow_is_ignore
-                && blocked.is_some_and(|blocked| blocked.contains(follow))
-            {
-                continue;
-            }
-            let boundary_pair = seed_terminals.get(terminal).copied().unwrap_or(false)
-                || seed_terminals.get(follow).copied().unwrap_or(false)
-                || owners.get(terminal) != owners.get(follow);
-            if !boundary_pair {
-                continue;
-            }
-            let Some(right) = summaries[follow] else {
-                continue;
-            };
-            boundary_terminals[terminal] = true;
-            boundary_terminals[follow] = true;
-            for byte in left.last.iter() {
-                allowed_pairs[byte as usize] |= right.first;
-            }
-        }
-    }
-
-
-    let mut candidates =
-        crate::compiler::stages::id_map_and_terminal_dwa::classify::
-            vocab_tokens_with_adjacent_pairs(vocab, &allowed_pairs)
-            .into_iter()
-            .collect::<BTreeSet<_>>();
-
-    // A component switch can occur exactly at the preceding token boundary.
-    // Compile every seed endpoint once, index them by possible first byte, and
-    // classify the vocabulary in one pass. The previous terminal-major loop
-    // traversed the complete 128k-token vocabulary once per seed terminal.
+    // Boundary repair is needed when a token begins a segment-entry terminal at
+    // any byte offset, including offset zero. Compile each seed exactly and scan
+    // token suffixes for a completed seed prefix or an unfinished seed at token
+    // end. Exact parser discovery below still rejects lexically possible suffixes
+    // whose preceding bytes cannot reach the boundary in the grammar.
     let mut endpoint_dfas = Vec::new();
     let mut endpoint_dfas_by_first = (0..256)
         .map(|_| Vec::<usize>::new())
@@ -1238,60 +1289,67 @@ fn boundary_token_prefilter(
             {
                 continue;
             }
-            let first = summaries[global_terminal]
-                .map(|summary| summary.first)
-                .unwrap_or(U8Set::all());
             let Some(expr) = component.tokenizer.terminal_expr(local_terminal as u32) else {
                 // Missing retained source is rare and cannot justify an unsafe
                 // exclusion. Fall back to the conservative first-byte summary.
-                conservative_first |= first;
+                conservative_first |= summaries[global_terminal]
+                    .map(|summary| summary.first)
+                    .unwrap_or(U8Set::all());
                 continue;
             };
             let dfa_index = endpoint_dfas.len();
-            endpoint_dfas.push(compile_terminal_expr_dfa(expr));
-            for byte in first.iter() {
-                endpoint_dfas_by_first[byte as usize].push(dfa_index);
+            let dfa = compile_terminal_expr_dfa(expr);
+            for byte in 0u8..=u8::MAX {
+                if dfa.step(0, byte).is_some() {
+                    endpoint_dfas_by_first[byte as usize].push(dfa_index);
+                }
             }
+            endpoint_dfas.push(dfa);
         }
     }
+    let mut candidates = BTreeSet::new();
     for (&token, bytes) in vocab.entries_map().iter() {
         if bytes.len() < 2 {
             continue;
         }
-        let first = bytes[0];
-        if conservative_first.contains(first) {
-            candidates.insert(token);
-            continue;
-        }
-        for &dfa_index in &endpoint_dfas_by_first[first as usize] {
-            let dfa = &endpoint_dfas[dfa_index];
-            let mut state = 0u32;
-            let mut live = true;
-            for &byte in bytes {
-                let Some(next) = dfa.step(state, byte) else {
-                    live = false;
-                    break;
-                };
-                state = next;
-            }
-            if live
-                && (!dfa.finalizers(state).is_empty()
-                    || !dfa.possible_future_group_ids(state).is_empty())
-            {
+        'suffixes: for offset in 0..bytes.len() {
+            let first = bytes[offset];
+            if conservative_first.contains(first) {
                 candidates.insert(token);
-                break;
+                break 'suffixes;
+            }
+            for &dfa_index in &endpoint_dfas_by_first[first as usize] {
+                let dfa = &endpoint_dfas[dfa_index];
+                let mut state = 0u32;
+                let mut reached_token_end = true;
+                for &byte in &bytes[offset..] {
+                    let Some(next) = dfa.step(state, byte) else {
+                        reached_token_end = false;
+                        break;
+                    };
+                    state = next;
+                    if dfa.finalizers(state).contains(0) {
+                        candidates.insert(token);
+                        break 'suffixes;
+                    }
+                }
+                if reached_token_end && dfa.possible_future_group_ids(state).contains(0) {
+                    candidates.insert(token);
+                    break 'suffixes;
+                }
             }
         }
     }
+    let seed_dfa_candidates = candidates.len();
 
-    // A boundary endpoint terminal can occupy an entire token immediately
-    // before or after a component switch, without the token itself containing
-    // the switch. Component possible-matches is exact for those cases; union
-    // every grammar-valid boundary endpoint into the byte-pair candidates.
+    // The first terminal of the entered segment can occupy an entire token.
+    // Component possible-matches is exact for that endpoint case. A terminal
+    // immediately *before* the boundary needs no repair unless the same token
+    // also begins the new segment; the byte-pair candidates cover that case.
     for (component_index, component) in components.iter().enumerate() {
         let terminal_offset = terminal_offsets[component_index] as usize;
         for local_terminal in 0..component.tokenizer.num_terminals() as usize {
-            if !boundary_terminals
+            if !seed_terminals
                 .get(terminal_offset + local_terminal)
                 .copied()
                 .unwrap_or(false)
@@ -1325,6 +1383,19 @@ fn boundary_token_prefilter(
             }
         }
     }
+    if compose_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][constraint_boundary_prefilter_sources] adjacent_pairs={} after_seed_dfas={} after_seed_possible_matches={} seed_terminals={:?}",
+            seed_dfa_candidates,
+            seed_dfa_candidates,
+            candidates.len(),
+            seed_terminals
+                .iter()
+                .enumerate()
+                .filter_map(|(terminal, &seed)| seed.then_some(terminal))
+                .collect::<Vec<_>>(),
+        );
+    }
     candidates
 }
 
@@ -1345,29 +1416,11 @@ fn discover_boundary_token_paths(
         .unwrap_or(0) as usize;
     let reset_starts = composite_reset_states(components, tokenizer_state_offsets);
     let reset_live_bytes = component_reset_live_bytes(components);
-    let candidate_ranges_started_at = Instant::now();
-    let candidate_ranges =
-        boundary_candidate_state_ranges_by_token(components, tokenizer_state_offsets, vocab);
-    let candidate_ranges_ms = candidate_ranges_started_at.elapsed().as_secs_f64() * 1000.0;
-    let candidate_range_rows = candidate_ranges.values().map(Vec::len).sum::<usize>();
-    let prefilter_started_at = Instant::now();
-    let mut prefilter = boundary_token_prefilter(
-        vocab,
-        components,
-        terminal_offsets,
-        seed_terminals,
-        ignore_terminals,
-        disallowed_follows,
-    );
-    prefilter.extend(candidate_ranges.keys().copied());
-    let prefilter_ms = prefilter_started_at.elapsed().as_secs_f64() * 1000.0;
     let use_prefilter = std::env::var_os("GLRMASK_COMPOSE_DISABLE_BOUNDARY_PREFILTER").is_none();
-    let multi_byte_entries = vocab
+    let all_multi_byte_entries = vocab
         .entries_map()
         .iter()
-        .filter(|&(&token_id, ref bytes)| {
-            bytes.len() >= 2 && (!use_prefilter || prefilter.contains(&token_id))
-        })
+        .filter(|(_, bytes)| bytes.len() >= 2)
         .map(|(&token_id, bytes)| (token_id, bytes.as_slice()))
         .collect::<Vec<_>>();
     let suffix_cache_started_at = Instant::now();
@@ -1377,8 +1430,8 @@ fn discover_boundary_token_paths(
         None
     } else {
         let mut suffixes = FxHashSet::<&[u8]>::default();
-        for &(_, bytes) in &multi_byte_entries {
-            for offset in 1..bytes.len() {
+        for &(_, bytes) in &all_multi_byte_entries {
+            for offset in 0..bytes.len() {
                 suffixes.insert(&bytes[offset..]);
             }
         }
@@ -1400,6 +1453,56 @@ fn discover_boundary_token_paths(
         )
     };
     let suffix_cache_ms = suffix_cache_started_at.elapsed().as_secs_f64() * 1000.0;
+    let prefilter_started_at = Instant::now();
+    let prefilter = if use_prefilter {
+        if let Some(cache) = reset_suffix_cache.as_ref() {
+            all_multi_byte_entries
+                .iter()
+                .filter_map(|&(token_id, bytes)| {
+                    (0..bytes.len())
+                        .any(|offset| {
+                            let scan = cache
+                                .get(&bytes[offset..])
+                                .expect("reset suffix cache must cover every vocabulary suffix");
+                            scan.matches.iter().any(|&(terminal, _)| {
+                                seed_terminals
+                                    .get(terminal as usize)
+                                    .copied()
+                                    .unwrap_or(false)
+                            }) || scan.future_terminals.iter().any(|&terminal| {
+                                seed_terminals
+                                    .get(terminal as usize)
+                                    .copied()
+                                    .unwrap_or(false)
+                            })
+                        })
+                        .then_some(token_id)
+                })
+                .collect::<BTreeSet<_>>()
+        } else {
+            boundary_token_prefilter(vocab, components, terminal_offsets, seed_terminals)
+        }
+    } else {
+        all_multi_byte_entries
+            .iter()
+            .map(|&(token_id, _)| token_id)
+            .collect::<BTreeSet<_>>()
+    };
+    let prefilter_ms = prefilter_started_at.elapsed().as_secs_f64() * 1000.0;
+    let multi_byte_entries = all_multi_byte_entries
+        .iter()
+        .copied()
+        .filter(|(token_id, _)| prefilter.contains(token_id))
+        .collect::<Vec<_>>();
+    let candidate_ranges_started_at = Instant::now();
+    let candidate_ranges = boundary_candidate_state_ranges_by_token(
+        components,
+        tokenizer_state_offsets,
+        vocab,
+        &prefilter,
+    );
+    let candidate_ranges_ms = candidate_ranges_started_at.elapsed().as_secs_f64() * 1000.0;
+    let candidate_range_rows = candidate_ranges.values().map(Vec::len).sum::<usize>();
 
     // Each model token is an independent acyclic same-token graph. Run those
     // scans in parallel, then merge in vocabulary order for deterministic
@@ -1442,43 +1545,14 @@ fn discover_boundary_token_paths(
             );
             candidate_start_visits.fetch_add(candidate_groups.len(), Ordering::Relaxed);
             max_candidate_starts.fetch_max(candidate_groups.len(), Ordering::Relaxed);
-            let mut starts_by_scan = FxHashMap::<ResidualScanResult, Vec<u32>>::default();
-            for (representative, support_states) in candidate_groups {
-                let representative_scan = scan_component_residual_starts(
-                    components,
-                    tokenizer_state_offsets,
-                    terminal_offsets,
-                    &reset_live_bytes,
-                    bytes,
-                    &[representative],
-                );
-                if std::env::var_os("GLRMASK_VALIDATE_COMPOSE_TSID_REPRESENTATIVE_SCAN")
-                    .is_some()
-                {
-                    for &state in &support_states {
-                        let reference = scan_component_residual_starts(
-                            components,
-                            tokenizer_state_offsets,
-                            terminal_offsets,
-                            &reset_live_bytes,
-                            bytes,
-                            &[state],
-                        );
-                        assert_eq!(
-                            representative_scan, reference,
-                            "component TSID representative scan differs for token {token_id}, representative {representative}, state {state}",
-                        );
-                    }
-                }
-                starts_by_scan
-                    .entry(representative_scan)
-                    .or_default()
-                    .extend(support_states);
-            }
-            for states in starts_by_scan.values_mut() {
-                states.sort_unstable();
-                states.dedup();
-            }
+            let starts_by_scan = scan_component_residual_start_groups(
+                components,
+                tokenizer_state_offsets,
+                terminal_offsets,
+                &reset_live_bytes,
+                bytes,
+                &candidate_groups,
+            );
             distinct_scan_groups.fetch_add(starts_by_scan.len(), Ordering::Relaxed);
             let mut scan_groups = starts_by_scan.into_iter().collect::<Vec<_>>();
             scan_groups.sort_unstable_by(|left, right| left.0.cmp(&right.0));
