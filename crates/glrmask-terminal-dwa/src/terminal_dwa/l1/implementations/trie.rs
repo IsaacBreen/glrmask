@@ -110,30 +110,58 @@ pub(super) fn build(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
     let mut scanner = Scanner::new(input);
     let mut starts = std::collections::BTreeMap::<u32, Vec<u32>>::new();
     for state in 0..input.tokenizer.num_states() { starts.entry(scanner.start(state)).or_default().push(state); }
+    let children = trie.root.iter_children().collect::<Vec<_>>();
     let mut state_class = vec![0; input.tokenizer.num_states() as usize];
-    let mut rows = Vec::<Vec<u32>>::new();
-    let mut row_ids = FxHashMap::<Vec<u32>, u32>::default();
-    let mut first_byte_cache = FxHashMap::<(usize, u32), Arc<[(usize, u32)]>>::default();
+    let mut class_profiles = Vec::<Vec<u32>>::new();
+    let mut class_ids = FxHashMap::<Vec<u32>, u32>::default();
+    let mut profiles = vec![Arc::<[(usize, u32)]>::from([])];
+    let mut profile_ids = FxHashMap::<Arc<[(usize, u32)]>, u32>::default();
+    let mut first_byte_cache = FxHashMap::<(usize, u32), u32>::default();
     let mut cache_hits = 0usize;
     for (start, states) in starts {
-        let mut row = vec![0; aliases.len()];
-        if trie.root.has_token() { row[trie.root.token_id()] = scanner.signature(start); }
-        for (edge, child) in trie.root.iter_children() {
+        let mut fingerprint = Vec::with_capacity(children.len() + 1);
+        fingerprint.push(if trie.root.has_token() { scanner.signature(start) } else { 0 });
+        for &(edge, child) in &children {
             let target = scanner.step_bytes(start, edge);
-            if target == DEAD { continue; }
+            if target == DEAD { fingerprint.push(0); continue; }
             let key = (child as *const VocabPrefixTreeNode as usize, target);
-            let profile = if let Some(profile) = first_byte_cache.get(&key) {
-                cache_hits += 1; Arc::clone(profile)
+            let profile = if let Some(&profile) = first_byte_cache.get(&key) {
+                cache_hits += 1;
+                profile
             } else {
-                let mut profile = Vec::new(); collect(&mut scanner, child, target, &mut profile);
-                let profile: Arc<[(usize, u32)]> = Arc::from(profile);
-                first_byte_cache.insert(key, Arc::clone(&profile)); profile
+                let mut values = Vec::new();
+                collect(&mut scanner, child, target, &mut values);
+                let values: Arc<[(usize, u32)]> = Arc::from(values);
+                let profile = if values.is_empty() {
+                    0
+                } else if let Some(&profile) = profile_ids.get(&values) {
+                    profile
+                } else {
+                    let profile = profiles.len() as u32;
+                    profile_ids.insert(Arc::clone(&values), profile);
+                    profiles.push(values);
+                    profile
+                };
+                first_byte_cache.insert(key, profile);
+                profile
             };
-            for &(token, signature) in profile.iter() { row[token] = signature; }
+            fingerprint.push(profile);
         }
-        let next = rows.len() as u32;
-        let class = *row_ids.entry(row.clone()).or_insert_with(|| { rows.push(row); next });
+        let next = class_profiles.len() as u32;
+        let class = *class_ids.entry(fingerprint.clone()).or_insert_with(|| {
+            class_profiles.push(fingerprint);
+            next
+        });
         for state in states { state_class[state as usize] = class; }
+    }
+    let mut rows = Vec::with_capacity(class_profiles.len());
+    for fingerprint in &class_profiles {
+        let mut row = vec![0; aliases.len()];
+        if trie.root.has_token() { row[trie.root.token_id()] = fingerprint[0]; }
+        for &profile in &fingerprint[1..] {
+            for &(token, signature) in profiles[profile as usize].iter() { row[token] = signature; }
+        }
+        rows.push(row);
     }
     let scan_ms = scan.elapsed().as_secs_f64() * 1000.0;
     let finished = common::finish(input, &aliases, &scanner.signatures, state_class, rows, scan_ms,
