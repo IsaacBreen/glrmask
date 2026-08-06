@@ -1,8 +1,8 @@
 //! Swappable L1 builders and exact cross-checking machinery.
 //!
 //! Controls:
-//! - `GLRMASK_L1_IMPLEMENTATION=production|scalar|trie|bulk|dense|frontier`
-//! - `GLRMASK_L1_CHECK_AGAINST=none|production|scalar|trie|bulk|dense|frontier|other`
+//! - `GLRMASK_L1_IMPLEMENTATION=production|scalar|trie|bulk|dense|frontier|single`
+//! - `GLRMASK_L1_CHECK_AGAINST=none|production|scalar|trie|bulk|dense|frontier|single|other`
 //! - `GLRMASK_L1_EXPERIMENT_PARTITIONS=p2,p5` scopes both controls.
 //! - `GLRMASK_PROFILE_L1_IMPLEMENTATIONS=1` prints per-implementation timings.
 //!
@@ -14,6 +14,7 @@ mod dense;
 mod frontier;
 mod production;
 pub mod scalar;
+mod single;
 mod support;
 mod trie;
 mod verify;
@@ -39,6 +40,7 @@ pub enum Implementation {
     Bulk,
     Dense,
     Frontier,
+    Single,
 }
 
 impl Implementation {
@@ -50,14 +52,15 @@ impl Implementation {
             "bulk" | "dag" => Self::Bulk,
             "dense" | "chunked" => Self::Dense,
             "frontier" | "weighted" => Self::Frontier,
-            other => panic!("unknown L1 implementation {other:?}; expected production, scalar, trie, bulk, dense, or frontier"),
+            "single" | "single-group" | "prefix-dfa" => Self::Single,
+            other => panic!("unknown L1 implementation {other:?}; expected production, scalar, trie, bulk, dense, frontier, or single"),
         }
     }
 
     fn other(self) -> Self {
         match self {
             Self::Production => Self::Scalar,
-            Self::Scalar | Self::Trie | Self::Bulk | Self::Dense | Self::Frontier => Self::Production,
+            Self::Scalar | Self::Trie | Self::Bulk | Self::Dense | Self::Frontier | Self::Single => Self::Production,
         }
     }
 }
@@ -122,6 +125,7 @@ fn run(implementation: Implementation, input: BuildInput<'_>) -> Option<LocalIdM
         Implementation::Bulk => bulk::build(input),
         Implementation::Dense => dense::build(input),
         Implementation::Frontier => frontier::build(input),
+        Implementation::Single => single::build(input),
     }
 }
 

@@ -71,6 +71,7 @@ mod tests {
                 Implementation::Bulk,
                 Implementation::Dense,
                 Implementation::Frontier,
+                Implementation::Single,
             ] {
                 let checker = if implementation == Implementation::Production {
                     Implementation::Trie
