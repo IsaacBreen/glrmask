@@ -1,7 +1,8 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 use range_set_blaze::RangeSetBlaze;
+use rustc_hash::FxHashMap;
 
 use super::{BuildInput, LocalIdMapTerminalDwa};
 use crate::automata::lexer::Lexer;
@@ -18,8 +19,8 @@ pub(super) struct Finished {
     pub token_classes: usize,
 }
 
-fn compact<T: Ord>(values: impl IntoIterator<Item = T>) -> (Vec<u32>, Vec<usize>) {
-    let mut ids = BTreeMap::new();
+fn compact<T: std::hash::Hash + Eq>(values: impl IntoIterator<Item = T>) -> (Vec<u32>, Vec<usize>) {
+    let mut ids = FxHashMap::default();
     let mut reps = Vec::new();
     let classes = values.into_iter().enumerate().map(|(i, value)| match ids.get(&value) {
         Some(&id) => id,
@@ -64,12 +65,12 @@ pub(super) fn finish(
     let compact_ms = compact_started.elapsed().as_secs_f64() * 1000.0;
 
     let build_started = Instant::now();
-    let mut by_terminal = BTreeMap::<u32, Vec<BTreeSet<u32>>>::new();
+    let mut by_terminal = BTreeMap::<u32, Vec<Vec<u32>>>::new();
     for (state, row) in rows.iter().enumerate() {
-        for (token, &signature) in row.iter().enumerate() {
-            for &terminal in &signatures[signature as usize] {
-                by_terminal.entry(terminal).or_insert_with(|| vec![BTreeSet::new(); rows.len()])
-                    [state].insert(token_class[token]);
+        for (class, &token) in token_reps.iter().enumerate() {
+            for &terminal in &signatures[row[token] as usize] {
+                by_terminal.entry(terminal).or_insert_with(|| vec![Vec::new(); rows.len()])[state]
+                    .push(class as u32);
             }
         }
     }
