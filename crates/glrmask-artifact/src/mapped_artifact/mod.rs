@@ -12,7 +12,7 @@ use crate::equiv_types::InternalIdMap;
 use crate::ds::weight::Weight;
 
 pub use compaction::{CompactPlan, CompactReport, InternedRangeCounts};
-pub use reconcile::remap_weights_with_maps;
+pub use reconcile::{remap_weights_with_maps, remap_weights_with_maps_serial};
 
 pub trait WeightRefs {
     fn weight_refs(&self) -> Vec<&Weight>;

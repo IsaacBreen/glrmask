@@ -36,7 +36,9 @@ use crate::compiler::glr::labels::{
 use crate::compiler::stages::equiv_types::{
     InternalIdMap, ManyToOneIdMap, MappedArtifact,
 };
-use crate::compiler::stages::mapped_artifact::{WeightRefs, remap_weights_with_maps};
+use crate::compiler::stages::mapped_artifact::{
+    WeightRefs, remap_weights_with_maps, remap_weights_with_maps_serial,
+};
 use crate::compiler::stages::id_map_and_terminal_dwa::types::TerminalColoring;
 use crate::compiler::stages::parser_dwa::build_parser_dwa_from_terminal_dwa_with_precomputed_templates;
 use crate::compiler::stages::templates::characterize::characterize_selected_terminals_profiled;
@@ -4254,7 +4256,7 @@ fn remap_unmapped_component_artifacts(
                 artifact.top_accept_parts,
             );
             let mut weights = triple.weight_refs_mut();
-            remap_weights_with_maps(
+            remap_weights_with_maps_serial(
                 &mut weights,
                 &maps.local_to_global_tsids,
                 &token_map,
@@ -6856,7 +6858,7 @@ pub(crate) fn compose_constraints_owned_parent(
     let (control_elimination_result, lexical_result) = {
         let table = &mut composed_table.table;
         let controls = &mut composed_table.control_terminals;
-        if std::env::var_os("GLRMASK_COMPOSE_PARALLEL_CONTROL_LEXICAL").is_none() {
+        if std::env::var_os("GLRMASK_COMPOSE_SERIAL_CONTROL_LEXICAL").is_some() {
             let control = eliminate_runtime_controls_parts(table, controls);
             let lexical = prepare_boundary_lexical_prepass(
                 &boundary_analyzed,
@@ -7056,7 +7058,7 @@ pub(crate) fn compose_constraints_owned_parent(
             (result, started_at.elapsed().as_secs_f64() * 1000.0)
     };
     let (prepared_components_result, (boundary_result, boundary_ms)) =
-        if std::env::var_os("GLRMASK_COMPOSE_PARALLEL_COMPONENT_BOUNDARY").is_some() {
+        if std::env::var_os("GLRMASK_COMPOSE_SERIAL_COMPONENT_BOUNDARY").is_none() {
             rayon::join(prepare_components, finish_boundary)
         } else {
             (prepare_components(), finish_boundary())

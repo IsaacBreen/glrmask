@@ -1096,10 +1096,42 @@ pub fn remap_weights_with_maps(
     local_to_common_tokens: &[Vec<u32>],
     common_tsid_count: usize,
 ) {
+    remap_weights_with_maps_impl(
+        weights,
+        local_to_common_tsids,
+        local_to_common_tokens,
+        common_tsid_count,
+        true,
+    );
+}
+
+/// Remap one artifact's weights without launching nested Rayon jobs. This is
+/// useful when many independent artifacts are already being remapped in an
+/// outer parallel iterator.
+pub fn remap_weights_with_maps_serial(
+    weights: &mut [&mut Weight],
+    local_to_common_tsids: &[Vec<u32>],
+    local_to_common_tokens: &[Vec<u32>],
+    common_tsid_count: usize,
+) {
+    remap_weights_with_maps_impl(
+        weights,
+        local_to_common_tsids,
+        local_to_common_tokens,
+        common_tsid_count,
+        false,
+    );
+}
+
+fn remap_weights_with_maps_impl(
+    weights: &mut [&mut Weight],
+    local_to_common_tsids: &[Vec<u32>],
+    local_to_common_tokens: &[Vec<u32>],
+    common_tsid_count: usize,
+    allow_parallel: bool,
+) {
     let profiling = std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
         || std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some();
-    let allow_parallel =
-        std::env::var_os("GLRMASK_SERIAL_INNER_WEIGHT_REMAP").is_none();
     let total_started_at = profiling.then(Instant::now);
     let tsid_map = InjectiveLocalMap::from_local_to_common(local_to_common_tsids, common_tsid_count);
     let tsid_run_map =
