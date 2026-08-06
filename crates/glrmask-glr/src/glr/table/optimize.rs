@@ -1742,13 +1742,40 @@ impl GLRTable {
         let started_at = std::time::Instant::now();
         let source = self.clone();
         let controls = source.control_terminals.clone();
+        let predecessor_started_at = std::time::Instant::now();
         let predecessors = build_control_elimination_predecessors(&source)?;
+        let predecessor_ms = predecessor_started_at.elapsed().as_secs_f64() * 1000.0;
         let budget = UnitInlineBudget::exact_control_elimination();
         let mut compiled_rows = Vec::with_capacity(source.num_states as usize);
         let mut compiled_cells = 0usize;
         let mut closure_frames = 0usize;
+        let mut copied_row_count = 0usize;
+        let mut symbolic_row_count = 0usize;
+        let mut slowest_rows = Vec::<(u64, u32, usize, usize)>::new();
+        let profile_control = std::env::var_os("GLRMASK_PROFILE_CONTROL_ELIMINATION").is_some();
 
         for origin_state in 0..source.num_states {
+            let row_started_at = profile_control.then(std::time::Instant::now);
+            let visits_before = budget.stack_effect_visits();
+            let source_row = &source.action[origin_state as usize];
+            if !controls
+                .iter()
+                .any(|control| source_row.contains_key(control))
+            {
+                // A leading zero-width control closure can only begin with an
+                // action in the current top-state row. With no control cell,
+                // the closure is exactly identity and every ordinary action is
+                // already the required compiled result. Copy it verbatim;
+                // symbolically recompiling every child-table row dominates
+                // realistic multi-schema composition for no semantic gain.
+                compiled_cells = compiled_cells.saturating_add(source_row.len());
+                compiled_rows.push(source_row.clone());
+                closure_frames = closure_frames.saturating_add(1);
+                copied_row_count += 1;
+                continue;
+            }
+            symbolic_row_count += 1;
+
             let mut depth_cache = FxHashMap::default();
             let closure = control_effect_closure(
                 &source,
@@ -1864,6 +1891,11 @@ impl GLRTable {
                 }
             }
             compiled_rows.push(row);
+            if let Some(row_started_at) = row_started_at {
+                let elapsed_ns = row_started_at.elapsed().as_nanos() as u64;
+                let visits = budget.stack_effect_visits().saturating_sub(visits_before);
+                slowest_rows.push((elapsed_ns, origin_state, closure.len(), visits));
+            }
         }
 
         if budget.is_aborted() {
@@ -1881,6 +1913,23 @@ impl GLRTable {
         self.admission_policy = AdmissionPolicy::RowPresenceExact;
         self.rebuild_advance_rows_from_actions();
         self.rebuild_guarded_shift_index();
+
+        if profile_control {
+            slowest_rows.sort_unstable_by_key(|entry| std::cmp::Reverse(entry.0));
+            slowest_rows.truncate(20);
+            eprintln!(
+                "[glrmask/profile][control_elimination] states={} controls={} copied_rows={} symbolic_rows={} compiled_cells={} closure_frames={} stack_effect_visits={} predecessor_ms={predecessor_ms:.3} total_ms={:.3} slowest_rows={:?}",
+                source.num_states,
+                controls.len(),
+                copied_row_count,
+                symbolic_row_count,
+                compiled_cells,
+                closure_frames,
+                budget.stack_effect_visits(),
+                started_at.elapsed().as_secs_f64() * 1000.0,
+                slowest_rows,
+            );
+        }
 
         Ok(ControlEliminationReport {
             states: self.num_states as usize,
@@ -4179,30 +4228,45 @@ fn control_elimination_failure(
     )
 }
 
-fn action_stack_rewrites(action: &Action) -> Vec<(u32, Vec<u32>)> {
+fn for_each_action_stack_rewrite(
+    action: &Action,
+    mut visit: impl FnMut(u32, &[u32]),
+) {
     match action {
         Action::Shift(target, replace) => {
-            vec![(u32::from(*replace), vec![*target])]
+            visit(u32::from(*replace), std::slice::from_ref(target));
         }
-        Action::ReplaceShifts(targets) => targets
-            .iter()
-            .map(|&target| (1, vec![target]))
-            .collect(),
-        Action::StackShifts(shifts) => shifts
-            .iter()
-            .map(|shift| (shift.pop, shift.pushes.clone()))
-            .collect(),
-        Action::GuardedStackShifts(shifts) => shifts
-            .iter()
-            .map(|shift| (shift.pop, shift.pushes.clone()))
-            .collect(),
-        Action::Split { shift, .. } => shift
-            .iter()
-            .map(|&(target, replace)| (u32::from(replace), vec![target]))
-            .collect(),
-        Action::Skip => vec![(0, Vec::new())],
-        Action::Reduce(..) | Action::Accept => Vec::new(),
+        Action::ReplaceShifts(targets) => {
+            for target in targets.iter() {
+                visit(1, std::slice::from_ref(target));
+            }
+        }
+        Action::StackShifts(shifts) => {
+            for shift in shifts {
+                visit(shift.pop, &shift.pushes);
+            }
+        }
+        Action::GuardedStackShifts(shifts) => {
+            for shift in shifts {
+                visit(shift.pop, &shift.pushes);
+            }
+        }
+        Action::Split { shift, .. } => {
+            if let Some((target, replace)) = shift {
+                visit(u32::from(*replace), std::slice::from_ref(target));
+            }
+        }
+        Action::Skip | Action::Reduce(..) | Action::Accept => {}
     }
+}
+
+#[cfg(test)]
+fn action_stack_rewrites(action: &Action) -> Vec<(u32, Vec<u32>)> {
+    let mut rewrites = Vec::new();
+    for_each_action_stack_rewrite(action, |pop, pushes| {
+        rewrites.push((pop, pushes.to_vec()));
+    });
+    rewrites
 }
 
 fn predecessor_states_at_depth(
@@ -4228,12 +4292,444 @@ fn predecessor_states_at_depth(
     states
 }
 
+struct DensePredecessorMatrix {
+    bit_len: usize,
+    words_per_row: usize,
+    words: Vec<u64>,
+}
+
+impl DensePredecessorMatrix {
+    fn new(rows: usize, bit_len: usize) -> Self {
+        let words_per_row = bit_len.div_ceil(64);
+        Self {
+            bit_len,
+            words_per_row,
+            words: vec![0; rows.saturating_mul(words_per_row)],
+        }
+    }
+
+    fn set(&mut self, row: u32, bit: u32) -> bool {
+        let index = row as usize * self.words_per_row + bit as usize / 64;
+        let mask = 1u64 << (bit % 64);
+        let was_set = self.words[index] & mask != 0;
+        self.words[index] |= mask;
+        !was_set
+    }
+
+    fn row_words(&self, row: u32) -> &[u64] {
+        let start = row as usize * self.words_per_row;
+        &self.words[start..start + self.words_per_row]
+    }
+
+    fn union_row_into(&mut self, source: u32, destination: u32) -> bool {
+        if source == destination {
+            return false;
+        }
+        let source_start = source as usize * self.words_per_row;
+        let destination_start = destination as usize * self.words_per_row;
+        let mut changed = false;
+        for offset in 0..self.words_per_row {
+            let source_word = self.words[source_start + offset];
+            let destination_word = &mut self.words[destination_start + offset];
+            let merged = *destination_word | source_word;
+            changed |= merged != *destination_word;
+            *destination_word = merged;
+        }
+        changed
+    }
+
+    fn union_words_into(&mut self, destination: u32, source: &[u64]) -> bool {
+        debug_assert_eq!(source.len(), self.words_per_row);
+        let destination_start = destination as usize * self.words_per_row;
+        let mut changed = false;
+        for (offset, &source_word) in source.iter().enumerate() {
+            let destination_word = &mut self.words[destination_start + offset];
+            let merged = *destination_word | source_word;
+            changed |= merged != *destination_word;
+            *destination_word = merged;
+        }
+        changed
+    }
+
+}
+
+fn for_each_set_bit(words: &[u64], bit_len: usize, mut visit: impl FnMut(u32)) {
+    for (word_index, &word) in words.iter().enumerate() {
+        let mut remaining = word;
+        while remaining != 0 {
+            let bit = remaining.trailing_zeros() as usize;
+            let state = word_index * 64 + bit;
+            if state < bit_len {
+                visit(state as u32);
+            }
+            remaining &= remaining - 1;
+        }
+    }
+}
+
+fn condense_pop_one_predecessor_graph(
+    adjacency: &[PredecessorSet],
+) -> (Vec<u32>, Vec<PredecessorSet>, Vec<u32>) {
+    let state_count = adjacency.len();
+    let mut visited = vec![false; state_count];
+    let mut finish_order = Vec::with_capacity(state_count);
+
+    for start in 0..state_count {
+        if visited[start] {
+            continue;
+        }
+        visited[start] = true;
+        let mut stack = vec![(start, 0usize)];
+        while let Some((state, next_index)) = stack.last_mut() {
+            if *next_index < adjacency[*state].len() {
+                let destination = adjacency[*state][*next_index] as usize;
+                *next_index += 1;
+                if !visited[destination] {
+                    visited[destination] = true;
+                    stack.push((destination, 0));
+                }
+            } else {
+                finish_order.push(*state);
+                stack.pop();
+            }
+        }
+    }
+
+    let mut reverse = vec![Vec::<u32>::new(); state_count];
+    for (source, destinations) in adjacency.iter().enumerate() {
+        for &destination in destinations {
+            reverse[destination as usize].push(source as u32);
+        }
+    }
+
+    visited.fill(false);
+    let mut state_to_component = vec![0u32; state_count];
+    let mut component_count = 0u32;
+    for &start in finish_order.iter().rev() {
+        if visited[start] {
+            continue;
+        }
+        visited[start] = true;
+        let mut stack = vec![start as u32];
+        while let Some(state) = stack.pop() {
+            state_to_component[state as usize] = component_count;
+            for &predecessor in &reverse[state as usize] {
+                if !visited[predecessor as usize] {
+                    visited[predecessor as usize] = true;
+                    stack.push(predecessor);
+                }
+            }
+        }
+        component_count += 1;
+    }
+
+    let mut component_edges = vec![PredecessorSet::new(); component_count as usize];
+    for (source, destinations) in adjacency.iter().enumerate() {
+        let source_component = state_to_component[source];
+        for &destination in destinations {
+            let destination_component = state_to_component[destination as usize];
+            if source_component != destination_component {
+                component_edges[source_component as usize].push(destination_component);
+            }
+        }
+    }
+    for edges in &mut component_edges {
+        edges.sort_unstable();
+        edges.dedup();
+    }
+
+    let mut indegree = vec![0usize; component_count as usize];
+    for edges in &component_edges {
+        for &destination in edges {
+            indegree[destination as usize] += 1;
+        }
+    }
+    let mut queue = VecDeque::new();
+    for (component, &degree) in indegree.iter().enumerate() {
+        if degree == 0 {
+            queue.push_back(component as u32);
+        }
+    }
+    let mut topological_order = Vec::with_capacity(component_count as usize);
+    while let Some(component) = queue.pop_front() {
+        topological_order.push(component);
+        for &destination in &component_edges[component as usize] {
+            indegree[destination as usize] -= 1;
+            if indegree[destination as usize] == 0 {
+                queue.push_back(destination);
+            }
+        }
+    }
+    debug_assert_eq!(topological_order.len(), component_count as usize);
+
+    (state_to_component, component_edges, topological_order)
+}
+
+fn propagate_component_predecessors(
+    matrix: &mut DensePredecessorMatrix,
+    component_edges: &[PredecessorSet],
+    topological_order: &[u32],
+    dirty_components: &mut [bool],
+) -> usize {
+    let mut changed_edges = 0usize;
+    for &source in topological_order {
+        if !dirty_components[source as usize] {
+            continue;
+        }
+        dirty_components[source as usize] = false;
+        for &destination in &component_edges[source as usize] {
+            if matrix.union_row_into(source, destination) {
+                changed_edges += 1;
+                dirty_components[destination as usize] = true;
+            }
+        }
+    }
+    changed_edges
+}
+
+fn dense_predecessor_states_at_depth(
+    matrix: &DensePredecessorMatrix,
+    state_to_component: &[u32],
+    origin_component: u32,
+    depth: u32,
+    component_marks: &mut [u32],
+    mark_generation: &mut u32,
+) -> Vec<u64> {
+    debug_assert!(depth >= 1);
+    let mut current = matrix.row_words(origin_component).to_vec();
+    let mut next = vec![0u64; matrix.words_per_row];
+    let mut components = Vec::<u32>::new();
+
+    for _ in 1..depth {
+        next.fill(0);
+        components.clear();
+        *mark_generation = mark_generation.wrapping_add(1);
+        if *mark_generation == 0 {
+            component_marks.fill(0);
+            *mark_generation = 1;
+        }
+        let mark = *mark_generation;
+        for_each_set_bit(&current, matrix.bit_len, |state| {
+            let component = state_to_component[state as usize];
+            if component_marks[component as usize] != mark {
+                component_marks[component as usize] = mark;
+                components.push(component);
+            }
+        });
+        for component in components.iter().copied() {
+            for (destination, source) in next.iter_mut().zip(matrix.row_words(component)) {
+                *destination |= *source;
+            }
+        }
+        std::mem::swap(&mut current, &mut next);
+        if current.iter().all(|word| *word == 0) {
+            break;
+        }
+    }
+
+    current
+}
+
 /// Conservative-exact predecessor support for arbitrary stack rewrites.
 /// Extra predecessor candidates are harmless because generated guarded effects
 /// test the concrete stack state before applying; missing candidates would be
 /// unsound. Iterate stack-shift propagation to a fixed point so copied-child
 /// return actions contribute their caller context.
 fn build_control_elimination_predecessors(
+    table: &GLRTable,
+) -> Result<RuntimePredecessors, String> {
+    let started_at = std::time::Instant::now();
+    let mut predecessors = vec![PredecessorSet::new(); table.num_states as usize];
+    let mut pop_one_destinations = vec![PredecessorSet::new(); table.num_states as usize];
+    let mut deep_rules = Vec::<(u32, u32, u32)>::new();
+    let mut rewrite_count = 0usize;
+    let mut direct_edge_count = 0usize;
+
+    // Extract the monotone predecessor equations once. The previous
+    // implementation rebuilt every action rewrite, cloned the complete
+    // predecessor relation, and rescanned the whole table on every fixed-point
+    // round. Realistic composed tables have tens of thousands of states but
+    // only a small number of rounds and stack-rewrite shapes, so that repeated
+    // table work dominated control elimination by orders of magnitude.
+    //
+    // Each delayed rule `(source, pop, destination)` means:
+    //
+    //     pred[destination] += pred^pop[source]
+    //
+    // Direct stack adjacency inside a pushed sequence and pop-zero rules are
+    // seeded immediately. The equations are monotone over finite state sets;
+    // asynchronous iteration below therefore reaches the same least fixed
+    // point as the old synchronous snapshot iteration.
+    for source in 0..table.num_states {
+        let mut record_rewrite = |pop: u32, pushes: &[u32]| {
+            rewrite_count += 1;
+            if pushes.is_empty() {
+                return;
+            }
+            for pair in pushes.windows(2) {
+                predecessors[pair[1] as usize].push(pair[0]);
+                direct_edge_count += 1;
+            }
+            let destination = pushes[0];
+            if pop == 0 {
+                predecessors[destination as usize].push(source);
+                direct_edge_count += 1;
+            } else if pop == 1 {
+                pop_one_destinations[source as usize].push(destination);
+            } else {
+                deep_rules.push((source, pop, destination));
+            }
+        };
+
+        for action in table.action[source as usize].values() {
+            for_each_action_stack_rewrite(action, &mut record_rewrite);
+        }
+        for &(target, replace) in table.goto[source as usize].values() {
+            record_rewrite(u32::from(replace), std::slice::from_ref(&target));
+        }
+    }
+    let extraction_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+
+    for row in &mut predecessors {
+        row.sort_unstable();
+        row.dedup();
+    }
+    for row in &mut pop_one_destinations {
+        row.sort_unstable();
+        row.dedup();
+    }
+    deep_rules.sort_unstable();
+    deep_rules.dedup();
+    let normalized_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+
+    // `pop == 1` equations are pure row-copy edges. Collapse their SCCs, then
+    // propagate predecessor bitsets once over the condensation DAG. This turns
+    // hundreds of thousands of individual sorted-vector insertions into dense
+    // word-wise unions while preserving the exact least fixed point.
+    let scc_started_at = std::time::Instant::now();
+    let (state_to_component, component_edges, topological_order) =
+        condense_pop_one_predecessor_graph(&pop_one_destinations);
+    let component_count = topological_order.len();
+    let scc_ms = scc_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let matrix_started_at = std::time::Instant::now();
+    let mut component_predecessors =
+        DensePredecessorMatrix::new(component_count, table.num_states as usize);
+    let mut dirty_components = vec![false; component_count];
+    for (state, row) in predecessors.iter().enumerate() {
+        let component = state_to_component[state];
+        for &predecessor in row {
+            if component_predecessors.set(component, predecessor) {
+                dirty_components[component as usize] = true;
+            }
+        }
+    }
+    let initial_changed_component_edges = propagate_component_predecessors(
+        &mut component_predecessors,
+        &component_edges,
+        &topological_order,
+        &mut dirty_components,
+    );
+    let initial_propagation_ms = matrix_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    for (source, _, destination) in &mut deep_rules {
+        *source = state_to_component[*source as usize];
+        *destination = state_to_component[*destination as usize];
+    }
+    deep_rules.sort_unstable();
+    deep_rules.dedup();
+
+    let pass_limit = (table.num_states as usize)
+        .saturating_mul(table.num_states as usize)
+        .saturating_add(2);
+
+    let mut deep_rounds = 0usize;
+    let mut changed_deep_rules_total = 0usize;
+    let mut changed_component_edges_total = initial_changed_component_edges;
+    let mut component_marks = vec![0u32; component_count];
+    let mut mark_generation = 0u32;
+    for _ in 0..pass_limit {
+        deep_rounds += 1;
+        let mut changed_deep_rules = 0usize;
+        let mut depth_cache = FxHashMap::<(u32, u32), Vec<u64>>::default();
+        for &(source_component, pop, destination_component) in &deep_rules {
+            let key = (source_component, pop);
+            if !depth_cache.contains_key(&key) {
+                let bases = dense_predecessor_states_at_depth(
+                    &component_predecessors,
+                    &state_to_component,
+                    source_component,
+                    pop,
+                    &mut component_marks,
+                    &mut mark_generation,
+                );
+                depth_cache.insert(key, bases);
+            }
+            let bases = depth_cache.get(&key).expect("depth cache was populated");
+            if component_predecessors.union_words_into(destination_component, bases) {
+                changed_deep_rules += 1;
+                dirty_components[destination_component as usize] = true;
+            }
+        }
+
+        if changed_deep_rules == 0 {
+            let materialize_started_at = std::time::Instant::now();
+            let mut result = Vec::with_capacity(table.num_states as usize);
+            let mut predecessor_edges = 0usize;
+            let mut max_predecessors = 0usize;
+            for state in 0..table.num_states as usize {
+                let mut row = PredecessorSet::new();
+                for_each_set_bit(
+                    component_predecessors.row_words(state_to_component[state]),
+                    table.num_states as usize,
+                    |predecessor| row.push(predecessor),
+                );
+                predecessor_edges += row.len();
+                max_predecessors = max_predecessors.max(row.len());
+                result.push(row);
+            }
+            let materialize_ms = materialize_started_at.elapsed().as_secs_f64() * 1000.0;
+            if std::env::var_os("GLRMASK_PROFILE_CONTROL_ELIMINATION").is_some() {
+                let pop_one_rules = pop_one_destinations.iter().map(|row| row.len()).sum::<usize>();
+                let component_edge_count = component_edges.iter().map(|row| row.len()).sum::<usize>();
+                eprintln!(
+                    "[glrmask/profile][control_predecessors] states={} components={} rewrites={} direct_edges={} pop_one_rules={} component_edges={} deep_rules={} deep_rounds={} changed_component_edges={} changed_deep_rules={} predecessor_edges={} max_predecessors={} matrix_mib={:.3} extraction_ms={extraction_ms:.3} normalize_ms={:.3} scc_ms={scc_ms:.3} initial_propagation_ms={initial_propagation_ms:.3} materialize_ms={materialize_ms:.3} total_ms={:.3}",
+                    table.num_states,
+                    component_count,
+                    rewrite_count,
+                    direct_edge_count,
+                    pop_one_rules,
+                    component_edge_count,
+                    deep_rules.len(),
+                    deep_rounds,
+                    changed_component_edges_total,
+                    changed_deep_rules_total,
+                    predecessor_edges,
+                    max_predecessors,
+                    component_predecessors.words.len() as f64 * 8.0 / (1024.0 * 1024.0),
+                    normalized_ms - extraction_ms,
+                    started_at.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
+            return Ok(result);
+        }
+        changed_deep_rules_total += changed_deep_rules;
+        changed_component_edges_total += propagate_component_predecessors(
+            &mut component_predecessors,
+            &component_edges,
+            &topological_order,
+            &mut dirty_components,
+        );
+    }
+
+    Err(format!(
+        "control-elimination predecessor propagation did not converge: states={}",
+        table.num_states,
+    ))
+}
+
+#[cfg(test)]
+fn build_control_elimination_predecessors_synchronous_reference(
     table: &GLRTable,
 ) -> Result<RuntimePredecessors, String> {
     let mut predecessors = vec![PredecessorSet::new(); table.num_states as usize];
@@ -4289,7 +4785,7 @@ fn build_control_elimination_predecessors(
     }
 
     Err(format!(
-        "control-elimination predecessor propagation did not converge: states={}",
+        "reference control-elimination predecessor propagation did not converge: states={}",
         table.num_states,
     ))
 }
@@ -5858,6 +6354,118 @@ mod tests {
             synthetic_states: std::sync::atomic::AtomicUsize::new(0),
             stack_effect_visits: std::sync::atomic::AtomicUsize::new(0),
             abort_code: std::sync::atomic::AtomicU8::new(ABORT_NONE),
+        }
+    }
+
+    #[test]
+    fn control_predecessor_propagation_matches_synchronous_reference() {
+        fn next(seed: &mut u64) -> u64 {
+            *seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            *seed
+        }
+
+        fn random_pushes(seed: &mut u64, nstates: u32) -> Vec<u32> {
+            let len = (next(seed) % 3 + 1) as usize;
+            (0..len)
+                .map(|_| (next(seed) % u64::from(nstates)) as u32)
+                .collect()
+        }
+
+        fn random_action(seed: &mut u64, nstates: u32) -> Action {
+            match next(seed) % 8 {
+                0 => Action::Shift(
+                    (next(seed) % u64::from(nstates)) as u32,
+                    next(seed) & 1 != 0,
+                ),
+                1 => Action::ReplaceShifts(
+                    (0..(next(seed) % 3 + 1))
+                        .map(|_| (next(seed) % u64::from(nstates)) as u32)
+                        .collect(),
+                ),
+                2 => Action::StackShifts(
+                    (0..(next(seed) % 3 + 1))
+                        .map(|_| StackShift {
+                            pop: (next(seed) % 4) as u32,
+                            pushes: random_pushes(seed, nstates),
+                        })
+                        .collect(),
+                ),
+                3 => Action::GuardedStackShifts(
+                    (0..(next(seed) % 3 + 1))
+                        .map(|_| GuardedStackShift {
+                            guards: Vec::new(),
+                            pop: (next(seed) % 4) as u32,
+                            pushes: random_pushes(seed, nstates),
+                        })
+                        .collect(),
+                ),
+                4 => Action::Split {
+                    shift: Some((
+                        (next(seed) % u64::from(nstates)) as u32,
+                        next(seed) & 1 != 0,
+                    )),
+                    reduces: Vec::new(),
+                    accept: false,
+                },
+                5 => Action::Skip,
+                6 => Action::Reduce((next(seed) % 4) as u32, (next(seed) % 4) as u32),
+                _ => Action::Accept,
+            }
+        }
+
+        let mut seed = 0xD1CE_F00D_5EED_BAADu64;
+        for case in 0..256 {
+            let nstates = (next(&mut seed) % 9 + 2) as usize;
+            let mut action = vec![ActionRow::default(); nstates];
+            let mut goto = vec![GotoRow::default(); nstates];
+
+            for state in 0..nstates {
+                for terminal in 0..4 {
+                    if next(&mut seed) % 3 != 0 {
+                        action[state].insert(
+                            terminal,
+                            random_action(&mut seed, nstates as u32),
+                        );
+                    }
+                }
+                for nonterminal in 0..4 {
+                    if next(&mut seed) & 1 != 0 {
+                        goto[state].insert(
+                            nonterminal,
+                            (
+                                (next(&mut seed) % nstates as u64) as u32,
+                                next(&mut seed) & 1 != 0,
+                            ),
+                        );
+                    }
+                }
+            }
+
+            let table = GLRTable {
+                action,
+                goto,
+                num_states: nstates as u32,
+                num_terminals: 4,
+                num_rules: 0,
+                rules: Vec::new(),
+                nonterminal_display_names: Vec::new(),
+                construction: GlrTableConstruction::LegacyRowBisim,
+                admission_policy: AdmissionPolicy::RowPresenceExact,
+                advance: Vec::new(),
+                forwarded_shifts: FxHashSet::default(),
+                control_terminals: Default::default(),
+                skip_terminals: Default::default(),
+                guarded_shift_index: Vec::new(),
+                direct_regular_wide_frontiers: Vec::new(),
+            };
+
+            let expected = build_control_elimination_predecessors_synchronous_reference(&table)
+                .unwrap_or_else(|error| panic!("reference failed for case {case}: {error}"));
+            let actual = build_control_elimination_predecessors(&table)
+                .unwrap_or_else(|error| panic!("optimized failed for case {case}: {error}"));
+            assert_eq!(actual, expected, "case {case}");
         }
     }
 
