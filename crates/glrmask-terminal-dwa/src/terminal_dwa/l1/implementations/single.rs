@@ -179,37 +179,74 @@ fn node_info(node: usize, trie: &[FlatNode], info: &mut [NodeInfo]) -> NodeInfo 
     result
 }
 
-fn live_tokens(
+fn fill_profiles(
     node: usize,
-    state: u32,
+    frontier: &[(u32, u64)],
+    word: usize,
     trie: &[FlatNode],
     info: &[NodeInfo],
     transitions: &[[u32; 256]],
     loops: &[ByteMask],
-    out: &mut Vec<usize>,
-    subtree_skips: &mut usize,
+    profiles: &mut [Vec<u64>],
+    stats: &mut FrontierStats,
 ) {
-    if info[node].token_count != 0 && subset(&info[node].bytes, &loops[state as usize]) {
+    stats.group_visits += frontier.len();
+    let alive = frontier.iter().fold(0u64, |mask, &(_, origins)| mask | origins);
+    stats.origin_visits += alive.count_ones() as usize;
+    if info[node].token_count != 0
+        && frontier.iter().all(|&(state, _)| subset(&info[node].bytes, &loops[state as usize]))
+    {
         let first = info[node].first_token;
-        out.extend(first..first + info[node].token_count);
-        *subtree_skips += 1;
+        for profile in &mut profiles[first..first + info[node].token_count] {
+            profile[word] |= alive;
+        }
+        stats.subtree_skips += 1;
         return;
     }
     if let Some(token) = trie[node].token {
-        out.push(token);
+        profiles[token][word] |= alive;
     }
     for (edge, child) in &trie[node].edges {
-        let mut target = state;
-        for &byte in edge.iter() {
-            target = transitions[target as usize][byte as usize];
-            if target == DEAD {
-                break;
+        let mut next = Vec::<(u32, u64)>::with_capacity(frontier.len());
+        for &(mut state, origins) in frontier {
+            for &byte in edge.iter() {
+                state = transitions[state as usize][byte as usize];
+                if state == DEAD {
+                    break;
+                }
+            }
+            if state == DEAD {
+                continue;
+            }
+            if let Some((_, existing)) = next.iter_mut().find(|(candidate, _)| *candidate == state) {
+                *existing |= origins;
+                stats.merges += 1;
+            } else {
+                next.push((state, origins));
             }
         }
-        if target != DEAD {
-            live_tokens(*child, target, trie, info, transitions, loops, out, subtree_skips);
+        if !next.is_empty() {
+            fill_profiles(
+                *child,
+                &next,
+                word,
+                trie,
+                info,
+                transitions,
+                loops,
+                profiles,
+                stats,
+            );
         }
     }
+}
+
+#[derive(Default)]
+struct FrontierStats {
+    group_visits: usize,
+    origin_visits: usize,
+    merges: usize,
+    subtree_skips: usize,
 }
 
 pub(super) fn build(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
@@ -286,26 +323,7 @@ pub(super) fn build(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
     }
 
     let traverse_started = Instant::now();
-    let mut info = vec![NodeInfo::default(); trie.len()];
-    node_info(0, &trie, &mut info);
-    let mut used_classes = roots
-        .iter()
-        .flatten()
-        .copied()
-        .filter(|&state| state != DEAD)
-        .collect::<Vec<_>>();
-    used_classes.sort_unstable();
-    used_classes.dedup();
-    let mut token_sets = FxHashMap::<u32, Vec<usize>>::default();
-    let mut subtree_skips = 0usize;
-    for state in used_classes {
-        let mut tokens = Vec::new();
-        live_tokens(0, state, &trie, &info, &transitions, &loops, &mut tokens, &mut subtree_skips);
-        token_sets.insert(state, tokens);
-    }
-    // Full residual-root vectors are an exact preclassification of raw lexer
-    // states. Build one expensive vocabulary row per distinct vector, not per
-    // raw state, then retain the later vocabulary-specific row merge.
+    // Full residual-root vectors exactly preclassify raw lexer states.
     let mut root_vector_ids = FxHashMap::<Vec<u32>, u32>::default();
     let mut root_vectors = Vec::<Vec<u32>>::new();
     let mut raw_root_class = vec![0u32; roots.len()];
@@ -317,11 +335,16 @@ pub(super) fn build(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
         });
     }
 
-    // A token is characterized exactly by the minimized residual states from
-    // which it survives. Compact this Boolean column relation before mapping
-    // residual roots back to `(raw lexer state, terminal)` coordinates.
-    let mut used_classes = token_sets.keys().copied().collect::<Vec<_>>();
+    let mut info = vec![NodeInfo::default(); trie.len()];
+    node_info(0, &trie, &mut info);
+    let mut used_classes = roots
+        .iter()
+        .flatten()
+        .copied()
+        .filter(|&state| state != DEAD)
+        .collect::<Vec<_>>();
     used_classes.sort_unstable();
+    used_classes.dedup();
     let root_index = used_classes
         .iter()
         .enumerate()
@@ -329,11 +352,24 @@ pub(super) fn build(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
         .collect::<FxHashMap<_, _>>();
     let words = used_classes.len().div_ceil(64);
     let mut token_profiles = vec![vec![0u64; words]; aliases.len()];
-    for (&state, tokens) in &token_sets {
-        let index = root_index[&state];
-        for &token in tokens {
-            token_profiles[token][index / 64] |= 1u64 << (index % 64);
-        }
+    let mut frontier_stats = FrontierStats::default();
+    for (word, chunk) in used_classes.chunks(64).enumerate() {
+        let frontier = chunk
+            .iter()
+            .enumerate()
+            .map(|(bit, &state)| (state, 1u64 << bit))
+            .collect::<Vec<_>>();
+        fill_profiles(
+            0,
+            &frontier,
+            word,
+            &trie,
+            &info,
+            &transitions,
+            &loops,
+            &mut token_profiles,
+            &mut frontier_stats,
+        );
     }
     let mut token_profile_ids = FxHashMap::<Vec<u64>, u32>::default();
     let mut class_profiles = Vec::<Vec<u64>>::new();
@@ -405,7 +441,7 @@ pub(super) fn build(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
     )?;
     if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
         eprintln!(
-            "[glrmask/profile][l1_single] partition={} raw_states={} terminals={} bytes={} projected_states={} expanded={} minimized_states={} root_classes={} root_vectors={} residual_token_classes={} signature_updates={} subtree_skips={} signatures={} state_classes={} token_classes={} project_ms={:.3} minimize_ms={:.3} traverse_ms={:.3} compact_ms={:.3} build_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][l1_single] partition={} raw_states={} terminals={} bytes={} projected_states={} expanded={} minimized_states={} root_classes={} root_vectors={} residual_token_classes={} signature_updates={} frontier_groups={} frontier_origins={} frontier_merges={} subtree_skips={} signatures={} state_classes={} token_classes={} project_ms={:.3} minimize_ms={:.3} traverse_ms={:.3} compact_ms={:.3} build_ms={:.3} total_ms={:.3}",
             input.partition_label,
             input.tokenizer.num_states(),
             projected.terminals.len(),
@@ -413,11 +449,14 @@ pub(super) fn build(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
             projected.configs.len(),
             expanded,
             transitions.len(),
-            token_sets.len(),
+            used_classes.len(),
             root_vectors.len(),
             class_profiles.len(),
             signature_updates,
-            subtree_skips,
+            frontier_stats.group_visits,
+            frontier_stats.origin_visits,
+            frontier_stats.merges,
+            frontier_stats.subtree_skips,
             signatures.len(),
             finished.state_classes,
             finished.token_classes,
