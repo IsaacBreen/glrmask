@@ -1541,8 +1541,8 @@ mod tests {
         )
         .unwrap();
         assert!(
-            !composed.table.control_terminals.is_empty(),
-            "a child followed directly by an end token must use explicit controls",
+            composed.table.control_terminals.is_empty(),
+            "a child followed directly by an end token must compile linker controls away",
         );
         let loaded = Constraint::load(&composed.save()).unwrap();
 

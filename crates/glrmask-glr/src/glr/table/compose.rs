@@ -1251,6 +1251,46 @@ mod tests {
                 | Some(Action::Split {
                     accept: true, ..
                 }) => return true,
+                Some(Action::Skip) => {
+                    pending.push_back(stack);
+                }
+                Some(Action::Shift(target, replace)) => {
+                    if let Some(next) = apply_stack_shift(
+                        &stack,
+                        u32::from(*replace),
+                        std::slice::from_ref(target),
+                    ) {
+                        pending.push_back(next);
+                    }
+                }
+                Some(Action::ReplaceShifts(targets)) => {
+                    for target in targets.iter() {
+                        if let Some(next) = apply_stack_shift(
+                            &stack,
+                            1,
+                            std::slice::from_ref(target),
+                        ) {
+                            pending.push_back(next);
+                        }
+                    }
+                }
+                Some(Action::StackShifts(shifts)) => {
+                    for shift in shifts {
+                        if let Some(next) = apply_stack_shift(&stack, shift.pop, &shift.pushes) {
+                            pending.push_back(next);
+                        }
+                    }
+                }
+                Some(Action::GuardedStackShifts(shifts)) => {
+                    for shift in shifts {
+                        if shift.guards.iter().all(|guard| guard_matches(&stack, guard))
+                            && let Some(next) =
+                                apply_stack_shift(&stack, shift.pop, &shift.pushes)
+                        {
+                            pending.push_back(next);
+                        }
+                    }
+                }
                 Some(Action::Reduce(nonterminal, len)) => {
                     let Some(mut reduced) = apply_stack_shift(&stack, *len, &[]) else {
                         continue;
@@ -1268,7 +1308,16 @@ mod tests {
                     reduced.push(target);
                     pending.push_back(reduced);
                 }
-                Some(Action::Split { reduces, .. }) => {
+                Some(Action::Split { shift, reduces, .. }) => {
+                    if let Some((target, replace)) = shift
+                        && let Some(next) = apply_stack_shift(
+                            &stack,
+                            u32::from(*replace),
+                            std::slice::from_ref(target),
+                        )
+                    {
+                        pending.push_back(next);
+                    }
                     for &(nonterminal, len) in reduces {
                         let Some(mut reduced) = apply_stack_shift(&stack, len, &[]) else {
                             continue;
@@ -1488,6 +1537,217 @@ mod tests {
                 "explicit nullable composition rejected {word:?}",
             );
         }
+    }
+
+    #[test]
+    fn compiled_control_actions_match_explicit_adjacent_child_reference() {
+        let (child, child_analysis) = table(
+            r#"
+                start child;
+                nt child ::= "a";
+            "#,
+        );
+        let (parent, parent_analysis) = table(
+            r#"
+                start document;
+                t SUB ::= @token(999);
+                nt document ::= "X" SUB SUB "!";
+            "#,
+        );
+        let input = SubgrammarTableInput {
+            placeholder_terminal: terminal(&parent_analysis, "SUB"),
+            table: &child,
+            ignore_terminal: None,
+            start_nullable: false,
+        };
+        let explicit =
+            compose_subgrammar_tables_explicit(&parent, None, std::slice::from_ref(&input))
+                .unwrap()
+                .table;
+        let mut compiled = explicit.clone();
+        let report = compiled.eliminate_control_terminals_exact().unwrap();
+        assert!(compiled.control_terminals.is_empty());
+        assert!(report.compiled_cells > 0);
+
+        let alphabet = [
+            terminal(&parent_analysis, "X"),
+            explicit.num_terminals - child.num_terminals + terminal(&child_analysis, "a"),
+            terminal(&parent_analysis, "!"),
+        ];
+        enumerate_words(&alphabet, 5, |word| {
+            assert_eq!(
+                accepts(&compiled, word),
+                accepts(&explicit, word),
+                "control elimination changed adjacent-child language for {word:?}",
+            );
+        });
+    }
+
+    #[test]
+    fn compiled_control_actions_match_nullable_special_continuation_reference() {
+        let (child, child_analysis) = table(
+            r#"
+                start child;
+                nt item ::= "a";
+                nt child ::= item?;
+            "#,
+        );
+        let (parent, parent_analysis) = table(
+            r#"
+                start document;
+                t SUB ::= @token(999);
+                t DONE ::= @token(1000);
+                nt document ::= SUB DONE;
+            "#,
+        );
+        let input = SubgrammarTableInput {
+            placeholder_terminal: terminal(&parent_analysis, "SUB"),
+            table: &child,
+            ignore_terminal: None,
+            start_nullable: true,
+        };
+        let explicit =
+            compose_subgrammar_tables_explicit(&parent, None, std::slice::from_ref(&input))
+                .unwrap()
+                .table;
+        let mut compiled = explicit.clone();
+        compiled.eliminate_control_terminals_exact().unwrap();
+        assert!(compiled.control_terminals.is_empty());
+
+        let alphabet = [
+            explicit.num_terminals - child.num_terminals + terminal(&child_analysis, "a"),
+            terminal(&parent_analysis, "DONE"),
+        ];
+        enumerate_words(&alphabet, 3, |word| {
+            assert_eq!(
+                accepts(&compiled, word),
+                accepts(&explicit, word),
+                "control elimination changed nullable-special language for {word:?}",
+            );
+        });
+    }
+
+    #[test]
+    fn compiled_control_actions_preserve_scoped_ignore_ownership() {
+        let (child, child_analysis) = table(
+            r#"
+                start child;
+                t C_WS ::= "\t"+;
+                t A ::= "a";
+                nt child ::= A;
+            "#,
+        );
+        let (parent, parent_analysis) = table(
+            r#"
+                start document;
+                t SUB ::= @token(999);
+                t P_WS ::= " "+;
+                t L ::= "<";
+                t R ::= ">";
+                nt document ::= L SUB R;
+            "#,
+        );
+        let parent_ws = terminal(&parent_analysis, "P_WS");
+        let child_ws = terminal(&child_analysis, "C_WS");
+        let input = SubgrammarTableInput {
+            placeholder_terminal: terminal(&parent_analysis, "SUB"),
+            table: &child,
+            ignore_terminal: Some(child_ws),
+            start_nullable: false,
+        };
+        let composed = compose_subgrammar_tables_explicit(
+            &parent,
+            Some(parent_ws),
+            std::slice::from_ref(&input),
+        )
+        .unwrap();
+        let explicit = composed.table;
+        let child_offset = composed.terminal_offsets[1];
+        let mut compiled = explicit.clone();
+        compiled.eliminate_control_terminals_exact().unwrap();
+
+        let alphabet = [
+            terminal(&parent_analysis, "L"),
+            terminal(&parent_analysis, "R"),
+            parent_ws,
+            child_offset + child_ws,
+            child_offset + terminal(&child_analysis, "A"),
+        ];
+        enumerate_words(&alphabet, 5, |word| {
+            assert_eq!(
+                accepts(&compiled, word),
+                accepts(&explicit, word),
+                "control elimination changed scoped-ignore language for {word:?}",
+            );
+        });
+    }
+
+    #[test]
+    fn compiled_control_actions_preserve_nested_control_chains() {
+        let (leaf, leaf_analysis) = table(
+            r#"
+                start leaf;
+                nt leaf ::= "a";
+            "#,
+        );
+        let (middle_parent, middle_analysis) = table(
+            r#"
+                start child;
+                t LEAF ::= @token(998);
+                nt child ::= LEAF LEAF;
+            "#,
+        );
+        let middle_input = SubgrammarTableInput {
+            placeholder_terminal: terminal(&middle_analysis, "LEAF"),
+            table: &leaf,
+            ignore_terminal: None,
+            start_nullable: false,
+        };
+        let middle = compose_subgrammar_tables_explicit(
+            &middle_parent,
+            None,
+            std::slice::from_ref(&middle_input),
+        )
+        .unwrap();
+        let middle_leaf_a = middle.terminal_offsets[1] + terminal(&leaf_analysis, "a");
+
+        let (outer_parent, outer_analysis) = table(
+            r#"
+                start document;
+                t CHILD ::= @token(999);
+                t DONE ::= @token(1000);
+                nt document ::= CHILD DONE;
+            "#,
+        );
+        let outer_input = SubgrammarTableInput {
+            placeholder_terminal: terminal(&outer_analysis, "CHILD"),
+            table: &middle.table,
+            ignore_terminal: None,
+            start_nullable: false,
+        };
+        let outer = compose_subgrammar_tables_explicit(
+            &outer_parent,
+            None,
+            std::slice::from_ref(&outer_input),
+        )
+        .unwrap();
+        let outer_middle_offset = outer.terminal_offsets[1];
+        let explicit = outer.table;
+        assert!(explicit.control_terminals.len() >= 2);
+        let mut compiled = explicit.clone();
+        compiled.eliminate_control_terminals_exact().unwrap();
+
+        let alphabet = [
+            outer_middle_offset + middle_leaf_a,
+            terminal(&outer_analysis, "DONE"),
+        ];
+        enumerate_words(&alphabet, 4, |word| {
+            assert_eq!(
+                accepts(&compiled, word),
+                accepts(&explicit, word),
+                "control elimination changed nested-control language for {word:?}",
+            );
+        });
     }
 
     #[test]

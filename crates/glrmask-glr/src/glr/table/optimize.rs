@@ -3,6 +3,7 @@ use crate::ds::bitset::BitSet;
 use rayon::prelude::*;
 use smallvec::{smallvec, SmallVec};
 use rustc_hash::FxHasher;
+use std::collections::VecDeque;
 use std::hash::{Hash, Hasher};
 
 const DISABLE_STACK_SHIFT_PREDECESSOR_CANONICALIZATION_ENV: &str =
@@ -114,6 +115,16 @@ pub(super) struct UnitReductionInliningReport {
     pub(super) stack_effect_visits: usize,
     pub(super) elapsed_ms: f64,
     pub(super) changed_original_states: Vec<u32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ControlEliminationReport {
+    pub states: usize,
+    pub controls: usize,
+    pub compiled_cells: usize,
+    pub closure_frames: usize,
+    pub stack_effect_visits: usize,
+    pub elapsed_ms: f64,
 }
 
 struct UnitInlineUndo {
@@ -237,6 +248,28 @@ impl UnitInlineBudget {
                 UNIT_INLINE_WORK_MAX_STACK_EFFECT_VISITS_ENV,
                 DEFAULT_UNIT_INLINE_WORK_MAX_STACK_EFFECT_VISITS,
             ),
+            iterations: AtomicUsize::new(0),
+            cells: AtomicUsize::new(0),
+            synthetic_states: AtomicUsize::new(0),
+            stack_effect_visits: AtomicUsize::new(0),
+            abort_code: AtomicU8::new(ABORT_NONE),
+        }
+    }
+
+    /// Exact control elimination is a semantic compilation pass, not an
+    /// optional optimizer. It must not succeed or fail according to the
+    /// environment limits used to bound speculative unit-reduction inlining.
+    /// Structural cycle/non-convergence guards live in the control compiler
+    /// itself; this object is retained only to reuse traversal accounting.
+    fn exact_control_elimination() -> Self {
+        use std::sync::atomic::{AtomicU8, AtomicUsize};
+        Self {
+            started_at: std::time::Instant::now(),
+            max_ms: u128::MAX,
+            max_iterations: usize::MAX,
+            max_cells: usize::MAX,
+            max_synthetic_states: usize::MAX,
+            max_stack_effect_visits: usize::MAX,
             iterations: AtomicUsize::new(0),
             cells: AtomicUsize::new(0),
             synthetic_states: AtomicUsize::new(0),
@@ -1149,6 +1182,182 @@ impl GLRTable {
             })
             .collect();
         self.num_states = kept.len() as u32;
+    }
+
+    /// Partially evaluate linker-internal zero-width controls into ordinary
+    /// consuming parser actions.
+    ///
+    /// For every source LR state and every real terminal reachable after zero
+    /// or more control actions, this compiles the exact guarded stack relation
+    /// `control* ; terminal` into one `StackShifts`/`GuardedStackShifts` cell.
+    /// The next consuming cell performs its own leading closure, so no runtime
+    /// control closure is required between tokens. EOF is represented by row
+    /// presence, matching `stacks_finished` semantics.
+    pub fn eliminate_control_terminals_exact(
+        &mut self,
+    ) -> Result<ControlEliminationReport, String> {
+        if self.control_terminals.is_empty() {
+            return Ok(ControlEliminationReport {
+                states: self.num_states as usize,
+                controls: 0,
+                compiled_cells: 0,
+                closure_frames: 0,
+                stack_effect_visits: 0,
+                elapsed_ms: 0.0,
+            });
+        }
+
+        let started_at = std::time::Instant::now();
+        let source = self.clone();
+        let controls = source.control_terminals.clone();
+        let predecessors = build_control_elimination_predecessors(&source)?;
+        let budget = UnitInlineBudget::exact_control_elimination();
+        let mut compiled_rows = Vec::with_capacity(source.num_states as usize);
+        let mut compiled_cells = 0usize;
+        let mut closure_frames = 0usize;
+
+        for origin_state in 0..source.num_states {
+            let mut depth_cache = FxHashMap::default();
+            let closure = control_effect_closure(
+                &source,
+                &predecessors,
+                origin_state,
+                &controls,
+                StackEffectFrame {
+                    pop: 0,
+                    pushes: Vec::new(),
+                    guards: Vec::new(),
+                },
+                &mut depth_cache,
+                &budget,
+            )?;
+            closure_frames = closure_frames.saturating_add(closure.len());
+
+            let mut candidates = BTreeSet::<TerminalID>::new();
+            for frame in &closure {
+                for (top_state, _) in frame_top_branches(
+                    &predecessors,
+                    origin_state,
+                    frame,
+                    &mut depth_cache,
+                    &budget,
+                )? {
+                    candidates.extend(
+                        source.action[top_state as usize]
+                            .keys()
+                            .filter(|terminal| !controls.contains(terminal)),
+                    );
+                }
+            }
+
+            let mut row = ActionRow::default();
+            for terminal in candidates {
+                if terminal == EOF {
+                    if matches!(source.action(origin_state, EOF), Some(Action::Accept)) {
+                        row.insert(EOF, Action::Accept);
+                        compiled_cells += 1;
+                        continue;
+                    }
+                    let mut effects = Vec::<GuardedStackShift>::new();
+                    for frame in &closure {
+                        for (top_state, top_frame) in frame_top_branches(
+                            &predecessors,
+                            origin_state,
+                            frame,
+                            &mut depth_cache,
+                            &budget,
+                        )? {
+                            let Some(action) = source.action[top_state as usize].get(&EOF) else {
+                                continue;
+                            };
+                            effects.extend(eof_accept_effects_for_action(
+                                &source,
+                                &predecessors,
+                                origin_state,
+                                top_state,
+                                action,
+                                top_frame,
+                                &mut depth_cache,
+                                &mut FxHashSet::default(),
+                                &budget,
+                            )?);
+                        }
+                    }
+                    if let Some(action) = control_stack_effect_action(&source, effects) {
+                        row.insert(EOF, action);
+                        compiled_cells += 1;
+                    }
+                    continue;
+                }
+
+                let mut effects = Vec::<GuardedStackShift>::new();
+                for frame in &closure {
+                    for (top_state, top_frame) in frame_top_branches(
+                        &predecessors,
+                        origin_state,
+                        frame,
+                        &mut depth_cache,
+                        &budget,
+                    )? {
+                        let Some(action) = source.action[top_state as usize].get(&terminal) else {
+                            continue;
+                        };
+                        let Some(result) = stack_effects_for_action(
+                            &source,
+                            &predecessors,
+                            origin_state,
+                            terminal,
+                            top_state,
+                            action,
+                            top_frame,
+                            &mut depth_cache,
+                            &mut FxHashSet::default(),
+                            &mut Vec::new(),
+                            &budget,
+                        ) else {
+                            return Err(control_elimination_failure(
+                                &budget,
+                                origin_state,
+                                terminal,
+                                "real-terminal stack-effect traversal failed",
+                            ));
+                        };
+                        effects.extend(result.effects);
+                    }
+                }
+
+                if let Some(action) = control_stack_effect_action(&source, effects) {
+                    row.insert(terminal, action);
+                    compiled_cells += 1;
+                }
+            }
+            compiled_rows.push(row);
+        }
+
+        if budget.is_aborted() {
+            return Err(control_elimination_failure(
+                &budget,
+                0,
+                EOF,
+                "control elimination exceeded its compile budget",
+            ));
+        }
+
+        self.action = compiled_rows;
+        self.control_terminals.clear();
+        self.forwarded_shifts.clear();
+        self.admission_policy = AdmissionPolicy::RowPresenceExact;
+        self.rebuild_advance_rows_from_actions();
+        self.rebuild_guarded_shift_index();
+
+        Ok(ControlEliminationReport {
+            states: self.num_states as usize,
+            controls: controls.len(),
+            compiled_cells,
+            closure_frames,
+            stack_effect_visits: budget.stack_effect_visits(),
+            elapsed_ms: started_at.elapsed().as_secs_f64() * 1000.0,
+        })
     }
 
     /// Collapse unit reductions by inlining their destination actions.
@@ -3320,6 +3529,534 @@ fn build_runtime_state_predecessors(
     }
 
     predecessors
+}
+
+fn control_elimination_failure(
+    budget: &UnitInlineBudget,
+    state: u32,
+    terminal: TerminalID,
+    message: &str,
+) -> String {
+    let reason = budget.report().reason.unwrap_or("semantic traversal");
+    format!(
+        "{message}: state={state} terminal={terminal} reason={reason} stack_effect_visits={}",
+        budget.stack_effect_visits(),
+    )
+}
+
+fn action_stack_rewrites(action: &Action) -> Vec<(u32, Vec<u32>)> {
+    match action {
+        Action::Shift(target, replace) => {
+            vec![(u32::from(*replace), vec![*target])]
+        }
+        Action::ReplaceShifts(targets) => targets
+            .iter()
+            .map(|&target| (1, vec![target]))
+            .collect(),
+        Action::StackShifts(shifts) => shifts
+            .iter()
+            .map(|shift| (shift.pop, shift.pushes.clone()))
+            .collect(),
+        Action::GuardedStackShifts(shifts) => shifts
+            .iter()
+            .map(|shift| (shift.pop, shift.pushes.clone()))
+            .collect(),
+        Action::Split { shift, .. } => shift
+            .iter()
+            .map(|&(target, replace)| (u32::from(replace), vec![target]))
+            .collect(),
+        Action::Skip => vec![(0, Vec::new())],
+        Action::Reduce(..) | Action::Accept => Vec::new(),
+    }
+}
+
+fn predecessor_states_at_depth(
+    predecessors: &[PredecessorSet],
+    origin: u32,
+    depth: u32,
+) -> PredecessorSet {
+    let mut states = smallvec![origin];
+    for _ in 0..depth {
+        let mut next = PredecessorSet::new();
+        for state in states {
+            if let Some(preds) = predecessors.get(state as usize) {
+                next.extend_from_slice(preds);
+            }
+        }
+        next.sort_unstable();
+        next.dedup();
+        if next.is_empty() {
+            return next;
+        }
+        states = next;
+    }
+    states
+}
+
+/// Conservative-exact predecessor support for arbitrary stack rewrites.
+/// Extra predecessor candidates are harmless because generated guarded effects
+/// test the concrete stack state before applying; missing candidates would be
+/// unsound. Iterate stack-shift propagation to a fixed point so copied-child
+/// return actions contribute their caller context.
+fn build_control_elimination_predecessors(
+    table: &GLRTable,
+) -> Result<RuntimePredecessors, String> {
+    let mut predecessors = vec![PredecessorSet::new(); table.num_states as usize];
+    let pass_limit = (table.num_states as usize)
+        .saturating_mul(table.num_states as usize)
+        .saturating_add(2);
+
+    for _ in 0..pass_limit {
+        let snapshot = predecessors.clone();
+        let mut changed = false;
+
+        for source in 0..table.num_states {
+            let mut rewrites = Vec::<(u32, Vec<u32>)>::new();
+            for action in table.action[source as usize].values() {
+                rewrites.extend(action_stack_rewrites(action));
+            }
+            rewrites.extend(
+                table.goto[source as usize]
+                    .values()
+                    .map(|&(target, replace)| (u32::from(replace), vec![target])),
+            );
+
+            for (pop, pushes) in rewrites {
+                if pushes.is_empty() {
+                    continue;
+                }
+                for pair in pushes.windows(2) {
+                    let destination = pair[1] as usize;
+                    let before = predecessors[destination].len();
+                    predecessors[destination].push(pair[0]);
+                    predecessors[destination].sort_unstable();
+                    predecessors[destination].dedup();
+                    changed |= predecessors[destination].len() != before;
+                }
+
+                let bases = if pop == 0 {
+                    smallvec![source]
+                } else {
+                    predecessor_states_at_depth(&snapshot, source, pop)
+                };
+                let first = pushes[0] as usize;
+                let before = predecessors[first].len();
+                predecessors[first].extend_from_slice(&bases);
+                predecessors[first].sort_unstable();
+                predecessors[first].dedup();
+                changed |= predecessors[first].len() != before;
+            }
+        }
+
+        if !changed {
+            return Ok(predecessors);
+        }
+    }
+
+    Err(format!(
+        "control-elimination predecessor propagation did not converge: states={}",
+        table.num_states,
+    ))
+}
+
+fn frame_top_branches(
+    predecessors: &[PredecessorSet],
+    origin_state: u32,
+    frame: &StackEffectFrame,
+    states_at_depth_cache: &mut FxHashMap<(u32, u32), Option<StateSubset>>,
+    budget: &UnitInlineBudget,
+) -> Result<Vec<(u32, StackEffectFrame)>, String> {
+    if let Some(&state) = frame.pushes.last() {
+        return Ok(vec![(state, frame.clone())]);
+    }
+
+    let Some(states) = states_at_depth(
+        predecessors,
+        origin_state,
+        frame.pop,
+        states_at_depth_cache,
+        budget,
+    )
+    .cloned()
+    else {
+        if budget.is_aborted() {
+            return Err(control_elimination_failure(
+                budget,
+                origin_state,
+                EOF,
+                "top-state traversal failed",
+            ));
+        }
+        return Ok(Vec::new());
+    };
+
+    if states.len() == 1 {
+        return Ok(vec![(states[0], frame.clone())]);
+    }
+
+    let mut branches = Vec::with_capacity(states.len());
+    for state in states {
+        let mut branch = frame.clone();
+        if add_guard_to_frame(&mut branch, frame.pop, [state]) {
+            branches.push((state, branch));
+        }
+    }
+    Ok(branches)
+}
+
+fn control_effect_closure(
+    table: &GLRTable,
+    predecessors: &[PredecessorSet],
+    origin_state: u32,
+    controls: &BTreeSet<TerminalID>,
+    seed: StackEffectFrame,
+    states_at_depth_cache: &mut FxHashMap<(u32, u32), Option<StateSubset>>,
+    budget: &UnitInlineBudget,
+) -> Result<Vec<StackEffectFrame>, String> {
+    let mut seen = BTreeSet::<StackEffectFrame>::new();
+    let mut queue = VecDeque::<StackEffectFrame>::new();
+    seen.insert(seed.clone());
+    queue.push_back(seed);
+    let frame_limit = (table.num_states as usize)
+        .saturating_mul(controls.len().max(1))
+        .saturating_mul(64)
+        .saturating_add(256);
+
+    while let Some(frame) = queue.pop_front() {
+        for (top_state, top_frame) in frame_top_branches(
+            predecessors,
+            origin_state,
+            &frame,
+            states_at_depth_cache,
+            budget,
+        )? {
+            for &control in controls {
+                let Some(action) = table.action[top_state as usize].get(&control) else {
+                    continue;
+                };
+                let Some(result) = stack_effects_for_action(
+                    table,
+                    predecessors,
+                    origin_state,
+                    control,
+                    top_state,
+                    action,
+                    top_frame.clone(),
+                    states_at_depth_cache,
+                    &mut FxHashSet::default(),
+                    &mut Vec::new(),
+                    budget,
+                ) else {
+                    return Err(control_elimination_failure(
+                        budget,
+                        origin_state,
+                        control,
+                        "control stack-effect traversal failed",
+                    ));
+                };
+                for effect in result.effects {
+                    let next = StackEffectFrame {
+                        pop: effect.pop,
+                        pushes: effect.pushes,
+                        guards: effect.guards,
+                    };
+                    if seen.insert(next.clone()) {
+                        if seen.len() > frame_limit {
+                            return Err(format!(
+                                "control stack-effect closure did not converge: origin_state={origin_state} controls={controls:?} frames={} limit={frame_limit}",
+                                seen.len(),
+                            ));
+                        }
+                        queue.push_back(next);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(seen.into_iter().collect())
+}
+
+fn continue_eof_accept_from_frames(
+    table: &GLRTable,
+    predecessors: &[PredecessorSet],
+    origin_state: u32,
+    frames: Vec<StackEffectFrame>,
+    states_at_depth_cache: &mut FxHashMap<(u32, u32), Option<StateSubset>>,
+    visiting: &mut FxHashSet<StackEffectVisitKey>,
+    budget: &UnitInlineBudget,
+) -> Result<Vec<GuardedStackShift>, String> {
+    let mut out = Vec::new();
+    for frame in frames {
+        for (top_state, top_frame) in frame_top_branches(
+            predecessors,
+            origin_state,
+            &frame,
+            states_at_depth_cache,
+            budget,
+        )? {
+            let Some(next) = table.action[top_state as usize].get(&EOF) else {
+                continue;
+            };
+            out.extend(eof_accept_effects_for_action(
+                table,
+                predecessors,
+                origin_state,
+                top_state,
+                next,
+                top_frame,
+                states_at_depth_cache,
+                visiting,
+                budget,
+            )?);
+        }
+    }
+    Ok(out)
+}
+
+/// Compile an EOF reduction/control path into the stack rewrite which reaches
+/// the table's unique canonical `Accept` state. EOF is never committed as a
+/// model token, so shifts and stack shifts on this column are zero-width
+/// completion rewrites and must be followed until `Accept` rather than treated
+/// as consuming endpoints. Keeping only the canonical state as `Action::Accept`
+/// preserves the standalone-table embedding contract for nested composition.
+fn eof_accept_effects_for_action(
+    table: &GLRTable,
+    predecessors: &[PredecessorSet],
+    origin_state: u32,
+    state: u32,
+    action: &Action,
+    frame: StackEffectFrame,
+    states_at_depth_cache: &mut FxHashMap<(u32, u32), Option<StateSubset>>,
+    visiting: &mut FxHashSet<StackEffectVisitKey>,
+    budget: &UnitInlineBudget,
+) -> Result<Vec<GuardedStackShift>, String> {
+    if !budget.record_stack_effect_visit() {
+        return Err(control_elimination_failure(
+            budget,
+            origin_state,
+            EOF,
+            "EOF stack-effect traversal exceeded its compile budget",
+        ));
+    }
+    let key = StackEffectVisitKey {
+        state,
+        tid: EOF,
+        action_tag: stack_effect_action_tag(action),
+        frame: frame.clone(),
+    };
+    if !visiting.insert(key.clone()) {
+        // A cyclic completion branch contributes no new accepting effect. Any
+        // acyclic sibling branch remains live and is collected independently.
+        return Ok(Vec::new());
+    }
+
+    let result = (|| -> Result<Vec<GuardedStackShift>, String> {
+        match action {
+            Action::Accept => Ok(vec![frame_to_guarded_shift(frame)]),
+            Action::Reduce(nonterminal, len) => {
+                let frames = match apply_reduce_to_frame(
+                    table,
+                    predecessors,
+                    origin_state,
+                    frame,
+                    *nonterminal,
+                    *len,
+                    states_at_depth_cache,
+                    budget,
+                ) {
+                    Some(ReduceFrameResult::Dead) => return Ok(Vec::new()),
+                    Some(ReduceFrameResult::Frames { frames, .. }) => frames,
+                    None => {
+                        return Err(control_elimination_failure(
+                            budget,
+                            origin_state,
+                            EOF,
+                            "EOF reduction traversal failed",
+                        ));
+                    }
+                };
+                continue_eof_accept_from_frames(
+                    table,
+                    predecessors,
+                    origin_state,
+                    frames,
+                    states_at_depth_cache,
+                    visiting,
+                    budget,
+                )
+            }
+            Action::Split {
+                shift,
+                reduces,
+                accept,
+            } => {
+                let mut out = Vec::new();
+                if *accept {
+                    out.push(frame_to_guarded_shift(frame.clone()));
+                }
+                if let Some((target, replace)) = shift {
+                    let mut shifted = frame.clone();
+                    let effective_replace =
+                        *replace && !table.forwarded_shifts.contains(&(state, EOF));
+                    push_transition_to_frame(&mut shifted, *target, effective_replace);
+                    out.extend(continue_eof_accept_from_frames(
+                        table,
+                        predecessors,
+                        origin_state,
+                        vec![shifted],
+                        states_at_depth_cache,
+                        visiting,
+                        budget,
+                    )?);
+                }
+                for &(nonterminal, len) in reduces {
+                    out.extend(eof_accept_effects_for_action(
+                        table,
+                        predecessors,
+                        origin_state,
+                        state,
+                        &Action::Reduce(nonterminal, len),
+                        frame.clone(),
+                        states_at_depth_cache,
+                        visiting,
+                        budget,
+                    )?);
+                }
+                Ok(out)
+            }
+            Action::Shift(target, replace) => {
+                let mut shifted = frame;
+                let effective_replace =
+                    *replace && !table.forwarded_shifts.contains(&(state, EOF));
+                push_transition_to_frame(&mut shifted, *target, effective_replace);
+                continue_eof_accept_from_frames(
+                    table,
+                    predecessors,
+                    origin_state,
+                    vec![shifted],
+                    states_at_depth_cache,
+                    visiting,
+                    budget,
+                )
+            }
+            Action::ReplaceShifts(targets) => {
+                let mut frames = Vec::with_capacity(targets.len());
+                for &target in targets.iter() {
+                    let mut shifted = frame.clone();
+                    pop_frame(&mut shifted, 1);
+                    shifted.pushes.push(target);
+                    frames.push(shifted);
+                }
+                continue_eof_accept_from_frames(
+                    table,
+                    predecessors,
+                    origin_state,
+                    frames,
+                    states_at_depth_cache,
+                    visiting,
+                    budget,
+                )
+            }
+            Action::StackShifts(shifts) => {
+                let frames = shifts
+                    .iter()
+                    .map(|shift| {
+                        let mut shifted = frame.clone();
+                        pop_frame(&mut shifted, shift.pop);
+                        shifted.pushes.extend_from_slice(&shift.pushes);
+                        shifted
+                    })
+                    .collect();
+                continue_eof_accept_from_frames(
+                    table,
+                    predecessors,
+                    origin_state,
+                    frames,
+                    states_at_depth_cache,
+                    visiting,
+                    budget,
+                )
+            }
+            Action::GuardedStackShifts(shifts) => {
+                let mut frames = Vec::new();
+                for shift in shifts {
+                    if let Some(Some(shifted)) =
+                        compose_guarded_shift_with_frame(frame.clone(), shift)
+                    {
+                        frames.push(shifted);
+                    }
+                }
+                continue_eof_accept_from_frames(
+                    table,
+                    predecessors,
+                    origin_state,
+                    frames,
+                    states_at_depth_cache,
+                    visiting,
+                    budget,
+                )
+            }
+            Action::Skip => continue_eof_accept_from_frames(
+                table,
+                predecessors,
+                origin_state,
+                vec![frame],
+                states_at_depth_cache,
+                visiting,
+                budget,
+            ),
+        }
+    })();
+
+    visiting.remove(&key);
+    let mut effects = result?;
+    effects.sort();
+    effects.dedup();
+    Ok(effects)
+}
+
+fn control_stack_effect_action(
+    table: &GLRTable,
+    mut effects: Vec<GuardedStackShift>,
+) -> Option<Action> {
+    for effect in &mut effects {
+        for guard in &mut effect.guards {
+            guard.states.sort_unstable();
+            guard.states.dedup();
+        }
+        effect.guards.retain(|guard| !guard.states.is_empty());
+        effect.guards.sort_by_key(|guard| guard.pop);
+        effect.guards.dedup();
+    }
+    effects.sort();
+    effects.dedup();
+    if effects.is_empty() {
+        return None;
+    }
+
+    if effects.iter().all(|effect| effect.guards.is_empty()) {
+        let mut shifts = effects
+            .into_iter()
+            .map(|effect| StackShift {
+                pop: effect.pop,
+                pushes: effect.pushes,
+            })
+            .collect::<Vec<_>>();
+        normalize_stack_shifts(&mut shifts);
+        if shifts.len() == 1 && shifts[0].pop == 0 && shifts[0].pushes.is_empty() {
+            return Some(Action::Skip);
+        }
+        if stack_shift_predecessor_canonicalization_enabled() {
+            canonicalize_stack_shift_predecessors_by_goto_superset(table, &mut shifts);
+        }
+        return stack_shift_action(shifts);
+    }
+
+    // This is an exact linker compilation pass, not an optional table-size
+    // optimization. Environment caps used by generic reduction inlining must
+    // never turn a live subgrammar path into a missing action.
+    Some(Action::GuardedStackShifts(effects))
 }
 
 fn subset_key(subset: &StateSubset) -> Vec<u32> {
