@@ -9,6 +9,7 @@
 use std::collections::VecDeque;
 use std::time::Instant;
 
+use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
 use super::{BuildInput, LocalIdMapTerminalDwa, common};
@@ -111,14 +112,22 @@ impl<'a> Projected<'a> {
     }
 }
 
-fn minimize(transitions: &[[u32; 256]], bytes: &[u8]) -> (Vec<u32>, Vec<[u32; 256]>) {
+fn minimize(transitions: &[[u32; 256]], bytes: &[u8]) -> (Vec<u32>, Vec<[u32; 256]>, usize) {
+    // Bytes with identical target columns can never distinguish states in any
+    // refinement round. Keep one representative per exact column.
+    let mut byte_columns = FxHashMap::<Vec<u32>, u8>::default();
+    for &byte in bytes {
+        let column = transitions.iter().map(|row| row[byte as usize]).collect::<Vec<_>>();
+        byte_columns.entry(column).or_insert(byte);
+    }
+    let alphabet = byte_columns.values().copied().collect::<Vec<_>>();
     let mut classes = vec![0u32; transitions.len()];
     loop {
         let mut ids = FxHashMap::<Vec<u32>, u32>::default();
         let next = transitions
             .iter()
             .map(|row| {
-                let key = bytes
+                let key = alphabet
                     .iter()
                     .map(|&byte| {
                         let target = row[byte as usize];
@@ -148,7 +157,7 @@ fn minimize(transitions: &[[u32; 256]], bytes: &[u8]) -> (Vec<u32>, Vec<[u32; 25
             }
         }
     }
-    (classes, compact)
+    (classes, compact, alphabet.len())
 }
 
 #[derive(Clone, Copy, Default)]
@@ -179,15 +188,14 @@ fn node_info(node: usize, trie: &[FlatNode], info: &mut [NodeInfo]) -> NodeInfo 
     result
 }
 
-fn fill_profiles(
+fn fill_profile_word(
     node: usize,
     frontier: &[(u32, u64)],
-    word: usize,
     trie: &[FlatNode],
     info: &[NodeInfo],
     transitions: &[[u32; 256]],
     loops: &[ByteMask],
-    profiles: &mut [Vec<u64>],
+    profile: &mut [u64],
     stats: &mut FrontierStats,
 ) {
     stats.group_visits += frontier.len();
@@ -197,14 +205,14 @@ fn fill_profiles(
         && frontier.iter().all(|&(state, _)| subset(&info[node].bytes, &loops[state as usize]))
     {
         let first = info[node].first_token;
-        for profile in &mut profiles[first..first + info[node].token_count] {
-            profile[word] |= alive;
+        for token in &mut profile[first..first + info[node].token_count] {
+            *token |= alive;
         }
         stats.subtree_skips += 1;
         return;
     }
     if let Some(token) = trie[node].token {
-        profiles[token][word] |= alive;
+        profile[token] |= alive;
     }
     for (edge, child) in &trie[node].edges {
         let mut next = Vec::<(u32, u64)>::with_capacity(frontier.len());
@@ -226,15 +234,14 @@ fn fill_profiles(
             }
         }
         if !next.is_empty() {
-            fill_profiles(
+            fill_profile_word(
                 *child,
                 &next,
-                word,
                 trie,
                 info,
                 transitions,
                 loops,
-                profiles,
+                profile,
                 stats,
             );
         }
@@ -304,7 +311,7 @@ pub(super) fn build(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
     let projected_ms = projected_started.elapsed().as_secs_f64() * 1000.0;
 
     let minimize_started = Instant::now();
-    let (classes, transitions) = minimize(&projected.transitions, &bytes);
+    let (classes, transitions, minimized_bytes) = minimize(&projected.transitions, &bytes);
     let minimize_ms = minimize_started.elapsed().as_secs_f64() * 1000.0;
     let mut loops = vec![[0u64; 4]; transitions.len()];
     for (state, row) in transitions.iter().enumerate() {
@@ -350,31 +357,45 @@ pub(super) fn build(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
         .enumerate()
         .map(|(index, &state)| (state, index))
         .collect::<FxHashMap<_, _>>();
-    let words = used_classes.len().div_ceil(64);
-    let mut token_profiles = vec![vec![0u64; words]; aliases.len()];
+    let chunks = used_classes
+        .chunks(64)
+        .map(|chunk| chunk.to_vec())
+        .collect::<Vec<_>>();
+    let word_results = chunks
+        .into_par_iter()
+        .map(|chunk| {
+            let frontier = chunk
+                .iter()
+                .enumerate()
+                .map(|(bit, &state)| (state, 1u64 << bit))
+                .collect::<Vec<_>>();
+            let mut profile = vec![0u64; aliases.len()];
+            let mut stats = FrontierStats::default();
+            fill_profile_word(
+                0,
+                &frontier,
+                &trie,
+                &info,
+                &transitions,
+                &loops,
+                &mut profile,
+                &mut stats,
+            );
+            (profile, stats)
+        })
+        .collect::<Vec<_>>();
     let mut frontier_stats = FrontierStats::default();
-    for (word, chunk) in used_classes.chunks(64).enumerate() {
-        let frontier = chunk
-            .iter()
-            .enumerate()
-            .map(|(bit, &state)| (state, 1u64 << bit))
-            .collect::<Vec<_>>();
-        fill_profiles(
-            0,
-            &frontier,
-            word,
-            &trie,
-            &info,
-            &transitions,
-            &loops,
-            &mut token_profiles,
-            &mut frontier_stats,
-        );
+    for (_, stats) in &word_results {
+        frontier_stats.group_visits += stats.group_visits;
+        frontier_stats.origin_visits += stats.origin_visits;
+        frontier_stats.merges += stats.merges;
+        frontier_stats.subtree_skips += stats.subtree_skips;
     }
     let mut token_profile_ids = FxHashMap::<Vec<u64>, u32>::default();
     let mut class_profiles = Vec::<Vec<u64>>::new();
     let mut token_class = vec![0u32; aliases.len()];
-    for (token, profile) in token_profiles.into_iter().enumerate() {
+    for token in 0..aliases.len() {
+        let profile = word_results.iter().map(|(word, _)| word[token]).collect::<Vec<_>>();
         let next = class_profiles.len() as u32;
         token_class[token] = *token_profile_ids.entry(profile.clone()).or_insert_with(|| {
             class_profiles.push(profile);
@@ -441,11 +462,12 @@ pub(super) fn build(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
     )?;
     if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
         eprintln!(
-            "[glrmask/profile][l1_single] partition={} raw_states={} terminals={} bytes={} projected_states={} expanded={} minimized_states={} root_classes={} root_vectors={} residual_token_classes={} signature_updates={} frontier_groups={} frontier_origins={} frontier_merges={} subtree_skips={} signatures={} state_classes={} token_classes={} project_ms={:.3} minimize_ms={:.3} traverse_ms={:.3} compact_ms={:.3} build_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][l1_single] partition={} raw_states={} terminals={} bytes={} minimized_bytes={} projected_states={} expanded={} minimized_states={} root_classes={} root_vectors={} residual_token_classes={} signature_updates={} frontier_groups={} frontier_origins={} frontier_merges={} subtree_skips={} signatures={} state_classes={} token_classes={} project_ms={:.3} minimize_ms={:.3} traverse_ms={:.3} compact_ms={:.3} build_ms={:.3} total_ms={:.3}",
             input.partition_label,
             input.tokenizer.num_states(),
             projected.terminals.len(),
             bytes.len(),
+            minimized_bytes,
             projected.configs.len(),
             expanded,
             transitions.len(),
