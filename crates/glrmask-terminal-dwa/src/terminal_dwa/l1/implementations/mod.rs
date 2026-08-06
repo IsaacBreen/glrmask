@@ -1,4 +1,12 @@
 //! Swappable L1 builders and exact cross-checking machinery.
+//!
+//! Controls:
+//! - `GLRMASK_L1_IMPLEMENTATION=production|scalar`
+//! - `GLRMASK_L1_CHECK_AGAINST=none|production|scalar|other`
+//! - `GLRMASK_L1_EXPERIMENT_PARTITIONS=p2,p5` scopes both controls.
+//! - `GLRMASK_PROFILE_L1_IMPLEMENTATIONS=1` prints per-implementation timings.
+//!
+//! Defaults are production, no checker, all partitions.
 
 mod production;
 pub mod scalar;

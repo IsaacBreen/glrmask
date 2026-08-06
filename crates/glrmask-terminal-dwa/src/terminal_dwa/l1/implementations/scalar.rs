@@ -1,8 +1,10 @@
 //! Deliberately slow scalar L1 definition.
 //!
-//! Walk every `(raw state, vocabulary token)` pair, intern the resulting active
-//! terminal signature, quotient identical state rows and token columns, and
-//! directly construct the two-state weighted DWA.
+//! Walk every `(raw state, vocabulary token)` pair. After consuming the whole
+//! token, the active signature is the union of terminals finalized at every end
+//! state and terminals listed in `possible_future_group_ids` there. Intern those
+//! signatures, quotient identical state rows and token columns, and directly
+//! construct the two-state weighted DWA.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;

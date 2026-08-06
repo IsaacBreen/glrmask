@@ -1,3 +1,6 @@
+//! Exact semantic comparison after expanding both artifacts to raw
+//! `(tokenizer state, original token, terminal)` coordinates.
+
 use std::collections::BTreeSet;
 
 use super::{BuildInput, Implementation, LocalIdMapTerminalDwa};
