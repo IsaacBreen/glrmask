@@ -111,13 +111,18 @@ struct DirectComponentStateCoordinates {
 fn build_direct_component_state_coordinates(
     components: &[ParserDwaComponent<'_>],
     merged_tokenizer_state_count: usize,
+    merged_reset_state: u32,
 ) -> Result<DirectComponentStateCoordinates, String> {
     let mut state_to_global = vec![u32::MAX; merged_tokenizer_state_count];
-    let mut global_to_states = vec![vec![0u32]];
-    let mut state_representatives = vec![0u32];
-    if let Some(reset) = state_to_global.first_mut() {
-        *reset = 0;
-    }
+    let Some(reset_slot) = state_to_global.get_mut(merged_reset_state as usize) else {
+        return Err(format!(
+            "merged tokenizer reset state {merged_reset_state} lies outside {merged_tokenizer_state_count} states",
+        ));
+    };
+    *reset_slot = 0;
+    let mut global_to_states = vec![vec![merged_reset_state]];
+    let mut state_representatives = vec![merged_reset_state];
+    let mut dead_merged_states = Vec::<u32>::new();
 
     let mut local_to_global_tsids = Vec::with_capacity(components.len());
     for component in components {
@@ -129,36 +134,47 @@ fn build_direct_component_state_coordinates(
             return Err("component tokenizer-state map contains no internal TSIDs".into());
         }
         let mut local_map = vec![Vec::<u32>::new(); constraint.internal_tsid_to_states.len()];
-        for (local_tsid, local_states) in constraint.internal_tsid_to_states.iter().enumerate() {
-            if local_states.is_empty() {
+        let mut merged_states_by_tsid = vec![Vec::<u32>::new(); local_map.len()];
+        for (local_state, &local_tsid) in constraint.state_to_internal_tsid.iter().enumerate() {
+            let local_state = local_state as u32;
+            let merged_state = component
+                .tokenizer_state_offset
+                .checked_add(local_state)
+                .ok_or_else(|| "component tokenizer-state offset overflow".to_string())?;
+            if local_tsid == u32::MAX {
+                if merged_state == merged_reset_state {
+                    return Err("merged tokenizer reset state has no internal TSID".into());
+                }
+                dead_merged_states.push(merged_state);
                 continue;
             }
-            let mut merged_states = Vec::with_capacity(local_states.len());
-            for &local_state in local_states {
-                let merged_state = component
-                    .tokenizer_state_offset
-                    .checked_add(local_state)
-                    .ok_or_else(|| "component tokenizer-state offset overflow".to_string())?;
-                if merged_state == 0 {
-                    local_map[local_tsid].push(0);
-                    continue;
-                }
-                let Some(slot) = state_to_global.get_mut(merged_state as usize) else {
-                    return Err(format!(
-                        "component tokenizer state {local_state} maps outside merged tokenizer"
-                    ));
-                };
-                if *slot != u32::MAX {
-                    return Err(format!(
-                        "merged tokenizer state {merged_state} belongs to more than one component class"
-                    ));
-                }
+            let Some(merged_states) = merged_states_by_tsid.get_mut(local_tsid as usize) else {
+                return Err(format!(
+                    "component tokenizer state {local_state} maps to TSID {local_tsid} outside {} internal TSIDs",
+                    merged_states_by_tsid.len(),
+                ));
+            };
+            if merged_state == merged_reset_state {
+                local_map[local_tsid as usize].push(0);
+            } else {
                 merged_states.push(merged_state);
             }
+        }
+        for (local_tsid, merged_states) in merged_states_by_tsid.into_iter().enumerate() {
             if !merged_states.is_empty() {
                 let global_tsid = global_to_states.len() as u32;
                 for &merged_state in &merged_states {
-                    state_to_global[merged_state as usize] = global_tsid;
+                    let Some(slot) = state_to_global.get_mut(merged_state as usize) else {
+                        return Err(format!(
+                            "component tokenizer state {merged_state} maps outside merged tokenizer"
+                        ));
+                    };
+                    if *slot != u32::MAX {
+                        return Err(format!(
+                            "merged tokenizer state {merged_state} belongs to more than one component class"
+                        ));
+                    }
+                    *slot = global_tsid;
                 }
                 state_representatives.push(merged_states[0]);
                 global_to_states.push(merged_states);
@@ -179,8 +195,30 @@ fn build_direct_component_state_coordinates(
         start_targets.dedup();
         local_to_global_tsids.push(local_map);
     }
+    if !dead_merged_states.is_empty() {
+        dead_merged_states.sort_unstable();
+        dead_merged_states.dedup();
+        let dead_tsid = global_to_states.len() as u32;
+        for &merged_state in &dead_merged_states {
+            let Some(slot) = state_to_global.get_mut(merged_state as usize) else {
+                return Err(format!(
+                    "dead component tokenizer state {merged_state} lies outside merged tokenizer",
+                ));
+            };
+            if *slot != u32::MAX {
+                return Err(format!(
+                    "dead component tokenizer state {merged_state} was also assigned a live TSID",
+                ));
+            }
+            *slot = dead_tsid;
+        }
+        state_representatives.push(dead_merged_states[0]);
+        global_to_states.push(dead_merged_states);
+    }
     if state_to_global.iter().any(|&tsid| tsid == u32::MAX) {
-        return Err("direct component state map does not cover the merged tokenizer".into());
+        return Err(format!(
+            "direct component state map does not cover the merged tokenizer (reset={merged_reset_state})",
+        ));
     }
     Ok(DirectComponentStateCoordinates {
         tokenizer_states: ManyToOneIdMap {
@@ -315,12 +353,16 @@ fn build_direct_component_token_coordinates(
 fn build_direct_component_coordinate_maps(
     components: &[ParserDwaComponent<'_>],
     merged_tokenizer_state_count: usize,
+    merged_reset_state: u32,
     original_token_ids: &[u32],
 ) -> Result<(InternalIdMap, Vec<DirectComponentCoordinateMaps>), String> {
     let total_started_at = Instant::now();
     let state_started_at = Instant::now();
-    let state_coordinates =
-        build_direct_component_state_coordinates(components, merged_tokenizer_state_count)?;
+    let state_coordinates = build_direct_component_state_coordinates(
+        components,
+        merged_tokenizer_state_count,
+        merged_reset_state,
+    )?;
     let state_ms = state_started_at.elapsed().as_secs_f64() * 1000.0;
     let token_started_at = Instant::now();
     let (vocab_tokens, local_to_global_tokens) =
@@ -662,12 +704,9 @@ fn component_tokenizer_state_layout_owned_parent(
 }
 
 fn composite_reset_states(
-    _components: &[&Constraint],
-    _tokenizer_state_offsets: &[u32],
+    merged_reset_state: u32,
 ) -> Vec<u32> {
-    // The disjoint-union tokenizer resets to its fresh dispatcher. Executing
-    // from state zero epsilon-dispatches to every component start state.
-    vec![0]
+    vec![merged_reset_state]
 }
 
 fn expanded_component_reset_states(
@@ -705,6 +744,7 @@ fn scan_component_residual_starts(
     tokenizer_state_offsets: &[u32],
     terminal_offsets: &[u32],
     reset_live_bytes: &[U8Set],
+    merged_reset_state: u32,
     bytes: &[u8],
     starts: &[u32],
 ) -> ResidualScanResult {
@@ -736,7 +776,7 @@ fn scan_component_residual_starts(
     };
 
     for &global_start in starts {
-        if global_start == 0 {
+        if global_start == merged_reset_state {
             for (component_index, component) in components.iter().enumerate() {
                 if bytes.first().is_some_and(|byte| {
                     !reset_live_bytes[component_index].contains(*byte)
@@ -771,6 +811,7 @@ fn scan_component_residual_start_groups(
     tokenizer_state_offsets: &[u32],
     terminal_offsets: &[u32],
     reset_live_bytes: &[U8Set],
+    merged_reset_state: u32,
     bytes: &[u8],
     candidate_groups: &[(u32, Vec<u32>)],
 ) -> FxHashMap<ResidualScanResult, Vec<u32>> {
@@ -780,12 +821,13 @@ fn scan_component_residual_start_groups(
     let mut by_component = vec![Vec::<(u32, &[u32])>::new(); components.len()];
 
     for (representative, support_states) in candidate_groups {
-        if *representative == 0 {
+        if *representative == merged_reset_state {
             let scan = scan_component_residual_starts(
                 components,
                 tokenizer_state_offsets,
                 terminal_offsets,
                 reset_live_bytes,
+                merged_reset_state,
                 bytes,
                 &[*representative],
             );
@@ -854,6 +896,7 @@ fn scan_component_residual_start_groups(
                             tokenizer_state_offsets,
                             terminal_offsets,
                             reset_live_bytes,
+                            merged_reset_state,
                             bytes,
                             &[global_state],
                         );
@@ -1103,12 +1146,13 @@ fn candidate_start_state_groups_for_token(
     candidate_ranges: &BTreeMap<u32, Vec<(usize, u32, u32)>>,
     components: &[&Constraint],
     tokenizer_state_offsets: &[u32],
+    merged_reset_state: u32,
 ) -> Vec<(u32, Vec<u32>)> {
-    // Global state zero is the retained/fresh merged reset dispatcher. It is a
+    // The retained/fresh merged reset dispatcher is a semantic state of its
     // semantic state of its own and must not be conflated with an individual
     // component's local start state.
     let mut support_by_representative = FxHashMap::<u32, Vec<u32>>::default();
-    support_by_representative.insert(0, vec![0]);
+    support_by_representative.insert(merged_reset_state, vec![merged_reset_state]);
     if let Some(ranges) = candidate_ranges.get(&token_id) {
         for &(component_index, start_tsid, end_tsid) in ranges {
             let constraint = components[component_index];
@@ -1122,7 +1166,7 @@ fn candidate_start_state_groups_for_token(
                     let Some(global) = state_offset.checked_add(state) else {
                         continue;
                     };
-                    if global == 0 {
+                    if global == merged_reset_state {
                         continue;
                     }
                     representative.get_or_insert(global);
@@ -1417,6 +1461,7 @@ fn discover_boundary_token_paths(
     vocab: &Vocab,
     components: &[&Constraint],
     tokenizer_state_offsets: &[u32],
+    merged_reset_state: u32,
     terminal_offsets: &[u32],
     seed_terminals: &[bool],
     ignore_terminals: &BitSet,
@@ -1428,7 +1473,7 @@ fn discover_boundary_token_paths(
         .map(|(component, offset)| offset + component.tokenizer.num_terminals())
         .max()
         .unwrap_or(0) as usize;
-    let reset_starts = composite_reset_states(components, tokenizer_state_offsets);
+    let reset_starts = composite_reset_states(merged_reset_state);
     let reset_live_bytes = component_reset_live_bytes(components);
     let use_prefilter = std::env::var_os("GLRMASK_COMPOSE_DISABLE_BOUNDARY_PREFILTER").is_none();
     let all_multi_byte_entries = vocab
@@ -1458,6 +1503,7 @@ fn discover_boundary_token_paths(
                         tokenizer_state_offsets,
                         terminal_offsets,
                         &reset_live_bytes,
+                        merged_reset_state,
                         suffix,
                         &reset_starts,
                     );
@@ -1544,6 +1590,7 @@ fn discover_boundary_token_paths(
                             tokenizer_state_offsets,
                             terminal_offsets,
                             &reset_live_bytes,
+                            merged_reset_state,
                             &bytes[offset..],
                             &reset_starts,
                         )
@@ -1556,6 +1603,7 @@ fn discover_boundary_token_paths(
                 &candidate_ranges,
                 components,
                 tokenizer_state_offsets,
+                merged_reset_state,
             );
             candidate_start_visits.fetch_add(candidate_groups.len(), Ordering::Relaxed);
             max_candidate_starts.fetch_max(candidate_groups.len(), Ordering::Relaxed);
@@ -1564,6 +1612,7 @@ fn discover_boundary_token_paths(
                 tokenizer_state_offsets,
                 terminal_offsets,
                 &reset_live_bytes,
+                merged_reset_state,
                 bytes,
                 &candidate_groups,
             );
@@ -1864,6 +1913,7 @@ fn collect_one_byte_seed_relations_components(
     components: &[&Constraint],
     tokenizer_state_offsets: &[u32],
     terminal_offsets: &[u32],
+    merged_reset_state: u32,
     vocab: &Vocab,
     seed_terminals: &[bool],
 ) -> BTreeMap<Vec<u32>, BTreeMap<u32, BTreeSet<u32>>> {
@@ -1938,11 +1988,14 @@ fn collect_one_byte_seed_relations_components(
                     .entry(state_offset + local_state)
                     .or_default()
                     .extend(tokens.iter().copied());
-                // The fresh merged state zero epsilon-dispatches to every
-                // component start state. Its exact one-byte relation is the
-                // union of those local start-state relations.
+                // The merged reset epsilon-dispatches to every component start
+                // state. Its exact one-byte relation is the union of those
+                // local start-state relations.
                 if local_state == local_start {
-                    destination.entry(0).or_default().extend(tokens);
+                    destination
+                        .entry(merged_reset_state)
+                        .or_default()
+                        .extend(tokens);
                 }
             }
         }
@@ -1954,23 +2007,44 @@ fn component_state_coordinate_map(
     components: &[&Constraint],
     tokenizer_state_offsets: &[u32],
     merged_tokenizer_state_count: usize,
+    merged_reset_state: u32,
 ) -> Result<ManyToOneIdMap, String> {
     let mut state_to_global = vec![u32::MAX; merged_tokenizer_state_count];
-    let mut global_to_states = vec![vec![0u32]];
-    let mut representatives = vec![0u32];
-    if let Some(reset) = state_to_global.first_mut() {
-        *reset = 0;
-    }
+    let Some(reset_slot) = state_to_global.get_mut(merged_reset_state as usize) else {
+        return Err(format!(
+            "merged tokenizer reset state {merged_reset_state} lies outside {merged_tokenizer_state_count} states",
+        ));
+    };
+    *reset_slot = 0;
+    let mut global_to_states = vec![vec![merged_reset_state]];
+    let mut representatives = vec![merged_reset_state];
+    let mut dead_merged_states = Vec::<u32>::new();
     for (component_index, component) in components.iter().enumerate() {
         let state_offset = tokenizer_state_offsets[component_index];
-        for local_states in &component.internal_tsid_to_states {
-            let merged_states = local_states
-                .iter()
-                .filter_map(|&local_state| {
-                    let merged_state = state_offset.checked_add(local_state)?;
-                    (merged_state != 0).then_some(merged_state)
-                })
-                .collect::<Vec<_>>();
+        let mut merged_states_by_tsid =
+            vec![Vec::<u32>::new(); component.internal_tsid_to_states.len()];
+        for (local_state, &local_tsid) in component.state_to_internal_tsid.iter().enumerate() {
+            let merged_state = state_offset
+                .checked_add(local_state as u32)
+                .ok_or_else(|| "component tokenizer-state offset overflow".to_string())?;
+            if local_tsid == u32::MAX {
+                if merged_state == merged_reset_state {
+                    return Err("merged tokenizer reset state has no internal TSID".into());
+                }
+                dead_merged_states.push(merged_state);
+                continue;
+            }
+            let Some(states) = merged_states_by_tsid.get_mut(local_tsid as usize) else {
+                return Err(format!(
+                    "component {component_index} tokenizer state {local_state} maps to TSID {local_tsid} outside {} internal TSIDs",
+                    merged_states_by_tsid.len(),
+                ));
+            };
+            if merged_state != merged_reset_state {
+                states.push(merged_state);
+            }
+        }
+        for merged_states in merged_states_by_tsid {
             if merged_states.is_empty() {
                 continue;
             }
@@ -1991,6 +2065,26 @@ fn component_state_coordinate_map(
             representatives.push(merged_states[0]);
             global_to_states.push(merged_states);
         }
+    }
+    if !dead_merged_states.is_empty() {
+        dead_merged_states.sort_unstable();
+        dead_merged_states.dedup();
+        let dead_tsid = global_to_states.len() as u32;
+        for &merged_state in &dead_merged_states {
+            let Some(slot) = state_to_global.get_mut(merged_state as usize) else {
+                return Err(format!(
+                    "dead component tokenizer state {merged_state} lies outside merged tokenizer",
+                ));
+            };
+            if *slot != u32::MAX {
+                return Err(format!(
+                    "dead component tokenizer state {merged_state} was also assigned a live TSID",
+                ));
+            }
+            *slot = dead_tsid;
+        }
+        representatives.push(dead_merged_states[0]);
+        global_to_states.push(dead_merged_states);
     }
     if state_to_global.iter().any(|&tsid| tsid == u32::MAX) {
         return Err("component TSID map does not cover merged tokenizer".into());
@@ -3276,6 +3370,7 @@ pub(crate) fn compose_component_parser_dwas_and_possible_matches(
     components: &[ParserDwaComponent<'_>],
     terminal_offsets: &[u32],
     merged_tokenizer_state_count: usize,
+    merged_reset_state: u32,
     original_token_ids: &[u32],
     strip_scoped_ignore_identity: bool,
 ) -> Result<MappedArtifact<(DWA, PossibleMatches)>, String> {
@@ -3294,6 +3389,7 @@ pub(crate) fn compose_component_parser_dwas_and_possible_matches(
     let (id_map, component_maps) = build_direct_component_coordinate_maps(
         components,
         merged_tokenizer_state_count,
+        merged_reset_state,
         original_token_ids,
     )?;
     let coordinate_ms = coordinate_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -3866,6 +3962,7 @@ fn build_boundary_repair(
     composed_table: &ComposedTable,
     merged_tokenizer: Option<&Tokenizer>,
     merged_tokenizer_state_count: usize,
+    merged_reset_state: u32,
     terminal_display_names: Vec<String>,
     ignore_terminals: &MergedIgnoreTerminals,
     vocab: &Vocab,
@@ -3963,6 +4060,7 @@ fn build_boundary_repair(
                             vocab,
                             components,
                             tokenizer_state_offsets,
+                            merged_reset_state,
                             &composed_table.terminal_offsets,
                             &seed_terminals,
                             &ignore_terminals.all,
@@ -3976,6 +4074,7 @@ fn build_boundary_repair(
                             components,
                             tokenizer_state_offsets,
                             &composed_table.terminal_offsets,
+                            merged_reset_state,
                             vocab,
                             &seed_terminals,
                         );
@@ -4098,6 +4197,7 @@ fn build_boundary_repair(
             components,
             tokenizer_state_offsets,
             merged_tokenizer_state_count,
+            merged_reset_state,
         )?)
     } else {
         None
@@ -4210,7 +4310,8 @@ fn build_boundary_repair(
     let terminal_dwa = terminal_dwa?;
     let special_source_state = merged_tokenizer
         .map(Tokenizer::initial_state_id)
-        .unwrap_or(0);
+        .unwrap_or(merged_reset_state);
+    debug_assert_eq!(special_source_state, merged_reset_state);
     let terminal_dwa = add_boundary_special_token_paths(
         terminal_dwa,
         &boundary_special_token_terminals,
@@ -4971,6 +5072,7 @@ pub(crate) fn compose_constraints(
         .collect::<Vec<_>>();
     let (expected_tokenizer_state_offsets, merged_tokenizer_state_count) =
         component_tokenizer_state_layout(&component_constraints);
+    let merged_reset_state = 0;
 
     let special_token_terminals = merged_special_token_terminals(
         parent,
@@ -5086,6 +5188,7 @@ pub(crate) fn compose_constraints(
                     &parser_components,
                     &composed_table.terminal_offsets,
                     merged_tokenizer_state_count,
+                    merged_reset_state,
                     &original_token_ids,
                     !global_ignores,
                 );
@@ -5097,6 +5200,7 @@ pub(crate) fn compose_constraints(
                     &composed_table,
                     Some(&tokenizer_result.0),
                     merged_tokenizer_state_count,
+                    merged_reset_state,
                     terminal_display_names.clone(),
                     &merged_ignores,
                     vocab,
@@ -5137,6 +5241,7 @@ pub(crate) fn compose_constraints(
                                 &parser_components,
                                 &composed_table.terminal_offsets,
                                 merged_tokenizer_state_count,
+                                merged_reset_state,
                                 &original_token_ids,
                                 !global_ignores,
                             );
@@ -5148,6 +5253,7 @@ pub(crate) fn compose_constraints(
                                 &composed_table,
                                 None,
                                 merged_tokenizer_state_count,
+                                merged_reset_state,
                                 terminal_display_names.clone(),
                                 &merged_ignores,
                                 vocab,
@@ -5357,6 +5463,9 @@ pub(crate) fn compose_constraints_owned_parent(
         .collect::<Vec<_>>();
     let (expected_tokenizer_state_offsets, merged_tokenizer_state_count) =
         component_tokenizer_state_layout_owned_parent(&component_constraints);
+    let merged_reset_state = expected_tokenizer_state_offsets[0]
+        .checked_add(parent.tokenizer.start_state())
+        .ok_or_else(|| "owned-parent merged reset state overflow".to_string())?;
     let component_views_ms = metadata_started_at.elapsed().as_secs_f64() * 1000.0;
     let specials_started_at = Instant::now();
     let special_token_terminals = merged_special_token_terminals(
@@ -5436,6 +5545,7 @@ pub(crate) fn compose_constraints_owned_parent(
                 let state_result = build_direct_component_state_coordinates(
                     &parser_components,
                     merged_tokenizer_state_count,
+                    merged_reset_state,
                 );
                 let component_state_ms = state_started_at.elapsed().as_secs_f64() * 1000.0;
                 let published_state_map = state_result
@@ -5544,6 +5654,7 @@ pub(crate) fn compose_constraints_owned_parent(
                     &composed_table,
                     None,
                     merged_tokenizer_state_count,
+                    merged_reset_state,
                     terminal_display_names.clone(),
                     &merged_ignores,
                     vocab,
@@ -6006,6 +6117,7 @@ mod tests {
             ],
             &composed_table.terminal_offsets,
             merged_tokenizer.num_states() as usize,
+            merged_tokenizer.initial_state_id(),
             &vocab.entries_map().keys().copied().collect::<Vec<_>>(),
             false,
         )
@@ -7394,6 +7506,52 @@ mod tests {
             }
             assert!(actual.is_finished());
             assert!(expected.is_finished());
+        }
+    }
+
+    #[test]
+    fn external_only_adjacent_parent_preserves_cross_child_tokens() {
+        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"aa".to_vec())]);
+        let parent = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t SUB ::= @token(999);
+                nt document ::= SUB+;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child = Constraint::from_glrm_grammar(
+            r#"
+                start child;
+                nt child ::= "a";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let monolithic = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                nt document ::= "a"+;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let composed = parent
+            .compose_subgrammars(&[("SUB", &child)], &vocab)
+            .unwrap();
+
+        assert!(composed.table.control_terminals.is_empty());
+        for sequence in [vec![0], vec![1], vec![0, 0], vec![0, 1]] {
+            let mut actual = composed.start();
+            let mut expected = monolithic.start();
+            for token in sequence {
+                assert_eq!(actual.mask(), expected.mask());
+                actual.commit_token(token).unwrap();
+                expected.commit_token(token).unwrap();
+            }
+            assert_eq!(actual.mask(), expected.mask());
+            assert_eq!(actual.is_finished(), expected.is_finished());
         }
     }
 
