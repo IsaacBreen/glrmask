@@ -806,6 +806,51 @@ fn scan_component_residual_starts(
     result
 }
 
+/// Exact lightweight predicate used before materializing full residual scans.
+///
+/// Boundary discovery only needs to retain a model token when some suffix can
+/// either finish a segment-entry terminal or leave one live at the token end.
+/// Testing that predicate directly avoids allocating and storing complete
+/// match/future vectors for every vocabulary suffix. Full residual summaries
+/// are built later only for tokens that pass this test.
+fn reset_suffix_reaches_seed_terminal(
+    components: &[&Constraint],
+    reset_live_bytes: &[U8Set],
+    seed_terminals_by_component: &[BitSet],
+    bytes: &[u8],
+) -> bool {
+    debug_assert_eq!(components.len(), reset_live_bytes.len());
+    debug_assert_eq!(components.len(), seed_terminals_by_component.len());
+    let Some(&first_byte) = bytes.first() else {
+        return false;
+    };
+
+    for (component_index, component) in components.iter().enumerate() {
+        let seeds = &seed_terminals_by_component[component_index];
+        if seeds.is_zero() || !reset_live_bytes[component_index].contains(first_byte) {
+            continue;
+        }
+        let (end_states, matches) = component
+            .tokenizer
+            .execute_summary_from_state(bytes, component.tokenizer.start_state());
+        if matches
+            .iter()
+            .any(|(terminal, _)| seeds.contains(*terminal as usize))
+        {
+            return true;
+        }
+        if end_states.iter().copied().any(|end_state| {
+            component
+                .tokenizer
+                .possible_future_terminals_iter(end_state)
+                .any(|terminal| seeds.contains(terminal as usize))
+        }) {
+            return true;
+        }
+    }
+    false
+}
+
 fn scan_component_residual_start_groups(
     components: &[&Constraint],
     tokenizer_state_offsets: &[u32],
@@ -1482,6 +1527,65 @@ fn discover_boundary_token_paths(
         .filter(|(_, bytes)| bytes.len() >= 2)
         .map(|(&token_id, bytes)| (token_id, bytes.as_slice()))
         .collect::<Vec<_>>();
+    let prefilter_started_at = Instant::now();
+    let prefilter = if use_prefilter {
+        let coarse = boundary_token_prefilter(vocab, components, terminal_offsets, seed_terminals);
+        let mut seed_terminals_by_component = Vec::with_capacity(components.len());
+        for (component_index, component) in components.iter().enumerate() {
+            let terminal_offset = terminal_offsets[component_index] as usize;
+            let mut local = BitSet::new(component.tokenizer.num_terminals() as usize);
+            for local_terminal in 0..component.tokenizer.num_terminals() as usize {
+                if seed_terminals
+                    .get(terminal_offset + local_terminal)
+                    .copied()
+                    .unwrap_or(false)
+                {
+                    local.set(local_terminal);
+                }
+            }
+            seed_terminals_by_component.push(local);
+        }
+
+        // Associate every unique suffix directly with the tokens containing
+        // it. A suffix is scanned once, and a positive result publishes all of
+        // its owner tokens without a second large hash-lookup pass.
+        let mut suffix_tokens = FxHashMap::<&[u8], SmallVec<[u32; 2]>>::default();
+        for &(token_id, bytes) in &all_multi_byte_entries {
+            if !coarse.contains(&token_id) {
+                continue;
+            }
+            for offset in 0..bytes.len() {
+                suffix_tokens
+                    .entry(&bytes[offset..])
+                    .or_default()
+                    .push(token_id);
+            }
+        }
+        suffix_tokens
+            .into_par_iter()
+            .filter_map(|(suffix, tokens)| {
+                reset_suffix_reaches_seed_terminal(
+                    components,
+                    &reset_live_bytes,
+                    &seed_terminals_by_component,
+                    suffix,
+                )
+                .then_some(tokens)
+            })
+            .flatten_iter()
+            .collect::<BTreeSet<_>>()
+    } else {
+        all_multi_byte_entries
+            .iter()
+            .map(|&(token_id, _)| token_id)
+            .collect::<BTreeSet<_>>()
+    };
+    let prefilter_ms = prefilter_started_at.elapsed().as_secs_f64() * 1000.0;
+    let multi_byte_entries = all_multi_byte_entries
+        .iter()
+        .copied()
+        .filter(|(token_id, _)| prefilter.contains(token_id))
+        .collect::<Vec<_>>();
     let suffix_cache_started_at = Instant::now();
     let reset_suffix_cache = if std::env::var_os("GLRMASK_COMPOSE_DISABLE_SUFFIX_CACHE")
         .is_some()
@@ -1489,8 +1593,8 @@ fn discover_boundary_token_paths(
         None
     } else {
         let mut suffixes = FxHashSet::<&[u8]>::default();
-        for &(_, bytes) in &all_multi_byte_entries {
-            for offset in 0..bytes.len() {
+        for &(_, bytes) in &multi_byte_entries {
+            for offset in 1..bytes.len() {
                 suffixes.insert(&bytes[offset..]);
             }
         }
@@ -1513,47 +1617,6 @@ fn discover_boundary_token_paths(
         )
     };
     let suffix_cache_ms = suffix_cache_started_at.elapsed().as_secs_f64() * 1000.0;
-    let prefilter_started_at = Instant::now();
-    let prefilter = if use_prefilter {
-        if let Some(cache) = reset_suffix_cache.as_ref() {
-            all_multi_byte_entries
-                .iter()
-                .filter_map(|&(token_id, bytes)| {
-                    (0..bytes.len())
-                        .any(|offset| {
-                            let scan = cache
-                                .get(&bytes[offset..])
-                                .expect("reset suffix cache must cover every vocabulary suffix");
-                            scan.matches.iter().any(|&(terminal, _)| {
-                                seed_terminals
-                                    .get(terminal as usize)
-                                    .copied()
-                                    .unwrap_or(false)
-                            }) || scan.future_terminals.iter().any(|&terminal| {
-                                seed_terminals
-                                    .get(terminal as usize)
-                                    .copied()
-                                    .unwrap_or(false)
-                            })
-                        })
-                        .then_some(token_id)
-                })
-                .collect::<BTreeSet<_>>()
-        } else {
-            boundary_token_prefilter(vocab, components, terminal_offsets, seed_terminals)
-        }
-    } else {
-        all_multi_byte_entries
-            .iter()
-            .map(|&(token_id, _)| token_id)
-            .collect::<BTreeSet<_>>()
-    };
-    let prefilter_ms = prefilter_started_at.elapsed().as_secs_f64() * 1000.0;
-    let multi_byte_entries = all_multi_byte_entries
-        .iter()
-        .copied()
-        .filter(|(token_id, _)| prefilter.contains(token_id))
-        .collect::<Vec<_>>();
     let candidate_ranges_started_at = Instant::now();
     let candidate_ranges = boundary_candidate_state_ranges_by_token(
         components,
@@ -2631,6 +2694,62 @@ fn determinize_epsilon_free_component_union(
         return Some((DWA::new(0, 0), 0));
     }
 
+    #[derive(Clone)]
+    struct RawTransitionRun {
+        start: i32,
+        end: i32,
+        targets: Vec<(u32, Weight)>,
+    }
+
+    struct OutputTransitionRun {
+        start: i32,
+        end: i32,
+        target: u32,
+        weight: Weight,
+    }
+
+    #[derive(Default)]
+    struct PendingDwaState {
+        runs: Vec<OutputTransitionRun>,
+        default_transition: Option<(u32, Weight)>,
+        final_weight: Option<Weight>,
+    }
+
+    fn same_raw_targets(left: &[(u32, Weight)], right: &[(u32, Weight)]) -> bool {
+        left.len() == right.len()
+            && left
+                .iter()
+                .zip(right)
+                .all(|((left_target, left_weight), (right_target, right_weight))| {
+                    left_target == right_target && left_weight.ptr_key() == right_weight.ptr_key()
+                })
+    }
+
+    let raw_transition_runs = raw_states
+        .iter()
+        .map(|state| {
+            let mut runs = Vec::<RawTransitionRun>::new();
+            for (&label, targets) in &state.transitions {
+                if label == DEFAULT_LABEL || targets.is_empty() {
+                    continue;
+                }
+                if let Some(last) = runs.last_mut()
+                    && last.end.checked_add(1) == Some(label)
+                    && same_raw_targets(&last.targets, targets)
+                {
+                    last.end = label;
+                } else {
+                    runs.push(RawTransitionRun {
+                        start: label,
+                        end: label,
+                        targets: targets.clone(),
+                    });
+                }
+            }
+            runs
+        })
+        .collect::<Vec<_>>();
+
     type ResidualSubset = SmallVec<[(u32, Weight); 4]>;
     type ResidualSubsetKey = SmallVec<[(u32, usize); 4]>;
 
@@ -2654,7 +2773,7 @@ fn determinize_epsilon_free_component_union(
         raw_state: u32,
         singleton_states: &mut [u32],
         singleton_count: &mut usize,
-        states: &mut Vec<DWAState>,
+        states: &mut Vec<PendingDwaState>,
         queue: &mut VecDeque<(u32, ResidualSubset)>,
     ) -> u32 {
         let slot = &mut singleton_states[raw_state as usize];
@@ -2662,7 +2781,7 @@ fn determinize_epsilon_free_component_union(
             return *slot;
         }
         let created = states.len() as u32;
-        states.push(DWAState::default());
+        states.push(PendingDwaState::default());
         *slot = created;
         *singleton_count += 1;
         let mut subset = ResidualSubset::new();
@@ -2676,7 +2795,7 @@ fn determinize_epsilon_free_component_union(
         weight_ops: &mut ScopedWeightOpCache,
         singleton_states: &mut [u32],
         singleton_count: &mut usize,
-        states: &mut Vec<DWAState>,
+        states: &mut Vec<PendingDwaState>,
         queue: &mut VecDeque<(u32, ResidualSubset)>,
         subset_states: &mut FxHashMap<ResidualSubsetKey, u32>,
     ) -> Option<(u32, Weight)> {
@@ -2685,7 +2804,7 @@ fn determinize_epsilon_free_component_union(
             edge_weight: Weight,
             singleton_states: &mut [u32],
             singleton_count: &mut usize,
-            states: &mut Vec<DWAState>,
+            states: &mut Vec<PendingDwaState>,
             queue: &mut VecDeque<(u32, ResidualSubset)>,
             subset_states: &mut FxHashMap<ResidualSubsetKey, u32>,
         | {
@@ -2706,7 +2825,7 @@ fn determinize_epsilon_free_component_union(
                 existing
             } else {
                 let created = states.len() as u32;
-                states.push(DWAState::default());
+                states.push(PendingDwaState::default());
                 subset_states.insert(key, created);
                 queue.push_back((created, normalized));
                 created
@@ -2811,7 +2930,7 @@ fn determinize_epsilon_free_component_union(
         }
     }
 
-    let mut states = Vec::<DWAState>::new();
+    let mut states = Vec::<PendingDwaState>::new();
     let mut queue = VecDeque::<(u32, ResidualSubset)>::new();
     let mut singleton_states = vec![u32::MAX; raw_states.len()];
     let mut singleton_count = 0usize;
@@ -2831,7 +2950,7 @@ fn determinize_epsilon_free_component_union(
         )
     } else {
         let state = states.len() as u32;
-        states.push(DWAState::default());
+        states.push(PendingDwaState::default());
         queue.push_back((state, initial_subset.clone()));
         state
     };
@@ -2852,6 +2971,9 @@ fn determinize_epsilon_free_component_union(
     let mut profiled_wide_subsets = 0usize;
     let mut profiled_max_subset = 0usize;
     let mut profiled_explicit_labels = 0usize;
+    let mut profiled_output_transitions = 0usize;
+    let mut profiled_contribution_candidates = 0usize;
+    let mut profiled_nonempty_contributions = 0usize;
     while let Some((output_state, subset)) = queue.pop_front() {
         profiled_max_subset = profiled_max_subset.max(subset.len());
         match subset.len() {
@@ -2868,13 +2990,14 @@ fn determinize_epsilon_free_component_union(
             let raw_state = subset[0].0;
             let source = &raw_states[raw_state as usize];
             if source.transitions.values().all(|targets| targets.len() <= 1) {
-                let mut output_transitions = Vec::with_capacity(source.transitions.len());
                 let final_weight = source
                     .final_weight
                     .as_ref()
                     .filter(|weight| !weight.is_empty())
                     .cloned();
-                for (&label, targets) in &source.transitions {
+                let mut runs = Vec::with_capacity(raw_transition_runs[raw_state as usize].len());
+                for raw_run in &raw_transition_runs[raw_state as usize] {
+                    let targets = &raw_run.targets;
                     let Some((target, edge_weight)) = targets.first() else {
                         continue;
                     };
@@ -2888,10 +3011,34 @@ fn determinize_epsilon_free_component_union(
                         &mut states,
                         &mut queue,
                     );
-                    output_transitions.push((label, (target, edge_weight.clone())));
+                    profiled_output_transitions +=
+                        (i64::from(raw_run.end) - i64::from(raw_run.start) + 1) as usize;
+                    runs.push(OutputTransitionRun {
+                        start: raw_run.start,
+                        end: raw_run.end,
+                        target,
+                        weight: edge_weight.clone(),
+                    });
                 }
-                states[output_state as usize] = DWAState {
-                    transitions: output_transitions.into_iter().collect(),
+                let default_transition = source
+                    .transitions
+                    .get(&DEFAULT_LABEL)
+                    .and_then(|targets| targets.first())
+                    .filter(|(_, weight)| !weight.is_empty())
+                    .map(|(target, weight)| {
+                        let target = intern_singleton(
+                            *target,
+                            &mut singleton_states,
+                            &mut singleton_count,
+                            &mut states,
+                            &mut queue,
+                        );
+                        profiled_output_transitions += 1;
+                        (target, weight.clone())
+                    });
+                states[output_state as usize] = PendingDwaState {
+                    runs,
+                    default_transition,
                     final_weight,
                 };
                 continue;
@@ -2918,161 +3065,124 @@ fn determinize_epsilon_free_component_union(
             let weight = weight_ops.union_all(final_parts.iter());
             (!weight.is_empty()).then_some(weight)
         };
-        let mut output_transitions = Vec::<(i32, (u32, Weight))>::new();
+        let mut default_transition = None::<(u32, Weight)>;
 
-        if subset.len() == 2 {
-            let left_source = &raw_states[subset[0].0 as usize];
-            let right_source = &raw_states[subset[1].0 as usize];
-            let left_prefix = &subset[0].1;
-            let right_prefix = &subset[1].1;
-            let left_default = left_source.transitions.get(&DEFAULT_LABEL);
-            let right_default = right_source.transitions.get(&DEFAULT_LABEL);
-            let mut left = left_source
-                .transitions
-                .iter()
-                .filter(|(label, _)| **label != DEFAULT_LABEL)
-                .peekable();
-            let mut right = right_source
-                .transitions
-                .iter()
-                .filter(|(label, _)| **label != DEFAULT_LABEL)
-                .peekable();
-
-            loop {
-                let left_label = left.peek().map(|(label, _)| **label);
-                let right_label = right.peek().map(|(label, _)| **label);
-                let Some(label) = (match (left_label, right_label) {
-                    (Some(left), Some(right)) => Some(left.min(right)),
-                    (Some(left), None) => Some(left),
-                    (None, Some(right)) => Some(right),
-                    (None, None) => None,
-                }) else {
-                    break;
-                };
-                profiled_explicit_labels += 1;
-                let left_targets = if left_label == Some(label) {
-                    left.next().map(|(_, targets)| targets)
-                } else if label >= 0 {
-                    left_default
-                } else {
-                    None
-                };
-                let right_targets = if right_label == Some(label) {
-                    right.next().map(|(_, targets)| targets)
-                } else if label >= 0 {
-                    right_default
-                } else {
-                    None
-                };
-                let mut contributions = SmallVec::<[(u32, Weight); 4]>::new();
-                for (targets, prefix) in [
-                    (left_targets, left_prefix),
-                    (right_targets, right_prefix),
-                ] {
-                    let Some(targets) = targets else {
-                        continue;
-                    };
-                    for (target, edge_weight) in targets {
-                        let contribution = weight_ops.intersection(prefix, edge_weight);
-                        if !contribution.is_empty() {
-                            contributions.push((*target, contribution));
-                        }
-                    }
-                }
-                if let Some((target, edge_weight)) = finish_overlap_transition(
-                    contributions,
-                    &mut weight_ops,
-                    &mut singleton_states,
-                    &mut singleton_count,
-                    &mut states,
-                    &mut queue,
-                    &mut subset_states,
-                ) {
-                    output_transitions.push((label, (target, edge_weight)));
-                }
-            }
-
-            if default_positive_label_count.is_some()
-                && (left_default.is_some() || right_default.is_some())
-            {
-                let mut contributions = SmallVec::<[(u32, Weight); 4]>::new();
-                for (targets, prefix) in [
-                    (left_default, left_prefix),
-                    (right_default, right_prefix),
-                ] {
-                    let Some(targets) = targets else {
-                        continue;
-                    };
-                    for (target, edge_weight) in targets {
-                        let contribution = weight_ops.intersection(prefix, edge_weight);
-                        if !contribution.is_empty() {
-                            contributions.push((*target, contribution));
-                        }
-                    }
-                }
-                if let Some((target, edge_weight)) = finish_overlap_transition(
-                    contributions,
-                    &mut weight_ops,
-                    &mut singleton_states,
-                    &mut singleton_count,
-                    &mut states,
-                    &mut queue,
-                    &mut subset_states,
-                ) {
-                    // DEFAULT_LABEL sorts before all encoded parser labels.
-                    output_transitions.insert(0, (DEFAULT_LABEL, (target, edge_weight)));
-                }
-            }
-            states[output_state as usize] = DWAState {
-                transitions: output_transitions.into_iter().collect(),
-                final_weight,
-            };
-            continue;
-        }
-
-        let mut explicit_labels = SmallVec::<[i32; 32]>::new();
+        // Sweep maximal intervals on which every constituent row has the same
+        // explicit/default transition. The old implementation repeated the
+        // same weighted subset construction once per parser-state label; real
+        // composed rows contain millions of adjacent labels with identical
+        // outcomes. Run-wise evaluation preserves the exact explicit/default
+        // semantics and expands to the ordinary DWA map only after each result
+        // interval has been solved once.
+        let mut boundaries = SmallVec::<[i64; 64]>::new();
+        let mut has_default = false;
         for (raw_state, _) in &subset {
-            explicit_labels.extend(
-                raw_states[*raw_state as usize]
-                    .transitions
-                    .keys()
-                    .copied()
-                    .filter(|&label| label != DEFAULT_LABEL),
-            );
+            for run in &raw_transition_runs[*raw_state as usize] {
+                boundaries.push(i64::from(run.start));
+                boundaries.push(i64::from(run.end) + 1);
+            }
+            has_default |= raw_states[*raw_state as usize]
+                .transitions
+                .contains_key(&DEFAULT_LABEL);
         }
-        explicit_labels.sort_unstable();
-        explicit_labels.dedup();
-        profiled_explicit_labels += explicit_labels.len();
+        if has_default && default_positive_label_count.is_some() {
+            // Explicit negative labels never fall through to DEFAULT_LABEL;
+            // positive labels do. Split a run interval at that semantic edge.
+            boundaries.push(0);
+        }
+        boundaries.sort_unstable();
+        boundaries.dedup();
 
-        let include_default = default_positive_label_count.is_some()
-            && subset.iter().any(|(raw_state, _)| {
-                raw_states[*raw_state as usize]
-                    .transitions
-                    .contains_key(&DEFAULT_LABEL)
-            });
-        let labels = explicit_labels
-            .iter()
-            .copied()
-            .chain(include_default.then_some(DEFAULT_LABEL));
-        for label in labels {
+        let mut run_positions = vec![0usize; subset.len()];
+        let mut output_runs = Vec::<OutputTransitionRun>::new();
+        for interval in boundaries.windows(2) {
+            let start = interval[0];
+            let end = interval[1] - 1;
+            if start > end || start < i64::from(i32::MIN) || end > i64::from(i32::MAX) {
+                continue;
+            }
+            let label = start as i32;
             let mut contributions = SmallVec::<[(u32, Weight); 4]>::new();
-            for (raw_state, prefix_weight) in &subset {
-                let source = &raw_states[*raw_state as usize];
-                let targets = if label == DEFAULT_LABEL {
-                    source.transitions.get(&DEFAULT_LABEL)
-                } else {
-                    source.transitions.get(&label).or_else(|| {
-                        (label >= 0)
-                            .then(|| source.transitions.get(&DEFAULT_LABEL))
-                            .flatten()
-                    })
-                };
+            let mut has_explicit = false;
+            for (subset_index, (raw_state, prefix_weight)) in subset.iter().enumerate() {
+                let runs = &raw_transition_runs[*raw_state as usize];
+                let position = &mut run_positions[subset_index];
+                while *position < runs.len() && runs[*position].end < label {
+                    *position += 1;
+                }
+                let explicit = runs
+                    .get(*position)
+                    .filter(|run| run.start <= label && label <= run.end);
+                has_explicit |= explicit.is_some();
+                let targets = explicit.map(|run| run.targets.as_slice()).or_else(|| {
+                    (label >= 0)
+                        .then(|| {
+                            raw_states[*raw_state as usize]
+                                .transitions
+                                .get(&DEFAULT_LABEL)
+                                .map(Vec::as_slice)
+                        })
+                        .flatten()
+                });
                 let Some(targets) = targets else {
                     continue;
                 };
                 for (target, edge_weight) in targets {
+                    profiled_contribution_candidates += 1;
                     let contribution = weight_ops.intersection(prefix_weight, edge_weight);
                     if !contribution.is_empty() {
+                        profiled_nonempty_contributions += 1;
+                        contributions.push((*target, contribution));
+                    }
+                }
+            }
+            // A gap covered only by defaults is represented by the one
+            // DEFAULT_LABEL cell below, not by redundant explicit labels.
+            if !has_explicit {
+                continue;
+            }
+            if let Some((target, edge_weight)) = finish_overlap_transition(
+                contributions,
+                &mut weight_ops,
+                &mut singleton_states,
+                &mut singleton_count,
+                &mut states,
+                &mut queue,
+                &mut subset_states,
+            ) {
+                let start = start as i32;
+                let end = end as i32;
+                if let Some(previous) = output_runs.last_mut()
+                    && previous.end.checked_add(1) == Some(start)
+                    && previous.target == target
+                    && previous.weight.ptr_key() == edge_weight.ptr_key()
+                {
+                    previous.end = end;
+                } else {
+                    output_runs.push(OutputTransitionRun {
+                        start,
+                        end,
+                        target,
+                        weight: edge_weight,
+                    });
+                }
+            }
+        }
+
+        if default_positive_label_count.is_some() && has_default {
+            let mut contributions = SmallVec::<[(u32, Weight); 4]>::new();
+            for (raw_state, prefix_weight) in &subset {
+                let Some(targets) = raw_states[*raw_state as usize]
+                    .transitions
+                    .get(&DEFAULT_LABEL)
+                else {
+                    continue;
+                };
+                for (target, edge_weight) in targets {
+                    profiled_contribution_candidates += 1;
+                    let contribution = weight_ops.intersection(prefix_weight, edge_weight);
+                    if !contribution.is_empty() {
+                        profiled_nonempty_contributions += 1;
                         contributions.push((*target, contribution));
                     }
                 }
@@ -3086,19 +3196,76 @@ fn determinize_epsilon_free_component_union(
                 &mut queue,
                 &mut subset_states,
             ) {
-                output_transitions.push((label, (target, edge_weight)));
+                default_transition = Some((target, edge_weight));
             }
         }
-        states[output_state as usize] = DWAState {
-            transitions: output_transitions.into_iter().collect(),
+
+        let explicit_transition_count = output_runs
+            .iter()
+            .map(|run| (i64::from(run.end) - i64::from(run.start) + 1) as usize)
+            .sum::<usize>();
+        profiled_explicit_labels += explicit_transition_count;
+        profiled_output_transitions +=
+            explicit_transition_count + usize::from(default_transition.is_some());
+        states[output_state as usize] = PendingDwaState {
+            runs: output_runs,
+            default_transition,
             final_weight,
         };
     }
 
     let synthetic_states = states.len().saturating_sub(singleton_count);
+    let mut outcome_groups = 0usize;
+    let mut contiguous_runs = 0usize;
+    let mut max_outcome_groups = 0usize;
+    let mut max_contiguous_runs = 0usize;
+    if compose_profile_enabled() {
+        for state in &states {
+            let mut outcomes = FxHashSet::<(u32, usize)>::default();
+            for run in &state.runs {
+                outcomes.insert((run.target, run.weight.ptr_key()));
+            }
+            if let Some((target, weight)) = &state.default_transition {
+                outcomes.insert((*target, weight.ptr_key()));
+            }
+            let row_runs = state.runs.len() + usize::from(state.default_transition.is_some());
+            outcome_groups += outcomes.len();
+            contiguous_runs += row_runs;
+            max_outcome_groups = max_outcome_groups.max(outcomes.len());
+            max_contiguous_runs = max_contiguous_runs.max(row_runs);
+        }
+    }
+
+    let materialize_started_at = Instant::now();
+    let states = states
+        .into_par_iter()
+        .map(|state| {
+            let transition_count = state
+                .runs
+                .iter()
+                .map(|run| (i64::from(run.end) - i64::from(run.start) + 1) as usize)
+                .sum::<usize>()
+                + usize::from(state.default_transition.is_some());
+            let mut entries = Vec::with_capacity(transition_count);
+            if let Some((target, weight)) = state.default_transition {
+                entries.push((DEFAULT_LABEL, (target, weight)));
+            }
+            for run in state.runs {
+                for label in run.start..=run.end {
+                    entries.push((label, (run.target, run.weight.clone())));
+                }
+            }
+            DWAState {
+                transitions: entries.into_iter().collect(),
+                final_weight: state.final_weight,
+            }
+        })
+        .collect::<Vec<_>>();
+    let materialize_ms = materialize_started_at.elapsed().as_secs_f64() * 1000.0;
+
     if compose_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][constraint_overlap_local_shape] raw_states={} result_states={} singleton_states={} pair_subsets={} wide_subsets={} max_subset={} explicit_labels={}",
+            "[glrmask/profile][constraint_overlap_local_shape] raw_states={} result_states={} singleton_states={} pair_subsets={} wide_subsets={} max_subset={} explicit_labels={} output_transitions={} contribution_candidates={} nonempty_contributions={} outcome_groups={} contiguous_runs={} max_outcome_groups={} max_contiguous_runs={} materialize_ms={materialize_ms:.3}",
             raw_states.len(),
             states.len(),
             profiled_singletons,
@@ -3106,6 +3273,13 @@ fn determinize_epsilon_free_component_union(
             profiled_wide_subsets,
             profiled_max_subset,
             profiled_explicit_labels,
+            profiled_output_transitions,
+            profiled_contribution_candidates,
+            profiled_nonempty_contributions,
+            outcome_groups,
+            contiguous_runs,
+            max_outcome_groups,
+            max_contiguous_runs,
         );
     }
     Some((DWA::from_parts(states, start_state), synthetic_states))
