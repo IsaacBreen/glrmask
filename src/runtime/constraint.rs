@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use range_set_blaze::RangeSetBlaze;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use rayon::prelude::*;
 
@@ -2027,14 +2027,26 @@ impl Constraint {
             } else {
                 started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0)
             };
-            let started = profile.then(std::time::Instant::now);
+            let inventory_started = profile.then(std::time::Instant::now);
             let weight_token_sets = self.weight_token_set_inventory();
+            let weight_inventory_ms = inventory_started
+                .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+            let sparse_started = profile.then(std::time::Instant::now);
             let prebuilt_weight_caches = self.compute_direct_sparse_weight_token_buf_masks(
                 &weight_token_sets.final_sets,
                 &internal_token_buf_masks,
+                true,
             );
-            let prebuilt_weight_sparse_ms =
-                started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+            let sparse_classify_ms = sparse_started
+                .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+            let prebuilt_weight_sparse_ms = weight_inventory_ms + sparse_classify_ms;
+            if profile {
+                eprintln!(
+                    "[glrmask/profile][runtime_weight_inventory] inventory_ms={weight_inventory_ms:.3} classify_ms={sparse_classify_ms:.3} final_sets={} transition_sets={}",
+                    weight_token_sets.final_sets.len(),
+                    weight_token_sets.transition_sets.len(),
+                );
+            }
             let started = profile.then(std::time::Instant::now);
             let reused_tokenizer_fast_transitions = prebuilt_tokenizer_fast_transitions.is_some();
             let tokenizer_fast_transitions = prebuilt_tokenizer_fast_transitions
@@ -2107,14 +2119,26 @@ impl Constraint {
                             started.elapsed().as_secs_f64() * 1000.0
                         })
                     };
-                    let started = profile.then(std::time::Instant::now);
+                    let inventory_started = profile.then(std::time::Instant::now);
                     let weight_token_sets = self.weight_token_set_inventory();
+                    let weight_inventory_ms = inventory_started
+                        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+                    let sparse_started = profile.then(std::time::Instant::now);
                     let prebuilt_weight_caches = self.compute_direct_sparse_weight_token_buf_masks(
                         &weight_token_sets.final_sets,
                         &internal_token_buf_masks,
+                        false,
                     );
-                    let prebuilt_weight_sparse_ms = started
+                    let sparse_classify_ms = sparse_started
                         .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+                    let prebuilt_weight_sparse_ms = weight_inventory_ms + sparse_classify_ms;
+                    if profile {
+                        eprintln!(
+                            "[glrmask/profile][runtime_weight_inventory] inventory_ms={weight_inventory_ms:.3} classify_ms={sparse_classify_ms:.3} final_sets={} transition_sets={}",
+                            weight_token_sets.final_sets.len(),
+                            weight_token_sets.transition_sets.len(),
+                        );
+                    }
                     let started = profile.then(std::time::Instant::now);
                     let (dense_mask_words, dense_masks) = self
                         .compute_dense_token_masks_excluding_direct_final(
@@ -2144,6 +2168,7 @@ impl Constraint {
         };
         let primary_ms = primary_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        self.prebuilt_parser_weight_token_sets = None;
         self.internal_token_buf_masks = internal_token_buf_masks;
         let token_mask_profile = if token_mask_caches_prebuilt {
             TokenMaskCacheBuildProfile::default()
@@ -2796,7 +2821,41 @@ impl Constraint {
             }
         }
 
-        let mut inventory = if rayon::current_num_threads() > 1
+        fn add_inventory_final_weight<'a>(
+            inventory: &mut InventoryBatch<'a>,
+            weight: &'a Weight,
+        ) {
+            if weight.is_full() || weight.is_empty() {
+                return;
+            }
+            for (_, token_set) in weight.raw_range_values() {
+                inventory
+                    .final_sets
+                    .entry(Arc::as_ptr(token_set) as usize)
+                    .or_insert(token_set);
+            }
+        }
+
+        let inventory_base_started_at = std::env::var_os("GLRMASK_PROFILE_COMPILE")
+            .is_some()
+            .then(std::time::Instant::now);
+        let used_prebuilt = self.prebuilt_parser_weight_token_sets.is_some();
+        let mut inventory = if let Some(prebuilt) = self.prebuilt_parser_weight_token_sets.as_ref() {
+            let mut batch = InventoryBatch::default();
+            batch.final_sets.extend(
+                prebuilt
+                    .final_sets
+                    .iter()
+                    .map(|tokens| (Arc::as_ptr(tokens) as usize, tokens)),
+            );
+            batch.transition_sets.extend(
+                prebuilt
+                    .transition_sets
+                    .iter()
+                    .map(|tokens| (Arc::as_ptr(tokens) as usize, tokens.as_ref())),
+            );
+            batch
+        } else if rayon::current_num_threads() > 1
             && self.parser_dwa.states().len() >= 4_096
         {
             self.parser_dwa
@@ -2818,13 +2877,24 @@ impl Constraint {
             batch
         };
 
-        for final_weight in self.parser_top_accept.values() {
-            if final_weight.is_full() || final_weight.is_empty() {
-                continue;
-            }
-            for (_tsid_range, token_set) in final_weight.raw_range_values() {
-                let key = Arc::as_ptr(token_set) as usize;
-                inventory.final_sets.entry(key).or_insert(token_set);
+        let inventory_base_ms = inventory_base_started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let inventory_extras_started_at = std::env::var_os("GLRMASK_PROFILE_COMPILE")
+            .is_some()
+            .then(std::time::Instant::now);
+        let parser_top_accept_prebuilt = self
+            .prebuilt_parser_weight_token_sets
+            .as_ref()
+            .is_some_and(|prebuilt| prebuilt.includes_parser_top_accept);
+        if !parser_top_accept_prebuilt {
+            for final_weight in self.parser_top_accept.values() {
+                if final_weight.is_full() || final_weight.is_empty() {
+                    continue;
+                }
+                for (_tsid_range, token_set) in final_weight.raw_range_values() {
+                    let key = Arc::as_ptr(token_set) as usize;
+                    inventory.final_sets.entry(key).or_insert(token_set);
+                }
             }
         }
 
@@ -2848,6 +2918,54 @@ impl Constraint {
             }
         }
 
+        if used_prebuilt
+            && std::env::var_os("GLRMASK_VALIDATE_PREBUILT_WEIGHT_INVENTORY").is_some()
+        {
+            let mut reference = InventoryBatch::default();
+            for state in self.parser_dwa.states() {
+                reference.add_state(state);
+            }
+            for weight in self.parser_top_accept.values() {
+                add_inventory_final_weight(&mut reference, weight);
+            }
+            for weight in self.parser_top_accept_parts.values().flatten() {
+                add_inventory_final_weight(&mut reference, weight);
+            }
+            for weight in self.direct_regular_l1_complete_by_terminal.values() {
+                add_inventory_final_weight(&mut reference, weight);
+            }
+            assert_eq!(
+                inventory.final_sets.keys().copied().collect::<FxHashSet<_>>(),
+                reference.final_sets.keys().copied().collect::<FxHashSet<_>>(),
+            );
+            assert_eq!(
+                inventory
+                    .transition_sets
+                    .keys()
+                    .copied()
+                    .collect::<FxHashSet<_>>(),
+                reference
+                    .transition_sets
+                    .keys()
+                    .copied()
+                    .collect::<FxHashSet<_>>(),
+            );
+            eprintln!(
+                "[glrmask/validate][prebuilt_weight_inventory] final_sets={} transition_sets={} exact=true",
+                inventory.final_sets.len(),
+                inventory.transition_sets.len(),
+            );
+        }
+        let inventory_extras_ms = inventory_extras_started_at
+            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some() {
+            eprintln!(
+                "[glrmask/profile][runtime_weight_inventory_detail] prebuilt={} base_ms={inventory_base_ms:.3} extras_ms={inventory_extras_ms:.3} parser_final_sets={} transition_sets={}",
+                used_prebuilt,
+                inventory.final_sets.len(),
+                inventory.transition_sets.len(),
+            );
+        }
         WeightTokenSetInventory {
             final_sets: inventory.final_sets.into_iter().collect(),
             transition_sets: inventory.transition_sets,
@@ -2864,6 +2982,7 @@ impl Constraint {
         &self,
         final_token_sets: &[(usize, &Arc<RangeSetBlaze<u32>>) ],
         internal_token_buf_masks: &[InternalTokenBufMasks],
+        allow_parallel: bool,
     ) -> DirectSparseWeightBufCaches {
         let buf_words = self.mask_len();
         let direct_sparse = buf_words != 0
@@ -2910,7 +3029,7 @@ impl Constraint {
             }
         };
 
-        let batch = if rayon::current_num_threads() == 1 {
+        let batch = if !allow_parallel || rayon::current_num_threads() == 1 {
             let mut batch = SparseBatch::default();
             for entry in final_token_sets {
                 build_one(&mut batch, entry);

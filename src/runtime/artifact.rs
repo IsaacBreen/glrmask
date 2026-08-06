@@ -2,6 +2,7 @@ use glrmask_artifact::CommitTemplateDfas;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
 use rayon::prelude::*;
+use range_set_blaze::RangeSetBlaze;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
@@ -106,6 +107,13 @@ pub(crate) type DenseWeightMaskCache = FxHashMap<usize, DenseWords>;
 pub(crate) type DenseWeightBufMaskCache = FxHashMap<usize, Box<[u32]>>;
 pub(crate) type SparseWeightBufMaskCache = FxHashMap<usize, Box<[(u16, u32)]>>;
 pub(crate) type DirectSparseWeightTokenSetCache = FxHashSet<usize>;
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PrebuiltParserWeightTokenSets {
+    pub(crate) final_sets: Vec<Arc<RangeSetBlaze<u32>>>,
+    pub(crate) transition_sets: Vec<Arc<RangeSetBlaze<u32>>>,
+    pub(crate) includes_parser_top_accept: bool,
+}
 pub(crate) type SeedTerminalDenseMasks = FxHashMap<(u32, TerminalID), DenseWords>;
 const INLINE_DWA_TRANSITION_LIMIT: usize = 8;
 
@@ -1988,6 +1996,11 @@ pub struct Constraint {
     /// runtime intersects them with the current dense state on every use.
     #[serde(skip)]
     pub(crate) direct_sparse_weight_token_sets: DirectSparseWeightTokenSetCache,
+    /// Transient exact token-set inventory emitted while the parser DWA is
+    /// materialized. Runtime finalization consumes and discards it, avoiding a
+    /// second scan over every expanded parser transition.
+    #[serde(skip, default)]
+    pub(crate) prebuilt_parser_weight_token_sets: Option<PrebuiltParserWeightTokenSets>,
     /// Precomputed dense bitmask for the seed phase: for each (tokenizer_state, terminal_id),
     /// the dense bitmap of internal tokens that terminal covers in that state.
     #[serde(skip)]

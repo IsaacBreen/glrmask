@@ -4044,6 +4044,7 @@ fn compile_prepared_with_profile_and_table_construction(
             weight_token_buf_masks: rustc_hash::FxHashMap::default(),
             weight_token_sparse_buf_masks: rustc_hash::FxHashMap::default(),
             direct_sparse_weight_token_sets: rustc_hash::FxHashSet::default(),
+            prebuilt_parser_weight_token_sets: None,
             seed_terminal_dense: rustc_hash::FxHashMap::default(),
             seed_terminal_dense_fallback: Default::default(),
             seed_universe_dense: std::sync::Arc::<[u64]>::from(Vec::<u64>::new().into_boxed_slice()),

@@ -60,7 +60,9 @@ use crate::compiler::glr::table::{
 use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
 use crate::ds::weight::{ScopedWeightOpCache, Weight};
-use crate::runtime::{Constraint, ConstraintRuntimeBackend, SpecialTokenTerminal};
+use crate::runtime::{
+    Constraint, ConstraintRuntimeBackend, PrebuiltParserWeightTokenSets, SpecialTokenTerminal,
+};
 use crate::Vocab;
 
 #[inline]
@@ -839,59 +841,69 @@ fn transported_component_top_accept_parts(
 fn collapse_transported_top_accept_parts(
     parts: BTreeMap<i32, Vec<Weight>>,
     num_parser_states: u32,
-) -> BTreeMap<i32, Weight> {
+) -> (BTreeMap<i32, Weight>, Vec<Arc<RangeSetBlaze<u32>>>) {
     let profile = compose_profile_enabled();
     let started_at = Instant::now();
     let labels = parts.len();
     let total_parts = parts.values().map(Vec::len).sum::<usize>();
     let max_parts = parts.values().map(Vec::len).max().unwrap_or(0);
-    let mut collapsed = parts
-        .into_par_iter()
-        .filter_map(|(label, mut weights)| {
-            weights.sort_unstable_by_key(Weight::ptr_key);
-            weights.dedup_by_key(|weight| weight.ptr_key());
-            let weight = match weights.len() {
-                0 => return None,
-                1 => weights.pop().unwrap(),
-                _ => Weight::union_all(weights.iter()),
-            };
-            (!weight.is_empty()).then_some((label, weight))
-        })
-        .collect::<Vec<_>>()
-        .into_iter()
-        .collect::<BTreeMap<_, _>>();
-    let unique_weights;
+    let collapse_one = |(label, mut weights): (i32, Vec<Weight>)| {
+        weights.sort_unstable_by_key(Weight::ptr_key);
+        weights.dedup_by_key(|weight| weight.ptr_key());
+        let weight = match weights.len() {
+            0 => return None,
+            1 => weights.pop().unwrap(),
+            _ => Weight::union_all(weights.iter()),
+        };
+        (!weight.is_empty()).then_some((label, weight))
+    };
+    let mut collapsed = if max_parts <= 1 {
+        parts
+            .into_iter()
+            .filter_map(collapse_one)
+            .collect::<BTreeMap<_, _>>()
+    } else {
+        parts
+            .into_par_iter()
+            .filter_map(collapse_one)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .collect::<BTreeMap<_, _>>()
+    };
+    let mut token_sets = FxHashMap::<usize, Arc<RangeSetBlaze<u32>>>::default();
+    let mut by_weight = FxHashMap::<usize, (Weight, usize)>::default();
+    for weight in collapsed.values() {
+        by_weight
+            .entry(weight.ptr_key())
+            .and_modify(|(_, count)| *count += 1)
+            .or_insert_with(|| (weight.clone(), 1));
+    }
+    let unique_weights = by_weight.len();
+    for (weight, _) in by_weight.values() {
+        if !weight.is_full() && !weight.is_empty() {
+            for (_, token_set) in weight.raw_range_values() {
+                token_sets
+                    .entry(Arc::as_ptr(token_set) as usize)
+                    .or_insert_with(|| Arc::clone(token_set));
+            }
+        }
+    }
     let mut default_multiplicity = 0usize;
     let mut exceptions = collapsed.len();
     let full_positive_domain = collapsed.len() == num_parser_states as usize
-        && (0..num_parser_states).all(|state| {
-            collapsed.contains_key(&encode_positive_label(state))
-        });
-    if full_positive_domain && !collapsed.is_empty() {
-        let mut by_weight = FxHashMap::<usize, (Weight, usize)>::default();
-        for weight in collapsed.values() {
-            by_weight
-                .entry(weight.ptr_key())
-                .and_modify(|(_, count)| *count += 1)
-                .or_insert_with(|| (weight.clone(), 1));
-        }
-        unique_weights = by_weight.len();
-        if let Some((default_weight, count)) = by_weight
+        && (0..num_parser_states)
+            .all(|state| collapsed.contains_key(&encode_positive_label(state)));
+    if full_positive_domain
+        && !collapsed.is_empty()
+        && let Some((default_weight, count)) = by_weight
             .into_values()
             .max_by_key(|(_, count)| *count)
-        {
-            let default_key = default_weight.ptr_key();
-            collapsed.retain(|_, weight| weight.ptr_key() != default_key);
-            collapsed.insert(DEFAULT_LABEL, default_weight);
-            default_multiplicity = count;
-            exceptions = collapsed.len().saturating_sub(1);
-        }
-    } else {
-        unique_weights = collapsed
-            .values()
-            .map(Weight::ptr_key)
-            .collect::<FxHashSet<_>>()
-            .len();
+    {
+        let default_key = default_weight.ptr_key();
+        collapsed.retain(|_, weight| weight.ptr_key() != default_key);
+        collapsed.insert(DEFAULT_LABEL, default_weight);
+        default_multiplicity = count;
+        exceptions = collapsed.len().saturating_sub(1);
     }
     if profile {
         eprintln!(
@@ -907,7 +919,7 @@ fn collapse_transported_top_accept_parts(
             started_at.elapsed().as_secs_f64() * 1000.0,
         );
     }
-    collapsed
+    (collapsed, token_sets.into_values().collect())
 }
 
 /// Standalone component parser DWAs erase their one global ignore terminal
@@ -3258,18 +3270,19 @@ fn determinize_epsilon_free_component_union_prechecked(
         .map(RawCompressedAutomaton::from_nwa)
         .collect::<Vec<_>>();
     let raw_compress_ms = compress_started_at.elapsed().as_secs_f64() * 1000.0;
-    determinize_compressed_component_union_prechecked(
+    let (dwa, synthetic_states, _) = determinize_compressed_component_union_prechecked(
         compressed,
         default_positive_label_count,
         raw_compress_ms,
-    )
+    );
+    (dwa, synthetic_states)
 }
 
 fn determinize_compressed_component_union_prechecked(
     automata: Vec<RawCompressedAutomaton>,
     default_positive_label_count: Option<u32>,
     raw_compress_ms: f64,
-) -> (DWA, usize) {
+) -> (DWA, usize, PrebuiltParserWeightTokenSets) {
     let total_started_at = Instant::now();
 
     struct OutputTransitionRun {
@@ -3324,7 +3337,7 @@ fn determinize_compressed_component_union_prechecked(
     starts.sort_unstable();
     starts.dedup();
     if starts.is_empty() {
-        return (DWA::new(0, 0), 0);
+        return (DWA::new(0, 0), 0, PrebuiltParserWeightTokenSets::default());
     }
 
     type ResidualSubset = SmallVec<[(u32, Weight); 4]>;
@@ -3969,6 +3982,32 @@ fn determinize_compressed_component_union_prechecked(
                 .map(|run| (i64::from(run.end) - i64::from(run.start) + 1) as usize)
                 .sum::<usize>()
                 + usize::from(state.default_transition.is_some());
+            let mut final_sets = FxHashMap::<usize, Arc<RangeSetBlaze<u32>>>::default();
+            let mut transition_sets = FxHashMap::<usize, Arc<RangeSetBlaze<u32>>>::default();
+            if let Some(final_weight) = state.final_weight.as_ref()
+                && !final_weight.is_full()
+                && !final_weight.is_empty()
+            {
+                for (_, token_set) in final_weight.raw_range_values() {
+                    final_sets
+                        .entry(Arc::as_ptr(token_set) as usize)
+                        .or_insert_with(|| Arc::clone(token_set));
+                }
+            }
+            for run in &state.runs {
+                for (_, token_set) in run.weight.raw_range_values() {
+                    transition_sets
+                        .entry(Arc::as_ptr(token_set) as usize)
+                        .or_insert_with(|| Arc::clone(token_set));
+                }
+            }
+            if let Some((_, weight)) = state.default_transition.as_ref() {
+                for (_, token_set) in weight.raw_range_values() {
+                    transition_sets
+                        .entry(Arc::as_ptr(token_set) as usize)
+                        .or_insert_with(|| Arc::clone(token_set));
+                }
+            }
             let mut entries = Vec::with_capacity(transition_count);
             if let Some((target, weight)) = state.default_transition {
                 entries.push((DEFAULT_LABEL, (target, weight)));
@@ -3978,12 +4017,39 @@ fn determinize_compressed_component_union_prechecked(
                     entries.push((label, (run.target, run.weight.clone())));
                 }
             }
-            DWAState {
+            let dwa_state = DWAState {
                 transitions: entries.into_iter().collect(),
                 final_weight: state.final_weight,
-            }
+            };
+            (
+                dwa_state,
+                final_sets.into_values().collect::<Vec<_>>(),
+                transition_sets.into_values().collect::<Vec<_>>(),
+            )
         })
         .collect::<Vec<_>>();
+    let mut materialized_states = Vec::with_capacity(states.len());
+    let mut final_sets = FxHashMap::<usize, Arc<RangeSetBlaze<u32>>>::default();
+    let mut transition_sets = FxHashMap::<usize, Arc<RangeSetBlaze<u32>>>::default();
+    for (state, local_final_sets, local_transition_sets) in states {
+        materialized_states.push(state);
+        for token_set in local_final_sets {
+            final_sets
+                .entry(Arc::as_ptr(&token_set) as usize)
+                .or_insert(token_set);
+        }
+        for token_set in local_transition_sets {
+            transition_sets
+                .entry(Arc::as_ptr(&token_set) as usize)
+                .or_insert(token_set);
+        }
+    }
+    let states = materialized_states;
+    let prebuilt_weight_token_sets = PrebuiltParserWeightTokenSets {
+        final_sets: final_sets.into_values().collect(),
+        transition_sets: transition_sets.into_values().collect(),
+        includes_parser_top_accept: false,
+    };
     let materialize_ms = materialize_started_at.elapsed().as_secs_f64() * 1000.0;
 
     if compose_profile_enabled() {
@@ -4020,7 +4086,11 @@ fn determinize_compressed_component_union_prechecked(
             weight_ops.intersection_entry_count(),
         );
     }
-    (DWA::from_parts(states, start_state), synthetic_states)
+    (
+        DWA::from_parts(states, start_state),
+        synthetic_states,
+        prebuilt_weight_token_sets,
+    )
 }
 
 
@@ -6543,6 +6613,7 @@ fn build_composed_constraint_unfinalized(
         weight_token_buf_masks: FxHashMap::default(),
         weight_token_sparse_buf_masks: FxHashMap::default(),
         direct_sparse_weight_token_sets: FxHashSet::default(),
+        prebuilt_parser_weight_token_sets: None,
         seed_terminal_dense: FxHashMap::default(),
         seed_terminal_dense_fallback: Default::default(),
         seed_universe_dense: Arc::<[u64]>::from(Vec::<u64>::new().into_boxed_slice()),
@@ -7540,12 +7611,13 @@ pub(crate) fn compose_constraints_owned_parent(
         true,
         vocab,
     );
-    result.constraint.parser_top_accept =
+    let (parser_top_accept, parser_top_accept_token_sets) =
         collapse_transported_top_accept_parts(top_accept_parts, num_parser_states);
+    result.constraint.parser_top_accept = parser_top_accept;
 
     let union_started_at = Instant::now();
     let (parser_union_result, token_cache_prebuild_ms) = rayon::join(
-        || -> Result<DWA, String> {
+        || -> Result<(DWA, PrebuiltParserWeightTokenSets), String> {
             let final_build_started_at = Instant::now();
             let mut automata = automata;
             match boundary_work {
@@ -7583,7 +7655,7 @@ pub(crate) fn compose_constraints_owned_parent(
                     .is_some()
                     .then(|| automata.clone());
                     let direct_started_at = Instant::now();
-                    let (parser_dwa, synthetic_states) =
+                    let (parser_dwa, synthetic_states, weight_token_sets) =
                         determinize_compressed_component_union_prechecked(
                             automata,
                             Some(num_parser_states),
@@ -7623,12 +7695,12 @@ pub(crate) fn compose_constraints_owned_parent(
                             final_build_started_at.elapsed().as_secs_f64() * 1000.0,
                         );
                     }
-                    Ok(parser_dwa)
+                    Ok((parser_dwa, weight_token_sets))
                 }
                 None => {
                     let automata_len = automata.len();
                     let direct_started_at = Instant::now();
-                    let (parser_dwa, synthetic_states) =
+                    let (parser_dwa, synthetic_states, weight_token_sets) =
                         determinize_compressed_component_union_prechecked(
                             automata,
                             None,
@@ -7646,7 +7718,7 @@ pub(crate) fn compose_constraints_owned_parent(
                             final_build_started_at.elapsed().as_secs_f64() * 1000.0,
                         );
                     }
-                    Ok(parser_dwa)
+                    Ok((parser_dwa, weight_token_sets))
                 }
             }
         },
@@ -7660,7 +7732,24 @@ pub(crate) fn compose_constraints_owned_parent(
             started_at.elapsed().as_secs_f64() * 1000.0
         },
     );
-    result.constraint.parser_dwa = parser_union_result?;
+    let (parser_dwa, mut prebuilt_parser_weight_token_sets) = parser_union_result?;
+    result.constraint.parser_dwa = parser_dwa;
+    if std::env::var_os("GLRMASK_COMPOSE_DISABLE_PREBUILT_WEIGHT_INVENTORY").is_none() {
+        let mut final_sets = prebuilt_parser_weight_token_sets
+            .final_sets
+            .into_iter()
+            .map(|tokens| (Arc::as_ptr(&tokens) as usize, tokens))
+            .collect::<FxHashMap<_, _>>();
+        for tokens in parser_top_accept_token_sets {
+            final_sets
+                .entry(Arc::as_ptr(&tokens) as usize)
+                .or_insert(tokens);
+        }
+        prebuilt_parser_weight_token_sets.final_sets = final_sets.into_values().collect();
+        prebuilt_parser_weight_token_sets.includes_parser_top_accept = true;
+        result.constraint.prebuilt_parser_weight_token_sets =
+            Some(prebuilt_parser_weight_token_sets);
+    }
     let union_ms = union_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let finalize_started_at = Instant::now();
