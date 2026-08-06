@@ -646,6 +646,126 @@ fn component_parser_nwa(component: &ParserDwaComponent<'_>) -> Result<NWA, Strin
     component_parser_nwa_with_top_accept(component, true)
 }
 
+fn component_parser_compressed(
+    component: &ParserDwaComponent<'_>,
+) -> Result<RawCompressedAutomaton, String> {
+    let constraint = component.constraint;
+    if component.parser_state_relation.len() != constraint.table.num_states as usize {
+        return Err(format!(
+            "parser-state relation has {} rows for a {}-state component table",
+            component.parser_state_relation.len(),
+            constraint.table.num_states,
+        ));
+    }
+    let source = &constraint.parser_dwa;
+    debug_assert!(source.is_acyclic());
+    let build_state = |state: &DWAState| -> Result<RawCompressedState, String> {
+        let mut explicit_positive = SmallVec::<[u32; 8]>::new();
+        let mut entries = Vec::<(i32, u32, Weight)>::new();
+        for (&label, (target, weight)) in &state.transitions {
+            if label == DEFAULT_LABEL {
+                continue;
+            }
+            if label >= 0 {
+                explicit_positive.push(label as u32);
+            }
+            for mapped in mapped_labels(label, component.parser_state_relation)? {
+                entries.push((mapped, *target, weight.clone()));
+            }
+        }
+        explicit_positive.sort_unstable();
+        explicit_positive.dedup();
+        if let Some((target, weight)) = state.transitions.get(&DEFAULT_LABEL) {
+            for local_state in 0..constraint.table.num_states {
+                if explicit_positive.binary_search(&local_state).is_ok() {
+                    continue;
+                }
+                let mapped_states = component
+                    .parser_state_relation
+                    .get(local_state as usize)
+                    .ok_or_else(|| {
+                        format!("parser-state relation omits local state {local_state}")
+                    })?;
+                if mapped_states.is_empty() {
+                    return Err(format!(
+                        "parser-state relation maps local state {local_state} nowhere"
+                    ));
+                }
+                entries.extend(mapped_states.iter().copied().map(|global_state| {
+                    (encode_positive_label(global_state), *target, weight.clone())
+                }));
+            }
+        }
+        entries.sort_unstable_by_key(|(label, target, weight)| {
+            (*label, *target, weight.ptr_key())
+        });
+        entries.dedup_by(|left, right| {
+            left.0 == right.0 && left.1 == right.1 && left.2.ptr_key() == right.2.ptr_key()
+        });
+
+        let mut runs = Vec::<RawTransitionRun>::new();
+        let mut deterministic = true;
+        let mut index = 0usize;
+        while index < entries.len() {
+            let label = entries[index].0;
+            let mut targets = Vec::<(u32, Weight)>::new();
+            while index < entries.len() && entries[index].0 == label {
+                targets.push((entries[index].1, entries[index].2.clone()));
+                index += 1;
+            }
+            deterministic &= targets.len() <= 1;
+            if let Some(last) = runs.last_mut()
+                && last.end.checked_add(1) == Some(label)
+                && same_raw_targets(&last.targets, &targets)
+            {
+                last.end = label;
+            } else {
+                runs.push(RawTransitionRun {
+                    start: label,
+                    end: label,
+                    targets,
+                });
+            }
+        }
+        Ok(RawCompressedState {
+            runs,
+            default_targets: None,
+            final_weight: state.final_weight.clone(),
+            deterministic,
+        })
+    };
+    let states = source
+        .states()
+        .par_iter()
+        .map(build_state)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(RawCompressedAutomaton {
+        states,
+        start_states: vec![source.start_state()],
+    })
+}
+
+fn strip_unscoped_ignore_identity_compressed(
+    automaton: &mut RawCompressedAutomaton,
+    ignore_possible_matches: Option<&Weight>,
+) {
+    let Some(ignore_weight) = ignore_possible_matches else {
+        return;
+    };
+    for &start in &automaton.start_states {
+        let Some(state) = automaton.states.get_mut(start as usize) else {
+            continue;
+        };
+        let Some(final_weight) = state.final_weight.take() else {
+            continue;
+        };
+        let retained = final_weight.difference(ignore_weight);
+        if !retained.is_empty() {
+            state.final_weight = Some(retained);
+        }
+    }
+}
+
 fn transported_component_top_accept_parts(
     component: &ParserDwaComponent<'_>,
 ) -> Result<BTreeMap<i32, Vec<Weight>>, String> {
@@ -2917,6 +3037,182 @@ fn add_boundary_special_token_paths(
     ))
 }
 
+#[derive(Clone)]
+struct RawTransitionRun {
+    start: i32,
+    end: i32,
+    targets: Vec<(u32, Weight)>,
+}
+
+#[derive(Clone)]
+struct RawCompressedState {
+    runs: Vec<RawTransitionRun>,
+    default_targets: Option<Vec<(u32, Weight)>>,
+    final_weight: Option<Weight>,
+    deterministic: bool,
+}
+
+#[derive(Clone)]
+struct RawCompressedAutomaton {
+    states: Vec<RawCompressedState>,
+    start_states: Vec<u32>,
+}
+
+fn same_raw_targets(left: &[(u32, Weight)], right: &[(u32, Weight)]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|((left_target, left_weight), (right_target, right_weight))| {
+                left_target == right_target && left_weight.ptr_key() == right_weight.ptr_key()
+            })
+}
+
+impl RawCompressedAutomaton {
+    fn from_nwa(automaton: NWA) -> Self {
+        let (states, start_states) = automaton.into_parts();
+        let states = states
+            .into_par_iter()
+            .map(|state| {
+                debug_assert!(state.epsilons.is_empty());
+                let mut runs = Vec::<RawTransitionRun>::new();
+                let mut default_targets = None;
+                let mut deterministic = true;
+                for (label, targets) in state.transitions {
+                    deterministic &= targets.len() <= 1;
+                    if targets.is_empty() {
+                        continue;
+                    }
+                    if label == DEFAULT_LABEL {
+                        default_targets = Some(targets);
+                        continue;
+                    }
+                    if let Some(last) = runs.last_mut()
+                        && last.end.checked_add(1) == Some(label)
+                        && same_raw_targets(&last.targets, &targets)
+                    {
+                        last.end = label;
+                    } else {
+                        runs.push(RawTransitionRun {
+                            start: label,
+                            end: label,
+                            targets,
+                        });
+                    }
+                }
+                RawCompressedState {
+                    runs,
+                    default_targets,
+                    final_weight: state.final_weight,
+                    deterministic,
+                }
+            })
+            .collect();
+        Self {
+            states,
+            start_states,
+        }
+    }
+
+    fn from_dwa_preserving_defaults(automaton: &DWA) -> Self {
+        let states = automaton
+            .states()
+            .par_iter()
+            .map(|state| {
+                let mut runs = Vec::<RawTransitionRun>::new();
+                let mut default_targets = None;
+                for (&label, (target, weight)) in &state.transitions {
+                    let targets = vec![(*target, weight.clone())];
+                    if label == DEFAULT_LABEL {
+                        default_targets = Some(targets);
+                        continue;
+                    }
+                    if let Some(last) = runs.last_mut()
+                        && last.end.checked_add(1) == Some(label)
+                        && same_raw_targets(&last.targets, &targets)
+                    {
+                        last.end = label;
+                    } else {
+                        runs.push(RawTransitionRun {
+                            start: label,
+                            end: label,
+                            targets,
+                        });
+                    }
+                }
+                RawCompressedState {
+                    runs,
+                    default_targets,
+                    final_weight: state.final_weight.clone(),
+                    deterministic: true,
+                }
+            })
+            .collect();
+        Self {
+            states,
+            start_states: vec![automaton.start_state()],
+        }
+    }
+
+    fn to_nwa(&self) -> NWA {
+        let states = self
+            .states
+            .iter()
+            .map(|state| {
+                let mut transitions = BTreeMap::<i32, Vec<(u32, Weight)>>::new();
+                for run in &state.runs {
+                    for label in run.start..=run.end {
+                        transitions.insert(label, run.targets.clone());
+                    }
+                }
+                if let Some(default_targets) = &state.default_targets {
+                    transitions.insert(DEFAULT_LABEL, default_targets.clone());
+                }
+                NWAState {
+                    final_weight: state.final_weight.clone(),
+                    transitions,
+                    epsilons: Vec::new(),
+                }
+            })
+            .collect();
+        NWA::from_parts(states, self.start_states.clone())
+    }
+}
+
+impl WeightRefs for RawCompressedAutomaton {
+    fn weight_refs(&self) -> Vec<&Weight> {
+        let mut weights = Vec::new();
+        for state in &self.states {
+            if let Some(weight) = &state.final_weight {
+                weights.push(weight);
+            }
+            for run in &state.runs {
+                weights.extend(run.targets.iter().map(|(_, weight)| weight));
+            }
+            if let Some(targets) = &state.default_targets {
+                weights.extend(targets.iter().map(|(_, weight)| weight));
+            }
+        }
+        weights
+    }
+
+    fn weight_refs_mut(&mut self) -> Vec<&mut Weight> {
+        let mut weights = Vec::new();
+        for state in &mut self.states {
+            if let Some(weight) = &mut state.final_weight {
+                weights.push(weight);
+            }
+            for run in &mut state.runs {
+                weights.extend(run.targets.iter_mut().map(|(_, weight)| weight));
+            }
+            if let Some(targets) = &mut state.default_targets {
+                weights.extend(targets.iter_mut().map(|(_, weight)| weight));
+            }
+        }
+        weights
+    }
+}
+
 /// Exact union/determinization specialized for epsilon-free acyclic component
 /// parser automata. Reachable singleton raw states are copied directly;
 /// synthetic subset states
@@ -2951,21 +3247,25 @@ fn determinize_epsilon_free_component_union_prechecked(
     default_positive_label_count: Option<u32>,
 ) -> (DWA, usize) {
     debug_assert!(supports_overlap_local_union(&automata));
+    let compress_started_at = Instant::now();
+    let compressed = automata
+        .into_par_iter()
+        .map(RawCompressedAutomaton::from_nwa)
+        .collect::<Vec<_>>();
+    let raw_compress_ms = compress_started_at.elapsed().as_secs_f64() * 1000.0;
+    determinize_compressed_component_union_prechecked(
+        compressed,
+        default_positive_label_count,
+        raw_compress_ms,
+    )
+}
+
+fn determinize_compressed_component_union_prechecked(
+    automata: Vec<RawCompressedAutomaton>,
+    default_positive_label_count: Option<u32>,
+    raw_compress_ms: f64,
+) -> (DWA, usize) {
     let total_started_at = Instant::now();
-
-    #[derive(Clone)]
-    struct RawTransitionRun {
-        start: i32,
-        end: i32,
-        targets: Vec<(u32, Weight)>,
-    }
-
-    struct RawCompressedState {
-        runs: Vec<RawTransitionRun>,
-        default_targets: Option<Vec<(u32, Weight)>>,
-        final_weight: Option<Weight>,
-        deterministic: bool,
-    }
 
     struct OutputTransitionRun {
         start: i32,
@@ -2982,86 +3282,42 @@ fn determinize_epsilon_free_component_union_prechecked(
         deferred_final_pairs: SmallVec<[(usize, usize); 4]>,
     }
 
-    fn same_raw_targets(left: &[(u32, Weight)], right: &[(u32, Weight)]) -> bool {
-        left.len() == right.len()
-            && left
-                .iter()
-                .zip(right)
-                .all(|((left_target, left_weight), (right_target, right_weight))| {
-                    left_target == right_target && left_weight.ptr_key() == right_weight.ptr_key()
-                })
-    }
-
     let mut next_offset = 0u32;
+    let mut starts = Vec::new();
     let components = automata
         .into_iter()
-        .map(|automaton| {
+        .map(|mut automaton| {
             let offset = next_offset;
             next_offset = next_offset
-                .checked_add(automaton.states().len() as u32)
+                .checked_add(automaton.states.len() as u32)
                 .expect("component parser-DWA state count overflow");
-            let (states, start_states) = automaton.into_parts();
-            (offset, states, start_states)
-        })
-        .collect::<Vec<_>>();
-    let mut starts = components
-        .iter()
-        .flat_map(|(offset, _, start_states)| {
-            start_states.iter().map(move |state| offset + *state)
-        })
-        .collect::<Vec<_>>();
-    let raw_chunks = components
-        .into_par_iter()
-        .map(|(offset, states, _)| {
-            states
-                .into_par_iter()
-                .map(|appended| {
-            debug_assert!(appended.epsilons.is_empty());
-            let mut runs = Vec::<RawTransitionRun>::new();
-            let mut default_targets = None;
-            let mut deterministic = true;
-            for (label, mut targets) in appended.transitions {
-                deterministic &= targets.len() <= 1;
-                for (target, _) in &mut targets {
-                    *target += offset;
+            starts.extend(
+                automaton
+                    .start_states
+                    .iter()
+                    .map(|state| offset + *state),
+            );
+            for state in &mut automaton.states {
+                for run in &mut state.runs {
+                    for (target, _) in &mut run.targets {
+                        *target += offset;
+                    }
                 }
-                if targets.is_empty() {
-                    continue;
-                }
-                if label == DEFAULT_LABEL {
-                    default_targets = Some(targets);
-                    continue;
-                }
-                if let Some(last) = runs.last_mut()
-                    && last.end.checked_add(1) == Some(label)
-                    && same_raw_targets(&last.targets, &targets)
-                {
-                    last.end = label;
-                } else {
-                    runs.push(RawTransitionRun {
-                        start: label,
-                        end: label,
-                        targets,
-                    });
+                if let Some(targets) = &mut state.default_targets {
+                    for (target, _) in targets {
+                        *target += offset;
+                    }
                 }
             }
-                    RawCompressedState {
-                runs,
-                default_targets,
-                final_weight: appended.final_weight,
-                deterministic,
-                    }
-                })
-                .collect::<Vec<_>>()
+            automaton.states
         })
         .collect::<Vec<_>>();
     let mut raw_states = Vec::<RawCompressedState>::with_capacity(next_offset as usize);
-    for chunk in raw_chunks {
-        raw_states.extend(chunk);
+    for states in components {
+        raw_states.extend(states);
     }
     starts.sort_unstable();
     starts.dedup();
-    let raw_compress_ms = total_started_at.elapsed().as_secs_f64() * 1000.0;
     if starts.is_empty() {
         return (DWA::new(0, 0), 0);
     }
@@ -3764,7 +4020,7 @@ fn determinize_epsilon_free_component_union_prechecked(
 
 
 struct UnmappedComponentParserArtifact {
-    automaton: NWA,
+    automaton: RawCompressedAutomaton,
     possible_matches: PossibleMatches,
     top_accept_parts: BTreeMap<i32, Vec<Weight>>,
 }
@@ -3784,10 +4040,14 @@ fn prepare_unmapped_component_parser_artifacts(
         .zip(terminal_offsets.par_iter().copied())
         .map(|(component, terminal_offset)| {
             let possible_matches = component_possible_matches(&component, terminal_offset)?;
-            let mut automaton = component_parser_nwa_with_top_accept(
-                &component,
-                !transport_top_accept_directly,
-            )?;
+            let mut automaton = if transport_top_accept_directly {
+                component_parser_compressed(&component)?
+            } else {
+                RawCompressedAutomaton::from_nwa(component_parser_nwa_with_top_accept(
+                    &component,
+                    true,
+                )?)
+            };
             let top_accept_parts = if transport_top_accept_directly {
                 transported_component_top_accept_parts(&component)?
             } else {
@@ -3798,7 +4058,7 @@ fn prepare_unmapped_component_parser_artifacts(
                     .constraint
                     .ignore_terminal
                     .and_then(|ignore| possible_matches.get(&(terminal_offset + ignore)));
-                strip_unscoped_ignore_identity(&mut automaton, ignore_weight);
+                strip_unscoped_ignore_identity_compressed(&mut automaton, ignore_weight);
             }
             Ok(UnmappedComponentParserArtifact {
                 automaton,
@@ -3818,7 +4078,7 @@ struct BoundaryRefinementPlan {
 }
 
 struct PreparedOwnedComponentArtifacts {
-    automata: Vec<NWA>,
+    automata: Vec<RawCompressedAutomaton>,
     possible_matches: PossibleMatches,
     top_accept_parts: BTreeMap<i32, Vec<Weight>>,
     id_map: InternalIdMap,
@@ -3969,7 +4229,7 @@ fn remap_unmapped_component_artifacts(
     base_to_common_tokens: Option<&[Vec<u32>]>,
     common_tsid_count: usize,
 ) -> Result<(
-    Vec<NWA>,
+    Vec<RawCompressedAutomaton>,
     PossibleMatches,
     BTreeMap<i32, Vec<Weight>>,
     f64,
@@ -6945,7 +7205,9 @@ pub(crate) fn compose_constraints_owned_parent(
                         id_num_tsids as usize,
                     );
                     drop(boundary_weights);
-                    automata.push(parser_nwa_preserve_defaults(&boundary_dwa));
+                    automata.push(RawCompressedAutomaton::from_dwa_preserving_defaults(
+                        &boundary_dwa,
+                    ));
                     let automata_len = automata.len();
                     let validation_automata = std::env::var_os(
                         "GLRMASK_VALIDATE_COMPOSE_SINGLE_PASS_UNION",
@@ -6953,11 +7215,11 @@ pub(crate) fn compose_constraints_owned_parent(
                     .is_some()
                     .then(|| automata.clone());
                     let direct_started_at = Instant::now();
-                    debug_assert!(supports_overlap_local_union(&automata));
                     let (parser_dwa, synthetic_states) =
-                        determinize_epsilon_free_component_union_prechecked(
+                        determinize_compressed_component_union_prechecked(
                             automata,
                             Some(num_parser_states),
+                            0.0,
                         );
                     let union_path = "overlap_local";
                     let direct_ms = direct_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -6969,7 +7231,7 @@ pub(crate) fn compose_constraints_owned_parent(
                             let explicit = if index + 1 == automata.len() {
                                 explicit_parser_nwa(&boundary_dwa, num_parser_states)
                             } else {
-                                automaton.clone()
+                                automaton.to_nwa()
                             };
                             let body = reference.append_with_body(&explicit);
                             starts.extend(body.start_states);
@@ -6998,9 +7260,12 @@ pub(crate) fn compose_constraints_owned_parent(
                 None => {
                     let automata_len = automata.len();
                     let direct_started_at = Instant::now();
-                    debug_assert!(supports_overlap_local_union(&automata));
                     let (parser_dwa, synthetic_states) =
-                        determinize_epsilon_free_component_union_prechecked(automata, None);
+                        determinize_compressed_component_union_prechecked(
+                            automata,
+                            None,
+                            0.0,
+                        );
                     let union_path = "overlap_local";
                     let direct_ms = direct_started_at.elapsed().as_secs_f64() * 1000.0;
                     if compose_profile_enabled() {
