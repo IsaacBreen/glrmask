@@ -988,6 +988,21 @@ pub fn compose_subgrammar_tables_explicit(
                 }
             }
 
+            if child_input.start_nullable {
+                // Nullable-start metadata is not represented by an ordinary
+                // child-table EOF action: the standalone table records it out
+                // of band for later embedding. Reify that empty derivation on
+                // the linker's zero-width control label. The root reduction
+                // reaches `mapped_accept` through the copied start-row goto;
+                // the existing accept-state control action then returns to the
+                // parent continuation exactly like a non-empty child parse.
+                merge_action_cell(
+                    &mut action[mapped_start as usize],
+                    control,
+                    Action::Reduce(child_root, 0),
+                )?;
+            }
+
             for &(state, terminal) in &child.forwarded_shifts {
                 forwarded_shifts.insert((
                     state_map[state as usize],
@@ -1431,6 +1446,48 @@ mod tests {
                 "explicit control table differs from optimized splice for {word:?}",
             );
         });
+    }
+
+    #[test]
+    fn explicit_control_table_completes_nullable_child_before_continuation() {
+        let (child, child_analysis) = table(
+            r#"
+                start child;
+                nt item ::= "a";
+                nt child ::= item?;
+            "#,
+        );
+        let (parent, parent_analysis) = table(
+            r#"
+                start document;
+                t SUB ::= @token(999);
+                t DONE ::= @token(1000);
+                nt document ::= SUB DONE;
+            "#,
+        );
+        let input = SubgrammarTableInput {
+            placeholder_terminal: terminal(&parent_analysis, "SUB"),
+            table: &child,
+            ignore_terminal: None,
+            start_nullable: true,
+        };
+        let optimized = compose_subgrammar_tables(&parent, std::slice::from_ref(&input)).unwrap();
+        let explicit =
+            compose_subgrammar_tables_explicit(&parent, None, std::slice::from_ref(&input))
+                .unwrap();
+
+        let done = terminal(&parent_analysis, "DONE");
+        let child_a = explicit.terminal_offsets[1] + terminal(&child_analysis, "a");
+        for word in [vec![done], vec![child_a, done]] {
+            assert!(
+                accepts(&optimized.table, &word),
+                "optimized nullable composition rejected {word:?}",
+            );
+            assert!(
+                accepts(&explicit.table, &word),
+                "explicit nullable composition rejected {word:?}",
+            );
+        }
     }
 
     #[test]
