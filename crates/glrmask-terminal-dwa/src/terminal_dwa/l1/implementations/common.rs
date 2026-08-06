@@ -18,13 +18,34 @@ pub(super) struct Finished {
     pub token_classes: usize,
 }
 
-fn compact<T: Ord>(values: impl IntoIterator<Item = T>) -> (Vec<u32>, Vec<usize>) {
-    let mut ids = BTreeMap::new();
-    let mut reps = Vec::new();
-    let classes = values.into_iter().enumerate().map(|(i, value)| match ids.get(&value) {
-        Some(&id) => id,
-        None => { let id = reps.len() as u32; ids.insert(value, id); reps.push(i); id }
-    }).collect();
+fn compact_columns(rows: &[Vec<u32>], tokens: usize, signatures: usize) -> (Vec<u32>, Vec<usize>) {
+    let mut classes = vec![0u32; tokens];
+    let mut next = vec![0u32; tokens];
+    let mut class_count = 1usize;
+    let mut seen = Vec::<u32>::new();
+    let mut ids = Vec::<u32>::new();
+    for (round, row) in rows.iter().enumerate() {
+        let needed = class_count * signatures;
+        seen.resize(needed, u32::MAX);
+        ids.resize(needed, 0);
+        let epoch = round as u32;
+        let mut next_count = 0u32;
+        for token in 0..tokens {
+            let key = classes[token] as usize * signatures + row[token] as usize;
+            if seen[key] != epoch {
+                seen[key] = epoch;
+                ids[key] = next_count;
+                next_count += 1;
+            }
+            next[token] = ids[key];
+        }
+        std::mem::swap(&mut classes, &mut next);
+        class_count = next_count as usize;
+    }
+    let mut reps = vec![usize::MAX; class_count];
+    for (token, &class) in classes.iter().enumerate() {
+        reps[class as usize] = reps[class as usize].min(token);
+    }
     (classes, reps)
 }
 
@@ -38,9 +59,7 @@ pub(super) fn finish(
     total_ms: impl FnOnce() -> f64,
 ) -> Option<Finished> {
     let compact_started = Instant::now();
-    let (token_class, token_reps) = compact((0..aliases.len()).map(|v|
-        rows.iter().map(|row| row[v]).collect::<Vec<_>>()
-    ));
+    let (token_class, token_reps) = compact_columns(&rows, aliases.len(), signatures.len());
     let initial = input.tokenizer.initial_state_id() as usize;
     let initial_class = state_class[initial];
     if state_class.iter().filter(|&&class| class == initial_class).count() > 1 {
