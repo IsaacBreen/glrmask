@@ -2,9 +2,9 @@
 //! length ≤ 1.
 
 use crate::automata::lexer::Lexer;
+pub mod implementations;
 pub mod max_length;
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
@@ -944,79 +944,29 @@ pub fn count_l1_equivalence_classes(
         .len()
 }
 
-
-fn time_scalar_l1_reference(
-    partition: &str,
+/// Build an L1 id map and terminal DWA using the configured implementation plan.
+pub fn build_l1_id_map_and_terminal_dwa(
+    partition_label: &str,
     tokenizer: &Tokenizer,
     vocab: &Vocab,
-    active: &[bool],
-) {
-    if std::env::var("GLRMASK_TIME_L1_REFERENCE_PARTITION").ok().as_deref() != Some(partition) {
-        return;
-    }
-    let total = Instant::now();
-    let tokens = vocab.iter().map(|(id, bytes)| (id, bytes.to_vec())).collect::<Vec<_>>();
-    let scan = Instant::now();
-    let mut row_ids = BTreeMap::<Vec<Vec<u32>>, u32>::new();
-    let mut state_classes = Vec::with_capacity(tokenizer.num_states() as usize);
-    let mut rows = Vec::<Vec<Vec<u32>>>::new();
-    for q in 0..tokenizer.num_states() {
-        let row = tokens.iter().map(|(_, bytes)| {
-            let mut signature = BTreeSet::new();
-            for end in tokenizer.execute_from_state_end_only(bytes, q) {
-                signature.extend(tokenizer.matched_terminals_iter(end).filter(|&t| active.get(t as usize) == Some(&true)));
-                signature.extend(tokenizer.tokens_accessible_from_state(end).iter().filter(|&t| active.get(t) == Some(&true)).map(|t| t as u32));
-            }
-            signature.into_iter().collect::<Vec<_>>()
-        }).collect::<Vec<_>>();
-        let class = if let Some(&class) = row_ids.get(&row) {
-            class
-        } else {
-            let class = rows.len() as u32;
-            row_ids.insert(row.clone(), class);
-            rows.push(row);
-            class
-        };
-        state_classes.push(class);
-    }
-    let scan_ms = scan.elapsed().as_secs_f64() * 1000.0;
-
-    let compact = Instant::now();
-    let mut column_ids = BTreeMap::<Vec<Vec<u32>>, u32>::new();
-    let mut token_classes = Vec::with_capacity(tokens.len());
-    for v in 0..tokens.len() {
-        let column = rows.iter().map(|row| row[v].clone()).collect::<Vec<_>>();
-        let next = column_ids.len() as u32;
-        token_classes.push(*column_ids.entry(column).or_insert(next));
-    }
-    let compact_ms = compact.elapsed().as_secs_f64() * 1000.0;
-
-    let assemble = Instant::now();
-    let mut edges = BTreeMap::<u32, Vec<BTreeSet<u32>>>::new();
-    for (q, row) in rows.iter().enumerate() {
-        for (v, terminals) in row.iter().enumerate() {
-            for &terminal in terminals {
-                edges.entry(terminal).or_insert_with(|| vec![BTreeSet::new(); rows.len()])[q]
-                    .insert(token_classes[v]);
-            }
-        }
-    }
-    let assemble_ms = assemble.elapsed().as_secs_f64() * 1000.0;
-    eprintln!(
-        "[l1-reference] partition={} states={} tokens={} cells={} state_classes={} token_classes={} terminals={} scan_ms={:.3} compact_ms={:.3} assemble_ms={:.3} total_ms={:.3}",
-        partition,
-        tokenizer.num_states(),
-        tokens.len(),
-        tokenizer.num_states() as usize * tokens.len(),
-        rows.len(),
-        column_ids.len(),
-        edges.len(),
-        scan_ms,
-        compact_ms,
-        assemble_ms,
-        total.elapsed().as_secs_f64() * 1000.0,
-    );
-    std::hint::black_box((state_classes, token_classes, edges));
+    terminal_coloring: &TerminalColoring,
+    use_terminal_coloring: bool,
+    ignore_terminal: Option<TerminalID>,
+    grammar: &AnalyzedGrammar,
+    active_terminals: &[bool],
+    flat_trans: &Arc<[u32]>,
+    transitions_by_byte: Option<&[u32]>,
+    initial_state_map: Option<&ManyToOneIdMap>,
+    shared_generic_nfa_topology: Option<&super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTopology>,
+    shared_generic_nfa_trie: Option<&super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTrie>,
+    subset_parent_order: Option<&L1IdentityVocabOrder>,
+) -> Option<LocalIdMapTerminalDwa> {
+    implementations::build_from_env(implementations::BuildInput {
+        partition_label, tokenizer, vocab, terminal_coloring, use_terminal_coloring,
+        ignore_terminal, grammar, active_terminals, flat_trans, transitions_by_byte,
+        initial_state_map, shared_generic_nfa_topology, shared_generic_nfa_trie,
+        subset_parent_order,
+    })
 }
 
 /// Build an L1 id_map and terminal DWA for the given vocab and terminal set.
@@ -1028,7 +978,7 @@ fn time_scalar_l1_reference(
 /// Returns `None` if the vocab is empty or no terminal matches exist.
 /// The caller should pre-check `count_l1_equivalence_classes()` and merge
 /// L1 terminals into L2+ when the count exceeds `MAX_L1_TSIDS`.
-pub fn build_l1_id_map_and_terminal_dwa(
+pub(super) fn build_l1_id_map_and_terminal_dwa_production(
     partition_label: &str,
     tokenizer: &Tokenizer,
     vocab: &Vocab,
@@ -1051,7 +1001,6 @@ pub fn build_l1_id_map_and_terminal_dwa(
     if vocab.is_empty() {
         return None;
     }
-    time_scalar_l1_reference(partition_label, tokenizer, vocab, active_terminals);
 
     let generic_epsilon_nfa = tokenizer.has_epsilon_transitions()
         && !tokenizer.has_scalar_deterministic_dispatch();
