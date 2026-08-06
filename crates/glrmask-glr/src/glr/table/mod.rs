@@ -21,6 +21,8 @@ pub use compose::{
 };
 
 use build::{build_table, build_table_with_default_construction, Item, PendingAction};
+#[allow(unused_imports)]
+pub use optimize::ControlEliminationReport;
 use optimize::merge_same_core_lr1_states;
 
 use row::{ActionRow, GotoRow};

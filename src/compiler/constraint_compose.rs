@@ -27,7 +27,7 @@ use crate::automata::weighted_u32::equivalence::find_difference;
 use crate::automata::weighted_u32::dwa::{DWA, DWAState};
 use crate::automata::weighted_u32::nwa::NWA;
 use crate::automata::weighted_u32::terminal_automaton::TerminalAutomaton;
-use crate::compiler::glr::analysis::AnalyzedGrammar;
+use crate::compiler::glr::analysis::{AnalyzedGrammar, EOF};
 use crate::compiler::glr::labels::{
     DEFAULT_LABEL, encode_negative_label, encode_positive_label, is_negative_label,
     negative_to_positive_label,
@@ -48,7 +48,7 @@ use crate::compiler::constraint_possible_matches::{
     build_internal_token_bytes_from_groups, runtime_dynamic_vocab_for_vocab,
 };
 use crate::compiler::glr::table::{
-    Action, ComposedTable, SubgrammarTableInput, compose_subgrammar_tables,
+    Action, ComposedTable, ControlEliminationReport, SubgrammarTableInput, compose_subgrammar_tables,
     compose_subgrammar_tables_explicit,
 };
 use crate::ds::bitset::BitSet;
@@ -70,6 +70,20 @@ use structural_sharing::{
 fn compose_profile_enabled() -> bool {
     std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some()
         || std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+}
+
+fn eliminate_composed_runtime_controls(
+    composed: &mut ComposedTable,
+) -> Result<Option<ControlEliminationReport>, String> {
+    if composed.control_terminals.is_empty() {
+        debug_assert!(composed.table.control_terminals.is_empty());
+        return Ok(None);
+    }
+    debug_assert_eq!(composed.control_terminals, composed.table.control_terminals);
+    let report = composed.table.eliminate_control_terminals_exact()?;
+    composed.control_terminals.clear();
+    debug_assert!(composed.table.control_terminals.is_empty());
+    Ok(Some(report))
 }
 
 #[derive(Clone, Copy)]
@@ -4517,6 +4531,29 @@ fn components_have_no_explicit_controls(
         .all(|component| component.table.control_terminals.is_empty())
 }
 
+fn components_have_no_compiled_eof_stack_rewrites(
+    parent: &Constraint,
+    children: &[CompiledSubgrammarInput<'_>],
+) -> bool {
+    std::iter::once(parent)
+        .chain(children.iter().map(|child| child.constraint))
+        .all(|component| {
+            component.table.action.iter().all(|row| {
+                !matches!(
+                    row.get(&EOF),
+                    Some(
+                        Action::Shift(..)
+                            | Action::StackShifts(_)
+                            | Action::GuardedStackShifts(_)
+                            | Action::ReplaceShifts(_)
+                            | Action::Skip
+                            | Action::Split { shift: Some(_), .. }
+                    )
+                )
+            })
+        })
+}
+
 /// The legacy splice identifies child start/accept states with parent
 /// caller/continuation states. That optimization is not equivalent when one
 /// subgrammar call can directly follow another without consuming a real parent
@@ -5049,6 +5086,7 @@ pub(crate) fn compose_constraints(
     let use_legacy_splice =
         global_ignores
             && components_have_no_explicit_controls(parent, children)
+            && components_have_no_compiled_eof_stack_rewrites(parent, children)
             && legacy_splice_has_only_byte_terminal_continuations(parent, children);
     let table_started_at = Instant::now();
     let mut composed_table = if use_legacy_splice {
@@ -5131,6 +5169,18 @@ pub(crate) fn compose_constraints(
     let (expected_tokenizer_state_offsets, merged_tokenizer_state_count) =
         component_tokenizer_state_layout(&component_constraints);
 
+    let special_token_terminals = merged_special_token_terminals(
+        parent,
+        children,
+        &composed_table.terminal_offsets,
+        &composed_table.table,
+        &composed_table.control_terminals,
+    );
+    let control_elimination_report = eliminate_composed_runtime_controls(&mut composed_table)?;
+    let control_elimination_ms = control_elimination_report
+        .as_ref()
+        .map(|report| report.elapsed_ms)
+        .unwrap_or(0.0);
     let parser_components = component_constraints
         .iter()
         .enumerate()
@@ -5175,13 +5225,7 @@ pub(crate) fn compose_constraints(
             per_component,
         );
     }
-    let special_token_terminals = merged_special_token_terminals(
-        parent,
-        children,
-        &composed_table.terminal_offsets,
-        &composed_table.table,
-        &composed_table.control_terminals,
-    );
+
     let live_special_token_ids = special_token_terminals
         .iter()
         .map(|special| special.token_id)
@@ -5441,7 +5485,7 @@ pub(crate) fn compose_constraints(
     let finalize_ms = finalize_started_at.elapsed().as_secs_f64() * 1000.0;
     if compose_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][constraint_composition] components={} table_ms={table_ms:.3} tokenizer_ms={tokenizer_ms:.3} reuse_ms={reuse_ms:.3} boundary_ms={boundary_ms:.3} union_ms={union_ms:.3} closure_prime_ms={closure_prime_ms:.3} finalize_ms={finalize_ms:.3} total_ms={:.3}",
+            "[glrmask/profile][constraint_composition] components={} table_ms={table_ms:.3} control_elimination_ms={control_elimination_ms:.3} tokenizer_ms={tokenizer_ms:.3} reuse_ms={reuse_ms:.3} boundary_ms={boundary_ms:.3} union_ms={union_ms:.3} closure_prime_ms={closure_prime_ms:.3} finalize_ms={finalize_ms:.3} total_ms={:.3}",
             children.len() + 1,
             total_started_at.elapsed().as_secs_f64() * 1000.0,
         );
@@ -5530,6 +5574,7 @@ pub(crate) fn compose_constraints_owned_parent(
     let use_legacy_splice =
         global_ignores
             && components_have_no_explicit_controls(&parent, children)
+            && components_have_no_compiled_eof_stack_rewrites(&parent, children)
             && legacy_splice_has_only_byte_terminal_continuations(&parent, children);
     let table_started_at = Instant::now();
     let mut composed_table = if use_legacy_splice {
@@ -5605,6 +5650,21 @@ pub(crate) fn compose_constraints_owned_parent(
         .collect::<Vec<_>>();
     let (expected_tokenizer_state_offsets, merged_tokenizer_state_count) =
         component_tokenizer_state_layout_owned_parent(&component_constraints);
+
+    let component_views_ms = metadata_started_at.elapsed().as_secs_f64() * 1000.0;
+    let specials_started_at = Instant::now();
+    let special_token_terminals = merged_special_token_terminals(
+        &parent,
+        children,
+        &composed_table.terminal_offsets,
+        &composed_table.table,
+        &composed_table.control_terminals,
+    );
+    let control_elimination_report = eliminate_composed_runtime_controls(&mut composed_table)?;
+    let control_elimination_ms = control_elimination_report
+        .as_ref()
+        .map(|report| report.elapsed_ms)
+        .unwrap_or(0.0);
     let parser_components = component_constraints
         .iter()
         .enumerate()
@@ -5649,15 +5709,6 @@ pub(crate) fn compose_constraints_owned_parent(
             per_component,
         );
     }
-    let component_views_ms = metadata_started_at.elapsed().as_secs_f64() * 1000.0;
-    let specials_started_at = Instant::now();
-    let special_token_terminals = merged_special_token_terminals(
-        &parent,
-        children,
-        &composed_table.terminal_offsets,
-        &composed_table.table,
-        &composed_table.control_terminals,
-    );
     let live_special_token_ids = special_token_terminals
         .iter()
         .map(|special| special.token_id)
@@ -6162,7 +6213,7 @@ pub(crate) fn compose_constraints_owned_parent(
     let finalize_ms = finalize_started_at.elapsed().as_secs_f64() * 1000.0;
     if compose_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][constraint_composition_owned_parent] components={} table_ms={table_ms:.3} tokenizer_ms={tokenizer_ms:.3} coordinate_ms={coordinate_ms:.3} parser_extract_ms={parser_extract_ms:.3} boundary_ms={boundary_ms:.3} preparation_ms={preparation_ms:.3} terminal_live_ms={terminal_live_ms:.3} union_ms={union_ms:.3} token_cache_prebuild_ms={token_cache_prebuild_ms:.3} finalize_ms={finalize_ms:.3} total_ms={:.3}",
+            "[glrmask/profile][constraint_composition_owned_parent] components={} table_ms={table_ms:.3} control_elimination_ms={control_elimination_ms:.3} tokenizer_ms={tokenizer_ms:.3} coordinate_ms={coordinate_ms:.3} parser_extract_ms={parser_extract_ms:.3} boundary_ms={boundary_ms:.3} preparation_ms={preparation_ms:.3} terminal_live_ms={terminal_live_ms:.3} union_ms={union_ms:.3} token_cache_prebuild_ms={token_cache_prebuild_ms:.3} finalize_ms={finalize_ms:.3} total_ms={:.3}",
             children.len() + 1,
             total_started_at.elapsed().as_secs_f64() * 1000.0,
         );
@@ -7209,12 +7260,7 @@ mod tests {
                     && matches!(action, Action::Skip)
             })
         }));
-        assert!(composed.table.action.iter().all(|row| {
-            row.iter().all(|(terminal, action)| {
-                !composed.table.skip_terminals.contains(&terminal)
-                    || matches!(action, Action::Skip)
-            })
-        }));
+        assert!(composed.table.control_terminals.is_empty());
 
         assert_constraints_equivalent_on_reachable_prefixes(
             &composed,
@@ -7297,12 +7343,7 @@ mod tests {
         for constraint in [&composed, &loaded] {
             assert!(constraint.ignore_terminal.is_none());
             assert_eq!(constraint.table.skip_terminals.len(), 2);
-            assert!(constraint.table.action.iter().all(|row| {
-                row.iter().all(|(terminal, action)| {
-                    !constraint.table.skip_terminals.contains(&terminal)
-                        || matches!(action, Action::Skip)
-                })
-            }));
+            assert!(constraint.table.control_terminals.is_empty());
         }
 
         // The current inline scoped-ignore lowering materialises nullable skip
@@ -7541,7 +7582,7 @@ mod tests {
     }
 
     #[test]
-    fn adjacent_children_with_uniform_ignore_use_global_ignore_and_explicit_controls() {
+    fn adjacent_children_with_uniform_ignore_compile_controls_and_keep_global_ignore() {
         let vocab = Vocab::new(vec![
             (0, b"X a".to_vec()),
             (1, b" a".to_vec()),
@@ -7595,8 +7636,8 @@ mod tests {
         for constraint in [&composed, &loaded] {
             assert!(constraint.ignore_terminal.is_some());
             assert!(
-                !constraint.table.control_terminals.is_empty(),
-                "adjacent calls must retain explicit entry/return controls"
+                constraint.table.control_terminals.is_empty(),
+                "linker entry/return controls must be compiled out of the runtime table"
             );
             assert!(
                 constraint.table.skip_terminals.is_empty(),
@@ -7636,10 +7677,9 @@ mod tests {
             4,
         );
 
-        // Existing explicit controls do not make the common ignore scoped.
-        // They only prohibit the legacy table splice: the outer composition
-        // must retain the nested controls while continuing to erase WS
-        // globally.
+        // The compiled child no longer carries runtime controls. Reusing it in
+        // an outer composition must retain the same globally erased ignore and
+        // compile the new call/return controls away again.
         let outer_parent = Constraint::from_glrm_grammar(
             r#"
                 start outer;
@@ -7672,7 +7712,7 @@ mod tests {
         for constraint in [&outer, &outer_from_loaded] {
             assert!(constraint.ignore_terminal.is_some());
             assert!(constraint.ignore_expr.is_some());
-            assert!(!constraint.table.control_terminals.is_empty());
+            assert!(constraint.table.control_terminals.is_empty());
             assert!(constraint.table.skip_terminals.is_empty());
             assert!(constraint.table.action.iter().all(|row| {
                 row.iter().all(|(_, action)| !matches!(action, Action::Skip))
@@ -7998,6 +8038,116 @@ mod tests {
     }
 
     #[test]
+
+    fn composition_compiles_named_special_continuation_into_static_mask() {
+        const SPECIAL_TOKEN: u32 = 1000;
+        let vocab = Vocab::new(vec![
+            (0, b"Xa".to_vec()),
+            (1, b"X".to_vec()),
+            (2, b"a".to_vec()),
+        ]);
+        let parent = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t SUB ::= @token(999);
+                t DONE ::= @token(1000);
+                nt document ::= "X" SUB DONE;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child = Constraint::from_glrm_grammar(
+            r#"
+                start child;
+                nt child ::= "a";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let monolithic = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t DONE ::= @token(1000);
+                nt document ::= "X" "a" DONE;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let composed = parent
+            .compose_subgrammars(&[("SUB", &child)], &vocab)
+            .unwrap();
+
+        assert!(composed.table.control_terminals.is_empty());
+        for content in [vec![0], vec![1, 2]] {
+            let mut actual = composed.start();
+            let mut expected = monolithic.start();
+            for token in content {
+                assert_eq!(actual.mask(), expected.mask());
+                actual.commit_token(token).unwrap();
+                expected.commit_token(token).unwrap();
+            }
+            assert_eq!(actual.mask(), expected.mask());
+            assert_eq!(actual.forced(), vec![SPECIAL_TOKEN]);
+            actual.commit_token(SPECIAL_TOKEN).unwrap();
+            expected.commit_token(SPECIAL_TOKEN).unwrap();
+            assert!(actual.is_finished());
+            assert!(expected.is_finished());
+        }
+    }
+
+    #[test]
+    fn nullable_child_to_named_special_is_static_masked() {
+        const SPECIAL_TOKEN: u32 = 1000;
+        let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
+        let parent = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t SUB ::= @token(999);
+                t DONE ::= @token(1000);
+                nt document ::= SUB DONE;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child = Constraint::from_glrm_grammar(
+            r#"
+                start child;
+                nt item ::= "a";
+                nt child ::= item?;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let monolithic = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t DONE ::= @token(1000);
+                nt item ::= "a";
+                nt document ::= item? DONE;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let composed = parent
+            .compose_subgrammars(&[("SUB", &child)], &vocab)
+            .unwrap();
+
+        assert!(composed.table.control_terminals.is_empty());
+        for sequence in [vec![SPECIAL_TOKEN], vec![0, SPECIAL_TOKEN]] {
+            let mut actual = composed.start();
+            let mut expected = monolithic.start();
+            for token in sequence {
+                assert_eq!(actual.mask(), expected.mask());
+                actual.commit_token(token).unwrap();
+                expected.commit_token(token).unwrap();
+            }
+            assert!(actual.is_finished());
+            assert!(expected.is_finished());
+        }
+    }
+
+    #[test]
+
     fn composition_rejects_placeholder_token_id_reused_by_live_end_token() {
         const SHARED_TOKEN: u32 = 999;
         let vocab = Vocab::new(vec![
