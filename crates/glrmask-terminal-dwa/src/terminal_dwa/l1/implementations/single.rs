@@ -303,12 +303,27 @@ pub(super) fn build(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
         live_tokens(0, state, &trie, &info, &transitions, &loops, &mut tokens, &mut subtree_skips);
         token_sets.insert(state, tokens);
     }
+    // Full residual-root vectors are an exact preclassification of raw lexer
+    // states. Build one expensive vocabulary row per distinct vector, not per
+    // raw state, then retain the later vocabulary-specific row merge.
+    let mut root_vector_ids = FxHashMap::<Vec<u32>, u32>::default();
+    let mut root_vectors = Vec::<Vec<u32>>::new();
+    let mut raw_root_class = vec![0u32; roots.len()];
+    for (raw, root_row) in roots.iter().enumerate() {
+        let next = root_vectors.len() as u32;
+        raw_root_class[raw] = *root_vector_ids.entry(root_row.clone()).or_insert_with(|| {
+            root_vectors.push(root_row.clone());
+            next
+        });
+    }
+
     let mut signature_ids = FxHashMap::<(u32, u32), u32>::default();
     let mut signatures = vec![Vec::<u32>::new()];
-    let mut state_class = vec![0; roots.len()];
     let mut row_ids = FxHashMap::<Vec<u32>, u32>::default();
     let mut rows = Vec::<Vec<u32>>::new();
-    for (raw, root_row) in roots.iter().enumerate() {
+    let mut root_to_state_class = vec![0u32; root_vectors.len()];
+    let mut signature_updates = 0usize;
+    for (root_class, root_row) in root_vectors.iter().enumerate() {
         let mut row = vec![0u32; aliases.len()];
         for (&terminal, &state) in projected.terminals.iter().zip(root_row) {
             if state == DEAD {
@@ -323,15 +338,19 @@ pub(super) fn build(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
                     signatures.push(signature);
                     next
                 });
+                signature_updates += 1;
             }
         }
         let next = rows.len() as u32;
-        let class = *row_ids.entry(row.clone()).or_insert_with(|| {
+        root_to_state_class[root_class] = *row_ids.entry(row.clone()).or_insert_with(|| {
             rows.push(row);
             next
         });
-        state_class[raw] = class;
     }
+    let state_class = raw_root_class
+        .into_iter()
+        .map(|class| root_to_state_class[class as usize])
+        .collect::<Vec<_>>();
     let traverse_ms = traverse_started.elapsed().as_secs_f64() * 1000.0;
     let finished = common::finish(
         input,
@@ -344,7 +363,7 @@ pub(super) fn build(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
     )?;
     if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
         eprintln!(
-            "[glrmask/profile][l1_single] partition={} raw_states={} terminals={} bytes={} projected_states={} expanded={} minimized_states={} root_classes={} subtree_skips={} signatures={} state_classes={} token_classes={} project_ms={:.3} minimize_ms={:.3} traverse_ms={:.3} compact_ms={:.3} build_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][l1_single] partition={} raw_states={} terminals={} bytes={} projected_states={} expanded={} minimized_states={} root_classes={} root_vectors={} signature_updates={} subtree_skips={} signatures={} state_classes={} token_classes={} project_ms={:.3} minimize_ms={:.3} traverse_ms={:.3} compact_ms={:.3} build_ms={:.3} total_ms={:.3}",
             input.partition_label,
             input.tokenizer.num_states(),
             projected.terminals.len(),
@@ -353,6 +372,8 @@ pub(super) fn build(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
             expanded,
             transitions.len(),
             token_sets.len(),
+            root_vectors.len(),
+            signature_updates,
             subtree_skips,
             signatures.len(),
             finished.state_classes,
