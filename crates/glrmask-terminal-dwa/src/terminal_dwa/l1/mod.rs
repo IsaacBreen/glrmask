@@ -848,6 +848,15 @@ fn l1_sequential_group_assembly_override() -> Option<bool> {
     })
 }
 
+fn l1_concurrent_dominant_profile_enabled() -> bool {
+    std::env::var("GLRMASK_L1_CONCURRENT_DOMINANT_PROFILE")
+        .map(|value| {
+            let trimmed = value.trim();
+            !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false)
+}
+
 #[inline]
 fn auto_use_sequential_l1_group_assembly(
     contribution_group_visits: usize,
@@ -3026,14 +3035,6 @@ fn find_l1_exact_state_equivalence_by_components_with_first_target_cache(
                     token_buckets.token_indices_by_first_byte[*byte as usize].len() >= 10_000
                 })
                 .map(|(index, _)| index);
-            let dominant_started_at = profile_enabled.then(Instant::now);
-            let dominant_batch = dominant.map(|index| {
-                let (byte, targets) = &byte_target_groups[index];
-                build_byte_profiles(*byte, targets)
-            });
-            let dominant_ms = dominant_started_at
-                .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-
             const TASK_FLAT: u8 = 0;
             const TASK_PACKED: u8 = 1;
             const TASK_WHOLE: u8 = 2;
@@ -3093,40 +3094,26 @@ fn find_l1_exact_state_equivalence_by_components_with_first_target_cache(
 
             tasks.sort_unstable_by(|left, right| right.3.cmp(&left.3));
             let task_count = tasks.len();
-            let remaining_started_at = profile_enabled.then(Instant::now);
-            let task_batches = tasks
-                .par_iter()
-                .map(|(kind, byte, targets, _)| {
-                    let byte_idx = *byte as usize;
-                    let token_ids = &token_buckets.token_indices_by_first_byte[byte_idx];
-                    let suffix_lcps = &token_buckets.suffix_lcps_by_first_byte[byte_idx];
-                    match *kind {
-                        TASK_FLAT => l1_bucket_suffix_signature_profiles_batched_arc(
-                            *byte,
-                            targets,
-                            sorted_entries,
-                            token_ids,
-                            suffix_lcps,
-                            &token_buckets.suffix_subtree_bytes[byte_idx],
-                            &token_buckets.suffix_first_bytes_by_bucket[byte_idx],
-                            token_buckets.has_empty_suffix_by_bucket[byte_idx],
-                            &state_to_terminal_signature,
-                            flat_trans,
-                            transitions_by_byte,
-                            num_tokenizer_states,
-                            Some(&active_language),
-                        ),
-                        TASK_PACKED => {
-                            let prebuilt_trie = token_buckets
-                                .packed_suffix_tries_by_first_byte[byte_idx]
-                                .get_or_init(|| {
-                                    Arc::new(L1PackedSuffixTrie::build(
-                                        sorted_entries,
-                                        token_ids,
-                                        suffix_lcps,
-                                    ))
-                                });
-                            l1_bucket_suffix_signature_profiles_packed(
+            let build_dominant = || {
+                let started_at = profile_enabled.then(Instant::now);
+                let batch = dominant.map(|index| {
+                    let (byte, targets) = &byte_target_groups[index];
+                    build_byte_profiles(*byte, targets)
+                });
+                let elapsed_ms = started_at
+                    .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+                (batch, elapsed_ms)
+            };
+            let build_remaining = || {
+                let started_at = profile_enabled.then(Instant::now);
+                let task_batches = tasks
+                    .par_iter()
+                    .map(|(kind, byte, targets, _)| {
+                        let byte_idx = *byte as usize;
+                        let token_ids = &token_buckets.token_indices_by_first_byte[byte_idx];
+                        let suffix_lcps = &token_buckets.suffix_lcps_by_first_byte[byte_idx];
+                        match *kind {
+                            TASK_FLAT => l1_bucket_suffix_signature_profiles_batched_arc(
                                 *byte,
                                 targets,
                                 sorted_entries,
@@ -3136,53 +3123,92 @@ fn find_l1_exact_state_equivalence_by_components_with_first_target_cache(
                                 &token_buckets.suffix_first_bytes_by_bucket[byte_idx],
                                 token_buckets.has_empty_suffix_by_bucket[byte_idx],
                                 &state_to_terminal_signature,
-                                self_loop_bytes_by_state,
                                 flat_trans,
                                 transitions_by_byte,
                                 num_tokenizer_states,
                                 Some(&active_language),
-                                horizon_maps.as_deref(),
-                                suffix_horizon_by_first_byte[byte_idx],
-                                Some(prebuilt_trie.as_ref()),
-                            )
+                            ),
+                            TASK_PACKED => {
+                                let prebuilt_trie = token_buckets
+                                    .packed_suffix_tries_by_first_byte[byte_idx]
+                                    .get_or_init(|| {
+                                        Arc::new(L1PackedSuffixTrie::build(
+                                            sorted_entries,
+                                            token_ids,
+                                            suffix_lcps,
+                                        ))
+                                    });
+                                l1_bucket_suffix_signature_profiles_packed(
+                                    *byte,
+                                    targets,
+                                    sorted_entries,
+                                    token_ids,
+                                    suffix_lcps,
+                                    &token_buckets.suffix_subtree_bytes[byte_idx],
+                                    &token_buckets.suffix_first_bytes_by_bucket[byte_idx],
+                                    token_buckets.has_empty_suffix_by_bucket[byte_idx],
+                                    &state_to_terminal_signature,
+                                    self_loop_bytes_by_state,
+                                    flat_trans,
+                                    transitions_by_byte,
+                                    num_tokenizer_states,
+                                    Some(&active_language),
+                                    horizon_maps.as_deref(),
+                                    suffix_horizon_by_first_byte[byte_idx],
+                                    Some(prebuilt_trie.as_ref()),
+                                )
+                            }
+                            TASK_WHOLE => build_byte_profiles(*byte, targets),
+                            _ => unreachable!("unknown L1 profile task kind"),
                         }
-                        TASK_WHOLE => build_byte_profiles(*byte, targets),
-                        _ => unreachable!("unknown L1 profile task kind"),
-                    }
-                })
-                .collect::<Vec<_>>();
-            let mut remaining_profiles =
-                task_batches.into_iter().flatten().collect::<Vec<_>>();
+                    })
+                    .collect::<Vec<_>>();
+                let mut remaining_profiles =
+                    task_batches.into_iter().flatten().collect::<Vec<_>>();
 
-            // Builders canonicalize equal profiles within one task. Restore one
-            // canonical Arc per first-byte bucket after joining task slices.
-            let mut canonical_by_byte = (0..256)
-                .map(|_| {
-                    FxHashMap::<Arc<[(u32, u32, u32)]>, Arc<[(u32, u32, u32)]>>::default()
-                })
-                .collect::<Vec<_>>();
-            for ((byte, _), profile) in &mut remaining_profiles {
-                if profile.is_empty() {
-                    continue;
+                // Builders canonicalize equal profiles within one task. Restore one
+                // canonical Arc per first-byte bucket after joining task slices.
+                let mut canonical_by_byte = (0..256)
+                    .map(|_| {
+                        FxHashMap::<Arc<[(u32, u32, u32)]>, Arc<[(u32, u32, u32)]>>::default()
+                    })
+                    .collect::<Vec<_>>();
+                for ((byte, _), profile) in &mut remaining_profiles {
+                    if profile.is_empty() {
+                        continue;
+                    }
+                    let canonical = &mut canonical_by_byte[*byte as usize];
+                    if let Some(existing) = canonical.get(profile) {
+                        *profile = Arc::clone(existing);
+                    } else {
+                        canonical.insert(Arc::clone(profile), Arc::clone(profile));
+                    }
                 }
-                let canonical = &mut canonical_by_byte[*byte as usize];
-                if let Some(existing) = canonical.get(profile) {
-                    *profile = Arc::clone(existing);
+                let elapsed_ms = started_at
+                    .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+                (remaining_profiles, elapsed_ms)
+            };
+            let ((dominant_batch, dominant_ms), (remaining_profiles, remaining_ms)) =
+                if dominant.is_some()
+                    && !tasks.is_empty()
+                    && l1_concurrent_dominant_profile_enabled()
+                {
+                    rayon::join(build_dominant, build_remaining)
                 } else {
-                    canonical.insert(Arc::clone(profile), Arc::clone(profile));
-                }
-            }
-            let remaining_ms = remaining_started_at
-                .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+                    (build_dominant(), build_remaining())
+                };
             if profile_enabled {
                 eprintln!(
-                    "[glrmask/profile][l1_profile_schedule] dominant_byte={:?} dominant_ms={:.3} tasks={} flat_buckets={} packed_buckets={} remaining_ms={:.3}",
+                    "[glrmask/profile][l1_profile_schedule] dominant_byte={:?} dominant_ms={:.3} tasks={} flat_buckets={} packed_buckets={} remaining_ms={:.3} concurrent={}",
                     dominant.map(|index| byte_target_groups[index].0),
                     dominant_ms,
                     task_count,
                     flat_buckets,
                     packed_buckets,
                     remaining_ms,
+                    dominant.is_some()
+                        && !tasks.is_empty()
+                        && l1_concurrent_dominant_profile_enabled(),
                 );
             }
 
