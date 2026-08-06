@@ -1991,20 +1991,16 @@ fn component_state_coordinate_map(
 fn boundary_id_map_for_selected_tokens(
     component_state_map: &ManyToOneIdMap,
     selected_original_tokens: &[u32],
-    vocab: &Vocab,
 ) -> Result<InternalIdMap, String> {
     if selected_original_tokens.is_empty() {
-        return Err("boundary witness construction selected no vocabulary tokens".into());
+        return Err("boundary witness construction selected no model tokens".into());
     }
-    let max_original_token = vocab.entries_map().keys().next_back().copied().unwrap_or(0);
+    let max_original_token = selected_original_tokens.last().copied().unwrap_or(0);
     let mut original_to_internal = vec![u32::MAX; max_original_token as usize + 1];
     let mut internal_to_originals = Vec::with_capacity(selected_original_tokens.len());
     let mut token_representatives = Vec::with_capacity(selected_original_tokens.len());
     for (internal, &original) in selected_original_tokens.iter().enumerate() {
-        let Some(slot) = original_to_internal.get_mut(original as usize) else {
-            return Err(format!("boundary token {original} lies outside supplied vocabulary"));
-        };
-        *slot = internal as u32;
+        original_to_internal[original as usize] = internal as u32;
         internal_to_originals.push(vec![original]);
         token_representatives.push(original);
     }
@@ -2047,9 +2043,6 @@ fn direct_boundary_terminal_automaton(
         .flat_map(|tokens| tokens.iter().copied())
         .chain(discovery.token_ids.iter().copied())
         .collect::<BTreeSet<_>>();
-    if selected_original_tokens.is_empty() {
-        return Err("boundary witness construction selected no vocabulary tokens".into());
-    }
     let max_original_token = vocab.entries_map().keys().next_back().copied().unwrap_or(0);
     let mut original_to_internal = vec![u32::MAX; max_original_token as usize + 1];
     let mut internal_to_originals = Vec::with_capacity(selected_original_tokens.len());
@@ -2372,6 +2365,119 @@ fn add_control_loops_to_terminal_artifact(
         },
         id_map,
     )
+}
+
+/// Add exact out-of-vocabulary special-token branches to the boundary terminal
+/// artifact. Byte-token boundary discovery cannot see these IDs because they
+/// are deliberately absent from `Vocab`, but parser-DWA construction still
+/// needs their terminal effect when a linker control closure precedes or
+/// follows the special terminal.
+///
+/// Existing internal token IDs are preserved and special IDs are appended as
+/// singleton classes, so no existing terminal-automaton weight needs remapping.
+fn add_boundary_special_token_paths(
+    artifact: MappedArtifact<TerminalAutomaton>,
+    special_token_terminals: &[SpecialTokenTerminal],
+    raw_source_state: u32,
+    fallback_state_map: Option<&ManyToOneIdMap>,
+    control_terminals: &BTreeSet<u32>,
+) -> Result<MappedArtifact<TerminalAutomaton>, String> {
+    if special_token_terminals.is_empty() {
+        return Ok(artifact);
+    }
+
+    let (automaton, mut id_map) = artifact.into_parts();
+    let source_tsid = id_map
+        .tokenizer_states
+        .original_to_internal
+        .get(raw_source_state as usize)
+        .copied()
+        .filter(|&tsid| tsid != u32::MAX)
+        .or_else(|| {
+            fallback_state_map
+                .and_then(|map| map.original_to_internal.get(raw_source_state as usize))
+                .copied()
+                .filter(|&tsid| tsid != u32::MAX)
+        })
+        .ok_or_else(|| {
+            format!(
+                "boundary special-token source state {raw_source_state} has no tokenizer-state coordinate",
+            )
+        })?;
+
+    let mut unique = special_token_terminals.to_vec();
+    unique.sort_unstable_by_key(|special| (special.token_id, special.terminal_id));
+    unique.dedup_by_key(|special| (special.token_id, special.terminal_id));
+
+    let max_special_id = unique
+        .iter()
+        .map(|special| special.token_id)
+        .max()
+        .unwrap_or(0);
+    if id_map.vocab_tokens.original_to_internal.len() <= max_special_id as usize {
+        id_map
+            .vocab_tokens
+            .original_to_internal
+            .resize(max_special_id as usize + 1, u32::MAX);
+    }
+    for special in &unique {
+        let slot = &mut id_map.vocab_tokens.original_to_internal[special.token_id as usize];
+        if *slot == u32::MAX {
+            *slot = id_map.vocab_tokens.internal_to_originals.len() as u32;
+            id_map
+                .vocab_tokens
+                .internal_to_originals
+                .push(vec![special.token_id]);
+            id_map
+                .vocab_tokens
+                .representative_original_ids
+                .push(special.token_id);
+        }
+    }
+
+    let mut nwa = match automaton {
+        TerminalAutomaton::Dwa(dwa) => dwa.to_nwa(),
+        TerminalAutomaton::TokenDeterministicNwa(nwa)
+        | TerminalAutomaton::EpsilonNwa(nwa) => nwa,
+    };
+    let starts = nwa.start_states().to_vec();
+    if starts.is_empty() {
+        return Err("boundary terminal automaton has no start state".into());
+    }
+    let special_final = nwa.add_state();
+    nwa.set_final_weight(special_final, Weight::all());
+    for &control in control_terminals {
+        nwa.add_transition(
+            special_final,
+            control as i32,
+            special_final,
+            Weight::all(),
+        );
+    }
+    for special in unique {
+        let internal_token = id_map
+            .internal_token_for_original(special.token_id)
+            .expect("special token was inserted into the boundary token coordinate");
+        let weight = Weight::from_per_tsid_token_sets(std::iter::once((
+            source_tsid,
+            RangeSetBlaze::from_iter([internal_token]),
+        )));
+        for &start in &starts {
+            nwa.add_transition(
+                start,
+                special.terminal_id as i32,
+                special_final,
+                weight.clone(),
+            );
+        }
+    }
+
+    // This may overlap a byte-token branch for an ID that intentionally has
+    // both exact-special and byte semantics, so retain the general NWA form.
+    Ok(MappedArtifact::new(
+        TerminalAutomaton::EpsilonNwa(nwa),
+        id_map,
+    ))
 }
 
 /// Exact union/determinization specialized for epsilon-free acyclic component
@@ -3749,6 +3855,7 @@ fn build_boundary_repair(
     terminal_display_names: Vec<String>,
     ignore_terminals: &MergedIgnoreTerminals,
     vocab: &Vocab,
+    special_token_terminals: &[SpecialTokenTerminal],
     components: &[&Constraint],
     tokenizer_state_offsets: &[u32],
     precomputed_component_state_map: Option<&ManyToOneIdMap>,
@@ -3931,16 +4038,36 @@ fn build_boundary_repair(
         );
     }
 
+    let mut boundary_special_token_terminals = special_token_terminals
+        .iter()
+        .copied()
+        .filter(|special| {
+            active_terminals
+                .get(special.terminal_id as usize)
+                .copied()
+                .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+    boundary_special_token_terminals
+        .sort_unstable_by_key(|special| (special.token_id, special.terminal_id));
+    boundary_special_token_terminals
+        .dedup_by_key(|special| (special.token_id, special.terminal_id));
+
     let selected_original_tokens = seed_relations
         .values()
         .flat_map(|by_state| by_state.values())
         .flat_map(|tokens| tokens.iter().copied())
         .chain(boundary_paths.token_ids.iter().copied())
+        .chain(
+            boundary_special_token_terminals
+                .iter()
+                .map(|special| special.token_id),
+        )
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
     if selected_original_tokens.is_empty() {
-        let error = "boundary witness construction selected no vocabulary tokens".to_string();
+        let error = "boundary witness construction selected no model tokens".to_string();
         if let Some(selected_boundary_tokens) = selected_boundary_tokens {
             let _ = selected_boundary_tokens.set(Err(error.clone()));
         }
@@ -4067,6 +4194,16 @@ fn build_boundary_repair(
         );
     let (terminal_dwa, terminal_ms) = terminal_dwa;
     let terminal_dwa = terminal_dwa?;
+    let special_source_state = merged_tokenizer
+        .map(Tokenizer::initial_state_id)
+        .unwrap_or(0);
+    let terminal_dwa = add_boundary_special_token_paths(
+        terminal_dwa,
+        &boundary_special_token_terminals,
+        special_source_state,
+        Some(component_state_map),
+        &composed_table.control_terminals,
+    )?;
 
     let parser_started_at = Instant::now();
     let (terminal_automaton, id_map) = terminal_dwa.into_parts();
@@ -4082,11 +4219,12 @@ fn build_boundary_repair(
     let parser_ms = parser_started_at.elapsed().as_secs_f64() * 1000.0;
     if compose_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][constraint_boundary_build] active={} begin_active={} discovered_active={} boundary_tokens={} discovery_ms={discovery_ms:.3} one_byte_ms={one_byte_ms:.3} terminal_ms={terminal_ms:.3} templates_ms={templates_ms:.3} parser_ms={parser_ms:.3} total_ms={:.3}",
+            "[glrmask/profile][constraint_boundary_build] active={} begin_active={} discovered_active={} boundary_tokens={} boundary_special_tokens={} discovery_ms={discovery_ms:.3} one_byte_ms={one_byte_ms:.3} terminal_ms={terminal_ms:.3} templates_ms={templates_ms:.3} parser_ms={parser_ms:.3} total_ms={:.3}",
             active_terminals.iter().filter(|&&active| active).count(),
             seed_terminals.iter().filter(|&&active| active).count(),
             discovered_boundary_terminals.count_ones(),
             boundary_paths.token_ids.len(),
+            boundary_special_token_terminals.len(),
             total_started_at.elapsed().as_secs_f64() * 1000.0,
         );
     }
@@ -4919,6 +5057,7 @@ pub(crate) fn compose_constraints(
                     terminal_display_names.clone(),
                     &merged_ignores,
                     vocab,
+                    &special_token_terminals,
                     &component_constraints,
                     &expected_tokenizer_state_offsets,
                     None,
@@ -4969,6 +5108,7 @@ pub(crate) fn compose_constraints(
                                 terminal_display_names.clone(),
                                 &merged_ignores,
                                 vocab,
+                                &special_token_terminals,
                                 &component_constraints,
                                 &expected_tokenizer_state_offsets,
                                 None,
@@ -5306,7 +5446,6 @@ pub(crate) fn compose_constraints_owned_parent(
                     let boundary_id_map = boundary_id_map_for_selected_tokens(
                         &component_id_map.tokenizer_states,
                         &selected_boundary_tokens,
-                        vocab,
                     )?;
                     let plan = build_boundary_refinement_plan(component_id_map, &boundary_id_map)
                         .ok_or_else(|| {
@@ -5359,6 +5498,7 @@ pub(crate) fn compose_constraints_owned_parent(
                     terminal_display_names.clone(),
                     &merged_ignores,
                     vocab,
+                    &special_token_terminals,
                     &component_constraints,
                     &expected_tokenizer_state_offsets,
                     None,
@@ -7109,6 +7249,114 @@ mod tests {
         assert_eq!(loaded_state.forced(), vec![END_TOKEN]);
         loaded_state.commit_token(END_TOKEN).unwrap();
         assert!(loaded_state.is_finished());
+    }
+
+    #[test]
+    fn composition_compiles_named_special_continuation_into_static_mask() {
+        const SPECIAL_TOKEN: u32 = 1000;
+        let vocab = Vocab::new(vec![
+            (0, b"Xa".to_vec()),
+            (1, b"X".to_vec()),
+            (2, b"a".to_vec()),
+        ]);
+        let parent = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t SUB ::= @token(999);
+                t DONE ::= @token(1000);
+                nt document ::= "X" SUB DONE;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child = Constraint::from_glrm_grammar(
+            r#"
+                start child;
+                nt child ::= "a";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let monolithic = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t DONE ::= @token(1000);
+                nt document ::= "X" "a" DONE;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let composed = parent
+            .compose_subgrammars(&[("SUB", &child)], &vocab)
+            .unwrap();
+
+        assert!(!composed.table.control_terminals.is_empty());
+        for content in [vec![0], vec![1, 2]] {
+            let mut actual = composed.start();
+            let mut expected = monolithic.start();
+            for token in content {
+                assert_eq!(actual.mask(), expected.mask());
+                actual.commit_token(token).unwrap();
+                expected.commit_token(token).unwrap();
+            }
+            assert_eq!(actual.mask(), expected.mask());
+            assert_eq!(actual.forced(), vec![SPECIAL_TOKEN]);
+            actual.commit_token(SPECIAL_TOKEN).unwrap();
+            expected.commit_token(SPECIAL_TOKEN).unwrap();
+            assert!(actual.is_finished());
+            assert!(expected.is_finished());
+        }
+    }
+
+    #[test]
+    fn nullable_child_to_named_special_is_static_masked() {
+        const SPECIAL_TOKEN: u32 = 1000;
+        let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
+        let parent = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t SUB ::= @token(999);
+                t DONE ::= @token(1000);
+                nt document ::= SUB DONE;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child = Constraint::from_glrm_grammar(
+            r#"
+                start child;
+                nt item ::= "a";
+                nt child ::= item?;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let monolithic = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t DONE ::= @token(1000);
+                nt item ::= "a";
+                nt document ::= item? DONE;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let composed = parent
+            .compose_subgrammars(&[("SUB", &child)], &vocab)
+            .unwrap();
+
+        assert!(!composed.table.control_terminals.is_empty());
+        for sequence in [vec![SPECIAL_TOKEN], vec![0, SPECIAL_TOKEN]] {
+            let mut actual = composed.start();
+            let mut expected = monolithic.start();
+            for token in sequence {
+                assert_eq!(actual.mask(), expected.mask());
+                actual.commit_token(token).unwrap();
+                expected.commit_token(token).unwrap();
+            }
+            assert!(actual.is_finished());
+            assert!(expected.is_finished());
+        }
     }
 
     #[test]

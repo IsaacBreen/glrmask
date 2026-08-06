@@ -2226,31 +2226,6 @@ fn enqueue_parser_state_transition(
 }
 
 impl<'a> ConstraintState<'a> {
-    /// Exact overlay for an out-of-vocabulary special token reached only after
-    /// a linker control chain. Ordinary parser-DWA weights remain the fast path;
-    /// constraints without explicit controls pay nothing here.
-    fn update_control_special_token_mask(&self, buf: &mut [u32]) {
-        if self.constraint.table.control_terminals.is_empty() {
-            return;
-        }
-        let mut previous_token_id = None;
-        for special in &self.constraint.special_token_terminals {
-            if previous_token_id == Some(special.token_id) {
-                continue;
-            }
-            previous_token_id = Some(special.token_id);
-            if super::commit::advance_special_token_paths(
-                self.constraint,
-                &self.state,
-                special.token_id,
-            )
-            .is_some_and(|gss| !gss.is_empty())
-            {
-                set_original_mask_bit(buf, special.token_id);
-            }
-        }
-    }
-
     fn fill_blocked_seed_dense(
         &self,
         terminals_disallowed: &TerminalsDisallowed,
@@ -4314,7 +4289,6 @@ impl<'a> ConstraintState<'a> {
             self.store_mask_cache_reuse_dense(&buf);
         } else {
             self.fill_mask_uncached(&mut buf);
-            self.update_control_special_token_mask(&mut buf);
             self.store_mask_cache_reuse_dense(&buf);
         }
     }
@@ -4338,7 +4312,6 @@ impl<'a> ConstraintState<'a> {
         let cache_hit = self.try_fill_mask_from_cache(mask);
         if !cache_hit {
             self.fill_mask_uncached(mask);
-            self.update_control_special_token_mask(mask);
             if !self.constraint.table.control_terminals.is_empty() {
                 self.store_mask_cache_reuse_dense(mask);
             }
@@ -4380,7 +4353,6 @@ impl<'a> ConstraintState<'a> {
                 total_ns: elapsed_ns(total_start),
                 ..MaskProfile::default()
             });
-        self.update_control_special_token_mask(buf);
         if !self.constraint.table.control_terminals.is_empty() {
             self.store_mask_cache_reuse_dense(buf);
         }
