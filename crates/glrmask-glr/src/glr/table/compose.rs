@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::row::{ActionRow, GotoRow};
 use super::{
@@ -1027,6 +1027,335 @@ pub fn compose_subgrammar_tables_explicit(
         for targets in &mut child_relation {
             targets.sort_unstable();
             targets.dedup();
+        }
+        state_relations.push(child_relation);
+
+        for rule in &child.rules {
+            rules.push(remap_rule(rule, terminal_offset, nonterminal_offset));
+        }
+        if child_input.start_nullable {
+            ensure_epsilon_rule(&mut rules, child_root);
+        }
+        nonterminal_display_names.extend(
+            child
+                .nonterminal_display_names
+                .iter()
+                .map(|name| format!("child{child_index}::{name}")),
+        );
+    }
+
+    let result_start_nullable = rules_make_start_nullable(&rules, parent_root);
+    let mut table = GLRTable {
+        action,
+        goto,
+        num_states: next_state,
+        num_terminals: next_terminal,
+        num_rules: rules.len() as u32,
+        rules,
+        nonterminal_display_names,
+        construction: GlrTableConstruction::Lalr,
+        admission_policy: AdmissionPolicy::ExactSimulation,
+        advance: Vec::<BitSet>::new(),
+        forwarded_shifts,
+        control_terminals: control_terminals.clone(),
+        skip_terminals,
+        guarded_shift_index: Vec::new(),
+        direct_regular_wide_frontiers,
+    };
+    table.rebuild_advance_rows_from_actions();
+    table.rebuild_guarded_shift_index();
+    table.compress_default_action_rows();
+    table.set_embedded_start_nullable(result_start_nullable);
+
+    Ok(ComposedTable {
+        table,
+        terminal_offsets,
+        state_relations,
+        boundary_nonterminals,
+        control_terminals,
+    })
+}
+
+/// Exact explicit-control linker which shares each child's parser-table body
+/// across all call sites.
+///
+/// The copied-body reference linker above bakes the parent continuation into
+/// the identity of every child state. That is unnecessary: while a child is
+/// active, the caller state already remains immediately below the child frame
+/// on the parser stack. A guarded return can inspect that revealed caller and
+/// select the corresponding continuation exactly. Replace-style calls, which
+/// would otherwise discard the caller, retain one tiny call-site marker below
+/// the shared child start state and remove it again on return.
+///
+/// This representation has ordinary static table semantics. It introduces no
+/// runtime composition mode; after control elimination it is just the same
+/// `GuardedStackShifts` representation used elsewhere by optimized tables.
+pub fn compose_subgrammar_tables_shared_explicit(
+    parent: &GLRTable,
+    parent_scoped_ignore_terminal: Option<TerminalID>,
+    children: &[SubgrammarTableInput<'_>],
+) -> Result<ComposedTable, String> {
+    let mut terminal_offsets = Vec::with_capacity(children.len() + 1);
+    terminal_offsets.push(0);
+    let mut next_terminal = parent.num_terminals;
+    for child in children {
+        terminal_offsets.push(next_terminal);
+        next_terminal = next_terminal
+            .checked_add(child.table.num_terminals)
+            .ok_or_else(|| "merged terminal ID overflow".to_string())?;
+    }
+
+    let parent_nonterminals = parent.nonterminal_display_names.len() as u32;
+    let mut nonterminal_offsets = Vec::with_capacity(children.len());
+    let mut next_nonterminal = parent_nonterminals;
+    for child in children {
+        nonterminal_offsets.push(next_nonterminal);
+        next_nonterminal = next_nonterminal
+            .checked_add(child.table.nonterminal_display_names.len() as u32)
+            .ok_or_else(|| "merged nonterminal ID overflow".to_string())?;
+    }
+
+    let mut action = parent.action.clone();
+    let mut goto = parent.goto.clone();
+    if let Some(ignore) = parent_scoped_ignore_terminal {
+        for row in &mut action {
+            merge_action_cell(row, ignore, identity_skip_action())?;
+        }
+    }
+
+    let mut state_relations = Vec::with_capacity(children.len() + 1);
+    state_relations.push(
+        (0..parent.num_states)
+            .map(|state| vec![state])
+            .collect::<Vec<_>>(),
+    );
+    let mut next_state = parent.num_states;
+
+    let parent_root = child_root_nonterminal(parent)?;
+    let mut rules = parent.rules.clone();
+    if parent.embedded_start_nullable() {
+        ensure_epsilon_rule(&mut rules, parent_root);
+    }
+    let parent_rule_count = rules.len();
+    let mut nonterminal_display_names = parent.nonterminal_display_names.clone();
+    let mut forwarded_shifts = parent.forwarded_shifts.clone();
+    let mut direct_regular_wide_frontiers = parent.direct_regular_wide_frontiers.clone();
+    let mut boundary_nonterminals = BTreeSet::<NonterminalID>::new();
+    let mut control_terminals = parent.control_terminals.clone();
+    let mut skip_terminals = parent.skip_terminals.clone();
+    if let Some(ignore) = parent_scoped_ignore_terminal {
+        skip_terminals.insert(ignore);
+    }
+
+    for (child_index, child_input) in children.iter().enumerate() {
+        let child = child_input.table;
+        let terminal_offset = terminal_offsets[child_index + 1];
+        let nonterminal_offset = nonterminal_offsets[child_index];
+        let child_root_local = child_root_nonterminal(child)?;
+        let child_root = child_root_local + nonterminal_offset;
+        boundary_nonterminals.insert(child_root);
+        let child_start = 0u32;
+        let child_accept = accept_state(child)?;
+        let control = child_input.placeholder_terminal;
+        control_terminals.insert(control);
+        control_terminals.extend(
+            child
+                .control_terminals
+                .iter()
+                .map(|terminal| terminal + terminal_offset),
+        );
+        skip_terminals.extend(
+            child
+                .skip_terminals
+                .iter()
+                .map(|terminal| terminal + terminal_offset),
+        );
+        if let Some(ignore) = child_input.ignore_terminal {
+            skip_terminals.insert(ignore + terminal_offset);
+        }
+
+        for rule in &mut rules[..parent_rule_count] {
+            for symbol in &mut rule.rhs {
+                if *symbol == Symbol::Terminal(control) {
+                    *symbol = Symbol::Nonterminal(child_root);
+                }
+            }
+        }
+
+        let mut call_sites = Vec::<(u32, u32, bool)>::new();
+        for state in 0..parent.num_states {
+            let Some(placeholder_action) = parent.action(state, control) else {
+                continue;
+            };
+            if let Some((target, replace)) = simple_shift(placeholder_action) {
+                call_sites.push((state, target, replace));
+            } else if !reduction_only(placeholder_action) {
+                return Err(format!(
+                    "placeholder terminal {control} has unsupported action {placeholder_action:?} in parent state {state}",
+                ));
+            }
+        }
+        if call_sites.is_empty() {
+            return Err(format!(
+                "placeholder terminal {control} has no shift call sites in the parent table",
+            ));
+        }
+
+        let Some(&(child_root_target, child_root_replace)) =
+            child.goto[child_start as usize].get(&child_root_local)
+        else {
+            return Err("child start row has no goto for its root nonterminal".to_string());
+        };
+        if child_root_target != child_accept {
+            return Err(format!(
+                "child root goto targets state {child_root_target}, expected accept state {child_accept}",
+            ));
+        }
+        let return_pop = if child_root_replace { 1 } else { 2 };
+
+        // Allocate one shared copy of the child table, independent of call-site
+        // count. Every source child state therefore has a singleton relation.
+        let mut state_map = vec![u32::MAX; child.num_states as usize];
+        let mut child_relation = vec![Vec::<u32>::new(); child.num_states as usize];
+        for local_state in 0..child.num_states {
+            let mapped = next_state;
+            next_state = next_state
+                .checked_add(1)
+                .ok_or_else(|| "merged parser-state ID overflow".to_string())?;
+            state_map[local_state as usize] = mapped;
+            child_relation[local_state as usize].push(mapped);
+            action.push(ActionRow::default());
+            goto.push(GotoRow::default());
+        }
+        let mapped_start = state_map[child_start as usize];
+        let mapped_accept = state_map[child_accept as usize];
+
+        // Group call sites with the same return effect. The guard-state list
+        // then identifies the exact caller (append calls) or synthetic marker
+        // (replace calls) which owns that continuation.
+        let mut return_guards = BTreeMap::<(u32, Vec<u32>, u32), Vec<u32>>::new();
+        for &(caller_state, placeholder_target, placeholder_replace) in &call_sites {
+            if placeholder_replace {
+                let marker = next_state;
+                next_state = next_state
+                    .checked_add(1)
+                    .ok_or_else(|| "call-site marker state overflow".to_string())?;
+                action.push(ActionRow::default());
+                goto.push(GotoRow::default());
+                action[caller_state as usize].insert(
+                    control,
+                    Action::StackShifts(vec![StackShift {
+                        pop: 1,
+                        pushes: vec![marker, mapped_start],
+                    }]),
+                );
+                return_guards
+                    .entry((return_pop + 1, vec![placeholder_target], return_pop))
+                    .or_default()
+                    .push(marker);
+            } else {
+                action[caller_state as usize]
+                    .insert(control, Action::Shift(mapped_start, false));
+                return_guards
+                    .entry((return_pop, vec![placeholder_target], return_pop))
+                    .or_default()
+                    .push(caller_state);
+            }
+        }
+        let mut return_effects = Vec::<GuardedStackShift>::with_capacity(return_guards.len());
+        for ((pop, pushes, guard_pop), mut states) in return_guards {
+            states.sort_unstable();
+            states.dedup();
+            return_effects.push(GuardedStackShift {
+                guards: vec![StackShiftGuard {
+                    pop: guard_pop,
+                    states,
+                }],
+                pop,
+                pushes,
+            });
+        }
+        return_effects.sort();
+
+        for local_state in 0..child.num_states {
+            let merged_state = state_map[local_state as usize] as usize;
+            for (terminal, child_action) in child.action[local_state as usize].iter() {
+                if terminal == EOF && local_state == child_accept {
+                    if !matches!(child_action, Action::Accept) {
+                        return Err(format!(
+                            "child accept state {child_accept} has unsupported EOF action {child_action:?}",
+                        ));
+                    }
+                    merge_action_cell(
+                        &mut action[merged_state],
+                        control,
+                        Action::GuardedStackShifts(return_effects.clone()),
+                    )?;
+                    continue;
+                }
+
+                let mapped_action = remap_action(
+                    child_action,
+                    &state_map,
+                    terminal_offset,
+                    nonterminal_offset,
+                    Some(mapped_start),
+                    Some(mapped_accept),
+                    child_start,
+                    child_accept,
+                )?;
+                let mapped_terminal = if terminal == EOF {
+                    control
+                } else {
+                    terminal + terminal_offset
+                };
+                merge_action_cell(
+                    &mut action[merged_state],
+                    mapped_terminal,
+                    mapped_action,
+                )?;
+            }
+
+            if let Some(local_ignore) = child_input.ignore_terminal {
+                merge_action_cell(
+                    &mut action[merged_state],
+                    local_ignore + terminal_offset,
+                    identity_skip_action(),
+                )?;
+            }
+
+            for (nonterminal, &(target, replace)) in child.goto[local_state as usize].iter() {
+                goto[merged_state].insert(
+                    nonterminal + nonterminal_offset,
+                    (state_map[target as usize], replace),
+                );
+            }
+        }
+
+        if child_input.start_nullable {
+            merge_action_cell(
+                &mut action[mapped_start as usize],
+                control,
+                Action::Reduce(child_root, 0),
+            )?;
+        }
+
+        for &(state, terminal) in &child.forwarded_shifts {
+            forwarded_shifts.insert((
+                state_map[state as usize],
+                terminal + terminal_offset,
+            ));
+        }
+        for frontier in &child.direct_regular_wide_frontiers {
+            direct_regular_wide_frontiers.push(super::DirectRegularWideFrontierDescriptor {
+                source_state: state_map[frontier.source_state as usize],
+                terminal: frontier.terminal + terminal_offset,
+                target_states: frontier
+                    .target_states
+                    .iter()
+                    .map(|&target| state_map[target as usize])
+                    .collect(),
+            });
         }
         state_relations.push(child_relation);
 

@@ -810,6 +810,111 @@ pub struct Templates {
 }
 
 impl Templates {
+    /// Build exact direct replace-top templates for the selected terminals
+    /// whose complete table action column is independently direct regular.
+    ///
+    /// Unlike [`Self::from_direct_regular_table`], one stack-sensitive
+    /// terminal does not force every unrelated terminal through generic stack
+    /// characterization. The returned bitmap marks precisely which selected
+    /// terminal columns were certified and materialized.
+    pub fn from_individually_direct_regular_terminals(
+        table: &GLRTable,
+        selected: &[bool],
+    ) -> (Self, Vec<bool>) {
+        let num_terminals = selected.len();
+        let mut eligible = selected.to_vec();
+        let mut targets_by_terminal = (0..num_terminals)
+            .map(|_| BTreeMap::<u32, Vec<u32>>::new())
+            .collect::<Vec<_>>();
+
+        for (source, row) in table.action.iter().enumerate() {
+            for (terminal, action) in row {
+                let terminal = terminal as usize;
+                if terminal >= num_terminals || !eligible[terminal] {
+                    continue;
+                }
+                let targets = targets_by_terminal[terminal]
+                    .entry(source as u32)
+                    .or_default();
+                let supported = match action {
+                    Action::Shift(target, true) => {
+                        targets.push(*target);
+                        true
+                    }
+                    Action::ReplaceShifts(replacements) => {
+                        targets.extend(replacements.iter().copied());
+                        true
+                    }
+                    Action::StackShifts(shifts) => {
+                        if shifts
+                            .iter()
+                            .all(|shift| shift.pop == 1 && shift.pushes.len() == 1)
+                        {
+                            targets.extend(shifts.iter().map(|shift| shift.pushes[0]));
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    Action::Split {
+                        shift: Some((target, true)),
+                        reduces,
+                        accept: false,
+                    } if reduces.is_empty() => {
+                        targets.push(*target);
+                        true
+                    }
+                    _ => false,
+                };
+                if !supported {
+                    eligible[terminal] = false;
+                    targets_by_terminal[terminal].clear();
+                }
+            }
+        }
+
+        let mut by_terminal = BTreeMap::new();
+        let mut by_terminal_nwa = BTreeMap::new();
+        for (terminal, targets_by_source) in targets_by_terminal.into_iter().enumerate() {
+            if !eligible[terminal] {
+                continue;
+            }
+            let terminal = terminal as u32;
+            let mut dfa = UnweightedDfa::new();
+            if !targets_by_source.is_empty() {
+                let accept = dfa.add_state();
+                dfa.set_accepting(accept, true);
+                let mut middle_by_targets = BTreeMap::<Vec<u32>, u32>::new();
+                for (source, mut targets) in targets_by_source {
+                    targets.sort_unstable();
+                    targets.dedup();
+                    let middle = if let Some(&middle) = middle_by_targets.get(&targets) {
+                        middle
+                    } else {
+                        let middle = dfa.add_state();
+                        for &target in &targets {
+                            dfa.add_transition(middle, encode_negative_label(target), accept);
+                        }
+                        middle_by_targets.insert(targets, middle);
+                        middle
+                    };
+                    dfa.add_transition(dfa.start_state, encode_positive_label(source), middle);
+                }
+            }
+            let skeleton = dfa_to_nwa_skeleton(&dfa);
+            by_terminal.insert(terminal, dfa);
+            by_terminal_nwa.insert(terminal, skeleton);
+        }
+
+        (
+            Self {
+                by_terminal,
+                by_terminal_nwa,
+            },
+            eligible,
+        )
+    }
+
     /// Build exact templates for a constant-depth direct-regular parser table.
     ///
     /// Every terminal action replaces the current parser top with one of a

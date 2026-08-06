@@ -25,8 +25,9 @@ use crate::automata::lexer::compile::compile_terminal_expr_dfa;
 use crate::automata::weighted_u32::determinize::determinize;
 use crate::automata::weighted_u32::equivalence::find_difference;
 use crate::automata::weighted_u32::dwa::{DWA, DWAState};
-use crate::automata::weighted_u32::nwa::NWA;
+use crate::automata::weighted_u32::nwa::{NWA, NWAState};
 use crate::automata::weighted_u32::terminal_automaton::TerminalAutomaton;
+use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
 use crate::compiler::glr::analysis::{AnalyzedGrammar, EOF};
 use crate::compiler::glr::labels::{
     DEFAULT_LABEL, encode_negative_label, encode_positive_label, is_negative_label,
@@ -43,13 +44,13 @@ use crate::compiler::stages::templates::compile_dfa::{
     specialize_template_dfa_defaults_for_commit_split_input,
     try_split_commit_template_dfas,
 };
-use crate::compiler::stages::templates::Templates;
+use crate::compiler::stages::templates::{Templates, commit_template_dfas_enabled};
 use crate::compiler::constraint_possible_matches::{
     build_internal_token_bytes_from_groups, runtime_dynamic_vocab_for_vocab,
 };
 use crate::compiler::glr::table::{
     Action, ComposedTable, ControlEliminationReport, SubgrammarTableInput, compose_subgrammar_tables,
-    compose_subgrammar_tables_explicit,
+    compose_subgrammar_tables_explicit, compose_subgrammar_tables_shared_explicit,
 };
 use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
@@ -66,15 +67,70 @@ fn compose_profile_enabled() -> bool {
 fn eliminate_composed_runtime_controls(
     composed: &mut ComposedTable,
 ) -> Result<Option<ControlEliminationReport>, String> {
-    if composed.control_terminals.is_empty() {
-        debug_assert!(composed.table.control_terminals.is_empty());
+    eliminate_runtime_controls_parts(&mut composed.table, &mut composed.control_terminals)
+}
+
+fn eliminate_runtime_controls_parts(
+    table: &mut crate::compiler::glr::table::GLRTable,
+    controls: &mut BTreeSet<u32>,
+) -> Result<Option<ControlEliminationReport>, String> {
+    if controls.is_empty() {
+        debug_assert!(table.control_terminals.is_empty());
         return Ok(None);
     }
-    debug_assert_eq!(composed.control_terminals, composed.table.control_terminals);
-    let report = composed.table.eliminate_control_terminals_exact()?;
-    composed.control_terminals.clear();
-    debug_assert!(composed.table.control_terminals.is_empty());
+    debug_assert_eq!(*controls, table.control_terminals);
+    let report = table.eliminate_control_terminals_exact()?;
+    controls.clear();
+    debug_assert!(table.control_terminals.is_empty());
     Ok(Some(report))
+}
+
+fn profile_composed_state_relations(composed: &ComposedTable) {
+    if !compose_profile_enabled() {
+        return;
+    }
+    let mut rows = 0usize;
+    let mut empty = 0usize;
+    let mut singleton = 0usize;
+    let mut multi = 0usize;
+    let mut max_fanout = 0usize;
+    let mut singleton_offset_runs = 0usize;
+    let mut singleton_offset_run_rows = 0usize;
+    for relation in &composed.state_relations {
+        rows += relation.len();
+        let mut last_offset = None::<i64>;
+        for (local, targets) in relation.iter().enumerate() {
+            max_fanout = max_fanout.max(targets.len());
+            match targets.as_slice() {
+                [] => empty += 1,
+                [target] => {
+                    singleton += 1;
+                    let offset = i64::from(*target) - local as i64;
+                    if last_offset != Some(offset) {
+                        singleton_offset_runs += 1;
+                        last_offset = Some(offset);
+                    }
+                    singleton_offset_run_rows += 1;
+                }
+                _ => {
+                    multi += 1;
+                    last_offset = None;
+                }
+            }
+        }
+    }
+    eprintln!(
+        "[glrmask/profile][constraint_state_relations] components={} rows={} empty={} singleton={} multi={} max_fanout={} singleton_offset_runs={} singleton_offset_run_rows={} boundary_nonterminals={}",
+        composed.state_relations.len(),
+        rows,
+        empty,
+        singleton,
+        multi,
+        max_fanout,
+        singleton_offset_runs,
+        singleton_offset_run_rows,
+        composed.boundary_nonterminals.len(),
+    );
 }
 
 #[derive(Clone, Copy)]
@@ -483,7 +539,10 @@ fn materialized_top_acceptance(constraint: &Constraint) -> BTreeMap<i32, Weight>
     result
 }
 
-fn component_parser_nwa(component: &ParserDwaComponent<'_>) -> Result<NWA, String> {
+fn component_parser_nwa_with_top_accept(
+    component: &ParserDwaComponent<'_>,
+    include_top_accept: bool,
+) -> Result<NWA, String> {
     let constraint = component.constraint;
     if component.parser_state_relation.len() != constraint.table.num_states as usize {
         return Err(format!(
@@ -499,55 +558,72 @@ fn component_parser_nwa(component: &ParserDwaComponent<'_>) -> Result<NWA, Strin
     // component NWA carries the same overlap-local certification without a
     // second whole-graph scan at link time.
     debug_assert!(source.is_acyclic());
-    let mut nwa = NWA::new(0, 0);
-    for _ in source.states() {
-        nwa.add_state();
-    }
-    nwa.set_start_states(vec![source.start_state()]);
-
-    for (state_id, state) in source.states().iter().enumerate() {
-        if let Some(final_weight) = &state.final_weight {
-            nwa.set_final_weight(state_id as u32, final_weight.clone());
-        }
-        let explicit_positive = state
-            .transitions
-            .keys()
-            .filter_map(|&label| {
-                (label >= 0 && label != DEFAULT_LABEL).then_some(label as u32)
-            })
-            .collect::<BTreeSet<_>>();
+    let build_state = |state: &DWAState| -> Result<NWAState, String> {
+        let mut explicit_positive = SmallVec::<[u32; 8]>::new();
+        let mut entries = Vec::<(i32, u32, Weight)>::new();
         for (&label, (target, weight)) in &state.transitions {
             if label == DEFAULT_LABEL {
                 continue;
             }
-            add_transition_for_mapped_label(
-                &mut nwa,
-                state_id as u32,
-                label,
-                *target,
-                weight,
-                component.parser_state_relation,
-            )?;
-        }
-        if let Some((target, weight)) = state.transitions.get(&DEFAULT_LABEL) {
-            for local_state in 0..constraint.table.num_states {
-                if explicit_positive.contains(&local_state) {
-                    continue;
-                }
-                add_transition_for_mapped_label(
-                    &mut nwa,
-                    state_id as u32,
-                    encode_positive_label(local_state),
-                    *target,
-                    weight,
-                    component.parser_state_relation,
-                )?;
+            if label >= 0 {
+                explicit_positive.push(label as u32);
+            }
+            for mapped in mapped_labels(label, component.parser_state_relation)? {
+                entries.push((mapped, *target, weight.clone()));
             }
         }
-    }
+        explicit_positive.sort_unstable();
+        explicit_positive.dedup();
+        if let Some((target, weight)) = state.transitions.get(&DEFAULT_LABEL) {
+            for local_state in 0..constraint.table.num_states {
+                if explicit_positive.binary_search(&local_state).is_ok() {
+                    continue;
+                }
+                let mapped_states = component
+                    .parser_state_relation
+                    .get(local_state as usize)
+                    .ok_or_else(|| {
+                        format!("parser-state relation omits local state {local_state}")
+                    })?;
+                if mapped_states.is_empty() {
+                    return Err(format!(
+                        "parser-state relation maps local state {local_state} nowhere"
+                    ));
+                }
+                entries.extend(mapped_states.iter().copied().map(|global_state| {
+                    (encode_positive_label(global_state), *target, weight.clone())
+                }));
+            }
+        }
+        entries.sort_unstable_by_key(|(label, target, weight)| {
+            (*label, *target, weight.ptr_key())
+        });
+        entries.dedup_by(|left, right| {
+            left.0 == right.0 && left.1 == right.1 && left.2.ptr_key() == right.2.ptr_key()
+        });
+        let mut transitions = BTreeMap::<i32, Vec<(u32, Weight)>>::new();
+        for (label, target, weight) in entries {
+            transitions.entry(label).or_default().push((target, weight));
+        }
+        Ok(NWAState {
+            final_weight: state.final_weight.clone(),
+            transitions,
+            epsilons: Vec::new(),
+        })
+    };
+    let states = if rayon::current_num_threads() == 1 {
+        source.states().iter().map(build_state).collect::<Result<Vec<_>, _>>()?
+    } else {
+        source
+            .states()
+            .par_iter()
+            .map(build_state)
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let mut nwa = NWA::from_parts(states, vec![source.start_state()]);
 
-    let top_accept = materialized_top_acceptance(constraint);
-    if !top_accept.is_empty() {
+    let top_accept = include_top_accept.then(|| materialized_top_acceptance(constraint));
+    if let Some(top_accept) = top_accept.filter(|top_accept| !top_accept.is_empty()) {
         let start = nwa.add_state();
         let final_state = nwa.add_state();
         nwa.set_final_weight(final_state, Weight::all());
@@ -564,6 +640,149 @@ fn component_parser_nwa(component: &ParserDwaComponent<'_>) -> Result<NWA, Strin
         nwa.start_states_mut().push(start);
     }
     Ok(nwa)
+}
+
+fn component_parser_nwa(component: &ParserDwaComponent<'_>) -> Result<NWA, String> {
+    component_parser_nwa_with_top_accept(component, true)
+}
+
+fn transported_component_top_accept_parts(
+    component: &ParserDwaComponent<'_>,
+) -> Result<BTreeMap<i32, Vec<Weight>>, String> {
+    let constraint = component.constraint;
+    if component.parser_state_relation.len() != constraint.table.num_states as usize {
+        return Err(format!(
+            "parser-state relation has {} rows for a {}-state component table",
+            component.parser_state_relation.len(),
+            constraint.table.num_states,
+        ));
+    }
+
+    let default_combined = constraint.parser_top_accept.get(&DEFAULT_LABEL);
+    let default_parts = constraint.parser_top_accept_parts.get(&DEFAULT_LABEL);
+    let mut transported = BTreeMap::<i32, Vec<Weight>>::new();
+    for local_state in 0..constraint.table.num_states {
+        let local_label = encode_positive_label(local_state);
+        let mut parts = SmallVec::<[Weight; 8]>::new();
+        if let Some(weight) = constraint
+            .parser_top_accept
+            .get(&local_label)
+            .or(default_combined)
+        {
+            parts.push(weight.clone());
+        }
+        if let Some(weights) = constraint
+            .parser_top_accept_parts
+            .get(&local_label)
+            .or(default_parts)
+        {
+            parts.extend(weights.iter().cloned());
+        }
+        if let Some(row) = constraint.table.advance.get(local_state as usize) {
+            for terminal in row.iter_ones() {
+                if let Some(weight) = constraint
+                    .direct_regular_l1_complete_by_terminal
+                    .get(&(terminal as u32))
+                {
+                    parts.push(weight.clone());
+                }
+            }
+        }
+        if parts.is_empty() {
+            continue;
+        }
+        parts.sort_unstable_by_key(Weight::ptr_key);
+        parts.dedup_by_key(|weight| weight.ptr_key());
+        for &global_state in component
+            .parser_state_relation
+            .get(local_state as usize)
+            .ok_or_else(|| format!("parser-state relation omits local state {local_state}"))?
+        {
+            transported
+                .entry(encode_positive_label(global_state))
+                .or_default()
+                .extend(parts.iter().cloned());
+        }
+    }
+    for parts in transported.values_mut() {
+        parts.sort_unstable_by_key(Weight::ptr_key);
+        parts.dedup_by_key(|weight| weight.ptr_key());
+    }
+    Ok(transported)
+}
+
+fn collapse_transported_top_accept_parts(
+    parts: BTreeMap<i32, Vec<Weight>>,
+    num_parser_states: u32,
+) -> BTreeMap<i32, Weight> {
+    let profile = compose_profile_enabled();
+    let started_at = Instant::now();
+    let labels = parts.len();
+    let total_parts = parts.values().map(Vec::len).sum::<usize>();
+    let max_parts = parts.values().map(Vec::len).max().unwrap_or(0);
+    let mut collapsed = parts
+        .into_par_iter()
+        .filter_map(|(label, mut weights)| {
+            weights.sort_unstable_by_key(Weight::ptr_key);
+            weights.dedup_by_key(|weight| weight.ptr_key());
+            let weight = match weights.len() {
+                0 => return None,
+                1 => weights.pop().unwrap(),
+                _ => Weight::union_all(weights.iter()),
+            };
+            (!weight.is_empty()).then_some((label, weight))
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+    let unique_weights;
+    let mut default_multiplicity = 0usize;
+    let mut exceptions = collapsed.len();
+    let full_positive_domain = collapsed.len() == num_parser_states as usize
+        && (0..num_parser_states).all(|state| {
+            collapsed.contains_key(&encode_positive_label(state))
+        });
+    if full_positive_domain && !collapsed.is_empty() {
+        let mut by_weight = FxHashMap::<usize, (Weight, usize)>::default();
+        for weight in collapsed.values() {
+            by_weight
+                .entry(weight.ptr_key())
+                .and_modify(|(_, count)| *count += 1)
+                .or_insert_with(|| (weight.clone(), 1));
+        }
+        unique_weights = by_weight.len();
+        if let Some((default_weight, count)) = by_weight
+            .into_values()
+            .max_by_key(|(_, count)| *count)
+        {
+            let default_key = default_weight.ptr_key();
+            collapsed.retain(|_, weight| weight.ptr_key() != default_key);
+            collapsed.insert(DEFAULT_LABEL, default_weight);
+            default_multiplicity = count;
+            exceptions = collapsed.len().saturating_sub(1);
+        }
+    } else {
+        unique_weights = collapsed
+            .values()
+            .map(Weight::ptr_key)
+            .collect::<FxHashSet<_>>()
+            .len();
+    }
+    if profile {
+        eprintln!(
+            "[glrmask/profile][constraint_top_accept_transport] labels={} parts={} max_parts={} collapsed_labels={} full_positive_domain={} unique_weights={} default_multiplicity={} exceptions={} collapse_ms={:.3}",
+            labels,
+            total_parts,
+            max_parts,
+            collapsed.len(),
+            full_positive_domain,
+            unique_weights,
+            default_multiplicity,
+            exceptions,
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    collapsed
 }
 
 /// Standalone component parser DWAs erase their one global ignore terminal
@@ -602,6 +821,19 @@ struct BoundaryRepair {
     parser_dwa: MappedArtifact<DWA>,
     template_dfas_by_terminal: Vec<Option<Arc<crate::runtime::CommitTemplateDfas>>>,
     active_terminals: Vec<bool>,
+}
+
+type BoundarySeedRelations = BTreeMap<Vec<u32>, BTreeMap<u32, BTreeSet<u32>>>;
+
+struct BoundaryLexicalPrepass {
+    seed_terminals: Vec<bool>,
+    disallowed_follows: BTreeMap<u32, BitSet>,
+    boundary_paths: BoundaryTokenDiscovery,
+    discovery_ms: f64,
+    seed_relations: BoundarySeedRelations,
+    one_byte_ms: f64,
+    active_terminals: Vec<bool>,
+    boundary_special_token_terminals: Vec<SpecialTokenTerminal>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1570,28 +1802,30 @@ fn discover_boundary_token_paths(
         let coarse_ms = coarse_started_at.elapsed().as_secs_f64() * 1000.0;
 
         let suffix_index_started_at = Instant::now();
-        let mut suffix_tokens = FxHashMap::<&[u8], SmallVec<[u32; 2]>>::default();
-        for &(token_id, bytes) in &all_multi_byte_entries {
-            if !coarse.contains(&token_id) {
-                continue;
-            }
-            for offset in 0..bytes.len() {
-                suffix_tokens
-                    .entry(&bytes[offset..])
-                    .or_default()
-                    .push(token_id);
-            }
-        }
-        let suffix_count = suffix_tokens.len();
+        let suffix_index = crate::compiler::vocab_suffix_index::get(vocab);
+        let suffix_count = suffix_index.entries().len();
         let suffix_index_ms = suffix_index_started_at.elapsed().as_secs_f64() * 1000.0;
         let exact_started_at = Instant::now();
-        let exact = suffix_tokens
-            .into_par_iter()
-            .filter_map(|(suffix, tokens)| {
-                seed_dfas
+        let exact = suffix_index
+            .entries()
+            .par_iter()
+            .filter_map(|entry| {
+                let has_coarse_owner = entry
+                    .token_ids()
                     .iter()
-                    .any(|dfa| seed_dfa_reaches_match_or_future(dfa, suffix))
-                .then_some(tokens)
+                    .any(|token_id| coarse.contains(token_id));
+                (has_coarse_owner
+                    && seed_dfas
+                        .iter()
+                        .any(|dfa| seed_dfa_reaches_match_or_future(dfa, entry.suffix())))
+                .then(|| {
+                    entry
+                        .token_ids()
+                        .iter()
+                        .copied()
+                        .filter(|token_id| coarse.contains(token_id))
+                        .collect::<SmallVec<[u32; 2]>>()
+                })
             })
             .flatten_iter()
             .collect::<BTreeSet<_>>();
@@ -1659,7 +1893,6 @@ fn discover_boundary_token_paths(
     );
     let candidate_ranges_ms = candidate_ranges_started_at.elapsed().as_secs_f64() * 1000.0;
     let candidate_range_rows = candidate_ranges.values().map(Vec::len).sum::<usize>();
-
     // Each model token is an independent acyclic same-token graph. Run those
     // scans in parallel, then merge in vocabulary order for deterministic
     // output and profiling.
@@ -2759,13 +2992,30 @@ fn determinize_epsilon_free_component_union_prechecked(
                 })
     }
 
-    let mut raw_states = Vec::<RawCompressedState>::new();
-    let mut starts = Vec::new();
-    for automaton in automata {
-        let offset = raw_states.len() as u32;
-        let (states, start_states) = automaton.into_parts();
-        starts.extend(start_states.into_iter().map(|state| offset + state));
-        for appended in states {
+    let mut next_offset = 0u32;
+    let components = automata
+        .into_iter()
+        .map(|automaton| {
+            let offset = next_offset;
+            next_offset = next_offset
+                .checked_add(automaton.states().len() as u32)
+                .expect("component parser-DWA state count overflow");
+            let (states, start_states) = automaton.into_parts();
+            (offset, states, start_states)
+        })
+        .collect::<Vec<_>>();
+    let mut starts = components
+        .iter()
+        .flat_map(|(offset, _, start_states)| {
+            start_states.iter().map(move |state| offset + *state)
+        })
+        .collect::<Vec<_>>();
+    let raw_chunks = components
+        .into_par_iter()
+        .map(|(offset, states, _)| {
+            states
+                .into_par_iter()
+                .map(|appended| {
             debug_assert!(appended.epsilons.is_empty());
             let mut runs = Vec::<RawTransitionRun>::new();
             let mut default_targets = None;
@@ -2795,14 +3045,22 @@ fn determinize_epsilon_free_component_union_prechecked(
                     });
                 }
             }
-            raw_states.push(RawCompressedState {
+                    RawCompressedState {
                 runs,
                 default_targets,
                 final_weight: appended.final_weight,
                 deterministic,
-            });
-        }
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let mut raw_states = Vec::<RawCompressedState>::with_capacity(next_offset as usize);
+    for chunk in raw_chunks {
+        raw_states.extend(chunk);
     }
+    starts.sort_unstable();
+    starts.dedup();
     let raw_compress_ms = total_started_at.elapsed().as_secs_f64() * 1000.0;
     if starts.is_empty() {
         return (DWA::new(0, 0), 0);
@@ -3508,12 +3766,14 @@ fn determinize_epsilon_free_component_union_prechecked(
 struct UnmappedComponentParserArtifact {
     automaton: NWA,
     possible_matches: PossibleMatches,
+    top_accept_parts: BTreeMap<i32, Vec<Weight>>,
 }
 
 fn prepare_unmapped_component_parser_artifacts(
     components: &[ParserDwaComponent<'_>],
     terminal_offsets: &[u32],
     strip_scoped_ignore_identity: bool,
+    transport_top_accept_directly: bool,
 ) -> Result<Vec<UnmappedComponentParserArtifact>, String> {
     if components.len() != terminal_offsets.len() {
         return Err("component/parser terminal-offset count mismatch".into());
@@ -3524,7 +3784,15 @@ fn prepare_unmapped_component_parser_artifacts(
         .zip(terminal_offsets.par_iter().copied())
         .map(|(component, terminal_offset)| {
             let possible_matches = component_possible_matches(&component, terminal_offset)?;
-            let mut automaton = component_parser_nwa(&component)?;
+            let mut automaton = component_parser_nwa_with_top_accept(
+                &component,
+                !transport_top_accept_directly,
+            )?;
+            let top_accept_parts = if transport_top_accept_directly {
+                transported_component_top_accept_parts(&component)?
+            } else {
+                BTreeMap::new()
+            };
             if strip_scoped_ignore_identity {
                 let ignore_weight = component
                     .constraint
@@ -3535,6 +3803,7 @@ fn prepare_unmapped_component_parser_artifacts(
             Ok(UnmappedComponentParserArtifact {
                 automaton,
                 possible_matches,
+                top_accept_parts,
             })
         })
         .collect()
@@ -3551,11 +3820,13 @@ struct BoundaryRefinementPlan {
 struct PreparedOwnedComponentArtifacts {
     automata: Vec<NWA>,
     possible_matches: PossibleMatches,
+    top_accept_parts: BTreeMap<i32, Vec<Weight>>,
     id_map: InternalIdMap,
     boundary_tsid_map: Option<Vec<Vec<u32>>>,
     boundary_token_map: Option<Vec<Vec<u32>>>,
     remap_ms: f64,
 }
+
 
 fn build_boundary_refinement_plan(
     component_map: InternalIdMap,
@@ -3697,7 +3968,12 @@ fn remap_unmapped_component_artifacts(
     component_maps: Vec<DirectComponentCoordinateMaps>,
     base_to_common_tokens: Option<&[Vec<u32>]>,
     common_tsid_count: usize,
-) -> Result<(Vec<NWA>, PossibleMatches, f64), String> {
+) -> Result<(
+    Vec<NWA>,
+    PossibleMatches,
+    BTreeMap<i32, Vec<Weight>>,
+    f64,
+), String> {
     if artifacts.len() != component_maps.len() {
         return Err("component artifact/map count mismatch".into());
     }
@@ -3712,20 +3988,25 @@ fn remap_unmapped_component_artifacts(
                     compose_local_id_map(&maps.local_to_global_tokens, base_to_common)
                 },
             );
-            let mut pair = (artifact.automaton, artifact.possible_matches);
-            let mut weights = pair.weight_refs_mut();
+            let mut triple = (
+                artifact.automaton,
+                artifact.possible_matches,
+                artifact.top_accept_parts,
+            );
+            let mut weights = triple.weight_refs_mut();
             remap_weights_with_maps(
                 &mut weights,
                 &maps.local_to_global_tsids,
                 &token_map,
                 common_tsid_count,
             );
-            Ok::<_, String>(pair)
+            Ok::<_, String>(triple)
         })
         .collect::<Result<Vec<_>, String>>()?;
     let mut automata = Vec::with_capacity(remapped.len());
     let mut possible_matches = PossibleMatches::new();
-    for (automaton, component_possible_matches) in remapped {
+    let mut top_accept_parts = BTreeMap::<i32, Vec<Weight>>::new();
+    for (automaton, component_possible_matches, component_top_accept_parts) in remapped {
         automata.push(automaton);
         for (terminal, weight) in component_possible_matches {
             possible_matches
@@ -3733,10 +4014,18 @@ fn remap_unmapped_component_artifacts(
                 .and_modify(|existing| *existing = existing.union(&weight))
                 .or_insert(weight);
         }
+        for (label, parts) in component_top_accept_parts {
+            top_accept_parts.entry(label).or_default().extend(parts);
+        }
+    }
+    for parts in top_accept_parts.values_mut() {
+        parts.sort_unstable_by_key(Weight::ptr_key);
+        parts.dedup_by_key(|weight| weight.ptr_key());
     }
     Ok((
         automata,
         possible_matches,
+        top_accept_parts,
         started_at.elapsed().as_secs_f64() * 1000.0,
     ))
 }
@@ -4331,25 +4620,32 @@ fn build_composition_templates(
     table: &crate::compiler::glr::table::GLRTable,
     analyzed: &AnalyzedGrammar,
     selected: &[bool],
-) -> (
-    Templates,
-    Vec<Option<Arc<crate::runtime::CommitTemplateDfas>>>,
-    f64,
-) {
+) -> (Templates, f64) {
     let started_at = Instant::now();
+    let direct_started_at = Instant::now();
+    let (mut templates, direct_eligible) =
+        Templates::from_individually_direct_regular_terminals(table, selected);
+    let direct_ms = direct_started_at.elapsed().as_secs_f64() * 1000.0;
+    let generic_selected = selected
+        .iter()
+        .zip(&direct_eligible)
+        .map(|(&selected, &direct)| selected && !direct)
+        .collect::<Vec<_>>();
     let (characterizations, characterization_profile) =
-        characterize_selected_terminals_profiled(table, analyzed, selected);
-    let templates = Templates::from_characterizations(&characterizations);
-    let mut template_dfas_by_terminal = vec![None; analyzed.num_terminals as usize];
-    for (&terminal, dfa) in &templates.by_terminal {
-        let commit_dfa = specialize_template_dfa_defaults_for_commit_split_input(dfa);
-        if let Some(split) = try_split_commit_template_dfas(&commit_dfa)
-            && let Some(slot) = template_dfas_by_terminal.get_mut(terminal as usize)
-        {
-            *slot = Some(Arc::new(split));
-        }
-    }
+        characterize_selected_terminals_profiled(table, analyzed, &generic_selected);
+    let (generic_templates, template_profile) =
+        Templates::from_characterizations_profiled(&characterizations);
+    templates.by_terminal.extend(generic_templates.by_terminal);
+    templates
+        .by_terminal_nwa
+        .extend(generic_templates.by_terminal_nwa);
     if compose_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][constraint_boundary_direct_templates] selected={} direct={} generic={} total_ms={direct_ms:.3}",
+            selected.iter().filter(|&&selected| selected).count(),
+            direct_eligible.iter().filter(|&&direct| direct).count(),
+            generic_selected.iter().filter(|&&selected| selected).count(),
+        );
         eprintln!(
             "[glrmask/profile][constraint_boundary_characterization] terminals={} unique_action_signatures={} max_signature_multiplicity={} quotient_hits={} signature_ms={:.3} characterize_ms={:.3} fanout_ms={:.3} validation_ms={:.3} total_ms={:.3}",
             characterization_profile.terminals,
@@ -4362,58 +4658,251 @@ fn build_composition_templates(
             characterization_profile.validation_ms,
             characterization_profile.total_ms,
         );
+        eprintln!(
+            "[glrmask/profile][constraint_boundary_template_compile] terminals={} unique={} compiled={} quotient_hits={} build_nfa_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} fanout_ms={:.3} validation_ms={:.3} profile_total_ms={:.3} wall_ms={:.3} nfa_states={} premin_dfa_states={} dfa_states={} max_nfa_states={} max_premin_dfa_states={} max_dfa_states={}",
+            template_profile.num_terminals,
+            template_profile.unique_characterizations,
+            template_profile.compiled_characterizations,
+            template_profile.quotient_hits,
+            template_profile.build_nfa_ms,
+            template_profile.determinize_ms,
+            template_profile.minimize_ms,
+            template_profile.fanout_ms,
+            template_profile.validation_ms,
+            template_profile.total_ms,
+            template_profile.wall_ms,
+            template_profile.total_nfa_states,
+            template_profile.total_premin_dfa_states,
+            template_profile.total_dfa_states,
+            template_profile.max_nfa_states,
+            template_profile.max_premin_dfa_states,
+            template_profile.max_dfa_states,
+        );
     }
-    (
-        templates,
-        template_dfas_by_terminal,
-        started_at.elapsed().as_secs_f64() * 1000.0,
-    )
+    (templates, started_at.elapsed().as_secs_f64() * 1000.0)
 }
 
-fn build_boundary_repair(
+fn build_composition_commit_templates(
+    templates: &Templates,
+    num_terminals: usize,
+    selected: Option<&[bool]>,
+) -> (Vec<Option<Arc<crate::runtime::CommitTemplateDfas>>>, f64) {
+    let started_at = Instant::now();
+    let compiled = templates
+        .by_terminal
+        .par_iter()
+        .filter_map(|(&terminal, dfa)| {
+            if selected.is_some_and(|selected| {
+                !selected
+                    .get(terminal as usize)
+                    .copied()
+                    .unwrap_or(false)
+            }) {
+                return None;
+            }
+            let commit_dfa = specialize_template_dfa_defaults_for_commit_split_input(dfa);
+            try_split_commit_template_dfas(&commit_dfa)
+                .map(|split| (terminal as usize, Arc::new(split)))
+        })
+        .collect::<Vec<_>>();
+    let mut template_dfas_by_terminal = vec![None; num_terminals];
+    for (terminal, split) in compiled {
+        if let Some(slot) = template_dfas_by_terminal.get_mut(terminal) {
+            *slot = Some(split);
+        }
+    }
+    let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+    if compose_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][constraint_boundary_commit_templates] input_templates={} output_templates={} total_ms={elapsed_ms:.3}",
+            templates.by_terminal.len(),
+            template_dfas_by_terminal.iter().filter(|slot| slot.is_some()).count(),
+        );
+    }
+    (template_dfas_by_terminal, elapsed_ms)
+}
+
+fn remap_split_template_dfa(
+    dfa: &UnweightedDfa,
+    relation: &[Vec<u32>],
+) -> Result<UnweightedDfa, String> {
+    let mut remapped = dfa.clone();
+    for state in &mut remapped.states {
+        let mut transitions = BTreeMap::new();
+        for (&label, &target) in &state.transitions {
+            if label == DEFAULT_LABEL {
+                return Err("split commit template retained an unmaterialized default label".into());
+            }
+            let labels = mapped_labels(label, relation)?;
+            if labels.len() != 1 {
+                return Err(format!(
+                    "split commit template requires one-to-one parser-state transport; label {label} maps to {} states",
+                    labels.len(),
+                ));
+            }
+            let mapped = labels[0];
+            if let Some(existing) = transitions.insert(mapped, target)
+                && existing != target
+            {
+                return Err(format!(
+                    "split commit template label transport collides at {mapped}: {existing} vs {target}",
+                ));
+            }
+        }
+        state.transitions = transitions;
+    }
+    Ok(remapped)
+}
+
+fn remap_split_commit_template(
+    template: &crate::runtime::CommitTemplateDfas,
+    relation: &[Vec<u32>],
+) -> Result<crate::runtime::CommitTemplateDfas, String> {
+    Ok(crate::runtime::CommitTemplateDfas {
+        pop: remap_split_template_dfa(&template.pop, relation)?,
+        read: remap_split_template_dfa(&template.read, relation)?,
+        push: remap_split_template_dfa(&template.push, relation)?,
+        pop_to_read: template.pop_to_read.clone(),
+        pop_to_push: template.pop_to_push.clone(),
+        read_to_push: template.read_to_push.clone(),
+    })
+}
+
+fn transport_component_commit_templates(
     composed_table: &ComposedTable,
+    components: &[&Constraint],
+    rebuild_missing: bool,
+) -> (
+    Vec<Option<Arc<crate::runtime::CommitTemplateDfas>>>,
+    Vec<bool>,
+    f64,
+) {
+    let started_at = Instant::now();
+    let mut transported = vec![None; composed_table.table.num_terminals as usize];
+    let mut needs_rebuild = vec![false; composed_table.table.num_terminals as usize];
+    let mut transported_count = 0usize;
+    let mut failed_count = 0usize;
+    for (component_index, component) in components.iter().enumerate() {
+        let terminal_offset = composed_table.terminal_offsets[component_index] as usize;
+        let relation = &composed_table.state_relations[component_index];
+        for (local_terminal, template) in component.template_dfas_by_terminal.iter().enumerate() {
+            let global_terminal = terminal_offset + local_terminal;
+            let Some(template) = template else {
+                if rebuild_missing {
+                    needs_rebuild[global_terminal] = true;
+                }
+                continue;
+            };
+            match remap_split_commit_template(template, relation) {
+                Ok(template) => {
+                    transported[global_terminal] = Some(Arc::new(template));
+                    transported_count += 1;
+                }
+                Err(_) => {
+                    needs_rebuild[global_terminal] = true;
+                    failed_count += 1;
+                }
+            }
+        }
+    }
+    let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+    if compose_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][constraint_commit_template_transport] components={} transported={} failed={} missing={} total_ms={elapsed_ms:.3}",
+            components.len(),
+            transported_count,
+            failed_count,
+            needs_rebuild.iter().filter(|&&needed| needed).count(),
+        );
+    }
+    (transported, needs_rebuild, elapsed_ms)
+}
+
+fn profile_boundary_parser_dwa(dwa: &DWA) {
+    if !compose_profile_enabled() {
+        return;
+    }
+    let states = dwa.states();
+    let mut positive = 0usize;
+    let mut negative = 0usize;
+    let mut defaults = 0usize;
+    let mut final_states = 0usize;
+    let mut indegree = vec![0usize; states.len()];
+    for state in states {
+        final_states += usize::from(state.final_weight.is_some());
+        for (&label, (target, _)) in &state.transitions {
+            if label == DEFAULT_LABEL {
+                defaults += 1;
+            } else if label >= 0 {
+                positive += 1;
+            } else {
+                negative += 1;
+            }
+            if let Some(degree) = indegree.get_mut(*target as usize) {
+                *degree += 1;
+            }
+        }
+    }
+    let mut queue = VecDeque::new();
+    for (state, degree) in indegree.iter().copied().enumerate() {
+        if degree == 0 {
+            queue.push_back(state);
+        }
+    }
+    let mut topo = Vec::with_capacity(states.len());
+    while let Some(source) = queue.pop_front() {
+        topo.push(source);
+        for &(target, _) in states[source].transitions.values() {
+            let degree = &mut indegree[target as usize];
+            *degree -= 1;
+            if *degree == 0 {
+                queue.push_back(target as usize);
+            }
+        }
+    }
+    let mut height = vec![0usize; states.len()];
+    for &source in topo.iter().rev() {
+        height[source] = states[source]
+            .transitions
+            .values()
+            .map(|(target, _)| 1 + height[*target as usize])
+            .max()
+            .unwrap_or(0);
+    }
+    let mut by_height = BTreeMap::<usize, usize>::new();
+    for value in &height {
+        *by_height.entry(*value).or_default() += 1;
+    }
+    eprintln!(
+        "[glrmask/profile][constraint_boundary_parser_shape] states={} transitions={} finals={} positive={} negative={} defaults={} acyclic={} max_height={} start_height={} height_hist={:?}",
+        states.len(),
+        dwa.num_transitions(),
+        final_states,
+        positive,
+        negative,
+        defaults,
+        topo.len() == states.len(),
+        height.iter().copied().max().unwrap_or(0),
+        height.get(dwa.start_state() as usize).copied().unwrap_or(0),
+        by_height,
+    );
+}
+
+fn prepare_boundary_lexical_prepass(
+    analyzed: &AnalyzedGrammar,
+    boundary_nonterminals: &BTreeSet<u32>,
+    terminal_offsets: &[u32],
     merged_tokenizer: Option<&Tokenizer>,
-    merged_tokenizer_state_count: usize,
     merged_reset_state: u32,
-    terminal_display_names: Vec<String>,
     ignore_terminals: &MergedIgnoreTerminals,
     vocab: &Vocab,
     special_token_terminals: &[SpecialTokenTerminal],
     components: &[&Constraint],
     tokenizer_state_offsets: &[u32],
-    precomputed_component_state_map: Option<&ManyToOneIdMap>,
-    deferred_component_state_map: Option<&OnceLock<Result<ManyToOneIdMap, String>>>,
     selected_boundary_tokens: Option<&OnceLock<Result<Option<Vec<u32>>, String>>>,
-) -> Result<Option<BoundaryRepair>, String> {
-    let total_started_at = Instant::now();
-    let augmented_start = composed_table
-        .table
-        .rules
-        .first()
-        .map(|rule| rule.lhs)
-        .ok_or_else(|| "composed table contains no augmented-start rule".to_string())?;
-    let analyzed = AnalyzedGrammar::from_composed_rules(
-        composed_table.table.rules.clone(),
-        composed_table.table.num_terminals,
-        terminal_display_names,
-        composed_table.table.nonterminal_display_names.clone(),
-        augmented_start,
-    );
-
-    // A transported component parser DWA already covers paths wholly inside
-    // that component. Boundary repair is required whenever the explicit
-    // linker can take a zero-width call/return before the next lexical
-    // terminal. For a child root N, those lexical beginnings are exactly:
-    //
-    //   FIRST(N)  — paths which begin the child; and
-    //   FOLLOW(N) — paths which begin the parent continuation.
-    //
-    // Compute this over the fully composed rule graph, rather than reading the
-    // direct child-start/continuation rows. FIRST/FOLLOW propagates through
-    // nullable suffixes, adjacent children, and children whose first visible
-    // syntax belongs to another nested child.
-    let mut seed_terminals = vec![false; composed_table.table.num_terminals as usize];
-    for &nonterminal in &composed_table.boundary_nonterminals {
+) -> Result<Option<BoundaryLexicalPrepass>, String> {
+    let mut seed_terminals = vec![false; analyzed.num_terminals as usize];
+    for &nonterminal in boundary_nonterminals {
         let Some(first) = analyzed.first.get(nonterminal as usize) else {
             return Err(format!(
                 "boundary nonterminal {nonterminal} lies outside composed FIRST analysis",
@@ -4435,104 +4924,69 @@ fn build_boundary_repair(
             *slot = true;
         }
     }
-    // The composed rule graph substitutes every placeholder occurrence with
-    // the remapped child root. Its grammar-level ever-follow relation is
-    // therefore exact for adjacent terminal matches and can discard lexical
-    // component switches that no parser derivation can realize. Retain an
-    // opt-out while the composition differential corpus validates this path.
+
     let disallowed_follows = if std::env::var_os("GLRMASK_COMPOSE_DISABLE_GRAMMAR_FOLLOWS")
         .is_some()
     {
         BTreeMap::<u32, BitSet>::new()
     } else {
-        crate::compiler::pipeline::compute_disallowed_follows(&analyzed)
+        crate::compiler::pipeline::compute_disallowed_follows(analyzed)
     };
-    // Boundary-path discovery and exact one-byte seed analysis are independent
-    // read-only passes over the tokenizer.  Running them serially made boundary
-    // repair pay two full million-state/vocabulary scans back-to-back.
-    let eager_all_templates =
-        std::env::var_os("GLRMASK_COMPOSE_SELECTED_TEMPLATES_ONLY").is_none();
-    let all_terminals = vec![true; analyzed.num_terminals as usize];
-    let (eager_templates, ((boundary_paths, discovery_ms), (seed_relations, one_byte_ms))) =
-        rayon::join(
-            || {
-                eager_all_templates.then(|| {
-                    build_composition_templates(
-                        &composed_table.table,
-                        &analyzed,
-                        &all_terminals,
-                    )
-                })
-            },
-            || {
-                rayon::join(
-                    || {
-                        let started_at = Instant::now();
-                        let boundary_paths = discover_boundary_token_paths(
-                            vocab,
-                            components,
-                            tokenizer_state_offsets,
-                            merged_reset_state,
-                            &composed_table.terminal_offsets,
-                            &seed_terminals,
-                            &ignore_terminals.all,
-                            &disallowed_follows,
-                        );
-                        (boundary_paths, started_at.elapsed().as_secs_f64() * 1000.0)
-                    },
-                    || {
-                        let started_at = Instant::now();
-                        let relations = collect_one_byte_seed_relations_components(
-                            components,
-                            tokenizer_state_offsets,
-                            &composed_table.terminal_offsets,
-                            merged_reset_state,
-                            vocab,
-                            &seed_terminals,
-                        );
-                        if std::env::var_os(
-                            "GLRMASK_VALIDATE_COMPOSE_COMPONENT_BOUNDARY_VIEW",
-                        )
-                        .is_some()
-                        {
-                            let mut reference = BTreeMap::<
-                                Vec<u32>,
-                                BTreeMap<u32, BTreeSet<u32>>,
-                            >::new();
-                            let tokenizer = merged_tokenizer.expect(
-                                "component boundary-view validation requires a materialized tokenizer",
-                            );
-                            let all_states = (0..tokenizer.num_states()).collect::<Vec<_>>();
-                            collect_one_byte_seed_relations(
-                                tokenizer,
-                                vocab,
-                                &seed_terminals,
-                                &all_states,
-                                &mut reference,
-                            );
-                            assert_eq!(
-                                relations, reference,
-                                "component-view one-byte relation differs from merged tokenizer"
-                            );
-                            eprintln!(
-                                "[glrmask/validate][compose_component_one_byte_view] relation_rows={} exact=true",
-                                relations.len(),
-                            );
-                        }
-                        (relations, started_at.elapsed().as_secs_f64() * 1000.0)
-                    },
-                )
-            },
-        );
+    let ((boundary_paths, discovery_ms), (seed_relations, one_byte_ms)) = rayon::join(
+        || {
+            let started_at = Instant::now();
+            let boundary_paths = discover_boundary_token_paths(
+                vocab,
+                components,
+                tokenizer_state_offsets,
+                merged_reset_state,
+                terminal_offsets,
+                &seed_terminals,
+                &ignore_terminals.all,
+                &disallowed_follows,
+            );
+            (boundary_paths, started_at.elapsed().as_secs_f64() * 1000.0)
+        },
+        || {
+            let started_at = Instant::now();
+            let relations = collect_one_byte_seed_relations_components(
+                components,
+                tokenizer_state_offsets,
+                terminal_offsets,
+                merged_reset_state,
+                vocab,
+                &seed_terminals,
+            );
+            if std::env::var_os("GLRMASK_VALIDATE_COMPOSE_COMPONENT_BOUNDARY_VIEW").is_some() {
+                let mut reference = BoundarySeedRelations::new();
+                let tokenizer = merged_tokenizer.expect(
+                    "component boundary-view validation requires a materialized tokenizer",
+                );
+                let all_states = (0..tokenizer.num_states()).collect::<Vec<_>>();
+                collect_one_byte_seed_relations(
+                    tokenizer,
+                    vocab,
+                    &seed_terminals,
+                    &all_states,
+                    &mut reference,
+                );
+                assert_eq!(
+                    relations, reference,
+                    "component-view one-byte relation differs from merged tokenizer"
+                );
+                eprintln!(
+                    "[glrmask/validate][compose_component_one_byte_view] relation_rows={} exact=true",
+                    relations.len(),
+                );
+            }
+            (relations, started_at.elapsed().as_secs_f64() * 1000.0)
+        },
+    );
+
     let discovered_boundary_terminals = boundary_paths.terminals.clone();
     let mut active_terminals = seed_terminals.clone();
     for terminal in discovered_boundary_terminals.iter() {
         active_terminals[terminal] = true;
-    }
-    for &terminal in &composed_table.control_terminals {
-        if let Some(active) = active_terminals.get_mut(terminal as usize) {
-            *active = true;
-        }
     }
     if !active_terminals.iter().any(|&active| active) {
         if let Some(selected_boundary_tokens) = selected_boundary_tokens {
@@ -4602,6 +5056,120 @@ fn build_boundary_repair(
         let _ = selected_boundary_tokens.set(Ok(Some(selected_original_tokens)));
     }
 
+    Ok(Some(BoundaryLexicalPrepass {
+        seed_terminals,
+        disallowed_follows,
+        boundary_paths,
+        discovery_ms,
+        seed_relations,
+        one_byte_ms,
+        active_terminals,
+        boundary_special_token_terminals,
+    }))
+}
+
+fn build_boundary_repair(
+    composed_table: &ComposedTable,
+    merged_tokenizer: Option<&Tokenizer>,
+    merged_tokenizer_state_count: usize,
+    merged_reset_state: u32,
+    terminal_display_names: Vec<String>,
+    ignore_terminals: &MergedIgnoreTerminals,
+    vocab: &Vocab,
+    special_token_terminals: &[SpecialTokenTerminal],
+    components: &[&Constraint],
+    control_changed_terminals: &[u32],
+    tokenizer_state_offsets: &[u32],
+    precomputed_component_state_map: Option<&ManyToOneIdMap>,
+    deferred_component_state_map: Option<&OnceLock<Result<ManyToOneIdMap, String>>>,
+    selected_boundary_tokens: Option<&OnceLock<Result<Option<Vec<u32>>, String>>>,
+    precomputed_lexical: Option<BoundaryLexicalPrepass>,
+    precomputed_analyzed: Option<AnalyzedGrammar>,
+) -> Result<Option<BoundaryRepair>, String> {
+    let total_started_at = Instant::now();
+    let analyzed_started_at = Instant::now();
+    let analyzed = if let Some(analyzed) = precomputed_analyzed {
+        analyzed
+    } else {
+        let augmented_start = composed_table
+            .table
+            .rules
+            .first()
+            .map(|rule| rule.lhs)
+            .ok_or_else(|| "composed table contains no augmented-start rule".to_string())?;
+        AnalyzedGrammar::from_composed_rules(
+            composed_table.table.rules.clone(),
+            composed_table.table.num_terminals,
+            terminal_display_names,
+            composed_table.table.nonterminal_display_names.clone(),
+            augmented_start,
+        )
+    };
+    let analyzed_ms = analyzed_started_at.elapsed().as_secs_f64() * 1000.0;
+    let commit_transport_started_at = Instant::now();
+    let (mut transported_commit_templates, mut commit_rebuild, _transport_ms) =
+        transport_component_commit_templates(
+            composed_table,
+            components,
+            commit_template_dfas_enabled(),
+        );
+    let commit_transport_ms = commit_transport_started_at.elapsed().as_secs_f64() * 1000.0;
+    if commit_template_dfas_enabled() || transported_commit_templates.iter().any(Option::is_some) {
+        for &terminal in control_changed_terminals {
+            if let Some(slot) = commit_rebuild.get_mut(terminal as usize) {
+                *slot = true;
+            }
+        }
+    }
+
+    let eager_all_templates =
+        std::env::var_os("GLRMASK_COMPOSE_SELECTED_TEMPLATES_ONLY").is_none();
+    let (eager_templates, lexical) = if let Some(lexical) = precomputed_lexical {
+        (None, Ok(Some(lexical)))
+    } else {
+        rayon::join(
+            || {
+                eager_all_templates.then(|| {
+                    build_composition_templates(
+                        &composed_table.table,
+                        &analyzed,
+                        &vec![true; analyzed.num_terminals as usize],
+                    )
+                })
+            },
+            || {
+                prepare_boundary_lexical_prepass(
+                    &analyzed,
+                    &composed_table.boundary_nonterminals,
+                    &composed_table.terminal_offsets,
+                    merged_tokenizer,
+                    merged_reset_state,
+                    ignore_terminals,
+                    vocab,
+                    special_token_terminals,
+                    components,
+                    tokenizer_state_offsets,
+                    selected_boundary_tokens,
+                )
+            },
+        )
+    };
+    let Some(BoundaryLexicalPrepass {
+        seed_terminals,
+        disallowed_follows,
+        boundary_paths,
+        discovery_ms,
+        seed_relations,
+        one_byte_ms,
+        active_terminals,
+        boundary_special_token_terminals,
+    }) = lexical?
+    else {
+        return Ok(None);
+    };
+    let discovered_boundary_terminals = boundary_paths.terminals.clone();
+
+    let state_map_started_at = Instant::now();
     let owned_component_state_map = if precomputed_component_state_map.is_none()
         && deferred_component_state_map.is_none()
     {
@@ -4629,38 +5197,36 @@ fn build_boundary_repair(
         .or(deferred_component_state_map)
         .or(owned_component_state_map.as_ref())
         .expect("component state map must be available");
+    let state_map_ms = state_map_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    let ((templates, template_dfas_by_terminal, templates_ms), terminal_dwa) =
+    let template_terminal_started_at = Instant::now();
+    let ((templates, templates_ms), terminal_dwa) =
         rayon::join(
             || {
-                let (mut templates, mut template_dfas_by_terminal, templates_ms) =
-                    eager_templates.unwrap_or_else(|| {
-                        build_composition_templates(
-                            &composed_table.table,
-                            &analyzed,
-                            &active_terminals,
-                        )
-                    });
+                let (mut templates, templates_ms) = eager_templates.unwrap_or_else(|| {
+                    build_composition_templates(
+                        &composed_table.table,
+                        &analyzed,
+                        &active_terminals,
+                    )
+                });
                 if eager_all_templates {
                     templates.by_terminal.retain(|terminal, _| {
-                        active_terminals
-                            .get(*terminal as usize)
-                            .copied()
-                            .unwrap_or(false)
+                        active_terminals.get(*terminal as usize).copied().unwrap_or(false)
+                            || commit_rebuild
+                                .get(*terminal as usize)
+                                .copied()
+                                .unwrap_or(false)
                     });
                     templates.by_terminal_nwa.retain(|terminal, _| {
-                        active_terminals
-                            .get(*terminal as usize)
-                            .copied()
-                            .unwrap_or(false)
+                        active_terminals.get(*terminal as usize).copied().unwrap_or(false)
+                            || commit_rebuild
+                                .get(*terminal as usize)
+                                .copied()
+                                .unwrap_or(false)
                     });
-                    for (terminal, slot) in template_dfas_by_terminal.iter_mut().enumerate() {
-                        if !active_terminals[terminal] {
-                            *slot = None;
-                        }
-                    }
                 }
-                (templates, template_dfas_by_terminal, templates_ms)
+                (templates, templates_ms)
             },
             || {
                 let started_at = Instant::now();
@@ -4730,12 +5296,15 @@ fn build_boundary_repair(
                 (result, started_at.elapsed().as_secs_f64() * 1000.0)
             },
         );
+    let template_terminal_wall_ms =
+        template_terminal_started_at.elapsed().as_secs_f64() * 1000.0;
     let (terminal_dwa, terminal_ms) = terminal_dwa;
     let terminal_dwa = terminal_dwa?;
     let special_source_state = merged_tokenizer
         .map(Tokenizer::initial_state_id)
         .unwrap_or(merged_reset_state);
     debug_assert_eq!(special_source_state, merged_reset_state);
+    let special_paths_started_at = Instant::now();
     let terminal_dwa = add_boundary_special_token_paths(
         terminal_dwa,
         &boundary_special_token_terminals,
@@ -4743,22 +5312,46 @@ fn build_boundary_repair(
         Some(component_state_map),
         &composed_table.control_terminals,
     )?;
+    let special_paths_ms = special_paths_started_at.elapsed().as_secs_f64() * 1000.0;
 
-    let parser_started_at = Instant::now();
     let (terminal_automaton, id_map) = terminal_dwa.into_parts();
-    let parser_dwa = build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
-        &composed_table.table,
-        &analyzed,
-        &terminal_automaton,
-        &templates,
-        vocab,
-        &id_map,
-        false,
+    let parser_commit_started_at = Instant::now();
+    let ((rebuilt_commit_templates, commit_ms), (parser_dwa, parser_ms)) = rayon::join(
+        || {
+            build_composition_commit_templates(
+                &templates,
+                analyzed.num_terminals as usize,
+                Some(&commit_rebuild),
+            )
+        },
+        || {
+            let parser_started_at = Instant::now();
+            let parser_dwa = build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
+                &composed_table.table,
+                &analyzed,
+                &terminal_automaton,
+                &templates,
+                vocab,
+                &id_map,
+                false,
+            );
+            (
+                parser_dwa,
+                parser_started_at.elapsed().as_secs_f64() * 1000.0,
+            )
+        },
     );
-    let parser_ms = parser_started_at.elapsed().as_secs_f64() * 1000.0;
+    let parser_commit_wall_ms = parser_commit_started_at.elapsed().as_secs_f64() * 1000.0;
+    for (terminal, rebuilt) in rebuilt_commit_templates.into_iter().enumerate() {
+        if rebuilt.is_some() {
+            transported_commit_templates[terminal] = rebuilt;
+        }
+    }
+    let template_dfas_by_terminal = transported_commit_templates;
+    profile_boundary_parser_dwa(&parser_dwa);
     if compose_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][constraint_boundary_build] active={} begin_active={} discovered_active={} boundary_tokens={} boundary_special_tokens={} discovery_ms={discovery_ms:.3} one_byte_ms={one_byte_ms:.3} terminal_ms={terminal_ms:.3} templates_ms={templates_ms:.3} parser_ms={parser_ms:.3} total_ms={:.3}",
+            "[glrmask/profile][constraint_boundary_build] active={} begin_active={} discovered_active={} boundary_tokens={} boundary_special_tokens={} analyzed_ms={analyzed_ms:.3} commit_transport_ms={commit_transport_ms:.3} state_map_ms={state_map_ms:.3} discovery_ms={discovery_ms:.3} one_byte_ms={one_byte_ms:.3} terminal_ms={terminal_ms:.3} templates_ms={templates_ms:.3} template_terminal_wall_ms={template_terminal_wall_ms:.3} special_paths_ms={special_paths_ms:.3} commit_ms={commit_ms:.3} parser_ms={parser_ms:.3} parser_commit_wall_ms={parser_commit_wall_ms:.3} total_ms={:.3}",
             active_terminals.iter().filter(|&&active| active).count(),
             seed_terminals.iter().filter(|&&active| active).count(),
             discovered_boundary_terminals.count_ones(),
@@ -5473,8 +6066,16 @@ pub(crate) fn compose_constraints(
     let table_started_at = Instant::now();
     let mut composed_table = if use_legacy_splice {
         compose_subgrammar_tables(&parent.table, &table_inputs)?
-    } else {
+    } else if std::env::var_os("GLRMASK_COMPOSE_COPIED_EXPLICIT_TABLE").is_some() {
         compose_subgrammar_tables_explicit(
+            &parent.table,
+            (!global_ignores)
+                .then_some(parent.ignore_terminal)
+                .flatten(),
+            &table_inputs,
+        )?
+    } else {
+        compose_subgrammar_tables_shared_explicit(
             &parent.table,
             (!global_ignores)
                 .then_some(parent.ignore_terminal)
@@ -5483,6 +6084,7 @@ pub(crate) fn compose_constraints(
         )?
     };
     let table_ms = table_started_at.elapsed().as_secs_f64() * 1000.0;
+    profile_composed_state_relations(&composed_table);
 
     let component_constraints = std::iter::once(parent)
         .chain(children.iter().map(|child| child.constraint))
@@ -5510,6 +6112,10 @@ pub(crate) fn compose_constraints(
         .as_ref()
         .map(|report| report.elapsed_ms)
         .unwrap_or(0.0);
+    let control_changed_terminals = control_elimination_report
+        .as_ref()
+        .map(|report| report.changed_terminals.clone())
+        .unwrap_or_default();
     let parser_components = component_constraints
         .iter()
         .enumerate()
@@ -5630,7 +6236,10 @@ pub(crate) fn compose_constraints(
                     vocab,
                     &special_token_terminals,
                     &component_constraints,
+                    &control_changed_terminals,
                     &expected_tokenizer_state_offsets,
+                    None,
+                    None,
                     None,
                     None,
                     None,
@@ -5683,7 +6292,10 @@ pub(crate) fn compose_constraints(
                                 vocab,
                                 &special_token_terminals,
                                 &component_constraints,
+                                &control_changed_terminals,
                                 &expected_tokenizer_state_offsets,
+                                None,
+                                None,
                                 None,
                                 None,
                                 None,
@@ -5870,8 +6482,16 @@ pub(crate) fn compose_constraints_owned_parent(
     let table_started_at = Instant::now();
     let mut composed_table = if use_legacy_splice {
         compose_subgrammar_tables(&parent.table, &table_inputs)?
-    } else {
+    } else if std::env::var_os("GLRMASK_COMPOSE_COPIED_EXPLICIT_TABLE").is_some() {
         compose_subgrammar_tables_explicit(
+            &parent.table,
+            (!global_ignores)
+                .then_some(parent.ignore_terminal)
+                .flatten(),
+            &table_inputs,
+        )?
+    } else {
+        compose_subgrammar_tables_shared_explicit(
             &parent.table,
             (!global_ignores)
                 .then_some(parent.ignore_terminal)
@@ -5880,6 +6500,7 @@ pub(crate) fn compose_constraints_owned_parent(
         )?
     };
     let table_ms = table_started_at.elapsed().as_secs_f64() * 1000.0;
+    profile_composed_state_relations(&composed_table);
 
     let metadata_started_at = Instant::now();
     let component_constraints = std::iter::once(&parent)
@@ -5899,11 +6520,6 @@ pub(crate) fn compose_constraints_owned_parent(
         &composed_table.table,
         &composed_table.control_terminals,
     );
-    let control_elimination_report = eliminate_composed_runtime_controls(&mut composed_table)?;
-    let control_elimination_ms = control_elimination_report
-        .as_ref()
-        .map(|report| report.elapsed_ms)
-        .unwrap_or(0.0);
     let parser_components = component_constraints
         .iter()
         .enumerate()
@@ -5955,126 +6571,209 @@ pub(crate) fn compose_constraints_owned_parent(
             "[glrmask/profile][constraint_composition_metadata] component_views_ms={component_views_ms:.3} specials_ms={specials_ms:.3} token_ids_ms={token_ids_ms:.3} names_ms={names_ms:.3} total_ms={metadata_ms:.3}",
         );
     }
-    // Publish state coordinates and the exact boundary-token coordinate as
-    // soon as each becomes available. Component weight remapping then overlaps
-    // boundary template/terminal/parser construction instead of sitting on the
-    // serial parser-union path.
-    let state_map_cell = OnceLock::<Result<ManyToOneIdMap, String>>::new();
+    // Control elimination mutates only action/control rows. Lexical boundary
+    // discovery depends on the already-linked rule graph and immutable child
+    // tokenizers, so run those two substantial passes together. Component
+    // remapping then overlaps the control-free boundary parser finish.
+    let augmented_start = composed_table
+        .table
+        .rules
+        .first()
+        .map(|rule| rule.lhs)
+        .ok_or_else(|| "composed table contains no augmented-start rule".to_string())?;
+    let boundary_analyzed = AnalyzedGrammar::from_composed_rules(
+        composed_table.table.rules.clone(),
+        composed_table.table.num_terminals,
+        terminal_display_names.clone(),
+        composed_table.table.nonterminal_display_names.clone(),
+        augmented_start,
+    );
+    let boundary_nonterminals = composed_table.boundary_nonterminals.clone();
+    let boundary_terminal_offsets = composed_table.terminal_offsets.clone();
     let selected_boundary_tokens_cell =
         OnceLock::<Result<Option<Vec<u32>>, String>>::new();
+    let control_overlap_started_at = Instant::now();
+    let (control_elimination_result, lexical_result) = {
+        let table = &mut composed_table.table;
+        let controls = &mut composed_table.control_terminals;
+        if std::env::var_os("GLRMASK_COMPOSE_PARALLEL_CONTROL_LEXICAL").is_none() {
+            let control = eliminate_runtime_controls_parts(table, controls);
+            let lexical = prepare_boundary_lexical_prepass(
+                &boundary_analyzed,
+                &boundary_nonterminals,
+                &boundary_terminal_offsets,
+                None,
+                merged_reset_state,
+                &merged_ignores,
+                vocab,
+                &special_token_terminals,
+                &component_constraints,
+                &expected_tokenizer_state_offsets,
+                Some(&selected_boundary_tokens_cell),
+            );
+            (control, lexical)
+        } else {
+            rayon::join(
+                || eliminate_runtime_controls_parts(table, controls),
+                || {
+                    prepare_boundary_lexical_prepass(
+                        &boundary_analyzed,
+                        &boundary_nonterminals,
+                        &boundary_terminal_offsets,
+                        None,
+                        merged_reset_state,
+                        &merged_ignores,
+                        vocab,
+                        &special_token_terminals,
+                        &component_constraints,
+                        &expected_tokenizer_state_offsets,
+                        Some(&selected_boundary_tokens_cell),
+                    )
+                },
+            )
+        }
+    };
+    let control_elimination_report = control_elimination_result?;
+    let control_elimination_ms = control_elimination_report
+        .as_ref()
+        .map(|report| report.elapsed_ms)
+        .unwrap_or(0.0);
+    let control_changed_terminals = control_elimination_report
+        .as_ref()
+        .map(|report| report.changed_terminals.clone())
+        .unwrap_or_default();
+    let lexical_prepass = lexical_result?;
+    let lexical_discovery_ms = lexical_prepass
+        .as_ref()
+        .map(|prepass| prepass.discovery_ms.max(prepass.one_byte_ms))
+        .unwrap_or(0.0);
+    let control_overlap_ms = control_overlap_started_at.elapsed().as_secs_f64() * 1000.0;
+    if compose_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][constraint_control_lexical_overlap] control_ms={control_elimination_ms:.3} lexical_ms={lexical_discovery_ms:.3} wall_ms={control_overlap_ms:.3}",
+        );
+    }
+
+    let state_map_cell = OnceLock::<Result<ManyToOneIdMap, String>>::new();
+    let transport_top_accept_directly =
+        std::env::var_os("GLRMASK_COMPOSE_LEGACY_TOP_ACCEPT_BRANCH").is_none();
     let preparation_started_at = Instant::now();
-    let (prepared_components_result, (boundary_result, boundary_ms)) = rayon::join(
-            || {
-                let state_started_at = Instant::now();
-                let state_result = build_direct_component_state_coordinates(
-                    &parser_components,
-                    merged_tokenizer_state_count,
-                    merged_reset_state,
-                );
-                let component_state_ms = state_started_at.elapsed().as_secs_f64() * 1000.0;
-                let published_state_map = state_result
-                    .as_ref()
-                    .map(|coordinates| coordinates.tokenizer_states.clone())
-                    .map_err(Clone::clone);
-                assert!(
-                    state_map_cell.set(published_state_map).is_ok(),
-                    "component state map published twice",
-                );
-                let state_coordinates = state_result?;
-                let ((token_coordinate_result, token_coordinate_ms), (unmapped_result, parser_extract_ms)) =
-                    rayon::join(
-                        || {
-                            let started_at = Instant::now();
-                            let result = build_direct_component_token_coordinates(
-                                &parser_components,
-                                &original_token_ids,
-                            );
-                            (result, started_at.elapsed().as_secs_f64() * 1000.0)
-                        },
-                        || {
-                            let started_at = Instant::now();
-                            let result = prepare_unmapped_component_parser_artifacts(
-                                &parser_components,
-                                &composed_table.terminal_offsets,
-                                !global_ignores,
-                            );
-                            (result, started_at.elapsed().as_secs_f64() * 1000.0)
-                        },
+    let prepared_components_result = {
+            let state_started_at = Instant::now();
+            let state_result = build_direct_component_state_coordinates(
+                &parser_components,
+                merged_tokenizer_state_count,
+                merged_reset_state,
+            );
+            let component_state_ms = state_started_at.elapsed().as_secs_f64() * 1000.0;
+            let published_state_map = state_result
+                .as_ref()
+                .map(|coordinates| coordinates.tokenizer_states.clone())
+                .map_err(Clone::clone);
+            assert!(
+                state_map_cell.set(published_state_map).is_ok(),
+                "component state map published twice",
+            );
+            let state_coordinates = state_result?;
+            let (
+                (token_coordinate_result, token_coordinate_ms),
+                (unmapped_result, parser_extract_ms),
+            ) = rayon::join(
+                || {
+                    let started_at = Instant::now();
+                    let result = build_direct_component_token_coordinates(
+                        &parser_components,
+                        &original_token_ids,
                     );
-                let (vocab_tokens, local_to_global_tokens) = token_coordinate_result?;
-                let component_maps = state_coordinates
-                    .local_to_global_tsids
-                    .into_iter()
-                    .zip(local_to_global_tokens)
-                    .map(|(local_to_global_tsids, local_to_global_tokens)| {
-                        DirectComponentCoordinateMaps {
-                            local_to_global_tsids,
-                            local_to_global_tokens,
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                let component_id_map = InternalIdMap {
-                    tokenizer_states: state_coordinates.tokenizer_states,
-                    vocab_tokens,
-                    deferred_vocab_singleton_original_ids: None,
-                };
-                let selected_boundary_tokens = loop {
-                    if let Some(selected) = selected_boundary_tokens_cell.get() {
-                        break selected.as_ref().map_err(Clone::clone)?.clone();
+                    (result, started_at.elapsed().as_secs_f64() * 1000.0)
+                },
+                || {
+                    let started_at = Instant::now();
+                    let result = prepare_unmapped_component_parser_artifacts(
+                        &parser_components,
+                        &composed_table.terminal_offsets,
+                        !global_ignores,
+                        transport_top_accept_directly,
+                    );
+                    (result, started_at.elapsed().as_secs_f64() * 1000.0)
+                },
+            );
+            let (vocab_tokens, local_to_global_tokens) = token_coordinate_result?;
+            let component_maps = state_coordinates
+                .local_to_global_tsids
+                .into_iter()
+                .zip(local_to_global_tokens)
+                .map(|(local_to_global_tsids, local_to_global_tokens)| {
+                    DirectComponentCoordinateMaps {
+                        local_to_global_tsids,
+                        local_to_global_tokens,
                     }
-                    std::thread::yield_now();
-                };
-                let unmapped_components = unmapped_result?;
-                let prepared = if let Some(selected_boundary_tokens) = selected_boundary_tokens {
-                    let boundary_id_map = boundary_id_map_for_selected_tokens(
-                        &component_id_map.tokenizer_states,
-                        &selected_boundary_tokens,
+                })
+                .collect::<Vec<_>>();
+            let component_id_map = InternalIdMap {
+                tokenizer_states: state_coordinates.tokenizer_states,
+                vocab_tokens,
+                deferred_vocab_singleton_original_ids: None,
+            };
+            let selected_boundary_tokens = selected_boundary_tokens_cell
+                .get()
+                .expect("boundary lexical prepass must publish selected tokens")
+                .as_ref()
+                .map_err(Clone::clone)?
+                .clone();
+            let prepared = if let Some(selected_boundary_tokens) = selected_boundary_tokens {
+                let boundary_id_map = boundary_id_map_for_selected_tokens(
+                    &component_id_map.tokenizer_states,
+                    &selected_boundary_tokens,
+                )?;
+                let plan = build_boundary_refinement_plan(component_id_map, &boundary_id_map)
+                    .ok_or_else(|| {
+                        "component coordinate map does not cover boundary repair".to_string()
+                    })?;
+                let (automata, possible_matches, top_accept_parts, remap_ms) =
+                    remap_unmapped_component_artifacts(
+                        unmapped_result?,
+                        component_maps,
+                        Some(&plan.component_token_map),
+                        plan.common_map.num_tsids() as usize,
                     )?;
-                    let plan = build_boundary_refinement_plan(component_id_map, &boundary_id_map)
-                        .ok_or_else(|| {
-                            "component coordinate map does not cover boundary repair".to_string()
-                        })?;
-                    let (automata, possible_matches, remap_ms) =
-                        remap_unmapped_component_artifacts(
-                            unmapped_components,
-                            component_maps,
-                            Some(&plan.component_token_map),
-                            plan.common_map.num_tsids() as usize,
-                        )?;
-                    PreparedOwnedComponentArtifacts {
-                        automata,
-                        possible_matches,
-                        id_map: plan.common_map,
-                        boundary_tsid_map: Some(plan.boundary_tsid_map),
-                        boundary_token_map: Some(plan.boundary_token_map),
-                        remap_ms,
-                    }
-                } else {
-                    let (automata, possible_matches, remap_ms) =
-                        remap_unmapped_component_artifacts(
-                            unmapped_components,
-                            component_maps,
-                            None,
-                            component_id_map.num_tsids() as usize,
-                        )?;
-                    PreparedOwnedComponentArtifacts {
-                        automata,
-                        possible_matches,
-                        id_map: component_id_map,
-                        boundary_tsid_map: None,
-                        boundary_token_map: None,
-                        remap_ms,
-                    }
-                };
-                Ok::<_, String>((
-                    prepared,
-                    component_state_ms + token_coordinate_ms,
-                    parser_extract_ms,
-                ))
-            },
-            || {
-                let started_at = Instant::now();
-                let result = build_boundary_repair(
+                PreparedOwnedComponentArtifacts {
+                    automata,
+                    possible_matches,
+                    top_accept_parts,
+                    id_map: plan.common_map,
+                    boundary_tsid_map: Some(plan.boundary_tsid_map),
+                    boundary_token_map: Some(plan.boundary_token_map),
+                    remap_ms,
+                }
+            } else {
+                let (automata, possible_matches, top_accept_parts, remap_ms) =
+                    remap_unmapped_component_artifacts(
+                        unmapped_result?,
+                        component_maps,
+                        None,
+                        component_id_map.num_tsids() as usize,
+                    )?;
+                PreparedOwnedComponentArtifacts {
+                    automata,
+                    possible_matches,
+                    top_accept_parts,
+                    id_map: component_id_map,
+                    boundary_tsid_map: None,
+                    boundary_token_map: None,
+                    remap_ms,
+                }
+            };
+            Ok::<_, String>((
+                prepared,
+                component_state_ms + token_coordinate_ms,
+                parser_extract_ms,
+            ))
+        };
+    let (boundary_result, boundary_ms) = {
+        let started_at = Instant::now();
+            let result = match lexical_prepass {
+                Some(lexical_prepass) => build_boundary_repair(
                     &composed_table,
                     None,
                     merged_tokenizer_state_count,
@@ -6084,25 +6783,18 @@ pub(crate) fn compose_constraints_owned_parent(
                     vocab,
                     &special_token_terminals,
                     &component_constraints,
+                    &control_changed_terminals,
                     &expected_tokenizer_state_offsets,
                     None,
                     Some(&state_map_cell),
                     Some(&selected_boundary_tokens_cell),
-                );
-                if selected_boundary_tokens_cell.get().is_none() {
-                    let publication = match &result {
-                        Err(error) => Err(error.clone()),
-                        Ok(None) => Ok(None),
-                        Ok(Some(_)) => Err(
-                            "boundary repair completed without publishing selected tokens"
-                                .to_string(),
-                        ),
-                    };
-                    let _ = selected_boundary_tokens_cell.set(publication);
-                }
-                (result, started_at.elapsed().as_secs_f64() * 1000.0)
-            },
-        );
+                    Some(lexical_prepass),
+                    Some(boundary_analyzed),
+                ),
+                None => Ok(None),
+            };
+            (result, started_at.elapsed().as_secs_f64() * 1000.0)
+        };
     let (prepared_components, coordinate_ms, parser_extract_ms) = prepared_components_result?;
     let boundary_repair = boundary_result?;
     let preparation_ms = preparation_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -6169,6 +6861,7 @@ pub(crate) fn compose_constraints_owned_parent(
     let PreparedOwnedComponentArtifacts {
         automata,
         mut possible_matches,
+        top_accept_parts,
         id_map,
         boundary_tsid_map,
         boundary_token_map,
@@ -6219,6 +6912,8 @@ pub(crate) fn compose_constraints_owned_parent(
         true,
         vocab,
     );
+    result.constraint.parser_top_accept =
+        collapse_transported_top_accept_parts(top_accept_parts, num_parser_states);
 
     let union_started_at = Instant::now();
     let (parser_union_result, token_cache_prebuild_ms) = rayon::join(

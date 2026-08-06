@@ -1,4 +1,4 @@
-use std::collections::{hash_map::Entry, BTreeMap, VecDeque};
+use std::collections::{hash_map::Entry, BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -2862,6 +2862,101 @@ fn append_bundle_redirecting_finals(
     body
 }
 
+#[derive(Debug)]
+struct PreparedBranchFragment {
+    states: Vec<crate::automata::weighted::nwa::NWAState>,
+    start_states: Vec<u32>,
+    external_epsilons: Vec<(u32, u32, Weight)>,
+}
+
+fn prepare_weighted_template_fragment(
+    template: &NWA,
+    weight: &Weight,
+    continuation_state: u32,
+) -> PreparedBranchFragment {
+    let mut states = template.states().to_vec();
+    let mut external_epsilons = Vec::new();
+    for (state_id, state) in states.iter_mut().enumerate() {
+        for targets in state.transitions.values_mut() {
+            for (_, edge_weight) in targets {
+                *edge_weight = weight.clone();
+            }
+        }
+        for (_, epsilon_weight) in &mut state.epsilons {
+            *epsilon_weight = weight.clone();
+        }
+        if state.final_weight.take().is_some() {
+            external_epsilons.push((state_id as u32, continuation_state, weight.clone()));
+        }
+    }
+    PreparedBranchFragment {
+        states,
+        start_states: template.start_states().to_vec(),
+        external_epsilons,
+    }
+}
+
+fn prepare_bundle_fragment(
+    bundle: &NWA,
+    continuation_state: u32,
+) -> PreparedBranchFragment {
+    let mut states = bundle.states().to_vec();
+    let mut external_epsilons = Vec::new();
+    for (state_id, state) in states.iter_mut().enumerate() {
+        let Some(final_weight) = state.final_weight.take() else {
+            continue;
+        };
+        if !final_weight.is_empty() {
+            external_epsilons.push((state_id as u32, continuation_state, final_weight));
+        }
+    }
+    PreparedBranchFragment {
+        states,
+        start_states: bundle.start_states().to_vec(),
+        external_epsilons,
+    }
+}
+
+fn append_prepared_branch_fragments(
+    arena: &mut NWA,
+    fragments: Vec<((usize, u32), PreparedBranchFragment)>,
+) -> FxHashMap<(usize, u32), NwaBody> {
+    let total_states = fragments
+        .iter()
+        .map(|(_, fragment)| fragment.states.len())
+        .sum::<usize>();
+    arena.states_mut().reserve(total_states);
+    let mut bodies = FxHashMap::default();
+    for (key, mut fragment) in fragments {
+        let offset = arena.states().len() as u32;
+        for state in &mut fragment.states {
+            for targets in state.transitions.values_mut() {
+                for (target, _) in targets {
+                    *target += offset;
+                }
+            }
+            for (target, _) in &mut state.epsilons {
+                *target += offset;
+            }
+        }
+        for (source, target, weight) in fragment.external_epsilons {
+            fragment.states[source as usize]
+                .epsilons
+                .push((target, weight));
+        }
+        let body = NwaBody {
+            start_states: fragment
+                .start_states
+                .into_iter()
+                .map(|state| offset + state)
+                .collect(),
+        };
+        arena.states_mut().extend(fragment.states);
+        bodies.insert(key, body);
+    }
+    bodies
+}
+
 fn append_branch_fragment(
     arena: &mut NWA,
     summaries: &StateSummaries,
@@ -3062,6 +3157,60 @@ fn build_parser_nwa_from_terminal_dwa(
             .collect();
     }
 
+    // Every `(bundle, continuation)` fragment is independent. Preparing them
+    // serially through `NWA::append_with_body` repeatedly allocates and clones
+    // BTreeMap-heavy rows into one arena. Build the exact fragment bodies in
+    // parallel, then assign deterministic offsets and append them once. Keep
+    // the historical path in detailed profiling mode so its per-fragment
+    // counters remain directly comparable.
+    let parallel_fragment_started_at = Instant::now();
+    let mut prebuilt_branch_fragments = FxHashMap::<(usize, u32), NwaBody>::default();
+    if !compose_detail_enabled {
+        let mut fragment_keys = BTreeSet::<(usize, u32)>::new();
+        for (state_id, state) in states.iter().enumerate() {
+            if !productive[state_id] {
+                continue;
+            }
+            for branch in &state.branches {
+                let target_idx = branch.target as usize;
+                if productive.get(target_idx).copied().unwrap_or(false)
+                    && summaries
+                        .bundle_accepts
+                        .get(branch.bundle_id)
+                        .copied()
+                        .unwrap_or(false)
+                {
+                    fragment_keys.insert((branch.bundle_id, branch.target));
+                }
+            }
+        }
+        let keys = fragment_keys.into_iter().collect::<Vec<_>>();
+        let prepared = keys
+            .par_iter()
+            .filter_map(|&(bundle_id, target)| {
+                let bundle = summaries.unique_bundles.get(bundle_id)?;
+                let continuation_state = *continuation_states.get(target as usize)?;
+                if continuation_state == u32::MAX {
+                    return None;
+                }
+                let fragment = if bundle.len() == 1 {
+                    let (&terminal, weight) = bundle.iter().next()?;
+                    if weight.is_empty() {
+                        return None;
+                    }
+                    let template = templates.by_terminal_nwa.get(&terminal)?;
+                    prepare_weighted_template_fragment(template, weight, continuation_state)
+                } else {
+                    let bundle_nwa = built_bundle_cache.get(bundle_id)?.as_ref()?;
+                    prepare_bundle_fragment(bundle_nwa, continuation_state)
+                };
+                Some(((bundle_id, target), fragment))
+            })
+            .collect::<Vec<_>>();
+        prebuilt_branch_fragments = append_prepared_branch_fragments(&mut arena, prepared);
+    }
+    let parallel_fragment_ms = elapsed_ms(parallel_fragment_started_at);
+
     let branch_walk_started_at = Instant::now();
     for (state_id, state) in states.iter().enumerate() {
         if !productive[state_id] {
@@ -3106,7 +3255,9 @@ fn build_parser_nwa_from_terminal_dwa(
                 "missing parser-DWA target continuation state",
             );
             let fragment_key = (branch.bundle_id, branch.target);
-            let fragment = if let Some(existing) = branch_fragment_memo.get(&fragment_key) {
+            let fragment = if let Some(existing) = prebuilt_branch_fragments.get(&fragment_key) {
+                existing.clone()
+            } else if let Some(existing) = branch_fragment_memo.get(&fragment_key) {
                 if compose_detail_enabled {
                     let memo_hit_started_at = Instant::now();
                     compose_detail.memo_hits += 1;
@@ -3198,6 +3349,13 @@ fn build_parser_nwa_from_terminal_dwa(
             compose_detail.bundle_profile_result_dwa_transitions,
             compose_detail.bundle_profile_result_nwa_states,
             compose_detail.bundle_profile_result_nwa_transitions,
+        );
+    }
+    if compile_profile_enabled() && !compose_detail_enabled {
+        eprintln!(
+            "[glrmask/profile][parser_dwa_parallel_fragments] fragments={} states={} total_ms={parallel_fragment_ms:.3}",
+            prebuilt_branch_fragments.len(),
+            arena.states().len().saturating_sub(continuation_states.iter().filter(|&&state| state != u32::MAX).count()),
         );
     }
 
