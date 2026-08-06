@@ -2348,6 +2348,115 @@ impl Tokenizer {
         (end_states, matches)
     }
 
+    /// Build the exact minimized one-group DFA for a selected terminal union.
+    ///
+    /// Unrelated terminal branches are removed before subset construction, so
+    /// equivalent terminal languages from independently compiled tokenizers
+    /// become structurally comparable. This is a compile-time helper and does
+    /// not alter the runtime tokenizer.
+    #[doc(hidden)]
+    pub fn selected_terminal_language_dfa(&self, terminals: &[TerminalID]) -> DFA {
+        let mut selected = BitSet::new(self.num_terminals as usize);
+        let mut group_bytes = U8Set::empty();
+        for &terminal in terminals {
+            if terminal < self.num_terminals {
+                selected.set(terminal as usize);
+                group_bytes |= *self.dfa.group_id_to_u8set(terminal);
+            }
+        }
+
+        let is_live = |state: u32| {
+            !self.dfa.finalizers(state).is_disjoint(&selected)
+                || !self
+                    .dfa
+                    .possible_future_group_ids(state)
+                    .is_disjoint(&selected)
+        };
+        let close_selected = |states: &[u32]| {
+            let mut closure = self.dfa.epsilon_closure(states);
+            closure.retain(|state| is_live(*state));
+            closure.sort_unstable();
+            closure.dedup();
+            closure
+        };
+
+        let start = close_selected(&[self.start_state()]);
+        let mut result = DFA::new(1);
+        result.ensure_group_capacity(1);
+        result.set_group_u8set(0, group_bytes);
+        if start.is_empty() {
+            result.recompute_possible_futures();
+            return result;
+        }
+
+        let metadata = |subset: &[u32]| {
+            let accepting = subset
+                .iter()
+                .any(|&state| !self.dfa.finalizers(state).is_disjoint(&selected));
+            let future = subset.iter().any(|&state| {
+                !self
+                    .dfa
+                    .possible_future_group_ids(state)
+                    .is_disjoint(&selected)
+            });
+            let mut finalizers = BitSet::new(1);
+            if accepting {
+                finalizers.set(0);
+            }
+            let mut futures = BitSet::new(1);
+            if future {
+                futures.set(0);
+            }
+            (finalizers, futures)
+        };
+
+        let (start_finalizers, start_futures) = metadata(&start);
+        result.overwrite_state_metadata(0, start_finalizers, start_futures);
+        let start = start.into_vec().into_boxed_slice();
+        let mut subsets = vec![start.clone()];
+        let mut state_by_subset = FxHashMap::<Box<[u32]>, u32>::default();
+        state_by_subset.insert(start, 0);
+        let mut queue = VecDeque::from([0u32]);
+
+        while let Some(source) = queue.pop_front() {
+            let subset = subsets[source as usize].clone();
+            let mut transitions = Vec::new();
+            for byte in 0u16..=255 {
+                let mut targets = SmallVec::<[u32; 8]>::new();
+                for &state in subset.iter() {
+                    if let Some(target) = self.step(state, byte as u8) {
+                        targets.push(target);
+                    }
+                }
+                if targets.is_empty() {
+                    continue;
+                }
+                targets.sort_unstable();
+                targets.dedup();
+                let closed = close_selected(&targets);
+                if closed.is_empty() {
+                    continue;
+                }
+                let closed = closed.into_vec().into_boxed_slice();
+                let target = if let Some(&target) = state_by_subset.get(&closed) {
+                    target
+                } else {
+                    let target = result.add_state();
+                    let (finalizers, futures) = metadata(&closed);
+                    result.overwrite_state_metadata(target, finalizers, futures);
+                    state_by_subset.insert(closed.clone(), target);
+                    subsets.push(closed);
+                    queue.push_back(target);
+                    target
+                };
+                transitions.push((byte as u8, target));
+            }
+            result.set_transitions_from_sorted_entries(source, transitions);
+        }
+
+        result.minimize_owned_reachable()
+    }
+
     /// Execute the same exact compact residual scan for many starting states,
     /// merging starts as soon as their live lexer states and accumulated
     /// longest matches become identical.
@@ -3034,6 +3143,70 @@ mod tests {
         assert!(matched.contains(0));
         assert!(matched.contains(1));
         assert!(continuation.is_empty());
+    }
+
+    #[test]
+    fn selected_terminal_language_dfa_matches_selected_tokenizer_observation() {
+        let mut dfa = DFA::new(7);
+        dfa.ensure_group_capacity(2);
+        dfa.add_epsilon_transition(0, 1);
+        dfa.add_epsilon_transition(0, 4);
+        dfa.add_transition(1, b'a', 2);
+        dfa.add_transition(2, b'b', 3);
+        dfa.add_transition(4, b'a', 5);
+        dfa.add_transition(5, b'c', 6);
+        let mut terminal_zero = BitSet::new(2);
+        terminal_zero.set(0);
+        dfa.overwrite_state_metadata(3, terminal_zero, BitSet::new(2));
+        let mut terminal_one = BitSet::new(2);
+        terminal_one.set(1);
+        dfa.overwrite_state_metadata(6, terminal_one, BitSet::new(2));
+        dfa.recompute_possible_futures();
+        let tokenizer = Tokenizer::from_parts(dfa, 2, None);
+
+        for selected in [vec![0], vec![1], vec![0, 1]] {
+            let projected = tokenizer.selected_terminal_language_dfa(&selected);
+            for input in [
+                b"".as_slice(),
+                b"a",
+                b"ab",
+                b"abc",
+                b"ac",
+                b"b",
+                b"x",
+            ] {
+                let (end_states, matches) = tokenizer
+                    .execute_summary_from_state(input, tokenizer.start_state());
+                let expected = matches
+                    .iter()
+                    .any(|(terminal, _)| selected.contains(terminal))
+                    || end_states.iter().copied().any(|state| {
+                        tokenizer
+                            .possible_future_terminals_iter(state)
+                            .any(|terminal| selected.contains(&terminal))
+                    });
+
+                let mut state = 0u32;
+                let mut actual = projected.finalizers(state).contains(0);
+                if !actual {
+                    for &byte in input {
+                        let Some(next) = projected.step(state, byte) else {
+                            state = u32::MAX;
+                            break;
+                        };
+                        state = next;
+                        if projected.finalizers(state).contains(0) {
+                            actual = true;
+                            break;
+                        }
+                    }
+                }
+                if !actual && state != u32::MAX {
+                    actual = projected.possible_future_group_ids(state).contains(0);
+                }
+                assert_eq!(actual, expected, "selected={selected:?} input={input:?}");
+            }
+        }
     }
 
     #[test]

@@ -310,6 +310,31 @@ fn group_terminals_by_action_signature<'a>(
     (groups, elapsed_ms(signature_started_at))
 }
 
+fn group_selected_terminals_by_action_signature<'a>(
+    table: &'a GLRTable,
+    index: &CharacterizationIndex,
+    selected: &[bool],
+) -> (Vec<Vec<TerminalID>>, f64) {
+    let signature_started_at = Instant::now();
+    let mut groups_by_signature: FxHashMap<TerminalActionSignature<'a>, Vec<TerminalID>> =
+        FxHashMap::default();
+
+    for (terminal, &is_selected) in selected.iter().enumerate() {
+        if !is_selected {
+            continue;
+        }
+        let terminal = terminal as TerminalID;
+        groups_by_signature
+            .entry(terminal_action_signature_from_index(table, index, terminal))
+            .or_default()
+            .push(terminal);
+    }
+
+    let mut groups: Vec<Vec<TerminalID>> = groups_by_signature.into_values().collect();
+    groups.sort_by_key(|terminals| terminals.first().copied().unwrap_or(u32::MAX));
+    (groups, elapsed_ms(signature_started_at))
+}
+
 fn build_characterization_index(
     table: &GLRTable,
     grammar: &AnalyzedGrammar,
@@ -1000,25 +1025,107 @@ pub fn characterize_selected_terminals(
     grammar: &AnalyzedGrammar,
     selected: &[bool],
 ) -> BTreeMap<TerminalID, TerminalCharacterization> {
+    characterize_selected_terminals_profiled(table, grammar, selected).0
+}
+
+pub fn characterize_selected_terminals_profiled(
+    table: &GLRTable,
+    grammar: &AnalyzedGrammar,
+    selected: &[bool],
+) -> (
+    BTreeMap<TerminalID, TerminalCharacterization>,
+    TerminalCharacterizationProfile,
+) {
     assert_eq!(
         selected.len(),
         grammar.num_terminals as usize,
         "selected template mask must cover the merged terminal domain",
     );
+    let total_started_at = Instant::now();
+    let selected_count = selected.iter().filter(|&&selected| selected).count();
     let index = build_characterization_index(table, grammar);
-    selected
-        .iter()
-        .enumerate()
-        .filter_map(|(terminal, &is_selected)| {
-            is_selected.then(|| {
-                let terminal = terminal as TerminalID;
-                (
-                    terminal,
-                    characterize_terminal(table, &index, terminal),
-                )
+
+    if characterization_quotient_disabled() {
+        let characterize_started_at = Instant::now();
+        let characterizations = selected
+            .iter()
+            .enumerate()
+            .filter_map(|(terminal, &is_selected)| {
+                is_selected.then(|| {
+                    let terminal = terminal as TerminalID;
+                    (
+                        terminal,
+                        characterize_terminal(table, &index, terminal),
+                    )
+                })
             })
+            .collect();
+        let characterize_ms = elapsed_ms(characterize_started_at);
+        return (
+            characterizations,
+            TerminalCharacterizationProfile {
+                terminals: selected_count,
+                unique_action_signatures: selected_count,
+                max_action_signature_multiplicity: usize::from(selected_count != 0),
+                characterize_ms,
+                total_ms: elapsed_ms(total_started_at),
+                quotient_disabled: true,
+                ..TerminalCharacterizationProfile::default()
+            },
+        );
+    }
+
+    let (groups, signature_ms) =
+        group_selected_terminals_by_action_signature(table, &index, selected);
+    let unique_action_signatures = groups.len();
+    let max_action_signature_multiplicity = groups.iter().map(Vec::len).max().unwrap_or(0);
+
+    let characterize_started_at = Instant::now();
+    let characterized_groups = groups
+        .par_iter()
+        .map(|terminals| {
+            let representative = terminals[0];
+            (
+                terminals.clone(),
+                characterize_terminal(table, &index, representative),
+            )
         })
-        .collect()
+        .collect::<Vec<_>>();
+    let characterize_ms = elapsed_ms(characterize_started_at);
+
+    let fanout_started_at = Instant::now();
+    let mut characterizations = BTreeMap::new();
+    for (terminals, characterization) in characterized_groups {
+        for terminal in terminals {
+            characterizations.insert(terminal, characterization.clone());
+        }
+    }
+    let fanout_ms = elapsed_ms(fanout_started_at);
+
+    let validation_started_at = Instant::now();
+    if sparse_action_signature_validation_enabled() {
+        validate_sparse_action_signatures(&index, table, &groups);
+    }
+    if characterization_quotient_validation_enabled() {
+        validate_characterization_quotient(&index, table, &groups, &characterizations);
+    }
+    let validation_ms = elapsed_ms(validation_started_at);
+
+    (
+        characterizations,
+        TerminalCharacterizationProfile {
+            terminals: selected_count,
+            unique_action_signatures,
+            max_action_signature_multiplicity,
+            quotient_hits: selected_count.saturating_sub(unique_action_signatures),
+            signature_ms,
+            characterize_ms,
+            fanout_ms,
+            validation_ms,
+            total_ms: elapsed_ms(total_started_at),
+            quotient_disabled: false,
+        },
+    )
 }
 
 fn characterize_terminals_unquotiented(

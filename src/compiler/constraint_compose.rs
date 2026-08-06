@@ -38,7 +38,7 @@ use crate::compiler::stages::equiv_types::{
 use crate::compiler::stages::mapped_artifact::{WeightRefs, remap_weights_with_maps};
 use crate::compiler::stages::id_map_and_terminal_dwa::types::TerminalColoring;
 use crate::compiler::stages::parser_dwa::build_parser_dwa_from_terminal_dwa_with_precomputed_templates;
-use crate::compiler::stages::templates::characterize::characterize_selected_terminals;
+use crate::compiler::stages::templates::characterize::characterize_selected_terminals_profiled;
 use crate::compiler::stages::templates::compile_dfa::{
     specialize_template_dfa_defaults_for_commit_split_input,
     try_split_commit_template_dfas,
@@ -494,6 +494,11 @@ fn component_parser_nwa(component: &ParserDwaComponent<'_>) -> Result<NWA, Strin
     }
 
     let source = &constraint.parser_dwa;
+    // Parser DWAs are acyclic by construction. This conversion only relabels
+    // edges and adds a disjoint one-edge top-accept branch, so the resulting
+    // component NWA carries the same overlap-local certification without a
+    // second whole-graph scan at link time.
+    debug_assert!(source.is_acyclic());
     let mut nwa = NWA::new(0, 0);
     for _ in source.states() {
         nwa.add_state();
@@ -813,42 +818,21 @@ fn scan_component_residual_starts(
 /// Testing that predicate directly avoids allocating and storing complete
 /// match/future vectors for every vocabulary suffix. Full residual summaries
 /// are built later only for tokens that pass this test.
-fn reset_suffix_reaches_seed_terminal(
-    components: &[&Constraint],
-    reset_live_bytes: &[U8Set],
-    seed_terminals_by_component: &[BitSet],
+fn seed_dfa_reaches_match_or_future(
+    dfa: &crate::automata::lexer::DFA,
     bytes: &[u8],
 ) -> bool {
-    debug_assert_eq!(components.len(), reset_live_bytes.len());
-    debug_assert_eq!(components.len(), seed_terminals_by_component.len());
-    let Some(&first_byte) = bytes.first() else {
-        return false;
-    };
-
-    for (component_index, component) in components.iter().enumerate() {
-        let seeds = &seed_terminals_by_component[component_index];
-        if seeds.is_zero() || !reset_live_bytes[component_index].contains(first_byte) {
-            continue;
-        }
-        let (end_states, matches) = component
-            .tokenizer
-            .execute_summary_from_state(bytes, component.tokenizer.start_state());
-        if matches
-            .iter()
-            .any(|(terminal, _)| seeds.contains(*terminal as usize))
-        {
-            return true;
-        }
-        if end_states.iter().copied().any(|end_state| {
-            component
-                .tokenizer
-                .possible_future_terminals_iter(end_state)
-                .any(|terminal| seeds.contains(terminal as usize))
-        }) {
+    let mut state = 0u32;
+    for &byte in bytes {
+        let Some(next) = dfa.step(state, byte) else {
+            return false;
+        };
+        state = next;
+        if dfa.finalizers(state).contains(0) {
             return true;
         }
     }
-    false
+    dfa.possible_future_group_ids(state).contains(0)
 }
 
 fn scan_component_residual_start_groups(
@@ -1130,50 +1114,61 @@ fn build_boundary_token_graph(
 fn boundary_candidate_state_ranges_by_token(
     components: &[&Constraint],
     tokenizer_state_offsets: &[u32],
-    vocab: &Vocab,
+    _vocab: &Vocab,
     candidate_tokens: &BTreeSet<u32>,
 ) -> BTreeMap<u32, Vec<(usize, u32, u32)>> {
     debug_assert_eq!(components.len(), tokenizer_state_offsets.len());
     let mut by_token = BTreeMap::<u32, Vec<(usize, u32, u32)>>::new();
     for (component_index, constraint) in components.iter().enumerate() {
         debug_assert!(constraint.possible_matches_complete);
+
+        // Transpose only the candidate vocabulary classes. The previous path
+        // enumerated every token in every possible-match bitmap and filtered
+        // afterward, even though boundary discovery had already reduced the
+        // 128k vocabulary to a few hundred candidates.
+        let mut originals_by_internal = FxHashMap::<u32, SmallVec<[u32; 2]>>::default();
+        if constraint.internal_token_to_tokens.is_empty() {
+            for &original in candidate_tokens {
+                originals_by_internal
+                    .entry(original)
+                    .or_default()
+                    .push(original);
+            }
+        } else {
+            for &original in candidate_tokens {
+                let Some(&internal) = constraint
+                    .original_token_to_internal
+                    .get(original as usize)
+                else {
+                    continue;
+                };
+                if internal != u32::MAX {
+                    originals_by_internal
+                        .entry(internal)
+                        .or_default()
+                        .push(original);
+                }
+            }
+        }
+        if originals_by_internal.is_empty() {
+            continue;
+        }
+        let candidate_internal_tokens =
+            RangeSetBlaze::from_iter(originals_by_internal.keys().copied());
+
         for weight in constraint.possible_matches.values() {
             for (start_tsid, end_tsid, internal_tokens) in weight.range_entries() {
-                for internal_token in internal_tokens.iter() {
-                    if constraint.internal_token_to_tokens.is_empty() {
-                        if candidate_tokens.contains(&internal_token)
-                            && vocab
-                            .entries_map()
-                            .get(&internal_token)
-                            .is_some_and(|bytes| bytes.len() >= 2)
-                        {
-                            by_token.entry(internal_token).or_default().push((
-                                component_index,
-                                start_tsid,
-                                end_tsid,
-                            ));
-                        }
-                        continue;
-                    }
-                    let Some(originals) = constraint
-                        .internal_token_to_tokens
-                        .get(internal_token as usize)
-                    else {
+                let hits = internal_tokens.as_ref() & &candidate_internal_tokens;
+                for internal_token in hits.iter() {
+                    let Some(originals) = originals_by_internal.get(&internal_token) else {
                         continue;
                     };
                     for &original in originals {
-                        if candidate_tokens.contains(&original)
-                            && vocab
-                            .entries_map()
-                            .get(&original)
-                            .is_some_and(|bytes| bytes.len() >= 2)
-                        {
-                            by_token.entry(original).or_default().push((
-                                component_index,
-                                start_tsid,
-                                end_tsid,
-                            ));
-                        }
+                        by_token.entry(original).or_default().push((
+                            component_index,
+                            start_tsid,
+                            end_tsid,
+                        ));
                     }
                 }
             }
@@ -1529,26 +1524,52 @@ fn discover_boundary_token_paths(
         .collect::<Vec<_>>();
     let prefilter_started_at = Instant::now();
     let prefilter = if use_prefilter {
-        let coarse = boundary_token_prefilter(vocab, components, terminal_offsets, seed_terminals);
-        let mut seed_terminals_by_component = Vec::with_capacity(components.len());
+        let seed_compile_started_at = Instant::now();
+        let mut seen_seed_exprs = FxHashSet::<&Expr>::default();
+        let mut seed_dfas = FxHashSet::<crate::automata::lexer::DFA>::default();
+        let mut fallback_seed_terminals_by_component = Vec::with_capacity(components.len());
         for (component_index, component) in components.iter().enumerate() {
             let terminal_offset = terminal_offsets[component_index] as usize;
-            let mut local = BitSet::new(component.tokenizer.num_terminals() as usize);
+            let mut fallback = Vec::new();
             for local_terminal in 0..component.tokenizer.num_terminals() as usize {
-                if seed_terminals
+                if !seed_terminals
                     .get(terminal_offset + local_terminal)
                     .copied()
                     .unwrap_or(false)
                 {
-                    local.set(local_terminal);
+                    continue;
+                }
+                if let Some(expr) = component.tokenizer.terminal_expr(local_terminal as u32) {
+                    if seen_seed_exprs.insert(expr) {
+                        seed_dfas.insert(compile_terminal_expr_dfa(expr));
+                    }
+                } else {
+                    fallback.push(local_terminal as u32);
                 }
             }
-            seed_terminals_by_component.push(local);
+            fallback_seed_terminals_by_component.push(fallback);
         }
+        let projected_seed_dfas = components
+            .par_iter()
+            .zip(fallback_seed_terminals_by_component.par_iter())
+            .filter_map(|(component, terminals)| {
+                (!terminals.is_empty()).then(|| {
+                    component
+                        .tokenizer
+                        .selected_terminal_language_dfa(terminals)
+                })
+            })
+            .collect::<Vec<_>>();
+        let projected_seed_dfa_count = projected_seed_dfas.len();
+        seed_dfas.extend(projected_seed_dfas);
+        let seed_dfas = seed_dfas.into_iter().collect::<Vec<_>>();
+        let seed_compile_ms = seed_compile_started_at.elapsed().as_secs_f64() * 1000.0;
 
-        // Associate every unique suffix directly with the tokens containing
-        // it. A suffix is scanned once, and a positive result publishes all of
-        // its owner tokens without a second large hash-lookup pass.
+        let coarse_started_at = Instant::now();
+        let coarse = boundary_token_prefilter(vocab, components, terminal_offsets, seed_terminals);
+        let coarse_ms = coarse_started_at.elapsed().as_secs_f64() * 1000.0;
+
+        let suffix_index_started_at = Instant::now();
         let mut suffix_tokens = FxHashMap::<&[u8], SmallVec<[u32; 2]>>::default();
         for &(token_id, bytes) in &all_multi_byte_entries {
             if !coarse.contains(&token_id) {
@@ -1561,19 +1582,31 @@ fn discover_boundary_token_paths(
                     .push(token_id);
             }
         }
-        suffix_tokens
+        let suffix_count = suffix_tokens.len();
+        let suffix_index_ms = suffix_index_started_at.elapsed().as_secs_f64() * 1000.0;
+        let exact_started_at = Instant::now();
+        let exact = suffix_tokens
             .into_par_iter()
             .filter_map(|(suffix, tokens)| {
-                reset_suffix_reaches_seed_terminal(
-                    components,
-                    &reset_live_bytes,
-                    &seed_terminals_by_component,
-                    suffix,
-                )
+                seed_dfas
+                    .iter()
+                    .any(|dfa| seed_dfa_reaches_match_or_future(dfa, suffix))
                 .then_some(tokens)
             })
             .flatten_iter()
-            .collect::<BTreeSet<_>>()
+            .collect::<BTreeSet<_>>();
+        if compose_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][constraint_boundary_seed_suffix_filter] unique_seed_dfas={} projected_seed_dfas={} coarse_tokens={} suffixes={} exact_tokens={} seed_compile_ms={seed_compile_ms:.3} coarse_ms={coarse_ms:.3} suffix_index_ms={suffix_index_ms:.3} exact_ms={:.3}",
+                seed_dfas.len(),
+                projected_seed_dfa_count,
+                coarse.len(),
+                suffix_count,
+                exact.len(),
+                exact_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        exact
     } else {
         all_multi_byte_entries
             .iter()
@@ -2674,31 +2707,31 @@ fn determinize_epsilon_free_component_union(
     if !supports_overlap_local_union(&automata) {
         return None;
     }
+    Some(determinize_epsilon_free_component_union_prechecked(
+        automata,
+        default_positive_label_count,
+    ))
+}
 
-    let mut raw_states = Vec::new();
-    let mut starts = Vec::new();
-    for automaton in automata {
-        let offset = raw_states.len() as u32;
-        let (states, start_states) = automaton.into_parts();
-        starts.extend(start_states.into_iter().map(|state| offset + state));
-        for mut appended in states {
-            for targets in appended.transitions.values_mut() {
-                for (target, _) in targets {
-                    *target += offset;
-                }
-            }
-            raw_states.push(appended);
-        }
-    }
-    if starts.is_empty() {
-        return Some((DWA::new(0, 0), 0));
-    }
+fn determinize_epsilon_free_component_union_prechecked(
+    automata: Vec<NWA>,
+    default_positive_label_count: Option<u32>,
+) -> (DWA, usize) {
+    debug_assert!(supports_overlap_local_union(&automata));
+    let total_started_at = Instant::now();
 
     #[derive(Clone)]
     struct RawTransitionRun {
         start: i32,
         end: i32,
         targets: Vec<(u32, Weight)>,
+    }
+
+    struct RawCompressedState {
+        runs: Vec<RawTransitionRun>,
+        default_targets: Option<Vec<(u32, Weight)>>,
+        final_weight: Option<Weight>,
+        deterministic: bool,
     }
 
     struct OutputTransitionRun {
@@ -2713,6 +2746,7 @@ fn determinize_epsilon_free_component_union(
         runs: Vec<OutputTransitionRun>,
         default_transition: Option<(u32, Weight)>,
         final_weight: Option<Weight>,
+        deferred_final_pairs: SmallVec<[(usize, usize); 4]>,
     }
 
     fn same_raw_targets(left: &[(u32, Weight)], right: &[(u32, Weight)]) -> bool {
@@ -2725,30 +2759,54 @@ fn determinize_epsilon_free_component_union(
                 })
     }
 
-    let raw_transition_runs = raw_states
-        .iter()
-        .map(|state| {
+    let mut raw_states = Vec::<RawCompressedState>::new();
+    let mut starts = Vec::new();
+    for automaton in automata {
+        let offset = raw_states.len() as u32;
+        let (states, start_states) = automaton.into_parts();
+        starts.extend(start_states.into_iter().map(|state| offset + state));
+        for appended in states {
+            debug_assert!(appended.epsilons.is_empty());
             let mut runs = Vec::<RawTransitionRun>::new();
-            for (&label, targets) in &state.transitions {
-                if label == DEFAULT_LABEL || targets.is_empty() {
+            let mut default_targets = None;
+            let mut deterministic = true;
+            for (label, mut targets) in appended.transitions {
+                deterministic &= targets.len() <= 1;
+                for (target, _) in &mut targets {
+                    *target += offset;
+                }
+                if targets.is_empty() {
+                    continue;
+                }
+                if label == DEFAULT_LABEL {
+                    default_targets = Some(targets);
                     continue;
                 }
                 if let Some(last) = runs.last_mut()
                     && last.end.checked_add(1) == Some(label)
-                    && same_raw_targets(&last.targets, targets)
+                    && same_raw_targets(&last.targets, &targets)
                 {
                     last.end = label;
                 } else {
                     runs.push(RawTransitionRun {
                         start: label,
                         end: label,
-                        targets: targets.clone(),
+                        targets,
                     });
                 }
             }
-            runs
-        })
-        .collect::<Vec<_>>();
+            raw_states.push(RawCompressedState {
+                runs,
+                default_targets,
+                final_weight: appended.final_weight,
+                deterministic,
+            });
+        }
+    }
+    let raw_compress_ms = total_started_at.elapsed().as_secs_f64() * 1000.0;
+    if starts.is_empty() {
+        return (DWA::new(0, 0), 0);
+    }
 
     type ResidualSubset = SmallVec<[(u32, Weight); 4]>;
     type ResidualSubsetKey = SmallVec<[(u32, usize); 4]>;
@@ -2974,7 +3032,30 @@ fn determinize_epsilon_free_component_union(
     let mut profiled_output_transitions = 0usize;
     let mut profiled_contribution_candidates = 0usize;
     let mut profiled_nonempty_contributions = 0usize;
+    let profile_union_detail = compose_profile_enabled();
+    let mut profiled_singleton_ms = 0.0f64;
+    let mut profiled_pair_ms = 0.0f64;
+    let mut profiled_wide_ms = 0.0f64;
+    let mut profiled_boundary_prep_ms = 0.0f64;
+    let mut profiled_interval_ms = 0.0f64;
+    let mut profiled_default_ms = 0.0f64;
+    let mut profiled_row_finalize_ms = 0.0f64;
+    let mut profiled_final_candidates = 0usize;
+    let mut profiled_final_nonempty = 0usize;
+    let mut profiled_final_full_prefix = 0usize;
+    let mut profiled_final_full_source = 0usize;
+    let mut profiled_final_ptr_equal = 0usize;
+    let mut profiled_final_states_zero = 0usize;
+    let mut profiled_final_states_one = 0usize;
+    let mut profiled_final_states_two = 0usize;
+    let mut profiled_final_states_wide = 0usize;
+    let mut profiled_final_prefix_ranges = 0usize;
+    let mut profiled_final_source_ranges = 0usize;
+    let mut final_intersection_inputs =
+        FxHashMap::<(usize, usize), (Weight, Weight)>::default();
+    let subset_started_at = Instant::now();
     while let Some((output_state, subset)) = queue.pop_front() {
+        let state_started_at = profile_union_detail.then(Instant::now);
         profiled_max_subset = profiled_max_subset.max(subset.len());
         match subset.len() {
             1 => profiled_singletons += 1,
@@ -2989,14 +3070,14 @@ fn determinize_epsilon_free_component_union(
         if subset.len() == 1 && subset[0].1.is_full() {
             let raw_state = subset[0].0;
             let source = &raw_states[raw_state as usize];
-            if source.transitions.values().all(|targets| targets.len() <= 1) {
+            if source.deterministic {
                 let final_weight = source
                     .final_weight
                     .as_ref()
                     .filter(|weight| !weight.is_empty())
                     .cloned();
-                let mut runs = Vec::with_capacity(raw_transition_runs[raw_state as usize].len());
-                for raw_run in &raw_transition_runs[raw_state as usize] {
+                let mut runs = Vec::with_capacity(source.runs.len());
+                for raw_run in &source.runs {
                     let targets = &raw_run.targets;
                     let Some((target, edge_weight)) = targets.first() else {
                         continue;
@@ -3021,8 +3102,8 @@ fn determinize_epsilon_free_component_union(
                     });
                 }
                 let default_transition = source
-                    .transitions
-                    .get(&DEFAULT_LABEL)
+                    .default_targets
+                    .as_ref()
                     .and_then(|targets| targets.first())
                     .filter(|(_, weight)| !weight.is_empty())
                     .map(|(target, weight)| {
@@ -3040,31 +3121,49 @@ fn determinize_epsilon_free_component_union(
                     runs,
                     default_transition,
                     final_weight,
+                    deferred_final_pairs: SmallVec::new(),
                 };
+                if let Some(state_started_at) = state_started_at {
+                    profiled_singleton_ms +=
+                        state_started_at.elapsed().as_secs_f64() * 1000.0;
+                }
                 continue;
             }
         }
 
-        let mut final_parts = SmallVec::<[Weight; 4]>::new();
+        let mut deferred_final_pairs = SmallVec::<[(usize, usize); 4]>::new();
         for (raw_state, prefix_weight) in &subset {
             let source = &raw_states[*raw_state as usize];
             if let Some(final_weight) = &source.final_weight {
-                let contribution = weight_ops.intersection(prefix_weight, final_weight);
-                if !contribution.is_empty() {
-                    final_parts.push(contribution);
+                if profile_union_detail {
+                    profiled_final_candidates += 1;
+                    profiled_final_full_prefix += usize::from(prefix_weight.is_full());
+                    profiled_final_full_source += usize::from(final_weight.is_full());
+                    profiled_final_ptr_equal +=
+                        usize::from(prefix_weight.ptr_key() == final_weight.ptr_key());
+                    profiled_final_prefix_ranges += prefix_weight.num_ranges();
+                    profiled_final_source_ranges += final_weight.num_ranges();
                 }
+                let left = prefix_weight.ptr_key();
+                let right = final_weight.ptr_key();
+                let key = if left <= right {
+                    (left, right)
+                } else {
+                    (right, left)
+                };
+                final_intersection_inputs
+                    .entry(key)
+                    .or_insert_with(|| (prefix_weight.clone(), final_weight.clone()));
+                deferred_final_pairs.push(key);
             }
+        }
+        if deferred_final_pairs.is_empty() {
+            profiled_final_states_zero += 1;
         }
         // Keep wildcard transitions symbolic. Process one label at a time so
         // synthetic rows do not allocate a nested label->target hash table and
         // sort it again afterward. Raw rows are deterministic in the common
         // path; the small target vector also handles genuine NWA overlap.
-        let final_weight = if final_parts.is_empty() {
-            None
-        } else {
-            let weight = weight_ops.union_all(final_parts.iter());
-            (!weight.is_empty()).then_some(weight)
-        };
         let mut default_transition = None::<(u32, Weight)>;
 
         // Sweep maximal intervals on which every constituent row has the same
@@ -3074,16 +3173,15 @@ fn determinize_epsilon_free_component_union(
         // outcomes. Run-wise evaluation preserves the exact explicit/default
         // semantics and expands to the ordinary DWA map only after each result
         // interval has been solved once.
+        let boundary_prep_started_at = profile_union_detail.then(Instant::now);
         let mut boundaries = SmallVec::<[i64; 64]>::new();
         let mut has_default = false;
         for (raw_state, _) in &subset {
-            for run in &raw_transition_runs[*raw_state as usize] {
+            for run in &raw_states[*raw_state as usize].runs {
                 boundaries.push(i64::from(run.start));
                 boundaries.push(i64::from(run.end) + 1);
             }
-            has_default |= raw_states[*raw_state as usize]
-                .transitions
-                .contains_key(&DEFAULT_LABEL);
+            has_default |= raw_states[*raw_state as usize].default_targets.is_some();
         }
         if has_default && default_positive_label_count.is_some() {
             // Explicit negative labels never fall through to DEFAULT_LABEL;
@@ -3092,9 +3190,14 @@ fn determinize_epsilon_free_component_union(
         }
         boundaries.sort_unstable();
         boundaries.dedup();
+        if let Some(boundary_prep_started_at) = boundary_prep_started_at {
+            profiled_boundary_prep_ms +=
+                boundary_prep_started_at.elapsed().as_secs_f64() * 1000.0;
+        }
 
         let mut run_positions = vec![0usize; subset.len()];
         let mut output_runs = Vec::<OutputTransitionRun>::new();
+        let interval_started_at = profile_union_detail.then(Instant::now);
         for interval in boundaries.windows(2) {
             let start = interval[0];
             let end = interval[1] - 1;
@@ -3105,7 +3208,8 @@ fn determinize_epsilon_free_component_union(
             let mut contributions = SmallVec::<[(u32, Weight); 4]>::new();
             let mut has_explicit = false;
             for (subset_index, (raw_state, prefix_weight)) in subset.iter().enumerate() {
-                let runs = &raw_transition_runs[*raw_state as usize];
+                let source = &raw_states[*raw_state as usize];
+                let runs = &source.runs;
                 let position = &mut run_positions[subset_index];
                 while *position < runs.len() && runs[*position].end < label {
                     *position += 1;
@@ -3116,12 +3220,7 @@ fn determinize_epsilon_free_component_union(
                 has_explicit |= explicit.is_some();
                 let targets = explicit.map(|run| run.targets.as_slice()).or_else(|| {
                     (label >= 0)
-                        .then(|| {
-                            raw_states[*raw_state as usize]
-                                .transitions
-                                .get(&DEFAULT_LABEL)
-                                .map(Vec::as_slice)
-                        })
+                        .then(|| source.default_targets.as_deref())
                         .flatten()
                 });
                 let Some(targets) = targets else {
@@ -3168,13 +3267,15 @@ fn determinize_epsilon_free_component_union(
                 }
             }
         }
+        if let Some(interval_started_at) = interval_started_at {
+            profiled_interval_ms += interval_started_at.elapsed().as_secs_f64() * 1000.0;
+        }
 
+        let default_started_at = profile_union_detail.then(Instant::now);
         if default_positive_label_count.is_some() && has_default {
             let mut contributions = SmallVec::<[(u32, Weight); 4]>::new();
             for (raw_state, prefix_weight) in &subset {
-                let Some(targets) = raw_states[*raw_state as usize]
-                    .transitions
-                    .get(&DEFAULT_LABEL)
+                let Some(targets) = raw_states[*raw_state as usize].default_targets.as_ref()
                 else {
                     continue;
                 };
@@ -3199,7 +3300,11 @@ fn determinize_epsilon_free_component_union(
                 default_transition = Some((target, edge_weight));
             }
         }
+        if let Some(default_started_at) = default_started_at {
+            profiled_default_ms += default_started_at.elapsed().as_secs_f64() * 1000.0;
+        }
 
+        let row_finalize_started_at = profile_union_detail.then(Instant::now);
         let explicit_transition_count = output_runs
             .iter()
             .map(|run| (i64::from(run.end) - i64::from(run.start) + 1) as usize)
@@ -3210,9 +3315,108 @@ fn determinize_epsilon_free_component_union(
         states[output_state as usize] = PendingDwaState {
             runs: output_runs,
             default_transition,
-            final_weight,
+            final_weight: None,
+            deferred_final_pairs,
         };
+        if let Some(row_finalize_started_at) = row_finalize_started_at {
+            profiled_row_finalize_ms +=
+                row_finalize_started_at.elapsed().as_secs_f64() * 1000.0;
+        }
+        if let Some(state_started_at) = state_started_at {
+            let elapsed = state_started_at.elapsed().as_secs_f64() * 1000.0;
+            if subset.len() == 2 {
+                profiled_pair_ms += elapsed;
+            } else {
+                profiled_wide_ms += elapsed;
+            }
+        }
     }
+    let subset_ms = subset_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    // Final weights are independent once the residual subset graph is fixed.
+    // Deduplicate every `(prefix, raw-final)` intersection globally, evaluate
+    // those unique pairs in parallel, then deduplicate the resulting union
+    // recipes before assigning them back to states. This preserves the shared
+    // work of the serial scoped cache without forcing all expensive range-map
+    // operations through one thread.
+    let final_weight_started_at = Instant::now();
+    let final_intersection_count = final_intersection_inputs.len();
+    let final_intersection_results = final_intersection_inputs
+        .into_par_iter()
+        .map(|(key, (left, right))| (key, left.intersection_uncached(&right)))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .collect::<FxHashMap<_, _>>();
+
+    type FinalUnionKey = SmallVec<[usize; 4]>;
+    let mut state_union_keys = vec![None::<FinalUnionKey>; states.len()];
+    let mut final_union_inputs = FxHashMap::<FinalUnionKey, SmallVec<[Weight; 4]>>::default();
+    for (state_id, state) in states.iter_mut().enumerate() {
+        if state.deferred_final_pairs.is_empty() {
+            continue;
+        }
+        let mut contributions = state
+            .deferred_final_pairs
+            .iter()
+            .filter_map(|key| final_intersection_results.get(key))
+            .filter(|weight| !weight.is_empty())
+            .cloned()
+            .collect::<SmallVec<[Weight; 4]>>();
+        contributions.sort_unstable_by_key(Weight::ptr_key);
+        contributions.dedup_by_key(|weight| weight.ptr_key());
+        profiled_final_nonempty += contributions.len();
+        match contributions.len() {
+            0 => profiled_final_states_zero += 1,
+            1 => {
+                profiled_final_states_one += 1;
+                state.final_weight = contributions.pop();
+            }
+            2 => {
+                profiled_final_states_two += 1;
+                let key = contributions
+                    .iter()
+                    .map(Weight::ptr_key)
+                    .collect::<FinalUnionKey>();
+                final_union_inputs
+                    .entry(key.clone())
+                    .or_insert(contributions);
+                state_union_keys[state_id] = Some(key);
+            }
+            _ => {
+                profiled_final_states_wide += 1;
+                let key = contributions
+                    .iter()
+                    .map(Weight::ptr_key)
+                    .collect::<FinalUnionKey>();
+                final_union_inputs
+                    .entry(key.clone())
+                    .or_insert(contributions);
+                state_union_keys[state_id] = Some(key);
+            }
+        }
+        state.deferred_final_pairs.clear();
+    }
+    let final_union_count = final_union_inputs.len();
+    let final_union_results = final_union_inputs
+        .into_par_iter()
+        .map(|(key, weights)| {
+            let mut ops = ScopedWeightOpCache::default();
+            let weight = ops.union_all(weights.iter());
+            (key, weight)
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .collect::<FxHashMap<_, _>>();
+    for (state, key) in states.iter_mut().zip(state_union_keys) {
+        if let Some(key) = key {
+            let weight = final_union_results
+                .get(&key)
+                .expect("final union recipe was evaluated")
+                .clone();
+            state.final_weight = (!weight.is_empty()).then_some(weight);
+        }
+    }
+    let profiled_final_weight_ms = final_weight_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let synthetic_states = states.len().saturating_sub(singleton_count);
     let mut outcome_groups = 0usize;
@@ -3264,8 +3468,9 @@ fn determinize_epsilon_free_component_union(
     let materialize_ms = materialize_started_at.elapsed().as_secs_f64() * 1000.0;
 
     if compose_profile_enabled() {
+        let total_ms = total_started_at.elapsed().as_secs_f64() * 1000.0;
         eprintln!(
-            "[glrmask/profile][constraint_overlap_local_shape] raw_states={} result_states={} singleton_states={} pair_subsets={} wide_subsets={} max_subset={} explicit_labels={} output_transitions={} contribution_candidates={} nonempty_contributions={} outcome_groups={} contiguous_runs={} max_outcome_groups={} max_contiguous_runs={} materialize_ms={materialize_ms:.3}",
+            "[glrmask/profile][constraint_overlap_local_shape] raw_states={} result_states={} singleton_states={} pair_subsets={} wide_subsets={} max_subset={} explicit_labels={} output_transitions={} contribution_candidates={} nonempty_contributions={} outcome_groups={} contiguous_runs={} max_outcome_groups={} max_contiguous_runs={} final_candidates={} final_nonempty={} final_full_prefix={} final_full_source={} final_ptr_equal={} final_states_zero={} final_states_one={} final_states_two={} final_states_wide={} final_unique_intersections={} final_unique_unions={} final_prefix_ranges={} final_source_ranges={} scoped_intersection_cache={} raw_compress_ms={raw_compress_ms:.3} subset_ms={subset_ms:.3} singleton_ms={profiled_singleton_ms:.3} pair_ms={profiled_pair_ms:.3} wide_ms={profiled_wide_ms:.3} final_weight_ms={profiled_final_weight_ms:.3} boundary_prep_ms={profiled_boundary_prep_ms:.3} interval_ms={profiled_interval_ms:.3} default_ms={profiled_default_ms:.3} row_finalize_ms={profiled_row_finalize_ms:.3} materialize_ms={materialize_ms:.3} total_ms={total_ms:.3}",
             raw_states.len(),
             states.len(),
             profiled_singletons,
@@ -3280,9 +3485,23 @@ fn determinize_epsilon_free_component_union(
             contiguous_runs,
             max_outcome_groups,
             max_contiguous_runs,
+            profiled_final_candidates,
+            profiled_final_nonempty,
+            profiled_final_full_prefix,
+            profiled_final_full_source,
+            profiled_final_ptr_equal,
+            profiled_final_states_zero,
+            profiled_final_states_one,
+            profiled_final_states_two,
+            profiled_final_states_wide,
+            final_intersection_count,
+            final_union_count,
+            profiled_final_prefix_ranges,
+            profiled_final_source_ranges,
+            weight_ops.intersection_entry_count(),
         );
     }
-    Some((DWA::from_parts(states, start_state), synthetic_states))
+    (DWA::from_parts(states, start_state), synthetic_states)
 }
 
 
@@ -3802,6 +4021,10 @@ fn explicit_parser_nwa(dwa: &DWA, num_parser_states: u32) -> NWA {
 }
 
 fn parser_nwa_preserve_defaults(dwa: &DWA) -> NWA {
+    // This is a graph-preserving DWA -> NWA view: no epsilon edges are added
+    // and transition targets are unchanged. Callers may therefore retain the
+    // source parser DWA's acyclic certification.
+    debug_assert!(dwa.is_acyclic());
     let states = dwa
         .states()
         .iter()
@@ -4114,7 +4337,8 @@ fn build_composition_templates(
     f64,
 ) {
     let started_at = Instant::now();
-    let characterizations = characterize_selected_terminals(table, analyzed, selected);
+    let (characterizations, characterization_profile) =
+        characterize_selected_terminals_profiled(table, analyzed, selected);
     let templates = Templates::from_characterizations(&characterizations);
     let mut template_dfas_by_terminal = vec![None; analyzed.num_terminals as usize];
     for (&terminal, dfa) in &templates.by_terminal {
@@ -4124,6 +4348,20 @@ fn build_composition_templates(
         {
             *slot = Some(Arc::new(split));
         }
+    }
+    if compose_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][constraint_boundary_characterization] terminals={} unique_action_signatures={} max_signature_multiplicity={} quotient_hits={} signature_ms={:.3} characterize_ms={:.3} fanout_ms={:.3} validation_ms={:.3} total_ms={:.3}",
+            characterization_profile.terminals,
+            characterization_profile.unique_action_signatures,
+            characterization_profile.max_action_signature_multiplicity,
+            characterization_profile.quotient_hits,
+            characterization_profile.signature_ms,
+            characterization_profile.characterize_ms,
+            characterization_profile.fanout_ms,
+            characterization_profile.validation_ms,
+            characterization_profile.total_ms,
+        );
     }
     (
         templates,
@@ -4395,7 +4633,7 @@ fn build_boundary_repair(
     let ((templates, template_dfas_by_terminal, templates_ms), terminal_dwa) =
         rayon::join(
             || {
-                let (templates, mut template_dfas_by_terminal, templates_ms) =
+                let (mut templates, mut template_dfas_by_terminal, templates_ms) =
                     eager_templates.unwrap_or_else(|| {
                         build_composition_templates(
                             &composed_table.table,
@@ -4404,6 +4642,18 @@ fn build_boundary_repair(
                         )
                     });
                 if eager_all_templates {
+                    templates.by_terminal.retain(|terminal, _| {
+                        active_terminals
+                            .get(*terminal as usize)
+                            .copied()
+                            .unwrap_or(false)
+                    });
+                    templates.by_terminal_nwa.retain(|terminal, _| {
+                        active_terminals
+                            .get(*terminal as usize)
+                            .copied()
+                            .unwrap_or(false)
+                    });
                     for (terminal, slot) in template_dfas_by_terminal.iter_mut().enumerate() {
                         if !active_terminals[terminal] {
                             *slot = None;
@@ -6008,36 +6258,13 @@ pub(crate) fn compose_constraints_owned_parent(
                     .is_some()
                     .then(|| automata.clone());
                     let direct_started_at = Instant::now();
-                    let direct_supported = supports_overlap_local_union(&automata);
-                    let (parser_dwa, synthetic_states, union_path) = if direct_supported {
-                        let (dwa, synthetic_states) =
-                            determinize_epsilon_free_component_union(
-                                automata,
-                                Some(num_parser_states),
-                            )
-                            .expect("overlap-local union support was prechecked");
-                        (dwa, synthetic_states, "overlap_local")
-                    } else {
-                        let mut reference =
-                            NWA::new(id_num_tsids, id_max_internal_token);
-                        let mut starts = Vec::new();
-                        let last = automata.len().saturating_sub(1);
-                        for (index, automaton) in automata.iter().enumerate() {
-                            let explicit = if index == last {
-                                explicit_parser_nwa(&boundary_dwa, num_parser_states)
-                            } else {
-                                automaton.clone()
-                            };
-                            let body = reference.append_with_body(&explicit);
-                            starts.extend(body.start_states);
-                        }
-                        reference.set_start_states(starts);
-                        (
-                            determinize(&reference).map_err(|error| error.to_string())?,
-                            0,
-                            "generic_fallback",
-                        )
-                    };
+                    debug_assert!(supports_overlap_local_union(&automata));
+                    let (parser_dwa, synthetic_states) =
+                        determinize_epsilon_free_component_union_prechecked(
+                            automata,
+                            Some(num_parser_states),
+                        );
+                    let union_path = "overlap_local";
                     let direct_ms = direct_started_at.elapsed().as_secs_f64() * 1000.0;
                     if let Some(automata) = validation_automata {
                         let mut reference =
@@ -6076,27 +6303,10 @@ pub(crate) fn compose_constraints_owned_parent(
                 None => {
                     let automata_len = automata.len();
                     let direct_started_at = Instant::now();
-                    let direct_supported = supports_overlap_local_union(&automata);
-                    let (parser_dwa, synthetic_states, union_path) = if direct_supported {
-                        let (dwa, synthetic_states) =
-                            determinize_epsilon_free_component_union(automata, None)
-                                .expect("overlap-local union support was prechecked");
-                        (dwa, synthetic_states, "overlap_local")
-                    } else {
-                        let mut reference =
-                            NWA::new(id_num_tsids, id_max_internal_token);
-                        let mut starts = Vec::new();
-                        for automaton in &automata {
-                            let body = reference.append_with_body(automaton);
-                            starts.extend(body.start_states);
-                        }
-                        reference.set_start_states(starts);
-                        (
-                            determinize(&reference).map_err(|error| error.to_string())?,
-                            0,
-                            "generic_fallback",
-                        )
-                    };
+                    debug_assert!(supports_overlap_local_union(&automata));
+                    let (parser_dwa, synthetic_states) =
+                        determinize_epsilon_free_component_union_prechecked(automata, None);
+                    let union_path = "overlap_local";
                     let direct_ms = direct_started_at.elapsed().as_secs_f64() * 1000.0;
                     if compose_profile_enabled() {
                         eprintln!(
