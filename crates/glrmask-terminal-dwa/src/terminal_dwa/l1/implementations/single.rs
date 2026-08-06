@@ -317,6 +317,46 @@ pub(super) fn build(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
         });
     }
 
+    // A token is characterized exactly by the minimized residual states from
+    // which it survives. Compact this Boolean column relation before mapping
+    // residual roots back to `(raw lexer state, terminal)` coordinates.
+    let mut used_classes = token_sets.keys().copied().collect::<Vec<_>>();
+    used_classes.sort_unstable();
+    let root_index = used_classes
+        .iter()
+        .enumerate()
+        .map(|(index, &state)| (state, index))
+        .collect::<FxHashMap<_, _>>();
+    let words = used_classes.len().div_ceil(64);
+    let mut token_profiles = vec![vec![0u64; words]; aliases.len()];
+    for (&state, tokens) in &token_sets {
+        let index = root_index[&state];
+        for &token in tokens {
+            token_profiles[token][index / 64] |= 1u64 << (index % 64);
+        }
+    }
+    let mut token_profile_ids = FxHashMap::<Vec<u64>, u32>::default();
+    let mut class_profiles = Vec::<Vec<u64>>::new();
+    let mut token_class = vec![0u32; aliases.len()];
+    for (token, profile) in token_profiles.into_iter().enumerate() {
+        let next = class_profiles.len() as u32;
+        token_class[token] = *token_profile_ids.entry(profile.clone()).or_insert_with(|| {
+            class_profiles.push(profile);
+            next
+        });
+    }
+    let mut live_token_classes = vec![Vec::<u32>::new(); used_classes.len()];
+    for (token_class, profile) in class_profiles.iter().enumerate() {
+        for (word_index, &word) in profile.iter().enumerate() {
+            let mut word = word;
+            while word != 0 {
+                let bit = word.trailing_zeros() as usize;
+                live_token_classes[word_index * 64 + bit].push(token_class as u32);
+                word &= word - 1;
+            }
+        }
+    }
+
     let mut signature_ids = FxHashMap::<(u32, u32), u32>::default();
     let mut signatures = vec![Vec::<u32>::new()];
     let mut row_ids = FxHashMap::<Vec<u32>, u32>::default();
@@ -324,15 +364,15 @@ pub(super) fn build(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
     let mut root_to_state_class = vec![0u32; root_vectors.len()];
     let mut signature_updates = 0usize;
     for (root_class, root_row) in root_vectors.iter().enumerate() {
-        let mut row = vec![0u32; aliases.len()];
+        let mut row = vec![0u32; class_profiles.len()];
         for (&terminal, &state) in projected.terminals.iter().zip(root_row) {
             if state == DEAD {
                 continue;
             }
-            for &token in &token_sets[&state] {
-                let previous = row[token];
+            for &token in &live_token_classes[root_index[&state]] {
+                let previous = row[token as usize];
                 let next = signatures.len() as u32;
-                row[token] = *signature_ids.entry((previous, terminal)).or_insert_with(|| {
+                row[token as usize] = *signature_ids.entry((previous, terminal)).or_insert_with(|| {
                     let mut signature = signatures[previous as usize].clone();
                     signature.push(terminal);
                     signatures.push(signature);
@@ -352,18 +392,20 @@ pub(super) fn build(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
         .map(|class| root_to_state_class[class as usize])
         .collect::<Vec<_>>();
     let traverse_ms = traverse_started.elapsed().as_secs_f64() * 1000.0;
-    let finished = common::finish(
+    let finished = common::finish_compacted(
         input,
         &aliases,
         &signatures,
         state_class,
         rows,
+        token_class,
         projected_ms + minimize_ms + traverse_ms,
+        0.0,
         || total.elapsed().as_secs_f64() * 1000.0,
     )?;
     if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
         eprintln!(
-            "[glrmask/profile][l1_single] partition={} raw_states={} terminals={} bytes={} projected_states={} expanded={} minimized_states={} root_classes={} root_vectors={} signature_updates={} subtree_skips={} signatures={} state_classes={} token_classes={} project_ms={:.3} minimize_ms={:.3} traverse_ms={:.3} compact_ms={:.3} build_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][l1_single] partition={} raw_states={} terminals={} bytes={} projected_states={} expanded={} minimized_states={} root_classes={} root_vectors={} residual_token_classes={} signature_updates={} subtree_skips={} signatures={} state_classes={} token_classes={} project_ms={:.3} minimize_ms={:.3} traverse_ms={:.3} compact_ms={:.3} build_ms={:.3} total_ms={:.3}",
             input.partition_label,
             input.tokenizer.num_states(),
             projected.terminals.len(),
@@ -373,6 +415,7 @@ pub(super) fn build(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
             transitions.len(),
             token_sets.len(),
             root_vectors.len(),
+            class_profiles.len(),
             signature_updates,
             subtree_skips,
             signatures.len(),

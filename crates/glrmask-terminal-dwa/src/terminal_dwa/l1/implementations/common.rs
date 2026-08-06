@@ -53,13 +53,43 @@ pub(super) fn finish(
     input: BuildInput<'_>,
     aliases: &[Vec<u32>],
     signatures: &[Vec<u32>],
-    mut state_class: Vec<u32>,
-    mut rows: Vec<Vec<u32>>,
+    state_class: Vec<u32>,
+    rows: Vec<Vec<u32>>,
     scan_ms: f64,
     total_ms: impl FnOnce() -> f64,
 ) -> Option<Finished> {
     let compact_started = Instant::now();
     let (token_class, token_reps) = compact_columns(&rows, aliases.len(), signatures.len());
+    let compact_rows = rows
+        .iter()
+        .map(|row| token_reps.iter().map(|&token| row[token]).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    let compact_ms = compact_started.elapsed().as_secs_f64() * 1000.0;
+    finish_compacted(
+        input,
+        aliases,
+        signatures,
+        state_class,
+        compact_rows,
+        token_class,
+        scan_ms,
+        compact_ms,
+        total_ms,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn finish_compacted(
+    input: BuildInput<'_>,
+    aliases: &[Vec<u32>],
+    signatures: &[Vec<u32>],
+    mut state_class: Vec<u32>,
+    mut rows: Vec<Vec<u32>>,
+    token_class: Vec<u32>,
+    scan_ms: f64,
+    compact_ms: f64,
+    total_ms: impl FnOnce() -> f64,
+) -> Option<Finished> {
     let initial = input.tokenizer.initial_state_id() as usize;
     let initial_class = state_class[initial];
     if state_class.iter().filter(|&&class| class == initial_class).count() > 1 {
@@ -71,45 +101,61 @@ pub(super) fn finish(
         state_reps[class as usize] = state_reps[class as usize].min(raw as u32);
     }
     let tokenizer_states = ManyToOneIdMap::from_original_to_internal_with_representatives(
-        state_class, rows.len() as u32, state_reps,
+        state_class,
+        rows.len() as u32,
+        state_reps,
     );
+    let token_classes = token_class.iter().copied().max().map_or(0, |class| class + 1);
     let mut original_to_internal = vec![u32::MAX; input.vocab.max_token_id() as usize + 1];
     for (unique, originals) in aliases.iter().enumerate() {
-        for &original in originals { original_to_internal[original as usize] = token_class[unique]; }
+        for &original in originals {
+            original_to_internal[original as usize] = token_class[unique];
+        }
     }
     let vocab_tokens = ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
-        original_to_internal, token_reps.len() as u32,
+        original_to_internal,
+        token_classes,
     );
-    let compact_ms = compact_started.elapsed().as_secs_f64() * 1000.0;
 
     let build_started = Instant::now();
     let mut by_terminal = BTreeMap::<u32, Vec<Vec<u32>>>::new();
     for (state, row) in rows.iter().enumerate() {
-        for (class, &token) in token_reps.iter().enumerate() {
-            for &terminal in &signatures[row[token] as usize] {
-                by_terminal.entry(terminal).or_insert_with(|| vec![Vec::new(); rows.len()])[state]
-                    .push(class as u32);
+        for (token, &signature) in row.iter().enumerate() {
+            for &terminal in &signatures[signature as usize] {
+                by_terminal
+                    .entry(terminal)
+                    .or_insert_with(|| vec![Vec::new(); rows.len()])[state]
+                    .push(token as u32);
             }
         }
     }
-    let mut dwa = DWA::new(rows.len() as u32, token_reps.len().saturating_sub(1) as u32);
+    let mut dwa = DWA::new(rows.len() as u32, token_classes.saturating_sub(1));
     let final_state = dwa.add_state();
     dwa.set_final_weight(final_state, Weight::all());
     for (terminal, per_state) in by_terminal {
         let weight = Weight::from_per_tsid_token_sets(per_state.into_iter().enumerate().filter_map(
-            |(state, tokens)| (!tokens.is_empty()).then(||
-                (state as u32, tokens.into_iter().collect::<RangeSetBlaze<u32>>())
-            ),
+            |(state, tokens)| {
+                (!tokens.is_empty()).then(|| {
+                    (state as u32, tokens.into_iter().collect::<RangeSetBlaze<u32>>())
+                })
+            },
         ));
-        if !weight.is_empty() { dwa.add_transition(dwa.start_state(), terminal as i32, final_state, weight); }
+        if !weight.is_empty() {
+            dwa.add_transition(dwa.start_state(), terminal as i32, final_state, weight);
+        }
     }
-    if dwa.num_transitions() == 0 { return None; }
+    if dwa.num_transitions() == 0 {
+        return None;
+    }
     let build_ms = build_started.elapsed().as_secs_f64() * 1000.0;
     let state_classes = rows.len();
-    let token_classes = token_reps.len();
     Some(Finished {
         artifact: LocalIdMapTerminalDwa {
-            id_map: InternalIdMap { tokenizer_states, vocab_tokens, deferred_vocab_singleton_original_ids: None },
+            id_map: InternalIdMap {
+                tokenizer_states,
+                vocab_tokens,
+                deferred_vocab_singleton_original_ids: None,
+            },
             dwa,
             profile: TerminalDwaPhaseProfile {
                 id_map_ms: scan_ms,
@@ -122,6 +168,6 @@ pub(super) fn finish(
         compact_ms,
         build_ms,
         state_classes,
-        token_classes,
+        token_classes: token_classes as usize,
     })
 }
