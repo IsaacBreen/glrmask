@@ -2632,6 +2632,10 @@ fn collect_suffix_effects_from_frame(
 
     let result = (|| {
         match action {
+            Action::Skip => {
+                effects.push(frame_to_guarded_shift(frame));
+                Ok(())
+            }
             Action::Shift(target, replace) => {
                 let mut frame = frame;
                 let effective_replace = *replace && !table.forwarded_shifts.contains(&(state, terminal));
@@ -2880,6 +2884,7 @@ fn remapped_action_hash(action: &Action, mapping: &[u32]) -> u64 {
             accept.hash(&mut h);
         }
         Action::Accept => 3u8.hash(&mut h),
+        Action::Skip => 7u8.hash(&mut h),
         Action::StackShifts(shifts) => return remapped_stack_shifts_hash(shifts, mapping),
         Action::ReplaceShifts(_) | Action::GuardedStackShifts(_) => {
             return unordered_entry_hash(&remap_action_targets(action, mapping));
@@ -2897,6 +2902,7 @@ fn actions_equal_after_remap(left: &Action, right: &Action, mapping: &[u32]) -> 
             ls.map(|(target, replace)| (mapping[target as usize], replace)) == rs.map(|(target, replace)| (mapping[target as usize], replace)) && lrs == rrs && la == ra
         }
         (Action::Accept, Action::Accept) => true,
+        (Action::Skip, Action::Skip) => true,
         (Action::StackShifts(left), Action::StackShifts(right)) => {
             remapped_stack_shifts_equal(left, right, mapping)
         }
@@ -3041,7 +3047,7 @@ fn collect_action_targets(action: &Action, out: &mut Vec<u32>) {
                 out.push(*target);
             }
         }
-        Action::Reduce(_, _) | Action::Accept => {}
+        Action::Reduce(_, _) | Action::Accept | Action::Skip => {}
     }
 }
 
@@ -3072,7 +3078,7 @@ fn push_action_targets(action: &Action, reachable: &mut [bool], stack: &mut Vec<
                 }
             }
         }
-        Action::Reduce(_, _) | Action::Accept => {}
+        Action::Reduce(_, _) | Action::Accept | Action::Skip => {}
         Action::Split { shift, .. } => {
             if let Some((target, _)) = shift {
                 push_reachable_state(*target, reachable, stack);
@@ -3391,7 +3397,7 @@ fn merge_action_into_pending(
             budget,
         ),
         Action::StackShifts(_) | Action::ReplaceShifts(_) => Err(()),
-        Action::GuardedStackShifts(_) => Err(()),
+        Action::GuardedStackShifts(_) | Action::Skip => Err(()),
         Action::Reduce(nt, len) => {
             pending.push_reduce(*nt, *len);
             Ok(())
@@ -3841,6 +3847,7 @@ fn stack_effect_action_tag(action: &Action) -> u8 {
         Action::Split { .. } => 4,
         Action::Accept => 5,
         Action::ReplaceShifts(_) => 6,
+        Action::Skip => 7,
     }
 }
 
@@ -3992,6 +3999,7 @@ fn stack_effects_for_action(
         let mut out = Vec::new();
         let mut origin_dependent = false;
         match action {
+            Action::Skip => out.push(frame_to_guarded_shift(frame)),
             Action::Shift(target, replace) => {
                 let mut frame = frame;
                 let effective_replace = *replace && !table.forwarded_shifts.contains(&(state, tid));
@@ -5862,7 +5870,7 @@ fn try_inline_unit_reductions_for_cell_inner(
     match action {
         Action::Shift(target, replace) => pending.push_shift(*target, *replace),
         Action::StackShifts(_) | Action::ReplaceShifts(_) => return Ok(None),
-        Action::GuardedStackShifts(_) => return Ok(None),
+        Action::GuardedStackShifts(_) | Action::Skip => return Ok(None),
         Action::Reduce(nt, len) => reduces.push((*nt, *len)),
         Action::Split {
             shift,
@@ -5992,7 +6000,7 @@ fn remap_action_targets_in_place(action: &mut Action, mapping: &[u32]) {
                 }
             }
         }
-        Action::Reduce(_, _) | Action::Accept => {}
+        Action::Reduce(_, _) | Action::Accept | Action::Skip => {}
         Action::Split { shift, .. } => {
             if let Some((target, _)) = shift {
                 *target = mapping[*target as usize];
@@ -6067,6 +6075,7 @@ fn remap_action_targets(action: &Action, mapping: &[u32]) -> Action {
             accept: *accept,
         },
         Action::Accept => Action::Accept,
+        Action::Skip => Action::Skip,
     }
 }
 
@@ -6083,6 +6092,7 @@ enum ActionSig {
         accept: bool,
     },
     Accept,
+    Skip,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -6153,6 +6163,7 @@ fn remap_action_to_partition(action: &Action, partition: &[u32]) -> ActionSig {
             accept: *accept,
         },
         Action::Accept => ActionSig::Accept,
+        Action::Skip => ActionSig::Skip,
     }
 }
 

@@ -1,13 +1,28 @@
 use crate::runtime::Constraint;
+use crate::automata::regex::Expr;
+use serde::{Deserialize, Serialize};
 use std::io::{BufWriter, Read, Write};
 
 const CONSTRAINT_MAGIC: [u8; 8] = *b"GLRCONS\0";
 const LEGACY_CONSTRAINT_VERSION: u16 = 7;
-const CONSTRAINT_VERSION: u16 = 9;
+const PREVIOUS_COMPRESSED_CONSTRAINT_VERSION: u16 = 9;
+const CONSTRAINT_VERSION: u16 = 10;
 const CONSTRAINT_HEADER_LEN: usize = CONSTRAINT_MAGIC.len() + 2 + 8;
 const COMPRESSED_PAYLOAD_HEADER_LEN: usize = 8;
 const CONSTRAINT_COMPRESSION_LEVEL: i32 = 1;
 const CONSTRAINT_SERIALIZATION_BUFFER_LEN: usize = 128 * 1024;
+
+#[derive(Serialize)]
+struct ConstraintArtifactV10Ref<'a> {
+    constraint: &'a Constraint,
+    ignore_expr: &'a Option<Expr>,
+}
+
+#[derive(Deserialize)]
+struct ConstraintArtifactV10 {
+    constraint: Constraint,
+    ignore_expr: Option<Expr>,
+}
 
 struct CountingWriter<W> {
     inner: W,
@@ -69,7 +84,13 @@ impl Constraint {
                     CONSTRAINT_SERIALIZATION_BUFFER_LEN,
                     &mut writer,
                 );
-                bincode::serialize_into(&mut buffered, self)
+                bincode::serialize_into(
+                    &mut buffered,
+                    &ConstraintArtifactV10Ref {
+                        constraint: self,
+                        ignore_expr: &self.ignore_expr,
+                    },
+                )
                     .expect("Constraint serialization should succeed");
                 buffered
                     .flush()
@@ -97,7 +118,12 @@ impl Constraint {
             ));
         }
         let version = u16::from_le_bytes([bytes[8], bytes[9]]);
-        if !matches!(version, LEGACY_CONSTRAINT_VERSION | CONSTRAINT_VERSION) {
+        if !matches!(
+            version,
+            LEGACY_CONSTRAINT_VERSION
+                | PREVIOUS_COMPRESSED_CONSTRAINT_VERSION
+                | CONSTRAINT_VERSION
+        ) {
             return Err(crate::GlrMaskError::Serialization(format!(
                 "unsupported constraint artifact version {version}"
             )));
@@ -119,7 +145,10 @@ impl Constraint {
         }
         let payload = &bytes[CONSTRAINT_HEADER_LEN..];
         let mut raw;
-        let serialized = if version == CONSTRAINT_VERSION {
+        let serialized = if matches!(
+            version,
+            PREVIOUS_COMPRESSED_CONSTRAINT_VERSION | CONSTRAINT_VERSION
+        ) {
             if payload.len() < COMPRESSED_PAYLOAD_HEADER_LEN {
                 return Err(crate::GlrMaskError::Serialization(
                     "invalid compressed constraint artifact payload".to_owned(),
@@ -169,8 +198,16 @@ impl Constraint {
         } else {
             payload
         };
-        let mut constraint: Constraint = bincode::deserialize(serialized)
-            .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
+        let mut constraint = if version == CONSTRAINT_VERSION {
+            let artifact: ConstraintArtifactV10 = bincode::deserialize(serialized)
+                .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
+            let mut constraint = artifact.constraint;
+            constraint.ignore_expr = artifact.ignore_expr;
+            constraint
+        } else {
+            bincode::deserialize(serialized)
+                .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?
+        };
         if constraint.uses_dynamic_runtime() {
             constraint.rebuild_dynamic_runtime_caches();
         } else {
@@ -201,6 +238,19 @@ mod tests {
                 (1, b"b".to_vec()),
                 (2, b"ab".to_vec()),
             ]),
+        )
+        .unwrap()
+    }
+
+    fn ignored_constraint() -> Constraint {
+        Constraint::from_glrm_grammar(
+            r#"
+                start start;
+                ignore WS;
+                t WS ::= " "+;
+                nt start ::= "a";
+            "#,
+            &Vocab::new(vec![(0, b"a".to_vec()), (1, b" ".to_vec())]),
         )
         .unwrap()
     }
@@ -248,6 +298,35 @@ mod tests {
         let loaded = Constraint::load(&envelope(LEGACY_CONSTRAINT_VERSION, &raw))
             .expect("legacy artifact should remain loadable");
 
+        assert_eq!(loaded.start().mask(), constraint.start().mask());
+    }
+
+    #[test]
+    fn constraint_envelope_loads_previous_compressed_payload_without_ignore_descriptor() {
+        let constraint = ignored_constraint();
+        assert!(constraint.ignore_expr.is_some());
+        let raw = bincode::serialize(&constraint).unwrap();
+        let compressed = zstd::bulk::compress(&raw, CONSTRAINT_COMPRESSION_LEVEL).unwrap();
+        let mut payload = Vec::with_capacity(COMPRESSED_PAYLOAD_HEADER_LEN + compressed.len());
+        payload.extend_from_slice(&(raw.len() as u64).to_le_bytes());
+        payload.extend_from_slice(&compressed);
+
+        let loaded = Constraint::load(&envelope(
+            PREVIOUS_COMPRESSED_CONSTRAINT_VERSION,
+            &payload,
+        ))
+        .expect("the previous compressed wire layout should remain loadable");
+
+        assert!(loaded.ignore_expr.is_none());
+        assert_eq!(loaded.start().mask(), constraint.start().mask());
+    }
+
+    #[test]
+    fn current_constraint_artifact_preserves_global_ignore_descriptor() {
+        let constraint = ignored_constraint();
+        let loaded = Constraint::load(&constraint.save()).unwrap();
+        assert!(constraint.ignore_expr.is_some());
+        assert_eq!(loaded.ignore_expr, constraint.ignore_expr);
         assert_eq!(loaded.start().mask(), constraint.start().mask());
     }
 

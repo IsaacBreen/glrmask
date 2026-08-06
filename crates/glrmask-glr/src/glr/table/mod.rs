@@ -625,7 +625,10 @@ impl GLRTable {
                             *target,
                         );
                     }
-                    Action::Split { shift: None, .. } | Action::Reduce(..) | Action::Accept => {}
+                    Action::Split { shift: None, .. }
+                    | Action::Reduce(..)
+                    | Action::Accept
+                    | Action::Skip => {}
                 }
             }
         }

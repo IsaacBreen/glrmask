@@ -3983,6 +3983,9 @@ fn compile_prepared_with_profile_and_table_construction(
         let finalize_started_at = Instant::now();
         let token_bytes = vocab.entries_arc();
         let special_token_terminals = collect_special_token_terminals(&prepared_grammar);
+        let ignore_expr = prepared_grammar
+            .ignore_terminal
+            .and_then(|terminal| tokenizer.terminal_expr(terminal).cloned());
         let tokenizer = runtime_tokenizer.unwrap_or(tokenizer);
         let constraint = finalize_constraint(Constraint {
             runtime_backend: crate::runtime::ConstraintRuntimeBackend::Static,
@@ -4060,6 +4063,7 @@ fn compile_prepared_with_profile_and_table_construction(
             internal_token_buf_op_costs: Vec::new(),
             word_group_buf_op_costs: Vec::new(),
             final_mask_mapping: crate::runtime::mask_mapping::FinalMaskMapping::default(),
+            ignore_expr,
         });
         profile.finalize_ms = elapsed_ms(finalize_started_at);
         profile.compile_ms = elapsed_ms(compile_started_at);
