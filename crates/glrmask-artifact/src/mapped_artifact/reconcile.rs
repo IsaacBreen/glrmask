@@ -1098,6 +1098,8 @@ pub fn remap_weights_with_maps(
 ) {
     let profiling = std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
         || std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some();
+    let allow_parallel =
+        std::env::var_os("GLRMASK_SERIAL_INNER_WEIGHT_REMAP").is_none();
     let total_started_at = profiling.then(Instant::now);
     let tsid_map = InjectiveLocalMap::from_local_to_common(local_to_common_tsids, common_tsid_count);
     let tsid_run_map =
@@ -1161,7 +1163,8 @@ pub fn remap_weights_with_maps(
                 );
             }
             let unique_ranges = unique_ranges.into_iter().collect::<Vec<_>>();
-            let remapped_ranges = if unique_ranges.len() >= PARALLEL_UNIQUE_WEIGHT_THRESHOLD
+            let remapped_ranges = if allow_parallel
+                && unique_ranges.len() >= PARALLEL_UNIQUE_WEIGHT_THRESHOLD
                 && rayon::current_num_threads() > 1
             {
                 unique_ranges
@@ -1192,7 +1195,8 @@ pub fn remap_weights_with_maps(
                     })
                     .collect::<FxHashMap<_, _>>()
             };
-            if sources.len() >= PARALLEL_UNIQUE_WEIGHT_THRESHOLD
+            if allow_parallel
+                && sources.len() >= PARALLEL_UNIQUE_WEIGHT_THRESHOLD
                 && rayon::current_num_threads() > 1
             {
                 sources
@@ -1221,7 +1225,8 @@ pub fn remap_weights_with_maps(
                     })
                     .collect::<Vec<_>>()
             }
-        } else if sources.len() >= PARALLEL_UNIQUE_WEIGHT_THRESHOLD
+        } else if allow_parallel
+            && sources.len() >= PARALLEL_UNIQUE_WEIGHT_THRESHOLD
             && rayon::current_num_threads() > 1
         {
             sources
@@ -1327,7 +1332,8 @@ pub fn remap_weights_with_maps(
 
     const PARALLEL_UNIQUE_WEIGHT_THRESHOLD: usize = 256;
     let unique_remap_started_at = profiling.then(Instant::now);
-    let remapped_unique: Vec<Weight> = if unique_weights.len() >= PARALLEL_UNIQUE_WEIGHT_THRESHOLD
+    let remapped_unique: Vec<Weight> = if allow_parallel
+        && unique_weights.len() >= PARALLEL_UNIQUE_WEIGHT_THRESHOLD
         && rayon::current_num_threads() > 1
     {
         unique_weights
@@ -1347,7 +1353,8 @@ pub fn remap_weights_with_maps(
     if std::env::var_os("GLRMASK_VALIDATE_GLOBAL_TOKEN_REMAP_CACHE").is_some()
         && precomputed_token_sets.is_some()
     {
-        let reference: Vec<Weight> = if unique_weights.len() >= PARALLEL_UNIQUE_WEIGHT_THRESHOLD
+        let reference: Vec<Weight> = if allow_parallel
+            && unique_weights.len() >= PARALLEL_UNIQUE_WEIGHT_THRESHOLD
             && rayon::current_num_threads() > 1
         {
             unique_weights
