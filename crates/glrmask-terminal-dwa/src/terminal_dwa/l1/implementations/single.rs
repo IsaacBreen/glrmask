@@ -7,6 +7,7 @@
 //! one distinguished start state.
 
 use std::collections::VecDeque;
+use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
 use rayon::prelude::*;
@@ -112,38 +113,69 @@ impl<'a> Projected<'a> {
     }
 }
 
-fn minimize(transitions: &[[u32; 256]], bytes: &[u8]) -> (Vec<u32>, Vec<[u32; 256]>, usize) {
+fn minimize(
+    transitions: &[[u32; 256]],
+    bytes: &[u8],
+) -> (Vec<u32>, Vec<[u32; 256]>, usize, usize) {
     // Bytes with identical target columns can never distinguish states in any
     // refinement round. Keep one representative per exact column.
     let mut byte_columns = FxHashMap::<Vec<u32>, u8>::default();
     for &byte in bytes {
-        let column = transitions.iter().map(|row| row[byte as usize]).collect::<Vec<_>>();
+        let column = transitions
+            .iter()
+            .map(|row| row[byte as usize])
+            .collect::<Vec<_>>();
         byte_columns.entry(column).or_insert(byte);
     }
     let alphabet = byte_columns.values().copied().collect::<Vec<_>>();
-    let mut classes = vec![0u32; transitions.len()];
-    loop {
-        let mut ids = FxHashMap::<Vec<u32>, u32>::default();
-        let next = transitions
-            .iter()
-            .map(|row| {
-                let key = alphabet
-                    .iter()
-                    .map(|&byte| {
-                        let target = row[byte as usize];
-                        if target == DEAD { 0 } else { classes[target as usize] + 1 }
-                    })
-                    .collect::<Vec<_>>();
-                let next = ids.len() as u32;
-                *ids.entry(key).or_insert(next)
+    let mapped = |target: u32, classes: &[u32]| {
+        if target == DEAD { 0 } else { classes[target as usize] + 1 }
+    };
+    let same = |left: usize, right: usize, classes: &[u32]| {
+        classes[left] == classes[right]
+            && alphabet.iter().all(|&byte| {
+                mapped(transitions[left][byte as usize], classes)
+                    == mapped(transitions[right][byte as usize], classes)
             })
-            .collect::<Vec<_>>();
+    };
+
+    let mut classes = vec![0u32; transitions.len()];
+    let mut iterations = 0usize;
+    loop {
+        let mut buckets = FxHashMap::<u64, Vec<(usize, u32)>>::default();
+        let mut next = vec![0u32; transitions.len()];
+        let mut next_class = 0u32;
+        for state in 0..transitions.len() {
+            let mut hasher = rustc_hash::FxHasher::default();
+            classes[state].hash(&mut hasher);
+            for &byte in &alphabet {
+                mapped(transitions[state][byte as usize], &classes).hash(&mut hasher);
+            }
+            let bucket = buckets.entry(hasher.finish()).or_default();
+            let class = bucket
+                .iter()
+                .find_map(|&(representative, class)| {
+                    same(state, representative, &classes).then_some(class)
+                })
+                .unwrap_or_else(|| {
+                    let class = next_class;
+                    next_class += 1;
+                    bucket.push((state, class));
+                    class
+                });
+            next[state] = class;
+        }
+        iterations += 1;
         if next == classes {
             break;
         }
         classes = next;
     }
-    let count = classes.iter().copied().max().map_or(0, |class| class + 1) as usize;
+    let count = classes
+        .iter()
+        .copied()
+        .max()
+        .map_or(0, |class| class + 1) as usize;
     let mut representatives = vec![usize::MAX; count];
     for (state, &class) in classes.iter().enumerate() {
         representatives[class as usize] = representatives[class as usize].min(state);
@@ -157,7 +189,7 @@ fn minimize(transitions: &[[u32; 256]], bytes: &[u8]) -> (Vec<u32>, Vec<[u32; 25
             }
         }
     }
-    (classes, compact, alphabet.len())
+    (classes, compact, alphabet.len(), iterations)
 }
 
 #[derive(Clone, Copy, Default)]
@@ -311,7 +343,8 @@ pub(super) fn build(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
     let projected_ms = projected_started.elapsed().as_secs_f64() * 1000.0;
 
     let minimize_started = Instant::now();
-    let (classes, transitions, minimized_bytes) = minimize(&projected.transitions, &bytes);
+    let (classes, transitions, minimized_bytes, minimize_rounds) =
+        minimize(&projected.transitions, &bytes);
     let minimize_ms = minimize_started.elapsed().as_secs_f64() * 1000.0;
     let mut loops = vec![[0u64; 4]; transitions.len()];
     for (state, row) in transitions.iter().enumerate() {
@@ -462,12 +495,13 @@ pub(super) fn build(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
     )?;
     if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
         eprintln!(
-            "[glrmask/profile][l1_single] partition={} raw_states={} terminals={} bytes={} minimized_bytes={} projected_states={} expanded={} minimized_states={} root_classes={} root_vectors={} residual_token_classes={} signature_updates={} frontier_groups={} frontier_origins={} frontier_merges={} subtree_skips={} signatures={} state_classes={} token_classes={} project_ms={:.3} minimize_ms={:.3} traverse_ms={:.3} compact_ms={:.3} build_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][l1_single] partition={} raw_states={} terminals={} bytes={} minimized_bytes={} minimize_rounds={} projected_states={} expanded={} minimized_states={} root_classes={} root_vectors={} residual_token_classes={} signature_updates={} frontier_groups={} frontier_origins={} frontier_merges={} subtree_skips={} signatures={} state_classes={} token_classes={} project_ms={:.3} minimize_ms={:.3} traverse_ms={:.3} compact_ms={:.3} build_ms={:.3} total_ms={:.3}",
             input.partition_label,
             input.tokenizer.num_states(),
             projected.terminals.len(),
             bytes.len(),
             minimized_bytes,
+            minimize_rounds,
             projected.configs.len(),
             expanded,
             transitions.len(),
