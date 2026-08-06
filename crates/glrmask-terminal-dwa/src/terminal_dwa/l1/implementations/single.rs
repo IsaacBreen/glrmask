@@ -7,7 +7,6 @@
 //! one distinguished start state.
 
 use std::collections::VecDeque;
-use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
 use rayon::prelude::*;
@@ -117,8 +116,7 @@ fn minimize(
     transitions: &[[u32; 256]],
     bytes: &[u8],
 ) -> (Vec<u32>, Vec<[u32; 256]>, usize, usize) {
-    // Bytes with identical target columns can never distinguish states in any
-    // refinement round. Keep one representative per exact column.
+    // Exact byte-column quotient first.
     let mut byte_columns = FxHashMap::<Vec<u32>, u8>::default();
     for &byte in bytes {
         let column = transitions
@@ -128,68 +126,123 @@ fn minimize(
         byte_columns.entry(column).or_insert(byte);
     }
     let alphabet = byte_columns.values().copied().collect::<Vec<_>>();
-    let mapped = |target: u32, classes: &[u32]| {
-        if target == DEAD { 0 } else { classes[target as usize] + 1 }
-    };
-    let same = |left: usize, right: usize, classes: &[u32]| {
-        classes[left] == classes[right]
-            && alphabet.iter().all(|&byte| {
-                mapped(transitions[left][byte as usize], classes)
-                    == mapped(transitions[right][byte as usize], classes)
-            })
-    };
 
-    let mut classes = vec![0u32; transitions.len()];
-    let mut iterations = 0usize;
-    loop {
-        let mut buckets = FxHashMap::<u64, Vec<(usize, u32)>>::default();
-        let mut next = vec![0u32; transitions.len()];
-        let mut next_class = 0u32;
-        for state in 0..transitions.len() {
-            let mut hasher = rustc_hash::FxHasher::default();
-            classes[state].hash(&mut hasher);
-            for &byte in &alphabet {
-                mapped(transitions[state][byte as usize], &classes).hash(&mut hasher);
-            }
-            let bucket = buckets.entry(hasher.finish()).or_default();
-            let class = bucket
-                .iter()
-                .find_map(|&(representative, class)| {
-                    same(state, representative, &classes).then_some(class)
-                })
-                .unwrap_or_else(|| {
-                    let class = next_class;
-                    next_class += 1;
-                    bucket.push((state, class));
-                    class
-                });
-            next[state] = class;
-        }
-        iterations += 1;
-        if next == classes {
-            break;
-        }
-        classes = next;
-    }
-    let count = classes
-        .iter()
-        .copied()
-        .max()
-        .map_or(0, |class| class + 1) as usize;
-    let mut representatives = vec![usize::MAX; count];
-    for (state, &class) in classes.iter().enumerate() {
-        representatives[class as usize] = representatives[class as usize].min(state);
-    }
-    let mut compact = vec![[DEAD; 256]; count];
-    for (class, &state) in representatives.iter().enumerate() {
-        for &byte in bytes {
+    // All real states are accepting. Add one explicit rejecting dead sink and
+    // run Hopcroft over every state; there is deliberately no reachability pass.
+    let live = transitions.len();
+    let dead = live;
+    let states = live + 1;
+    let mut delta = vec![vec![dead; alphabet.len()]; states];
+    for state in 0..live {
+        for (symbol, &byte) in alphabet.iter().enumerate() {
             let target = transitions[state][byte as usize];
             if target != DEAD {
-                compact[class][byte as usize] = classes[target as usize];
+                delta[state][symbol] = target as usize;
             }
         }
     }
-    (classes, compact, alphabet.len(), iterations)
+    for symbol in 0..alphabet.len() {
+        delta[dead][symbol] = dead;
+    }
+    let mut inverse = vec![vec![Vec::<u32>::new(); states]; alphabet.len()];
+    for (source, row) in delta.iter().enumerate() {
+        for (symbol, &target) in row.iter().enumerate() {
+            inverse[symbol][target].push(source as u32);
+        }
+    }
+
+    let mut blocks = vec![(0..live as u32).collect::<Vec<_>>(), vec![dead as u32]];
+    let mut class = vec![0u32; states];
+    class[dead] = 1;
+    let mut queue = VecDeque::<(u32, usize)>::new();
+    let mut queued = vec![vec![false; alphabet.len()]; blocks.len()];
+    for symbol in 0..alphabet.len() {
+        queue.push_back((1, symbol));
+        queued[1][symbol] = true;
+    }
+    let mut marked = vec![false; states];
+    let mut pops = 0usize;
+
+    while let Some((splitter, symbol)) = queue.pop_front() {
+        queued[splitter as usize][symbol] = false;
+        pops += 1;
+        let mut affected = FxHashMap::<u32, Vec<u32>>::default();
+        for &target in &blocks[splitter as usize] {
+            for &source in &inverse[symbol][target as usize] {
+                affected.entry(class[source as usize]).or_default().push(source);
+            }
+        }
+        for (block_id, sources) in affected {
+            let block_id = block_id as usize;
+            if sources.len() == blocks[block_id].len() {
+                continue;
+            }
+            for &source in &sources {
+                marked[source as usize] = true;
+            }
+            let old = std::mem::take(&mut blocks[block_id]);
+            let mut inside = Vec::with_capacity(sources.len());
+            let mut outside = Vec::with_capacity(old.len() - sources.len());
+            for state in old {
+                if marked[state as usize] {
+                    inside.push(state);
+                } else {
+                    outside.push(state);
+                }
+            }
+            for &source in &sources {
+                marked[source as usize] = false;
+            }
+            blocks[block_id] = outside;
+            let new_id = blocks.len();
+            for &state in &inside {
+                class[state as usize] = new_id as u32;
+            }
+            blocks.push(inside);
+            queued.push(vec![false; alphabet.len()]);
+
+            for other_symbol in 0..alphabet.len() {
+                if queued[block_id][other_symbol] {
+                    queue.push_back((new_id as u32, other_symbol));
+                    queued[new_id][other_symbol] = true;
+                } else {
+                    let smaller = if blocks[block_id].len() <= blocks[new_id].len() {
+                        block_id
+                    } else {
+                        new_id
+                    };
+                    if !queued[smaller][other_symbol] {
+                        queue.push_back((smaller as u32, other_symbol));
+                        queued[smaller][other_symbol] = true;
+                    }
+                }
+            }
+        }
+    }
+
+    let dead_block = class[dead] as usize;
+    let mut block_to_compact = vec![u32::MAX; blocks.len()];
+    let mut representatives = Vec::<usize>::new();
+    for (block, members) in blocks.iter().enumerate() {
+        if block == dead_block || members.is_empty() {
+            continue;
+        }
+        block_to_compact[block] = representatives.len() as u32;
+        representatives.push(members.iter().copied().filter(|&state| state as usize != dead).min().unwrap() as usize);
+    }
+    let classes = (0..live)
+        .map(|state| block_to_compact[class[state] as usize])
+        .collect::<Vec<_>>();
+    let mut compact = vec![[DEAD; 256]; representatives.len()];
+    for (new_state, &representative) in representatives.iter().enumerate() {
+        for &byte in bytes {
+            let target = transitions[representative][byte as usize];
+            if target != DEAD {
+                compact[new_state][byte as usize] = classes[target as usize];
+            }
+        }
+    }
+    (classes, compact, alphabet.len(), pops)
 }
 
 #[derive(Clone, Copy, Default)]
