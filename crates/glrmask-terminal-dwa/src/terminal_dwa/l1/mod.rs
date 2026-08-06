@@ -1162,8 +1162,27 @@ const L1_GENERIC_NFA_TOKEN_BOUNDED_LARGE_WORK_BUDGET:
     super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisWorkBudget =
     super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisWorkBudget {
         max_configurations: 64_000,
-        max_trie_visits: 1_000_000,
+        max_trie_visits: 1_050_000,
     };
+
+fn l1_generic_nfa_token_bounded_large_work_budget_with_override(
+    max_trie_visits: Option<usize>,
+) -> super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisWorkBudget {
+    let mut budget = L1_GENERIC_NFA_TOKEN_BOUNDED_LARGE_WORK_BUDGET;
+    if let Some(max_trie_visits) = max_trie_visits {
+        budget.max_trie_visits = max_trie_visits;
+    }
+    budget
+}
+
+fn l1_generic_nfa_token_bounded_large_work_budget(
+) -> super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisWorkBudget {
+    l1_generic_nfa_token_bounded_large_work_budget_with_override(
+        std::env::var("GLRMASK_L1_TOKEN_BOUNDED_MAX_TRIE_VISITS")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok()),
+    )
+}
 const L1_GENERIC_NFA_RELEVANT_POWERSET_PROBE_MIN_VOCAB: usize = 20_000;
 const L1_GENERIC_NFA_RELEVANT_POWERSET_PROBE_MAX_STATES: usize = 4_096;
 const L1_GENERIC_NFA_TINY_VOCAB_POWERSET_MIN_RAW_STATES: usize = 60_000;
@@ -1486,7 +1505,7 @@ fn build_l1_generic_nfa_exact_id_map<'a>(
         flat_trans,
         shared_topology,
         shared_token_trie,
-        L1_GENERIC_NFA_TOKEN_BOUNDED_LARGE_WORK_BUDGET,
+        l1_generic_nfa_token_bounded_large_work_budget(),
     );
     let view_build_ms = view_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -6958,6 +6977,18 @@ mod generic_nfa_tests {
             },
         );
         assert_eq!(analysis_view, "relevant_powerset_probe");
+    }
+
+    #[test]
+    fn token_bounded_large_work_budget_keeps_small_completion_headroom() {
+        let default = l1_generic_nfa_token_bounded_large_work_budget_with_override(None);
+        assert_eq!(default.max_configurations, 64_000);
+        assert_eq!(default.max_trie_visits, 1_050_000);
+
+        let overridden =
+            l1_generic_nfa_token_bounded_large_work_budget_with_override(Some(1_234_567));
+        assert_eq!(overridden.max_configurations, 64_000);
+        assert_eq!(overridden.max_trie_visits, 1_234_567);
     }
 
     #[test]
