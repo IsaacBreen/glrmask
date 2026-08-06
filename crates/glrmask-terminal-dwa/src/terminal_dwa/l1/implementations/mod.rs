@@ -1,8 +1,8 @@
 //! Swappable L1 builders and exact cross-checking machinery.
 //!
 //! Controls:
-//! - `GLRMASK_L1_IMPLEMENTATION=production|scalar|trie|bulk|dense|frontier|single`
-//! - `GLRMASK_L1_CHECK_AGAINST=none|production|scalar|trie|bulk|dense|frontier|single|other`
+//! - `GLRMASK_L1_IMPLEMENTATION=production|auto|scalar|trie|bulk|dense|frontier|single`
+//! - `GLRMASK_L1_CHECK_AGAINST=none|production|auto|scalar|trie|bulk|dense|frontier|single|other`
 //! - `GLRMASK_L1_EXPERIMENT_PARTITIONS=p2,p5` scopes both controls.
 //! - `GLRMASK_PROFILE_L1_IMPLEMENTATIONS=1` prints per-implementation timings.
 //!
@@ -35,6 +35,7 @@ use crate::{Vocab, compiler::glr::analysis::AnalyzedGrammar};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Implementation {
     Production,
+    Auto,
     Scalar,
     Trie,
     Bulk,
@@ -47,20 +48,33 @@ impl Implementation {
     fn parse(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
             "production" | "prod" | "existing" => Self::Production,
+            "auto" | "adaptive" => Self::Auto,
             "scalar" | "reference" | "ref" => Self::Scalar,
             "trie" | "optimized" | "opt" => Self::Trie,
             "bulk" | "dag" => Self::Bulk,
             "dense" | "chunked" => Self::Dense,
             "frontier" | "weighted" => Self::Frontier,
             "single" | "single-group" | "prefix-dfa" => Self::Single,
-            other => panic!("unknown L1 implementation {other:?}; expected production, scalar, trie, bulk, dense, frontier, or single"),
+            other => panic!("unknown L1 implementation {other:?}; expected production, auto, scalar, trie, bulk, dense, frontier, or single"),
         }
     }
 
+
+    fn resolve(self, input: BuildInput<'_>) -> Self {
+        if self != Self::Auto {
+            return self;
+        }
+        let active = input.active_terminals.iter().filter(|&&active| active).count();
+        if input.vocab.len() >= 20_000 && active <= 128 {
+            Self::Single
+        } else {
+            Self::Production
+        }
+    }
     fn other(self) -> Self {
         match self {
             Self::Production => Self::Scalar,
-            Self::Scalar | Self::Trie | Self::Bulk | Self::Dense | Self::Frontier | Self::Single => Self::Production,
+            Self::Auto | Self::Scalar | Self::Trie | Self::Bulk | Self::Dense | Self::Frontier | Self::Single => Self::Production,
         }
     }
 }
@@ -119,6 +133,7 @@ pub struct BuildInput<'a> {
 
 fn run(implementation: Implementation, input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
     match implementation {
+        Implementation::Auto => unreachable!("auto implementation must be resolved first"),
         Implementation::Production => production::build(input),
         Implementation::Scalar => scalar::build(input),
         Implementation::Trie => trie::build(input),
@@ -130,22 +145,30 @@ fn run(implementation: Implementation, input: BuildInput<'_>) -> Option<LocalIdM
 }
 
 pub fn build_with_plan(input: BuildInput<'_>, plan: Plan) -> Option<LocalIdMapTerminalDwa> {
+    let resolved = plan.use_implementation.resolve(input);
     let selected_started = Instant::now();
-    let selected = run(plan.use_implementation, input);
+    let selected = run(resolved, input);
     let selected_ms = selected_started.elapsed().as_secs_f64() * 1000.0;
 
     let mut check_ms = 0.0;
-    if let Some(checker) = plan.check_against {
+    let resolved_checker = plan.check_against.map(|checker| checker.resolve(input));
+    if let Some(checker) = resolved_checker.filter(|&checker| checker != resolved) {
         let check_started = Instant::now();
         let expected = run(checker, input);
-        verify::assert_equivalent(input, plan.use_implementation, selected.as_ref(), checker, expected.as_ref());
+        verify::assert_equivalent(input, resolved, selected.as_ref(), checker, expected.as_ref());
         check_ms = check_started.elapsed().as_secs_f64() * 1000.0;
     }
 
     if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
         eprintln!(
-            "[glrmask/profile][l1_implementation] partition={} selected={:?} selected_ms={:.3} checker={:?} check_ms={:.3}",
-            input.partition_label, plan.use_implementation, selected_ms, plan.check_against, check_ms,
+            "[glrmask/profile][l1_implementation] partition={} selected={:?} resolved={:?} selected_ms={:.3} checker={:?} resolved_checker={:?} check_ms={:.3}",
+            input.partition_label,
+            plan.use_implementation,
+            resolved,
+            selected_ms,
+            plan.check_against,
+            resolved_checker,
+            check_ms,
         );
     }
     selected
