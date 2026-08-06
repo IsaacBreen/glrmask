@@ -4202,7 +4202,7 @@ fn components_have_no_explicit_controls(
 /// Use the grammar's exact ever-follow relation to reject the optimization for
 /// direct, nullable-mediated, or nonterminal-mediated call adjacency. The
 /// explicit-control linker remains the reference path for those cases.
-fn legacy_splice_has_no_adjacent_subgrammar_calls(
+fn legacy_splice_has_only_byte_terminal_continuations(
     parent: &Constraint,
     children: &[CompiledSubgrammarInput<'_>],
 ) -> bool {
@@ -4212,6 +4212,16 @@ fn legacy_splice_has_no_adjacent_subgrammar_calls(
     let placeholders = children
         .iter()
         .map(|child| child.placeholder_terminal)
+        .collect::<BTreeSet<_>>();
+    let boundary_controlled_followers = placeholders
+        .iter()
+        .copied()
+        .chain(
+            parent
+                .special_token_terminals
+                .iter()
+                .map(|special| special.terminal_id),
+        )
         .collect::<BTreeSet<_>>();
     let Some(augmented_start) = parent.table.rules.first().map(|rule| rule.lhs) else {
         return false;
@@ -4225,7 +4235,7 @@ fn legacy_splice_has_no_adjacent_subgrammar_calls(
     );
     let disallowed = crate::compiler::pipeline::compute_disallowed_follows(&analyzed);
     for &left in &placeholders {
-        for &right in &placeholders {
+        for &right in &boundary_controlled_followers {
             let is_disallowed = disallowed
                 .get(&left)
                 .is_some_and(|blocked| blocked.contains(right as usize));
@@ -4684,7 +4694,7 @@ pub(crate) fn compose_constraints(
     let use_legacy_splice =
         global_ignores
             && components_have_no_explicit_controls(parent, children)
-            && legacy_splice_has_no_adjacent_subgrammar_calls(parent, children);
+            && legacy_splice_has_only_byte_terminal_continuations(parent, children);
     let table_started_at = Instant::now();
     let composed_table = if use_legacy_splice {
         compose_subgrammar_tables(&parent.table, &table_inputs)?
@@ -5068,7 +5078,7 @@ pub(crate) fn compose_constraints_owned_parent(
     let use_legacy_splice =
         global_ignores
             && components_have_no_explicit_controls(&parent, children)
-            && legacy_splice_has_no_adjacent_subgrammar_calls(&parent, children);
+            && legacy_splice_has_only_byte_terminal_continuations(&parent, children);
     let table_started_at = Instant::now();
     let composed_table = if use_legacy_splice {
         compose_subgrammar_tables(&parent.table, &table_inputs)?

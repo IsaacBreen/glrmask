@@ -3,7 +3,7 @@ pub(crate) use glrmask_grammar::__private::import::ebnf;
 pub mod json_schema;
 pub(crate) use glrmask_grammar::__private::import::lark;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::compiler::compile::{
     compile_owned_profiled_with_table_construction,
@@ -204,6 +204,64 @@ fn compile_from_source(
     Ok(constraint)
 }
 
+fn compile_from_named_grammar(
+    named: ast::NamedGrammar,
+    vocab: &crate::Vocab,
+    source_kind: &str,
+    default_table_construction: GlrTableConstruction,
+    end_token_ids: &[u32],
+) -> crate::Result<Constraint> {
+    let import_started_at = std::time::Instant::now();
+    let mut factored = factor_named_grammar(named);
+    append_end_token_choice(&mut factored, end_token_ids);
+    let grammar = ast::lower(&factored)?;
+    let import_ms = import_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    if compile_profile_enabled() || compile_top_profile_enabled() {
+        let (mut constraint, profile) = crate::error::catch_internal_invariant(|| {
+            compile_owned_profiled_with_table_construction(
+                grammar,
+                vocab,
+                default_table_construction,
+            )
+        })?;
+        constraint.table.set_embedded_end_token_ids(end_token_ids);
+        emit_compile_profile_summary(Some(source_kind), Some(import_ms), &profile);
+        return Ok(constraint);
+    }
+
+    let mut constraint = crate::error::catch_internal_invariant(|| {
+        compile_owned_with_table_construction(grammar, vocab, default_table_construction)
+    })?;
+    constraint.table.set_embedded_end_token_ids(end_token_ids);
+    Ok(constraint)
+}
+
+fn first_external_placeholder_token_id(vocab: &crate::Vocab) -> crate::Result<u32> {
+    if vocab.is_empty() {
+        return Ok(0);
+    }
+    if let Some(next) = vocab.max_token_id().checked_add(1) {
+        return Ok(next);
+    }
+
+    // Only the pathological `u32::MAX` case needs a vocabulary scan. Normal
+    // dense model vocabularies stay on the constant-time max+1 path.
+    let mut expected = 0u32;
+    for (token_id, _) in vocab.iter() {
+        if token_id != expected {
+            return Ok(expected);
+        }
+        expected = expected.checked_add(1).ok_or_else(|| {
+            crate::GlrMaskError::Compilation(
+                "every u32 token ID is occupied; no external-subgrammar placeholder is available"
+                    .to_string(),
+            )
+        })?;
+    }
+    Ok(expected)
+}
+
 fn dynamic_named_alternatives(
     source: &str,
     parse: NamedGrammarParser,
@@ -399,10 +457,10 @@ impl Constraint {
     /// Expensive component lexer/parser artifacts are reused. Composition
     /// compiles only the restricted cross-component boundary repair and the
     /// commit-template DFAs for terminals selected by that repair.
-    /// Components may declare different ignore terminals. Their lexical
-    /// languages are unioned into one transparent ignore terminal in the
-    /// flattened result, so parent whitespace and child whitespace/comments
-    /// remain valid on either side of and inside fused model tokens.
+    /// Components may declare different ignore terminals. Equivalent ignore
+    /// languages are canonicalized into one global transparent ignore.
+    /// Different ignore languages remain scope-local and are interpreted by
+    /// the explicit boundary parser, including inside fused model tokens.
     pub fn compose_subgrammars(
         &self,
         children: &[(&str, &Constraint)],
@@ -595,6 +653,88 @@ impl Constraint {
                 None,
                 end_token_ids,
             )
+        })
+    }
+
+    /// Compile GLRM containing typed `extern g name;` declarations and bind
+    /// each declaration to an already-compiled child constraint.
+    ///
+    /// Binding names are the source names of top-level externals. Externals
+    /// nested inside inline subgrammars use qualified names such as
+    /// `outer::leaf`. Hidden non-vocabulary placeholder IDs are allocated
+    /// automatically; callers never need to manufacture `@token(...)`
+    /// sentinels. Missing, duplicate, and unknown bindings are rejected before
+    /// compilation or linking.
+    pub fn from_glrm_grammar_with_subgrammars(
+        glrm: &str,
+        children: &[(&str, &Constraint)],
+        vocab: &crate::Vocab,
+    ) -> crate::Result<Self> {
+        Self::from_glrm_grammar_with_subgrammars_and_end_tokens(glrm, children, vocab, &[])
+    }
+
+    /// Compile GLRM with typed external subgrammars and model end-token IDs.
+    pub fn from_glrm_grammar_with_subgrammars_and_end_tokens(
+        glrm: &str,
+        children: &[(&str, &Constraint)],
+        vocab: &crate::Vocab,
+        end_token_ids: &[u32],
+    ) -> crate::Result<Self> {
+        with_large_import_stack(glrm.len(), || {
+            let first_placeholder_token_id = first_external_placeholder_token_id(vocab)?;
+            let parsed = crate::grammar::glrm::from_glrm_with_external_subgrammars(
+                glrm,
+                first_placeholder_token_id,
+                end_token_ids.iter().copied().chain(
+                    children
+                        .iter()
+                        .flat_map(|(_, child)| {
+                            child
+                                .special_token_terminals
+                                .iter()
+                                .map(|special| special.token_id)
+                        }),
+                ),
+            )?;
+
+            let mut children_by_name = BTreeMap::<&str, &Constraint>::new();
+            for &(binding_name, child) in children {
+                if children_by_name.insert(binding_name, child).is_some() {
+                    return Err(crate::GlrMaskError::Compilation(format!(
+                        "external subgrammar binding {binding_name:?} was supplied more than once",
+                    )));
+                }
+            }
+
+            let mut composition_bindings = Vec::with_capacity(parsed.placeholders.len());
+            for placeholder in &parsed.placeholders {
+                let child = children_by_name
+                    .remove(placeholder.binding_name.as_str())
+                    .ok_or_else(|| {
+                        crate::GlrMaskError::Compilation(format!(
+                            "GLRM declares external subgrammar {:?}, but no compiled child was supplied",
+                            placeholder.binding_name,
+                        ))
+                    })?;
+                composition_bindings.push((placeholder.terminal_name.as_str(), child));
+            }
+            if let Some((&unknown, _)) = children_by_name.first_key_value() {
+                return Err(crate::GlrMaskError::Compilation(format!(
+                    "compiled child was supplied for unknown external subgrammar {unknown:?}",
+                )));
+            }
+
+            let parent = compile_from_named_grammar(
+                parsed.grammar,
+                vocab,
+                "glrm",
+                GlrTableConstruction::ExperimentalCoreMerged,
+                end_token_ids,
+            )?;
+            if composition_bindings.is_empty() {
+                return Ok(parent);
+            }
+            parent.compose_subgrammars_owned(&composition_bindings, vocab)
         })
     }
 }
@@ -1138,6 +1278,284 @@ mod tests {
         let mut state = constraint.start();
         state.commit_bytes(b" <ab> ").unwrap();
         assert!(state.is_complete());
+    }
+
+    #[test]
+    fn glrm_external_subgrammar_api_matches_inline_grammar() {
+        let vocab = vocab(&["X", "a", "b", "!", "Xa", "ab!", "Xab!"]);
+        let child = Constraint::from_glrm_grammar(
+            r#"
+                start child;
+                nt child ::= "a" "b";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let composed = Constraint::from_glrm_grammar_with_subgrammars(
+            r#"
+                start document;
+                extern g payload;
+                nt document ::= "X" payload "!";
+            "#,
+            &[("payload", &child)],
+            &vocab,
+        )
+        .unwrap();
+        let inline = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                g payload ::= {
+                    start child;
+                    nt child ::= "a" "b";
+                };
+                nt document ::= "X" payload "!";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+
+        for sequence in [vec![6], vec![0, 5], vec![4, 2, 3]] {
+            let mut actual = composed.start();
+            let mut expected = inline.start();
+            for token_id in sequence {
+                assert_eq!(actual.mask(), expected.mask());
+                actual.commit_token(token_id).unwrap();
+                expected.commit_token(token_id).unwrap();
+            }
+            assert_eq!(actual.is_complete(), expected.is_complete());
+            assert!(actual.is_complete());
+        }
+    }
+
+    #[test]
+    fn glrm_external_subgrammars_support_adjacent_reuse() {
+        let vocab = vocab(&["X", "a", "!", "Xa", "aa!"]);
+        let child = Constraint::from_glrm_grammar(
+            "start child; nt child ::= \"a\";",
+            &vocab,
+        )
+        .unwrap();
+        let composed = Constraint::from_glrm_grammar_with_subgrammars(
+            r#"
+                start document;
+                extern g left;
+                extern g right;
+                nt document ::= "X" left right "!";
+            "#,
+            &[("left", &child), ("right", &child)],
+            &vocab,
+        )
+        .unwrap();
+        let inline = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                nt child ::= "a";
+                nt document ::= "X" child child "!";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+
+        let mut actual = composed.start();
+        let mut expected = inline.start();
+        for token_id in [3, 1, 2] {
+            assert_eq!(actual.mask(), expected.mask());
+            actual.commit_token(token_id).unwrap();
+            expected.commit_token(token_id).unwrap();
+        }
+        assert!(actual.is_complete());
+        assert!(expected.is_complete());
+    }
+
+    #[test]
+    fn glrm_external_subgrammars_support_qualified_nested_bindings() {
+        let vocab = vocab(&["<", ">", "[", "]", "a", "<[a]>"]);
+        let leaf = Constraint::from_glrm_grammar(
+            "start leaf; nt leaf ::= \"a\";",
+            &vocab,
+        )
+        .unwrap();
+        let composed = Constraint::from_glrm_grammar_with_subgrammars(
+            r#"
+                start document;
+                g wrapper ::= {
+                    start value;
+                    extern g leaf;
+                    nt value ::= "[" leaf "]";
+                };
+                nt document ::= "<" wrapper ">";
+            "#,
+            &[("wrapper::leaf", &leaf)],
+            &vocab,
+        )
+        .unwrap();
+
+        let mut state = composed.start();
+        state.commit_token(5).unwrap();
+        assert!(state.is_complete());
+    }
+
+    #[test]
+    fn glrm_external_subgrammar_api_preserves_scoped_ignores() {
+        let vocab = vocab(&[" ", "\t", "<", ">", "a", "b"]);
+        let child = Constraint::from_glrm_grammar(
+            r#"
+                start value;
+                ignore CHILD_WS;
+                t CHILD_WS ::= "\t"+;
+                nt value ::= "a" "b";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let composed = Constraint::from_glrm_grammar_with_subgrammars(
+            r#"
+                start document;
+                ignore PARENT_WS;
+                t PARENT_WS ::= " "+;
+                extern g child;
+                nt document ::= "<" child ">";
+            "#,
+            &[("child", &child)],
+            &vocab,
+        )
+        .unwrap();
+        let inline = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                ignore PARENT_WS;
+                t PARENT_WS ::= " "+;
+                g child ::= {
+                    start value;
+                    ignore CHILD_WS;
+                    t CHILD_WS ::= "\t"+;
+                    nt value ::= "a" "b";
+                };
+                nt document ::= "<" child ">";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+
+        let bytes = b" <\ta\t\tb\t> ";
+        let mut actual = composed.start();
+        let mut expected = inline.start();
+        actual.commit_bytes(bytes).unwrap();
+        expected.commit_bytes(bytes).unwrap();
+        assert!(actual.is_complete());
+        assert!(expected.is_complete());
+    }
+
+    #[test]
+    fn glrm_external_subgrammar_api_rejects_invalid_bindings() {
+        let vocab = vocab(&["a"]);
+        let child = Constraint::from_glrm_grammar(
+            "start child; nt child ::= \"a\";",
+            &vocab,
+        )
+        .unwrap();
+        let source = "start document; extern g child; nt document ::= child;";
+
+        let missing = Constraint::from_glrm_grammar_with_subgrammars(source, &[], &vocab)
+            .unwrap_err()
+            .to_string();
+        assert!(missing.contains("no compiled child"), "{missing}");
+
+        let duplicate = Constraint::from_glrm_grammar_with_subgrammars(
+            source,
+            &[("child", &child), ("child", &child)],
+            &vocab,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(duplicate.contains("more than once"), "{duplicate}");
+
+        let unknown = Constraint::from_glrm_grammar_with_subgrammars(
+            source,
+            &[("child", &child), ("other", &child)],
+            &vocab,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(unknown.contains("unknown external"), "{unknown}");
+    }
+
+    #[test]
+    fn glrm_external_subgrammar_allocator_avoids_child_special_tokens() {
+        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"!".to_vec())]);
+        let child = Constraint::from_glrm_grammar(
+            r#"
+                start child;
+                t MARK ::= @token(2);
+                nt child ::= "a" MARK;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let composed = Constraint::from_glrm_grammar_with_subgrammars(
+            r#"
+                start document;
+                extern g child;
+                nt document ::= child "!";
+            "#,
+            &[("child", &child)],
+            &vocab,
+        )
+        .unwrap();
+
+        let mut state = composed.start();
+        state.commit_token(0).unwrap();
+        state.commit_token(2).unwrap();
+        state.commit_token(1).unwrap();
+        assert!(state.is_complete());
+    }
+
+    #[test]
+    fn external_placeholder_allocator_finds_hole_below_u32_max() {
+        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (u32::MAX, b"z".to_vec())]);
+        assert_eq!(first_external_placeholder_token_id(&vocab).unwrap(), 1);
+    }
+
+    #[test]
+    fn typed_glrm_api_without_externals_is_the_normal_compile_path() {
+        let vocab = vocab(&["a"]);
+        let source = "start document; nt document ::= \"a\";";
+        let typed = Constraint::from_glrm_grammar_with_subgrammars(source, &[], &vocab).unwrap();
+        let normal = Constraint::from_glrm_grammar(source, &vocab).unwrap();
+        assert_eq!(typed.start().mask(), normal.start().mask());
+    }
+
+    #[test]
+    fn glrm_external_subgrammar_placeholders_avoid_end_tokens() {
+        let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
+        let child = Constraint::from_glrm_grammar(
+            "start child; nt child ::= \"a\";",
+            &vocab,
+        )
+        .unwrap();
+        let composed = Constraint::from_glrm_grammar_with_subgrammars_and_end_tokens(
+            "start document; extern g child; nt document ::= child;",
+            &[("child", &child)],
+            &vocab,
+            &[1],
+        )
+        .unwrap();
+        assert!(
+            !composed.table.control_terminals.is_empty(),
+            "a child followed directly by an end token must use explicit controls",
+        );
+        let loaded = Constraint::load(&composed.save()).unwrap();
+
+        for constraint in [&composed, &loaded] {
+            let mut state = constraint.start();
+            state.commit_token(0).unwrap();
+            for _ in 0..2 {
+                let mask = state.mask();
+                assert_ne!(mask[0] & (1 << 1), 0, "end token missing from cached mask");
+            }
+            state.commit_token(1).unwrap();
+            assert!(state.is_complete());
+        }
     }
 
     #[test]

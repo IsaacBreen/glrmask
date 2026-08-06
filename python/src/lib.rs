@@ -53,6 +53,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict};
 use self_cell::self_cell;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use glrmask::__private::{
     ConstraintExt as _, ConstraintStateExt as _, DynamicConstraintExt as _, VocabExt as _,
@@ -669,12 +670,36 @@ impl PyConstraint {
     }
 
     #[staticmethod]
-    #[pyo3(signature = (glrm_source, vocab, end_token_ids=None))]
+    #[pyo3(signature = (glrm_source, vocab, end_token_ids=None, subgrammars=None))]
     fn from_glrm_grammar(
+        py: Python<'_>,
         glrm_source: &str,
         vocab: &PyVocab,
         end_token_ids: Option<Vec<u32>>,
+        subgrammars: Option<BTreeMap<String, Py<PyConstraint>>>,
     ) -> PyResult<Self> {
+        if let Some(subgrammars) = subgrammars {
+            let owned_children = subgrammars
+                .into_iter()
+                .map(|(name, child)| {
+                    let child = child.borrow(py);
+                    (name, Arc::clone(&child.inner))
+                })
+                .collect::<Vec<_>>();
+            let borrowed_children = owned_children
+                .iter()
+                .map(|(name, child)| (name.as_str(), child.as_ref()))
+                .collect::<Vec<_>>();
+            return Self::from_constraint_result(
+                glrmask::Constraint::from_glrm_grammar_with_subgrammars_and_end_tokens(
+                    glrm_source,
+                    &borrowed_children,
+                    &vocab.inner,
+                    end_token_ids.as_deref().unwrap_or(&[]),
+                ),
+                vocab,
+            );
+        }
         Self::from_constraint_result(
             glrmask::Constraint::from_glrm_grammar_with_end_tokens(
                 glrm_source,
