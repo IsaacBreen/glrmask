@@ -64,8 +64,14 @@ mod tests {
 
     fn check_both_directions(tokenizer: Tokenizer, vocab: Vocab) {
         for active in [[true, true], [true, false], [false, true]] {
-            run(&tokenizer, &vocab, &active, Plan { use_implementation: Implementation::Production, check_against: Some(Implementation::Scalar) });
-            run(&tokenizer, &vocab, &active, Plan { use_implementation: Implementation::Scalar, check_against: Some(Implementation::Production) });
+            for implementation in [Implementation::Production, Implementation::Scalar, Implementation::Trie] {
+                let checker = if implementation == Implementation::Production {
+                    Implementation::Trie
+                } else {
+                    Implementation::Production
+                };
+                run(&tokenizer, &vocab, &active, Plan { use_implementation: implementation, check_against: Some(checker) });
+            }
         }
     }
 

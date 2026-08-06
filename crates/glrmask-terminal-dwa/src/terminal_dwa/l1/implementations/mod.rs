@@ -1,15 +1,17 @@
 //! Swappable L1 builders and exact cross-checking machinery.
 //!
 //! Controls:
-//! - `GLRMASK_L1_IMPLEMENTATION=production|scalar`
-//! - `GLRMASK_L1_CHECK_AGAINST=none|production|scalar|other`
+//! - `GLRMASK_L1_IMPLEMENTATION=production|scalar|trie`
+//! - `GLRMASK_L1_CHECK_AGAINST=none|production|scalar|trie|other`
 //! - `GLRMASK_L1_EXPERIMENT_PARTITIONS=p2,p5` scopes both controls.
 //! - `GLRMASK_PROFILE_L1_IMPLEMENTATIONS=1` prints per-implementation timings.
 //!
 //! Defaults are production, no checker, all partitions.
 
+mod common;
 mod production;
 pub mod scalar;
+mod trie;
 mod verify;
 
 use std::sync::Arc;
@@ -29,6 +31,7 @@ use crate::{Vocab, compiler::glr::analysis::AnalyzedGrammar};
 pub enum Implementation {
     Production,
     Scalar,
+    Trie,
 }
 
 impl Implementation {
@@ -36,14 +39,15 @@ impl Implementation {
         match value.trim().to_ascii_lowercase().as_str() {
             "production" | "prod" | "existing" => Self::Production,
             "scalar" | "reference" | "ref" => Self::Scalar,
-            other => panic!("unknown L1 implementation {other:?}; expected production or scalar"),
+            "trie" | "optimized" | "opt" => Self::Trie,
+            other => panic!("unknown L1 implementation {other:?}; expected production, scalar, or trie"),
         }
     }
 
     fn other(self) -> Self {
         match self {
             Self::Production => Self::Scalar,
-            Self::Scalar => Self::Production,
+            Self::Scalar | Self::Trie => Self::Production,
         }
     }
 }
@@ -104,6 +108,7 @@ fn run(implementation: Implementation, input: BuildInput<'_>) -> Option<LocalIdM
     match implementation {
         Implementation::Production => production::build(input),
         Implementation::Scalar => scalar::build(input),
+        Implementation::Trie => trie::build(input),
     }
 }
 
