@@ -2,6 +2,54 @@ import glrmask
 import pytest
 
 
+def test_from_glrm_grammar_binds_typed_external_subgrammar() -> None:
+    vocab = glrmask.Vocab.from_id_to_bytes(
+        {
+            0: b"X",
+            1: b"ab!",
+            2: b"Xab!",
+            3: b"a",
+            4: b"b",
+            5: b"!",
+        }
+    )
+    child = glrmask.Constraint.from_glrm_grammar(
+        '''
+        start child;
+        nt child ::= "a" "b";
+        ''',
+        vocab,
+    )
+    composed = glrmask.Constraint.from_glrm_grammar(
+        '''
+        start document;
+        extern g payload;
+        nt document ::= "X" payload "!";
+        ''',
+        vocab,
+        subgrammars={"payload": child},
+    )
+    inline = glrmask.Constraint.from_glrm_grammar(
+        '''
+        start document;
+        g payload ::= {
+            start child;
+            nt child ::= "a" "b";
+        };
+        nt document ::= "X" payload "!";
+        ''',
+        vocab,
+    )
+
+    actual = composed.start()
+    expected = inline.start()
+    assert actual.mask().tolist() == expected.mask().tolist()
+    actual.commit_token(2)
+    expected.commit_token(2)
+    assert actual.is_finished()
+    assert expected.is_finished()
+
+
 def test_compose_subgrammars_matches_monolithic_across_token_boundary() -> None:
     vocab = glrmask.Vocab.from_id_to_bytes(
         {

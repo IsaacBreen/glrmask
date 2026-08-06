@@ -49,6 +49,13 @@
 //! Use [`Constraint::save`] and [`Constraint::load`] to cache compiled
 //! constraints across requests or process restarts.
 //!
+//! # Reusing compiled subgrammars
+//!
+//! GLRM can declare typed external subgrammars with `extern g name;`. Bind an
+//! already-compiled child with [`Constraint::from_glrm_grammar_with_subgrammars`].
+//! The compiler allocates hidden call placeholders automatically and links the
+//! components exactly, including model tokens that cross grammar boundaries.
+//!
 //! See the repository's Python guide and README for model integration examples,
 //! grammar syntax, special tokens, and benchmarks.
 

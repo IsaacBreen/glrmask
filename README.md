@@ -138,6 +138,30 @@ Unfortunately, [there is no universally accepted EBNF dialect.](https://dwheeler
 
 GLRM is GLRMask's native, EBNF-like grammar syntax. It supports exact model-token terminals with `@token(<id>)`. GLRMask also accepts Lark and EBNF grammars.
 
+### Reusing compiled subgrammars
+
+Declare an external grammar with `extern g name;`, then bind an independently
+compiled constraint by name. Hidden call terminals and cross-boundary token
+paths are handled automatically:
+
+```python
+payload = glrmask.Constraint.from_json_schema(payload_schema, vocab)
+
+document = glrmask.Constraint.from_glrm_grammar(
+    '''
+    start document;
+    extern g payload;
+    nt document ::= "{" payload "}";
+    ''',
+    vocab,
+    subgrammars={"payload": payload},
+)
+```
+
+Inline `g name ::= { ... };` and externally bound `extern g name;` have the
+same language semantics, including scope-local ignores and model tokens that
+cross parent/child boundaries.
+
 ## Special tokens
 
 Use `@token(<id>)` in GLRM, Lark, or EBNF to match an exact model token:

@@ -100,26 +100,20 @@ constraint = glrmask.Constraint.from_ebnf(grammar, vocab)
 Each constructor accepts an optional `end_token_ids=[...]` argument.
 
 Already-compiled constraints can be composed without recompiling their full
-grammars. The parent uses uniquely named `@token(...)` terminals as call
-placeholders, and each pair supplies the compiled child that replaces one
-placeholder. Placeholder token IDs must be outside the supplied vocabulary so
-they are true non-vocabulary sentinels. Each sentinel ID must also be distinct
-from end-token IDs and other live special-token IDs used by the components:
+grammars. Declare typed external subgrammars in GLRM and bind them by name. The
+compiler allocates hidden non-vocabulary sentinels automatically:
 
 ```python
-parent = glrmask.Constraint.from_glrm_grammar(
-    '''
-    start document;
-    t PAYLOAD ::= @token(1000000);
-    nt document ::= "{" PAYLOAD "}";
-    ''',
-    vocab,
-)
 payload = glrmask.Constraint.from_json_schema(payload_schema, vocab)
 
-constraint = parent.compose_subgrammars(
-    [("PAYLOAD", payload)],
+constraint = glrmask.Constraint.from_glrm_grammar(
+    '''
+    start document;
+    extern g payload;
+    nt document ::= "{" payload "}";
+    ''',
     vocab,
+    subgrammars={"payload": payload},
 )
 ```
 
@@ -127,11 +121,15 @@ Composition remains exact when one model token contains bytes from both the
 parent and child grammars. Every component must have been compiled for the same
 vocabulary contents.
 
-Parent and child constraints may use different `ignore` terminals. Composition
-unions all of their lexical languages into one transparent ignore terminal in
-the flattened constraint. For example, a parent can ignore spaces while a child
-ignores tabs or comments; all remain accepted across subgrammar boundaries and
-inside fused model tokens.
+Parent and child constraints may use different `ignore` terminals. Equal ignore
+languages are canonicalized into one global transparent ignore. Different
+ignore languages remain scope-local: parent trivia is accepted in parent states
+and child trivia is accepted only after entering the child, including inside
+fused model tokens.
+
+`Constraint.compose_subgrammars(...)` remains available as a lower-level API
+for callers that already have a compiled parent containing explicit
+non-vocabulary `@token(...)` placeholder terminals.
 
 ### Decode
 

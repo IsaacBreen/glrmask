@@ -13,6 +13,7 @@
 //! start <nt-name>;
 //! [ignore <TM-NAME>;]
 //! [g <name> ::= { <grammar-body> };]
+//! [extern g <name>;]
 //! [lexer group <partition-name> ::= <TM-NAME> | "literal" | @literals | *, ...;]
 //!
 //! // Nonterminal rules
@@ -31,6 +32,11 @@
 //! a subgrammar cannot see its parent's definitions, and its private definitions
 //! are not visible to the parent. Only the declared subgrammar name is visible
 //! in the enclosing scope, where it is referenced like a nonterminal.
+//!
+//! `extern g name;` declares the same kind of scoped call without defining the
+//! child body in this source file. It is accepted by
+//! [`from_glrm_with_external_subgrammars`], which lowers each external call to a
+//! hidden non-vocabulary placeholder and returns the exact binding manifest.
 //!
 //! Ignore is also scope-local. `ignore I;` admits `I*` before the first lexical
 //! atom in that grammar scope, between lexical atoms, and after the last lexical
@@ -404,7 +410,66 @@ fn escape_regex_for_slash(pat: &str) -> String {
 pub fn from_glrm(input: &str) -> Result<NamedGrammar, GlrMaskError> {
     let tokens = Lexer::new(input).tokenize()?;
     let mut parser = GlrmParser { tokens, pos: 0 };
-    parser.parse_grammar()
+    let scope = parser.parse_root_scope()?;
+    if contains_external_subgrammar(&scope) {
+        return Err(err(
+            "external subgrammars require from_glrm_with_external_subgrammars and explicit bindings",
+        ));
+    }
+    lower_parsed_grammar(scope, &BTreeMap::new()).map(|parsed| parsed.grammar)
+}
+
+/// One external-subgrammar declaration lowered into a hidden special terminal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalSubgrammarPlaceholder {
+    /// Source-level binding name. Nested externals use `outer::inner`.
+    pub binding_name: String,
+    /// Actual terminal display name in the flattened parent constraint.
+    pub terminal_name: String,
+    /// Automatically allocated non-vocabulary token ID.
+    pub token_id: u32,
+}
+
+/// Parsed GLRM parent shell plus its typed external-subgrammar binding manifest.
+#[derive(Debug, Clone)]
+pub struct GlrmWithExternalSubgrammars {
+    pub grammar: NamedGrammar,
+    pub placeholders: Vec<ExternalSubgrammarPlaceholder>,
+}
+
+/// Parse GLRM containing `extern g name;` declarations.
+///
+/// `first_placeholder_token_id` must lie outside the model vocabulary.
+/// `reserved_token_ids` contains end-token and other caller-reserved IDs.
+/// Existing `@token(...)` IDs in the source are discovered automatically.
+/// Placeholder IDs are allocated upward from the supplied start, avoiding
+/// dense-ID blowups and accidental collisions.
+pub fn from_glrm_with_external_subgrammars(
+    input: &str,
+    first_placeholder_token_id: u32,
+    reserved_token_ids: impl IntoIterator<Item = u32>,
+) -> Result<GlrmWithExternalSubgrammars, GlrMaskError> {
+    let tokens = Lexer::new(input).tokenize()?;
+    let mut parser = GlrmParser { tokens, pos: 0 };
+    let scope = parser.parse_root_scope()?;
+
+    let mut used_token_ids = reserved_token_ids.into_iter().collect::<BTreeSet<_>>();
+    collect_scope_special_token_ids(&scope, &mut used_token_ids);
+    let external_names = collect_external_subgrammar_names(&scope);
+    let mut next_candidate = first_placeholder_token_id;
+    let mut external_tokens = BTreeMap::new();
+    let external_count = external_names.len();
+    for (index, binding_name) in external_names.into_iter().enumerate() {
+        let token_id = next_free_token_id(&used_token_ids, next_candidate)?;
+        used_token_ids.insert(token_id);
+        external_tokens.insert(binding_name, token_id);
+        if index + 1 < external_count {
+            next_candidate = token_id.checked_add(1).ok_or_else(|| {
+                err("no token ID is available for another external subgrammar placeholder")
+            })?;
+        }
+    }
+    lower_parsed_grammar(scope, &external_tokens)
 }
 
 // ---- Tokens ----------------------------------------------------------------
@@ -735,7 +800,13 @@ struct GlrmParser {
 #[derive(Debug, Clone)]
 struct ParsedSubgrammar {
     name: String,
-    scope: ParsedGlrmScope,
+    body: ParsedSubgrammarBody,
+}
+
+#[derive(Debug, Clone)]
+enum ParsedSubgrammarBody {
+    Inline(ParsedGlrmScope),
+    External,
 }
 
 #[derive(Debug, Clone)]
@@ -748,6 +819,107 @@ struct ParsedGlrmScope {
     lexer_literal_partitions: BTreeMap<Vec<u8>, String>,
     default_lexer_partition: Option<String>,
     all_literals_partition: Option<String>,
+}
+
+fn contains_external_subgrammar(scope: &ParsedGlrmScope) -> bool {
+    scope.subgrammars.iter().any(|subgrammar| match &subgrammar.body {
+        ParsedSubgrammarBody::External => true,
+        ParsedSubgrammarBody::Inline(child) => contains_external_subgrammar(child),
+    })
+}
+
+fn collect_external_subgrammar_names(scope: &ParsedGlrmScope) -> Vec<String> {
+    fn collect(scope: &ParsedGlrmScope, prefix: &str, names: &mut Vec<String>) {
+        for subgrammar in &scope.subgrammars {
+            let binding_name = if prefix.is_empty() {
+                subgrammar.name.clone()
+            } else {
+                format!("{prefix}::{}", subgrammar.name)
+            };
+            match &subgrammar.body {
+                ParsedSubgrammarBody::External => names.push(binding_name),
+                ParsedSubgrammarBody::Inline(child) => collect(child, &binding_name, names),
+            }
+        }
+    }
+
+    let mut names = Vec::new();
+    collect(scope, "", &mut names);
+    names
+}
+
+fn collect_expr_special_token_ids(expr: &GrammarExpr, token_ids: &mut BTreeSet<u32>) {
+    match expr {
+        GrammarExpr::SpecialToken(token_id) => {
+            token_ids.insert(*token_id);
+        }
+        GrammarExpr::Grouped(inner) | GrammarExpr::Quantified(inner, _) => {
+            collect_expr_special_token_ids(inner, token_ids);
+        }
+        GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
+            for part in parts {
+                collect_expr_special_token_ids(part, token_ids);
+            }
+        }
+        GrammarExpr::Exclude { expr, exclude } => {
+            collect_expr_special_token_ids(expr, token_ids);
+            collect_expr_special_token_ids(exclude, token_ids);
+        }
+        GrammarExpr::Intersect { expr, intersect } => {
+            collect_expr_special_token_ids(expr, token_ids);
+            collect_expr_special_token_ids(intersect, token_ids);
+        }
+        GrammarExpr::SeparatedSequence {
+            items, separator, ..
+        } => {
+            for (item, _) in items {
+                collect_expr_special_token_ids(item, token_ids);
+            }
+            collect_expr_special_token_ids(separator, token_ids);
+        }
+        GrammarExpr::ExprNFA(expr_nfa) => {
+            for symbol in &expr_nfa.symbols {
+                collect_expr_special_token_ids(symbol, token_ids);
+            }
+        }
+        GrammarExpr::Ref(_)
+        | GrammarExpr::Epsilon
+        | GrammarExpr::Literal(_)
+        | GrammarExpr::CharClass { .. }
+        | GrammarExpr::RawRegex(_)
+        | GrammarExpr::LexerDfa(_)
+        | GrammarExpr::AnyByte => {}
+    }
+}
+
+fn collect_scope_special_token_ids(scope: &ParsedGlrmScope, token_ids: &mut BTreeSet<u32>) {
+    for rule in &scope.rules {
+        collect_expr_special_token_ids(&rule.expr, token_ids);
+    }
+    for subgrammar in &scope.subgrammars {
+        if let ParsedSubgrammarBody::Inline(child) = &subgrammar.body {
+            collect_scope_special_token_ids(child, token_ids);
+        }
+    }
+}
+
+fn next_free_token_id(
+    used_token_ids: &BTreeSet<u32>,
+    preferred_start: u32,
+) -> Result<u32, GlrMaskError> {
+    let mut candidate = preferred_start;
+    for &used in used_token_ids.range(preferred_start..) {
+        if used < candidate {
+            continue;
+        }
+        if used > candidate {
+            return Ok(candidate);
+        }
+        candidate = candidate.checked_add(1).ok_or_else(|| {
+            err("no token ID is available for an external subgrammar placeholder")
+        })?;
+    }
+    Ok(candidate)
 }
 
 impl GlrmParser {
@@ -785,15 +957,8 @@ impl GlrmParser {
         }
     }
 
-    fn parse_grammar(&mut self) -> Result<NamedGrammar, GlrMaskError> {
-        let scope = self.parse_scope(false, "grammar")?;
-        if scope.subgrammars.is_empty() {
-            let grammar = named_grammar_for_scope(&scope)?;
-            validate_ignore_terminal(&grammar, "grammar")?;
-            return Ok(grammar);
-        }
-        let preserve_global_ignore = scopes_share_one_ignore_language(&scope, "grammar")?;
-        flatten_scoped_grammar(scope, preserve_global_ignore)
+    fn parse_root_scope(&mut self) -> Result<ParsedGlrmScope, GlrMaskError> {
+        self.parse_scope(false, "grammar")
     }
 
     fn parse_scope(
@@ -852,7 +1017,28 @@ impl GlrmParser {
                         let child_label = format!("subgrammar '{name}'");
                         let scope = self.parse_scope(true, &child_label)?;
                         self.consume(&Tok::Semi)?;
-                        subgrammars.push(ParsedSubgrammar { name, scope });
+                        subgrammars.push(ParsedSubgrammar {
+                            name,
+                            body: ParsedSubgrammarBody::Inline(scope),
+                        });
+                    }
+                    "extern" => {
+                        self.advance();
+                        match self.advance().clone() {
+                            Tok::Ident(ref kind) if kind == "g" || kind == "subgrammar" => {}
+                            other => {
+                                return Err(err(&format!(
+                                    "expected 'g' after 'extern', got {:?}",
+                                    other,
+                                )));
+                            }
+                        }
+                        let name = self.expect_ident()?;
+                        self.consume(&Tok::Semi)?;
+                        subgrammars.push(ParsedSubgrammar {
+                            name,
+                            body: ParsedSubgrammarBody::External,
+                        });
                     }
                     "lexer" => {
                         self.advance();
@@ -1574,6 +1760,7 @@ struct FlattenContext {
     rules: Vec<NamedRule>,
     lexer_partitions: BTreeMap<String, String>,
     lexer_literal_partition_constraints: Vec<(Vec<u8>, String)>,
+    external_placeholders: Vec<ExternalSubgrammarPlaceholder>,
 }
 
 impl FlattenContext {
@@ -1658,18 +1845,38 @@ fn scopes_match_ignore_language(
         return Ok(false);
     }
     for subgrammar in &scope.subgrammars {
+        let ParsedSubgrammarBody::Inline(child_scope) = &subgrammar.body else {
+            continue;
+        };
         let child_label = format!("{scope_label}::{}", subgrammar.name);
-        if !scopes_match_ignore_language(&subgrammar.scope, expected, &child_label)? {
+        if !scopes_match_ignore_language(child_scope, expected, &child_label)? {
             return Ok(false);
         }
     }
     Ok(true)
 }
 
+fn lower_parsed_grammar(
+    scope: ParsedGlrmScope,
+    external_tokens: &BTreeMap<String, u32>,
+) -> Result<GlrmWithExternalSubgrammars, GlrMaskError> {
+    if scope.subgrammars.is_empty() {
+        let grammar = named_grammar_for_scope(&scope)?;
+        validate_ignore_terminal(&grammar, "grammar")?;
+        return Ok(GlrmWithExternalSubgrammars {
+            grammar,
+            placeholders: Vec::new(),
+        });
+    }
+    let preserve_global_ignore = scopes_share_one_ignore_language(&scope, "grammar")?;
+    flatten_scoped_grammar(scope, preserve_global_ignore, external_tokens)
+}
+
 fn flatten_scoped_grammar(
     scope: ParsedGlrmScope,
     preserve_global_ignore: bool,
-) -> Result<NamedGrammar, GlrMaskError> {
+    external_tokens: &BTreeMap<String, u32>,
+) -> Result<GlrmWithExternalSubgrammars, GlrMaskError> {
     let global_ignore = preserve_global_ignore
         .then(|| scope.ignore.clone())
         .flatten();
@@ -1680,12 +1887,15 @@ fn flatten_scoped_grammar(
         rules: Vec::new(),
         lexer_partitions: BTreeMap::new(),
         lexer_literal_partition_constraints: Vec::new(),
+        external_placeholders: Vec::new(),
     };
     let start = flatten_scope(
         &scope,
         true,
         "grammar",
+        "",
         preserve_global_ignore,
+        external_tokens,
         &mut context,
     )?;
     let (lexer_partitions, lexer_literal_partitions) = canonicalize_flattened_lexer_partitions(
@@ -1694,13 +1904,16 @@ fn flatten_scoped_grammar(
         context.lexer_partitions,
         context.lexer_literal_partition_constraints,
     )?;
-    Ok(NamedGrammar {
-        rules: context.rules,
-        start,
-        ignore: global_ignore,
-        lexer_partitions,
-        lexer_literal_partitions,
-        default_lexer_partition: None,
+    Ok(GlrmWithExternalSubgrammars {
+        grammar: NamedGrammar {
+            rules: context.rules,
+            start,
+            ignore: global_ignore,
+            lexer_partitions,
+            lexer_literal_partitions,
+            default_lexer_partition: None,
+        },
+        placeholders: context.external_placeholders,
     })
 }
 
@@ -1798,7 +2011,9 @@ fn flatten_scope(
     scope: &ParsedGlrmScope,
     top_level: bool,
     scope_label: &str,
+    binding_prefix: &str,
     preserve_global_ignore: bool,
+    external_tokens: &BTreeMap<String, u32>,
     context: &mut FlattenContext,
 ) -> Result<String, GlrMaskError> {
     let symbol_kinds = scope_symbol_kinds(scope, scope_label)?;
@@ -1941,23 +2156,54 @@ fn flatten_scope(
 
     for subgrammar in &scope.subgrammars {
         let child_label = format!("{scope_label}::{}", subgrammar.name);
-        let child_entry = flatten_scope(
-            &subgrammar.scope,
-            false,
-            &child_label,
-            preserve_global_ignore,
-            context,
-        )?;
+        let binding_name = if binding_prefix.is_empty() {
+            subgrammar.name.clone()
+        } else {
+            format!("{binding_prefix}::{}", subgrammar.name)
+        };
         let alias_name = name_map
             .get(&subgrammar.name)
             .expect("subgrammar name must be allocated")
             .clone();
-        context.rules.push(NamedRule {
-            name: alias_name,
-            expr: GrammarExpr::Ref(child_entry),
-            is_terminal: false,
-            is_internal: false,
-        });
+        match &subgrammar.body {
+            ParsedSubgrammarBody::Inline(child_scope) => {
+                let child_entry = flatten_scope(
+                    child_scope,
+                    false,
+                    &child_label,
+                    &binding_name,
+                    preserve_global_ignore,
+                    external_tokens,
+                    context,
+                )?;
+                context.rules.push(NamedRule {
+                    name: alias_name,
+                    expr: GrammarExpr::Ref(child_entry),
+                    is_terminal: false,
+                    is_internal: false,
+                });
+            }
+            ParsedSubgrammarBody::External => {
+                let token_id = external_tokens.get(&binding_name).copied().ok_or_else(|| {
+                    err(&format!(
+                        "external subgrammar '{binding_name}' has no allocated placeholder token",
+                    ))
+                })?;
+                context.rules.push(NamedRule {
+                    name: alias_name.clone(),
+                    expr: GrammarExpr::SpecialToken(token_id),
+                    is_terminal: true,
+                    is_internal: false,
+                });
+                context
+                    .external_placeholders
+                    .push(ExternalSubgrammarPlaceholder {
+                        binding_name,
+                        terminal_name: alias_name,
+                        token_id,
+                    });
+            }
+        }
     }
 
     for rule in working_rules {
@@ -3056,5 +3302,84 @@ nt document ::= A inner;
         let lowered = lower(&grammar).unwrap();
         assert_eq!(lowered.terminals.len(), 1, "identical terminal languages should still deduplicate");
         assert_eq!(lowered.lexer_partitions.len(), 1);
+    }
+
+    #[test]
+    fn plain_glrm_parse_rejects_unbound_external_subgrammars() {
+        let error = from_glrm(
+            r#"
+start document;
+extern g payload;
+nt document ::= "<" payload ">";
+"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("explicit bindings"), "{error}");
+    }
+
+    #[test]
+    fn external_subgrammar_parse_returns_typed_manifest() {
+        let parsed = from_glrm_with_external_subgrammars(
+            r#"
+start document;
+extern g payload;
+g wrapper ::= {
+    start value;
+    extern g leaf;
+    nt value ::= "[" leaf "]";
+};
+t END ::= @token(52);
+nt document ::= "<" payload wrapper ">" END?;
+"#,
+            52,
+            [50, 51],
+        )
+        .unwrap();
+
+        assert_eq!(
+            parsed
+                .placeholders
+                .iter()
+                .map(|placeholder| placeholder.binding_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["payload", "wrapper::leaf"],
+        );
+        assert_eq!(
+            parsed
+                .placeholders
+                .iter()
+                .map(|placeholder| placeholder.token_id)
+                .collect::<Vec<_>>(),
+            vec![53, 54],
+        );
+        for placeholder in &parsed.placeholders {
+            let rule = parsed
+                .grammar
+                .rules
+                .iter()
+                .find(|rule| rule.name == placeholder.terminal_name)
+                .expect("external placeholder terminal must be emitted");
+            assert!(rule.is_terminal);
+            assert_eq!(rule.expr, GrammarExpr::SpecialToken(placeholder.token_id));
+        }
+        lower(&parsed.grammar).expect("external parent shell must lower normally");
+    }
+
+    #[test]
+    fn external_subgrammar_placeholder_allocation_does_not_wrap_u32_max() {
+        let error = from_glrm_with_external_subgrammars(
+            r#"
+start document;
+extern g left;
+extern g right;
+nt document ::= left right;
+"#,
+            u32::MAX,
+            [],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("another external subgrammar"), "{error}");
     }
 }
