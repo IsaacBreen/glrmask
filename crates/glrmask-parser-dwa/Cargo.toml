@@ -23,4 +23,5 @@ glrmask-weighted-automata = { version = "=0.1.1", path = "../glrmask-weighted-au
 range-set-blaze = "0.3.0"
 rayon = "1"
 rustc-hash = "1"
+serde = { version = "1", features = ["derive"] }
 smallvec = { version = "1", features = ["serde"] }

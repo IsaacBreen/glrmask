@@ -40,40 +40,40 @@ use crate::grammar::flat::{NonterminalID, TerminalID};
 
 type NtAdjacency = BTreeMap<NonterminalID, BTreeSet<NonterminalID>>;
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub enum StackMatcher {
     Any,
     State(u32),
     States(Vec<u32>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct InitialEscape {
     pub pop: Vec<StackMatcher>,
     pub pushes: Vec<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct InitialReduce {
     pub pop: Vec<StackMatcher>,
     pub nonterminal: NonterminalID,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct NtEscape {
     pub source_nonterminal: NonterminalID,
     pub pop: Vec<StackMatcher>,
     pub pushes: Vec<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct NtRereduce {
     pub source_nonterminal: NonterminalID,
     pub pop: Vec<StackMatcher>,
     pub target_nonterminal: NonterminalID,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct TerminalCharacterization {
     pub escapes: Vec<InitialEscape>,
     pub reduces: Vec<InitialReduce>,

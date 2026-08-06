@@ -397,6 +397,8 @@ impl DynamicConstraint {
             runtime_product_exact_source_states: Vec::new(),
             runtime_product_state_by_source_subset: Default::default(),
             template_dfas_by_terminal: Vec::new(),
+            composition_terminal_characterizations: BTreeMap::new(),
+            composition_templates: Default::default(),
             fast_template_dfas_by_terminal: Vec::new(),
             original_token_to_internal: Vec::new(),
             internal_token_to_tokens: Vec::new(),

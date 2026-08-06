@@ -803,7 +803,7 @@ fn compile_template_with_profile_and_minimize(
     )
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Templates {
     pub by_terminal: BTreeMap<TerminalID, UnweightedDfa>,
     pub by_terminal_nwa: BTreeMap<TerminalID, NWA>,

@@ -5,18 +5,20 @@ use crate::ds::weight::Weight;
 
 pub type Label = i32;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NWAState {
     pub final_weight: Option<Weight>,
     pub transitions: BTreeMap<Label, Vec<(u32, Weight)>>,
     pub epsilons: Vec<(u32, Weight)>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NWA {
     states: Vec<NWAState>,
     start_states: Vec<u32>,
+    #[serde(skip, default)]
     transition_count_cache: OnceLock<usize>,
+    #[serde(skip, default)]
     acyclic_cache: OnceLock<bool>,
 }
 

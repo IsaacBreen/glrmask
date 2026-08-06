@@ -578,6 +578,7 @@ dependencies = [
  "range-set-blaze",
  "rayon",
  "rustc-hash 1.1.0",
+ "serde",
  "smallvec",
 ]
 

@@ -1904,6 +1904,15 @@ pub struct Constraint {
     #[serde(skip, default)]
     pub(crate) runtime_product_state_by_source_subset: FxHashMap<Box<[u32]>, u32>,
     pub(crate) template_dfas_by_terminal: TemplateDfasByTerminal,
+    /// Exact compile-time terminal stack-effect characterizations retained for
+    /// generic constraint reuse. Composition can rebase these through parser
+    /// state/nonterminal offsets and compile only context-sensitive fallbacks.
+    #[serde(default)]
+    pub(crate) composition_terminal_characterizations:
+        BTreeMap<TerminalID, crate::compiler::stages::templates::characterize::TerminalCharacterization>,
+    /// Exact compiled parser templates retained for generic constraint reuse.
+    #[serde(default)]
+    pub(crate) composition_templates: crate::compiler::stages::templates::Templates,
     /// Runtime-only compact transition view for commit template products.
     #[serde(skip, default)]
     pub(crate) fast_template_dfas_by_terminal: FastTemplateDfasByTerminal,

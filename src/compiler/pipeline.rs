@@ -1739,6 +1739,7 @@ fn build_templates_for_compile(
 ) -> (
     Templates,
     Vec<Option<Arc<crate::runtime::CommitTemplateDfas>>>,
+    BTreeMap<TerminalID, crate::compiler::stages::templates::characterize::TerminalCharacterization>,
     f64,
 ) {
     let templates_started_at = Instant::now();
@@ -1756,6 +1757,7 @@ fn build_templates_for_compile(
         return (
             Templates::default(),
             vec![None; analyzed_grammar.num_terminals as usize],
+            BTreeMap::new(),
             templates_ms,
         );
     }
@@ -1802,7 +1804,12 @@ fn build_templates_for_compile(
                 templates_ms,
             );
         }
-        return (templates, template_dfas_by_terminal, templates_ms);
+        return (
+            templates,
+            template_dfas_by_terminal,
+            BTreeMap::new(),
+            templates_ms,
+        );
     }
 
     let (characterizations, characterization_profile) =
@@ -1876,6 +1883,7 @@ fn build_templates_for_compile(
     (
         templates,
         template_dfas_by_terminal,
+        characterizations,
         elapsed_ms(templates_started_at),
     )
 }
@@ -1977,6 +1985,8 @@ struct TemplatesDagResult {
     glr_ready_ms: f64,
     templates: Templates,
     template_dfas_by_terminal: Vec<Option<Arc<crate::runtime::CommitTemplateDfas>>>,
+    terminal_characterizations:
+        BTreeMap<TerminalID, crate::compiler::stages::templates::characterize::TerminalCharacterization>,
     templates_ms: f64,
     templates_started_ms: f64,
     templates_finished_ms: f64,
@@ -2011,6 +2021,8 @@ struct CompileDagResult {
     terminal_phase_profile: TerminalDwaPhaseProfile,
     templates: Option<Templates>,
     template_dfas_by_terminal: Vec<Option<Arc<crate::runtime::CommitTemplateDfas>>>,
+    terminal_characterizations:
+        BTreeMap<TerminalID, crate::compiler::stages::templates::characterize::TerminalCharacterization>,
     templates_ms: f64,
     classify_ms: f64,
     flat_trans_ms: f64,
@@ -2185,7 +2197,7 @@ fn build_and_merge_parser_dwa_families(
     table: &GLRTable,
     grammar: &AnalyzedGrammar,
     _ignore_terminal: Option<u32>,
-    templates: Templates,
+    templates: &Templates,
     tokenizer: &Tokenizer,
     vocab: &Vocab,
 ) -> MappedParserDwa {
@@ -2548,6 +2560,7 @@ fn launch_parser_dag_if_ready<'scope>(
             glr_ready_ms,
             templates,
             template_dfas_by_terminal,
+            terminal_characterizations,
             templates_ms,
             templates_started_ms,
             templates_finished_ms,
@@ -2579,14 +2592,14 @@ fn launch_parser_dag_if_ready<'scope>(
                 &table,
                 &analysis.analyzed_grammar,
                 ignore_terminal,
-                templates,
+                &templates,
                 &tokenizer.tokenizer,
                 vocab,
             );
             let parser_dwa_ms = elapsed_ms(parser_dwa_started_at);
             let parser_dwa_finished_ms = elapsed_ms(compile_started_at);
             (
-                None,
+                Some(templates),
                 Some((
                     parser_dwa,
                     parser_dwa_ms,
@@ -2618,6 +2631,7 @@ fn launch_parser_dag_if_ready<'scope>(
             terminal_phase_profile,
             templates,
             template_dfas_by_terminal,
+            terminal_characterizations,
             templates_ms,
             classify_ms,
             flat_trans_ms,
@@ -3345,8 +3359,12 @@ fn compile_prepared_with_profile_and_table_construction(
                     let compile_started_for_templates = compile_started_for_glr;
                     scope.spawn(move |scope| {
                         let templates_started_ms = elapsed_ms(compile_started_for_templates.clone());
-                        let (templates, template_dfas_by_terminal, templates_ms) =
-                            build_templates_for_compile(
+                        let (
+                            templates,
+                            template_dfas_by_terminal,
+                            terminal_characterizations,
+                            templates_ms,
+                        ) = build_templates_for_compile(
                                 &templates_table,
                                 &templates_analyzed_grammar,
                                 prepared_grammar_ref.ignore_terminal,
@@ -3361,6 +3379,7 @@ fn compile_prepared_with_profile_and_table_construction(
                             glr_ready_ms,
                             templates,
                             template_dfas_by_terminal,
+                            terminal_characterizations,
                             templates_ms,
                             templates_started_ms,
                             templates_finished_ms,
@@ -3456,8 +3475,9 @@ fn compile_prepared_with_profile_and_table_construction(
             terminal_coloring_ms,
             mut terminal_dwas,
             mut terminal_phase_profile,
-            mut templates,
+            templates,
             template_dfas_by_terminal,
+            terminal_characterizations,
             templates_ms,
             classify_ms,
             flat_trans_ms,
@@ -3578,7 +3598,7 @@ fn compile_prepared_with_profile_and_table_construction(
         } else {
             let parser_dwa_started_at = Instant::now();
             let retained_templates = templates
-                .take()
+                .as_ref()
                 .expect("terminal reconciliation mode retains templates");
             let (family_vec, family_layout) = reconcile_terminal_dwa_families(terminal_dwas);
             let shared_id_reconcile_started_at = Instant::now();
@@ -4018,6 +4038,8 @@ fn compile_prepared_with_profile_and_table_construction(
             original_token_to_internal: internal_ids.vocab_tokens.original_to_internal.clone(),
             internal_token_to_tokens: internal_ids.vocab_tokens.internal_to_originals_vecs(),
             template_dfas_by_terminal,
+            composition_terminal_characterizations: terminal_characterizations,
+            composition_templates: templates.unwrap_or_default(),
             fast_template_dfas_by_terminal: Vec::new(),
             token_bytes,
             internal_token_bytes,
