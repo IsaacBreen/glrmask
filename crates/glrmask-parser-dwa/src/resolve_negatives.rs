@@ -849,9 +849,46 @@ pub fn compute_cancellations_range(
                     !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
                 })
                 .unwrap_or(false);
-            allow_grouped
+            let table_selected = allow_grouped
                 && explicitly_enabled
-                && nwa.states().len() >= GROUPED_CANCELLATION_MIN_STATES
+                && nwa.states().len() >= GROUPED_CANCELLATION_MIN_STATES;
+            if table_selected {
+                true
+            } else {
+                // Grouping is valuable when many negative edges generate the
+                // same `(target, positive label, weight)` query for different
+                // source states.  Estimate that compression directly before
+                // choosing the solver; low-compression parser NWAs retain the
+                // lower-overhead serial path.
+                let min_tasks = std::env::var("GLRMASK_GROUPED_CANCELLATION_MIN_TASKS")
+                    .ok()
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(4_096);
+                let min_compression =
+                    std::env::var("GLRMASK_GROUPED_CANCELLATION_MIN_COMPRESSION")
+                        .ok()
+                        .and_then(|value| value.parse::<f64>().ok())
+                        .unwrap_or(4.0);
+                let state_count = nwa.states().len();
+                let mut tasks = 0usize;
+                let mut groups = FxHashSet::<(u32, i32, usize)>::default();
+                for source_state in range.clone() {
+                    let Some(state) = nwa.states().get(source_state as usize) else {
+                        continue;
+                    };
+                    for (&label, targets) in state.transitions.range(..0) {
+                        let positive_label = negative_to_positive_label(label);
+                        for (target_state, weight) in targets {
+                            if (*target_state as usize) < state_count && !weight.is_empty() {
+                                tasks += 1;
+                                groups.insert((*target_state, positive_label, weight.ptr_key()));
+                            }
+                        }
+                    }
+                }
+                tasks >= min_tasks
+                    && tasks as f64 / groups.len().max(1) as f64 >= min_compression
+            }
         }
     };
     if use_grouped {

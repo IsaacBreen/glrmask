@@ -409,19 +409,26 @@ fn ordered_vocab(input: BuildInput<'_>) -> Arc<super::super::L1IdentityVocabOrde
         .unwrap_or_else(|| super::super::prepared_l1_identity_vocab_order(input.vocab))
 }
 
-fn unique_vocab(input: BuildInput<'_>) -> (Vec<Vec<u32>>, Vec<Arc<[u8]>>) {
+fn unique_vocab(input: BuildInput<'_>) -> (Arc<super::super::L1UniqueVocab>, bool) {
     let order = ordered_vocab(input);
-    let mut tokens = Vec::<Arc<[u8]>>::new();
-    let mut aliases = Vec::<Vec<u32>>::new();
-    for (id, bytes) in order.token_entries_sorted.iter() {
-        if tokens.last().is_some_and(|token| token.as_ref() == bytes.as_ref()) {
-            aliases.last_mut().unwrap().push(*id);
-        } else {
-            tokens.push(Arc::clone(bytes));
-            aliases.push(vec![*id]);
+    let reverse_trie_enabled =
+        std::env::var_os("GLRMASK_L1_SINGLE_DISABLE_REVERSE_TRIE").is_none();
+    if std::env::var_os("GLRMASK_DISABLE_L1_UNIQUE_VOCAB_CACHE").is_none() {
+        if let Some(prepared) = order.prepared_unique_vocab() {
+            return (prepared, reverse_trie_enabled);
         }
     }
-    (aliases, tokens)
+
+    // Derived sub-vocabulary orders are one-shot artifacts. Reconstruct the
+    // exact compact view, but do not build a reverse trie whose construction
+    // cost cannot be amortized across constraints.
+    (
+        Arc::new(super::super::L1UniqueVocab::from_sorted_entries_with_reverse_trie(
+            order.token_entries_sorted.as_ref(),
+            false,
+        )),
+        false,
+    )
 }
 
 /// Quotient vocabulary bytes by their exact raw tokenizer transition column.
@@ -726,15 +733,7 @@ fn projected_cell_budget() -> usize {
         .unwrap_or(PROJECTED_CELL_BUDGET)
 }
 
-fn projected_shape(input: BuildInput<'_>) -> (usize, usize) {
-    let order = ordered_vocab(input);
-    let mut relevant = [false; 256];
-    for (_, token) in order.token_entries_sorted.iter() {
-        for &byte in token.iter() {
-            relevant[byte as usize] = true;
-        }
-    }
-    let vocab_bytes = relevant.iter().filter(|&&used| used).count();
+fn projected_memberships(input: BuildInput<'_>) -> usize {
     let memberships = (0..input.tokenizer.num_states())
         .map(|state| {
             super::super::collect_active_terminal_signature(
@@ -745,7 +744,7 @@ fn projected_shape(input: BuildInput<'_>) -> (usize, usize) {
             .len()
         })
         .sum();
-    (memberships, vocab_bytes)
+    memberships
 }
 
 /// One exact L1 compiler with two build-time representations of the same
@@ -759,7 +758,9 @@ pub(super) fn build(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
     if !generic_epsilon {
         super::production::build(input)
     } else {
-        let (memberships, vocab_bytes) = projected_shape(input);
+        let (unique_vocab, reverse_trie_available) = unique_vocab(input);
+        let memberships = projected_memberships(input);
+        let vocab_bytes = unique_vocab.relevant_bytes.len();
         let projected_cells = memberships.saturating_mul(vocab_bytes);
         let projected_cell_budget = projected_cell_budget();
         let use_established = projected_cells > projected_cell_budget;
@@ -777,45 +778,45 @@ pub(super) fn build(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
         if use_established {
             super::production::build(input)
         } else {
-            build_binary(input)
+            build_binary(input, unique_vocab, reverse_trie_available)
         }
     }
 }
 
-fn projected_limit_exceeded(input: BuildInput<'_>, states: usize, limit: usize) -> bool {
+fn projected_limit_exceeded(
+    input: BuildInput<'_>,
+    states: usize,
+    limit: usize,
+    unique_vocab_tokens: usize,
+) -> bool {
     if states <= limit {
         return false;
     }
     if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
         eprintln!(
-            "[glrmask/profile][l1_single_projected_abort] partition={} projected_states={} limit={} fallback=established",
-            input.partition_label, states, limit,
+            "[glrmask/profile][l1_single_projected_abort] partition={} projected_states={} limit={} unique_vocab_tokens={} fallback=established",
+            input.partition_label, states, limit, unique_vocab_tokens,
         );
     }
     true
 }
 
-fn build_binary(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
+fn build_binary(
+    input: BuildInput<'_>,
+    unique_vocab: Arc<super::super::L1UniqueVocab>,
+    reverse_trie_available: bool,
+) -> Option<LocalIdMapTerminalDwa> {
     if input.vocab.is_empty() {
         return None;
     }
     let total = Instant::now();
-    let (aliases, tokens) = unique_vocab(input);
+    let aliases = unique_vocab.aliases.as_ref();
+    let tokens = unique_vocab.tokens.as_ref();
     if tokens.iter().all(|token| token.len() == 1) {
-        return build_one_byte(input, &aliases, &tokens, total);
+        return build_one_byte(input, aliases, tokens, total);
     }
-    let mut relevant = [false; 256];
-    for token in &tokens {
-        for &byte in token.iter() {
-            relevant[byte as usize] = true;
-        }
-    }
-    let vocab_bytes = relevant
-        .iter()
-        .enumerate()
-        .filter_map(|(byte, &used)| used.then_some(byte as u8))
-        .collect::<Vec<_>>();
-    let (bytes, input_byte_representative) = quotient_input_bytes(input, &vocab_bytes);
+    let vocab_bytes = unique_vocab.relevant_bytes.as_ref();
+    let (bytes, input_byte_representative) = quotient_input_bytes(input, vocab_bytes);
 
     let projected_started = Instant::now();
     let mut projected = Projected::new(input);
@@ -823,11 +824,23 @@ fn build_binary(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
     for raw in 0..input.tokenizer.num_states() {
         roots.push(projected.root_row(raw));
     }
-    let limit = std::env::var("GLRMASK_L1_SINGLE_MAX_STATES")
+    let mut limit = std::env::var("GLRMASK_L1_SINGLE_MAX_STATES")
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(2_000_000usize);
-    if projected_limit_exceeded(input, projected.configs.len(), limit) {
+    let small_vocab_max_tokens = std::env::var("GLRMASK_L1_SINGLE_SMALL_VOCAB_MAX_TOKENS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(5_000usize);
+    let small_vocab_max_states = std::env::var("GLRMASK_L1_SINGLE_SMALL_VOCAB_MAX_STATES")
+        .ok()
+        .and_then(|value| value.parse().ok());
+    if tokens.len() <= small_vocab_max_tokens
+        && let Some(small_limit) = small_vocab_max_states
+    {
+        limit = limit.min(small_limit);
+    }
+    if projected_limit_exceeded(input, projected.configs.len(), limit, tokens.len()) {
         return super::production::build(input);
     }
     let mut queue = VecDeque::from_iter(0..projected.configs.len() as u32);
@@ -842,7 +855,7 @@ fn build_binary(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
             }
             if projected.configs.len() > before {
                 queue.extend(before as u32..projected.configs.len() as u32);
-                if projected_limit_exceeded(input, projected.configs.len(), limit) {
+                if projected_limit_exceeded(input, projected.configs.len(), limit, tokens.len()) {
                     return super::production::build(input);
                 }
             }
@@ -854,7 +867,7 @@ fn build_binary(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
 
     let minimize_started = Instant::now();
     let mut minimized = minimize(&projected.transitions, &bytes);
-    for &byte in &vocab_bytes {
+    for &byte in vocab_bytes {
         minimized.byte_class[byte as usize] =
             minimized.byte_class[input_byte_representative[byte as usize] as usize];
     }
@@ -905,9 +918,38 @@ fn build_binary(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
     let mut class_subsets = Vec::<u32>::new();
     let mut token_class = vec![0u32; aliases.len()];
     let mut token_bytes = 0usize;
-    for (token_index, token) in tokens.iter().enumerate() {
+    let use_reverse_trie = reverse_trie_available;
+    let token_subsets = if use_reverse_trie {
+        let mut node_subsets = vec![0u32; unique_vocab.reverse_trie_nodes.len()];
+        for (node_id, node) in unique_vocab.reverse_trie_nodes.iter().enumerate().skip(1) {
+            node_subsets[node_id] =
+                reverse.prepend(node_subsets[node.parent as usize], node.byte);
+        }
+        unique_vocab
+            .reverse_trie_leaves
+            .iter()
+            .map(|&leaf| node_subsets[leaf as usize])
+            .collect::<Vec<_>>()
+    } else {
+        tokens
+            .iter()
+            .map(|token| reverse.token(token))
+            .collect::<Vec<_>>()
+    };
+    if use_reverse_trie && std::env::var_os("GLRMASK_VALIDATE_L1_REVERSE_TRIE").is_some() {
+        let reference = tokens
+            .iter()
+            .map(|token| reverse.token(token))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            token_subsets, reference,
+            "reversed vocabulary trie changed an exact token residual subset"
+        );
+    }
+    for token in tokens {
         token_bytes += token.len();
-        let subset = reverse.token(token);
+    }
+    for (token_index, subset) in token_subsets.into_iter().enumerate() {
         let next = class_subsets.len() as u32;
         token_class[token_index] = *final_subset_to_class.entry(subset).or_insert_with(|| {
             class_subsets.push(subset);
@@ -984,7 +1026,7 @@ fn build_binary(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
     let traverse_ms = traverse_started.elapsed().as_secs_f64() * 1000.0;
     let finished = common::finish_compacted(
         input,
-        &aliases,
+        aliases,
         &signatures,
         state_class,
         rows,
@@ -1013,7 +1055,7 @@ fn build_binary(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
             .max()
             .unwrap_or(0);
         eprintln!(
-            "[glrmask/profile][l1_single] partition={} raw_states={} terminals={} terminal_groups={} vocab_bytes={} input_byte_classes={} minimized_bytes={} minimize_rounds={} projected_states={} live_edges={} max_live_edges={} singleton_configs={} total_config_states={} max_config_states={} expanded={} minimized_states={} root_closure_states={} root_memberships={} root_classes={} root_vectors={} residual_token_classes={} signature_updates={} reverse_states={} reverse_transitions={} reverse_target_visits={} reverse_predecessor_visits={} token_bytes={} signatures={} state_classes={} token_classes={} project_ms={:.3} minimize_ms={:.3} root_vectors_ms={:.3} reverse_ms={:.3} incidence_ms={:.3} signature_ms={:.3} traverse_ms={:.3} compact_ms={:.3} build_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][l1_single] partition={} raw_states={} terminals={} terminal_groups={} vocab_bytes={} input_byte_classes={} minimized_bytes={} minimize_rounds={} projected_states={} live_edges={} max_live_edges={} singleton_configs={} total_config_states={} max_config_states={} expanded={} minimized_states={} root_closure_states={} root_memberships={} root_classes={} root_vectors={} residual_token_classes={} signature_updates={} reverse_states={} reverse_transitions={} reverse_target_visits={} reverse_predecessor_visits={} token_bytes={} reverse_trie_nodes={} reverse_trie_enabled={} signatures={} state_classes={} token_classes={} project_ms={:.3} minimize_ms={:.3} root_vectors_ms={:.3} reverse_ms={:.3} incidence_ms={:.3} signature_ms={:.3} traverse_ms={:.3} compact_ms={:.3} build_ms={:.3} total_ms={:.3}",
             input.partition_label,
             input.tokenizer.num_states(),
             projected.terminals.len(),
@@ -1041,6 +1083,8 @@ fn build_binary(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
             reverse.target_visits,
             reverse.predecessor_visits,
             token_bytes,
+            unique_vocab.reverse_trie_nodes.len(),
+            use_reverse_trie,
             signatures.len(),
             finished.state_classes,
             finished.token_classes,

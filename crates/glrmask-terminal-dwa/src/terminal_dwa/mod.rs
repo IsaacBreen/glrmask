@@ -1723,6 +1723,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
     let shared_cache_setup_ms =
         shared_cache_setup_started_at.elapsed().as_secs_f64() * 1000.0;
 
+
     use rayon::prelude::*;
     let build_partition = |idx: usize,
                            sub_vocab: &Vocab|
@@ -1850,6 +1851,19 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
         (result, idx)
     };
     let serial_profile_partition_schedule = compile_profile_uses_serial_partition_schedule();
+    let grouped_partition_schedule = !serial_profile_partition_schedule
+        && sub_vocabs.len() == 10
+        && tokenizer.num_states() as usize
+            <= std::env::var("GLRMASK_GROUPED_PARTITION_MAX_STATES")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(512)
+        && std::env::var("GLRMASK_GROUPED_PARTITION_SCHEDULE")
+            .ok()
+            .is_some_and(|value| {
+                let value = value.trim();
+                !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+            });
     let partition_build_started_at = Instant::now();
     let partition_results: Vec<(Option<(types::PartitionTerminalDwas, f64)>, usize)> =
         if serial_profile_partition_schedule {
@@ -1857,6 +1871,27 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
                 .iter()
                 .enumerate()
                 .map(|(idx, sub_vocab)| build_partition(idx, sub_vocab))
+                .collect()
+        } else if grouped_partition_schedule {
+            // The three large/structurally expensive partitions retain one
+            // independent outer job each. The remaining partitions are exact,
+            // independent computations too, but scheduling all seven as outer
+            // Rayon jobs competes with nested equivalence and DWA work on the
+            // critical partitions. Bundle those small jobs into two sequential
+            // workers. This changes execution order only; each partition still
+            // calls the identical pure `build_partition` closure.
+            let groups: [&[usize]; 5] = [&[0], &[1], &[2], &[3, 4, 5], &[6, 7, 8, 9]];
+            groups
+                .par_iter()
+                .map(|indices| {
+                    indices
+                        .iter()
+                        .map(|&idx| build_partition(idx, &sub_vocabs[idx]))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .flatten()
                 .collect()
         } else {
             sub_vocabs

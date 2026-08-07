@@ -12,14 +12,17 @@ use crate::automata::weighted::minimize::minimize;
 use crate::automata::weighted::nwa::{NWA, NwaBody};
 use crate::automata::weighted::terminal_automaton::TerminalAutomaton;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
-use crate::compiler::glr::labels::DEFAULT_LABEL;
+use crate::compiler::glr::labels::{
+    DEFAULT_LABEL, is_negative_label, negative_to_positive_label,
+};
 use crate::compiler::glr::table::{
     Action, AdmissionPolicy, GLRTable, GlrTableConstruction,
 };
 use crate::grammar::flat::TerminalID;
 use crate::compiler::stages::equiv_types::InternalIdMap;
 use crate::compiler::stages::resolve_negatives::{
-    apply_finality_fixpoint, resolve_negative_codes_in_nwa,
+    apply_finality_fixpoint, remove_redundant_default_transitions,
+    resolve_negative_codes_in_nwa,
 };
 use crate::compiler::stages::templates::Templates;
 use crate::ds::bitset::BitSet;
@@ -32,6 +35,7 @@ fn compile_profile_enabled() -> bool {
 
 type TerminalBundle = BTreeMap<TerminalID, Weight>;
 type BundleSignature = Vec<(TerminalID, Weight)>;
+type BundleTopologySignature = Vec<Vec<TerminalID>>;
 type TargetContribs = SmallVec<[(u32, Weight); 4]>;
 type DeferredFinalEntries = SmallVec<[(u32, Weight); 4]>;
 type FinalPathWeights = SmallVec<[Weight; 4]>;
@@ -364,6 +368,277 @@ fn parser_dwa_compose_detail_enabled() -> bool {
         .unwrap_or(false)
 }
 
+fn parser_bundle_topology_reuse_enabled() -> bool {
+    std::env::var("GLRMASK_REUSE_PARSER_BUNDLE_TOPOLOGY")
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
+}
+
+fn profile_template_stack_effect_normal_form(templates: &Templates) {
+    if !compile_profile_enabled() {
+        return;
+    }
+
+    let mut templates_checked = 0usize;
+    let mut violating_templates = 0usize;
+    let mut total_states = 0usize;
+    let mut pre_push_reachable_states = 0usize;
+    let mut push_reachable_states = 0usize;
+    let mut dual_phase_states = 0usize;
+    let mut positive_or_default_edges = 0usize;
+    let mut negative_edges = 0usize;
+
+    for template in templates.by_terminal_nwa.values() {
+        templates_checked += 1;
+        total_states += template.states().len();
+        let mut seen_pre = vec![false; template.states().len()];
+        let mut seen_push = vec![false; template.states().len()];
+        let mut queue = VecDeque::<(u32, bool)>::new();
+        for &start in template.start_states() {
+            queue.push_back((start, false));
+        }
+        let mut violates = false;
+        while let Some((state_id, push_phase)) = queue.pop_front() {
+            let seen = if push_phase {
+                &mut seen_push[state_id as usize]
+            } else {
+                &mut seen_pre[state_id as usize]
+            };
+            if *seen {
+                continue;
+            }
+            *seen = true;
+            let state = &template.states()[state_id as usize];
+            for (&label, targets) in &state.transitions {
+                let negative = crate::compiler::glr::labels::is_negative_label(label);
+                if negative {
+                    negative_edges += targets.len();
+                } else {
+                    positive_or_default_edges += targets.len();
+                    if push_phase {
+                        violates = true;
+                    }
+                }
+                for (target, _) in targets {
+                    queue.push_back((*target, push_phase || negative));
+                }
+            }
+            for (target, _) in &state.epsilons {
+                queue.push_back((*target, push_phase));
+            }
+        }
+        violating_templates += usize::from(violates);
+        for state_id in 0..template.states().len() {
+            pre_push_reachable_states += usize::from(seen_pre[state_id]);
+            push_reachable_states += usize::from(seen_push[state_id]);
+            dual_phase_states += usize::from(seen_pre[state_id] && seen_push[state_id]);
+        }
+    }
+
+    eprintln!(
+        "[glrmask/profile][parser_template_stack_effect_normal_form] templates={} violating_templates={} total_states={} pre_push_reachable_states={} push_reachable_states={} dual_phase_states={} positive_or_default_edges={} negative_edges={}",
+        templates_checked,
+        violating_templates,
+        total_states,
+        pre_push_reachable_states,
+        push_reachable_states,
+        dual_phase_states,
+        positive_or_default_edges,
+        negative_edges,
+    );
+}
+
+fn profile_composed_parser_nwa_label_shape(nwa: &NWA) {
+    if !compile_profile_enabled() {
+        return;
+    }
+
+    let mut negative_only_states = 0usize;
+    let mut positive_only_states = 0usize;
+    let mut mixed_states = 0usize;
+    let mut unlabeled_states = 0usize;
+    let mut negative_edges = 0usize;
+    let mut positive_or_default_edges = 0usize;
+    let mut epsilon_edges = 0usize;
+    for state in nwa.states() {
+        let mut has_negative = false;
+        let mut has_positive = false;
+        for (&label, targets) in &state.transitions {
+            if crate::compiler::glr::labels::is_negative_label(label) {
+                has_negative = true;
+                negative_edges += targets.len();
+            } else {
+                has_positive = true;
+                positive_or_default_edges += targets.len();
+            }
+        }
+        epsilon_edges += state.epsilons.len();
+        match (has_negative, has_positive) {
+            (true, false) => negative_only_states += 1,
+            (false, true) => positive_only_states += 1,
+            (true, true) => mixed_states += 1,
+            (false, false) => unlabeled_states += 1,
+        }
+    }
+    eprintln!(
+        "[glrmask/profile][parser_composed_nwa_label_shape] states={} negative_only_states={} positive_only_states={} mixed_states={} unlabeled_states={} negative_edges={} positive_or_default_edges={} epsilon_edges={}",
+        nwa.states().len(),
+        negative_only_states,
+        positive_only_states,
+        mixed_states,
+        unlabeled_states,
+        negative_edges,
+        positive_or_default_edges,
+        epsilon_edges,
+    );
+
+    let n = nwa.states().len();
+    let mut eligible = vec![false; n];
+    for (state_id, state) in nwa.states().iter().enumerate() {
+        let mut has_negative = false;
+        let mut has_nonnegative = false;
+        for &label in state.transitions.keys() {
+            if crate::compiler::glr::labels::is_negative_label(label) {
+                has_negative = true;
+            } else {
+                has_nonnegative = true;
+            }
+        }
+        eligible[state_id] = has_negative && !has_nonnegative;
+    }
+
+    let mut internal_outdegree = vec![0usize; n];
+    let mut predecessors = vec![Vec::<usize>::new(); n];
+    for (source, state) in nwa.states().iter().enumerate() {
+        if !eligible[source] {
+            continue;
+        }
+        for targets in state.transitions.values() {
+            for (target, _) in targets {
+                let target = *target as usize;
+                if target < n && eligible[target] {
+                    internal_outdegree[source] += 1;
+                    predecessors[target].push(source);
+                }
+            }
+        }
+        for (target, _) in &state.epsilons {
+            let target = *target as usize;
+            if target < n && eligible[target] {
+                internal_outdegree[source] += 1;
+                predecessors[target].push(source);
+            }
+        }
+    }
+
+    let mut queue = VecDeque::new();
+    for state_id in 0..n {
+        if eligible[state_id] && internal_outdegree[state_id] == 0 {
+            queue.push_back(state_id);
+        }
+    }
+    let mut class_by_state = vec![None::<u32>; n];
+    let mut class_by_signature =
+        FxHashMap::<(usize, Vec<(u8, i32, u64, usize)>), u32>::default();
+    let mut processed = 0usize;
+    while let Some(state_id) = queue.pop_front() {
+        let state = &nwa.states()[state_id];
+        let final_key = state.final_weight.as_ref().map_or(0, Weight::ptr_key);
+        let mut signature = Vec::<(u8, i32, u64, usize)>::new();
+        for (&label, targets) in &state.transitions {
+            for (target, weight) in targets {
+                let target = *target as usize;
+                let target_key = if target < n && eligible[target] {
+                    class_by_state[target]
+                        .expect("negative-only successor must already be canonicalized")
+                        as u64
+                } else {
+                    (1u64 << 63) | target as u64
+                };
+                signature.push((0, label, target_key, weight.ptr_key()));
+            }
+        }
+        for (target, weight) in &state.epsilons {
+            let target = *target as usize;
+            let target_key = if target < n && eligible[target] {
+                class_by_state[target]
+                    .expect("negative-only epsilon successor must already be canonicalized")
+                    as u64
+            } else {
+                (1u64 << 63) | target as u64
+            };
+            signature.push((1, 0, target_key, weight.ptr_key()));
+        }
+        signature.sort_unstable();
+        let next_class = class_by_signature.len() as u32;
+        let class = *class_by_signature
+            .entry((final_key, signature))
+            .or_insert(next_class);
+        class_by_state[state_id] = Some(class);
+        processed += 1;
+        for &pred in &predecessors[state_id] {
+            internal_outdegree[pred] -= 1;
+            if internal_outdegree[pred] == 0 {
+                queue.push_back(pred);
+            }
+        }
+    }
+    eprintln!(
+        "[glrmask/profile][parser_negative_suffix_hashcons_potential] eligible_states={} acyclic_processed={} cyclic_or_blocked={} exact_classes={} removable_states={} compression={:.2}",
+        eligible.iter().filter(|&&value| value).count(),
+        processed,
+        eligible.iter().filter(|&&value| value).count().saturating_sub(processed),
+        class_by_signature.len(),
+        processed.saturating_sub(class_by_signature.len()),
+        processed as f64 / class_by_signature.len().max(1) as f64,
+    );
+}
+
+fn profile_parser_nwa_reachability(nwa: &NWA, phase: &str) {
+    if !compile_profile_enabled() {
+        return;
+    }
+    let mut reachable = vec![false; nwa.states().len()];
+    let mut queue = VecDeque::new();
+    for &start in nwa.start_states() {
+        if (start as usize) < reachable.len() {
+            queue.push_back(start);
+        }
+    }
+    while let Some(state_id) = queue.pop_front() {
+        let index = state_id as usize;
+        if index >= reachable.len() || reachable[index] {
+            continue;
+        }
+        reachable[index] = true;
+        let state = &nwa.states()[index];
+        for targets in state.transitions.values() {
+            for (target, weight) in targets {
+                if !weight.is_empty() {
+                    queue.push_back(*target);
+                }
+            }
+        }
+        for (target, weight) in &state.epsilons {
+            if !weight.is_empty() {
+                queue.push_back(*target);
+            }
+        }
+    }
+    let reachable_count = reachable.iter().filter(|&&value| value).count();
+    eprintln!(
+        "[glrmask/profile][parser_nwa_reachability] phase={} states={} reachable={} unreachable={} compression={:.2}",
+        phase,
+        nwa.states().len(),
+        reachable_count,
+        nwa.states().len().saturating_sub(reachable_count),
+        nwa.states().len() as f64 / reachable_count.max(1) as f64,
+    );
+}
+
 fn group_terminal_edges_by_target(
     terminal_automaton: &TerminalAutomaton,
     grammar: &AnalyzedGrammar,
@@ -456,6 +731,19 @@ fn bundle_signature(bundle: &TerminalBundle) -> BundleSignature {
         .iter()
         .map(|(&terminal, weight)| (terminal, weight.clone()))
         .collect()
+}
+
+fn bundle_topology_signature(bundle: &TerminalBundle) -> BundleTopologySignature {
+    let mut groups = FxHashMap::<Weight, Vec<TerminalID>>::default();
+    for (&terminal, weight) in bundle {
+        groups.entry(weight.clone()).or_default().push(terminal);
+    }
+    let mut groups = groups.into_values().collect::<Vec<_>>();
+    for group in &mut groups {
+        group.sort_unstable();
+    }
+    groups.sort_unstable();
+    groups
 }
 
 fn terminal_template_has_acceptance(template: &NWA) -> bool {
@@ -1152,6 +1440,283 @@ fn trim_unreachable_dwa(dwa: DWA) -> DWA {
         });
     }
     DWA::from_parts(new_states, remap[old_start])
+}
+
+fn trim_unreachable_nwa(nwa: NWA) -> NWA {
+    if nwa.states().is_empty() {
+        return nwa;
+    }
+
+    let mut reachable = vec![false; nwa.states().len()];
+    let mut queue = VecDeque::new();
+    for &start in nwa.start_states() {
+        if (start as usize) < reachable.len() {
+            queue.push_back(start);
+        }
+    }
+    while let Some(state_id) = queue.pop_front() {
+        let state_index = state_id as usize;
+        if state_index >= reachable.len() || reachable[state_index] {
+            continue;
+        }
+        reachable[state_index] = true;
+        let state = &nwa.states()[state_index];
+        for targets in state.transitions.values() {
+            for (target, weight) in targets {
+                if !weight.is_empty() && (*target as usize) < reachable.len() {
+                    queue.push_back(*target);
+                }
+            }
+        }
+        for (target, weight) in &state.epsilons {
+            if !weight.is_empty() && (*target as usize) < reachable.len() {
+                queue.push_back(*target);
+            }
+        }
+    }
+
+    if reachable.iter().all(|&value| value) {
+        return nwa;
+    }
+
+    let (old_states, old_starts) = nwa.into_parts();
+    let mut remap = vec![u32::MAX; old_states.len()];
+    let mut new_states = Vec::with_capacity(reachable.iter().filter(|&&value| value).count());
+    for (old_id, state) in old_states.into_iter().enumerate() {
+        if reachable[old_id] {
+            remap[old_id] = new_states.len() as u32;
+            new_states.push(state);
+        }
+    }
+
+    for state in &mut new_states {
+        for targets in state.transitions.values_mut() {
+            targets.retain_mut(|(target, weight)| {
+                if weight.is_empty() || (*target as usize) >= remap.len() {
+                    return false;
+                }
+                let mapped = remap[*target as usize];
+                if mapped == u32::MAX {
+                    return false;
+                }
+                *target = mapped;
+                true
+            });
+        }
+        state.transitions.retain(|_, targets| !targets.is_empty());
+        state.epsilons.retain_mut(|(target, weight)| {
+            if weight.is_empty() || (*target as usize) >= remap.len() {
+                return false;
+            }
+            let mapped = remap[*target as usize];
+            if mapped == u32::MAX {
+                return false;
+            }
+            *target = mapped;
+            true
+        });
+    }
+
+    let starts = old_starts
+        .into_iter()
+        .filter_map(|start| {
+            remap
+                .get(start as usize)
+                .copied()
+                .filter(|&mapped| mapped != u32::MAX)
+        })
+        .collect();
+    NWA::from_parts(new_states, starts)
+}
+
+fn trim_resolved_parser_nwa_enabled() -> bool {
+    std::env::var("GLRMASK_TRIM_RESOLVED_PARSER_NWA")
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
+}
+
+fn direct_parser_read_projection_enabled() -> bool {
+    std::env::var("GLRMASK_DIRECT_PARSER_READ_PROJECTION")
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
+}
+
+fn direct_parser_read_projection_state_limit() -> usize {
+    std::env::var("GLRMASK_DIRECT_PARSER_READ_PROJECTION_MAX_STATES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or(2_000_000)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ReadProjectionConfig {
+    state: u32,
+    pending_pushes: SmallVec<[i32; 8]>,
+}
+
+fn direct_parser_read_projection(nwa: &NWA) -> Option<NWA> {
+    let max_states = direct_parser_read_projection_state_limit();
+    let mut projected = NWA::new(0, 0);
+    let mut config_to_state = FxHashMap::<ReadProjectionConfig, u32>::default();
+    let mut configs = Vec::<ReadProjectionConfig>::new();
+    let mut worklist = VecDeque::<u32>::new();
+    let mut projected_starts = Vec::new();
+    let mut max_pending_depth = 0usize;
+
+    let intern = |config: ReadProjectionConfig,
+                  projected: &mut NWA,
+                  config_to_state: &mut FxHashMap<ReadProjectionConfig, u32>,
+                  configs: &mut Vec<ReadProjectionConfig>,
+                  worklist: &mut VecDeque<u32>|
+     -> Option<u32> {
+        if let Some(&state) = config_to_state.get(&config) {
+            return Some(state);
+        }
+        if configs.len() >= max_states {
+            return None;
+        }
+        let state = projected.add_state();
+        config_to_state.insert(config.clone(), state);
+        configs.push(config);
+        worklist.push_back(state);
+        Some(state)
+    };
+
+    for &start in nwa.start_states() {
+        let config = ReadProjectionConfig {
+            state: start,
+            pending_pushes: SmallVec::new(),
+        };
+        let start_state = intern(
+            config,
+            &mut projected,
+            &mut config_to_state,
+            &mut configs,
+            &mut worklist,
+        )?;
+        projected_starts.push(start_state);
+    }
+    projected_starts.sort_unstable();
+    projected_starts.dedup();
+    projected.set_start_states(projected_starts);
+
+    while let Some(projected_state) = worklist.pop_front() {
+        let config = configs[projected_state as usize].clone();
+        max_pending_depth = max_pending_depth.max(config.pending_pushes.len());
+        let Some(source) = nwa.states().get(config.state as usize) else {
+            continue;
+        };
+        if let Some(final_weight) = source.final_weight.as_ref().filter(|weight| !weight.is_empty()) {
+            projected.set_final_weight(projected_state, final_weight.clone());
+        }
+
+        for (target, weight) in &source.epsilons {
+            if weight.is_empty() {
+                continue;
+            }
+            let target_config = ReadProjectionConfig {
+                state: *target,
+                pending_pushes: config.pending_pushes.clone(),
+            };
+            let target_state = intern(
+                target_config,
+                &mut projected,
+                &mut config_to_state,
+                &mut configs,
+                &mut worklist,
+            )?;
+            projected.add_epsilon(projected_state, target_state, weight.clone());
+        }
+
+        for (&label, targets) in &source.transitions {
+            if is_negative_label(label) {
+                let pushed = negative_to_positive_label(label);
+                for (target, weight) in targets {
+                    if weight.is_empty() {
+                        continue;
+                    }
+                    let mut pending_pushes = config.pending_pushes.clone();
+                    pending_pushes.push(pushed);
+                    let target_config = ReadProjectionConfig {
+                        state: *target,
+                        pending_pushes,
+                    };
+                    let target_state = intern(
+                        target_config,
+                        &mut projected,
+                        &mut config_to_state,
+                        &mut configs,
+                        &mut worklist,
+                    )?;
+                    projected.add_epsilon(projected_state, target_state, weight.clone());
+                }
+                continue;
+            }
+
+            if let Some(&pending_top) = config.pending_pushes.last() {
+                if label != pending_top && label != DEFAULT_LABEL {
+                    continue;
+                }
+                for (target, weight) in targets {
+                    if weight.is_empty() {
+                        continue;
+                    }
+                    let mut pending_pushes = config.pending_pushes.clone();
+                    pending_pushes.pop();
+                    let target_config = ReadProjectionConfig {
+                        state: *target,
+                        pending_pushes,
+                    };
+                    let target_state = intern(
+                        target_config,
+                        &mut projected,
+                        &mut config_to_state,
+                        &mut configs,
+                        &mut worklist,
+                    )?;
+                    projected.add_epsilon(projected_state, target_state, weight.clone());
+                }
+                continue;
+            }
+
+            for (target, weight) in targets {
+                if weight.is_empty() {
+                    continue;
+                }
+                let target_config = ReadProjectionConfig {
+                    state: *target,
+                    pending_pushes: SmallVec::new(),
+                };
+                let target_state = intern(
+                    target_config,
+                    &mut projected,
+                    &mut config_to_state,
+                    &mut configs,
+                    &mut worklist,
+                )?;
+                projected.add_transition(projected_state, label, target_state, weight.clone());
+            }
+        }
+    }
+
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][parser_direct_read_projection] input_states={} output_states={} output_transitions={} max_pending_depth={} state_limit={}",
+            nwa.states().len(),
+            projected.states().len(),
+            projected.num_transitions(),
+            max_pending_depth,
+            max_states,
+        );
+    }
+    Some(projected)
 }
 
 /// Push final weights from transition-free leaf states into their incoming
@@ -2108,13 +2673,19 @@ fn determinize_parser_dwa_with_fallbacks_impl(
     possible_by_state: &[PossibleOutgoingIds],
     num_parser_states: u32,
     normalize_singletons: bool,
+    reuse_input_singletons: bool,
 ) -> DWA {
     fn subset_key(entries: &[(u32, Weight)]) -> Vec<(u32, usize)> {
         entries.iter().map(|(sid, w)| (*sid, w.ptr_key())).collect()
     }
 
     let dense_label_limit = num_parser_states as usize;
-    let mut result = DWA::new(0, 0);
+    let reuse_input_singletons = reuse_input_singletons && normalize_singletons;
+    let mut result = if reuse_input_singletons {
+        dwa.clone()
+    } else {
+        DWA::new(0, 0)
+    };
 
     let mut start_subset = FxHashMap::default();
     start_subset.insert(dwa.start_state(), Weight::all());
@@ -2135,18 +2706,35 @@ fn determinize_parser_dwa_with_fallbacks_impl(
     let mut weighted_singleton_subsets: FxHashMap<(u32, usize), u32> = FxHashMap::default();
     let normalized_singleton_weight = Weight::all();
     let normalized_singleton_key = normalized_singleton_weight.ptr_key();
-    let start_key = subset_key(&canon_buf);
-    subset_map.insert(start_key, result.start_state());
-    if let [(state_id, weight)] = canon_buf.as_slice() {
-        if normalize_singletons && weight.is_full() {
-            normalized_singleton_subsets.insert(*state_id, result.start_state());
-        } else {
-            weighted_singleton_subsets
-                .insert((*state_id, weight.ptr_key()), result.start_state());
+    if reuse_input_singletons {
+        normalized_singleton_subsets.extend(
+            (0..dwa.states().len()).map(|state_id| (state_id as u32, state_id as u32)),
+        );
+    } else {
+        let start_key = subset_key(&canon_buf);
+        subset_map.insert(start_key, result.start_state());
+        if let [(state_id, weight)] = canon_buf.as_slice() {
+            if normalize_singletons && weight.is_full() {
+                normalized_singleton_subsets.insert(*state_id, result.start_state());
+            } else {
+                weighted_singleton_subsets
+                    .insert((*state_id, weight.ptr_key()), result.start_state());
+            }
         }
     }
     let mut worklist: VecDeque<(u32, Vec<(u32, Weight)>)> = VecDeque::new();
-    worklist.push_back((result.start_state(), canon_buf.clone()));
+    if reuse_input_singletons {
+        for (state_id, state) in dwa.states().iter().enumerate() {
+            if state.transitions.contains_key(&DEFAULT_LABEL) {
+                worklist.push_back((
+                    state_id as u32,
+                    vec![(state_id as u32, normalized_singleton_weight.clone())],
+                ));
+            }
+        }
+    } else {
+        worklist.push_back((result.start_state(), canon_buf.clone()));
+    }
 
     let mut dense_raw_targets: Vec<TargetContribs> =
         (0..dense_label_limit).map(|_| TargetContribs::new()).collect();
@@ -2161,9 +2749,23 @@ fn determinize_parser_dwa_with_fallbacks_impl(
     let mut final_contributions: Vec<Weight> = Vec::new();
     let mut detail =
         ParserDwaDeterminizeDetail::enabled().then(ParserDwaDeterminizeDetail::default);
+    let fallback_shape_profile = ParserDwaDeterminizeDetail::enabled();
+    let mut fallback_singleton_states_processed = 0usize;
+    let mut fallback_pair_states_processed = 0usize;
+    let mut fallback_larger_states_processed = 0usize;
+    let mut fallback_singleton_result_states_created = 0usize;
+    let mut fallback_pair_result_states_created = 0usize;
+    let mut fallback_larger_result_states_created = 0usize;
 
     while let Some((from_state, subset_entries)) = worklist.pop_front() {
         dense_default_all_raw_targets.clear();
+        if fallback_shape_profile {
+            match subset_entries.len() {
+                1 => fallback_singleton_states_processed += 1,
+                2 => fallback_pair_states_processed += 1,
+                _ => fallback_larger_states_processed += 1,
+            }
+        }
         if let Some(detail) = detail.as_mut() {
             detail.states_processed += 1;
         }
@@ -2188,6 +2790,14 @@ fn determinize_parser_dwa_with_fallbacks_impl(
         let final_weight = Weight::union_all(final_contributions.iter());
         if !final_weight.is_empty() {
             result.set_final_weight(from_state, final_weight);
+        }
+
+        // In seeded mode singleton states retain their original IDs. Only
+        // singleton rows containing DEFAULT need rebuilding; rows without a
+        // fallback edge remain valid verbatim. Pair states are newly appended
+        // and start empty.
+        if reuse_input_singletons && subset_entries.len() == 1 {
+            result.states_mut()[from_state as usize].transitions.clear();
         }
 
         // The fallback pass overwhelmingly visits singleton subsets whose input
@@ -2225,10 +2835,13 @@ fn determinize_parser_dwa_with_fallbacks_impl(
                     }
                     existing
                 } else {
-                    if let Some(detail) = detail.as_mut() {
-                        detail.subset_intern_misses += 1;
-                    }
-                    let new_state = result.add_state();
+                if let Some(detail) = detail.as_mut() {
+                    detail.subset_intern_misses += 1;
+                }
+                let new_state = result.add_state();
+                if fallback_shape_profile {
+                    fallback_singleton_result_states_created += 1;
+                }
                     subset_map.insert(vec![(input_target, normalized_singleton_key)], new_state);
                     normalized_singleton_subsets.insert(input_target, new_state);
                     worklist.push_back((
@@ -2401,6 +3014,9 @@ fn determinize_parser_dwa_with_fallbacks_impl(
                             detail.subset_intern_misses += 1;
                         }
                         let new_state = result.add_state();
+                        if fallback_shape_profile {
+                            fallback_singleton_result_states_created += 1;
+                        }
                         subset_map.insert(vec![(*only_state, normalized_singleton_key)], new_state);
                         normalized_singleton_subsets.insert(*only_state, new_state);
                         worklist.push_back((
@@ -2421,6 +3037,9 @@ fn determinize_parser_dwa_with_fallbacks_impl(
                             detail.subset_intern_misses += 1;
                         }
                         let new_state = result.add_state();
+                        if fallback_shape_profile {
+                            fallback_singleton_result_states_created += 1;
+                        }
                         subset_map.insert(vec![singleton_key], new_state);
                         weighted_singleton_subsets.insert(singleton_key, new_state);
                         worklist.push_back((new_state, contribs.into_iter().collect()));
@@ -2443,6 +3062,12 @@ fn determinize_parser_dwa_with_fallbacks_impl(
                         detail.subset_intern_misses += 1;
                     }
                     let new_state = result.add_state();
+                    if fallback_shape_profile {
+                        match contribs.len() {
+                            2 => fallback_pair_result_states_created += 1,
+                            _ => fallback_larger_result_states_created += 1,
+                        }
+                    }
                     subset_map.insert(key_buf.clone(), new_state);
                     let next_entries: Vec<(u32, Weight)> = contribs.into_iter().collect();
                     worklist.push_back((new_state, next_entries));
@@ -2481,6 +3106,22 @@ fn determinize_parser_dwa_with_fallbacks_impl(
     if let Some(detail) = detail {
         detail.emit("fallback");
     }
+    if fallback_shape_profile {
+        eprintln!(
+            "[glrmask/profile][parser_fallback_subset_shape] input_states={} output_states={} processed_singletons={} processed_pairs={} processed_larger={} created_singletons={} created_pairs={} created_larger={} normalized_singleton_states={} weighted_singleton_states={} generic_subset_states={}",
+            dwa.states().len(),
+            result.states().len(),
+            fallback_singleton_states_processed,
+            fallback_pair_states_processed,
+            fallback_larger_states_processed,
+            fallback_singleton_result_states_created,
+            fallback_pair_result_states_created,
+            fallback_larger_result_states_created,
+            normalized_singleton_subsets.len(),
+            weighted_singleton_subsets.len(),
+            subset_map.len(),
+        );
+    }
 
     result
 }
@@ -2490,11 +3131,18 @@ fn determinize_parser_dwa_with_fallbacks(
     possible_by_state: &[PossibleOutgoingIds],
     num_parser_states: u32,
 ) -> DWA {
+    let reuse_input_singletons = std::env::var("GLRMASK_SEEDED_FALLBACK_NORMALIZATION")
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false);
     determinize_parser_dwa_with_fallbacks_impl(
         dwa,
         possible_by_state,
         num_parser_states,
         true,
+        reuse_input_singletons,
     )
 }
 
@@ -2921,10 +3569,12 @@ fn append_branch_fragment(
             detail.bundle_profile_result_nwa_states += bundle_profile.result_nwa_states;
             detail.bundle_profile_result_nwa_transitions += bundle_profile.result_nwa_transitions;
             eprintln!(
-                "[glrmask/profile][parser_bundle] bundle_id={} terminals={} weight_groups={} single_entry_weights={} single_tsid_weights={} total_weight_outer_ranges={} build_group_dfas_ms={:.3} union_groups_ms={:.3} determinize_bundle_ms={:.3} det_pop_ms={:.3} det_alive_ms={:.3} det_final_ms={:.3} det_collect_labels_ms={:.3} det_next_state_ms={:.3} det_edge_weight_ms={:.3} det_lookup_ms={:.3} det_add_transition_ms={:.3} det_states={} det_labels={} det_transitions={} det_edge_subset_total={} det_edge_subset_max={} det_edge_cache_hits={} det_edge_cache_misses={} minimize_ms={:.3} minimize_skipped={} dwa_to_nwa_ms={:.3} total_ms={:.3} result_dwa_states={} result_dwa_transitions={} result_nwa_states={} result_nwa_transitions={}",
+                "[glrmask/profile][parser_bundle] bundle_id={} terminals={} weight_groups={} overlap_components={} largest_overlap_component={} single_entry_weights={} single_tsid_weights={} total_weight_outer_ranges={} build_group_dfas_ms={:.3} union_groups_ms={:.3} determinize_bundle_ms={:.3} det_pop_ms={:.3} det_alive_ms={:.3} det_final_ms={:.3} det_collect_labels_ms={:.3} det_next_state_ms={:.3} det_edge_weight_ms={:.3} det_lookup_ms={:.3} det_add_transition_ms={:.3} det_states={} det_labels={} det_transitions={} det_edge_subset_total={} det_edge_subset_max={} det_edge_cache_hits={} det_edge_cache_misses={} minimize_ms={:.3} minimize_skipped={} dwa_to_nwa_ms={:.3} total_ms={:.3} result_dwa_states={} result_dwa_transitions={} result_nwa_states={} result_nwa_transitions={}",
                 bundle_id,
                 bundle_profile.input_terminals,
                 bundle_profile.weight_groups,
+                bundle_profile.overlap_components,
+                bundle_profile.largest_overlap_component,
                 bundle_profile.single_entry_weights,
                 bundle_profile.single_tsid_weights,
                 bundle_profile.total_weight_outer_ranges,
@@ -2994,6 +3644,26 @@ fn build_parser_nwa_from_terminal_dwa(
         accepting_bundles: summaries.bundle_accepts.iter().filter(|&&accepts| accepts).count(),
         ..ParserDwaComposeDetailProfile::default()
     };
+    if compose_detail_enabled {
+        let terminal_sets = summaries
+            .unique_bundles
+            .iter()
+            .map(|bundle| bundle.keys().copied().collect::<Vec<_>>())
+            .collect::<rustc_hash::FxHashSet<_>>();
+        let topology_signatures = summaries
+            .unique_bundles
+            .iter()
+            .map(bundle_topology_signature)
+            .collect::<rustc_hash::FxHashSet<_>>();
+        eprintln!(
+            "[glrmask/profile][parser_bundle_reuse] unique_bundles={} unique_terminal_sets={} unique_weight_partition_topologies={} terminal_set_reuse={:.2} topology_reuse={:.2}",
+            summaries.unique_bundles.len(),
+            terminal_sets.len(),
+            topology_signatures.len(),
+            summaries.unique_bundles.len() as f64 / terminal_sets.len().max(1) as f64,
+            summaries.unique_bundles.len() as f64 / topology_signatures.len().max(1) as f64,
+        );
+    }
 
     let productive_start_states: Vec<u32> = summaries
         .start_states
@@ -3051,15 +3721,73 @@ fn build_parser_nwa_from_terminal_dwa(
 
     let mut built_bundle_cache: Vec<Option<Arc<NWA>>> = vec![None; summaries.unique_bundles.len()];
     if !compose_detail_enabled {
-        built_bundle_cache = summaries
-            .unique_bundles
-            .par_iter()
-            .enumerate()
-            .map(|(bundle_id, bundle)| {
-                used_multi_bundle[bundle_id]
-                    .then(|| Arc::new(templates.build_bundle(bundle)))
-            })
-            .collect();
+        if parser_bundle_topology_reuse_enabled() {
+            let mut bundle_ids_by_topology =
+                FxHashMap::<Vec<Vec<TerminalID>>, Vec<usize>>::default();
+            for (bundle_id, bundle) in summaries.unique_bundles.iter().enumerate() {
+                if used_multi_bundle[bundle_id] {
+                    bundle_ids_by_topology
+                        .entry(templates.bundle_topology_signature(bundle))
+                        .or_default()
+                        .push(bundle_id);
+                }
+            }
+            let topology_groups = bundle_ids_by_topology.into_values().collect::<Vec<_>>();
+            let built_groups = topology_groups
+                .par_iter()
+                .map(|bundle_ids| {
+                    if bundle_ids.len() == 1 {
+                        let bundle_id = bundle_ids[0];
+                        return vec![(
+                            bundle_id,
+                            Arc::new(templates.build_bundle(&summaries.unique_bundles[bundle_id])),
+                        )];
+                    }
+
+                    let representative = &summaries.unique_bundles[bundle_ids[0]];
+                    let Some(skeleton) = templates.build_bundle_skeleton(representative) else {
+                        return bundle_ids
+                            .iter()
+                            .map(|&bundle_id| {
+                                (
+                                    bundle_id,
+                                    Arc::new(templates.build_bundle(
+                                        &summaries.unique_bundles[bundle_id],
+                                    )),
+                                )
+                            })
+                            .collect();
+                    };
+                    bundle_ids
+                        .iter()
+                        .map(|&bundle_id| {
+                            (
+                                bundle_id,
+                                Arc::new(templates.instantiate_bundle_skeleton(
+                                    &summaries.unique_bundles[bundle_id],
+                                    &skeleton,
+                                )),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            for group in built_groups {
+                for (bundle_id, bundle) in group {
+                    built_bundle_cache[bundle_id] = Some(bundle);
+                }
+            }
+        } else {
+            built_bundle_cache = summaries
+                .unique_bundles
+                .par_iter()
+                .enumerate()
+                .map(|(bundle_id, bundle)| {
+                    used_multi_bundle[bundle_id]
+                        .then(|| Arc::new(templates.build_bundle(bundle)))
+                })
+                .collect();
+        }
     }
 
     let branch_walk_started_at = Instant::now();
@@ -3224,6 +3952,7 @@ pub fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     let total_started_at = Instant::now();
     let minimize_skipped = false;
     let profiling_enabled = compile_profile_enabled();
+    profile_template_stack_effect_normal_form(templates);
     let (terminal_dwa_transition_count, terminal_dwa_interned_ranges) = if profiling_enabled {
         let stats = terminal_dwa.stats();
         (stats.transitions, stats.interned_ranges)
@@ -3243,13 +3972,53 @@ pub fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
         }
         return DWA::new(0, 0);
     };
+    profile_composed_parser_nwa_label_shape(&parser_nwa);
 
     let resolve_negative_started_at = Instant::now();
-    resolve_negative_codes_in_nwa(
-        &mut parser_nwa,
-        table.construction == GlrTableConstruction::ExperimentalCoreMerged,
-    );
+    let mut used_direct_read_projection = false;
+    if direct_parser_read_projection_enabled()
+        && let Some(mut projected) = direct_parser_read_projection(&parser_nwa)
+    {
+        let direct_finality_started_at = Instant::now();
+        apply_finality_fixpoint(&mut projected);
+        let direct_finality_ms = elapsed_ms(direct_finality_started_at);
+        let direct_prune_started_at = Instant::now();
+        remove_redundant_default_transitions(&mut projected);
+        let direct_prune_ms = elapsed_ms(direct_prune_started_at);
+        if profiling_enabled {
+            eprintln!(
+                "[glrmask/profile][parser_direct_read_projection_finish] states={} finality_ms={:.3} prune_defaults_ms={:.3}",
+                projected.states().len(),
+                direct_finality_ms,
+                direct_prune_ms,
+            );
+        }
+        parser_nwa = projected;
+        used_direct_read_projection = true;
+    }
+    if !used_direct_read_projection {
+        resolve_negative_codes_in_nwa(
+            &mut parser_nwa,
+            table.construction == GlrTableConstruction::ExperimentalCoreMerged,
+        );
+    }
     let resolve_negative_ms = elapsed_ms(resolve_negative_started_at);
+    profile_parser_nwa_reachability(&parser_nwa, "post_negative_resolution");
+    let trim_resolved_nwa_started_at = Instant::now();
+    let parser_nwa_states_before_trim = parser_nwa.states().len();
+    if trim_resolved_parser_nwa_enabled() {
+        parser_nwa = trim_unreachable_nwa(parser_nwa);
+    }
+    let trim_resolved_nwa_ms = elapsed_ms(trim_resolved_nwa_started_at);
+    if profiling_enabled && trim_resolved_parser_nwa_enabled() {
+        eprintln!(
+            "[glrmask/profile][parser_resolved_nwa_trim] before_states={} after_states={} removed={} trim_ms={:.3}",
+            parser_nwa_states_before_trim,
+            parser_nwa.states().len(),
+            parser_nwa_states_before_trim.saturating_sub(parser_nwa.states().len()),
+            trim_resolved_nwa_ms,
+        );
+    }
 
     let support_determinize_started_at = Instant::now();
     let determinized = determinize_with_supports(&parser_nwa, Some(num_parser_states));
@@ -3334,6 +4103,7 @@ pub fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
             &parser_dwa_pre_minimize,
             &possible_by_state,
             num_parser_states,
+            false,
             false,
         );
         let reference_ms = elapsed_ms(reference_started_at);

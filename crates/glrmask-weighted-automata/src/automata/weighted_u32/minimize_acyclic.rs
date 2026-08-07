@@ -5,15 +5,18 @@
 //! compatibility constraints, and reconstructs the minimized automaton from the
 //! merged buckets.
 use std::collections::BTreeMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Instant;
 
 use range_set_blaze::RangeSetBlaze;
+use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
 use super::dwa::{DWA, DWAState};
-use crate::ds::weight::{Weight, WeightIntersectionIndex};
+use crate::ds::weight::{
+    shared_rangeset, ScopedWeightOpCache, SharedTokenSet, Weight, WeightIntersectionIndex,
+};
 
 type Label = i32;
 
@@ -35,16 +38,31 @@ fn weighted_dwa_minimize_profile_enabled() -> bool {
         || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
 }
 
-fn reconstruction_token_range_coalescing_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("GLRMASK_WEIGHT_UNION_COALESCE_TOKEN_RANGES")
-            .map(|value| {
-                let value = value.trim();
-                !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
-            })
-            .unwrap_or(false)
-    })
+fn reconstruction_token_range_coalescing_enabled(
+    automatic_large_minimizer: bool,
+    pending_count: usize,
+) -> bool {
+    if std::env::var("GLRMASK_WEIGHT_UNION_COALESCE_TOKEN_RANGES")
+        .map(|value| {
+            let value = value.trim();
+            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    match std::env::var("GLRMASK_WEIGHT_UNION_COALESCE_MODE")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("off" | "disabled" | "merge") => false,
+        Some("force" | "on" | "coalesce") => true,
+        Some("auto") | None => automatic_large_minimizer && (16..=127).contains(&pending_count),
+        Some(other) => panic!(
+            "unknown GLRMASK_WEIGHT_UNION_COALESCE_MODE={other:?}; expected auto, off, or force"
+        ),
+    }
 }
 
 fn mapped_target(old_to_new: &[u32], target: u32) -> Option<u32> {
@@ -160,6 +178,17 @@ pub fn push_weights(dwa: &mut DWA) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
     let mut reachable_parts = 0usize;
     let mut pushed_transitions = 0usize;
     let mut intersection_ms = 0.0;
+    let pointer_fast_path =
+        std::env::var_os("GLRMASK_WEIGHTED_MINIMIZE_DISABLE_PUSH_POINTER_FAST_PATH").is_none();
+    let subset_fast_path = std::env::var("GLRMASK_WEIGHTED_MINIMIZE_PUSH_SUBSET_FAST_PATH")
+        .map(|value| {
+            let value = value.trim();
+            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false);
+    let mut subset_checks = 0usize;
+    let mut subset_hits = 0usize;
+    let mut subset_ms = 0.0;
     let mut union_ms = 0.0;
     let mut apply_ms = 0.0;
     let mut union_size_histogram = [0usize; 7];
@@ -205,21 +234,53 @@ pub fn push_weights(dwa: &mut DWA) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
             } else {
                 target_partial += 1;
                 let intersection_started_at = profile_enabled.then(Instant::now);
-                let index = (incoming_transition_counts[t] >= 8).then(|| {
-                    let key = reachable[t].ptr_key();
-                    intersection_indexes
-                        .entry(key)
-                        .or_insert_with(|| reachable[t].intersection_index())
-                });
-                if index.is_some() {
-                    indexed_intersection_uses += 1;
-                }
-                let new_w = memoized_intersection(
-                    &mut intersection_cache,
-                    w,
-                    &reachable[t],
-                    index.as_deref(),
-                );
+                let new_w = if pointer_fast_path && w.storage_ptr_eq(&reachable[t]) {
+                    subset_hits += 1;
+                    w.clone()
+                } else if subset_fast_path {
+                    let subset_started_at = profile_enabled.then(Instant::now);
+                    subset_checks += 1;
+                    let contained = w.is_subset(&reachable[t]);
+                    if let Some(subset_started_at) = subset_started_at {
+                        subset_ms += subset_started_at.elapsed().as_secs_f64() * 1000.0;
+                    }
+                    if contained {
+                        subset_hits += 1;
+                        w.clone()
+                    } else {
+                        let index = (incoming_transition_counts[t] >= 8).then(|| {
+                            let key = reachable[t].ptr_key();
+                            intersection_indexes
+                                .entry(key)
+                                .or_insert_with(|| reachable[t].intersection_index())
+                        });
+                        if index.is_some() {
+                            indexed_intersection_uses += 1;
+                        }
+                        memoized_intersection(
+                            &mut intersection_cache,
+                            w,
+                            &reachable[t],
+                            index.as_deref(),
+                        )
+                    }
+                } else {
+                    let index = (incoming_transition_counts[t] >= 8).then(|| {
+                        let key = reachable[t].ptr_key();
+                        intersection_indexes
+                            .entry(key)
+                            .or_insert_with(|| reachable[t].intersection_index())
+                    });
+                    if index.is_some() {
+                        indexed_intersection_uses += 1;
+                    }
+                    memoized_intersection(
+                        &mut intersection_cache,
+                        w,
+                        &reachable[t],
+                        index.as_deref(),
+                    )
+                };
                 if let Some(started_at) = intersection_started_at {
                     intersection_ms += started_at.elapsed().as_secs_f64() * 1000.0;
                 }
@@ -291,12 +352,15 @@ pub fn push_weights(dwa: &mut DWA) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
 
     if profile_enabled {
         eprintln!(
-            "[glrmask/profile][weighted_dwa_minimize_push] states={} topo_ms={:.3} target_full={} target_empty={} target_partial={} intersection_ms={:.3} intersection_cache_entries={} intersection_indexes={} indexed_intersection_uses={} reachable_parts={} union_ms={:.3} union_sizes=[{},{},{},{},{},{},{}] max_union_size={} union_key_occurrences={} union_unique_keys={} union_key_repeats={} pushed_transitions={} apply_ms={:.3}",
+            "[glrmask/profile][weighted_dwa_minimize_push] states={} topo_ms={:.3} target_full={} target_empty={} target_partial={} subset_checks={} subset_hits={} subset_ms={:.3} intersection_ms={:.3} intersection_cache_entries={} intersection_indexes={} indexed_intersection_uses={} reachable_parts={} union_ms={:.3} union_sizes=[{},{},{},{},{},{},{}] max_union_size={} union_key_occurrences={} union_unique_keys={} union_key_repeats={} pushed_transitions={} apply_ms={:.3}",
             n,
             topo_ms,
             target_full,
             target_empty,
             target_partial,
+            subset_checks,
+            subset_hits,
+            subset_ms,
             intersection_ms,
             intersection_cache.len(),
             intersection_indexes.len(),
@@ -319,6 +383,174 @@ pub fn push_weights(dwa: &mut DWA) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
         );
     }
 
+    (changed, Some(topo), reachable)
+}
+
+struct ParallelPushStateResult {
+    state: usize,
+    reachable: Weight,
+    changes: Vec<(Label, u32, Option<Weight>)>,
+    target_full: usize,
+    target_empty: usize,
+    target_partial: usize,
+    pointer_hits: usize,
+    intersections: usize,
+    union_parts: usize,
+}
+
+/// Exact height-parallel form of [`push_weights`].
+///
+/// In an acyclic DWA, every transition from a state of height `h` targets a
+/// strictly lower height. Therefore all states at one height read only live
+/// domains finalized by earlier rounds and can compute their recurrence in
+/// parallel. Applying their edge rewrites after the round cannot affect any
+/// peer computation because no same-height edge exists.
+fn push_weights_parallel_by_height(
+    dwa: &mut DWA,
+) -> (bool, Option<Vec<usize>>, Vec<Weight>) {
+    let profile_enabled = weighted_dwa_minimize_profile_enabled();
+    let total_started_at = profile_enabled.then(Instant::now);
+    let n = dwa.states().len();
+    if n == 0 {
+        return (false, Some(Vec::new()), Vec::new());
+    }
+    let Some(topo) = compute_topo_order(dwa) else {
+        return (false, None, Vec::new());
+    };
+    let heights = compute_heights(dwa, &topo);
+    let max_height = heights.iter().copied().max().unwrap_or(0);
+    let mut states_by_height = vec![Vec::<usize>::new(); max_height + 1];
+    for (state, height) in heights.into_iter().enumerate() {
+        states_by_height[height].push(state);
+    }
+
+    let mut reachable = vec![Weight::empty(); n];
+    let mut changed = false;
+    let mut target_full = 0usize;
+    let mut target_empty = 0usize;
+    let mut target_partial = 0usize;
+    let mut pointer_hits = 0usize;
+    let mut intersections = 0usize;
+    let mut union_parts = 0usize;
+    let mut changed_transitions = 0usize;
+
+    for states in states_by_height {
+        let results = states
+            .par_iter()
+            .map(|&u| {
+                let state = &dwa.states()[u];
+                let mut parts = Vec::<Weight>::with_capacity(state.transitions.len() + 1);
+                let mut acc_full = false;
+                if let Some(final_weight) = &state.final_weight {
+                    if final_weight.is_full() {
+                        acc_full = true;
+                    } else if !final_weight.is_empty() {
+                        parts.push(final_weight.clone());
+                    }
+                }
+                let mut changes = Vec::new();
+                let mut local_target_full = 0usize;
+                let mut local_target_empty = 0usize;
+                let mut local_target_partial = 0usize;
+                let mut local_pointer_hits = 0usize;
+                let mut local_intersections = 0usize;
+                for (&label, (target, weight)) in &state.transitions {
+                    let target_index = *target as usize;
+                    if target_index >= n {
+                        continue;
+                    }
+                    let target_domain = &reachable[target_index];
+                    let contribution = if target_domain.is_full() {
+                        local_target_full += 1;
+                        weight.clone()
+                    } else if target_domain.is_empty() {
+                        local_target_empty += 1;
+                        changes.push((label, *target, None));
+                        continue;
+                    } else if weight.storage_ptr_eq(target_domain) {
+                        local_target_partial += 1;
+                        local_pointer_hits += 1;
+                        weight.clone()
+                    } else {
+                        local_target_partial += 1;
+                        local_intersections += 1;
+                        let intersection = weight.intersection(target_domain);
+                        if intersection != *weight {
+                            changes.push((
+                                label,
+                                *target,
+                                (!intersection.is_empty()).then(|| intersection.clone()),
+                            ));
+                        }
+                        intersection
+                    };
+                    if !acc_full && !contribution.is_empty() {
+                        if contribution.is_full() {
+                            acc_full = true;
+                            parts.clear();
+                        } else {
+                            parts.push(contribution);
+                        }
+                    }
+                }
+                let union_part_count = parts.len();
+                let state_reachable = if acc_full {
+                    Weight::all()
+                } else {
+                    Weight::union_all(parts.iter())
+                };
+                ParallelPushStateResult {
+                    state: u,
+                    reachable: state_reachable,
+                    changes,
+                    target_full: local_target_full,
+                    target_empty: local_target_empty,
+                    target_partial: local_target_partial,
+                    pointer_hits: local_pointer_hits,
+                    intersections: local_intersections,
+                    union_parts: union_part_count,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        for result in results {
+            reachable[result.state] = result.reachable;
+            target_full += result.target_full;
+            target_empty += result.target_empty;
+            target_partial += result.target_partial;
+            pointer_hits += result.pointer_hits;
+            intersections += result.intersections;
+            union_parts += result.union_parts;
+            changed_transitions += result.changes.len();
+            if !result.changes.is_empty() {
+                changed = true;
+                let state = &mut dwa.states_mut()[result.state];
+                for (label, target, replacement) in result.changes {
+                    if let Some(weight) = replacement {
+                        state.transitions.insert(label, (target, weight));
+                    } else {
+                        state.transitions.remove(&label);
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(started_at) = total_started_at {
+        eprintln!(
+            "[glrmask/profile][weighted_dwa_minimize_push_parallel] states={} heights={} target_full={} target_empty={} target_partial={} pointer_hits={} intersections={} union_parts={} changed_transitions={} total_ms={:.3}",
+            n,
+            max_height + 1,
+            target_full,
+            target_empty,
+            target_partial,
+            pointer_hits,
+            intersections,
+            union_parts,
+            changed_transitions,
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
     (changed, Some(topo), reachable)
 }
 
@@ -394,9 +626,14 @@ struct ProductiveTransition {
     weight: Weight,
 }
 
-fn compute_productive_transitions(dwa: &DWA, needed: &[Weight]) -> Vec<Vec<ProductiveTransition>> {
+fn compute_productive_transitions(
+    dwa: &DWA,
+    needed: &[Weight],
+    edges_already_productive: bool,
+) -> Vec<Vec<ProductiveTransition>> {
     let n = dwa.states().len();
     let mut result = Vec::with_capacity(n);
+    let mut cache = ScopedWeightOpCache::default();
 
     for state in dwa.states() {
         let mut transitions = Vec::with_capacity(state.transitions.len());
@@ -405,16 +642,37 @@ fn compute_productive_transitions(dwa: &DWA, needed: &[Weight]) -> Vec<Vec<Produ
             if t >= n {
                 continue;
             }
-            // After push_weights, all remaining transitions are already productive
-            // (w_pushed = w_orig ∩ reachable[t], and needed == reachable from push).
-            // The intersection w_pushed ∩ needed[t] = w_pushed, so just clone.
             if needed[t].is_empty() {
+                continue;
+            }
+            if edges_already_productive {
+                transitions.push(ProductiveTransition {
+                    label,
+                    target: *target,
+                    weight: weight.clone(),
+                });
+                continue;
+            }
+            // The productive relation is the only transition relation observed
+            // by minimization.  On the legacy path `weight` has already been
+            // pushed and this is normally an identity operation.  On the fused
+            // determinize/minimize path the DWA remains unmodified, so derive
+            // the exact same relation explicitly from the supplied live domain.
+            let productive_weight = if needed[t].is_full()
+                || weight.storage_ptr_eq(&needed[t])
+                || weight.is_subset(&needed[t])
+            {
+                weight.clone()
+            } else {
+                cache.intersection(weight, &needed[t])
+            };
+            if productive_weight.is_empty() {
                 continue;
             }
             transitions.push(ProductiveTransition {
                 label,
                 target: *target,
-                weight: weight.clone(),
+                weight: productive_weight,
             });
         }
         result.push(transitions);
@@ -1153,6 +1411,7 @@ struct PointwiseBehavior {
 #[derive(Default)]
 struct PointwiseBehaviorInterner {
     ids: FxHashMap<PointwiseBehavior, u32>,
+    values: Vec<PointwiseBehavior>,
 }
 
 impl PointwiseBehaviorInterner {
@@ -1162,8 +1421,13 @@ impl PointwiseBehaviorInterner {
             return id;
         }
         let id = self.ids.len() as u32;
+        self.values.push(behavior.clone());
         self.ids.insert(behavior, id);
         id
+    }
+
+    fn get(&self, id: u32) -> &PointwiseBehavior {
+        &self.values[id as usize]
     }
 }
 
@@ -1906,6 +2170,201 @@ fn build_pointwise_profile(
     Some(PointwiseProfile { by_tsid })
 }
 
+struct PointwiseProfileBuildOutput {
+    profiles: Vec<PointwiseProfile>,
+    behaviors: PointwiseBehaviorInterner,
+    regions: PointwiseRegionInterner,
+    cache_entries: usize,
+    cache_hits: usize,
+    cache_misses: usize,
+    parallel_chunks: usize,
+}
+
+struct LocalPointwiseProfileBuild {
+    profiles: Vec<PointwiseProfile>,
+    behaviors: Vec<PointwiseBehavior>,
+    cache_entries: usize,
+    cache_hits: usize,
+    cache_misses: usize,
+}
+
+fn build_pointwise_profiles_serial(
+    class_needed_union: &[Weight],
+    class_profiles: &[ClassProfile],
+) -> Option<PointwiseProfileBuildOutput> {
+    let mut behaviors = PointwiseBehaviorInterner::default();
+    let mut regions = PointwiseRegionInterner::default();
+    let mut build_cache = PointwiseRegionBuildCache::default();
+    let mut profiles = Vec::with_capacity(class_profiles.len());
+    for (domain, profile) in class_needed_union.iter().zip(class_profiles) {
+        profiles.push(build_pointwise_profile(
+            domain,
+            profile,
+            &mut behaviors,
+            &mut regions,
+            &mut build_cache,
+        )?);
+    }
+    Some(PointwiseProfileBuildOutput {
+        profiles,
+        behaviors,
+        regions,
+        cache_entries: build_cache.entries.len(),
+        cache_hits: build_cache.hits,
+        cache_misses: build_cache.misses,
+        parallel_chunks: 1,
+    })
+}
+
+/// Build exact pointwise profiles in deterministic contiguous chunks.
+///
+/// Each chunk owns its behavior/region interners, so profile construction is
+/// embarrassingly parallel. The merge phase maps every local behavior value to
+/// one global ID and rewrites every local immutable region through that map.
+/// Thus each resulting `(tsid, token) -> behavior value` function is identical
+/// to serial construction; only internal IDs and allocation order differ.
+fn build_pointwise_profiles_parallel(
+    class_needed_union: &[Weight],
+    class_profiles: &[ClassProfile],
+) -> Option<PointwiseProfileBuildOutput> {
+    debug_assert_eq!(class_needed_union.len(), class_profiles.len());
+    if class_profiles.is_empty() {
+        return Some(PointwiseProfileBuildOutput {
+            profiles: Vec::new(),
+            behaviors: PointwiseBehaviorInterner::default(),
+            regions: PointwiseRegionInterner::default(),
+            cache_entries: 0,
+            cache_hits: 0,
+            cache_misses: 0,
+            parallel_chunks: 0,
+        });
+    }
+
+    let workers = rayon::current_num_threads().max(1);
+    let desired_chunks = workers.min(class_profiles.len().div_ceil(32)).max(1);
+    if desired_chunks == 1 {
+        return build_pointwise_profiles_serial(class_needed_union, class_profiles);
+    }
+    let chunk_size = class_profiles.len().div_ceil(desired_chunks);
+    let local_chunks = class_needed_union
+        .par_chunks(chunk_size)
+        .zip(class_profiles.par_chunks(chunk_size))
+        .map(|(domains, profiles)| {
+            let mut behaviors = PointwiseBehaviorInterner::default();
+            let mut regions = PointwiseRegionInterner::default();
+            let mut build_cache = PointwiseRegionBuildCache::default();
+            let profiles = domains
+                .iter()
+                .zip(profiles)
+                .map(|(domain, profile)| {
+                    build_pointwise_profile(
+                        domain,
+                        profile,
+                        &mut behaviors,
+                        &mut regions,
+                        &mut build_cache,
+                    )
+                })
+                .collect::<Option<Vec<_>>>()?;
+            Some(LocalPointwiseProfileBuild {
+                profiles,
+                behaviors: behaviors.values,
+                cache_entries: build_cache.entries.len(),
+                cache_hits: build_cache.hits,
+                cache_misses: build_cache.misses,
+            })
+        })
+        .collect::<Vec<_>>();
+    if local_chunks.iter().any(Option::is_none) {
+        return None;
+    }
+
+    let mut global_behaviors = PointwiseBehaviorInterner::default();
+    let mut global_regions = PointwiseRegionInterner::default();
+    let mut merged_profiles = Vec::with_capacity(class_profiles.len());
+    let mut cache_entries = 0usize;
+    let mut cache_hits = 0usize;
+    let mut cache_misses = 0usize;
+    let parallel_chunks = local_chunks.len();
+
+    for local in local_chunks.into_iter().map(Option::unwrap) {
+        cache_entries += local.cache_entries;
+        cache_hits += local.cache_hits;
+        cache_misses += local.cache_misses;
+        let local_to_global = local
+            .behaviors
+            .iter()
+            .map(|behavior| {
+                global_behaviors.intern(
+                    behavior.final_active,
+                    behavior.transitions.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut remapped_regions = FxHashMap::<usize, Arc<Vec<TokenBehaviorRange>>>::default();
+        for profile in local.profiles {
+            let mut by_tsid = Vec::with_capacity(profile.by_tsid.len());
+            for (tsid, local_region) in profile.by_tsid {
+                let key = Arc::as_ptr(&local_region) as usize;
+                let global_region = remapped_regions
+                    .entry(key)
+                    .or_insert_with(|| {
+                        let remapped = local_region
+                            .iter()
+                            .map(|range| TokenBehaviorRange {
+                                start: range.start,
+                                end: range.end,
+                                behavior: local_to_global[range.behavior as usize],
+                            })
+                            .collect::<Vec<_>>();
+                        global_regions.intern(remapped)
+                    })
+                    .clone();
+                by_tsid.push((tsid, global_region));
+            }
+            merged_profiles.push(PointwiseProfile { by_tsid });
+        }
+    }
+
+    Some(PointwiseProfileBuildOutput {
+        profiles: merged_profiles,
+        behaviors: global_behaviors,
+        regions: global_regions,
+        cache_entries,
+        cache_hits,
+        cache_misses,
+        parallel_chunks,
+    })
+}
+
+fn pointwise_profiles_equal_by_value(
+    left_profiles: &[PointwiseProfile],
+    left_behaviors: &PointwiseBehaviorInterner,
+    right_profiles: &[PointwiseProfile],
+    right_behaviors: &PointwiseBehaviorInterner,
+) -> bool {
+    left_profiles.len() == right_profiles.len()
+        && left_profiles.iter().zip(right_profiles).all(|(left, right)| {
+            left.by_tsid.len() == right.by_tsid.len()
+                && left
+                    .by_tsid
+                    .iter()
+                    .zip(&right.by_tsid)
+                    .all(|((left_tsid, left_region), (right_tsid, right_region))| {
+                        left_tsid == right_tsid
+                            && left_region.len() == right_region.len()
+                            && left_region.iter().zip(right_region.iter()).all(
+                                |(left_range, right_range)| {
+                                    left_range.start == right_range.start
+                                        && left_range.end == right_range.end
+                                        && left_behaviors.get(left_range.behavior)
+                                            == right_behaviors.get(right_range.behavior)
+                                },
+                            )
+                    })
+        })
+}
+
 /// Range-compressed equivalent of [`build_pointwise_profile`].
 ///
 /// Every point in one emitted TSID interval observes the same final and
@@ -2107,6 +2566,1051 @@ fn merge_pointwise_profile_into_group(
 ) {
     group.behavior_by_tsid.merge_profile(profile, regions);
 }
+
+fn pointwise_conflict_graph_coloring(
+    class_profiles: &[ClassProfile],
+    pointwise_profiles: &[PointwiseProfile],
+    class_order: &[usize],
+) -> (Vec<usize>, usize, usize, usize, usize) {
+    fn profiles_compatible(left: &PointwiseProfile, right: &PointwiseProfile) -> bool {
+        let mut left_index = 0usize;
+        let mut right_index = 0usize;
+        while left_index < left.by_tsid.len() && right_index < right.by_tsid.len() {
+            let (left_tsid, left_region) = &left.by_tsid[left_index];
+            let (right_tsid, right_region) = &right.by_tsid[right_index];
+            if left_tsid < right_tsid {
+                left_index += 1;
+            } else if right_tsid < left_tsid {
+                right_index += 1;
+            } else {
+                if !Arc::ptr_eq(left_region, right_region)
+                    && !token_behavior_ranges_compatible(
+                        left_region.as_ref(),
+                        right_region.as_ref(),
+                    )
+                {
+                    return false;
+                }
+                left_index += 1;
+                right_index += 1;
+            }
+        }
+        true
+    }
+
+    fn mark_conflict(conflicts: &mut [Vec<u64>], left: usize, right: usize) {
+        debug_assert_ne!(left, right);
+        let (left_words, right_words) = if left < right {
+            let (before, after) = conflicts.split_at_mut(right);
+            (&mut before[left], &mut after[0])
+        } else {
+            let (before, after) = conflicts.split_at_mut(left);
+            (&mut after[0], &mut before[right])
+        };
+        left_words[right >> 6] |= 1u64 << (right & 63);
+        right_words[left >> 6] |= 1u64 << (left & 63);
+    }
+
+    let class_count = class_profiles.len();
+    let words = class_count.div_ceil(64);
+    let mut conflicts = vec![vec![0u64; words]; class_count];
+    let mut target_conflicts = 0usize;
+
+    for left in 0..class_count {
+        for right in left + 1..class_count {
+            if !sorted_targets_compatible(
+                &class_profiles[left].targets,
+                &class_profiles[right].targets,
+            ) {
+                mark_conflict(&mut conflicts, left, right);
+                target_conflicts += 1;
+            }
+        }
+    }
+
+    let max_tsid = pointwise_profiles
+        .iter()
+        .flat_map(|profile| profile.by_tsid.iter().map(|(tsid, _)| *tsid))
+        .max()
+        .unwrap_or(0);
+    let mut region_ids = FxHashMap::<usize, usize>::default();
+    let mut region_values = Vec::<Arc<Vec<TokenBehaviorRange>>>::new();
+    let mut active_by_tsid = vec![Vec::<(usize, usize)>::new(); max_tsid as usize + 1];
+    for (class, profile) in pointwise_profiles.iter().enumerate() {
+        for (tsid, region) in &profile.by_tsid {
+            let region_id = *region_ids
+                .entry(Arc::as_ptr(region) as usize)
+                .or_insert_with(|| {
+                    let id = region_values.len();
+                    region_values.push(Arc::clone(region));
+                    id
+                });
+            active_by_tsid[*tsid as usize].push((class, region_id));
+        }
+    }
+    let region_count = region_values.len();
+    let mut compatible_regions = vec![false; region_count * region_count];
+    for left in 0..region_count {
+        for right in left..region_count {
+            let compatible = left == right
+                || token_behavior_ranges_compatible(
+                    region_values[left].as_ref(),
+                    region_values[right].as_ref(),
+                );
+            compatible_regions[left * region_count + right] = compatible;
+            compatible_regions[right * region_count + left] = compatible;
+        }
+    }
+
+    let accumulate = |active_slice: &[Vec<(usize, usize)>]| {
+        let mut local_conflicts = vec![vec![0u64; words]; class_count];
+        let mut behavior_conflicts = 0usize;
+        let mut members_by_region = vec![Vec::<usize>::new(); region_count];
+        let mut member_bits_by_region = vec![vec![0u64; words]; region_count];
+        let mut used_regions = Vec::<usize>::new();
+        for active in active_slice {
+            used_regions.clear();
+            for &(class, region) in active {
+                if members_by_region[region].is_empty() {
+                    used_regions.push(region);
+                }
+                members_by_region[region].push(class);
+                member_bits_by_region[region][class >> 6] |= 1u64 << (class & 63);
+            }
+            for left_index in 0..used_regions.len() {
+                let left_region = used_regions[left_index];
+                for &right_region in &used_regions[left_index + 1..] {
+                    if compatible_regions[left_region * region_count + right_region] {
+                        continue;
+                    }
+                    behavior_conflicts += members_by_region[left_region].len()
+                        * members_by_region[right_region].len();
+                    for &class in &members_by_region[left_region] {
+                        for (dst, add) in local_conflicts[class]
+                            .iter_mut()
+                            .zip(&member_bits_by_region[right_region])
+                        {
+                            *dst |= *add;
+                        }
+                    }
+                    for &class in &members_by_region[right_region] {
+                        for (dst, add) in local_conflicts[class]
+                            .iter_mut()
+                            .zip(&member_bits_by_region[left_region])
+                        {
+                            *dst |= *add;
+                        }
+                    }
+                }
+            }
+            for region in used_regions.drain(..) {
+                members_by_region[region].clear();
+                member_bits_by_region[region].fill(0);
+            }
+        }
+        (local_conflicts, behavior_conflicts)
+    };
+
+    let parallel_requested = std::env::var("GLRMASK_WEIGHTED_MINIMIZE_PARALLEL_CONFLICT_GRAPH")
+        .map(|value| {
+            let value = value.trim();
+            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false);
+    let parallel_chunks = if parallel_requested && class_count >= 128 {
+        rayon::current_num_threads()
+            .min(active_by_tsid.len().div_ceil(32))
+            .max(1)
+    } else {
+        1
+    };
+    let (behavior_matrix, behavior_conflicts) = if parallel_chunks > 1 {
+        let chunk_size = active_by_tsid.len().div_ceil(parallel_chunks);
+        active_by_tsid
+            .par_chunks(chunk_size)
+            .map(accumulate)
+            .reduce(
+                || (vec![vec![0u64; words]; class_count], 0usize),
+                |(mut left_matrix, left_count), (right_matrix, right_count)| {
+                    for (left_row, right_row) in left_matrix.iter_mut().zip(right_matrix) {
+                        for (left, right) in left_row.iter_mut().zip(right_row) {
+                            *left |= right;
+                        }
+                    }
+                    (left_matrix, left_count + right_count)
+                },
+            )
+    } else {
+        accumulate(&active_by_tsid)
+    };
+    for (row, add) in conflicts.iter_mut().zip(behavior_matrix) {
+        for (dst, value) in row.iter_mut().zip(add) {
+            *dst |= value;
+        }
+    }
+
+    if std::env::var_os("GLRMASK_VALIDATE_POINTWISE_CONFLICT_GRAPH").is_some() {
+        for left in 0..class_count {
+            for right in left + 1..class_count {
+                let graph_conflict = conflicts[left][right >> 6] & (1u64 << (right & 63)) != 0;
+                let direct_compatible = sorted_targets_compatible(
+                    &class_profiles[left].targets,
+                    &class_profiles[right].targets,
+                ) && profiles_compatible(
+                    &pointwise_profiles[left],
+                    &pointwise_profiles[right],
+                );
+                assert_eq!(
+                    graph_conflict,
+                    !direct_compatible,
+                    "pointwise conflict graph disagreed for classes {left} and {right}"
+                );
+            }
+        }
+    }
+
+    let mut group_members = Vec::<Vec<u64>>::new();
+    let mut class_to_group = vec![usize::MAX; class_count];
+    for &class in class_order {
+        let group = group_members
+            .iter()
+            .position(|members| {
+                members
+                    .iter()
+                    .zip(&conflicts[class])
+                    .all(|(members, conflicts)| members & conflicts == 0)
+            })
+            .unwrap_or_else(|| {
+                group_members.push(vec![0u64; words]);
+                group_members.len() - 1
+            });
+        group_members[group][class >> 6] |= 1u64 << (class & 63);
+        class_to_group[class] = group;
+    }
+
+    (
+        class_to_group,
+        group_members.len(),
+        target_conflicts,
+        behavior_conflicts,
+        parallel_chunks,
+    )
+}
+
+/// Build the exact incompatibility graph directly from partial weighted
+/// behaviors, without materializing a pointwise `(tsid, token) -> behavior`
+/// profile for every class.
+///
+/// At one acyclic height all transition targets have already been quotiented.
+/// Each class therefore denotes a partial deterministic function on its live
+/// token domain: a final bit plus at most one quotient target per label. Two
+/// classes are mergeable exactly when their target maps are compatible and
+/// those partial functions agree on the intersection of their live domains.
+/// Pairwise compatibility is sufficient for a whole group because pairwise
+/// consistent partial functions have one well-defined union.
+fn domain_conflict_graph_coloring(
+    class_profiles: &[ClassProfile],
+    class_domains: &[Weight],
+    class_order: &[usize],
+) -> (Vec<usize>, usize, usize, usize, usize) {
+    fn mark_conflict(conflicts: &mut [Vec<u64>], left: usize, right: usize) {
+        debug_assert_ne!(left, right);
+        let (left_words, right_words) = if left < right {
+            let (before, after) = conflicts.split_at_mut(right);
+            (&mut before[left], &mut after[0])
+        } else {
+            let (before, after) = conflicts.split_at_mut(left);
+            (&mut after[0], &mut before[right])
+        };
+        left_words[right >> 6] |= 1u64 << (right & 63);
+        right_words[left >> 6] |= 1u64 << (left & 63);
+    }
+
+    debug_assert_eq!(class_profiles.len(), class_domains.len());
+    let class_count = class_profiles.len();
+    let words = class_count.div_ceil(64);
+    let mut conflicts = vec![vec![0u64; words]; class_count];
+    let mut target_conflicts = 0usize;
+    let mut overlap_pairs = 0usize;
+    let mut behavior_conflicts = 0usize;
+
+    for left in 0..class_count {
+        for right in left + 1..class_count {
+            if !sorted_targets_compatible(
+                &class_profiles[left].targets,
+                &class_profiles[right].targets,
+            ) {
+                mark_conflict(&mut conflicts, left, right);
+                target_conflicts += 1;
+                continue;
+            }
+
+            if class_domains[left].is_disjoint(&class_domains[right]) {
+                continue;
+            }
+            overlap_pairs += 1;
+
+            let compatible = final_weights_compatible_on_domain_intersection(
+                class_profiles[left].final_weight.as_ref(),
+                class_profiles[right].final_weight.as_ref(),
+                &class_domains[left],
+                &class_domains[right],
+            ) && sorted_weights_compatible_on_domain_intersection(
+                &class_profiles[left].weights,
+                &class_profiles[right].weights,
+                &class_domains[left],
+                &class_domains[right],
+            );
+            if !compatible {
+                mark_conflict(&mut conflicts, left, right);
+                behavior_conflicts += 1;
+            }
+        }
+    }
+
+    let mut group_members = Vec::<Vec<u64>>::new();
+    let mut class_to_group = vec![usize::MAX; class_count];
+    for &class in class_order {
+        let group = group_members
+            .iter()
+            .position(|members| {
+                members
+                    .iter()
+                    .zip(&conflicts[class])
+                    .all(|(members, conflicts)| members & conflicts == 0)
+            })
+            .unwrap_or_else(|| {
+                group_members.push(vec![0u64; words]);
+                group_members.len() - 1
+            });
+        group_members[group][class >> 6] |= 1u64 << (class & 63);
+        class_to_group[class] = group;
+    }
+
+    (
+        class_to_group,
+        group_members.len(),
+        target_conflicts,
+        overlap_pairs,
+        behavior_conflicts,
+    )
+}
+
+#[derive(Clone, Copy)]
+struct PointwiseBehaviorEvent {
+    position: u64,
+    class: usize,
+    component: i32,
+    add: bool,
+}
+
+fn append_weight_behavior_events(
+    events_by_tsid: &mut BTreeMap<u32, Vec<PointwiseBehaviorEvent>>,
+    class: usize,
+    component: i32,
+    weight: &Weight,
+) -> bool {
+    if weight.is_full() {
+        return false;
+    }
+    for (tsid_range, tokens) in weight.raw_range_values() {
+        let mut tsid = *tsid_range.start();
+        loop {
+            let events = events_by_tsid.entry(tsid).or_default();
+            for token_range in tokens.ranges() {
+                events.push(PointwiseBehaviorEvent {
+                    position: u64::from(*token_range.start()),
+                    class,
+                    component,
+                    add: true,
+                });
+                events.push(PointwiseBehaviorEvent {
+                    position: u64::from(*token_range.end()) + 1,
+                    class,
+                    component,
+                    add: false,
+                });
+            }
+            if tsid == *tsid_range.end() {
+                break;
+            }
+            tsid += 1;
+        }
+    }
+    true
+}
+
+/// Exact conflict graph from one global sweep of weighted behavior events.
+///
+/// For a fixed `(tsid, token)` point, every class denotes either no function
+/// (outside its live domain) or one deterministic behavior: a final bit and a
+/// sorted list of `(label, quotient target)` pairs. Classes with distinct
+/// behaviors at the same point conflict; equal behaviors agree there. Sweeping
+/// all event boundaries therefore records exactly the same incompatibility
+/// relation as materializing one complete pointwise profile per class, but its
+/// work is proportional to weight-range events and actual behavior changes.
+fn event_conflict_graph_coloring(
+    class_profiles: &[ClassProfile],
+    class_domains: &[Weight],
+    class_order: &[usize],
+) -> Option<(Vec<usize>, usize, usize, usize, usize)> {
+    fn mark_conflict(conflicts: &mut [Vec<u64>], left: usize, right: usize) {
+        debug_assert_ne!(left, right);
+        let (left_words, right_words) = if left < right {
+            let (before, after) = conflicts.split_at_mut(right);
+            (&mut before[left], &mut after[0])
+        } else {
+            let (before, after) = conflicts.split_at_mut(left);
+            (&mut after[0], &mut before[right])
+        };
+        left_words[right >> 6] |= 1u64 << (right & 63);
+        right_words[left >> 6] |= 1u64 << (left & 63);
+    }
+
+    fn mark_cross_conflicts(
+        conflicts: &mut [Vec<u64>],
+        left: &[u64],
+        right: &[u64],
+    ) -> usize {
+        let mut pairs = 0usize;
+        for (word_index, &word) in left.iter().enumerate() {
+            let mut remaining = word;
+            while remaining != 0 {
+                let bit = remaining.trailing_zeros() as usize;
+                let class = word_index * 64 + bit;
+                for (dst, add) in conflicts[class].iter_mut().zip(right) {
+                    *dst |= *add;
+                }
+                pairs += right.iter().map(|word| word.count_ones() as usize).sum::<usize>();
+                remaining &= remaining - 1;
+            }
+        }
+        for (word_index, &word) in right.iter().enumerate() {
+            let mut remaining = word;
+            while remaining != 0 {
+                let bit = remaining.trailing_zeros() as usize;
+                let class = word_index * 64 + bit;
+                for (dst, add) in conflicts[class].iter_mut().zip(left) {
+                    *dst |= *add;
+                }
+                remaining &= remaining - 1;
+            }
+        }
+        pairs
+    }
+
+    const DOMAIN_COMPONENT: i32 = -2;
+    const FINAL_COMPONENT: i32 = -1;
+
+    debug_assert_eq!(class_profiles.len(), class_domains.len());
+    let class_count = class_profiles.len();
+    let words = class_count.div_ceil(64);
+    let mut conflicts = vec![vec![0u64; words]; class_count];
+    let mut target_conflicts = 0usize;
+    for left in 0..class_count {
+        for right in left + 1..class_count {
+            if !sorted_targets_compatible(
+                &class_profiles[left].targets,
+                &class_profiles[right].targets,
+            ) {
+                mark_conflict(&mut conflicts, left, right);
+                target_conflicts += 1;
+            }
+        }
+    }
+
+    let mut transition_descriptors = Vec::<Vec<(Label, u32)>>::with_capacity(class_count);
+    let mut events_by_tsid = BTreeMap::<u32, Vec<PointwiseBehaviorEvent>>::new();
+    for class in 0..class_count {
+        if !append_weight_behavior_events(
+            &mut events_by_tsid,
+            class,
+            DOMAIN_COMPONENT,
+            &class_domains[class],
+        ) {
+            return None;
+        }
+        if let Some(final_weight) = &class_profiles[class].final_weight
+            && !append_weight_behavior_events(
+                &mut events_by_tsid,
+                class,
+                FINAL_COMPONENT,
+                final_weight,
+            )
+        {
+            return None;
+        }
+
+        let mut descriptors = Vec::with_capacity(class_profiles[class].weights.len());
+        for (index, (label, weight)) in class_profiles[class].weights.iter().enumerate() {
+            let target = profile_target_for_label(&class_profiles[class], *label)?;
+            descriptors.push((*label, target));
+            if !append_weight_behavior_events(
+                &mut events_by_tsid,
+                class,
+                index as i32,
+                weight,
+            ) {
+                return None;
+            }
+        }
+        transition_descriptors.push(descriptors);
+    }
+
+    let mut interner = PointwiseBehaviorInterner::default();
+    let mut behavior_conflict_pairs = 0usize;
+    let mut interval_count = 0usize;
+    for (_, mut events) in events_by_tsid {
+        events.sort_unstable_by_key(|event| event.position);
+        let mut domain_active = vec![false; class_count];
+        let mut final_active = vec![false; class_count];
+        let mut transition_active = transition_descriptors
+            .iter()
+            .map(|transitions| vec![false; transitions.len()])
+            .collect::<Vec<_>>();
+        let mut class_behavior = vec![None::<u32>; class_count];
+        let mut members_by_behavior = Vec::<Vec<u64>>::new();
+        let mut affected = Vec::<usize>::new();
+        let mut affected_mark = vec![false; class_count];
+
+        let mut event_index = 0usize;
+        while event_index < events.len() {
+            let position = events[event_index].position;
+            let mut event_end = event_index + 1;
+            while event_end < events.len() && events[event_end].position == position {
+                event_end += 1;
+            }
+
+            affected.clear();
+            for event in &events[event_index..event_end] {
+                if !affected_mark[event.class] {
+                    affected_mark[event.class] = true;
+                    affected.push(event.class);
+                    if let Some(behavior) = class_behavior[event.class].take() {
+                        members_by_behavior[behavior as usize][event.class >> 6] &=
+                            !(1u64 << (event.class & 63));
+                    }
+                }
+            }
+
+            for event in &events[event_index..event_end] {
+                match event.component {
+                    DOMAIN_COMPONENT => domain_active[event.class] = event.add,
+                    FINAL_COMPONENT => final_active[event.class] = event.add,
+                    component => {
+                        transition_active[event.class][component as usize] = event.add;
+                    }
+                }
+            }
+
+            for &class in &affected {
+                affected_mark[class] = false;
+                if !domain_active[class] {
+                    continue;
+                }
+                let transitions = transition_descriptors[class]
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, value)| transition_active[class][index].then_some(*value))
+                    .collect::<Vec<_>>();
+                if !final_active[class] && transitions.is_empty() {
+                    return None;
+                }
+                let behavior = interner.intern(final_active[class], transitions);
+                if members_by_behavior.len() <= behavior as usize {
+                    members_by_behavior
+                        .resize_with(behavior as usize + 1, || vec![0u64; words]);
+                }
+                members_by_behavior[behavior as usize][class >> 6] |=
+                    1u64 << (class & 63);
+                class_behavior[class] = Some(behavior);
+            }
+
+            let next_position = events.get(event_end).map(|event| event.position);
+            if next_position.is_some_and(|next| next > position) {
+                interval_count += 1;
+                let active_behaviors = members_by_behavior
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(behavior, members)| {
+                        members.iter().any(|word| *word != 0).then_some((behavior, members))
+                    })
+                    .collect::<Vec<_>>();
+                for left in 0..active_behaviors.len() {
+                    for right in left + 1..active_behaviors.len() {
+                        behavior_conflict_pairs += mark_cross_conflicts(
+                            &mut conflicts,
+                            active_behaviors[left].1,
+                            active_behaviors[right].1,
+                        );
+                    }
+                }
+            }
+            event_index = event_end;
+        }
+    }
+
+    let mut group_members = Vec::<Vec<u64>>::new();
+    let mut class_to_group = vec![usize::MAX; class_count];
+    for &class in class_order {
+        let group = group_members
+            .iter()
+            .position(|members| {
+                members
+                    .iter()
+                    .zip(&conflicts[class])
+                    .all(|(members, conflicts)| members & conflicts == 0)
+            })
+            .unwrap_or_else(|| {
+                group_members.push(vec![0u64; words]);
+                group_members.len() - 1
+            });
+        group_members[group][class >> 6] |= 1u64 << (class & 63);
+        class_to_group[class] = group;
+    }
+
+    Some((
+        class_to_group,
+        group_members.len(),
+        target_conflicts,
+        interval_count,
+        behavior_conflict_pairs,
+    ))
+}
+
+enum GroupCompatibilityWitness {
+    Target(Label),
+    Point { tsid: u32, token: u32 },
+}
+
+fn first_weight_point(weight: &Weight) -> Option<(u32, u32)> {
+    if weight.is_empty() || weight.is_full() {
+        return None;
+    }
+    let (tsid_range, tokens) = weight.raw_range_values().next()?;
+    let token_range = tokens.ranges().next()?;
+    Some((*tsid_range.start(), *token_range.start()))
+}
+
+fn weight_contains_point(weight: &Weight, tsid: u32, token: u32) -> bool {
+    if weight.is_full() {
+        return true;
+    }
+    weight
+        .token_set_for_tsid_ref(tsid)
+        .is_some_and(|tokens| tokens.contains(token))
+}
+
+fn profile_weight_for_label(profile: &ClassProfile, label: Label) -> Option<&Weight> {
+    profile
+        .weights
+        .binary_search_by_key(&label, |(candidate, _)| *candidate)
+        .ok()
+        .map(|index| &profile.weights[index].1)
+}
+
+/// Prove that all classes in `members` define one compatible partial
+/// deterministic behavior, or return one exact separating witness.
+///
+/// For a boolean observable component `c` (finality or one labelled edge), let
+/// `W_i,c` be the tokens where class `i` exposes that component and `D_i` its
+/// live domain. The component agrees across every overlapping class iff
+///
+///   union_i W_i,c  ∩  union_i (D_i \ W_i,c) = empty.
+///
+/// The forward direction is immediate: a point in the intersection witnesses
+/// one active class with `c` and one active class without it. Conversely, any
+/// disagreement supplies exactly such a point. Checking every component plus
+/// the token-independent target-map condition is therefore necessary and
+/// sufficient for whole-group compatibility.
+fn prove_group_compatible_or_witness(
+    members: &[usize],
+    class_profiles: &[ClassProfile],
+    class_domains: &[Weight],
+) -> Result<(), GroupCompatibilityWitness> {
+    if members.len() <= 1 {
+        return Ok(());
+    }
+    if members
+        .iter()
+        .any(|&class| class_domains[class].is_full())
+    {
+        // The finite event/set representation deliberately does not invent a
+        // universe for the all sentinel. Let the established pointwise path
+        // handle that uncommon case.
+        return Err(GroupCompatibilityWitness::Point {
+            tsid: u32::MAX,
+            token: u32::MAX,
+        });
+    }
+
+    let mut target_by_label = BTreeMap::<Label, u32>::new();
+    for &class in members {
+        for &(label, target) in &class_profiles[class].targets {
+            match target_by_label.entry(label) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(target);
+                }
+                std::collections::btree_map::Entry::Occupied(entry)
+                    if *entry.get() != target =>
+                {
+                    return Err(GroupCompatibilityWitness::Target(label));
+                }
+                std::collections::btree_map::Entry::Occupied(_) => {}
+            }
+        }
+    }
+
+    let mut components = Vec::<Option<Label>>::with_capacity(target_by_label.len() + 1);
+    components.push(None); // finality
+    components.extend(target_by_label.keys().copied().map(Some));
+
+    for component in components {
+        let mut positive = Vec::<&Weight>::new();
+        let mut negative = Vec::<Weight>::with_capacity(members.len());
+        for &class in members {
+            let domain = &class_domains[class];
+            let component_weight = match component {
+                None => class_profiles[class].final_weight.as_ref(),
+                Some(label) => profile_weight_for_label(&class_profiles[class], label),
+            };
+            if let Some(weight) = component_weight {
+                debug_assert!(weight.is_subset(domain));
+                if !weight.is_empty() {
+                    positive.push(weight);
+                }
+                let absent = domain.difference(weight);
+                if !absent.is_empty() {
+                    negative.push(absent);
+                }
+            } else {
+                negative.push(domain.clone());
+            }
+        }
+        if positive.is_empty() || negative.is_empty() {
+            continue;
+        }
+        let positive_union = Weight::union_all(positive);
+        let negative_union = Weight::union_all(negative.iter());
+        let disagreement = positive_union.intersection(&negative_union);
+        if let Some((tsid, token)) = first_weight_point(&disagreement) {
+            return Err(GroupCompatibilityWitness::Point { tsid, token });
+        }
+    }
+    Ok(())
+}
+
+fn class_behavior_at_point(
+    class: usize,
+    tsid: u32,
+    token: u32,
+    class_profiles: &[ClassProfile],
+    class_domains: &[Weight],
+) -> Option<PointwiseBehavior> {
+    if !weight_contains_point(&class_domains[class], tsid, token) {
+        return None;
+    }
+    let final_active = class_profiles[class]
+        .final_weight
+        .as_ref()
+        .is_some_and(|weight| weight_contains_point(weight, tsid, token));
+    let transitions = class_profiles[class]
+        .weights
+        .iter()
+        .filter_map(|(label, weight)| {
+            weight_contains_point(weight, tsid, token).then(|| {
+                (
+                    *label,
+                    profile_target_for_label(&class_profiles[class], *label)
+                        .expect("class transition weight must retain its target"),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    debug_assert!(final_active || !transitions.is_empty());
+    Some(PointwiseBehavior {
+        final_active,
+        transitions,
+    })
+}
+
+/// Recursively partition classes using only global compatibility proofs and
+/// concrete counterexamples. Every emitted group has passed the complete set
+/// identity above, so the quotient is exact even if the partition differs from
+/// the historical greedy coloring.
+fn recursive_witness_coloring(
+    class_profiles: &[ClassProfile],
+    class_domains: &[Weight],
+    class_order: &[usize],
+) -> Option<(Vec<usize>, usize, usize)> {
+    let mut pending = vec![class_order.to_vec()];
+    let mut groups = Vec::<Vec<usize>>::new();
+    let mut proof_count = 0usize;
+    let mut witness_count = 0usize;
+
+    while let Some(members) = pending.pop() {
+        proof_count += 1;
+        match prove_group_compatible_or_witness(&members, class_profiles, class_domains) {
+            Ok(()) => groups.push(members),
+            Err(GroupCompatibilityWitness::Target(label)) => {
+                witness_count += 1;
+                let mut split = Vec::<(u32, Vec<usize>)>::new();
+                let mut by_target = FxHashMap::<u32, usize>::default();
+                let mut inactive = Vec::new();
+                for class in members {
+                    if let Some(target) = profile_target_for_label(&class_profiles[class], label) {
+                        let index = *by_target.entry(target).or_insert_with(|| {
+                            let index = split.len();
+                            split.push((target, Vec::new()));
+                            index
+                        });
+                        split[index].1.push(class);
+                    } else {
+                        inactive.push(class);
+                    }
+                }
+                if split.len() < 2 {
+                    return None;
+                }
+                let largest = split
+                    .iter()
+                    .enumerate()
+                    .max_by_key(|(_, (_, group))| group.len())
+                    .map(|(index, _)| index)
+                    .unwrap();
+                split[largest].1.extend(inactive);
+                pending.extend(split.into_iter().map(|(_, group)| group));
+            }
+            Err(GroupCompatibilityWitness::Point { tsid, token }) => {
+                if tsid == u32::MAX && token == u32::MAX {
+                    return None;
+                }
+                witness_count += 1;
+                let mut behavior_ids = FxHashMap::<PointwiseBehavior, usize>::default();
+                let mut split = Vec::<Vec<usize>>::new();
+                let mut inactive = Vec::new();
+                for class in members {
+                    if let Some(behavior) = class_behavior_at_point(
+                        class,
+                        tsid,
+                        token,
+                        class_profiles,
+                        class_domains,
+                    ) {
+                        let index = *behavior_ids.entry(behavior).or_insert_with(|| {
+                            let index = split.len();
+                            split.push(Vec::new());
+                            index
+                        });
+                        split[index].push(class);
+                    } else {
+                        inactive.push(class);
+                    }
+                }
+                if split.len() < 2 {
+                    return None;
+                }
+                let largest = split
+                    .iter()
+                    .enumerate()
+                    .max_by_key(|(_, group)| group.len())
+                    .map(|(index, _)| index)
+                    .unwrap();
+                split[largest].extend(inactive);
+                pending.extend(split);
+            }
+        }
+    }
+
+    let mut class_to_group = vec![usize::MAX; class_profiles.len()];
+    for (group, members) in groups.iter().enumerate() {
+        // Re-prove every leaf independently. This is cheap for the final small
+        // number of groups and makes the construction fail closed.
+        if prove_group_compatible_or_witness(members, class_profiles, class_domains).is_err() {
+            return None;
+        }
+        for &class in members {
+            class_to_group[class] = group;
+        }
+    }
+    Some((class_to_group, proof_count, witness_count))
+}
+
+struct HybridColoring {
+    colors: Vec<usize>,
+    direct_builders: Option<Vec<MergedStateBuilder>>,
+}
+
+impl HybridColoring {
+    fn colors(colors: Vec<usize>) -> Self {
+        Self {
+            colors,
+            direct_builders: None,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct DecodedPointwiseRegion {
+    final_tokens: Option<SharedTokenSet>,
+    transitions: Vec<(Label, u32, SharedTokenSet)>,
+}
+
+fn decode_pointwise_region(
+    region: &Arc<Vec<TokenBehaviorRange>>,
+    behaviors: &PointwiseBehaviorInterner,
+) -> DecodedPointwiseRegion {
+    let mut final_ranges = Vec::new();
+    let mut transition_ranges = BTreeMap::<(Label, u32), Vec<std::ops::RangeInclusive<u32>>>::new();
+    for token_range in region.iter() {
+        let behavior = behaviors.get(token_range.behavior);
+        if behavior.final_active {
+            final_ranges.push(token_range.start..=token_range.end);
+        }
+        for &(label, target) in &behavior.transitions {
+            transition_ranges
+                .entry((label, target))
+                .or_default()
+                .push(token_range.start..=token_range.end);
+        }
+    }
+    let final_tokens = (!final_ranges.is_empty())
+        .then(|| shared_rangeset(final_ranges.into_iter().collect::<RangeSetBlaze<u32>>()));
+    let transitions = transition_ranges
+        .into_iter()
+        .map(|((label, target), ranges)| {
+            (
+                label,
+                target,
+                shared_rangeset(ranges.into_iter().collect::<RangeSetBlaze<u32>>()),
+            )
+        })
+        .collect();
+    DecodedPointwiseRegion {
+        final_tokens,
+        transitions,
+    }
+}
+
+fn direct_builders_from_pointwise_groups(
+    class_to_group: &[usize],
+    group_count: usize,
+    pointwise_profiles: &[PointwiseProfile],
+    behavior_map_layout: PointwiseBehaviorMapLayout,
+    behaviors: &PointwiseBehaviorInterner,
+    regions: &mut PointwiseRegionInterner,
+) -> Vec<MergedStateBuilder> {
+    let mut group_maps = (0..group_count)
+        .map(|_| PointwiseBehaviorMap::new(behavior_map_layout))
+        .collect::<Vec<_>>();
+    for (class, profile) in pointwise_profiles.iter().enumerate() {
+        group_maps[class_to_group[class]].merge_profile(profile, regions);
+    }
+
+    let mut decoded = FxHashMap::<usize, DecodedPointwiseRegion>::default();
+    group_maps
+        .into_iter()
+        .map(|group_map| {
+            let mut entries = match group_map {
+                PointwiseBehaviorMap::Sparse(entries) => entries.into_iter().collect::<Vec<_>>(),
+                PointwiseBehaviorMap::Dense(entries) => entries
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(tsid, region)| region.map(|region| (tsid as u32, region)))
+                    .collect::<Vec<_>>(),
+            };
+            entries.sort_unstable_by_key(|(tsid, _)| *tsid);
+
+            let mut final_entries = Vec::<(u32, SharedTokenSet)>::new();
+            let mut transition_entries =
+                BTreeMap::<Label, (u32, Vec<(u32, SharedTokenSet)>)>::new();
+            for (tsid, region) in entries {
+                let key = Arc::as_ptr(&region) as usize;
+                let decoded_region = decoded
+                    .entry(key)
+                    .or_insert_with(|| decode_pointwise_region(&region, behaviors));
+                if let Some(tokens) = &decoded_region.final_tokens {
+                    final_entries.push((tsid, Arc::clone(tokens)));
+                }
+                for (label, target, tokens) in &decoded_region.transitions {
+                    let (existing_target, entries) = transition_entries
+                        .entry(*label)
+                        .or_insert_with(|| (*target, Vec::new()));
+                    debug_assert_eq!(*existing_target, *target);
+                    entries.push((tsid, Arc::clone(tokens)));
+                }
+            }
+
+            let mut builder = MergedStateBuilder::default();
+            let final_weight = Weight::from_per_tsid_shared(final_entries);
+            if !final_weight.is_empty() {
+                builder.final_weights_pending.push(final_weight);
+            }
+            for (label, (target, entries)) in transition_entries {
+                let weight = Weight::from_per_tsid_shared(entries);
+                if !weight.is_empty() {
+                    builder
+                        .transitions_pending
+                        .insert(label, (target, vec![weight]));
+                }
+            }
+            builder
+        })
+        .collect()
+}
+
+fn validate_direct_builders(
+    candidates: &[usize],
+    coloring: &[usize],
+    dwa: &DWA,
+    productive_transitions: &[Vec<ProductiveTransition>],
+    old_to_new: &[u32],
+    direct_builders: &[MergedStateBuilder],
+) {
+    let mut legacy = (0..direct_builders.len())
+        .map(|_| MergedStateBuilder::default())
+        .collect::<Vec<_>>();
+    for (index, &color) in coloring.iter().enumerate() {
+        merge_productive_state_into_builder(
+            candidates[index],
+            color,
+            dwa,
+            productive_transitions,
+            old_to_new,
+            &mut legacy,
+        );
+    }
+
+    for (group, (direct, legacy)) in direct_builders.iter().zip(&legacy).enumerate() {
+        let direct_final = Weight::union_all(direct.final_weights_pending.iter());
+        let legacy_final = Weight::union_all(legacy.final_weights_pending.iter());
+        assert_eq!(
+            direct_final, legacy_final,
+            "direct quotient final weight disagreed for group {group}"
+        );
+
+        assert_eq!(
+            direct.transitions_pending.len(),
+            legacy.transitions_pending.len(),
+            "direct quotient transition-label count disagreed for group {group}"
+        );
+        for (&label, (legacy_target, legacy_weights)) in &legacy.transitions_pending {
+            let (direct_target, direct_weights) = direct.transitions_pending.get(&label).unwrap_or_else(|| {
+                panic!("direct quotient omitted label {label} for group {group}")
+            });
+            assert_eq!(
+                direct_target, legacy_target,
+                "direct quotient target disagreed for group {group}, label {label}"
+            );
+            assert_eq!(
+                Weight::union_all(direct_weights.iter()),
+                Weight::union_all(legacy_weights.iter()),
+                "direct quotient transition weight disagreed for group {group}, label {label}"
+            );
+        }
+    }
+}
+
 /// Exact greedy grouping using one sparse partial behavior function per group.
 /// The class order and target-map restriction are identical to the memberwise
 /// path; only the witness representation changes.
@@ -2117,22 +3621,43 @@ fn try_build_and_color_pointwise(
     class_profiles: &[ClassProfile],
     pointwise_class_order: PointwiseClassOrder,
     profile_enabled: bool,
-) -> Option<Vec<usize>> {
+) -> Option<HybridColoring> {
     let started_at = Instant::now();
-    let mut interner = PointwiseBehaviorInterner::default();
-    let mut regions = PointwiseRegionInterner::default();
-    let mut region_build_cache = PointwiseRegionBuildCache::default();
     let profile_started_at = Instant::now();
-    let mut pointwise_profiles = Vec::with_capacity(class_profiles.len());
-    for (domain, profile) in class_needed_union.iter().zip(class_profiles) {
-        pointwise_profiles.push(build_pointwise_profile(
-            domain,
-            profile,
-            &mut interner,
-            &mut regions,
-            &mut region_build_cache,
-        )?);
-    }
+    let parallel_requested = std::env::var("GLRMASK_WEIGHTED_MINIMIZE_PARALLEL_POINTWISE")
+        .map(|value| {
+            let value = value.trim();
+            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false);
+    let PointwiseProfileBuildOutput {
+        profiles: pointwise_profiles,
+        behaviors: interner,
+        mut regions,
+        cache_entries: region_build_cache_entries,
+        cache_hits: region_build_cache_hits,
+        cache_misses: region_build_cache_misses,
+        parallel_chunks,
+    } = if parallel_requested && class_profiles.len() >= 128 {
+        let parallel = build_pointwise_profiles_parallel(class_needed_union, class_profiles)?;
+        if std::env::var_os("GLRMASK_VALIDATE_WEIGHTED_MINIMIZE_PARALLEL_POINTWISE")
+            .is_some()
+        {
+            let serial = build_pointwise_profiles_serial(class_needed_union, class_profiles)?;
+            assert!(
+                pointwise_profiles_equal_by_value(
+                    &parallel.profiles,
+                    &parallel.behaviors,
+                    &serial.profiles,
+                    &serial.behaviors,
+                ),
+                "parallel pointwise profile construction differs from serial construction",
+            );
+        }
+        parallel
+    } else {
+        build_pointwise_profiles_serial(class_needed_union, class_profiles)?
+    };
     let profile_build_ms = profile_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let profile_entries = pointwise_profiles
@@ -2162,6 +3687,67 @@ fn try_build_and_color_pointwise(
                 class_profiles[class].targets.len(),
                 class,
             ))
+        });
+    }
+    let conflict_graph_mode = std::env::var("GLRMASK_WEIGHTED_MINIMIZE_POINTWISE_COLORING")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase());
+    let use_conflict_graph = match conflict_graph_mode.as_deref() {
+        Some("conflict" | "conflict_graph" | "graph") => true,
+        Some("merge" | "overlay" | "legacy") => false,
+        Some("auto") | None => (128..=1_024).contains(&class_profiles.len()),
+        Some(other) => panic!(
+            "unknown GLRMASK_WEIGHTED_MINIMIZE_POINTWISE_COLORING={other:?}; expected auto, merge, or conflict"
+        ),
+    } || std::env::var_os("GLRMASK_WEIGHTED_MINIMIZE_POINTWISE_CONFLICT_GRAPH").is_some();
+    if use_conflict_graph {
+        let conflict_started_at = Instant::now();
+        let (
+            class_to_group,
+            group_count,
+            target_conflicts,
+            behavior_conflicts,
+            conflict_chunks,
+        ) =
+            pointwise_conflict_graph_coloring(
+                class_profiles,
+                &pointwise_profiles,
+                &class_order,
+            );
+        let coloring = class_coloring
+            .iter()
+            .map(|class| class_to_group[*class])
+            .collect();
+        let direct_builders = std::env::var_os("GLRMASK_WEIGHTED_MINIMIZE_DIRECT_QUOTIENT")
+            .is_some()
+            .then(|| {
+                direct_builders_from_pointwise_groups(
+                    &class_to_group,
+                    group_count,
+                    &pointwise_profiles,
+                    behavior_map_layout,
+                    &interner,
+                    &mut regions,
+                )
+            });
+        if profile_enabled {
+            eprintln!(
+                "[glrmask/profile][weighted_dwa_minimize_pointwise_conflicts] candidates={} classes={} groups={} target_conflicts={} behavior_conflicts={} profile_chunks={} conflict_chunks={} profile_build_ms={:.3} conflict_ms={:.3} total_ms={:.3}",
+                candidates.len(),
+                class_profiles.len(),
+                group_count,
+                target_conflicts,
+                behavior_conflicts,
+                parallel_chunks,
+                conflict_chunks,
+                profile_build_ms,
+                conflict_started_at.elapsed().as_secs_f64() * 1000.0,
+                started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        return Some(HybridColoring {
+            colors: coloring,
+            direct_builders,
         });
     }
     for class in class_order {
@@ -2239,9 +3825,9 @@ fn try_build_and_color_pointwise(
             interner.ids.len(),
             regions.regions.len(),
             region_entries,
-            region_build_cache.entries.len(),
-            region_build_cache.hits,
-            region_build_cache.misses,
+            region_build_cache_entries,
+            region_build_cache_hits,
+            region_build_cache_misses,
             direct_overlay_slots,
             direct_overlay_hits,
             direct_overlay_misses,
@@ -2253,8 +3839,19 @@ fn try_build_and_color_pointwise(
             target_rejects,
             behavior_rejects,
         );
+        if parallel_chunks > 1 {
+            eprintln!(
+                "[glrmask/profile][weighted_dwa_minimize_pointwise_parallel] classes={} chunks={} profile_build_ms={:.3} cache_entries={} cache_hits={} cache_misses={}",
+                class_profiles.len(),
+                parallel_chunks,
+                profile_build_ms,
+                region_build_cache_entries,
+                region_build_cache_hits,
+                region_build_cache_misses,
+            );
+        }
     }
-    Some(coloring)
+    Some(HybridColoring::colors(coloring))
 }
 
 /// Exact greedy pointwise coloring using TSID intervals rather than one map
@@ -2316,7 +3913,8 @@ fn try_build_and_color_pointwise_ranges(
             class_profiles,
             pointwise_class_order,
             profile_enabled,
-        );
+        )
+        .map(|result| result.colors);
     }
 
     let merge_started_at = Instant::now();
@@ -2941,24 +4539,29 @@ fn build_and_color_hybrid(
     old_to_new: &[u32],
     productive_transitions: &[Vec<ProductiveTransition>],
     pointwise_class_order: PointwiseClassOrder,
-) -> Vec<usize> {
+) -> HybridColoring {
     let profile_enabled = weighted_dwa_minimize_profile_enabled();
     if candidates.len() <= 64
         && std::env::var_os("GLRMASK_WEIGHTED_MINIMIZE_DISABLE_PAIRWISE_SMALL").is_none()
     {
-        return build_and_color_pairwise_greedy(
+        return HybridColoring::colors(build_and_color_pairwise_greedy(
             dwa,
             candidates,
             needed,
             old_to_new,
             productive_transitions,
-        );
+        ));
     }
     let total_started_at = Instant::now();
 
     // Step 1: Partition refinement to get fine-grained classes.
     let partition_refine_started_at = Instant::now();
-    let class_coloring = partition_refine_coloring_raw(candidates, dwa, old_to_new);
+    let class_coloring = partition_refine_coloring_productive(
+        candidates,
+        dwa,
+        productive_transitions,
+        old_to_new,
+    );
     let partition_refine_ms = partition_refine_started_at.elapsed().as_secs_f64() * 1000.0;
     let num_classes = class_coloring.iter().max().map(|&c| c + 1).unwrap_or(0);
     if num_classes <= 1 {
@@ -2976,7 +4579,7 @@ fn build_and_color_hybrid(
                 total_started_at.elapsed().as_secs_f64() * 1000.0,
             );
         }
-        return class_coloring;
+        return HybridColoring::colors(class_coloring);
     }
 
     // Step 2: Pick one representative state per class and compute the union
@@ -3030,6 +4633,229 @@ fn build_and_color_hybrid(
         );
     }
 
+    if std::env::var_os("GLRMASK_WEIGHTED_MINIMIZE_RECURSIVE_WITNESS").is_some() {
+        let witness_started_at = Instant::now();
+        let mut class_order = (0..num_classes).collect::<Vec<_>>();
+        if pointwise_class_order == PointwiseClassOrder::DescendingDomain {
+            class_order.sort_unstable_by_key(|&class| {
+                std::cmp::Reverse((
+                    class_needed_union[class].outer_range_count(),
+                    class_profiles[class].targets.len(),
+                    class,
+                ))
+            });
+        }
+        if let Some((class_to_group, proof_count, witness_count)) = recursive_witness_coloring(
+            &class_profiles,
+            &class_needed_union,
+            &class_order,
+        ) {
+            let group_count = class_to_group
+                .iter()
+                .copied()
+                .max()
+                .map_or(0, |group| group + 1);
+            let coloring = class_coloring
+                .iter()
+                .map(|class| class_to_group[*class])
+                .collect::<Vec<_>>();
+
+            if std::env::var_os("GLRMASK_VALIDATE_WEIGHTED_MINIMIZE_RECURSIVE_WITNESS")
+                .is_some()
+            {
+                let reference = try_build_and_color_pointwise(
+                    candidates,
+                    &class_coloring,
+                    &class_needed_union,
+                    &class_profiles,
+                    pointwise_class_order,
+                    false,
+                )
+                .expect("pointwise reference coloring must be finite");
+                let reference_groups = reference
+                    .colors
+                    .iter()
+                    .copied()
+                    .max()
+                    .map_or(0, |group| group + 1);
+                assert_eq!(
+                    group_count, reference_groups,
+                    "recursive witness quotient produced a different group count",
+                );
+            }
+
+            if profile_enabled {
+                eprintln!(
+                    "[glrmask/profile][weighted_dwa_minimize_recursive_witness] candidates={} classes={} groups={} proofs={} witnesses={} total_ms={:.3}",
+                    candidates.len(),
+                    num_classes,
+                    group_count,
+                    proof_count,
+                    witness_count,
+                    witness_started_at.elapsed().as_secs_f64() * 1000.0,
+                );
+                eprintln!(
+                    "[glrmask/profile][weighted_dwa_minimize_pointwise_preamble] candidates={} classes={} partition_refine_ms={:.3} class_union_ms={:.3} class_profiles_ms={:.3}",
+                    candidates.len(),
+                    num_classes,
+                    partition_refine_ms,
+                    class_union_ms,
+                    class_profiles_ms,
+                );
+            }
+            return HybridColoring::colors(coloring);
+        }
+    }
+
+    if std::env::var_os("GLRMASK_WEIGHTED_MINIMIZE_EVENT_CONFLICT_GRAPH").is_some() {
+        let event_graph_started_at = Instant::now();
+        let mut class_order = (0..num_classes).collect::<Vec<_>>();
+        if pointwise_class_order == PointwiseClassOrder::DescendingDomain {
+            class_order.sort_unstable_by_key(|&class| {
+                std::cmp::Reverse((
+                    class_needed_union[class].outer_range_count(),
+                    class_profiles[class].targets.len(),
+                    class,
+                ))
+            });
+        }
+        if let Some((
+            class_to_group,
+            group_count,
+            target_conflicts,
+            intervals,
+            behavior_conflict_pairs,
+        )) = event_conflict_graph_coloring(
+            &class_profiles,
+            &class_needed_union,
+            &class_order,
+        ) {
+            let coloring = class_coloring
+                .iter()
+                .map(|class| class_to_group[*class])
+                .collect::<Vec<_>>();
+
+            if std::env::var_os("GLRMASK_VALIDATE_WEIGHTED_MINIMIZE_EVENT_CONFLICT_GRAPH")
+                .is_some()
+            {
+                assert_eq!(
+                    pointwise_class_order,
+                    PointwiseClassOrder::Stable,
+                    "event-conflict validation currently requires stable class order",
+                );
+                let reference = try_build_and_color_pointwise(
+                    candidates,
+                    &class_coloring,
+                    &class_needed_union,
+                    &class_profiles,
+                    pointwise_class_order,
+                    false,
+                )
+                .expect("pointwise reference coloring must be finite");
+                assert_eq!(
+                    coloring, reference.colors,
+                    "event conflict graph differs from pointwise behavior coloring",
+                );
+            }
+
+            if profile_enabled {
+                eprintln!(
+                    "[glrmask/profile][weighted_dwa_minimize_event_conflicts] candidates={} classes={} groups={} target_conflicts={} intervals={} behavior_conflict_pairs={} total_ms={:.3}",
+                    candidates.len(),
+                    num_classes,
+                    group_count,
+                    target_conflicts,
+                    intervals,
+                    behavior_conflict_pairs,
+                    event_graph_started_at.elapsed().as_secs_f64() * 1000.0,
+                );
+                eprintln!(
+                    "[glrmask/profile][weighted_dwa_minimize_pointwise_preamble] candidates={} classes={} partition_refine_ms={:.3} class_union_ms={:.3} class_profiles_ms={:.3}",
+                    candidates.len(),
+                    num_classes,
+                    partition_refine_ms,
+                    class_union_ms,
+                    class_profiles_ms,
+                );
+            }
+            return HybridColoring::colors(coloring);
+        }
+    }
+
+    if std::env::var_os("GLRMASK_WEIGHTED_MINIMIZE_DOMAIN_CONFLICT_GRAPH").is_some() {
+        let domain_graph_started_at = Instant::now();
+        let mut class_order = (0..num_classes).collect::<Vec<_>>();
+        if pointwise_class_order == PointwiseClassOrder::DescendingDomain {
+            class_order.sort_unstable_by_key(|&class| {
+                std::cmp::Reverse((
+                    class_needed_union[class].outer_range_count(),
+                    class_profiles[class].targets.len(),
+                    class,
+                ))
+            });
+        }
+        let (
+            class_to_group,
+            group_count,
+            target_conflicts,
+            overlap_pairs,
+            behavior_conflicts,
+        ) = domain_conflict_graph_coloring(
+            &class_profiles,
+            &class_needed_union,
+            &class_order,
+        );
+        let coloring = class_coloring
+            .iter()
+            .map(|class| class_to_group[*class])
+            .collect::<Vec<_>>();
+
+        if std::env::var_os("GLRMASK_VALIDATE_WEIGHTED_MINIMIZE_DOMAIN_CONFLICT_GRAPH")
+            .is_some()
+        {
+            assert_eq!(
+                pointwise_class_order,
+                PointwiseClassOrder::Stable,
+                "domain-conflict validation currently requires stable class order",
+            );
+            let reference = try_build_and_color_pointwise(
+                candidates,
+                &class_coloring,
+                &class_needed_union,
+                &class_profiles,
+                pointwise_class_order,
+                false,
+            )
+            .expect("pointwise reference coloring must be finite");
+            assert_eq!(
+                coloring, reference.colors,
+                "domain conflict graph differs from pointwise behavior coloring",
+            );
+        }
+
+        if profile_enabled {
+            eprintln!(
+                "[glrmask/profile][weighted_dwa_minimize_domain_conflicts] candidates={} classes={} groups={} target_conflicts={} overlap_pairs={} behavior_conflicts={} total_ms={:.3}",
+                candidates.len(),
+                num_classes,
+                group_count,
+                target_conflicts,
+                overlap_pairs,
+                behavior_conflicts,
+                domain_graph_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+            eprintln!(
+                "[glrmask/profile][weighted_dwa_minimize_pointwise_preamble] candidates={} classes={} partition_refine_ms={:.3} class_union_ms={:.3} class_profiles_ms={:.3}",
+                candidates.len(),
+                num_classes,
+                partition_refine_ms,
+                class_union_ms,
+                class_profiles_ms,
+            );
+        }
+        return HybridColoring::colors(coloring);
+    }
+
     // Each class is a partial behavior function over its pushed-needed
     // TSID/token domain. When that representation is finite, compare against
     // the exact union function of each group instead of revisiting all members.
@@ -3051,6 +4877,7 @@ fn build_and_color_hybrid(
             pointwise_class_order,
             profile_enabled,
         )
+        .map(HybridColoring::colors)
     } else {
         try_build_and_color_pointwise(
             candidates,
@@ -3563,12 +5390,13 @@ fn build_and_color_hybrid(
         );
     }
 
-    coloring
+    HybridColoring::colors(coloring)
 }
 
-fn partition_refine_coloring_raw(
+fn partition_refine_coloring_productive(
     candidates: &[usize],
     dwa: &DWA,
+    productive_transitions: &[Vec<ProductiveTransition>],
     old_to_new: &[u32],
 ) -> Vec<usize> {
     use std::hash::{Hash, Hasher};
@@ -3582,16 +5410,15 @@ fn partition_refine_coloring_raw(
         let c = candidates[idx];
         let mut hasher = FxHasher::default();
         dwa.states()[c].final_weight.hash(&mut hasher);
-        // Hash raw transitions (BTreeMap iterates in label order)
-        for (&label, (target, weight)) in &dwa.states()[c].transitions {
-            let Some(mapped) = mapped_target(old_to_new, *target) else {
+        for transition in &productive_transitions[c] {
+            let Some(mapped) = mapped_target(old_to_new, transition.target) else {
                 continue;
             };
-            label.hash(&mut hasher);
+            transition.label.hash(&mut hasher);
             mapped.hash(&mut hasher);
-            weight.hash(&mut hasher);
+            transition.weight.hash(&mut hasher);
         }
-        dwa.states()[c].transitions.len().hash(&mut hasher);
+        productive_transitions[c].len().hash(&mut hasher);
 
         let sig = hasher.finish();
         hash_groups.entry(sig).or_default().push(idx);
@@ -3613,7 +5440,13 @@ fn partition_refine_coloring_raw(
             let c = candidates[idx];
             for sub in &mut sub_groups {
                 let rep = candidates[sub[0]];
-                if states_raw_equal(c, rep, dwa, old_to_new) {
+                if states_productive_equal(
+                    c,
+                    rep,
+                    dwa,
+                    productive_transitions,
+                    old_to_new,
+                ) {
                     sub.push(idx);
                     continue 'outer;
                 }
@@ -3633,26 +5466,32 @@ fn partition_refine_coloring_raw(
     colors
 }
 
-/// Check if two states have identical raw signatures (no needed restriction).
-fn states_raw_equal(
+/// Check if two states have identical productive signatures.
+fn states_productive_equal(
     u: usize,
     v: usize,
     dwa: &DWA,
+    productive_transitions: &[Vec<ProductiveTransition>],
     old_to_new: &[u32],
 ) -> bool {
     if dwa.states()[u].final_weight != dwa.states()[v].final_weight {
         return false;
     }
-    let su = &dwa.states()[u];
-    let sv = &dwa.states()[v];
-    if su.transitions.len() != sv.transitions.len() {
+    let su = &productive_transitions[u];
+    let sv = &productive_transitions[v];
+    if su.len() != sv.len() {
         return false;
     }
-    // BTreeMap iterates in key order, so we can zip
-    for ((&lu, (tu, wu)), (&lv, (tv, wv))) in su.transitions.iter().zip(sv.transitions.iter()) {
-        if lu != lv { return false; }
-        if mapped_target(old_to_new, *tu) != mapped_target(old_to_new, *tv) { return false; }
-        if wu != wv { return false; }
+    for (left, right) in su.iter().zip(sv) {
+        if left.label != right.label {
+            return false;
+        }
+        if mapped_target(old_to_new, left.target) != mapped_target(old_to_new, right.target) {
+            return false;
+        }
+        if left.weight != right.weight {
+            return false;
+        }
     }
     true
 }
@@ -3738,8 +5577,8 @@ impl MergedStateBuilder {
 /// `Weight::union_all` already has a dedicated event-sweep implementation for
 /// wide unions. Feeding it a tree of bounded intermediate unions adds repeated
 /// sorting, allocation, and range coalescing without reducing the final work.
-fn batch_build_weight(pending: Vec<Weight>) -> Weight {
-    if reconstruction_token_range_coalescing_enabled() {
+fn batch_build_weight(pending: Vec<Weight>, automatic_large_minimizer: bool) -> Weight {
+    if reconstruction_token_range_coalescing_enabled(automatic_large_minimizer, pending.len()) {
         Weight::union_all_reconstruction(pending.iter())
     } else {
         Weight::union_all(pending.iter())
@@ -3801,7 +5640,12 @@ fn merge_productive_state_into_builder(
     }
 }
 
-fn reconstruct_dwa(start_old: usize, old_to_new: &[u32], builders: Vec<MergedStateBuilder>) -> DWA {
+fn reconstruct_dwa(
+    start_old: usize,
+    old_to_new: &[u32],
+    builders: Vec<MergedStateBuilder>,
+    automatic_large_minimizer: bool,
+) -> DWA {
     let profile_enabled = weighted_dwa_minimize_profile_enabled();
     let mut final_pending_weight_count = 0usize;
     let mut max_final_pending_weight_count = 0usize;
@@ -3821,7 +5665,10 @@ fn reconstruct_dwa(start_old: usize, old_to_new: &[u32], builders: Vec<MergedSta
             max_final_pending_weight_count = max_final_pending_weight_count.max(b.final_weights_pending.len());
             final_batches_over_16 += usize::from(b.final_weights_pending.len() > 16);
             let final_union_started_at = Instant::now();
-            let final_weight = batch_build_weight(b.final_weights_pending);
+            let final_weight = batch_build_weight(
+                b.final_weights_pending,
+                automatic_large_minimizer,
+            );
             final_union_ms += final_union_started_at.elapsed().as_secs_f64() * 1000.0;
             if !final_weight.is_empty() {
                 state.final_weight = Some(final_weight);
@@ -3832,7 +5679,7 @@ fn reconstruct_dwa(start_old: usize, old_to_new: &[u32], builders: Vec<MergedSta
                 max_transition_pending_weight_count = max_transition_pending_weight_count.max(pending_weights.len());
                 transition_batches_over_16 += usize::from(pending_weights.len() > 16);
                 let transition_union_started_at = Instant::now();
-                let weight = batch_build_weight(pending_weights);
+                let weight = batch_build_weight(pending_weights, automatic_large_minimizer);
                 transition_union_ms += transition_union_started_at.elapsed().as_secs_f64() * 1000.0;
                 if !weight.is_empty() {
                     let insert_started_at = Instant::now();
@@ -4045,7 +5892,7 @@ fn try_minimize_small_pairwise_direct(dwa: &DWA) -> Option<DWA> {
         }
     }
 
-    let minimized = reconstruct_dwa(start_state, &old_to_new, new_states);
+    let minimized = reconstruct_dwa(start_state, &old_to_new, new_states, false);
     if weighted_dwa_minimize_profile_enabled() {
         eprintln!(
             "[glrmask/profile][weighted_dwa_minimize_small_direct] input_states={} input_transitions={} output_states={} output_transitions={} total_ms={:.3}",
@@ -4073,13 +5920,53 @@ pub fn minimize_acyclic_owned(pushed: DWA) -> DWA {
 }
 
 pub fn minimize_acyclic_owned_with_pointwise_class_order(
+    pushed: DWA,
+    pointwise_class_order: PointwiseClassOrder,
+) -> DWA {
+    minimize_acyclic_owned_with_optional_live_domains(pushed, pointwise_class_order, None)
+}
+
+/// Minimize an acyclic DWA using exact live domains supplied by the
+/// determinizer.
+///
+/// `live_domains[u]` must be the intrinsic token domain from which state `u`
+/// can reach a final state.  The minimizer derives the productive transition
+/// relation `W(u,a,v) intersection live_domains[v]` directly and therefore
+/// skips the ordinary backward push recurrence over the DWA.
+pub fn minimize_acyclic_owned_with_live_domains(
+    dwa: DWA,
+    live_domains: Vec<Weight>,
+) -> DWA {
+    minimize_acyclic_owned_with_optional_live_domains(
+        dwa,
+        PointwiseClassOrder::Stable,
+        Some((live_domains, false)),
+    )
+}
+
+/// Variant for a DWA whose edge weights have already been restricted to the
+/// supplied target live domains by determinization.
+pub fn minimize_acyclic_owned_with_productive_live_domains(
+    dwa: DWA,
+    live_domains: Vec<Weight>,
+) -> DWA {
+    minimize_acyclic_owned_with_optional_live_domains(
+        dwa,
+        PointwiseClassOrder::Stable,
+        Some((live_domains, true)),
+    )
+}
+
+fn minimize_acyclic_owned_with_optional_live_domains(
     mut pushed: DWA,
     pointwise_class_order: PointwiseClassOrder,
+    supplied_live_domains: Option<(Vec<Weight>, bool)>,
 ) -> DWA {
     if pushed.states().is_empty() {
         return pushed;
     }
-    if std::env::var_os("GLRMASK_WEIGHTED_MINIMIZE_DISABLE_SMALL_DIRECT").is_none()
+    if supplied_live_domains.is_none()
+        && std::env::var_os("GLRMASK_WEIGHTED_MINIMIZE_DISABLE_SMALL_DIRECT").is_none()
         && let Some(minimized) = try_minimize_small_pairwise_direct(&pushed)
     {
         return minimized;
@@ -4090,31 +5977,91 @@ pub fn minimize_acyclic_owned_with_pointwise_class_order(
     let input_states = pushed.num_states();
     let input_transitions = pushed.num_transitions();
 
-    // Push weights in-place on the owned determinized DWA.
-    let push_started_at = Instant::now();
-    let (_, topo_from_push, reachable_from_push) = push_weights(&mut pushed);
-    let push_ms = push_started_at.elapsed().as_secs_f64() * 1000.0;
+    let (topo, needed, push_ms, edges_already_productive) =
+        if let Some((needed, edges_already_productive)) = supplied_live_domains {
+        if needed.len() != pushed.states().len() {
+            panic!(
+                "supplied weighted-DWA live-domain count {} does not match state count {}",
+                needed.len(),
+                pushed.states().len(),
+            );
+        }
+        let Some(topo) = compute_topo_order(&pushed) else {
+            return pushed;
+        };
 
-    // Reuse topo order from push_weights (graph structure unchanged by push).
-    let topo = match topo_from_push {
-        Some(t) => t,
-        None => return pushed, // cyclic — fall back
+        if std::env::var_os("GLRMASK_VALIDATE_WEIGHTED_MINIMIZE_LIVE_DOMAINS").is_some() {
+            let mut reference = pushed.clone();
+            let (_, reference_topo, reference_needed) = push_weights(&mut reference);
+            assert!(reference_topo.is_some(), "validated DWA must remain acyclic");
+            assert_eq!(
+                needed.len(),
+                reference_needed.len(),
+                "live-domain validation state count differs",
+            );
+            for (state, (derived, expected)) in
+                needed.iter().zip(&reference_needed).enumerate()
+            {
+                assert_eq!(
+                    derived, expected,
+                    "NWA-derived live domain differs from DWA recurrence at state {state}",
+                );
+            }
+        }
+        (topo, needed, 0.0, edges_already_productive)
+    } else {
+        // Legacy reference path: compute live domains and push transition
+        // weights together over the determinized DWA.
+        let push_started_at = Instant::now();
+        let parallel_push = std::env::var("GLRMASK_WEIGHTED_MINIMIZE_PARALLEL_PUSH")
+            .map(|value| {
+                let value = value.trim();
+                !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+            })
+            .unwrap_or(false);
+        let (_, topo_from_push, reachable_from_push) = if parallel_push {
+            let reference = std::env::var_os("GLRMASK_VALIDATE_WEIGHTED_MINIMIZE_PARALLEL_PUSH")
+                .is_some()
+                .then(|| pushed.clone());
+            let result = push_weights_parallel_by_height(&mut pushed);
+            if let Some(mut reference) = reference {
+                let reference_result = push_weights(&mut reference);
+                assert_eq!(
+                    result.1, reference_result.1,
+                    "parallel push produced a different topological order",
+                );
+                assert_eq!(
+                    result.2, reference_result.2,
+                    "parallel push produced different state live domains",
+                );
+                assert_eq!(
+                    pushed.states(),
+                    reference.states(),
+                    "parallel push produced different productive transitions",
+                );
+            }
+            result
+        } else {
+            push_weights(&mut pushed)
+        };
+        let push_ms = push_started_at.elapsed().as_secs_f64() * 1000.0;
+        let Some(topo) = topo_from_push else {
+            return pushed;
+        };
+        (topo, reachable_from_push, push_ms, true)
     };
 
-    // Reuse backward-reachable token sets from push_weights as needed sets.
-    // Proof: push_weights computes reachable[u] = final(u) ∪ union(w(u,t) ∩ reachable[t]).
-    // a fresh needed-set pass on the pushed DWA uses the same recurrence (since
-    // w_pushed = w_orig ∩ reachable[t], and A ∩ A = A in the needed recurrence).
-    // Both produce identical results, so we skip the redundant recomputation.
     let start_state = pushed.start_state() as usize;
-    let needed = reachable_from_push;
     #[cfg(debug_assertions)]
-    debug_assert_pushed_weights_within_needed(&pushed, &needed);
+    if push_ms != 0.0 {
+        debug_assert_pushed_weights_within_needed(&pushed, &needed);
+    }
     if needed[start_state].is_empty() {
         return canonical_dead_dwa();
     }
     let productive_transitions_started_at = Instant::now();
-    let productive_transitions = compute_productive_transitions(&pushed, &needed);
+    let productive_transitions =
+        compute_productive_transitions(&pushed, &needed, edges_already_productive);
     let productive_transitions_ms =
         productive_transitions_started_at.elapsed().as_secs_f64() * 1000.0;
     let heights_started_at = Instant::now();
@@ -4178,10 +6125,11 @@ pub fn minimize_acyclic_owned_with_pointwise_class_order(
 
                 let builders = &mut new_states[base_new_id as usize..];
                 for &candidate in candidates {
-                    merge_state_into_builder(
+                    merge_productive_state_into_builder(
                         candidate,
                         0,
                         &pushed,
+                        &productive_transitions,
                         &old_to_new,
                         builders,
                     );
@@ -4206,7 +6154,10 @@ pub fn minimize_acyclic_owned_with_pointwise_class_order(
         }
 
         let color_started_at = Instant::now();
-        let coloring = build_and_color_hybrid(
+        let HybridColoring {
+            colors: coloring,
+            direct_builders,
+        } = build_and_color_hybrid(
             &pushed,
             candidates,
             &needed,
@@ -4225,19 +6176,35 @@ pub fn minimize_acyclic_owned_with_pointwise_class_order(
             old_to_new[candidates[idx]] = base_new_id + color as u32;
         }
 
-        // Extend builders
-        new_states.extend((0..num_colors).map(|_| MergedStateBuilder::default()));
+        if let Some(mut direct_builders) = direct_builders {
+            debug_assert_eq!(direct_builders.len(), num_colors);
+            if std::env::var_os("GLRMASK_VALIDATE_WEIGHTED_MINIMIZE_DIRECT_QUOTIENT").is_some() {
+                validate_direct_builders(
+                    candidates,
+                    &coloring,
+                    &pushed,
+                    &productive_transitions,
+                    &old_to_new,
+                    &direct_builders,
+                );
+            }
+            new_states.append(&mut direct_builders);
+        } else {
+            // Extend builders
+            new_states.extend((0..num_colors).map(|_| MergedStateBuilder::default()));
 
-        // Merge states into builders
-        let builders = &mut new_states[base_new_id as usize..];
-        for (idx, &color) in coloring.iter().enumerate() {
-            merge_state_into_builder(
-                candidates[idx],
-                color,
-                &pushed,
-                &old_to_new,
-                builders,
-            );
+            // Merge states into builders
+            let builders = &mut new_states[base_new_id as usize..];
+            for (idx, &color) in coloring.iter().enumerate() {
+                merge_productive_state_into_builder(
+                    candidates[idx],
+                    color,
+                    &pushed,
+                    &productive_transitions,
+                    &old_to_new,
+                    builders,
+                );
+            }
         }
         let height_merge_ms = merge_started_at.elapsed().as_secs_f64() * 1000.0;
         color_ms_total += height_color_ms;
@@ -4258,7 +6225,12 @@ pub fn minimize_acyclic_owned_with_pointwise_class_order(
     }
 
     let reconstruct_started_at = Instant::now();
-    let minimized = reconstruct_dwa(start_state, &old_to_new, new_states);
+    let minimized = reconstruct_dwa(
+        start_state,
+        &old_to_new,
+        new_states,
+        input_states >= 1_024 && input_transitions >= 4_096,
+    );
     let reconstruct_ms = reconstruct_started_at.elapsed().as_secs_f64() * 1000.0;
 
     if profile_enabled {
@@ -4329,7 +6301,7 @@ mod tests {
             })
             .collect();
 
-        let direct = batch_build_weight(pending.clone());
+        let direct = batch_build_weight(pending.clone(), false);
         let mut tree = pending;
         while tree.len() > 64 {
             tree = tree

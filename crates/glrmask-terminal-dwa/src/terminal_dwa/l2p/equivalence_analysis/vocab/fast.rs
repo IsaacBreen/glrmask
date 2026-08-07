@@ -40,6 +40,7 @@ const STATE_NONE: usize = usize::MAX;
 const VOCAB_MATCH_POSITIONS_GROUP_BYTES: usize = 256 * 1024;
 const VOCAB_DEFAULT_BATCH_MAX_STATES: usize = 4_000;
 const VOCAB_DEFAULT_BATCH_MATCH_POSITION_BYTES: usize = 4 * 1024 * 1024;
+const VOCAB_MEDIUM_WORK_BATCH_MATCH_POSITION_BYTES: usize = 2 * 1024 * 1024;
 const VOCAB_LARGE_WORK_BATCH_MATCH_POSITION_BYTES: usize = 768 * 1024;
 // A one-batch trie walk is already bounded to one state slab. For modest
 // token×state work, running it directly avoids nested Rayon scheduling while
@@ -781,12 +782,26 @@ fn default_vocab_batch_size(
     // slice.  Smaller slices therefore reduce total trie replay substantially.
     // For smaller vocabularies or state domains, the extra refinement rounds
     // are pure overhead, so retain the wider historical batch there.
-    let refinement_bounded_states = if num_tokens >= 8_000 && num_states >= 2_000 {
-        // Keep the dominant per-batch match-position slab within a typical
-        // private cache. This was formerly a fixed 750-state tuning point;
-        // deriving it from group width preserves the same locality benefit for
-        // narrower and wider analysis DFAs.
-        (VOCAB_LARGE_WORK_BATCH_MATCH_POSITION_BYTES / bytes_per_state.max(1)).max(1)
+    let refinement_bounded_states = if num_states >= 2_000 {
+        let target_bytes = if num_tokens >= 8_000 {
+            // Keep the dominant per-batch match-position slab within a typical
+            // private cache. This was formerly a fixed 750-state tuning point;
+            // deriving it from group width preserves the same locality benefit for
+            // narrower and wider analysis DFAs.
+            VOCAB_LARGE_WORK_BATCH_MATCH_POSITION_BYTES
+        } else if num_tokens >= 2_000 {
+            // Medium vocabularies can still leave thousands of token classes
+            // unresolved after one very wide state batch. Refinement is
+            // monotone: once a token class becomes singleton, later state
+            // batches cannot merge it again. Keeping this slab smaller than
+            // the generic 4 MiB allocation therefore lets us retire singleton
+            // tokens before replaying the remaining scanner states, while the
+            // >=8k-token regime retains its separately tuned smaller slab.
+            VOCAB_MEDIUM_WORK_BATCH_MATCH_POSITION_BYTES
+        } else {
+            VOCAB_DEFAULT_BATCH_MATCH_POSITION_BYTES
+        };
+        (target_bytes / bytes_per_state.max(1)).max(1)
     } else {
         VOCAB_DEFAULT_BATCH_MAX_STATES
     };
@@ -2154,6 +2169,14 @@ fn token_signature(
 // ----- DFS Trie Walk for Prefix Sharing -----
 
 const TRIE_CHUNK_SIZE: usize = 128;
+
+fn trie_chunk_size() -> usize {
+    std::env::var("GLRMASK_VOCAB_TRIE_CHUNK_SIZE")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or(TRIE_CHUNK_SIZE)
+}
 const TRIE_WALK_MIN_TOKENS: usize = 256;
 
 static TRIE_WALK_DISABLED: Lazy<bool> =
@@ -3373,6 +3396,7 @@ const INPUT_VIEW_COMPACT_MAX_RATIO: f64 = 0.85;
 const INPUT_VIEW_COMPACT_MAX_TOKENS: usize = 16;
 const SINGLETON_PROBE_MAX_TOKENS: usize = 64;
 const SINGLETON_PROBE_STATES: usize = 16;
+const MEDIUM_SINGLETON_PROBE_MAX_TOKENS: usize = 5_000;
 const PRE_DFA_SINGLETON_PROBE_MIN_INITIAL_STATES: usize = 64;
 const PRE_DFA_SINGLETON_PROBE_MIN_WORK: usize = 8_192;
 const FIRST_TRANSITION_FACTOR_MAX_WORK_RATIO_DEFAULT: f64 = 0.05;
@@ -3385,6 +3409,13 @@ fn first_transition_factor_parallel_buckets_default(
     num_threads > 1
         && (num_threads <= 8
             || num_initial_states < FIRST_TRANSITION_FACTOR_HIGH_THREAD_SEQUENTIAL_MIN_STATES)
+}
+
+fn medium_singleton_probe_states_override() -> Option<usize> {
+    std::env::var("GLRMASK_VOCAB_MEDIUM_SINGLETON_PROBE_STATES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&value| value > 0)
 }
 
 /// Restrict a tokenizer view to exactly the states reachable from the state
@@ -4277,9 +4308,13 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
     // unresolved. A distinction found in the probe is permanent under further
     // refinement, so reaching `active_indices.is_empty()` is an exact identity
     // certificate, not a heuristic early exit.
-    let use_singleton_probe = analysis_token_count <= SINGLETON_PROBE_MAX_TOKENS
-        && num_authority_states > SINGLETON_PROBE_STATES
-        && batch_size > SINGLETON_PROBE_STATES;
+    let medium_probe_states = medium_singleton_probe_states_override();
+    let probe_states = medium_probe_states.unwrap_or(SINGLETON_PROBE_STATES);
+    let use_singleton_probe = (analysis_token_count <= SINGLETON_PROBE_MAX_TOKENS
+        || medium_probe_states.is_some()
+            && analysis_token_count <= MEDIUM_SINGLETON_PROBE_MAX_TOKENS)
+        && num_authority_states > probe_states
+        && batch_size > probe_states;
     let mut batch_start = 0usize;
     let mut batch_index = 0usize;
     while batch_start < num_authority_states {
@@ -4288,8 +4323,9 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
         }
         batches += 1;
 
+        let active_before_batch = active_indices.len();
         let current_batch_size = if batch_index == 0 && use_singleton_probe {
-            SINGLETON_PROBE_STATES
+            probe_states
         } else {
             batch_size
         };
@@ -4357,7 +4393,7 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
             } else {
                 let scratch_pool = Arc::clone(&scratch_pool);
                 let chunk_results: Vec<(Vec<(usize, u64)>, TrieWalkChunkStats)> = sorted_indices
-                    .par_chunks(TRIE_CHUNK_SIZE)
+                    .par_chunks(trie_chunk_size())
                     .map_init(
                         || scratch_pool.checkout(batch.len(), num_groups),
                         |lease, chunk| {
@@ -4465,6 +4501,16 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
             active_tokens[token_idx] = true;
         }
         active_indices = new_active;
+        if profiling {
+            eprintln!(
+                "[glrmask/profile][vocab_refinement_batch] batch={} states={} active_before={} active_after={} retired={}",
+                batch_index,
+                batch.len(),
+                active_before_batch,
+                active_indices.len(),
+                active_before_batch.saturating_sub(active_indices.len()),
+            );
+        }
         refinement_ms += elapsed_ms(refinement_started_at);
         batch_start = batch_end;
         batch_index += 1;

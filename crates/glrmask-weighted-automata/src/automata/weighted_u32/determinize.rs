@@ -10,7 +10,7 @@ use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
-use super::dwa::DWA;
+use super::dwa::{DWA, DWAState};
 use super::equivalence::find_difference;
 use super::nwa::NWA;
 use crate::ds::weight::{SharedTokenSet, ScopedWeightOpCache, Weight, WeightIntersectionIndex};
@@ -419,6 +419,296 @@ pub fn determinize_depth2(nwa: &NWA) -> Result<DWA, GlrMaskError> {
     Ok(dwa)
 }
 
+/// Exact determinization by explicit weighted-language dynamic programming for
+/// shallow acyclic NWAs.
+///
+/// Returns `Ok(None)` when the finite language exceeds `max_words`; callers can
+/// then use ordinary subset construction. This is a resource guard only and
+/// never changes the accepted language.
+pub fn determinize_bounded_language(
+    nwa: &NWA,
+    max_depth: usize,
+    max_words: usize,
+) -> Result<Option<DWA>, GlrMaskError> {
+    if !nwa.is_acyclic() {
+        return Err(GlrMaskError::Compilation(
+            "bounded-language weighted determinization supports only acyclic NWAs".into(),
+        ));
+    }
+    if max_depth == 0 || max_depth > 8 {
+        return Ok(None);
+    }
+
+    let profile = determinize_profile_enabled();
+    let total_started_at = profile.then(Instant::now);
+    type Word = SmallVec<[i32; 4]>;
+
+    fn union_word_weight(language: &mut BTreeMap<Word, Weight>, word: Word, add: Weight) {
+        if add.is_empty() {
+            return;
+        }
+        match language.entry(word) {
+            std::collections::btree_map::Entry::Occupied(mut occupied) => {
+                *occupied.get_mut() = occupied.get().union(&add);
+            }
+            std::collections::btree_map::Entry::Vacant(vacant) => {
+                vacant.insert(add);
+            }
+        }
+    }
+
+    let mut indegree = vec![0usize; nwa.states().len()];
+    for state in nwa.states() {
+        for (target, _) in &state.epsilons {
+            indegree[*target as usize] += 1;
+        }
+        for branches in state.transitions.values() {
+            for (target, _) in branches {
+                indegree[*target as usize] += 1;
+            }
+        }
+    }
+    let mut queue = indegree
+        .iter()
+        .enumerate()
+        .filter_map(|(state, &degree)| (degree == 0).then_some(state))
+        .collect::<VecDeque<_>>();
+    let mut topo = Vec::with_capacity(nwa.states().len());
+    while let Some(state) = queue.pop_front() {
+        topo.push(state);
+        for (target, _) in &nwa.states()[state].epsilons {
+            indegree[*target as usize] -= 1;
+            if indegree[*target as usize] == 0 {
+                queue.push_back(*target as usize);
+            }
+        }
+        for branches in nwa.states()[state].transitions.values() {
+            for (target, _) in branches {
+                indegree[*target as usize] -= 1;
+                if indegree[*target as usize] == 0 {
+                    queue.push_back(*target as usize);
+                }
+            }
+        }
+    }
+    if topo.len() != nwa.states().len() {
+        return Err(GlrMaskError::Compilation(
+            "bounded-language weighted determinization requires an acyclic NWA".into(),
+        ));
+    }
+
+    let dp_started_at = profile.then(Instant::now);
+    let mut languages = vec![BTreeMap::<Word, Weight>::new(); nwa.states().len()];
+    let mut cache = ScopedWeightOpCache::default();
+    let mut contribution_count = 0usize;
+    let mut max_state_words = 0usize;
+    for state_id in topo.into_iter().rev() {
+        let state = &nwa.states()[state_id];
+        let mut contributions = BTreeMap::<Word, SmallVec<[Weight; 4]>>::new();
+        if let Some(final_weight) = &state.final_weight
+            && !final_weight.is_empty()
+        {
+            contributions
+                .entry(Word::new())
+                .or_default()
+                .push(final_weight.clone());
+        }
+        for (target, edge_weight) in &state.epsilons {
+            for (word, suffix_weight) in &languages[*target as usize] {
+                contribution_count += 1;
+                let contribution = cache.intersection(edge_weight, suffix_weight);
+                if !contribution.is_empty() {
+                    contributions
+                        .entry(word.clone())
+                        .or_default()
+                        .push(contribution);
+                }
+            }
+        }
+        for (&label, branches) in &state.transitions {
+            for (target, edge_weight) in branches {
+                for (suffix, suffix_weight) in &languages[*target as usize] {
+                    if suffix.len() >= max_depth {
+                        let contribution = cache.intersection(edge_weight, suffix_weight);
+                        if !contribution.is_empty() {
+                            return Err(GlrMaskError::Compilation(format!(
+                                "bounded-language determinization received an accepted path deeper than {max_depth} labels"
+                            )));
+                        }
+                        continue;
+                    }
+                    contribution_count += 1;
+                    let contribution = cache.intersection(edge_weight, suffix_weight);
+                    if contribution.is_empty() {
+                        continue;
+                    }
+                    let mut word = Word::with_capacity(suffix.len() + 1);
+                    word.push(label);
+                    word.extend_from_slice(suffix);
+                    contributions.entry(word).or_default().push(contribution);
+                }
+            }
+        }
+        if contributions.len() > max_words {
+            if profile {
+                eprintln!(
+                    "[glrmask/profile][determinize_bounded_language_abort] state={} contributions={} max_words={}",
+                    state_id,
+                    contributions.len(),
+                    max_words,
+                );
+            }
+            return Ok(None);
+        }
+        let language = contributions
+            .into_iter()
+            .filter_map(|(word, weights)| {
+                let weight = Weight::union_all(weights.iter());
+                (!weight.is_empty()).then_some((word, weight))
+            })
+            .collect::<BTreeMap<_, _>>();
+        max_state_words = max_state_words.max(language.len());
+        languages[state_id] = language;
+    }
+    let dp_ms = dp_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+
+    let merge_started_at = profile.then(Instant::now);
+    let mut accepted = BTreeMap::<Word, Weight>::new();
+    for &start in nwa.start_states() {
+        for (word, weight) in &languages[start as usize] {
+            union_word_weight(&mut accepted, word.clone(), weight.clone());
+        }
+    }
+    if accepted.len() > max_words {
+        return Ok(None);
+    }
+    let accepted_word_count = accepted.len();
+    let merge_ms = merge_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+
+    struct TrieNode {
+        final_weight: Weight,
+        children: BTreeMap<i32, usize>,
+        subtree_weight: Weight,
+    }
+
+    impl Default for TrieNode {
+        fn default() -> Self {
+            Self {
+                final_weight: Weight::empty(),
+                children: BTreeMap::new(),
+                subtree_weight: Weight::empty(),
+            }
+        }
+    }
+
+    let trie_started_at = profile.then(Instant::now);
+    let mut trie = vec![TrieNode::default()];
+    for (word, weight) in accepted {
+        let mut node = 0usize;
+        for label in word {
+            let next = if let Some(&child) = trie[node].children.get(&label) {
+                child
+            } else {
+                let child = trie.len();
+                trie.push(TrieNode::default());
+                trie[node].children.insert(label, child);
+                child
+            };
+            node = next;
+        }
+        trie[node].final_weight = trie[node].final_weight.union(&weight);
+    }
+    for node in (0..trie.len()).rev() {
+        let mut parts = SmallVec::<[Weight; 8]>::new();
+        if !trie[node].final_weight.is_empty() {
+            parts.push(trie[node].final_weight.clone());
+        }
+        for &child in trie[node].children.values() {
+            if !trie[child].subtree_weight.is_empty() {
+                parts.push(trie[child].subtree_weight.clone());
+            }
+        }
+        trie[node].subtree_weight = Weight::union_all(parts.iter());
+    }
+    let trie_ms = trie_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+
+    #[derive(Clone, Eq, PartialEq, Hash)]
+    struct ResidualSignature {
+        final_weight: Weight,
+        transitions: Vec<(i32, u32, Weight)>,
+    }
+
+    let hash_cons_started_at = profile.then(Instant::now);
+    let mut signatures = FxHashMap::<ResidualSignature, u32>::default();
+    let mut states = Vec::<DWAState>::new();
+    let mut trie_to_state = vec![u32::MAX; trie.len()];
+    for node in (0..trie.len()).rev() {
+        let transitions = trie[node]
+            .children
+            .iter()
+            .map(|(&label, &child)| {
+                (
+                    label,
+                    trie_to_state[child],
+                    trie[child].subtree_weight.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let signature = ResidualSignature {
+            final_weight: trie[node].final_weight.clone(),
+            transitions,
+        };
+        let state = if let Some(&existing) = signatures.get(&signature) {
+            existing
+        } else {
+            let id = states.len() as u32;
+            let mut dwa_state = DWAState::default();
+            if !signature.final_weight.is_empty() {
+                dwa_state.final_weight = Some(signature.final_weight.clone());
+            }
+            for (label, target, weight) in &signature.transitions {
+                dwa_state
+                    .transitions
+                    .insert(*label, (*target, weight.clone()));
+            }
+            states.push(dwa_state);
+            signatures.insert(signature, id);
+            id
+        };
+        trie_to_state[node] = state;
+    }
+    let dwa = DWA::from_parts(states, trie_to_state[0]);
+    let hash_cons_ms = hash_cons_started_at
+        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+
+    if let Some(total_started_at) = total_started_at {
+        eprintln!(
+            "[glrmask/profile][determinize_bounded_language] nwa_states={} max_depth={} contributions={} max_state_words={} accepted_words={} trie_states={} hashcons_states={} intersection_cache_entries={} dp_ms={:.3} merge_ms={:.3} trie_ms={:.3} hash_cons_ms={:.3} total_ms={:.3}",
+            nwa.states().len(),
+            max_depth,
+            contribution_count,
+            max_state_words,
+            accepted_word_count,
+            trie.len(),
+            dwa.num_states(),
+            cache.intersection_entry_count(),
+            dp_ms,
+            merge_ms,
+            trie_ms,
+            hash_cons_ms,
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    Ok(Some(dwa))
+}
+
 /// Aggregate direct epsilon-free point-entry contributions without repeatedly
 /// rebuilding whole weight maps. Each contribution carries exactly one TSID;
 /// sorting lets us reduce token sets locally for a `(destination, TSID)` pair
@@ -465,21 +755,73 @@ fn aggregate_direct_point_entries(
     (next_key, edge_weight)
 }
 
+fn canonicalize_subset_live_domain(
+    next_key: Vec<(u32, Weight)>,
+    future_domains: Option<&[Weight]>,
+    cache: &mut ScopedWeightOpCache,
+) -> (Vec<(u32, Weight)>, Option<Weight>) {
+    let Some(future_domains) = future_domains else {
+        return (next_key, None);
+    };
+
+    // For every suffix word z, L_q(z) is a subset of F(q), the union of all
+    // accepting suffix weights from q. Therefore
+    //
+    //   w_q ∩ L_q(z) = (w_q ∩ F(q)) ∩ L_q(z).
+    //
+    // Replacing each subset entry by this canonical live restriction preserves
+    // the complete residual weighted language, entrywise and hence under union.
+    let mut canonical = Vec::with_capacity(next_key.len());
+    for (state, weight) in next_key {
+        let Some(future) = future_domains.get(state as usize) else {
+            continue;
+        };
+        let live = if future.is_full() || weight.storage_ptr_eq(future) || weight.is_subset(future) {
+            weight
+        } else {
+            cache.intersection(&weight, future)
+        };
+        if !live.is_empty() {
+            canonical.push((state, live));
+        }
+    }
+    let live_domain = Weight::union_all(canonical.iter().map(|(_, weight)| weight));
+    (canonical, Some(live_domain))
+}
+
 fn intern_determinized_subset(
     next_key: Vec<(u32, Weight)>,
+    future_domains: Option<&[Weight]>,
+    canonicalization_cache: &mut ScopedWeightOpCache,
+    state_live_domains: &mut Vec<Weight>,
     subset_map: &mut FxHashMap<Arc<[(u32, Weight)]>, u32>,
     worklist: &mut VecDeque<(u32, Arc<[(u32, Weight)]>)>,
     dwa: &mut DWA,
-) -> u32 {
+) -> Option<(u32, Option<Weight>)> {
+    let (next_key, live_domain) =
+        canonicalize_subset_live_domain(next_key, future_domains, canonicalization_cache);
+    if next_key.is_empty() {
+        return None;
+    }
     if let Some(existing) = subset_map.get(next_key.as_slice()).copied() {
-        return existing;
+        let live_domain = future_domains.map(|_| {
+            state_live_domains
+                .get(existing as usize)
+                .expect("interned determinized state must retain its live domain")
+                .clone()
+        });
+        return Some((existing, live_domain));
     }
 
     let new_id = dwa.add_state();
+    if let Some(live_domain) = &live_domain {
+        debug_assert_eq!(new_id as usize, state_live_domains.len());
+        state_live_domains.push(live_domain.clone());
+    }
     let shared_key: Arc<[(u32, Weight)]> = next_key.into();
     subset_map.insert(Arc::clone(&shared_key), new_id);
     worklist.push_back((new_id, shared_key));
-    new_id
+    Some((new_id, live_domain))
 }
 
 /// Intern a one-entry subset through a pointer-identity front cache. The
@@ -487,24 +829,74 @@ fn intern_determinized_subset(
 fn intern_determinized_singleton(
     dst: u32,
     weight: &Weight,
+    future_domains: Option<&[Weight]>,
+    canonicalization_cache: &mut ScopedWeightOpCache,
+    state_live_domains: &mut Vec<Weight>,
     singleton_subsets: &mut FxHashMap<(u32, usize), u32>,
     subset_map: &mut FxHashMap<Arc<[(u32, Weight)]>, u32>,
     worklist: &mut VecDeque<(u32, Arc<[(u32, Weight)]>)>,
     dwa: &mut DWA,
-) -> (u32, bool) {
-    let singleton_key = (dst, weight.ptr_key());
+) -> Option<(u32, Option<Weight>, bool)> {
+    let (canonical, live_domain) = canonicalize_subset_live_domain(
+        vec![(dst, weight.clone())],
+        future_domains,
+        canonicalization_cache,
+    );
+    let (_, canonical_weight) = canonical.first()?;
+    let singleton_key = (dst, canonical_weight.ptr_key());
     if let Some(existing) = singleton_subsets.get(&singleton_key).copied() {
-        return (existing, true);
+        let live_domain = future_domains.map(|_| {
+            state_live_domains
+                .get(existing as usize)
+                .expect("interned singleton state must retain its live domain")
+                .clone()
+        });
+        return Some((existing, live_domain, true));
     }
 
-    let state = intern_determinized_subset(
-        vec![(dst, weight.clone())],
-        subset_map,
-        worklist,
-        dwa,
-    );
+    if let Some(existing) = subset_map.get(canonical.as_slice()).copied() {
+        singleton_subsets.insert(singleton_key, existing);
+        let existing_live = future_domains.map(|_| {
+            state_live_domains
+                .get(existing as usize)
+                .expect("interned singleton state must retain its live domain")
+                .clone()
+        });
+        return Some((existing, existing_live, true));
+    }
+
+    let state = dwa.add_state();
+    if let Some(domain) = &live_domain {
+        debug_assert_eq!(state as usize, state_live_domains.len());
+        state_live_domains.push(domain.clone());
+    }
+    let shared_key: Arc<[(u32, Weight)]> = canonical.into();
+    subset_map.insert(Arc::clone(&shared_key), state);
+    worklist.push_back((state, shared_key));
     singleton_subsets.insert(singleton_key, state);
-    (state, false)
+    Some((state, live_domain, false))
+}
+
+#[inline]
+fn restrict_edge_to_target_live_domain(
+    edge_weight: Weight,
+    target_live_domain: Option<&Weight>,
+    cache: &mut ScopedWeightOpCache,
+) -> Weight {
+    let Some(target_live_domain) = target_live_domain else {
+        return edge_weight;
+    };
+    if target_live_domain.is_empty() {
+        return Weight::empty();
+    }
+    if target_live_domain.is_full()
+        || edge_weight.storage_ptr_eq(target_live_domain)
+        || edge_weight.is_subset(target_live_domain)
+    {
+        edge_weight
+    } else {
+        cache.intersection(&edge_weight, target_live_domain)
+    }
 }
 
 fn determinize_profile_enabled() -> bool {
@@ -513,12 +905,27 @@ fn determinize_profile_enabled() -> bool {
         .unwrap_or(false)
 }
 
+struct DeterminizeImplOutput {
+    dwa: DWA,
+    subsets: Option<Vec<Arc<[(u32, Weight)]>>>,
+    live_domains: Option<Vec<Weight>>,
+}
+
+pub struct DeterminizedWithLiveDomains {
+    pub dwa: DWA,
+    pub live_domains: Vec<Weight>,
+    /// Every transition weight has already been restricted to the live domain
+    /// of its target state.
+    pub productive_edges: bool,
+}
+
 pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
     let profile = determinize_profile_enabled();
-    let dwa = determinize_impl_with_options(nwa, true, true, profile)?;
+    let dwa = determinize_impl_with_options(nwa, true, true, profile, false, None)?.dwa;
 
     if std::env::var_os("GLRMASK_ASSERT_GROUPED_DETERMINIZE_EQUIVALENCE").is_some() {
-        let reference = determinize_impl_with_options(nwa, true, false, false)?;
+        let reference =
+            determinize_impl_with_options(nwa, true, false, false, false, None)?.dwa;
         match find_difference(&dwa, &reference)? {
             Some(word) => {
                 return Err(GlrMaskError::Compilation(format!(
@@ -535,16 +942,142 @@ pub fn determinize(nwa: &NWA) -> Result<DWA, GlrMaskError> {
     Ok(dwa)
 }
 
+/// Determinize an acyclic weighted NWA and derive each DWA state's intrinsic
+/// live token domain directly from the NWA subset representation.
+///
+/// For a determinized subset `S = {(q, w_q)}`, the exact future-acceptance
+/// domain is `union_q (w_q intersection F(q))`, where `F(q)` is the weighted
+/// future language domain of NWA state `q`. Computing `F` once on the small NWA
+/// avoids a second backward fixed-point over the usually much larger DWA.
+pub fn determinize_with_live_domains(
+    nwa: &NWA,
+) -> Result<DeterminizedWithLiveDomains, GlrMaskError> {
+    let profile = determinize_profile_enabled();
+    let future = nwa_future_domains(nwa)?;
+    let output = determinize_impl_with_options(nwa, true, true, profile, false, Some(&future))?;
+    let live_domains = output
+        .live_domains
+        .expect("live-canonical determinization must retain state live domains");
+
+    if profile {
+        eprintln!(
+            "[glrmask/profile][determinize_live_domains] nwa_states={} dwa_states={} future_ms_included=false canonicalized_during_subset_intern=true",
+            nwa.states().len(),
+            output.dwa.states().len(),
+        );
+    }
+    Ok(DeterminizedWithLiveDomains {
+        dwa: output.dwa,
+        live_domains,
+        productive_edges: true,
+    })
+}
+
+fn nwa_future_domains(nwa: &NWA) -> Result<Vec<Weight>, GlrMaskError> {
+    let state_count = nwa.states().len();
+    let mut indegree = vec![0usize; state_count];
+    for state in nwa.states() {
+        for (target, _) in &state.epsilons {
+            if (*target as usize) >= state_count {
+                return Err(GlrMaskError::Compilation(
+                    "weighted NWA contains an out-of-range epsilon target".into(),
+                ));
+            }
+            indegree[*target as usize] += 1;
+        }
+        for branches in state.transitions.values() {
+            for (target, _) in branches {
+                if (*target as usize) >= state_count {
+                    return Err(GlrMaskError::Compilation(
+                        "weighted NWA contains an out-of-range transition target".into(),
+                    ));
+                }
+                indegree[*target as usize] += 1;
+            }
+        }
+    }
+    let mut queue = indegree
+        .iter()
+        .enumerate()
+        .filter_map(|(state, &degree)| (degree == 0).then_some(state))
+        .collect::<Vec<_>>();
+    let mut head = 0usize;
+    let mut topo = Vec::with_capacity(state_count);
+    while head < queue.len() {
+        let state = queue[head];
+        head += 1;
+        topo.push(state);
+        for (target, _) in &nwa.states()[state].epsilons {
+            indegree[*target as usize] -= 1;
+            if indegree[*target as usize] == 0 {
+                queue.push(*target as usize);
+            }
+        }
+        for branches in nwa.states()[state].transitions.values() {
+            for (target, _) in branches {
+                indegree[*target as usize] -= 1;
+                if indegree[*target as usize] == 0 {
+                    queue.push(*target as usize);
+                }
+            }
+        }
+    }
+    if topo.len() != state_count {
+        return Err(GlrMaskError::Compilation(
+            "weighted determinization currently supports only acyclic NWAs".into(),
+        ));
+    }
+
+    let started_at = determinize_profile_enabled().then(Instant::now);
+    let mut future = vec![Weight::empty(); state_count];
+    let mut cache = ScopedWeightOpCache::default();
+    for state_id in topo.into_iter().rev() {
+        let state = &nwa.states()[state_id];
+        let mut parts = SmallVec::<[Weight; 8]>::new();
+        if let Some(final_weight) = &state.final_weight {
+            if !final_weight.is_empty() {
+                parts.push(final_weight.clone());
+            }
+        }
+        for (target, edge_weight) in &state.epsilons {
+            let contribution = cache.intersection(edge_weight, &future[*target as usize]);
+            if !contribution.is_empty() {
+                parts.push(contribution);
+            }
+        }
+        for branches in state.transitions.values() {
+            for (target, edge_weight) in branches {
+                let contribution = cache.intersection(edge_weight, &future[*target as usize]);
+                if !contribution.is_empty() {
+                    parts.push(contribution);
+                }
+            }
+        }
+        future[state_id] = Weight::union_all(parts.iter());
+    }
+    if let Some(started_at) = started_at {
+        eprintln!(
+            "[glrmask/profile][nwa_future_domains] states={} transitions={} total_ms={:.3}",
+            state_count,
+            nwa.num_transitions(),
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    Ok(future)
+}
+
 fn determinize_impl(
     nwa: &NWA,
     direct_single_target_enabled: bool,
 ) -> Result<DWA, GlrMaskError> {
-    determinize_impl_with_options(
+    Ok(determinize_impl_with_options(
         nwa,
         direct_single_target_enabled,
         true,
         determinize_profile_enabled(),
-    )
+        false,
+        None,
+    )?.dwa)
 }
 
 fn determinize_impl_with_options(
@@ -552,7 +1085,9 @@ fn determinize_impl_with_options(
     direct_single_target_enabled: bool,
     group_transition_weights: bool,
     profile: bool,
-) -> Result<DWA, GlrMaskError> {
+    retain_subsets: bool,
+    future_domains: Option<&[Weight]>,
+) -> Result<DeterminizeImplOutput, GlrMaskError> {
     if !nwa.is_acyclic() {
         return Err(GlrMaskError::Compilation(
             "weighted determinization currently supports only acyclic NWAs".into(),
@@ -617,17 +1152,35 @@ fn determinize_impl_with_options(
     let start_subset = epsilon_closure(nwa, seed_start_subset(nwa));
 
     if start_subset.is_empty() {
-        return Ok(dwa);
+        return Ok(DeterminizeImplOutput {
+            dwa,
+            subsets: retain_subsets.then(Vec::new),
+            live_domains: future_domains.map(|_| vec![Weight::empty()]),
+        });
     }
 
+    let mut canonicalization_cache = ScopedWeightOpCache::default();
     let mut subset_map: FxHashMap<Arc<[(u32, Weight)]>, u32> = FxHashMap::default();
     // This is an identity-only front cache. A miss always falls back through
     // `subset_map`, which retains structural equality as the source of truth.
     let mut singleton_subsets: FxHashMap<(u32, usize), u32> = FxHashMap::default();
     let mut worklist: VecDeque<(u32, Arc<[(u32, Weight)]>)> = VecDeque::new();
-    let start_entries: Arc<[(u32, Weight)]> = canonicalize(&start_subset).into();
+    let (start_entries, start_live_domain) = canonicalize_subset_live_domain(
+        canonicalize(&start_subset),
+        future_domains,
+        &mut canonicalization_cache,
+    );
+    if start_entries.is_empty() {
+        return Ok(DeterminizeImplOutput {
+            dwa,
+            subsets: retain_subsets.then(Vec::new),
+            live_domains: future_domains.map(|_| vec![Weight::empty()]),
+        });
+    }
+    let start_entries: Arc<[(u32, Weight)]> = start_entries.into();
     subset_map.insert(Arc::clone(&start_entries), start_id);
     worklist.push_back((start_id, start_entries));
+    let mut state_live_domains = start_live_domain.into_iter().collect::<Vec<_>>();
 
     // Almost every label has one surviving destination. Keep that common
     // case inline instead of allocating a nested hash map and a Vec per label.
@@ -698,14 +1251,20 @@ fn determinize_impl_with_options(
                                 profile_direct_singleton_fast_path_labels += 1;
                             }
                             let subset_lookup_started_at = profile.then(Instant::now);
-                            let (to_state, cache_hit) = intern_determinized_singleton(
+                            let Some((to_state, target_live_domain, cache_hit)) =
+                                intern_determinized_singleton(
                                 edge.dst,
                                 &next_weight,
+                                future_domains,
+                                &mut canonicalization_cache,
+                                &mut state_live_domains,
                                 &mut singleton_subsets,
                                 &mut subset_map,
                                 &mut worklist,
                                 &mut dwa,
-                            );
+                            ) else {
+                                continue;
+                            };
                             if let Some(subset_lookup_started_at) = subset_lookup_started_at {
                                 profile_subset_lookup_ms +=
                                     subset_lookup_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -717,7 +1276,19 @@ fn determinize_impl_with_options(
                                     profile_direct_singleton_cache_misses += 1;
                                 }
                             }
-                            dwa.add_transition(from_state, edge.label, to_state, next_weight.clone());
+                            let productive_edge = restrict_edge_to_target_live_domain(
+                                next_weight.clone(),
+                                target_live_domain.as_ref(),
+                                &mut scoped_determinize_weight_cache,
+                            );
+                            if !productive_edge.is_empty() {
+                                dwa.add_transition(
+                                    from_state,
+                                    edge.label,
+                                    to_state,
+                                    productive_edge,
+                                );
+                            }
                         } else {
                             raw_targets
                                 .entry(edge.label)
@@ -827,14 +1398,20 @@ fn determinize_impl_with_options(
                     }
                     let (dst, edge_weight) = target_contributions.into_iter().next().unwrap();
                     let subset_lookup_started_at = profile.then(Instant::now);
-                    let (to_state, cache_hit) = intern_determinized_singleton(
+                    let Some((to_state, target_live_domain, cache_hit)) =
+                        intern_determinized_singleton(
                         dst,
                         &edge_weight,
+                        future_domains,
+                        &mut canonicalization_cache,
+                        &mut state_live_domains,
                         &mut singleton_subsets,
                         &mut subset_map,
                         &mut worklist,
                         &mut dwa,
-                    );
+                    ) else {
+                        continue;
+                    };
                     if profile {
                         if cache_hit {
                             profile_direct_singleton_cache_hits += 1;
@@ -846,7 +1423,14 @@ fn determinize_impl_with_options(
                         profile_subset_lookup_ms +=
                             subset_lookup_started_at.elapsed().as_secs_f64() * 1000.0;
                     }
-                    dwa.add_transition(from_state, label, to_state, edge_weight);
+                    let productive_edge = restrict_edge_to_target_live_domain(
+                        edge_weight,
+                        target_live_domain.as_ref(),
+                        &mut scoped_determinize_weight_cache,
+                    );
+                    if !productive_edge.is_empty() {
+                        dwa.add_transition(from_state, label, to_state, productive_edge);
+                    }
                     continue;
                 }
 
@@ -857,17 +1441,29 @@ fn determinize_impl_with_options(
                     let (next_key, edge_weight) = aggregate_direct_point_entries(target_contributions);
                     debug_assert!(!edge_weight.is_empty());
                     let subset_lookup_started_at = profile.then(Instant::now);
-                    let to_state = intern_determinized_subset(
+                    let Some((to_state, target_live_domain)) = intern_determinized_subset(
                         next_key,
+                        future_domains,
+                        &mut canonicalization_cache,
+                        &mut state_live_domains,
                         &mut subset_map,
                         &mut worklist,
                         &mut dwa,
-                    );
+                    ) else {
+                        continue;
+                    };
                     if let Some(subset_lookup_started_at) = subset_lookup_started_at {
                         profile_subset_lookup_ms +=
                             subset_lookup_started_at.elapsed().as_secs_f64() * 1000.0;
                     }
-                    dwa.add_transition(from_state, label, to_state, edge_weight);
+                    let productive_edge = restrict_edge_to_target_live_domain(
+                        edge_weight,
+                        target_live_domain.as_ref(),
+                        &mut scoped_determinize_weight_cache,
+                    );
+                    if !productive_edge.is_empty() {
+                        dwa.add_transition(from_state, label, to_state, productive_edge);
+                    }
                     continue;
                 }
 
@@ -891,17 +1487,29 @@ fn determinize_impl_with_options(
                 debug_assert!(!edge_weight.is_empty());
 
                 let subset_lookup_started_at = profile.then(Instant::now);
-                let to_state = intern_determinized_subset(
+                let Some((to_state, target_live_domain)) = intern_determinized_subset(
                     next_key,
+                    future_domains,
+                    &mut canonicalization_cache,
+                    &mut state_live_domains,
                     &mut subset_map,
                     &mut worklist,
                     &mut dwa,
-                );
+                ) else {
+                    continue;
+                };
                 if let Some(subset_lookup_started_at) = subset_lookup_started_at {
                     profile_subset_lookup_ms +=
                         subset_lookup_started_at.elapsed().as_secs_f64() * 1000.0;
                 }
-                dwa.add_transition(from_state, label, to_state, edge_weight);
+                let productive_edge = restrict_edge_to_target_live_domain(
+                    edge_weight,
+                    target_live_domain.as_ref(),
+                    &mut scoped_determinize_weight_cache,
+                );
+                if !productive_edge.is_empty() {
+                    dwa.add_transition(from_state, label, to_state, productive_edge);
+                }
                 continue;
             }
 
@@ -997,17 +1605,29 @@ fn determinize_impl_with_options(
                 continue;
             }
             let subset_lookup_started_at = profile.then(Instant::now);
-            let to_state = intern_determinized_subset(
+            let Some((to_state, target_live_domain)) = intern_determinized_subset(
                 next_key,
+                future_domains,
+                &mut canonicalization_cache,
+                &mut state_live_domains,
                 &mut subset_map,
                 &mut worklist,
                 &mut dwa,
-            );
+            ) else {
+                continue;
+            };
             if let Some(subset_lookup_started_at) = subset_lookup_started_at {
                 profile_subset_lookup_ms += subset_lookup_started_at.elapsed().as_secs_f64() * 1000.0;
             }
 
-            dwa.add_transition(from_state, label, to_state, edge_weight);
+            let productive_edge = restrict_edge_to_target_live_domain(
+                edge_weight,
+                target_live_domain.as_ref(),
+                &mut scoped_determinize_weight_cache,
+            );
+            if !productive_edge.is_empty() {
+                dwa.add_transition(from_state, label, to_state, productive_edge);
+            }
         }
     }
 
@@ -1192,7 +1812,21 @@ fn determinize_impl_with_options(
         );
     }
 
-    Ok(dwa)
+    let subsets = if retain_subsets {
+        let empty: Arc<[(u32, Weight)]> = Arc::from([]);
+        let mut by_state = vec![empty; dwa.states().len()];
+        for (subset, &state) in &subset_map {
+            by_state[state as usize] = Arc::clone(subset);
+        }
+        Some(by_state)
+    } else {
+        None
+    };
+    Ok(DeterminizeImplOutput {
+        dwa,
+        subsets,
+        live_domains: future_domains.map(|_| state_live_domains),
+    })
 }
 
 #[cfg(test)]
@@ -1220,7 +1854,7 @@ mod tests {
 
         let fast = determinize_impl(&nwa, true).unwrap();
         let generic = determinize_impl(&nwa, false).unwrap();
-        let grouped = determinize_impl_with_options(&nwa, true, true, false).unwrap();
+        let grouped = determinize_impl_with_options(&nwa, true, true, false, false, None).unwrap().dwa;
         assert_eq!(find_difference(&fast, &generic).unwrap(), None);
         assert_eq!(find_difference(&grouped, &generic).unwrap(), None);
         assert_eq!(fast.eval_word(&[7]), tokens([0, 1]));
@@ -1325,7 +1959,7 @@ mod tests {
 
             let fast = determinize_impl(&nwa, true).unwrap();
             let generic = determinize_impl(&nwa, false).unwrap();
-            let grouped = determinize_impl_with_options(&nwa, true, true, false).unwrap();
+            let grouped = determinize_impl_with_options(&nwa, true, true, false, false, None).unwrap().dwa;
             assert_eq!(
                 find_difference(&fast, &generic).unwrap(),
                 None,
@@ -1355,7 +1989,7 @@ mod tests {
 
         let fast = determinize_impl(&nwa, true).unwrap();
         let generic = determinize_impl(&nwa, false).unwrap();
-        let grouped = determinize_impl_with_options(&nwa, true, true, false).unwrap();
+        let grouped = determinize_impl_with_options(&nwa, true, true, false, false, None).unwrap().dwa;
         assert_eq!(find_difference(&fast, &generic).unwrap(), None);
         assert_eq!(find_difference(&grouped, &generic).unwrap(), None);
         assert_eq!(fast.eval_word(&[5]), tokens([0, 1, 2, 3, 4, 5]));
@@ -1382,8 +2016,8 @@ mod tests {
         nwa.set_final_weight(second_accept, tokens([0, 1]));
         nwa.set_final_weight(epsilon_accept, tokens([0, 1]));
 
-        let grouped = determinize_impl_with_options(&nwa, true, true, false).unwrap();
-        let generic = determinize_impl_with_options(&nwa, false, false, false).unwrap();
+        let grouped = determinize_impl_with_options(&nwa, true, true, false, false, None).unwrap().dwa;
+        let generic = determinize_impl_with_options(&nwa, false, false, false, false, None).unwrap().dwa;
         assert_eq!(find_difference(&grouped, &generic).unwrap(), None);
         assert_eq!(grouped.eval_word(&[7]), tokens([0, 1]));
         assert_eq!(grouped.eval_word(&[8]), tokens([0, 1]));

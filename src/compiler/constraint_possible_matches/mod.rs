@@ -3180,10 +3180,53 @@ fn compute_constraint_possible_matches_with_artifacts(
     let possible_match_vocab_started_at = Instant::now();
     let (possible_match_vocab, possible_matches) = build_possible_match_vocab_and_weights_from_interval_maps(&trie_class_result.class_maps, &trie_class_result.state_classes, ordered_vocab.as_ref());
 
-    let local_vocab_map = ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
-        possible_match_vocab.original_to_internal.clone(),
-        possible_match_vocab.internal_to_originals.len() as u32,
-    );
+    // `build_possible_match_vocab_and_weights_from_interval_maps` has already
+    // materialized both directions of this exact quotient. Reconstructing a
+    // `ManyToOneIdMap` from a clone of `original_to_internal` repeated a full
+    // vocabulary scan and rebuilt the same groups. Move the proven maps
+    // directly and derive each representative from the first (smallest)
+    // original ID already stored in its class.
+    let PossibleMatchVocabMap {
+        original_to_internal,
+        internal_to_originals,
+    } = possible_match_vocab;
+    let rebuild_vocab_id_map =
+        std::env::var_os("GLRMASK_PM_REBUILD_VOCAB_ID_MAP").is_some();
+    let validate_direct_vocab_id_map =
+        std::env::var_os("GLRMASK_VALIDATE_PM_DIRECT_VOCAB_ID_MAP").is_some();
+    let local_vocab_map = if rebuild_vocab_id_map {
+        ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+            original_to_internal,
+            internal_to_originals.len() as u32,
+        )
+    } else {
+        let representative_original_ids = internal_to_originals
+            .iter()
+            .map(|originals| {
+                *originals
+                    .first()
+                    .expect("possible-match vocabulary classes are non-empty")
+            })
+            .collect();
+        let direct = ManyToOneIdMap {
+            original_to_internal,
+            internal_to_originals,
+            representative_original_ids,
+        };
+        if validate_direct_vocab_id_map {
+            let rebuilt = ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+                direct.original_to_internal.clone(),
+                direct.internal_to_originals.len() as u32,
+            );
+            assert_eq!(direct.original_to_internal, rebuilt.original_to_internal);
+            assert_eq!(direct.internal_to_originals, rebuilt.internal_to_originals);
+            assert_eq!(
+                direct.representative_original_ids,
+                rebuilt.representative_original_ids
+            );
+        }
+        direct
+    };
     let vocab_tokens = if let Some(initial_vocab_map) = initial_vocab_map {
         initial_vocab_map.compose(&local_vocab_map)
     } else {

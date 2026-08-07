@@ -22,15 +22,21 @@ pub use terminal_interchangeability::with_ti_pool;
 pub use terminal_interchangeability::SharedTiTokenizerOutputCache;
 
 use std::cell::Cell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::OnceLock;
 use std::time::Instant;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
-use crate::automata::weighted::determinize::{determinize, determinize_depth2};
+use crate::automata::regex::Expr;
+use crate::automata::weighted::determinize::{
+    determinize, determinize_bounded_language, determinize_depth2,
+    determinize_with_live_domains,
+};
 use crate::automata::weighted::equivalence::find_difference;
 use crate::automata::weighted::minimize::{
-    PointwiseClassOrder, minimize_owned, minimize_owned_with_pointwise_class_order,
+    PointwiseClassOrder, minimize_owned, minimize_owned_with_live_domains,
+    minimize_owned_with_productive_live_domains,
+    minimize_owned_with_pointwise_class_order,
 };
 use crate::automata::weighted::nwa::NWA;
 use crate::automata::weighted_u32::dwa::DWA;
@@ -65,6 +71,173 @@ use postprocess::{
 
 fn l2p_timing_profile_enabled() -> bool {
     compile_profile_enabled() || std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some()
+}
+
+fn ti_fixed_literal_bytes(expr: &Expr, output: &mut Vec<u8>) -> bool {
+    match expr {
+        Expr::U8Seq(bytes) => { output.extend_from_slice(bytes); true }
+        Expr::Seq(parts) => parts.iter().all(|part| ti_fixed_literal_bytes(part, output)),
+        Expr::Shared(inner) => ti_fixed_literal_bytes(inner, output),
+        Expr::Epsilon => true,
+        _ => false,
+    }
+}
+
+fn ti_literal_branch_signature(bytes: &[u8], selected: &[bool; 256]) -> Vec<u16> {
+    const OPAQUE: u16 = 256;
+    let mut signature = Vec::with_capacity(bytes.len());
+    let mut in_opaque = false;
+    for &byte in bytes {
+        if selected[byte as usize] {
+            signature.push(byte as u16);
+            in_opaque = false;
+        } else if !in_opaque {
+            signature.push(OPAQUE);
+            in_opaque = true;
+        }
+    }
+    signature
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct TiPrecontextOpportunity {
+    literals: usize,
+    nonliterals: usize,
+    literal_candidate_members: usize,
+    literal_possible_merges: usize,
+    duplicate_nonliteral_members: usize,
+    duplicate_nonliteral_possible_merges: usize,
+}
+
+impl TiPrecontextOpportunity {
+    fn cheap_merge_score(self) -> usize {
+        self.literal_possible_merges
+            .saturating_add(self.duplicate_nonliteral_possible_merges)
+    }
+}
+
+fn ti_precontext_opportunity(
+    partition_label: &str,
+    tokenizer: &Tokenizer,
+    active: &[bool],
+    selected: &[bool; 256],
+) -> TiPrecontextOpportunity {
+    let started = l2p_timing_profile_enabled().then(Instant::now);
+    let mut literal_groups = HashMap::<Vec<u16>, usize>::new();
+    let mut duplicate_nonliteral_groups = HashMap::<&Expr, usize>::new();
+    let mut result = TiPrecontextOpportunity::default();
+    for (terminal, &is_active) in active.iter().enumerate() {
+        if !is_active {
+            continue;
+        }
+        let Some(expr) = tokenizer.terminal_expr(terminal as u32) else {
+            result.nonliterals += 1;
+            continue;
+        };
+        let mut bytes = Vec::new();
+        if ti_fixed_literal_bytes(expr, &mut bytes) {
+            result.literals += 1;
+            *literal_groups
+                .entry(ti_literal_branch_signature(&bytes, selected))
+                .or_default() += 1;
+        } else {
+            result.nonliterals += 1;
+            *duplicate_nonliteral_groups.entry(expr).or_default() += 1;
+        }
+    }
+    result.literal_candidate_members = literal_groups
+        .values()
+        .filter(|&&n| n >= 2)
+        .sum::<usize>();
+    result.literal_possible_merges = literal_groups
+        .values()
+        .map(|&n| n.saturating_sub(1))
+        .sum::<usize>();
+    result.duplicate_nonliteral_members = duplicate_nonliteral_groups
+        .values()
+        .filter(|&&n| n >= 2)
+        .sum::<usize>();
+    result.duplicate_nonliteral_possible_merges = duplicate_nonliteral_groups
+        .values()
+        .map(|&n| n.saturating_sub(1))
+        .sum::<usize>();
+
+    if let Some(started) = started {
+        let mut literal_hist = BTreeMap::<usize, usize>::new();
+        for &n in literal_groups.values().filter(|&&n| n >= 2) {
+            *literal_hist.entry(n).or_default() += 1;
+        }
+        let mut nonliteral_hist = BTreeMap::<usize, usize>::new();
+        for &n in duplicate_nonliteral_groups.values().filter(|&&n| n >= 2) {
+            *nonliteral_hist.entry(n).or_default() += 1;
+        }
+        eprintln!(
+            "[glrmask/profile][ti_precontext_candidates] partition={} active={} literals={} nonliterals={} literal_candidate_members={} literal_possible_merges={} duplicate_nonliteral_members={} duplicate_nonliteral_possible_merges={} cheap_merge_score={} literal_group_hist={:?} duplicate_nonliteral_hist={:?} total_ms={:.3}",
+            partition_label,
+            active.iter().filter(|&&x| x).count(),
+            result.literals,
+            result.nonliterals,
+            result.literal_candidate_members,
+            result.literal_possible_merges,
+            result.duplicate_nonliteral_members,
+            result.duplicate_nonliteral_possible_merges,
+            result.cheap_merge_score(),
+            literal_hist,
+            nonliteral_hist,
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    result
+}
+
+fn ti_wide_alphabet_low_duplicate_skip(
+    tokenizer: &Tokenizer,
+    active: &[bool],
+    relevant_bytes: &[bool; 256],
+    has_global_state_quotient: bool,
+) -> bool {
+    if std::env::var_os("GLRMASK_TI_LOW_OPPORTUNITY_GATE").is_none()
+        || has_global_state_quotient
+    {
+        return false;
+    }
+    let active_count = active.iter().filter(|&&value| value).count();
+    let relevant_byte_count = relevant_bytes.iter().filter(|&&value| value).count();
+    if active_count < 128 || relevant_byte_count < 128 {
+        return false;
+    }
+
+    // Profitability heuristic only. Skipping TI cannot change the recognized
+    // language: it simply keeps every active terminal as its own representative.
+    // Exact duplicate definitions are a cheap proxy for the amount of obvious
+    // compaction available in wide-alphabet partitions, where building the
+    // global TI powerset is comparatively expensive.
+    let mut counts = HashMap::<&Expr, usize>::new();
+    for (terminal, &is_active) in active.iter().enumerate() {
+        if !is_active {
+            continue;
+        }
+        if let Some(expr) = tokenizer.terminal_expr(terminal as u32) {
+            *counts.entry(expr).or_default() += 1;
+        }
+    }
+    let duplicate_possible_merges = counts
+        .values()
+        .map(|&count| count.saturating_sub(1))
+        .sum::<usize>();
+    duplicate_possible_merges <= 4
+}
+
+fn ti_low_opportunity_skip(
+    opportunity: TiPrecontextOpportunity,
+    active_count: usize,
+    has_global_state_quotient: bool,
+) -> bool {
+    std::env::var_os("GLRMASK_TI_LOW_OPPORTUNITY_GATE").is_some()
+        && !has_global_state_quotient
+        && active_count >= 128
+        && opportunity.nonliterals <= 32
+        && opportunity.cheap_merge_score() <= 4
 }
 
 thread_local! {
@@ -216,8 +389,12 @@ fn l2p_terminal_interchangeability_enabled() -> bool {
         && !l2p_env_enabled("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY")
 }
 
-pub fn l2p_terminal_interchangeability_enabled_for_partition(_partition_label: &str) -> bool {
+pub fn l2p_terminal_interchangeability_enabled_for_partition(partition_label: &str) -> bool {
     l2p_terminal_interchangeability_enabled()
+        && !l2p_partition_selector_enabled(
+            "GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY_PARTITIONS",
+            partition_label,
+        )
 }
 
 /// Rebuild the TI-off local artifact and symbolically compare it with TI-on.
@@ -514,23 +691,139 @@ pub fn build_l2p_id_map_and_terminal_dwa(
                 }
             }
             let mut classes = singleton_partition(&active);
-            // Always use the byte-level exact discovery oracle. When the global
+            if ti_profile_timing {
+                let dispatch_roots = tokenizer.deterministic_dispatch_roots().map_or(0, <[u32]>::len);
+                let scalar_dispatch = tokenizer.has_scalar_deterministic_dispatch();
+                let components = scalar_dispatch
+                    .then(|| tokenizer.disjoint_dispatch_components())
+                    .flatten();
+                let (component_count, min_component, max_component, avg_component) =
+                    components.as_ref().map_or((0usize, 0usize, 0usize, 0.0f64), |components| {
+                        let min = components.iter().map(Vec::len).min().unwrap_or(0);
+                        let max = components.iter().map(Vec::len).max().unwrap_or(0);
+                        let total = components.iter().map(Vec::len).sum::<usize>();
+                        (components.len(), min, max, total as f64 / components.len().max(1) as f64)
+                    });
+                eprintln!(
+                    "[glrmask/profile][ti_dispatch_shape] partition={} scalar={} roots={} components={} min_component={} max_component={} avg_component={:.2}",
+                    partition_label,
+                    scalar_dispatch,
+                    dispatch_roots,
+                    component_count,
+                    min_component,
+                    max_component,
+                    avg_component,
+                );
+            }
+            let ti_early_profitability_skip = ti_wide_alphabet_low_duplicate_skip(
+                tokenizer,
+                &active,
+                &relevant_bytes,
+                global_state_quotient.is_some(),
+            );
+            let mut ti_relevant_bytes = relevant_bytes;
+            let mut semantic_byte_class_count = relevant_bytes.iter().filter(|&&value| value).count();
+            let semantic_byte_class_started_at = ti_profile_timing.then(Instant::now);
+            if !ti_early_profitability_skip
+                && let Some(byte_classes) =
+                equivalence_analysis::compat::compute_active_terminal_syntactic_byte_classes(
+                    tokenizer,
+                    &active,
+                )
+            {
+                let mut representative_by_class = [u8::MAX; 256];
+                for byte in 0..=u8::MAX {
+                    if relevant_bytes[byte as usize] {
+                        let class = byte_classes[byte as usize] as usize;
+                        representative_by_class[class] = representative_by_class[class].min(byte);
+                    }
+                }
+                semantic_byte_class_count = representative_by_class.iter().filter(|&&byte| byte != u8::MAX).count();
+                ti_relevant_bytes = [false; 256];
+                for &byte in &representative_by_class {
+                    if byte != u8::MAX {
+                        ti_relevant_bytes[byte as usize] = true;
+                    }
+                }
+            }
+            if ti_profile_timing {
+                eprintln!(
+                    "[glrmask/profile][ti_byte_congruence] partition={} relevant_bytes={} semantic_byte_classes={} selected_bytes={} semantic_byte_class_ms={:.3}",
+                    partition_label,
+                    relevant_bytes.iter().filter(|&&value| value).count(),
+                    semantic_byte_class_count,
+                    ti_relevant_bytes.iter().filter(|&&value| value).count(),
+                    semantic_byte_class_started_at
+                        .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
+                );
+            }
+            let ti_precontext_opportunity = ti_precontext_opportunity(
+                partition_label,
+                tokenizer,
+                &active,
+                &ti_relevant_bytes,
+            );
+            let ti_profitability_skip = ti_early_profitability_skip
+                || ti_low_opportunity_skip(
+                    ti_precontext_opportunity,
+                    active.iter().filter(|&&value| value).count(),
+                    global_state_quotient.is_some(),
+                );
+            if ti_profile_timing && ti_profitability_skip {
+                eprintln!(
+                    "[glrmask/profile][ti_precontext_skip] partition={} active={} cheap_merge_score={} nonliterals={} reason=large_low_opportunity",
+                    partition_label,
+                    active.iter().filter(|&&value| value).count(),
+                    ti_precontext_opportunity.cheap_merge_score(),
+                    ti_precontext_opportunity.nonliterals,
+                );
+            }
+            // Use one representative byte per exact active-language syntactic
+            // congruence class. For every residual expression r and bytes b,c
+            // in one class, D_b(r)=D_c(r); induction on words therefore makes
+            // this alphabet quotient exact for all active terminal traces.
+            // When the global
             // token-position quotient C is available (p7/p8), build discovery
             // evidence over C representatives; otherwise over raw states.
+            if ti_profitability_skip {
+                let discovery_ms = ti_discovery_started_at
+                    .as_ref()
+                    .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+                    .unwrap_or(0.0);
+                (
+                    Some(classes),
+                    Some(Vec::new()),
+                    0,
+                    discovery_ms,
+                    0,
+                    None,
+                    None,
+                    0.0,
+                )
+            } else {
             let discovery_context = match global_state_quotient.as_ref() {
                 Some(quotient) => {
-                    TiDiscoveryContext::try_new_with_global_state_quotient_and_output_cache(
+                    TiDiscoveryContext::try_new_with_active_groups_global_state_quotient_and_output_cache(
                         tokenizer,
-                        &relevant_bytes,
+                        &ti_relevant_bytes,
+                        Some(&active),
                         quotient,
                         shared_ti_output_cache,
                     )
                 }
-                None => TiDiscoveryContext::try_new_with_output_cache(
-                    tokenizer,
-                    &relevant_bytes,
-                    shared_ti_output_cache,
-                ),
+                None => {
+                    let ti_initial_state_map = std::env::var_os("GLRMASK_TI_USE_INITIAL_STATE_MAP")
+                        .is_some()
+                        .then_some(initial_state_map)
+                        .flatten();
+                    TiDiscoveryContext::try_new_with_active_groups_state_map_and_output_cache(
+                        tokenizer,
+                        &ti_relevant_bytes,
+                        Some(&active),
+                        ti_initial_state_map,
+                        shared_ti_output_cache,
+                    )
+                },
             };
             match discovery_context {
                 Ok(discovery_context) => {
@@ -565,11 +858,44 @@ pub fn build_l2p_id_map_and_terminal_dwa(
                         .unwrap_or(0.0);
                     let restricted_observation_seed_started_at =
                         ti_profile_timing.then(Instant::now);
-                    let restricted_observation_seed = discovery_context
-                        .reusable_nfa_restricted_observation_state_map(
+                    let use_support_seed = std::env::var_os("GLRMASK_TI_REUSE_FINAL_SUPPORT_STATE_MAP").is_some();
+                    let restricted_observation_seed = if use_support_seed {
+                        let seeded = discovery_context
+                            .reusable_nfa_restricted_observation_state_map_from_support(
+                                tokenizer,
+                                initial_state_map,
+                            );
+                        if std::env::var_os("GLRMASK_VALIDATE_TI_SUPPORT_STATE_MAP").is_some()
+                            && let Some(seeded_map) = seeded.as_ref()
+                            && let Some(reference) = discovery_context
+                                .reusable_nfa_restricted_observation_state_map(
+                                    tokenizer,
+                                    initial_state_map,
+                                )
+                        {
+                            assert_eq!(
+                                seeded_map.original_to_internal.len(),
+                                reference.original_to_internal.len(),
+                            );
+                            let mut seeded_to_reference = rustc_hash::FxHashMap::<u32, u32>::default();
+                            let mut reference_to_seeded = rustc_hash::FxHashMap::<u32, u32>::default();
+                            let same = seeded_map.original_to_internal.iter().copied()
+                                .zip(reference.original_to_internal.iter().copied())
+                                .all(|(seeded, reference)| {
+                                    seeded_to_reference.get(&seeded).is_none_or(|&old| old == reference)
+                                        && reference_to_seeded.get(&reference).is_none_or(|&old| old == seeded)
+                                        && { seeded_to_reference.insert(seeded, reference); true }
+                                        && { reference_to_seeded.insert(reference, seeded); true }
+                                });
+                            assert!(same, "TI support-seeded state map changed exact restricted-observation partition");
+                        }
+                        seeded
+                    } else {
+                        discovery_context.reusable_nfa_restricted_observation_state_map(
                             tokenizer,
                             initial_state_map,
-                        );
+                        )
+                    };
                     let restricted_observation_seed_ms = restricted_observation_seed_started_at
                         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
                         .unwrap_or(0.0);
@@ -594,6 +920,7 @@ pub fn build_l2p_id_map_and_terminal_dwa(
                     (None, None, 0, discovery_ms, 0, None, None, 0.0)
                 }
             }
+            }
         } else {
             (None, None, 0, 0.0, 0, None, None, 0.0)
         };
@@ -610,6 +937,10 @@ pub fn build_l2p_id_map_and_terminal_dwa(
         && l2p_strict_partition_matches(partition_label);
     let first_byte_vocab_factor_strict_reference =
         l2p_first_byte_vocab_factor_strict_reference_enabled_for_partition(partition_label);
+    let active_language_byte_dedup_strict_reference =
+        std::env::var_os("GLRMASK_L2P_ACTIVE_LANGUAGE_BYTE_DEDUP_STRICT_REFERENCE").is_some()
+            && !equivalence_analysis::combined::active_language_byte_dedup_is_suppressed()
+            && l2p_strict_partition_matches(partition_label);
     let analysis_active_terminals = terminal_partition
         .as_ref()
         .map(|partition| active_terminals_for_partition(partition, active_terminals.len()))
@@ -934,7 +1265,20 @@ pub fn build_l2p_id_map_and_terminal_dwa(
             let structural_depth = max_structural_label_depth_to_final(&nwa);
             let determinize_started_at = Instant::now();
             let use_depth2 = structural_depth.is_some_and(|depth| depth <= 2);
-            let det = if use_depth2 {
+            let bounded_language = if !use_depth2
+                && std::env::var_os("GLRMASK_L2P_BOUNDED_LANGUAGE_DETERMINIZE").is_some()
+                && structural_depth.is_some_and(|depth| depth <= 4)
+            {
+                determinize_bounded_language(&nwa, structural_depth.unwrap(), 250_000)
+                    .expect("bounded-language L2P determinization failed")
+            } else {
+                None
+            };
+            let fused_live_domains =
+                !use_depth2
+                    && bounded_language.is_none()
+                    && std::env::var_os("GLRMASK_L2P_FUSED_LIVE_DOMAINS").is_some();
+            let (det, live_domains, productive_edges) = if use_depth2 {
                 let depth2 = determinize_depth2(&nwa)
                     .expect("depth-2 terminal NWA determinization failed");
                 if std::env::var_os("GLRMASK_ASSERT_L2P_DEPTH2_DETERMINIZE").is_some() {
@@ -947,9 +1291,43 @@ pub fn build_l2p_id_map_and_terminal_dwa(
                         "depth-2 terminal DWA differs from generic determinization",
                     );
                 }
-                depth2
+                (depth2, None, false)
+            } else if let Some(bounded) = bounded_language {
+                if std::env::var_os("GLRMASK_VALIDATE_L2P_BOUNDED_LANGUAGE").is_some() {
+                    let reference =
+                        determinize(&nwa).expect("reference L2P NWA determinization failed");
+                    assert_eq!(
+                        find_difference(&bounded, &reference)
+                            .expect("bounded-language L2P equivalence check failed"),
+                        None,
+                        "bounded-language L2P determinization changed the weighted language",
+                    );
+                }
+                (bounded, None, false)
+            } else if fused_live_domains {
+                let result = determinize_with_live_domains(&nwa)
+                    .expect("L2+ terminal NWA determinization with live domains failed");
+                if std::env::var_os("GLRMASK_VALIDATE_L2P_FUSED_LIVE_DOMAINS").is_some() {
+                    let reference =
+                        determinize(&nwa).expect("reference L2P NWA determinization failed");
+                    assert_eq!(
+                        find_difference(&result.dwa, &reference)
+                            .expect("productive determinization equivalence check failed"),
+                        None,
+                        "restricting determinized edges to target live domains changed the weighted language",
+                    );
+                }
+                (
+                    result.dwa,
+                    Some(result.live_domains),
+                    result.productive_edges,
+                )
             } else {
-                determinize(&nwa).expect("L2+ terminal NWA determinization failed")
+                (
+                    determinize(&nwa).expect("L2+ terminal NWA determinization failed"),
+                    None,
+                    false,
+                )
             };
             let determinize_ms = determinize_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -960,7 +1338,40 @@ pub fn build_l2p_id_map_and_terminal_dwa(
                     trimmed.is_empty() || trimmed == "1" || trimmed.eq_ignore_ascii_case("true")
                 })
                 .unwrap_or(false);
-            let dwa = if skip_minimize { det } else { minimize_owned(det) };
+            let dwa = if skip_minimize {
+                det
+            } else if let Some(live_domains) = live_domains {
+                let validate = std::env::var_os("GLRMASK_VALIDATE_L2P_FUSED_LIVE_DOMAINS")
+                    .is_some();
+                let reference_input = validate.then(|| det.clone());
+                let candidate = if productive_edges {
+                    minimize_owned_with_productive_live_domains(det, live_domains)
+                } else {
+                    minimize_owned_with_live_domains(det, live_domains)
+                };
+                if let Some(reference_input) = reference_input {
+                    let reference = minimize_owned(reference_input);
+                    assert_eq!(
+                        find_difference(&candidate, &reference)
+                            .expect("fused L2P minimization equivalence check failed"),
+                        None,
+                        "fused L2P live-domain minimization changed the weighted language",
+                    );
+                    assert_eq!(
+                        candidate.stats().states,
+                        reference.stats().states,
+                        "fused L2P minimization produced a different quotient size",
+                    );
+                    assert_eq!(
+                        candidate.stats().transitions,
+                        reference.stats().transitions,
+                        "fused L2P minimization produced a different transition count",
+                    );
+                }
+                candidate
+            } else {
+                minimize_owned(det)
+            };
             let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
             let dwa_stats_before_compact = dwa.stats();
 
@@ -1376,6 +1787,7 @@ pub fn build_l2p_id_map_and_terminal_dwa(
     if strict_reference
         || global_token_position_strict_reference
         || first_byte_vocab_factor_strict_reference
+        || active_language_byte_dedup_strict_reference
     {
         // Rebuild the local artifact under the appropriate suppressed feature
         // set, then compare completed weighted terminal languages in original
@@ -1391,29 +1803,38 @@ pub fn build_l2p_id_map_and_terminal_dwa(
                 .then(SuppressGlobalTokenPosition::new);
             let _suppress_first_byte_vocab_factor = first_byte_vocab_factor_strict_reference
                 .then(SuppressFirstByteVocabFactor::new);
-            build_l2p_id_map_and_terminal_dwa(
-                partition_label,
-                tokenizer,
-                vocab,
-                terminal_coloring,
-                use_terminal_coloring,
-                ignore_terminal,
-                grammar,
-                always_allowed_follows,
-                active_terminals,
-                disallowed_follows,
-                token_path_disallowed_follows,
-                normalized_token_path_disallowed_follows,
-                shared_vocab_dfa_cache,
-                shared_original_vocab_dfa_cache,
-                shared_original_vocab_analysis_dfa_cache,
-                shared_transition_cache,
-                shared_ti_output_cache,
-                flat_trans,
-                prebuilt_token_trie,
-                initial_state_map,
-            )
-            .expect("terminal interchangeability baseline L2P build unexpectedly returned None")
+            let build_baseline = || {
+                build_l2p_id_map_and_terminal_dwa(
+                    partition_label,
+                    tokenizer,
+                    vocab,
+                    terminal_coloring,
+                    use_terminal_coloring,
+                    ignore_terminal,
+                    grammar,
+                    always_allowed_follows,
+                    active_terminals,
+                    disallowed_follows,
+                    token_path_disallowed_follows,
+                    normalized_token_path_disallowed_follows,
+                    shared_vocab_dfa_cache,
+                    shared_original_vocab_dfa_cache,
+                    shared_original_vocab_analysis_dfa_cache,
+                    shared_transition_cache,
+                    shared_ti_output_cache,
+                    flat_trans,
+                    prebuilt_token_trie,
+                    initial_state_map,
+                )
+                .expect("strict-reference baseline L2P build unexpectedly returned None")
+            };
+            if active_language_byte_dedup_strict_reference {
+                equivalence_analysis::combined::with_active_language_byte_dedup_suppressed(
+                    build_baseline,
+                )
+            } else {
+                build_baseline()
+            }
         };
         let strict_baseline_build_ms = strict_baseline_started_at.elapsed().as_secs_f64() * 1000.0;
         let strict_compare_started_at = Instant::now();
@@ -1427,11 +1848,12 @@ pub fn build_l2p_id_map_and_terminal_dwa(
         let strict_compare_ms = strict_compare_started_at.elapsed().as_secs_f64() * 1000.0;
         if ti_profile_timing {
             eprintln!(
-                "[glrmask/profile][l2p_strict_reference] partition={} ti_reference={} global_token_position_reference={} first_byte_vocab_factor_reference={} baseline_build_ms={:.3} terminal_dwa_equivalence_ms={:.3} differs=false",
+                "[glrmask/profile][l2p_strict_reference] partition={} ti_reference={} global_token_position_reference={} first_byte_vocab_factor_reference={} active_language_byte_dedup_reference={} baseline_build_ms={:.3} terminal_dwa_equivalence_ms={:.3} differs=false",
                 partition_label,
                 strict_reference,
                 global_token_position_strict_reference,
                 first_byte_vocab_factor_strict_reference,
+                active_language_byte_dedup_strict_reference,
                 strict_baseline_build_ms,
                 strict_compare_ms,
             );

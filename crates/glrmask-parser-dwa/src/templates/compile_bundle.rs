@@ -19,8 +19,21 @@ use crate::ds::weight::{SharedTokenSet, Weight};
 
 type SubsetKey = SmallVec<[u64; 4]>;
 type LabelTargets = SmallVec<[(i32, u32, u32); 8]>;
+pub(crate) type BundleTopologySignature = Vec<Vec<TerminalID>>;
 const SUBSET_BLOCK_BITS: usize = 8;
 const SUBSET_BLOCK_MASK: u64 = (1u64 << SUBSET_BLOCK_BITS) - 1;
+
+#[derive(Clone, Debug)]
+struct BundleSkeletonState {
+    final_groups: SmallVec<[u32; 8]>,
+    transitions: BTreeMap<i32, (u32, SmallVec<[u32; 8]>)>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct BundleSkeleton {
+    states: Vec<BundleSkeletonState>,
+    group_count: usize,
+}
 
 /// A per-weight terminal group either reuses an immutable template DFA or owns
 /// the union required for a multi-terminal group. Keeping singleton groups
@@ -267,6 +280,8 @@ pub struct BundleBuildProfile {
     pub input_terminals: usize,
     pub nonempty_terminals: usize,
     pub weight_groups: usize,
+    pub overlap_components: usize,
+    pub largest_overlap_component: usize,
     pub single_entry_weights: usize,
     pub single_tsid_weights: usize,
     pub total_weight_outer_ranges: usize,
@@ -309,6 +324,62 @@ pub struct BundleBuildProfile {
     pub total_ms: f64,
     pub used_single_terminal_fast_path: bool,
     pub minimize_skipped: bool,
+}
+
+fn weight_overlap_components(weight_groups: &[(&Weight, Vec<TerminalID>)]) -> Vec<Vec<usize>> {
+    let n = weight_groups.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut parent = (0..n).collect::<Vec<_>>();
+
+    fn find(parent: &mut [usize], mut x: usize) -> usize {
+        while parent[x] != x {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        x
+    }
+
+    for left in 0..n {
+        for right in left + 1..n {
+            if weight_groups[left]
+                .0
+                .intersection(weight_groups[right].0)
+                .is_empty()
+            {
+                continue;
+            }
+            let left_root = find(&mut parent, left);
+            let right_root = find(&mut parent, right);
+            if left_root != right_root {
+                parent[right_root] = left_root;
+            }
+        }
+    }
+
+    let mut components = FxHashMap::<usize, Vec<usize>>::default();
+    for index in 0..n {
+        let root = find(&mut parent, index);
+        components.entry(root).or_default().push(index);
+    }
+    let mut result = components.into_values().collect::<Vec<_>>();
+    result.sort_unstable_by(|left, right| {
+        right
+            .len()
+            .cmp(&left.len())
+            .then_with(|| left[0].cmp(&right[0]))
+    });
+    result
+}
+
+fn template_bundle_overlap_components_enabled() -> bool {
+    std::env::var("GLRMASK_TEMPLATE_BUNDLE_OVERLAP_COMPONENTS")
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
 }
 
 fn elapsed_ms(started_at: Instant) -> f64 {
@@ -374,6 +445,55 @@ impl Templates {
         groups
     }
 
+    pub(crate) fn bundle_topology_signature(
+        &self,
+        terminal_weights: &BTreeMap<TerminalID, Weight>,
+    ) -> BundleTopologySignature {
+        self.group_terminals_by_weight(terminal_weights)
+            .into_iter()
+            .map(|(_, terminals)| terminals)
+            .collect()
+    }
+
+    pub(crate) fn build_bundle_skeleton(
+        &self,
+        terminal_weights: &BTreeMap<TerminalID, Weight>,
+    ) -> Option<BundleSkeleton> {
+        if terminal_weights.len() <= 1 {
+            return None;
+        }
+        let weight_groups = self.group_terminals_by_weight(terminal_weights);
+        if weight_groups.is_empty() {
+            return None;
+        }
+        let group_dfas = self.build_group_dfas(&weight_groups);
+        Some(determinize_bundle_groups_skeleton(&group_dfas))
+    }
+
+    pub(crate) fn instantiate_bundle_skeleton(
+        &self,
+        terminal_weights: &BTreeMap<TerminalID, Weight>,
+        skeleton: &BundleSkeleton,
+    ) -> NWA {
+        let weight_groups = self.group_terminals_by_weight(terminal_weights);
+        assert_eq!(
+            weight_groups.len(),
+            skeleton.group_count,
+            "bundle skeleton group count does not match concrete bundle",
+        );
+        let group_weights = weight_groups
+            .into_iter()
+            .map(|(weight, _)| weight.clone())
+            .collect::<Vec<_>>();
+        let bundle_dwa = instantiate_bundle_skeleton_dwa(skeleton, &group_weights);
+        let bundle_dwa = if group_weights.len() > 1 && minimize_template_bundles_enabled() {
+            minimize(&bundle_dwa)
+        } else {
+            bundle_dwa
+        };
+        dwa_to_nwa(&bundle_dwa)
+    }
+
     fn build_group_dfas_profiled<'a>(
         &'a self,
         weight_groups: &'a [(&'a Weight, Vec<TerminalID>)],
@@ -433,6 +553,39 @@ impl Templates {
         group_dfas
     }
 
+    fn build_bundle_by_overlap_components(
+        &self,
+        weight_groups: &[(&Weight, Vec<TerminalID>)],
+    ) -> Option<NWA> {
+        let components = weight_overlap_components(weight_groups);
+        if components.len() <= 1 {
+            return None;
+        }
+
+        let mut union = NWA::new(0, 0);
+        for component in components {
+            let component_weight_groups = component
+                .into_iter()
+                .map(|index| (weight_groups[index].0, weight_groups[index].1.clone()))
+                .collect::<Vec<_>>();
+            let component_group_dfas = self.build_group_dfas(&component_weight_groups);
+            let component_dwa = determinize_bundle_groups(&component_group_dfas);
+            let component_dwa = if component_weight_groups.len() > 1
+                && minimize_template_bundles_enabled()
+            {
+                minimize(&component_dwa)
+            } else {
+                component_dwa
+            };
+            let component_nwa = dwa_to_nwa(&component_dwa);
+            let component_body = union.append_with_body(&component_nwa);
+            union
+                .start_states_mut()
+                .extend(component_body.start_states.into_iter());
+        }
+        Some(union)
+    }
+
     pub fn build_bundle_profiled(
         &self,
         terminal_weights: &BTreeMap<TerminalID, Weight>,
@@ -453,6 +606,10 @@ impl Templates {
 
         let weight_groups = self.group_terminals_by_weight(terminal_weights);
         profile.weight_groups = weight_groups.len();
+        let overlap_components = weight_overlap_components(&weight_groups);
+        profile.overlap_components = overlap_components.len();
+        profile.largest_overlap_component =
+            overlap_components.first().map_or(0, |component| component.len());
         for (weight, _) in &weight_groups {
             profile.total_weight_outer_ranges += weight.outer_range_count();
             if weight.single_compact_entry_parts().is_some() {
@@ -539,6 +696,11 @@ impl Templates {
         }
 
         let weight_groups = self.group_terminals_by_weight(terminal_weights);
+        if template_bundle_overlap_components_enabled()
+            && let Some(bundle) = self.build_bundle_by_overlap_components(&weight_groups)
+        {
+            return bundle;
+        }
         let group_dfas = self.build_group_dfas(&weight_groups);
         let bundle_dwa = determinize_bundle_groups(&group_dfas);
         let minimized = if weight_groups.len() > 1 && minimize_template_bundles_enabled() {
@@ -762,6 +924,165 @@ fn determinize_bundle_groups_profiled(
     (dwa, profile)
 }
 
+fn determinize_bundle_groups_skeleton(
+    groups: &[(&Weight, BundleGroupDfa<'_>)],
+) -> BundleSkeleton {
+    let n = groups.len();
+    if n == 0 {
+        return BundleSkeleton {
+            states: Vec::new(),
+            group_count: 0,
+        };
+    }
+
+    let start_key: Vec<(u32, u32)> = groups
+        .iter()
+        .enumerate()
+        .map(|(group_id, (_, dfa))| {
+            (
+                checked_usize_to_u32(group_id, "bundle group id"),
+                dfa.dfa().start_state,
+            )
+        })
+        .collect();
+
+    let mut states = vec![BundleSkeletonState {
+        final_groups: SmallVec::new(),
+        transitions: BTreeMap::new(),
+    }];
+    let mut state_map: FxHashMap<Vec<(u32, u32)>, u32> = FxHashMap::default();
+    let mut singleton_state_map: FxHashMap<(u32, u32), u32> = FxHashMap::default();
+    let mut worklist: VecDeque<(u32, Vec<(u32, u32)>)> = VecDeque::new();
+    if let [singleton] = start_key.as_slice() {
+        singleton_state_map.insert(*singleton, 0);
+    } else {
+        state_map.insert(start_key.clone(), 0);
+    }
+    worklist.push_back((0, start_key));
+
+    let mut label_targets = LabelTargets::new();
+    while let Some((state_id, product_state)) = worklist.pop_front() {
+        let mut final_groups = SmallVec::<[u32; 8]>::new();
+        for &(group_id, dfa_state) in &product_state {
+            if groups[group_id as usize].1.dfa().states[dfa_state as usize].is_accepting {
+                final_groups.push(group_id);
+            }
+        }
+        states[state_id as usize].final_groups = final_groups;
+
+        collect_label_targets(groups, &product_state, &mut label_targets);
+        let mut label_start = 0usize;
+        while label_start < label_targets.len() {
+            let label = label_targets[label_start].0;
+            let mut label_end = label_start + 1;
+            while label_end < label_targets.len() && label_targets[label_end].0 == label {
+                label_end += 1;
+            }
+
+            let singleton_target = (label_end == label_start + 1).then(|| {
+                let (_, group_id, target) = label_targets[label_start];
+                (group_id, target)
+            });
+            let mut edge_groups = SmallVec::<[u32; 8]>::new();
+            let mut next_state = singleton_target
+                .is_none()
+                .then(|| Vec::with_capacity(label_end - label_start));
+            for &(_, group_id, target) in &label_targets[label_start..label_end] {
+                edge_groups.push(group_id);
+                if let Some(next_state) = next_state.as_mut() {
+                    next_state.push((group_id, target));
+                }
+            }
+
+            let target_state = if let Some(singleton_target) = singleton_target {
+                if let Some(&existing) = singleton_state_map.get(&singleton_target) {
+                    existing
+                } else {
+                    let new_id = states.len() as u32;
+                    states.push(BundleSkeletonState {
+                        final_groups: SmallVec::new(),
+                        transitions: BTreeMap::new(),
+                    });
+                    singleton_state_map.insert(singleton_target, new_id);
+                    worklist.push_back((new_id, vec![singleton_target]));
+                    new_id
+                }
+            } else {
+                let next_state = next_state.expect("non-singleton bundle state is populated");
+                if let Some(&existing) = state_map.get(&next_state) {
+                    existing
+                } else {
+                    let new_id = states.len() as u32;
+                    states.push(BundleSkeletonState {
+                        final_groups: SmallVec::new(),
+                        transitions: BTreeMap::new(),
+                    });
+                    state_map.insert(next_state.clone(), new_id);
+                    worklist.push_back((new_id, next_state));
+                    new_id
+                }
+            };
+            states[state_id as usize]
+                .transitions
+                .insert(label, (target_state, edge_groups));
+            label_start = label_end;
+        }
+    }
+
+    BundleSkeleton {
+        states,
+        group_count: n,
+    }
+}
+
+fn instantiate_bundle_skeleton_dwa(
+    skeleton: &BundleSkeleton,
+    group_weights: &[Weight],
+) -> DWA {
+    assert_eq!(skeleton.group_count, group_weights.len());
+    if skeleton.states.is_empty() {
+        return DWA::new(0, 0);
+    }
+
+    let mut dwa = DWA::new(0, 0);
+    for _ in 1..skeleton.states.len() {
+        dwa.add_state();
+    }
+    let mut subset_cache = FxHashMap::<SmallVec<[u32; 8]>, Weight>::default();
+    let mut union_subset = |groups: &SmallVec<[u32; 8]>| -> Weight {
+        match groups.as_slice() {
+            [] => Weight::empty(),
+            [group] => group_weights[*group as usize].clone(),
+            _ => {
+                if let Some(weight) = subset_cache.get(groups) {
+                    return weight.clone();
+                }
+                let weight = Weight::union_all(
+                    groups
+                        .iter()
+                        .map(|&group| &group_weights[group as usize]),
+                );
+                subset_cache.insert(groups.clone(), weight.clone());
+                weight
+            }
+        }
+    };
+
+    for (state_id, state) in skeleton.states.iter().enumerate() {
+        let final_weight = union_subset(&state.final_groups);
+        if !final_weight.is_empty() {
+            dwa.set_final_weight(state_id as u32, final_weight);
+        }
+        for (&label, (target, groups)) in &state.transitions {
+            let edge_weight = union_subset(groups);
+            if !edge_weight.is_empty() {
+                dwa.add_transition(state_id as u32, label, *target, edge_weight);
+            }
+        }
+    }
+    dwa
+}
+
 fn determinize_bundle_groups(groups: &[(&Weight, BundleGroupDfa<'_>)]) -> DWA {
     use crate::automata::weighted_u32::dwa::DWA;
 
@@ -970,9 +1291,13 @@ fn dwa_to_nwa(dwa: &DWA) -> NWA {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use range_set_blaze::RangeSetBlaze;
 
     use super::*;
+    use crate::automata::weighted::equivalence::find_difference;
+    use crate::automata::weighted_u32::determinize::determinize as weighted_determinize;
 
     fn weight(tokens: std::ops::RangeInclusive<u32>) -> Weight {
         Weight::from_token_set_for_tsid(0, RangeSetBlaze::from_iter([tokens]))
@@ -1097,5 +1422,107 @@ mod tests {
             assert_eq!(optimized.eval_word(word), expected, "optimized word={word:?}");
             assert_eq!(profiled.eval_word(word), expected, "profiled word={word:?}");
         });
+    }
+
+    #[test]
+    fn overlap_component_bundle_union_matches_full_product() {
+        fn literal(labels: &[i32]) -> UnweightedDfa {
+            let mut dfa = UnweightedDfa::new();
+            let mut state = dfa.start_state;
+            for &label in labels {
+                let next = dfa.add_state();
+                dfa.add_transition(state, label, next);
+                state = next;
+            }
+            dfa.set_accepting(state, true);
+            dfa
+        }
+
+        let mut templates = Templates::default();
+        templates.by_terminal.insert(0, literal(&[1, 2]));
+        templates.by_terminal.insert(1, literal(&[1, 3]));
+        templates.by_terminal.insert(2, literal(&[1, 4]));
+        templates.by_terminal.insert(3, literal(&[5, 6]));
+
+        // The first two groups overlap and therefore must be determinized
+        // together. The last two are support-disjoint from that component and
+        // from each other, so they may remain separate weighted alternatives.
+        let mut terminal_weights = BTreeMap::new();
+        terminal_weights.insert(0, weight(0..=15));
+        terminal_weights.insert(1, weight(8..=23));
+        terminal_weights.insert(2, weight(32..=47));
+        terminal_weights.insert(3, weight(64..=79));
+
+        let weight_groups = templates.group_terminals_by_weight(&terminal_weights);
+        let components = weight_overlap_components(&weight_groups);
+        assert_eq!(components.len(), 3);
+        assert_eq!(components[0].len(), 2);
+
+        let full_groups = templates.build_group_dfas(&weight_groups);
+        let full = determinize_bundle_groups(&full_groups);
+        let split_nwa = templates
+            .build_bundle_by_overlap_components(&weight_groups)
+            .expect("three overlap components should take the split path");
+        let split = weighted_determinize(&split_nwa).expect("split bundle determinizes");
+
+        assert_eq!(
+            find_difference(&full, &split).expect("acyclic bundle comparison"),
+            None,
+            "splitting pairwise support-disjoint weight components changed the weighted bundle language",
+        );
+    }
+
+    #[test]
+    fn reusable_bundle_skeleton_matches_direct_determinization_after_reweighting() {
+        fn literal(labels: &[i32]) -> UnweightedDfa {
+            let mut dfa = UnweightedDfa::new();
+            let mut state = dfa.start_state;
+            for &label in labels {
+                let next = dfa.add_state();
+                dfa.add_transition(state, label, next);
+                state = next;
+            }
+            dfa.set_accepting(state, true);
+            dfa
+        }
+
+        let mut templates = Templates::default();
+        templates.by_terminal.insert(0, literal(&[1, 2]));
+        templates.by_terminal.insert(1, literal(&[1, 3]));
+        templates.by_terminal.insert(2, literal(&[1, 4]));
+        templates.by_terminal.insert(3, literal(&[5, 6]));
+
+        let mut representative = BTreeMap::new();
+        representative.insert(0, weight(0..=15));
+        representative.insert(1, weight(0..=15));
+        representative.insert(2, weight(16..=31));
+        representative.insert(3, weight(32..=47));
+        let skeleton = templates
+            .build_bundle_skeleton(&representative)
+            .expect("multi-terminal representative has a skeleton");
+
+        // Preserve exactly the same equality partition of terminals, but
+        // replace every concrete weight. The deterministic product topology is
+        // unchanged; only the subset unions decorating its states and edges
+        // should change.
+        let mut reweighted = BTreeMap::new();
+        reweighted.insert(0, weight(8..=23));
+        reweighted.insert(1, weight(8..=23));
+        reweighted.insert(2, weight(20..=39));
+        reweighted.insert(3, weight(64..=95));
+
+        assert_eq!(
+            templates.bundle_topology_signature(&representative),
+            templates.bundle_topology_signature(&reweighted),
+        );
+        let direct = templates.build_bundle(&reweighted);
+        let reused = templates.instantiate_bundle_skeleton(&reweighted, &skeleton);
+        let direct = weighted_determinize(&direct).expect("direct bundle determinizes");
+        let reused = weighted_determinize(&reused).expect("reused bundle determinizes");
+        assert_eq!(
+            find_difference(&direct, &reused).expect("acyclic bundle comparison"),
+            None,
+            "reusing deterministic bundle topology changed the weighted language",
+        );
     }
 }

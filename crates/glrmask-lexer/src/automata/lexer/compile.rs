@@ -6171,7 +6171,8 @@ fn prepare_partitioned_expression_pair_with_proof(
                 );
                 let minimize_started_at = profile.then(Instant::now);
                 let before_states = dfa.num_states();
-                let dfa = dfa.minimize();
+                let skip_minimize = std::env::var_os("GLRMASK_SKIP_PAIRED_ORDINARY_MINIMIZE").is_some();
+                let dfa = if skip_minimize { dfa } else { dfa.minimize() };
                 if profile {
                     let labels = visible_labels
                         .map(|labels| {
@@ -6184,10 +6185,11 @@ fn prepare_partitioned_expression_pair_with_proof(
                         })
                         .unwrap_or_default();
                     eprintln!(
-                        "[glrmask/profile][tokenizer] paired_ordinary_minimize terminals={} terminal_ids={:?} labels={:?} states_before={} states_after={} elapsed_ms={:.3}",
+                        "[glrmask/profile][tokenizer] paired_ordinary_minimize terminals={} terminal_ids={:?} labels={:?} skipped={} states_before={} states_after={} elapsed_ms={:.3}",
                         terminal_ids.len(),
                         terminal_ids,
                         labels,
+                        skip_minimize,
                         before_states,
                         dfa.num_states(),
                         minimize_started_at
@@ -9708,6 +9710,12 @@ fn build_product_dfa(
     let profile_timing = profile_detail
         || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
     let profile_started_at = Instant::now();
+    let light_trace_min_groups = std::env::var("GLRMASK_CAPTURE_LIGHT_PRODUCT_TRACE_MIN_GROUPS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok());
+    let light_trace = !capture_trace
+        && light_trace_min_groups.is_some_and(|minimum| exprs.len() >= minimum);
+    let retain_trace = capture_trace || light_trace;
     let component_compile_started_at = Instant::now();
     let (logical_components, component_cache_hits, component_profiles, component_indices) =
         compile_product_components_profiled(
@@ -9861,7 +9869,7 @@ fn build_product_dfa(
     let mut class_active = vec![false; num_classes];
     let mut used_classes = Vec::<usize>::new();
     let mut growth_recorder = profile_trace.then(|| ProductGrowthRecorder::new(num_coordinates));
-    let mut state_tuples = capture_trace.then(|| vec![start_tuple.clone()]);
+    let mut state_tuples = retain_trace.then(|| vec![start_tuple.clone()]);
     state_map.insert(start_tuple.clone(), 0);
     if let Some(recorder) = growth_recorder.as_mut() {
         recorder.record(num_coordinates, &start_tuple);
@@ -10095,6 +10103,19 @@ fn build_product_dfa(
         );
     }
 
+    if light_trace && profile_timing {
+        let tuples = state_tuples.as_ref().expect("light trace retains tuples");
+        let tuple_entries = tuples.iter().map(|tuple| tuple.len()).sum::<usize>();
+        eprintln!(
+            "[glrmask/profile][tokenizer] light_product_trace groups={} states={} tuple_entries={} avg_tuple_len={:.2} tuple_entry_bytes_estimate={} lookup_entries={}",
+            exprs.len(),
+            tuples.len(),
+            tuple_entries,
+            tuple_entries as f64 / tuples.len().max(1) as f64,
+            tuple_entries.saturating_mul(std::mem::size_of::<(u32, u32)>()),
+            state_map.len(),
+        );
+    }
     let trace = state_tuples.map(|state_tuples| ProductBuildTrace {
         components,
         state_tuples: ProductStateTuples::Generic(state_tuples),

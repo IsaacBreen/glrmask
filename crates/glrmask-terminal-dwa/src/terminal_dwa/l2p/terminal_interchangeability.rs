@@ -23,6 +23,7 @@ use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use smallvec::SmallVec;
 use super::nwa_builder::{TerminalNwaTransportMode, TransportScannerStateMap};
+use super::equivalence_analysis::state_equivalence::restricted_observation::hopcroft_refine_sparse_edges;
 use super::equivalence_analysis::state_equivalence::nfa::{
     RefinementDepth, RelevantPowersetView, RelevantPowersetWork,
     RelevantPowersetWorkBudget, build_relevant_powerset_view,
@@ -459,6 +460,8 @@ impl RestrictedTopology {
     fn build_budgeted(
         tokenizer: &Tokenizer,
         relevant_bytes: &[bool; 256],
+        active_groups: Option<&[bool]>,
+        state_map: Option<&ManyToOneIdMap>,
         global_state_quotient: Option<&GlobalScannerStateQuotient>,
         budget: RelevantPowersetWorkBudget,
     ) -> Result<Self, RelevantPowersetWork> {
@@ -466,6 +469,8 @@ impl RestrictedTopology {
             return Self::new_nfa_budgeted(
                 tokenizer,
                 relevant_bytes,
+                active_groups,
+                state_map,
                 global_state_quotient,
                 budget,
             );
@@ -604,20 +609,25 @@ impl RestrictedTopology {
     fn new_nfa_budgeted(
         tokenizer: &Tokenizer,
         relevant_bytes: &[bool; 256],
+        active_groups: Option<&[bool]>,
+        state_map: Option<&ManyToOneIdMap>,
         global_state_quotient: Option<&GlobalScannerStateQuotient>,
         budget: RelevantPowersetWorkBudget,
     ) -> Result<Self, RelevantPowersetWork> {
+        let projected_map = global_state_quotient
+            .map(GlobalScannerStateQuotient::as_many_to_one)
+            .or(state_map);
         let view = build_relevant_powerset_view_budgeted(
             tokenizer,
             relevant_bytes,
-            None,
-            global_state_quotient.map(GlobalScannerStateQuotient::as_many_to_one),
+            active_groups,
+            projected_map,
             budget,
         )?;
         Ok(Self::from_nfa_view(
             tokenizer,
             view,
-            global_state_quotient.is_none(),
+            projected_map.is_none(),
         ))
     }
 
@@ -1353,6 +1363,32 @@ impl TiDiscoveryContext {
                 (finished_at - raw_finished_at).as_secs_f64() * 1000.0,
                 (finished_at - started_at).as_secs_f64() * 1000.0,
             );
+            if let (Some(configurations), Some(state_for_raw)) =
+                (topology.nfa_configurations.as_ref(), topology.state_for_raw.as_ref())
+            {
+                let mut seeded = vec![false; topology.real_state_count];
+                for &state in state_for_raw.iter() {
+                    if (state as usize) < seeded.len() {
+                        seeded[state as usize] = true;
+                    }
+                }
+                let seeded_states = seeded.iter().filter(|&&value| value).count();
+                let singleton_configs = configurations.iter().filter(|config| config.len() == 1).count();
+                let empty_configs = configurations.iter().filter(|config| config.is_empty()).count();
+                let total_members = configurations.iter().map(|config| config.len()).sum::<usize>();
+                let max_members = configurations.iter().map(|config| config.len()).max().unwrap_or(0);
+                eprintln!(
+                    "[glrmask/profile][ti_powerset_shape] states={} raw_states={} seeded_states={} generated_states={} singleton_configs={} empty_configs={} avg_members={:.3} max_members={}",
+                    topology.real_state_count,
+                    topology.raw_state_count,
+                    seeded_states,
+                    topology.real_state_count.saturating_sub(seeded_states),
+                    singleton_configs,
+                    empty_configs,
+                    total_members as f64 / configurations.len().max(1) as f64,
+                    max_members,
+                );
+            }
         }
         Self {
             topology,
@@ -1394,12 +1430,45 @@ impl TiDiscoveryContext {
         relevant_bytes: &[bool; 256],
         shared_output_cache: Option<&SharedTiTokenizerOutputCache>,
     ) -> Result<Self, RelevantPowersetWork> {
+        Self::try_new_with_active_groups_state_map_and_output_cache(
+            tokenizer,
+            relevant_bytes,
+            None,
+            None,
+            shared_output_cache,
+        )
+    }
+
+    pub fn try_new_with_active_groups_and_output_cache(
+        tokenizer: &Tokenizer,
+        relevant_bytes: &[bool; 256],
+        active_groups: Option<&[bool]>,
+        shared_output_cache: Option<&SharedTiTokenizerOutputCache>,
+    ) -> Result<Self, RelevantPowersetWork> {
+        Self::try_new_with_active_groups_state_map_and_output_cache(
+            tokenizer,
+            relevant_bytes,
+            active_groups,
+            None,
+            shared_output_cache,
+        )
+    }
+
+    pub fn try_new_with_active_groups_state_map_and_output_cache(
+        tokenizer: &Tokenizer,
+        relevant_bytes: &[bool; 256],
+        active_groups: Option<&[bool]>,
+        state_map: Option<&ManyToOneIdMap>,
+        shared_output_cache: Option<&SharedTiTokenizerOutputCache>,
+    ) -> Result<Self, RelevantPowersetWork> {
         let profile = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
         let budget = ti_nfa_powerset_budget(tokenizer, relevant_bytes, None);
         let t0 = Instant::now();
         let topology = match RestrictedTopology::build_budgeted(
             tokenizer,
             relevant_bytes,
+            active_groups,
+            state_map,
             None,
             budget,
         ) {
@@ -1474,6 +1543,22 @@ impl TiDiscoveryContext {
         global_state_quotient: &GlobalScannerStateQuotient,
         shared_output_cache: Option<&SharedTiTokenizerOutputCache>,
     ) -> Result<Self, RelevantPowersetWork> {
+        Self::try_new_with_active_groups_global_state_quotient_and_output_cache(
+            tokenizer,
+            relevant_bytes,
+            None,
+            global_state_quotient,
+            shared_output_cache,
+        )
+    }
+
+    pub fn try_new_with_active_groups_global_state_quotient_and_output_cache(
+        tokenizer: &Tokenizer,
+        relevant_bytes: &[bool; 256],
+        active_groups: Option<&[bool]>,
+        global_state_quotient: &GlobalScannerStateQuotient,
+        shared_output_cache: Option<&SharedTiTokenizerOutputCache>,
+    ) -> Result<Self, RelevantPowersetWork> {
         let profile = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
         let budget = ti_nfa_powerset_budget(
             tokenizer,
@@ -1484,6 +1569,8 @@ impl TiDiscoveryContext {
         let topology = match RestrictedTopology::build_budgeted(
             tokenizer,
             relevant_bytes,
+            active_groups,
+            None,
             Some(global_state_quotient),
             budget,
         ) {
@@ -1542,6 +1629,136 @@ impl TiDiscoveryContext {
             ids.push(id);
         }
         Some((ids, representatives))
+    }
+
+    /// Reuse TI's exact stable support congruence as the downstream
+    /// restricted-observation state map. The retained support quotient may
+    /// have been built under an earlier, larger active-terminal alphabet. It
+    /// is therefore an exact but possibly finer congruence for the final mask.
+    /// `support_identity_stable_partition_from_seed` solves the final fixed
+    /// point over those old classes; this is exactly equivalent to solving over
+    /// every powerset state because each old class is already transition- and
+    /// output-uniform before labels are projected away.
+    pub fn reusable_nfa_restricted_observation_state_map_from_support(
+        &self,
+        tokenizer: &Tokenizer,
+        initial_state_map: Option<&ManyToOneIdMap>,
+    ) -> Option<ManyToOneIdMap> {
+        if !tokenizer.has_epsilon_transitions() || !self.topology.nfa_configurations_use_raw_states {
+            return None;
+        }
+        let started_at = Instant::now();
+        let support_seed = self.support_partition_seed.borrow().as_ref()?.clone();
+        let final_outputs = self.output_projection_seed.borrow().as_ref()?.clone();
+        if support_seed.active_terminals.as_ref() != final_outputs.active_terminals.as_ref() {
+            return None;
+        }
+
+        // The retained support quotient was built under an earlier, larger
+        // output alphabet. It is already a deterministic congruence of the
+        // same byte graph, and projecting labels away cannot invalidate that
+        // transition congruence. Use it directly as the compact coordinate;
+        // the source-output minimization below is allowed to merge its classes.
+        let support_class_for_state = support_seed.quotient.class_for_state.as_ref();
+        let state_count = self.topology.state_count();
+        if support_class_for_state.len() != state_count
+            || final_outputs.output_pair_by_state.len() != state_count
+        {
+            return None;
+        }
+
+        // A TI support class need not observe its *own* output. Split that one
+        // missing coordinate explicitly. The resulting coordinate state
+        // (support_class, source_output) is a true deterministic quotient of
+        // the full powerset: support equivalence already guarantees uniform
+        // byte-labelled target support classes and destination outputs.
+        let mut coordinate_by_pair = FxHashMap::<(u32, u32), u32>::default();
+        let mut coordinate_for_state = vec![u32::MAX; state_count];
+        let mut representative_for_coordinate = Vec::<u32>::new();
+        let mut source_output_for_coordinate = Vec::<u32>::new();
+        for state in 0..state_count {
+            let key = (
+                support_class_for_state[state],
+                final_outputs.output_pair_by_state[state],
+            );
+            let next = coordinate_by_pair.len() as u32;
+            let coordinate = *coordinate_by_pair.entry(key).or_insert_with(|| {
+                representative_for_coordinate.push(state as u32);
+                source_output_for_coordinate.push(key.1);
+                next
+            });
+            coordinate_for_state[state] = coordinate;
+        }
+
+        let coordinate_count = representative_for_coordinate.len();
+        let mut offsets = Vec::<u32>::with_capacity(coordinate_count + 1);
+        let mut bytes = Vec::<u8>::new();
+        let mut targets = Vec::<u32>::new();
+        offsets.push(0);
+        for &representative in &representative_for_coordinate {
+            for &(byte, destination) in self.topology.edges_from(representative as usize) {
+                bytes.push(byte);
+                targets.push(coordinate_for_state[destination as usize]);
+            }
+            offsets.push(bytes.len() as u32);
+        }
+
+        // Standard source-output DFA minimization on the compact coordinate
+        // graph. Initial classes are exactly current frozen outputs; Hopcroft
+        // then computes the coarsest right congruence. Because the coordinate
+        // graph is a homomorphic quotient of the full powerset that still
+        // refines source outputs, this is exactly the same partition as running
+        // restricted-observation refinement on all powerset states.
+        let coordinate_classes = hopcroft_refine_sparse_edges(
+            &source_output_for_coordinate,
+            offsets,
+            bytes,
+            targets,
+        )?;
+        let final_class_for_state = coordinate_for_state
+            .iter()
+            .map(|&coordinate| coordinate_classes[coordinate as usize])
+            .collect::<Vec<_>>();
+
+        let state_for_raw = self.topology.state_for_raw.as_ref()?;
+        if state_for_raw.len() != tokenizer.num_states() as usize {
+            return None;
+        }
+        let mut pair_to_internal = FxHashMap::<(u32, u32), u32>::default();
+        let mut original_to_internal = Vec::with_capacity(state_for_raw.len());
+        let mut representatives = Vec::<u32>::new();
+        for raw in 0..state_for_raw.len() {
+            let restricted_class = final_class_for_state[state_for_raw[raw] as usize];
+            let initial_class = initial_state_map
+                .map_or(0, |map| map.original_to_internal[raw]);
+            if initial_class == u32::MAX {
+                original_to_internal.push(u32::MAX);
+                continue;
+            }
+            let key = (initial_class, restricted_class);
+            let next = pair_to_internal.len() as u32;
+            let internal = *pair_to_internal.entry(key).or_insert_with(|| {
+                representatives.push(raw as u32);
+                next
+            });
+            original_to_internal.push(internal);
+        }
+        if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
+            eprintln!(
+                "[glrmask/profile][ti_support_state_seed] topology_states={} support_classes={} coordinate_states={} final_classes={} raw_classes={} total_ms={:.3}",
+                state_count,
+                support_class_for_state.iter().copied().collect::<FxHashSet<_>>().len(),
+                coordinate_count,
+                coordinate_classes.iter().copied().collect::<FxHashSet<_>>().len(),
+                representatives.len(),
+                started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        Some(ManyToOneIdMap::from_original_to_internal_with_representatives(
+            original_to_internal,
+            representatives.len() as u32,
+            representatives,
+        ))
     }
 
     pub fn reusable_nfa_restricted_observation_state_map(
@@ -2388,11 +2605,17 @@ impl InterchangeabilityDfa {
             finalizers: OutputBits::new(0),
             future_finalizers: OutputBits::new(0),
         };
+        let projection_profile = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
+        let projection_started_at = projection_profile.then(Instant::now);
+        let mut projection_seed_pairs = 0usize;
+        let mut projection_seed_states = 0usize;
         let (output_pairs, output_pair_lookup, output_pair_by_state): (
             Arc<[OutputPair]>,
             FxHashMap<OutputPair, u32>,
             Arc<[u32]>,
         ) = if let Some(seed) = output_projection_seed {
+            projection_seed_pairs = seed.output_pairs.len();
+            projection_seed_states = seed.output_pair_by_state.len();
             let mut output_pairs = vec![empty_pair.clone()];
             let mut output_pair_lookup = FxHashMap::<OutputPair, u32>::default();
             output_pair_lookup.insert(empty_pair.clone(), 0);
@@ -2510,6 +2733,17 @@ impl InterchangeabilityDfa {
             )
         };
 
+        if projection_profile {
+            eprintln!(
+                "[glrmask/profile][ti_output_projection] states={} seed_pairs={} seed_states={} output_pairs={} active_terminals={} total_ms={:.3}",
+                state_count,
+                projection_seed_pairs,
+                projection_seed_states,
+                output_pairs.len(),
+                observed_terminals.iter().filter(|&&active| active).count(),
+                projection_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
+            );
+        }
         let observed_destinations = &raw.observed_destinations;
         let mut observed_output_pair_is_observed = vec![false; output_pairs.len()];
         let mut observed_output_pair_canonical_ids = Vec::<u32>::new();
@@ -7491,6 +7725,20 @@ impl InterchangeabilityDfa {
         self.canonical_paired_hopcroft_interchange_map(left, right)
     }
 
+    fn discovery_identity_map(&self) -> InterchangeMap {
+        // A terminal transposition that preserves every frozen discovery-state
+        // output has the literal identity as an automorphism of the discovery
+        // transition system. Lift that identity back to raw scanner coordinates
+        // directly; no stable Moore quotient is needed to certify it.
+        let identity_targets = (0..self.topology.real_state_count as u32).collect::<Vec<_>>();
+        InterchangeMap {
+            scanner_state_map: self
+                .topology
+                .scanner_map_from_state_targets(&identity_targets)
+                .expect("identity TI state map must lift to every raw scanner state"),
+        }
+    }
+
     fn canonical_identity_map(&mut self) -> InterchangeMap {
         if let Some(map) = &self.canonical_identity_map {
             return map.clone();
@@ -8598,7 +8846,10 @@ pub fn discover_one_round_with_transport_witnesses_in_context(
             .sum::<usize>();
         let diagnostic_candidate_groups = std::env::var_os("GLRMASK_DUMP_TI_CONE_COMPONENTS")
             .is_some()
-            .then(|| candidate_groups.clone());
+            .then(|| {
+                eprintln!("[glrmask/dump][ti_exact_candidate_groups] groups={:?}", candidate_groups);
+                candidate_groups.clone()
+            });
         let output_hypergraph_filter_ms = output_hypergraph_filter_started_at
             .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
@@ -8638,6 +8889,7 @@ pub fn discover_one_round_with_transport_witnesses_in_context(
         if exact_candidate_pairs == 0 {
             return TiRoundTransportWitnesses::singleton(active_terminals);
         }
+        let residual_pipeline_started_at = profile_timing.then(Instant::now);
         let mut result = singleton_partition(active_terminals);
         let mut accepted_maps = BTreeMap::<(TerminalID, TerminalID), Arc<TransportScannerStateMap>>::new();
         let mut output_pair_rejections = 0usize;
@@ -8695,6 +8947,16 @@ pub fn discover_one_round_with_transport_witnesses_in_context(
         let mut petal_batch_grouping_ns = 0u64;
         let mut petal_batch_certificate_ns = 0u64;
         let mut petal_batch_map_ns = 0u64;
+        // One algorithmic crossover controls the two complementary exact
+        // certificates. Small literal families use raw-cone matching; large
+        // families bypass that O(family * cone discovery) prepass and go
+        // directly to the quotient/petal batch proof designed for them.
+        let direct_batch_min_terminals = std::env::var(
+            "GLRMASK_TI_DIRECT_BATCH_MIN_TERMINALS",
+        )
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(64);
         // Literal-like terminal families commonly differ only inside a tiny
         // reverse-closed scanner cone. Prove those symmetries directly before
         // constructing a stable quotient of the entire discovery topology.
@@ -8705,7 +8967,13 @@ pub fn discover_one_round_with_transport_witnesses_in_context(
             .ok()
             .and_then(|value| value.trim().parse::<usize>().ok())
             .unwrap_or(8);
+        let support_seed_available = context.support_partition_seed.borrow().is_some();
+        let raw_small_batch_applicable = !support_seed_available
+            && candidate_groups
+                .iter()
+                .all(|group| group.len() < direct_batch_min_terminals);
         let candidate_groups = if petal_batch_enabled
+            && raw_small_batch_applicable
             && std::env::var_os("GLRMASK_DISABLE_TI_RAW_SMALL_BATCH").is_none()
         {
             let grouping_started_at = Instant::now();
@@ -8831,12 +9099,6 @@ pub fn discover_one_round_with_transport_witnesses_in_context(
         // pivot certification.  This is especially important for generic NFA
         // topologies, where literal families can contain hundreds of terminals
         // but each terminal moves only a tiny, disjoint quotient petal.
-        let direct_batch_min_terminals = std::env::var(
-            "GLRMASK_TI_DIRECT_BATCH_MIN_TERMINALS",
-        )
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(64);
         let candidate_groups = if petal_batch_enabled
             && candidate_groups
                 .iter()
@@ -9049,12 +9311,20 @@ pub fn discover_one_round_with_transport_witnesses_in_context(
             candidate_groups
         };
 
+        let residual_pipeline_ms = residual_pipeline_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
         let support_candidates = candidate_groups
             .iter()
             .flatten()
             .copied()
             .collect::<Vec<_>>();
+        let support_prebuild_started_at = profile_timing.then(Instant::now);
         dfa.prebuild_terminal_quotient_output_supports(&support_candidates);
+        let support_prebuild_ms = support_prebuild_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+        let certification_started_at = profile_timing.then(Instant::now);
 
         // Accepted terminal swaps are automorphisms. Therefore (a b) and
         // (b c) imply (a c) by conjugation, so interchangeability is an
@@ -9417,7 +9687,7 @@ pub fn discover_one_round_with_transport_witnesses_in_context(
                     }
                     let map = if preserves_frozen_outputs {
                         output_invariant_checks += 1;
-                        Some(dfa.canonical_identity_map())
+                        Some(dfa.discovery_identity_map())
                     } else if !dfa.exact_pair_fallback_enabled() {
                         support_transposition_checks += 1;
                         let support_transposition_started_at = profile_timing.then(Instant::now);
@@ -9499,6 +9769,19 @@ pub fn discover_one_round_with_transport_witnesses_in_context(
                 unresolved = next_unresolved;
             }
         }
+        }
+
+        let certification_ms = certification_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+        if profile_timing {
+            eprintln!(
+                "[glrmask/profile][ti_coarse_phases] active={} residual_pipeline_ms={:.3} support_prebuild_ms={:.3} certification_ms={:.3}",
+                candidates.len(),
+                residual_pipeline_ms,
+                support_prebuild_ms,
+                certification_ms,
+            );
         }
 
         if std::env::var_os("GLRMASK_DUMP_TI_CONE_COMPONENTS").is_some() {

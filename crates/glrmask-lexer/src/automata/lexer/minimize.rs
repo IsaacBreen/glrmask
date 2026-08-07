@@ -6,7 +6,7 @@
 use std::collections::VecDeque;
 use std::hash::{Hash, Hasher};
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::ds::bitset::BitSet;
 use crate::ds::char_transitions::CharTransitions;
@@ -20,6 +20,38 @@ enum TopologyPrerefine {
         blocks: Vec<Vec<u32>>,
     },
     Skip,
+}
+
+/// Exact early minimality certificate from one ordinary Moore-refinement round.
+///
+/// The starting partition is finalizer equality. Any language-equivalent states
+/// must remain together under every sound refinement. Therefore, if the exact
+/// one-step signatures `(finalizer_block, byte -> target_block)` are already
+/// pairwise distinct, the Myhill-Nerode partition is discrete and full
+/// minimization cannot merge any states.
+///
+/// We store only signature hashes. This remains a one-sided certificate: a hash
+/// collision can only make two distinct signatures appear equal and force us to
+/// fall back; it can never make equal signatures appear different.
+fn one_round_discrete_minimality_certificate(dfa: &DFA, partition: &[u32]) -> bool {
+    if std::env::var_os("GLRMASK_DISABLE_ONE_ROUND_DFA_MINIMALITY_CERTIFICATE").is_some() {
+        return false;
+    }
+    let mut seen = FxHashSet::<u64>::default();
+    seen.reserve(dfa.states().len());
+    for (state_idx, state) in dfa.states().iter().enumerate() {
+        let mut hasher = rustc_hash::FxHasher::default();
+        partition[state_idx].hash(&mut hasher);
+        state.transitions.len().hash(&mut hasher);
+        for (byte, &target) in state.transitions.iter() {
+            byte.hash(&mut hasher);
+            partition[target as usize].hash(&mut hasher);
+        }
+        if !seen.insert(hasher.finish()) {
+            return false;
+        }
+    }
+    true
 }
 
 fn partition_by_finalizers(dfa: &DFA) -> (Vec<u32>, Vec<Vec<u32>>) {
@@ -532,7 +564,6 @@ impl DFA {
         } else {
             (0..orig_n as u32).collect()
         };
-        clear_possible_futures_for_minimization(&mut working);
         let n = working.states().len();
 
         if n <= 1 {
@@ -541,6 +572,11 @@ impl DFA {
         }
 
         let (partition, blocks) = partition_by_finalizers(&working);
+        if one_round_discrete_minimality_certificate(&working, &partition) {
+            working.recompute_possible_futures();
+            return (working, old_to_working);
+        }
+        clear_possible_futures_for_minimization(&mut working);
         let mut minimality_check_blocks = blocks.clone();
 
         // Topology pre-refinement is only an early minimality certificate.

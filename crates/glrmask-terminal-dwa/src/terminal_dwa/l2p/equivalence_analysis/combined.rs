@@ -1,5 +1,6 @@
 use crate::automata::lexer::Lexer;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::cell::Cell;
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -22,7 +23,10 @@ use super::state_equivalence::nfa::{
     build_relevant_powerset_view_budgeted, powerset_output_class_ids,
 };
 use crate::ds::bitset::BitSet;
-use super::compat::{TokenizerView, compute_active_terminal_language_byte_classes};
+use super::compat::{
+    TokenizerView, compute_active_terminal_language_byte_classes,
+    compute_active_terminal_syntactic_byte_classes,
+};
 use super::disallowed_follows::normalize_disallowed_follows;
 use super::shared::{
     TokenDedup,
@@ -38,6 +42,74 @@ use super::vocab::fast as vocab_equivalence_analysis;
 // Rebuilding the selected terminal languages is a fixed-cost semantic
 // prequotient. Restrict it to vocabularies large enough to amortize that build.
 const ACTIVE_LANGUAGE_BYTE_DEDUP_MIN_TOKENS: usize = 50_000;
+const SMALL_ACTIVE_SYNTACTIC_BYTE_DEDUP_MIN_TOKENS: usize = 10_000;
+const SMALL_ACTIVE_SYNTACTIC_BYTE_DEDUP_MAX_TERMINALS: usize = 16;
+const SMALL_ACTIVE_SYNTACTIC_BYTE_DEDUP_MIN_REDUCTION_PCT: f64 = 75.0;
+
+thread_local! {
+    static ACTIVE_LANGUAGE_BYTE_DEDUP_SUPPRESS_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+struct SuppressActiveLanguageByteDedup;
+
+impl SuppressActiveLanguageByteDedup {
+    fn new() -> Self {
+        ACTIVE_LANGUAGE_BYTE_DEDUP_SUPPRESS_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        Self
+    }
+}
+
+impl Drop for SuppressActiveLanguageByteDedup {
+    fn drop(&mut self) {
+        ACTIVE_LANGUAGE_BYTE_DEDUP_SUPPRESS_DEPTH.with(|depth| {
+            depth.set(
+                depth
+                    .get()
+                    .checked_sub(1)
+                    .expect("unbalanced active-language byte-dedup suppression"),
+            );
+        });
+    }
+}
+
+pub(crate) fn active_language_byte_dedup_is_suppressed() -> bool {
+    ACTIVE_LANGUAGE_BYTE_DEDUP_SUPPRESS_DEPTH.with(|depth| depth.get() != 0)
+}
+
+pub(crate) fn with_active_language_byte_dedup_suppressed<R>(f: impl FnOnce() -> R) -> R {
+    let _guard = SuppressActiveLanguageByteDedup::new();
+    f()
+}
+
+fn active_language_byte_dedup_min_tokens() -> usize {
+    std::env::var("GLRMASK_ACTIVE_LANGUAGE_BYTE_DEDUP_MIN_TOKENS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(ACTIVE_LANGUAGE_BYTE_DEDUP_MIN_TOKENS)
+}
+
+fn active_language_byte_dedup_uses_syntactic_classes() -> bool {
+    std::env::var("GLRMASK_ACTIVE_LANGUAGE_BYTE_DEDUP_IMPL")
+        .ok()
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("syntactic"))
+}
+
+fn active_language_byte_dedup_min_reduction_pct() -> f64 {
+    std::env::var("GLRMASK_ACTIVE_LANGUAGE_BYTE_DEDUP_MIN_REDUCTION_PCT")
+        .ok()
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value >= 0.0 && *value <= 100.0)
+        .unwrap_or(0.0)
+}
+
+fn small_active_syntactic_byte_dedup_disabled() -> bool {
+    std::env::var("GLRMASK_DISABLE_SMALL_ACTIVE_SYNTACTIC_BYTE_DEDUP")
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
+}
 
 fn common_atom_preclass_strict_reference_enabled(partition_label: &str) -> bool {
     std::env::var("GLRMASK_L2P_COMMON_ATOM_PRECLASS_STRICT_REFERENCE")
@@ -1968,22 +2040,93 @@ fn analyze_equivalences_impl(
         let identity_dedup =
             deduplicate_tokens_by_byte_class(&prepared.token_bytes, &identity_byte_class);
         let identity_token_count = identity_dedup.representative_token_bytes.len();
+        // Keep strategy-selection inputs in the original finite-vocabulary
+        // coordinates.  A later exact byte congruence is allowed to shrink the
+        // work performed *inside* the selected analysis, but must not silently
+        // change which exact algorithm is selected.  This makes the quotient a
+        // monotone work deletion rather than a representation-policy change.
+        let planning_max_token_len = identity_dedup
+            .representative_token_bytes
+            .iter()
+            .map(|token| token.len())
+            .max()
+            .unwrap_or(0);
+        let planning_direct_token_bytes = identity_dedup
+            .representative_token_bytes
+            .iter()
+            .map(|token| token.len())
+            .sum();
+        let mut planning_relevant_bytes = [false; 256];
+        for token in &identity_dedup.representative_token_bytes {
+            for &byte in *token {
+                planning_relevant_bytes[byte as usize] = true;
+            }
+        }
+        let planning_active_byte_count = planning_relevant_bytes
+            .iter()
+            .filter(|&&active| active)
+            .count();
         let active_byte_class_started_at = Instant::now();
-        let active_language_byte_classes = (identity_dedup.representative_token_bytes.len()
-            >= ACTIVE_LANGUAGE_BYTE_DEDUP_MIN_TOKENS)
+        let active_terminal_count = active_groups
+            .map(|active| active.iter().filter(|&&value| value).count())
+            .unwrap_or(0);
+        // The broad >=10k-token byte quotient changed too many partition shapes
+        // and was rejected globally.  A much narrower regime is different:
+        // with only a handful of active terminal languages, their syntactic
+        // byte congruence is almost free to build, and a very large spelling
+        // collapse deletes state×vocab work without changing any strategy
+        // selection (planning sizes above remain in identity coordinates).
+        let small_active_syntactic_candidate = !small_active_syntactic_byte_dedup_disabled()
+            && active_terminal_count > 0
+            && active_terminal_count <= SMALL_ACTIVE_SYNTACTIC_BYTE_DEDUP_MAX_TERMINALS
+            && identity_dedup.representative_token_bytes.len()
+                >= SMALL_ACTIVE_SYNTACTIC_BYTE_DEDUP_MIN_TOKENS;
+        let configured_byte_dedup_candidate = identity_dedup.representative_token_bytes.len()
+            >= active_language_byte_dedup_min_tokens();
+        // Keep the existing >=50k-token policy semantically and operationally
+        // independent from the new small-active admission.  In particular, do
+        // not silently replace its compiled-language congruence with the cheap
+        // syntactic congruence merely because the active set is small.  The
+        // narrow rule is intended to extend admission below the existing gate,
+        // not bundle a second implementation-policy change into the same A/B.
+        let use_syntactic_byte_classes = active_language_byte_dedup_uses_syntactic_classes()
+            || (small_active_syntactic_candidate && !configured_byte_dedup_candidate);
+        let candidate_active_language_byte_classes = (!active_language_byte_dedup_is_suppressed()
+            && (configured_byte_dedup_candidate || small_active_syntactic_candidate))
             .then(|| {
                 active_groups.and_then(|active_groups| {
-                    compute_active_terminal_language_byte_classes(tokenizer, active_groups)
+                    if use_syntactic_byte_classes {
+                        compute_active_terminal_syntactic_byte_classes(tokenizer, active_groups)
+                    } else {
+                        compute_active_terminal_language_byte_classes(tokenizer, active_groups)
+                    }
                 })
             })
             .flatten();
         let active_mask_filter_ms = active_byte_class_started_at.elapsed().as_secs_f64() * 1000.0;
-        let class_dedup = active_language_byte_classes.as_ref().map(|byte_to_class| {
+        let class_dedup = candidate_active_language_byte_classes.as_ref().map(|byte_to_class| {
             deduplicate_tokens_by_byte_class(
                 &identity_dedup.representative_token_bytes,
                 byte_to_class,
             )
         });
+        let min_byte_dedup_reduction_pct = if small_active_syntactic_candidate
+            && !configured_byte_dedup_candidate
+        {
+            active_language_byte_dedup_min_reduction_pct()
+                .max(SMALL_ACTIVE_SYNTACTIC_BYTE_DEDUP_MIN_REDUCTION_PCT)
+        } else {
+            active_language_byte_dedup_min_reduction_pct()
+        };
+        let class_dedup = class_dedup.filter(|class_dedup| {
+            let before = identity_dedup.representative_token_bytes.len();
+            let after = class_dedup.representative_token_bytes.len();
+            before > 0
+                && 100.0 * before.saturating_sub(after) as f64 / before as f64
+                    >= min_byte_dedup_reduction_pct
+        });
+        let active_language_byte_classes =
+            class_dedup.as_ref().and(candidate_active_language_byte_classes);
         let dedup = if let Some(class_dedup) = class_dedup {
             let original_to_repr = identity_dedup
                 .original_to_repr
@@ -2001,12 +2144,23 @@ fn analyze_equivalences_impl(
             - active_mask_filter_ms;
         if (std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some()
             || std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some())
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_ACTIVE_LANGUAGE_BYTE_DEDUP").is_some())
             && let Some(byte_to_class) = active_language_byte_classes.as_ref()
         {
+            let reduction_pct = if identity_token_count == 0 {
+                0.0
+            } else {
+                100.0
+                    * identity_token_count
+                        .saturating_sub(dedup.representative_token_bytes.len())
+                        as f64
+                    / identity_token_count as f64
+            };
             eprintln!(
-                "[glrmask/profile][active_language_byte_dedup] partition={} active_terminals={} byte_classes={} identity_tokens={} canonical_tokens={} build_ms={:.3}",
+                "[glrmask/profile][active_language_byte_dedup] partition={} impl={} active_terminals={} byte_classes={} identity_tokens={} canonical_tokens={} reduction_pct={:.2} small_active_extension={} build_ms={:.3}",
                 partition_label,
+                if use_syntactic_byte_classes { "syntactic" } else { "compiled" },
                 active_groups.map_or(0, |active| active.iter().filter(|&&value| value).count()),
                 byte_to_class
                     .iter()
@@ -2015,35 +2169,25 @@ fn analyze_equivalences_impl(
                     .map_or(0, |class| class as usize + 1),
                 identity_token_count,
                 dedup.representative_token_bytes.len(),
+                reduction_pct,
+                small_active_syntactic_candidate && !configured_byte_dedup_candidate,
                 active_mask_filter_ms,
             );
         }
-        let max_token_len = dedup
-            .representative_token_bytes
-            .iter()
-            .map(|token| token.len())
-            .max()
-            .unwrap_or(0);
         let mut relevant_bytes = [false; 256];
         for token in &dedup.representative_token_bytes {
             for &byte in *token {
                 relevant_bytes[byte as usize] = true;
             }
         }
-        let direct_token_bytes = dedup
-            .representative_token_bytes
-            .iter()
-            .map(|token| token.len())
-            .sum();
-        let active_byte_count = relevant_bytes.iter().filter(|&&active| active).count();
         let projected_by_global = prepared.initial_states.len() < tokenizer.num_states() as usize;
         let max_length_skipped = should_skip_max_length_for_partition(
             partition_label,
             prepared.initial_states.len(),
             projected_by_global,
-            direct_token_bytes,
-            max_token_len,
-            active_byte_count,
+            planning_direct_token_bytes,
+            planning_max_token_len,
+            planning_active_byte_count,
         );
         let analysis_view_policy = l2p_nfa_analysis_view_policy();
         let powerset_max_states = l2p_nfa_relevant_powerset_max_states();
@@ -2051,7 +2195,7 @@ fn analyze_equivalences_impl(
         let prepass_pair_estimate = prepared
             .initial_states
             .len()
-            .saturating_mul(dedup.representative_token_bytes.len());
+            .saturating_mul(identity_token_count);
         let should_probe_prepass_powerset = should_probe_l2p_nfa_powerset(
             analysis_view_policy,
             prepass_pair_estimate,
@@ -2144,7 +2288,7 @@ fn analyze_equivalences_impl(
         let analysis_view_started_at = Instant::now();
         let bounded_pair_estimate = raw_pre_representatives
             .len()
-            .saturating_mul(dedup.representative_token_bytes.len());
+            .saturating_mul(identity_token_count);
         let should_probe_powerset = should_probe_l2p_nfa_powerset(
             analysis_view_policy,
             bounded_pair_estimate,
@@ -2330,7 +2474,7 @@ fn analyze_equivalences_impl(
                 rows.into_iter().take(16).collect::<Vec<_>>(),
             );
         }
-        let vocab_first = dedup.representative_token_bytes.len() >= 512
+        let vocab_first = identity_token_count >= 512
             && query_view_states.len() >= 256;
         if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
             eprintln!(
@@ -2723,7 +2867,7 @@ fn analyze_equivalences_impl(
             CombinedEquivalenceProfile {
                 initial_states_considered: prepared.initial_states.len(),
                 max_length_skipped: pipeline_profile.max_length_skipped,
-                max_token_len,
+                max_token_len: planning_max_token_len,
                 token_len_gt_4: token_len_stats.gt_4,
                 token_len_gt_8: token_len_stats.gt_8,
                 token_len_gt_16: token_len_stats.gt_16,

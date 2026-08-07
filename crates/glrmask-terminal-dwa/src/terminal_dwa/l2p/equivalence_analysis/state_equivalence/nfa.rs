@@ -14,6 +14,7 @@ use super::super::compat::{FlatDfa, FlatDfaState, TokenizerView};
 enum RawPowersetTargetMode {
     Scalar,
     Direct,
+    FusedRows,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -548,7 +549,11 @@ pub fn build_relevant_powerset_view(
         active_groups,
         state_map,
         None,
-        RawPowersetTargetMode::Direct,
+        if std::env::var_os("GLRMASK_NFA_POWERSET_FUSED_ROWS").is_some() {
+            RawPowersetTargetMode::FusedRows
+        } else {
+            RawPowersetTargetMode::Direct
+        },
     )
     .expect("unbounded relevant-powerset construction cannot abort")
 }
@@ -566,7 +571,11 @@ pub fn build_relevant_powerset_view_budgeted(
         active_groups,
         state_map,
         Some(budget),
-        RawPowersetTargetMode::Direct,
+        if std::env::var_os("GLRMASK_NFA_POWERSET_FUSED_ROWS").is_some() {
+            RawPowersetTargetMode::FusedRows
+        } else {
+            RawPowersetTargetMode::Direct
+        },
     )
 }
 
@@ -595,6 +604,8 @@ fn try_build_relevant_powerset_view(
         Ok(())
     }
 
+    let profile_powerset = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
+    let powerset_started_at = profile_powerset.then(std::time::Instant::now);
     let raw_state_count = tokenizer.num_states() as usize;
     if let Some(state_map) = state_map {
         assert_eq!(state_map.original_to_internal.len(), raw_state_count);
@@ -616,6 +627,7 @@ fn try_build_relevant_powerset_view(
     let class_active_language = state_map.and_then(|state_map| {
         mapped_class_active_language(state_map, raw_active_language.as_deref())
     });
+    let active_language_finished_at = profile_powerset.then(std::time::Instant::now);
 
     let (mut config_ids, mut configs, raw_start_to_view, mut worklist, mut queued) =
         if let Some(state_map) = state_map {
@@ -688,6 +700,7 @@ fn try_build_relevant_powerset_view(
             )
         };
     check_budget(configs.len(), 0, budget)?;
+    let seed_finished_at = profile_powerset.then(std::time::Instant::now);
 
     let start_state = raw_start_to_view[tokenizer.initial_state_id() as usize] as usize;
     let bytes = relevant_bytes
@@ -857,12 +870,46 @@ fn try_build_relevant_powerset_view(
             edge_offsets.push(edges.len() as u32);
         }
     } else {
-        let direct_raw_target_views = raw_target_mode == RawPowersetTargetMode::Direct;
+        let direct_raw_target_views = matches!(
+            raw_target_mode,
+            RawPowersetTargetMode::Direct | RawPowersetTargetMode::FusedRows
+        );
+        let use_target_view_table = direct_raw_target_views
+            && std::env::var_os("GLRMASK_NFA_POWERSET_TARGET_VIEW_TABLE").is_some();
+        let mut direct_byte_slot = [usize::MAX; 256];
+        for (slot, &byte) in bytes.iter().enumerate() {
+            direct_byte_slot[byte as usize] = slot;
+        }
+        let target_view_by_source_slot = use_target_view_table.then(|| {
+            let byte_count = bytes.len();
+            let mut table = vec![u32::MAX; raw_state_count.saturating_mul(byte_count)];
+            for source in 0..raw_state_count {
+                let base = source * byte_count;
+                for (byte, raw_target) in tokenizer.transitions_from(source as u32) {
+                    let slot = direct_byte_slot[byte as usize];
+                    if slot != usize::MAX {
+                        table[base + slot] = raw_start_to_view[raw_target as usize];
+                    }
+                }
+            }
+            table
+        });
+        let fused_rows = raw_target_mode == RawPowersetTargetMode::FusedRows;
         let mut byte_marks = [0u32; 256];
         let mut byte_epoch = 0u32;
         let mut candidate_bytes = Vec::<u8>::new();
         let mut target_marks = direct_raw_target_views.then(|| vec![0u32; raw_state_count]);
         let mut target_epoch = 0u32;
+        let mut fused_byte_slot = [usize::MAX; 256];
+        for (slot, &byte) in bytes.iter().enumerate() {
+            fused_byte_slot[byte as usize] = slot;
+        }
+        let mut fused_target_marks = fused_rows.then(|| {
+            vec![0u32; raw_state_count.saturating_mul(bytes.len())]
+        });
+        let mut fused_target_epoch = 0u32;
+        let mut fused_targets = fused_rows.then(|| vec![Vec::<u32>::new(); bytes.len()]);
+        let mut fused_active_slots = Vec::<usize>::new();
         while let Some(state) = worklist.pop_front() {
             assert_eq!(
                 state as usize + 1,
@@ -888,6 +935,60 @@ fn try_build_relevant_powerset_view(
                         continue;
                     }
                     edges.push((byte, target));
+                    check_budget(configs.len(), edges.len(), budget)?;
+                    if !queued[target as usize] {
+                        queued[target as usize] = true;
+                        worklist.push_back(target);
+                    }
+                }
+                edge_offsets.push(edges.len() as u32);
+                continue;
+            }
+
+            if fused_rows {
+                fused_target_epoch = fused_target_epoch.wrapping_add(1);
+                let marks = fused_target_marks
+                    .as_mut()
+                    .expect("fused raw powerset must retain dense marks");
+                if fused_target_epoch == 0 {
+                    marks.fill(0);
+                    fused_target_epoch = 1;
+                }
+                let targets_by_slot = fused_targets
+                    .as_mut()
+                    .expect("fused raw powerset must retain target buckets");
+                fused_active_slots.clear();
+                for &source in configs[config_index].iter() {
+                    for (byte, raw_target) in tokenizer.transitions_from(source) {
+                        let slot = fused_byte_slot[byte as usize];
+                        if slot == usize::MAX {
+                            continue;
+                        }
+                        let target_view = raw_start_to_view[raw_target as usize];
+                        for &target_state in configs[target_view as usize].iter() {
+                            let mark_index = slot * raw_state_count + target_state as usize;
+                            if marks[mark_index] != fused_target_epoch {
+                                if targets_by_slot[slot].is_empty() {
+                                    fused_active_slots.push(slot);
+                                }
+                                marks[mark_index] = fused_target_epoch;
+                                targets_by_slot[slot].push(target_state);
+                            }
+                        }
+                    }
+                }
+                fused_active_slots.sort_unstable();
+                for &slot in &fused_active_slots {
+                    let mut projected = std::mem::take(&mut targets_by_slot[slot]);
+                    if projected.is_empty() {
+                        continue;
+                    }
+                    projected.sort_unstable();
+                    let target = config_ids.intern(projected, &mut configs);
+                    if queued.len() < configs.len() {
+                        queued.resize(configs.len(), false);
+                    }
+                    edges.push((bytes[slot], target));
                     check_budget(configs.len(), edges.len(), budget)?;
                     if !queued[target as usize] {
                         queued[target as usize] = true;
@@ -925,11 +1026,19 @@ fn try_build_relevant_powerset_view(
                         target_epoch = 1;
                     }
                     let mut projected = Vec::<u32>::new();
+                    let slot = direct_byte_slot[byte as usize];
                     for &source in configs[config_index].iter() {
-                        let Some(raw_target) = tokenizer.step(source, byte) else {
-                            continue;
+                        let target_view = if let Some(table) = target_view_by_source_slot.as_ref() {
+                            table[source as usize * bytes.len() + slot]
+                        } else {
+                            let Some(raw_target) = tokenizer.step(source, byte) else {
+                                continue;
+                            };
+                            raw_start_to_view[raw_target as usize]
                         };
-                        let target_view = raw_start_to_view[raw_target as usize];
+                        if target_view == u32::MAX {
+                            continue;
+                        }
                         for &target_state in configs[target_view as usize].iter() {
                             let mark = &mut target_marks[target_state as usize];
                             if *mark != target_epoch {
@@ -965,6 +1074,7 @@ fn try_build_relevant_powerset_view(
         }
     }
 
+    let traversal_finished_at = profile_powerset.then(std::time::Instant::now);
     let states = if let Some(state_map) = state_map {
         let closure_by_class = closure_by_class
             .as_ref()
@@ -1026,6 +1136,27 @@ fn try_build_relevant_powerset_view(
             })
             .collect()
     };
+    if let (Some(started), Some(active_done), Some(seed_done), Some(traversal_done)) = (
+        powerset_started_at,
+        active_language_finished_at,
+        seed_finished_at,
+        traversal_finished_at,
+    ) {
+        eprintln!(
+            "[glrmask/profile][nfa_powerset_build] raw_states={} active_groups={} bytes={} configs={} edges={} mapped={} active_language_ms={:.3} seed_ms={:.3} traversal_ms={:.3} metadata_ms={:.3} total_ms={:.3}",
+            raw_state_count,
+            active_groups.map_or(0, |groups| groups.iter().filter(|&&active| active).count()),
+            bytes.len(),
+            configs.len(),
+            edges.len(),
+            state_map.is_some(),
+            (active_done - started).as_secs_f64() * 1000.0,
+            (seed_done - active_done).as_secs_f64() * 1000.0,
+            (traversal_done - seed_done).as_secs_f64() * 1000.0,
+            traversal_done.elapsed().as_secs_f64() * 1000.0,
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
     Ok(RelevantPowersetView {
         states,
         start_state,
@@ -4149,7 +4280,17 @@ mod tests {
                 RawPowersetTargetMode::Direct,
             )
             .expect("unbounded direct powerset construction");
+            let fused = try_build_relevant_powerset_view(
+                &tokenizer,
+                &relevant_bytes,
+                active_groups,
+                None,
+                None,
+                RawPowersetTargetMode::FusedRows,
+            )
+            .expect("unbounded fused-row powerset construction");
             assert_same(&scalar, &direct);
+            assert_same(&scalar, &fused);
         }
     }
 

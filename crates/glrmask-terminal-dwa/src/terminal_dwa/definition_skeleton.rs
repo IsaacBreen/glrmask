@@ -613,6 +613,160 @@ impl GenericPartitionAnalysis {
     }
 }
 
+
+#[derive(Default)]
+struct LiteralPrefixRelationNode {
+    children: BTreeMap<u8, usize>,
+    residuals: Vec<(u32, u32)>,
+}
+
+/// Build the exact physical residual relation for fixed literals in one shared
+/// prefix traversal. A trie node represents one literal prefix `p`; its physical
+/// frontier is exactly epsilon-closure(delta*(reset,p)). Every literal that owns
+/// the prefix attaches its restricted residual class to that frontier.
+///
+/// This avoids the historical one-product-BFS-per-terminal construction. Shared
+/// prefixes execute once regardless of how many terminals use them.
+fn build_literal_prefix_physical_relation(
+    tokenizer: &Tokenizer,
+    active_mask: &[bool],
+    analysis: &GenericPartitionAnalysis,
+) -> Option<(Vec<Vec<(u32, u32)>>, usize, usize)> {
+    let raw_states = tokenizer.num_states() as usize;
+    let closures = tokenizer.all_singleton_epsilon_closures();
+    if closures.len() != raw_states {
+        return None;
+    }
+
+    let mut nodes = vec![LiteralPrefixRelationNode::default()];
+    let mut literal_terminals = 0usize;
+    for terminal in 0..active_mask.len() {
+        if !active_mask[terminal] {
+            continue;
+        }
+        let expr = tokenizer.terminal_expr(terminal as u32)?;
+        let mut bytes = Vec::new();
+        if !fixed_literal_bytes(expr, &mut bytes) {
+            continue;
+        }
+        let member = analysis.members.get(terminal)?.as_ref()?;
+        let singleton = analysis.source_dfas.get(terminal)?.as_ref()?;
+
+        // Fixed literal compilation must expose the ordinary prefix chain for
+        // this shortcut. Refuse rather than infer a source-state numbering.
+        if singleton.num_states() != bytes.len() + 1
+            || member.source_to_quotient.len() != bytes.len() + 1
+        {
+            continue;
+        }
+        let mut literal_chain = true;
+        for position in 0..=bytes.len() {
+            let expected_final = position == bytes.len();
+            let expected_future = position < bytes.len();
+            if singleton.finalizers(position as u32).contains(0) != expected_final
+                || singleton
+                    .possible_future_group_ids(position as u32)
+                    .contains(0)
+                    != expected_future
+            {
+                literal_chain = false;
+                break;
+            }
+            if position < bytes.len()
+                && singleton.step(position as u32, bytes[position]) != Some(position as u32 + 1)
+            {
+                literal_chain = false;
+                break;
+            }
+        }
+        if !literal_chain {
+            continue;
+        }
+
+        literal_terminals += 1;
+        let terminal = terminal as u32;
+        let mut node = 0usize;
+        nodes[node]
+            .residuals
+            .push((terminal, member.source_to_quotient[0]));
+        for (position, &byte) in bytes.iter().enumerate() {
+            let next = if let Some(&next) = nodes[node].children.get(&byte) {
+                next
+            } else {
+                let next = nodes.len();
+                nodes.push(LiteralPrefixRelationNode::default());
+                nodes[node].children.insert(byte, next);
+                next
+            };
+            node = next;
+            nodes[node]
+                .residuals
+                .push((terminal, member.source_to_quotient[position + 1]));
+        }
+    }
+    if literal_terminals == 0 {
+        return Some((vec![Vec::new(); raw_states], 0, nodes.len()));
+    }
+
+    let mut relation = vec![Vec::<(u32, u32)>::new(); raw_states];
+    let mut frontiers = vec![Vec::<u32>::new(); nodes.len()];
+    frontiers[0].extend_from_slice(
+        closures
+            .get(tokenizer.start_state() as usize)
+            .expect("reset closure must exist"),
+    );
+    let mut pending = VecDeque::from([0usize]);
+    while let Some(node) = pending.pop_front() {
+        for &(terminal, quotient_state) in &nodes[node].residuals {
+            for &physical_state in &frontiers[node] {
+                let live = closures
+                    .get(physical_state as usize)
+                    .into_iter()
+                    .flatten()
+                    .copied()
+                    .any(|closure_state| {
+                        tokenizer
+                            .matched_terminal_bitset(closure_state)
+                            .contains(terminal as usize)
+                            || tokenizer
+                                .possible_future_terminals(closure_state)
+                                .contains(terminal as usize)
+                    });
+                if live {
+                    relation[physical_state as usize].push((terminal, quotient_state));
+                }
+            }
+        }
+
+        let children = nodes[node]
+            .children
+            .iter()
+            .map(|(&byte, &child)| (byte, child))
+            .collect::<Vec<_>>();
+        for (byte, child) in children {
+            let mut target = Vec::<u32>::new();
+            for &physical_state in &frontiers[node] {
+                if let Some(raw_target) = tokenizer.step(physical_state, byte) {
+                    target.extend_from_slice(
+                        closures
+                            .get(raw_target as usize)
+                            .expect("transition target closure must exist"),
+                    );
+                }
+            }
+            target.sort_unstable();
+            target.dedup();
+            frontiers[child] = target;
+            pending.push_back(child);
+        }
+    }
+    for row in &mut relation {
+        row.sort_unstable();
+        row.dedup();
+    }
+    Some((relation, literal_terminals, nodes.len()))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct PhysicalDefinitionSeed {
     residual_configuration: Vec<(u32, u32)>,
@@ -1045,6 +1199,63 @@ fn report_physical_definition_coordinate(
         configuration.dedup();
     }
     let relation_ms = relation_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    if std::env::var_os("GLRMASK_DEFINITION_LITERAL_RELATION_COMPARE").is_some() {
+        let literal_started_at = Instant::now();
+        if let Some((literal_relation, literal_terminals, trie_nodes)) =
+            build_literal_prefix_physical_relation(tokenizer, active_mask, analysis)
+        {
+            let mut literal_mask = vec![false; active_mask.len()];
+            for terminal in 0..active_mask.len() {
+                if active_mask[terminal]
+                    && tokenizer
+                        .terminal_expr(terminal as u32)
+                        .is_some_and(|expr| {
+                            let mut bytes = Vec::new();
+                            fixed_literal_bytes(expr, &mut bytes)
+                                && analysis
+                                    .source_dfas
+                                    .get(terminal)
+                                    .and_then(Option::as_ref)
+                                    .is_some_and(|dfa| dfa.num_states() == bytes.len() + 1)
+                        })
+                {
+                    literal_mask[terminal] = true;
+                }
+            }
+            let mut mismatched_rows = 0usize;
+            let mut generic_pairs = 0usize;
+            let mut literal_pairs = 0usize;
+            for raw in 0..raw_states {
+                let generic = raw_configurations[raw]
+                    .iter()
+                    .copied()
+                    .filter(|(terminal, _)| {
+                        literal_mask
+                            .get(*terminal as usize)
+                            .copied()
+                            .unwrap_or(false)
+                    })
+                    .collect::<Vec<_>>();
+                generic_pairs += generic.len();
+                literal_pairs += literal_relation[raw].len();
+                if generic != literal_relation[raw] {
+                    mismatched_rows += 1;
+                }
+            }
+            eprintln!(
+                "[glrmask/profile][definition_literal_prefix_relation] partition={} scope={} literal_terminals={} trie_nodes={} generic_pairs={} literal_pairs={} mismatched_rows={} build_ms={:.3}",
+                partition_label,
+                scope,
+                literal_terminals,
+                trie_nodes,
+                generic_pairs,
+                literal_pairs,
+                mismatched_rows,
+                literal_started_at.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+    }
 
     let source_count = initial_state_map
         .map(ManyToOneIdMap::num_internal_ids)
@@ -1676,6 +1887,30 @@ fn report_generic_scope(
             terminal_ids,
             examples,
         );
+    }
+    if std::env::var_os("GLRMASK_DUMP_DEFINITION_QUOTIENT_CLASSES").is_some() {
+        let mut all_classes = BTreeMap::<GlobalTopologyKey, Vec<&GenericMember>>::new();
+        for (terminal, &active) in active_mask.iter().enumerate() {
+            if active {
+                if let Some(member) = analysis.members.get(terminal).and_then(Option::as_ref) {
+                    all_classes.entry(member.topology.clone()).or_default().push(member);
+                }
+            }
+        }
+        for members in all_classes.values() {
+            let ids = members.iter().map(|member| member.terminal).collect::<Vec<_>>();
+            let extracted = ids.iter().filter(|&&terminal| {
+                analysis.component_source_states.get(terminal).and_then(Option::as_ref).is_some()
+            }).count();
+            eprintln!(
+                "[glrmask/dump][definition_quotient_class] partition={} scope={} members={} extracted={} terminal_ids={:?}",
+                partition_label,
+                scope,
+                ids.len(),
+                extracted,
+                ids,
+            );
+        }
     }
 }
 

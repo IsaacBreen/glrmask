@@ -166,6 +166,112 @@ pub struct L1IdentityVocabOrder {
     token_entries_sorted: Arc<[(u32, Arc<[u8]>)]>,
     original_to_internal: Arc<[u32]>,
     token_buckets: L1SortedTokenBuckets,
+    unique_vocab: OnceLock<Arc<L1UniqueVocab>>,
+}
+
+#[derive(Debug)]
+pub(crate) struct L1UniqueVocab {
+    pub(crate) aliases: Arc<[Vec<u32>]>,
+    pub(crate) tokens: Arc<[Arc<[u8]>]>,
+    pub(crate) relevant_bytes: Arc<[u8]>,
+    pub(crate) reverse_trie_nodes: Arc<[L1ReverseTrieNode]>,
+    pub(crate) reverse_trie_leaves: Arc<[u32]>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct L1ReverseTrieNode {
+    pub(crate) parent: u32,
+    pub(crate) byte: u8,
+}
+
+impl L1UniqueVocab {
+    pub(crate) fn from_sorted_entries(entries: &[(u32, Arc<[u8]>)]) -> Self {
+        Self::from_sorted_entries_with_reverse_trie(entries, true)
+    }
+
+    pub(crate) fn from_sorted_entries_with_reverse_trie(
+        entries: &[(u32, Arc<[u8]>)],
+        build_reverse_trie: bool,
+    ) -> Self {
+        let mut tokens = Vec::<Arc<[u8]>>::new();
+        let mut aliases = Vec::<Vec<u32>>::new();
+        let mut relevant = [false; 256];
+        for (id, bytes) in entries {
+            if tokens
+                .last()
+                .is_some_and(|token| token.as_ref() == bytes.as_ref())
+            {
+                aliases
+                    .last_mut()
+                    .expect("duplicate token must follow one unique token")
+                    .push(*id);
+            } else {
+                for &byte in bytes.iter() {
+                    relevant[byte as usize] = true;
+                }
+                tokens.push(Arc::clone(bytes));
+                aliases.push(vec![*id]);
+            }
+        }
+
+        // A compact parent array is sufficient for bottom-up evaluation. Node
+        // IDs are allocated after their parents, so one linear pass evaluates
+        // every unique reversed-token prefix. Leaves align with `tokens`.
+        let (reverse_trie_nodes, reverse_trie_leaves) = if build_reverse_trie {
+            let mut nodes = vec![L1ReverseTrieNode { parent: 0, byte: 0 }];
+            let mut children = vec![FxHashMap::<u8, u32>::default()];
+            let mut leaves = Vec::with_capacity(tokens.len());
+            for token in &tokens {
+                let mut node = 0u32;
+                for &byte in token.iter().rev() {
+                    let child = if let Some(&child) = children[node as usize].get(&byte) {
+                        child
+                    } else {
+                        let child = nodes.len() as u32;
+                        nodes.push(L1ReverseTrieNode { parent: node, byte });
+                        children.push(FxHashMap::default());
+                        children[node as usize].insert(byte, child);
+                        child
+                    };
+                    node = child;
+                }
+                leaves.push(node);
+            }
+            (nodes, leaves)
+        } else {
+            (
+                vec![L1ReverseTrieNode { parent: 0, byte: 0 }],
+                vec![0; tokens.len()],
+            )
+        };
+
+        Self {
+            aliases: aliases.into(),
+            tokens: tokens.into(),
+            relevant_bytes: relevant
+                .iter()
+                .enumerate()
+                .filter_map(|(byte, &used)| used.then_some(byte as u8))
+                .collect::<Vec<_>>()
+                .into(),
+            reverse_trie_nodes: reverse_trie_nodes.into(),
+            reverse_trie_leaves: reverse_trie_leaves.into(),
+        }
+    }
+}
+
+impl L1IdentityVocabOrder {
+    pub(crate) fn prepared_unique_vocab(&self) -> Option<Arc<L1UniqueVocab>> {
+        self.unique_vocab.get().map(Arc::clone)
+    }
+
+    pub(crate) fn unique_vocab(&self) -> Arc<L1UniqueVocab> {
+        Arc::clone(self.unique_vocab.get_or_init(|| {
+            Arc::new(L1UniqueVocab::from_sorted_entries(
+                self.token_entries_sorted.as_ref(),
+            ))
+        }))
+    }
 }
 
 impl crate::vocab::VocabDerivedArtifact for L1IdentityVocabOrder {}
@@ -276,6 +382,7 @@ fn l1_identity_vocab_order(vocab: &Vocab) -> Arc<L1IdentityVocabOrder> {
         token_entries_sorted: token_entries_sorted.into(),
         original_to_internal: token_original_to_internal.into(),
         token_buckets,
+        unique_vocab: OnceLock::new(),
     });
     vocab.vocab_derived_cache_set(Arc::clone(&order));
     if let Some(total_started_at) = total_started_at {
@@ -294,6 +401,9 @@ fn l1_identity_vocab_order(vocab: &Vocab) -> Arc<L1IdentityVocabOrder> {
 
 pub fn prepare_l1_identity_vocab_order(vocab: &Vocab) {
     let order = l1_identity_vocab_order(vocab);
+    if std::env::var_os("GLRMASK_DISABLE_L1_UNIQUE_VOCAB_PREPARE").is_none() {
+        let _ = order.unique_vocab();
+    }
     for first_byte in 0..256 {
         let token_ids = &order.token_buckets.token_indices_by_first_byte[first_byte];
         if token_ids.is_empty() {
@@ -362,6 +472,7 @@ fn derive_l1_identity_vocab_order_from_parent(
         token_entries_sorted: token_entries_sorted.into(),
         original_to_internal: original_to_internal.into(),
         token_buckets,
+        unique_vocab: OnceLock::new(),
     })
 }
 

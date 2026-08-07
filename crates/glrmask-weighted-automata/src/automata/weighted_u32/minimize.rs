@@ -33,6 +33,30 @@ pub fn minimize_owned(dwa: DWA) -> DWA {
     minimize_owned_if_acyclic(dwa, super::minimize_acyclic::minimize_acyclic_owned)
 }
 
+/// Minimize using exact state live domains retained by determinization, thereby
+/// avoiding a second backward live-domain pass over the determinized DWA.
+pub fn minimize_owned_with_live_domains(dwa: DWA, live_domains: Vec<crate::ds::weight::Weight>) -> DWA {
+    if should_skip_minimization(&dwa) {
+        return dwa;
+    }
+    super::minimize_acyclic::minimize_acyclic_owned_with_live_domains(dwa, live_domains)
+}
+
+/// Minimize a DWA already pushed by determinization, using the retained exact
+/// live domains without rescanning or intersecting its transitions.
+pub fn minimize_owned_with_productive_live_domains(
+    dwa: DWA,
+    live_domains: Vec<crate::ds::weight::Weight>,
+) -> DWA {
+    if should_skip_minimization(&dwa) {
+        return dwa;
+    }
+    super::minimize_acyclic::minimize_acyclic_owned_with_productive_live_domains(
+        dwa,
+        live_domains,
+    )
+}
+
 /// Minimize an acyclic DWA using an explicit exact pointwise grouping order.
 /// The ordinary entry point keeps the stable historical order.
 pub fn minimize_owned_with_pointwise_class_order(

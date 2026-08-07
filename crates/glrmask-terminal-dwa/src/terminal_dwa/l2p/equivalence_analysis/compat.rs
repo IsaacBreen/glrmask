@@ -1,7 +1,9 @@
 //! Flattened tokenizer-DFA views for the equivalence-analysis passes.
 
 use crate::automata::lexer::Lexer;
+use crate::automata::lexer::ast::Expr;
 use crate::ds::u8set::U8Set;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -171,16 +173,24 @@ pub fn derive_flat_transition_cache(
 }
 
 
-pub fn compute_byte_classes(dfa: &FlatDfa) -> [u8; 256] {
+pub fn compute_byte_classes_from_transition_table(
+    transitions: &[u32],
+    num_states: usize,
+) -> [u8; 256] {
+    assert_eq!(transitions.len(), num_states.saturating_mul(256));
     let mut column_hashes = [0u64; 256];
-    for row in dfa.transitions.chunks_exact(256) {
+    for row in transitions.chunks_exact(256) {
         for (hash, &target) in column_hashes.iter_mut().zip(row) {
             *hash = hash
                 .wrapping_mul(BYTE_COLUMN_HASH_MULTIPLIER)
                 .wrapping_add(target as u64);
         }
     }
-    byte_classes_from_column_hashes(&dfa.transitions, dfa.states.len(), &column_hashes)
+    byte_classes_from_column_hashes(transitions, num_states, &column_hashes)
+}
+
+pub fn compute_byte_classes(dfa: &FlatDfa) -> [u8; 256] {
+    compute_byte_classes_from_transition_table(&dfa.transitions, dfa.states.len())
 }
 
 
@@ -219,6 +229,119 @@ pub fn compute_active_terminal_language_byte_classes(
     );
     let active_view = TokenizerView::new(&active_tokenizer);
     Some(compute_byte_classes(active_view.dfa()))
+}
+
+fn refine_byte_partitions(partitions: &mut Vec<U8Set>, split: U8Set) {
+    if split.is_empty() {
+        return;
+    }
+    let current = std::mem::take(partitions);
+    partitions.reserve(current.len().saturating_mul(2));
+    for partition in current {
+        let intersection = partition.intersection(&split);
+        let difference = partition.difference(&split);
+        if !intersection.is_empty() {
+            partitions.push(intersection);
+        }
+        if !difference.is_empty() {
+            partitions.push(difference);
+        }
+    }
+}
+
+/// Refine byte classes by every primitive byte observation occurring in an
+/// expression.
+///
+/// This is deliberately syntactic rather than language-minimal.  If two bytes
+/// remain in one class, every primitive byte predicate in the expression gives
+/// them the same answer.  A structural induction on `Expr` then gives equal
+/// Brzozowski derivatives for those two bytes from the expression and from
+/// every residual expression reachable from it.  Consequently this partition
+/// is a sound byte congruence for the complete terminal language.  It may be
+/// finer than the transition-column congruence of a minimized compiled DFA,
+/// but never coarser.
+fn refine_expr_byte_partitions(expr: &Expr, partitions: &mut Vec<U8Set>) {
+    match expr {
+        Expr::U8Seq(bytes) => {
+            for &byte in bytes {
+                refine_byte_partitions(partitions, U8Set::single(byte));
+            }
+        }
+        Expr::U8Class(set) => refine_byte_partitions(partitions, *set),
+        Expr::Dfa(dfa) => {
+            // Embedded DFA expressions are already residual automata.  At each
+            // state, refine by the exact set of bytes reaching each target
+            // (including the implicit dead target).  Bytes left together then
+            // have identical transition columns in every embedded-DFA state.
+            for state in 0..dfa.num_states() as u32 {
+                let mut bytes_by_target = BTreeMap::<u32, U8Set>::new();
+                for byte in 0..=u8::MAX {
+                    let target = dfa.step(state, byte).unwrap_or(u32::MAX);
+                    bytes_by_target
+                        .entry(target)
+                        .or_insert_with(U8Set::empty)
+                        .insert(byte);
+                }
+                for set in bytes_by_target.into_values() {
+                    refine_byte_partitions(partitions, set);
+                }
+            }
+        }
+        Expr::Intersect { expr, intersect } => {
+            refine_expr_byte_partitions(expr, partitions);
+            refine_expr_byte_partitions(intersect, partitions);
+        }
+        Expr::Seq(children) | Expr::Choice(children) => {
+            for child in children {
+                refine_expr_byte_partitions(child, partitions);
+            }
+        }
+        Expr::Exclude { expr, exclude } => {
+            refine_expr_byte_partitions(expr, partitions);
+            refine_expr_byte_partitions(exclude, partitions);
+        }
+        Expr::Repeat { expr, .. } => {
+            refine_expr_byte_partitions(expr, partitions);
+        }
+        Expr::Shared(expr) => {
+            refine_expr_byte_partitions(expr, partitions);
+        }
+        Expr::Epsilon => {}
+    }
+}
+
+/// Cheap exact byte congruence for the selected terminal languages.
+///
+/// Unlike `compute_active_terminal_language_byte_classes`, this does not
+/// compile another lexer.  It computes the congruence directly from primitive
+/// byte predicates in the stored terminal expressions.  See
+/// `refine_expr_byte_partitions` for the derivative argument.
+pub fn compute_active_terminal_syntactic_byte_classes(
+    tokenizer: &Tokenizer,
+    active_groups: &[bool],
+) -> Option<[u8; 256]> {
+    let mut partitions = vec![U8Set::all()];
+    let mut saw_active = false;
+    for (terminal, &active) in active_groups.iter().enumerate() {
+        if !active {
+            continue;
+        }
+        saw_active = true;
+        let expr = tokenizer.terminal_expr(terminal as u32)?;
+        refine_expr_byte_partitions(expr, &mut partitions);
+    }
+    if !saw_active {
+        return Some([0u8; 256]);
+    }
+
+    let mut byte_to_class = [0u8; 256];
+    for (class, partition) in partitions.iter().enumerate() {
+        debug_assert!(class <= u8::MAX as usize);
+        for byte in partition.iter() {
+            byte_to_class[byte as usize] = class as u8;
+        }
+    }
+    Some(byte_to_class)
 }
 
 
@@ -765,6 +888,53 @@ impl TokenizerView {
 #[cfg(test)]
 mod sparse_transition_cache_tests {
     use super::*;
+
+    fn partition_refines(finer: &[u8; 256], coarser: &[u8; 256]) -> bool {
+        (0..256).all(|a| {
+            (0..256).all(|b| finer[a] != finer[b] || coarser[a] == coarser[b])
+        })
+    }
+
+    #[test]
+    fn syntactic_active_terminal_byte_classes_refine_compiled_language_classes() {
+        use crate::automata::lexer::ast::{Expr, bytes, choice, class, exclude, intersect, repeat, seq};
+        use crate::automata::lexer::compile::build_regex_monolithic as build_regex;
+
+        let hex = U8Set::from_bytes(b"0123456789abcdefABCDEF");
+        let alpha = U8Set::from_range(b'a', b'z');
+        let expressions = vec![
+            seq(vec![bytes(b"ab"), class(alpha), repeat(class(hex), 1, Some(3))]),
+            choice(vec![bytes(b"true"), bytes(b"false"), bytes(b"null")]),
+            exclude(class(U8Set::from_range(0x20, 0x7e)), bytes(b"\"")),
+            intersect(
+                class(U8Set::from_range(b'a', b'z')),
+                class(U8Set::from_bytes(b"aeiou")),
+            ),
+            // Deliberately inactive. Its byte predicates must not affect the
+            // active-language congruence below.
+            Expr::U8Seq(vec![0xff, 0xfe]),
+        ];
+        let terminal_count = expressions.len() as u32;
+        let tokenizer = build_regex(&expressions).into_tokenizer(
+            terminal_count,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let active = [true, true, true, true, false];
+
+        let syntactic = compute_active_terminal_syntactic_byte_classes(&tokenizer, &active)
+            .expect("stored terminal expressions must provide syntactic byte classes");
+        let compiled = compute_active_terminal_language_byte_classes(&tokenizer, &active)
+            .expect("active terminal expressions must compile independently");
+
+        assert!(
+            partition_refines(&syntactic, &compiled),
+            "syntactic byte congruence merged bytes distinguished by the independently compiled active language",
+        );
+        assert_eq!(
+            syntactic[0xff], syntactic[0xfe],
+            "inactive-only literal bytes unexpectedly refined the active syntactic partition",
+        );
+    }
 
     #[test]
     fn filtered_byte_classes_ignore_inactive_only_transition_topology() {
