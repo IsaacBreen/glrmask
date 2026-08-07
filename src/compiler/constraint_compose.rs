@@ -5296,18 +5296,20 @@ fn build_transported_composition_templates(
         next_nonterminal += component.table.nonterminal_display_names.len() as u32;
     }
 
-    struct LocalTemplateResult {
+    struct LocalTemplatePlan {
         terminal_offset: u32,
         state_relation_index: usize,
         nonterminal_offset: u32,
-        characterizations: BTreeMap<u32, TerminalCharacterization>,
-        templates: Templates,
+        selected_terminals: Vec<u32>,
+        owned_characterizations: Option<BTreeMap<u32, TerminalCharacterization>>,
+        owned_templates: Option<Templates>,
         cached: bool,
         wall_ms: f64,
     }
 
+    let local_started_all = Instant::now();
     let local_results = components
-        .par_iter()
+        .iter()
         .enumerate()
         .filter_map(|(component_index, component)| {
             let terminal_offset = composed_table.terminal_offsets[component_index];
@@ -5341,6 +5343,67 @@ fn build_transported_composition_templates(
                         .contains_key(terminal)
             });
             let cached = cached_characterizations && cached_templates;
+
+            if cached {
+                if std::env::var_os("GLRMASK_VALIDATE_COMPOSE_CACHED_CHARACTERIZATIONS")
+                    .is_some()
+                    || std::env::var_os("GLRMASK_VALIDATE_COMPOSE_CACHED_TEMPLATES").is_some()
+                {
+                    let augmented_start = component.table.rules.first()?.lhs;
+                    let local_analyzed = AnalyzedGrammar::from_composed_rules(
+                        component.table.rules.clone(),
+                        component.table.num_terminals,
+                        component.terminal_display_names.clone(),
+                        component.table.nonterminal_display_names.clone(),
+                        augmented_start,
+                    );
+                    let reference_characterizations = characterize_selected_terminals_profiled(
+                        &component.table,
+                        &local_analyzed,
+                        &selected,
+                    )
+                    .0;
+                    if std::env::var_os(
+                        "GLRMASK_VALIDATE_COMPOSE_CACHED_CHARACTERIZATIONS",
+                    )
+                    .is_some()
+                    {
+                        for terminal in &selected_terminals {
+                            assert_eq!(
+                                component.composition_terminal_characterizations.get(terminal),
+                                reference_characterizations.get(terminal),
+                            );
+                        }
+                    }
+                    if std::env::var_os("GLRMASK_VALIDATE_COMPOSE_CACHED_TEMPLATES")
+                        .is_some()
+                    {
+                        let reference =
+                            Templates::from_characterizations_profiled(&reference_characterizations).0;
+                        for terminal in &selected_terminals {
+                            assert_eq!(
+                                component.composition_templates.by_terminal.get(terminal),
+                                reference.by_terminal.get(terminal),
+                            );
+                            let candidate = &component.composition_templates.by_terminal_nwa[terminal];
+                            let expected = &reference.by_terminal_nwa[terminal];
+                            assert_eq!(candidate.states(), expected.states());
+                            assert_eq!(candidate.start_states(), expected.start_states());
+                        }
+                    }
+                }
+                return Some(LocalTemplatePlan {
+                    terminal_offset,
+                    state_relation_index: component_index,
+                    nonterminal_offset: nonterminal_offsets[component_index],
+                    selected_terminals,
+                    owned_characterizations: None,
+                    owned_templates: None,
+                    cached: true,
+                    wall_ms: local_started_at.elapsed().as_secs_f64() * 1000.0,
+                });
+            }
+
             let characterizations = if cached_characterizations {
                 selected_terminals
                     .iter()
@@ -5367,28 +5430,6 @@ fn build_transported_composition_templates(
                 )
                 .0
             };
-            if cached_characterizations
-                && std::env::var_os(
-                    "GLRMASK_VALIDATE_COMPOSE_CACHED_CHARACTERIZATIONS",
-                )
-                .is_some()
-            {
-                let augmented_start = component.table.rules.first()?.lhs;
-                let local_analyzed = AnalyzedGrammar::from_composed_rules(
-                    component.table.rules.clone(),
-                    component.table.num_terminals,
-                    component.terminal_display_names.clone(),
-                    component.table.nonterminal_display_names.clone(),
-                    augmented_start,
-                );
-                let reference = characterize_selected_terminals_profiled(
-                    &component.table,
-                    &local_analyzed,
-                    &selected,
-                )
-                .0;
-                assert_eq!(characterizations, reference);
-            }
             let templates = if cached_templates {
                 Templates {
                     by_terminal: selected_terminals
@@ -5414,91 +5455,100 @@ fn build_transported_composition_templates(
             } else {
                 Templates::from_characterizations_profiled(&characterizations).0
             };
-            if cached_templates
-                && std::env::var_os("GLRMASK_VALIDATE_COMPOSE_CACHED_TEMPLATES")
-                    .is_some()
-            {
-                let reference = Templates::from_characterizations_profiled(&characterizations).0;
-                assert_eq!(templates.by_terminal, reference.by_terminal);
-                assert_eq!(
-                    templates.by_terminal_nwa.keys().collect::<Vec<_>>(),
-                    reference.by_terminal_nwa.keys().collect::<Vec<_>>(),
-                );
-                for (terminal, candidate) in &templates.by_terminal_nwa {
-                    let expected = &reference.by_terminal_nwa[terminal];
-                    assert_eq!(candidate.states(), expected.states());
-                    assert_eq!(candidate.start_states(), expected.start_states());
-                }
-            }
-            Some(LocalTemplateResult {
+            Some(LocalTemplatePlan {
                 terminal_offset,
                 state_relation_index: component_index,
                 nonterminal_offset: nonterminal_offsets[component_index],
-                characterizations,
-                templates,
-                cached,
+                selected_terminals,
+                owned_characterizations: Some(characterizations),
+                owned_templates: Some(templates),
+                cached: false,
                 wall_ms: local_started_at.elapsed().as_secs_f64() * 1000.0,
             })
         })
         .collect::<Vec<_>>();
+    let local_collect_ms = local_started_all.elapsed().as_secs_f64() * 1000.0;
 
     // Table composition preserves each component's parser rows under the exact
     // state/nonterminal rebasing relation. Only terminals whose columns were
-    // rewritten by control elimination, or whose relation cannot be represented
-    // by a singleton rebasing, require fresh composed-table characterization.
+    // rewritten by control elimination, or whose surrounding goto context
+    // changed, require fresh composed-table characterization.
     let characterization_started_at = Instant::now();
-    let mut composed_characterizations = BTreeMap::<u32, TerminalCharacterization>::new();
+    let context_started_at = Instant::now();
     let mut fallback_selected = characterization_context_fallbacks(
         composed_table,
         components,
         &nonterminal_offsets,
         active,
     );
+    let context_ms = context_started_at.elapsed().as_secs_f64() * 1000.0;
     for &terminal in control_changed_terminals {
         if active.get(terminal as usize).copied().unwrap_or(false) {
             fallback_selected[terminal as usize] = true;
         }
     }
     for local in &local_results {
-        let relation = &composed_table.state_relations[local.state_relation_index];
-        for (&local_terminal, local_characterization) in &local.characterizations {
-            let global_terminal = local.terminal_offset + local_terminal;
-            match transport_terminal_characterization(
-                local_characterization,
-                relation,
-                local.nonterminal_offset,
-            ) {
-                Some(transported) => {
-                    composed_characterizations.insert(global_terminal, transported);
-                }
-                None => fallback_selected[global_terminal as usize] = true,
+        if local.owned_characterizations.is_none()
+            && local.selected_terminals.iter().any(|terminal| {
+                !components[local.state_relation_index]
+                    .composition_terminal_characterizations
+                    .contains_key(terminal)
+            })
+        {
+            for &local_terminal in &local.selected_terminals {
+                fallback_selected[(local.terminal_offset + local_terminal) as usize] = true;
             }
         }
     }
-    for (terminal, &is_active) in active.iter().enumerate() {
-        if is_active && !composed_characterizations.contains_key(&(terminal as u32)) {
-            fallback_selected[terminal] = true;
-        }
-    }
-    let (fresh_characterizations, fresh_profile) =
+    let fresh_started_at = Instant::now();
+    let (mut fallback_characterizations, fresh_profile) =
         characterize_selected_terminals_profiled(
             &composed_table.table,
             analyzed,
             &fallback_selected,
         );
-    composed_characterizations.extend(fresh_characterizations);
+    let fresh_ms = fresh_started_at.elapsed().as_secs_f64() * 1000.0;
     let composed_characterize_ms = characterization_started_at.elapsed().as_secs_f64() * 1000.0;
+    let mut characterization_transport_ms = 0.0f64;
 
     if std::env::var_os("GLRMASK_VALIDATE_COMPOSE_CHARACTERIZATION_TRANSPORT").is_some() {
+        let validation_transport_started_at = Instant::now();
+        let mut candidate = fallback_characterizations.clone();
+        for local in &local_results {
+            let relation = &composed_table.state_relations[local.state_relation_index];
+            let component = components[local.state_relation_index];
+            for &local_terminal in &local.selected_terminals {
+                let global_terminal = local.terminal_offset + local_terminal;
+                if fallback_selected[global_terminal as usize] {
+                    continue;
+                }
+                let local_characterization = local
+                    .owned_characterizations
+                    .as_ref()
+                    .and_then(|characterizations| characterizations.get(&local_terminal))
+                    .unwrap_or_else(|| {
+                        &component.composition_terminal_characterizations[&local_terminal]
+                    });
+                let transported = transport_terminal_characterization(
+                    local_characterization,
+                    relation,
+                    local.nonterminal_offset,
+                )
+                .expect("certified singleton relation must transport characterization");
+                candidate.insert(global_terminal, transported);
+            }
+        }
+        characterization_transport_ms =
+            validation_transport_started_at.elapsed().as_secs_f64() * 1000.0;
         let reference = characterize_selected_terminals_profiled(
             &composed_table.table,
             analyzed,
             active,
         )
         .0;
-        if composed_characterizations != reference {
+        if candidate != reference {
             for (&terminal, expected) in &reference {
-                let actual = composed_characterizations.get(&terminal);
+                let actual = candidate.get(&terminal);
                 if actual != Some(expected) {
                     eprintln!(
                         "[glrmask/validate][compose_characterization_transport_mismatch] terminal={} fallback={} actual={:?} expected={:?}",
@@ -5507,106 +5557,81 @@ fn build_transported_composition_templates(
                         actual,
                         expected,
                     );
-                    for (state, row) in composed_table.table.action.iter().enumerate() {
-                        if row.contains_key(&terminal) {
-                            let predecessors = composed_table.table.goto.iter().enumerate().flat_map(|(revealed, goto_row)| {
-                                goto_row.iter().filter_map(move |(&nonterminal, &(target, replace))| {
-                                    (target == state as u32).then_some((revealed as u32, nonterminal, replace))
-                                })
-                            }).collect::<Vec<_>>();
-                            eprintln!(
-                                "[glrmask/validate][compose_characterization_action_state] terminal={} state={} action={:?} predecessors={:?}",
-                                terminal, state, row.get(&terminal), predecessors,
-                            );
-                        }
-                    }
-                    for (component_index, component) in components.iter().enumerate() {
-                        let offset = composed_table.terminal_offsets[component_index];
-                        if terminal < offset || terminal >= offset + component.table.num_terminals {
-                            continue;
-                        }
-                        let local_terminal = terminal - offset;
-                        eprintln!(
-                            "[glrmask/validate][compose_characterization_component] component={} local_terminal={} relation={:?}",
-                            component_index, local_terminal, composed_table.state_relations[component_index],
-                        );
-                        for (state, row) in component.table.action.iter().enumerate() {
-                            if row.contains_key(&local_terminal) {
-                                let predecessors = component.table.goto.iter().enumerate().flat_map(|(revealed, goto_row)| {
-                                    goto_row.iter().filter_map(move |(&nonterminal, &(target, replace))| {
-                                        (target == state as u32).then_some((revealed as u32, nonterminal, replace))
-                                    })
-                                }).collect::<Vec<_>>();
-                                eprintln!(
-                                    "[glrmask/validate][compose_characterization_local_action_state] component={} terminal={} state={} action={:?} predecessors={:?}",
-                                    component_index, local_terminal, state, row.get(&local_terminal), predecessors,
-                                );
-                            }
-                        }
-                    }
                     break;
                 }
             }
         }
-        assert_eq!(composed_characterizations, reference);
+        assert_eq!(candidate, reference);
         eprintln!(
             "[glrmask/validate][compose_characterization_transport] transported={} fresh={} exact=true",
-            composed_characterizations.len().saturating_sub(fresh_profile.terminals),
+            candidate.len().saturating_sub(fresh_profile.terminals),
             fresh_profile.terminals,
         );
     }
 
     let mut templates = Templates::default();
-    let mut fallback_characterizations = BTreeMap::<u32, TerminalCharacterization>::new();
     let mut transported_count = 0usize;
     let mut cached_components = 0usize;
     let mut local_wall_ms = 0.0f64;
+    let template_transport_started_at = Instant::now();
+    let mut dfa_transport_ms = 0.0f64;
+    let mut nwa_transport_ms = 0.0f64;
+    let characterization_compare_ms = 0.0f64;
+    let mut late_fallback_selected = vec![false; active.len()];
     for local in local_results {
-        let LocalTemplateResult {
+        let LocalTemplatePlan {
             terminal_offset,
             state_relation_index,
             nonterminal_offset,
-            characterizations,
-            templates: mut local_templates,
+            selected_terminals,
+            owned_characterizations,
+            mut owned_templates,
             cached,
             wall_ms,
         } = local;
         cached_components += usize::from(cached);
         local_wall_ms = local_wall_ms.max(wall_ms);
         let relation = &composed_table.state_relations[state_relation_index];
-        for (local_terminal, local_characterization) in characterizations {
+        let component = components[state_relation_index];
+        for local_terminal in selected_terminals {
             let global_terminal = terminal_offset + local_terminal;
-            let transported_characterization = transport_terminal_characterization(
-                &local_characterization,
-                relation,
-                nonterminal_offset,
-            );
-            let exact = transported_characterization
-                .as_ref()
-                .zip(composed_characterizations.get(&global_terminal))
-                .is_some_and(|(transported, composed)| transported == composed);
-            if !exact {
-                if let Some(composed) = composed_characterizations.get(&global_terminal) {
-                    fallback_characterizations.insert(global_terminal, composed.clone());
-                }
+            if fallback_selected[global_terminal as usize] {
                 continue;
             }
-            let Some(dfa) = local_templates.by_terminal.remove(&local_terminal) else {
-                fallback_characterizations
-                    .insert(global_terminal, composed_characterizations[&global_terminal].clone());
+            let dfa = if let Some(local_templates) = owned_templates.as_mut() {
+                local_templates.by_terminal.remove(&local_terminal)
+            } else {
+                component
+                    .composition_templates
+                    .by_terminal
+                    .get(&local_terminal)
+                    .cloned()
+            };
+            let Some(dfa) = dfa else {
+                late_fallback_selected[global_terminal as usize] = true;
                 continue;
             };
-            let Some(nwa) = local_templates.by_terminal_nwa.remove(&local_terminal) else {
-                fallback_characterizations
-                    .insert(global_terminal, composed_characterizations[&global_terminal].clone());
+            let nwa = if let Some(local_templates) = owned_templates.as_mut() {
+                local_templates.by_terminal_nwa.remove(&local_terminal)
+            } else {
+                component
+                    .composition_templates
+                    .by_terminal_nwa
+                    .get(&local_terminal)
+                    .cloned()
+            };
+            let Some(nwa) = nwa else {
+                late_fallback_selected[global_terminal as usize] = true;
                 continue;
             };
-            let (Some(dfa), Some(nwa)) = (
-                transport_template_dfa(dfa, relation),
-                transport_template_nwa(nwa, relation),
-            ) else {
-                fallback_characterizations
-                    .insert(global_terminal, composed_characterizations[&global_terminal].clone());
+            let dfa_started_at = Instant::now();
+            let transported_dfa = transport_template_dfa(dfa, relation);
+            dfa_transport_ms += dfa_started_at.elapsed().as_secs_f64() * 1000.0;
+            let nwa_started_at = Instant::now();
+            let transported_nwa = transport_template_nwa(nwa, relation);
+            nwa_transport_ms += nwa_started_at.elapsed().as_secs_f64() * 1000.0;
+            let (Some(dfa), Some(nwa)) = (transported_dfa, transported_nwa) else {
+                late_fallback_selected[global_terminal as usize] = true;
                 continue;
             };
             templates.by_terminal.insert(global_terminal, dfa);
@@ -5614,14 +5639,15 @@ fn build_transported_composition_templates(
             transported_count += 1;
         }
     }
-    for (&terminal, characterization) in &composed_characterizations {
-        if active.get(terminal as usize).copied().unwrap_or(false)
-            && !templates.by_terminal.contains_key(&terminal)
-        {
-            fallback_characterizations
-                .entry(terminal)
-                .or_insert_with(|| characterization.clone());
-        }
+    let template_transport_ms = template_transport_started_at.elapsed().as_secs_f64() * 1000.0;
+    if late_fallback_selected.iter().any(|&selected| selected) {
+        let late = characterize_selected_terminals_profiled(
+            &composed_table.table,
+            analyzed,
+            &late_fallback_selected,
+        )
+        .0;
+        fallback_characterizations.extend(late);
     }
     let fallback_count = fallback_characterizations.len();
     let fallback_started_at = Instant::now();
@@ -5634,7 +5660,13 @@ fn build_transported_composition_templates(
         .extend(fallback_templates.by_terminal_nwa);
 
     if std::env::var_os("GLRMASK_VALIDATE_COMPOSE_TEMPLATE_TRANSPORT").is_some() {
-        let (reference, _) = Templates::from_characterizations_profiled(&composed_characterizations);
+        let reference_characterizations = characterize_selected_terminals_profiled(
+            &composed_table.table,
+            analyzed,
+            active,
+        )
+        .0;
+        let (reference, _) = Templates::from_characterizations_profiled(&reference_characterizations);
         assert_eq!(templates.by_terminal, reference.by_terminal);
         assert_eq!(
             templates.by_terminal_nwa.keys().collect::<Vec<_>>(),
@@ -5654,11 +5686,10 @@ fn build_transported_composition_templates(
     let wall_ms = started_at.elapsed().as_secs_f64() * 1000.0;
     if compose_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][constraint_boundary_template_transport] transported={} fallback={} cached_components={} composed_characterize_ms={:.3} local_ms={local_wall_ms:.3} fallback_ms={fallback_ms:.3} total_ms={wall_ms:.3}",
+            "[glrmask/profile][constraint_boundary_template_transport] transported={} fallback={} cached_components={} local_collect_ms={local_collect_ms:.3} local_ms={local_wall_ms:.3} context_ms={context_ms:.3} characterization_transport_ms={characterization_transport_ms:.3} fresh_ms={fresh_ms:.3} composed_characterize_ms={composed_characterize_ms:.3} characterization_compare_ms={characterization_compare_ms:.3} dfa_transport_ms={dfa_transport_ms:.3} nwa_transport_ms={nwa_transport_ms:.3} template_transport_ms={template_transport_ms:.3} fallback_ms={fallback_ms:.3} total_ms={wall_ms:.3}",
             transported_count,
             fallback_count,
             cached_components,
-            composed_characterize_ms,
         );
     }
     (templates, wall_ms)
