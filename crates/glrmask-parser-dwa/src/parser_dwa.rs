@@ -2,7 +2,7 @@ use std::collections::{hash_map::Entry, BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
 use crate::Vocab;
@@ -12,7 +12,7 @@ use crate::automata::weighted::minimize::minimize;
 use crate::automata::weighted::nwa::{NWA, NwaBody};
 use crate::automata::weighted::terminal_automaton::TerminalAutomaton;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
-use crate::compiler::glr::labels::DEFAULT_LABEL;
+use crate::compiler::glr::labels::{DEFAULT_LABEL, is_negative_label, negative_to_positive_label};
 use crate::compiler::glr::table::{
     Action, AdmissionPolicy, GLRTable, GlrTableConstruction,
 };
@@ -3369,6 +3369,1535 @@ fn build_parser_nwa_from_terminal_dwa(
     ))
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ParserStackPreimageProfile {
+    pub bundle_ms: f64,
+    pub concatenate_ms: f64,
+    pub resolve_ms: f64,
+    pub normalize_ms: f64,
+    pub total_ms: f64,
+    pub bundle_states: usize,
+    pub concatenated_states: usize,
+    pub result_states: usize,
+}
+
+fn materialize_template_skeleton(template: &NWA) -> NWA {
+    let mut materialized = template.clone();
+    for state in materialized.states_mut() {
+        for targets in state.transitions.values_mut() {
+            for (_, weight) in targets {
+                *weight = Weight::all();
+            }
+        }
+        for (_, weight) in &mut state.epsilons {
+            *weight = Weight::all();
+        }
+        if state.final_weight.is_some() {
+            state.final_weight = Some(Weight::all());
+        }
+    }
+    materialized
+}
+
+fn normalize_positive_domain_nwa(table: &GLRTable, nwa: &NWA) -> DWA {
+    let determinized = determinize_with_supports(nwa, Some(table.num_states));
+    let mut domain = determinized.dwa;
+    let possible_by_state = build_possible_outgoing_ids_by_state(
+        nwa,
+        &determinized.supports,
+        table.num_states,
+    );
+    optimize_parser_dwa_defaults(&mut domain, &possible_by_state, table.num_states);
+    subtract_final_weights_from_outgoing_dwa(&mut domain);
+    domain = determinize_parser_dwa_with_fallbacks(
+        &domain,
+        &possible_by_state,
+        table.num_states,
+    );
+    minimize(&domain)
+}
+
+pub fn universal_parser_stack_domain_dwa() -> DWA {
+    let mut result = DWA::new(0, 1);
+    result.set_final_weight(0, Weight::all());
+    result
+}
+
+pub fn universal_parser_stack_domain_nwa() -> NWA {
+    let mut result = NWA::new(0, 0);
+    let start = result.add_state();
+    result.set_start_states(vec![start]);
+    result.set_final_weight(start, Weight::all());
+    result
+}
+
+/// Exact positive-NWA preimage. Unlike the DWA wrapper below, this deliberately
+/// does not determinize or normalize the result. That makes it suitable for a
+/// backward dynamic program over a finite terminal suffix DAG: a later
+/// terminal template can cancel its pushed states directly against this
+/// positive NWA, and determinization can be deferred until the completed root
+/// predicates are weighted and unioned.
+pub fn build_terminal_bundle_preimage_domain_nwa(
+    table: &GLRTable,
+    templates: &Templates,
+    terminals: &[TerminalID],
+    target_domain: &NWA,
+) -> Option<NWA> {
+    if terminals.is_empty() {
+        return None;
+    }
+    let terminal_weights = terminals
+        .iter()
+        .copied()
+        .map(|terminal| (terminal, Weight::all()))
+        .collect::<BTreeMap<_, _>>();
+    if terminal_weights
+        .keys()
+        .any(|terminal| !templates.by_terminal_nwa.contains_key(terminal))
+    {
+        return None;
+    }
+    let mut bundle = templates.build_bundle(&terminal_weights);
+    for state in bundle.states_mut() {
+        for targets in state.transitions.values_mut() {
+            for (_, weight) in targets {
+                if weight.is_empty() {
+                    *weight = Weight::all();
+                }
+            }
+        }
+        for (_, weight) in &mut state.epsilons {
+            if weight.is_empty() {
+                *weight = Weight::all();
+            }
+        }
+        if state.final_weight.as_ref().is_some_and(Weight::is_empty) {
+            state.final_weight = Some(Weight::all());
+        }
+    }
+
+    let mut arena = NWA::new(0, 0);
+    let bundle_offset = arena.states().len() as u32;
+    let bundle_body = arena.append_with_body(&bundle);
+    let bundle_finals = bundle
+        .states()
+        .iter()
+        .enumerate()
+        .filter_map(|(local, state)| {
+            state
+                .final_weight
+                .as_ref()
+                .is_some_and(|weight| !weight.is_empty())
+                .then_some(bundle_offset + local as u32)
+        })
+        .collect::<Vec<_>>();
+    if bundle_finals.is_empty() {
+        return None;
+    }
+    let target_body = arena.append_with_body(target_domain);
+    for source in bundle_finals {
+        let Some(final_weight) = arena.states_mut()[source as usize].final_weight.take() else {
+            continue;
+        };
+        if final_weight.is_empty() {
+            continue;
+        }
+        for &target_start in &target_body.start_states {
+            arena.add_epsilon(source, target_start, final_weight.clone());
+        }
+    }
+    arena.set_start_states(bundle_body.start_states);
+    resolve_negative_codes_in_nwa(
+        &mut arena,
+        table.construction == GlrTableConstruction::ExperimentalCoreMerged,
+    );
+    Some(arena)
+}
+
+pub fn union_parser_stack_domain_nwas(domains: &[&NWA]) -> NWA {
+    if domains.is_empty() {
+        return NWA::new(0, 0);
+    }
+    if domains.len() == 1 {
+        return domains[0].clone();
+    }
+    let mut arena = NWA::new(0, 0);
+    let mut starts = Vec::new();
+    for domain in domains {
+        let body = arena.append_with_body(domain);
+        starts.extend(body.start_states);
+    }
+    starts.sort_unstable();
+    starts.dedup();
+    arena.set_start_states(starts);
+    arena
+}
+
+fn determinize_boolean_domain_with_supports(domain: &NWA) -> DeterminizedDwaWithSupports {
+    fn epsilon_closure(domain: &NWA, seeds: &[u32]) -> Vec<u32> {
+        let mut seen = FxHashSet::<u32>::default();
+        let mut stack = seeds.to_vec();
+        while let Some(state) = stack.pop() {
+            if !seen.insert(state) {
+                continue;
+            }
+            let Some(node) = domain.states().get(state as usize) else {
+                continue;
+            };
+            for (target, weight) in &node.epsilons {
+                debug_assert!(weight.is_full() || weight.is_empty());
+                if !weight.is_empty() {
+                    stack.push(*target);
+                }
+            }
+        }
+        let mut closure = seen.into_iter().collect::<Vec<_>>();
+        closure.sort_unstable();
+        closure
+    }
+
+    let mut start_seeds = domain.start_states().to_vec();
+    start_seeds.sort_unstable();
+    start_seeds.dedup();
+    let start = epsilon_closure(domain, &start_seeds);
+    let mut dwa = DWA::new(0, 0);
+    let mut supports = vec![start.clone()];
+    if start.is_empty() {
+        return DeterminizedDwaWithSupports { dwa, supports };
+    }
+
+    let mut subset_to_state = FxHashMap::<Vec<u32>, u32>::default();
+    let mut subsets = Vec::<Vec<u32>>::new();
+    subset_to_state.insert(start.clone(), dwa.start_state());
+    subsets.push(start);
+    let mut queue = VecDeque::from([dwa.start_state()]);
+
+    while let Some(source_id) = queue.pop_front() {
+        let subset = subsets[source_id as usize].clone();
+        if subset.iter().any(|&state| {
+            domain.states()[state as usize]
+                .final_weight
+                .as_ref()
+                .is_some_and(|weight| !weight.is_empty())
+        }) {
+            dwa.set_final_weight(source_id, Weight::all());
+        }
+
+        // IMPORTANT: DEFAULT_LABEL is still an ordinary symbolic label here.
+        // It becomes a parser-state fallback only after this subset's NWA
+        // support has been recorded and PossibleOutgoingIds can be derived.
+        let mut targets_by_label = BTreeMap::<i32, Vec<u32>>::new();
+        for &state in &subset {
+            let node = &domain.states()[state as usize];
+            for (&label, targets) in &node.transitions {
+                if is_negative_label(label) {
+                    panic!("boolean parser-domain determinization requires negative-free NWA");
+                }
+                let seeds = targets_by_label.entry(label).or_default();
+                for (target, weight) in targets {
+                    debug_assert!(weight.is_full() || weight.is_empty());
+                    if !weight.is_empty() {
+                        seeds.push(*target);
+                    }
+                }
+            }
+        }
+
+        for (label, mut seeds) in targets_by_label {
+            seeds.sort_unstable();
+            seeds.dedup();
+            let closure = epsilon_closure(domain, &seeds);
+            if closure.is_empty() {
+                continue;
+            }
+            let target = if let Some(&existing) = subset_to_state.get(&closure) {
+                existing
+            } else {
+                let target = dwa.add_state();
+                subset_to_state.insert(closure.clone(), target);
+                supports.push(closure.clone());
+                subsets.push(closure);
+                queue.push_back(target);
+                target
+            };
+            dwa.add_transition(source_id, label, target, Weight::all());
+        }
+    }
+
+    DeterminizedDwaWithSupports { dwa, supports }
+}
+
+pub fn determinize_boolean_parser_stack_domain_nwa(
+    table: &GLRTable,
+    domain: &NWA,
+) -> DWA {
+    let determinized = determinize_boolean_domain_with_supports(domain);
+    let mut result = determinized.dwa;
+    let possible_by_state = build_possible_outgoing_ids_by_state(
+        domain,
+        &determinized.supports,
+        table.num_states,
+    );
+    if std::env::var_os("GLRMASK_EXPERIMENT_DISABLE_BOOLEAN_DOMAIN_DEFAULT_OPT").is_none() {
+        optimize_parser_dwa_defaults(&mut result, &possible_by_state, table.num_states);
+    }
+    subtract_final_weights_from_outgoing_dwa_impl(&mut result, false);
+    determinize_parser_dwa_with_fallbacks(&result, &possible_by_state, table.num_states)
+}
+
+pub fn normalize_parser_stack_domain_nwa(table: &GLRTable, domain: &NWA) -> DWA {
+    let fast = determinize_boolean_parser_stack_domain_nwa(table, domain);
+    let fast = minimize(&fast);
+    if std::env::var_os("GLRMASK_VALIDATE_BOOLEAN_DOMAIN_DETERMINIZE").is_some() {
+        let reference = normalize_positive_domain_nwa(table, domain);
+        let difference = find_difference(&fast, &reference)
+            .expect("parser stack domains should be acyclic for equivalence validation");
+        assert!(
+            difference.is_none(),
+            "boolean parser-domain determinization differs from weighted reference on labels {difference:?}",
+        );
+    }
+    fast
+}
+
+/// Normalize a boolean parser-stack NWA while preserving its explicit rows.
+///
+/// This is the exact standalone form needed when several independently
+/// supported parser domains will be combined later. Synthesizing DEFAULT rows
+/// here would discard the support provenance required by that later union.
+pub fn normalize_parser_stack_domain_nwa_preserving_explicit(
+    table: &GLRTable,
+    domain: &NWA,
+) -> DWA {
+    let determinized = determinize_boolean_domain_with_supports(domain);
+    let mut result = determinized.dwa;
+    let possible_by_state = build_possible_outgoing_ids_by_state(
+        domain,
+        &determinized.supports,
+        table.num_states,
+    );
+    subtract_final_weights_from_outgoing_dwa_impl(&mut result, false);
+    let result = determinize_parser_dwa_with_fallbacks(
+        &result,
+        &possible_by_state,
+        table.num_states,
+    );
+    minimize(&result)
+}
+
+/// Normalize an already-positive weighted parser-stack NWA into the ordinary
+/// runtime parser DWA representation.
+///
+/// This is the post-negative-resolution half of
+/// `build_parser_dwa_from_terminal_dwa_with_precomputed_templates`: callers
+/// that have composed parser-stack effects directly can reuse the exact same
+/// support-aware DEFAULT/finality semantics without first reconstructing a
+/// terminal automaton.
+pub fn normalize_weighted_parser_stack_nwa(table: &GLRTable, parser_nwa: &NWA) -> DWA {
+    let num_parser_states = table.num_states;
+    let determinized = determinize_with_supports(parser_nwa, Some(num_parser_states));
+    let mut parser_dwa = determinized.dwa;
+    let possible_by_state = build_possible_outgoing_ids_by_state(
+        parser_nwa,
+        &determinized.supports,
+        num_parser_states,
+    );
+    if std::env::var_os("GLRMASK_EXPERIMENT_LAZY_DIRECT_DISABLE_DEFAULT_OPT").is_none() {
+        optimize_parser_dwa_defaults(&mut parser_dwa, &possible_by_state, num_parser_states);
+    }
+    subtract_final_weights_from_outgoing_dwa(&mut parser_dwa);
+    parser_dwa = determinize_parser_dwa_with_fallbacks(
+        &parser_dwa,
+        &possible_by_state,
+        num_parser_states,
+    );
+    if should_skip_parser_dwa_minimization(parser_dwa.states().len(), parser_dwa.num_transitions()) {
+        parser_dwa
+    } else {
+        minimize(&parser_dwa)
+    }
+}
+
+/// Exact preimage of a parser-stack domain under one set of alternative
+/// terminals. `terminals` are all interpreted with equal boolean weight: the
+/// result accepts an input stack iff at least one terminal can transform it
+/// into a stack accepted by `target_domain`.
+pub fn build_boolean_terminal_bundle_nwa(
+    templates: &Templates,
+    terminals: &[TerminalID],
+) -> Option<NWA> {
+    if terminals.is_empty()
+        || terminals
+            .iter()
+            .any(|terminal| !templates.by_terminal_nwa.contains_key(terminal))
+    {
+        return None;
+    }
+    let terminal_weights = terminals
+        .iter()
+        .copied()
+        .map(|terminal| (terminal, Weight::all()))
+        .collect::<BTreeMap<_, _>>();
+    let mut bundle = templates.build_bundle(&terminal_weights);
+    for state in bundle.states_mut() {
+        for targets in state.transitions.values_mut() {
+            for (_, weight) in targets {
+                if weight.is_empty() {
+                    *weight = Weight::all();
+                }
+            }
+        }
+        for (_, weight) in &mut state.epsilons {
+            if weight.is_empty() {
+                *weight = Weight::all();
+            }
+        }
+        if state.final_weight.as_ref().is_some_and(Weight::is_empty) {
+            state.final_weight = Some(Weight::all());
+        }
+    }
+    Some(bundle)
+}
+
+fn advance_boolean_parser_domain_state(
+    domain: &DWA,
+    state: u32,
+    parser_state: u32,
+) -> Option<u32> {
+    let row = domain.states().get(state as usize)?;
+    if row
+        .final_weight
+        .as_ref()
+        .is_some_and(|weight| !weight.is_empty())
+    {
+        // Parser-stack languages are prefix languages: once the target domain
+        // has accepted the visible top-of-stack prefix, any deeper pushed or
+        // pre-existing stack suffix is irrelevant. Treat final states as
+        // absorbing while consuming the terminal effect's remaining pushes.
+        return Some(state);
+    }
+    let label = parser_state as i32;
+    let (target, weight) = row
+        .transitions
+        .get(&label)
+        .or_else(|| row.transitions.get(&DEFAULT_LABEL))?;
+    debug_assert!(weight.is_full() || weight.is_empty());
+    (!weight.is_empty()).then_some(*target)
+}
+
+fn direct_negative_suffix_residuals(
+    bundle: &NWA,
+    bundle_state: u32,
+    domain: &DWA,
+    domain_state: u32,
+    memo: &mut FxHashMap<(u32, u32), Option<Vec<u32>>>,
+) -> Option<Vec<u32>> {
+    if let Some(cached) = memo.get(&(bundle_state, domain_state)) {
+        return cached.clone();
+    }
+    let node = bundle.states().get(bundle_state as usize)?;
+    let mut residuals = Vec::<u32>::new();
+    if node
+        .final_weight
+        .as_ref()
+        .is_some_and(|weight| !weight.is_empty())
+    {
+        residuals.push(domain_state);
+    }
+    for (&label, targets) in &node.transitions {
+        if !is_negative_label(label) {
+            // Stack-effect templates are in read-then-push normal form. Once a
+            // push is encountered, seeing another read would require a more
+            // general transducer product; decline this direct fast path rather
+            // than weakening semantics.
+            memo.insert((bundle_state, domain_state), None);
+            return None;
+        }
+        let parser_state = negative_to_positive_label(label) as u32;
+        for (target, weight) in targets {
+            debug_assert!(weight.is_full() || weight.is_empty());
+            if weight.is_empty() {
+                continue;
+            }
+            // Pushes are observed from the final stack top downward, which is
+            // the reverse of the negative-edge order in the stack effect. The
+            // generic cancellation solver establishes downstream cancellations
+            // first and then propagates upstream queries through the derived
+            // epsilons. Mirror that algebra directly: resolve the child's later
+            // pushes first, then consume this push from each residual domain.
+            let Some(child) = direct_negative_suffix_residuals(
+                bundle,
+                *target,
+                domain,
+                domain_state,
+                memo,
+            ) else {
+                memo.insert((bundle_state, domain_state), None);
+                return None;
+            };
+            for child_domain in child {
+                if let Some(next_domain) = advance_boolean_parser_domain_state(
+                    domain,
+                    child_domain,
+                    parser_state,
+                ) {
+                    residuals.push(next_domain);
+                }
+            }
+        }
+    }
+    for (target, weight) in &node.epsilons {
+        debug_assert!(weight.is_full() || weight.is_empty());
+        if weight.is_empty() {
+            continue;
+        }
+        let Some(child) = direct_negative_suffix_residuals(
+            bundle,
+            *target,
+            domain,
+            domain_state,
+            memo,
+        ) else {
+            memo.insert((bundle_state, domain_state), None);
+            return None;
+        };
+        residuals.extend(child);
+    }
+    residuals.sort_unstable();
+    residuals.dedup();
+    memo.insert((bundle_state, domain_state), Some(residuals.clone()));
+    Some(residuals)
+}
+
+/// Algebraic boolean preimage for a read-then-push stack-effect bundle.
+///
+/// Positive labels are reads from the pre-token parser stack and remain in the
+/// resulting automaton. Negative labels are pushes. Because `target_domain` is
+/// already deterministic, a pushed parser state is consumed by one ordinary
+/// DWA transition (explicit label or DEFAULT fallback); the remaining target
+/// state is the exact residual language. This is the relational composition
+/// performed by negative-code cancellation, but without materializing the
+/// concatenated graph or running a global fixpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum LazyBooleanDomainExpr {
+    Empty,
+    Universal,
+    Read { label: i32, child: u32 },
+    Union { left: u32, right: u32 },
+}
+
+/// Lazy compile-time algebra for boolean parser-stack prefix languages.
+///
+/// Unlike `SharedBooleanParserDomains`, this representation deliberately does
+/// not determinize unions. DEFAULT remains an ordinary symbolic stack matcher
+/// until the final NWA normalization, preserving the parser-support semantics
+/// used by the generic compiler. The DAG is only an intermediate linking form;
+/// runtime artifacts remain ordinary DWAs.
+pub struct LazyBooleanParserDomains {
+    nodes: Vec<LazyBooleanDomainExpr>,
+    prefix_final: Vec<bool>,
+    reads: FxHashMap<(i32, u32), u32>,
+    unions: FxHashMap<(u32, u32), u32>,
+    advance_memo: FxHashMap<(u32, u32), u32>,
+}
+
+impl Default for LazyBooleanParserDomains {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LazyBooleanParserDomains {
+    pub const EMPTY: u32 = 0;
+    pub const UNIVERSAL: u32 = 1;
+
+    pub fn new() -> Self {
+        Self {
+            nodes: vec![LazyBooleanDomainExpr::Empty, LazyBooleanDomainExpr::Universal],
+            prefix_final: vec![false, true],
+            reads: FxHashMap::default(),
+            unions: FxHashMap::default(),
+            advance_memo: FxHashMap::default(),
+        }
+    }
+
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    pub fn read(&mut self, label: i32, child: u32) -> u32 {
+        if child == Self::EMPTY {
+            return Self::EMPTY;
+        }
+        if label == DEFAULT_LABEL && self.prefix_final[child as usize] {
+            // Parser-stack prefix finality propagates through DEFAULT edges.
+            // Once that makes the source final, every deeper stack suffix is
+            // irrelevant, so the represented prefix language is universal.
+            return Self::UNIVERSAL;
+        }
+        let key = (label, child);
+        if let Some(&existing) = self.reads.get(&key) {
+            return existing;
+        }
+        let id = self.nodes.len() as u32;
+        self.nodes.push(LazyBooleanDomainExpr::Read { label, child });
+        self.prefix_final.push(false);
+        self.reads.insert(key, id);
+        id
+    }
+
+    pub fn union(&mut self, left: u32, right: u32) -> u32 {
+        if left == right || right == Self::EMPTY {
+            return left;
+        }
+        if left == Self::EMPTY {
+            return right;
+        }
+        if left == Self::UNIVERSAL || right == Self::UNIVERSAL {
+            return Self::UNIVERSAL;
+        }
+        let (left, right) = if left < right { (left, right) } else { (right, left) };
+        if let Some(&existing) = self.unions.get(&(left, right)) {
+            return existing;
+        }
+        let id = self.nodes.len() as u32;
+        self.nodes.push(LazyBooleanDomainExpr::Union { left, right });
+        self.prefix_final.push(false);
+        self.unions.insert((left, right), id);
+        id
+    }
+
+    pub fn union_all(&mut self, roots: impl IntoIterator<Item = u32>) -> u32 {
+        roots.into_iter().fold(Self::EMPTY, |acc, root| self.union(acc, root))
+    }
+
+    /// Consume one concrete parser state from the top of the represented stack
+    /// language. DEFAULT is a symbolic wildcard here: final parser-DWA fallback
+    /// normalization happens only when the expression is exported to an NWA.
+    pub fn advance(&mut self, root: u32, parser_state: u32) -> u32 {
+        if root == Self::EMPTY || root == Self::UNIVERSAL {
+            return root;
+        }
+        if let Some(&cached) = self.advance_memo.get(&(root, parser_state)) {
+            return cached;
+        }
+        let expr = self.nodes[root as usize];
+        let result = match expr {
+            LazyBooleanDomainExpr::Empty => Self::EMPTY,
+            LazyBooleanDomainExpr::Universal => Self::UNIVERSAL,
+            LazyBooleanDomainExpr::Read { label, child } => {
+                if label == DEFAULT_LABEL || label == parser_state as i32 {
+                    child
+                } else {
+                    Self::EMPTY
+                }
+            }
+            LazyBooleanDomainExpr::Union { left, right } => {
+                let left = self.advance(left, parser_state);
+                let right = self.advance(right, parser_state);
+                self.union(left, right)
+            }
+        };
+        self.advance_memo.insert((root, parser_state), result);
+        result
+    }
+
+    fn negative_suffix_root(
+        &mut self,
+        bundle: &NWA,
+        bundle_state: u32,
+        target_root: u32,
+        memo: &mut FxHashMap<(u32, u32), Option<u32>>,
+    ) -> Option<u32> {
+        if let Some(cached) = memo.get(&(bundle_state, target_root)) {
+            return *cached;
+        }
+        let node = bundle.states().get(bundle_state as usize)?;
+        let mut result = if node
+            .final_weight
+            .as_ref()
+            .is_some_and(|weight| !weight.is_empty())
+        {
+            target_root
+        } else {
+            Self::EMPTY
+        };
+        for (&label, targets) in &node.transitions {
+            if !is_negative_label(label) {
+                memo.insert((bundle_state, target_root), None);
+                return None;
+            }
+            let parser_state = negative_to_positive_label(label) as u32;
+            for (target, weight) in targets {
+                debug_assert!(weight.is_full() || weight.is_empty());
+                if weight.is_empty() {
+                    continue;
+                }
+                let Some(child) = self.negative_suffix_root(
+                    bundle,
+                    *target,
+                    target_root,
+                    memo,
+                ) else {
+                    memo.insert((bundle_state, target_root), None);
+                    return None;
+                };
+                let residual = self.advance(child, parser_state);
+                result = self.union(result, residual);
+            }
+        }
+        for (target, weight) in &node.epsilons {
+            debug_assert!(weight.is_full() || weight.is_empty());
+            if weight.is_empty() {
+                continue;
+            }
+            let Some(child) = self.negative_suffix_root(bundle, *target, target_root, memo) else {
+                memo.insert((bundle_state, target_root), None);
+                return None;
+            };
+            result = self.union(result, child);
+        }
+        memo.insert((bundle_state, target_root), Some(result));
+        Some(result)
+    }
+
+    fn preimage_state(
+        &mut self,
+        bundle: &NWA,
+        bundle_state: u32,
+        target_root: u32,
+        positive_memo: &mut FxHashMap<(u32, u32), Option<u32>>,
+        negative_memo: &mut FxHashMap<(u32, u32), Option<u32>>,
+    ) -> Option<u32> {
+        if let Some(cached) = positive_memo.get(&(bundle_state, target_root)) {
+            return *cached;
+        }
+        let node = bundle.states().get(bundle_state as usize)?;
+        let mut result = if node
+            .final_weight
+            .as_ref()
+            .is_some_and(|weight| !weight.is_empty())
+        {
+            target_root
+        } else {
+            Self::EMPTY
+        };
+        for (&label, targets) in &node.transitions {
+            for (target, weight) in targets {
+                debug_assert!(weight.is_full() || weight.is_empty());
+                if weight.is_empty() {
+                    continue;
+                }
+                let branch = if is_negative_label(label) {
+                    let parser_state = negative_to_positive_label(label) as u32;
+                    let Some(child) = self.negative_suffix_root(
+                        bundle,
+                        *target,
+                        target_root,
+                        negative_memo,
+                    ) else {
+                        positive_memo.insert((bundle_state, target_root), None);
+                        return None;
+                    };
+                    self.advance(child, parser_state)
+                } else {
+                    let Some(child) = self.preimage_state(
+                        bundle,
+                        *target,
+                        target_root,
+                        positive_memo,
+                        negative_memo,
+                    ) else {
+                        positive_memo.insert((bundle_state, target_root), None);
+                        return None;
+                    };
+                    self.read(label, child)
+                };
+                result = self.union(result, branch);
+            }
+        }
+        for (target, weight) in &node.epsilons {
+            debug_assert!(weight.is_full() || weight.is_empty());
+            if weight.is_empty() {
+                continue;
+            }
+            let Some(child) = self.preimage_state(
+                bundle,
+                *target,
+                target_root,
+                positive_memo,
+                negative_memo,
+            ) else {
+                positive_memo.insert((bundle_state, target_root), None);
+                return None;
+            };
+            result = self.union(result, child);
+        }
+        positive_memo.insert((bundle_state, target_root), Some(result));
+        Some(result)
+    }
+
+    pub fn preimage_bundle(&mut self, bundle: &NWA, target_root: u32) -> Option<u32> {
+        let mut positive_memo = FxHashMap::default();
+        let mut negative_memo = FxHashMap::default();
+        let mut result = Self::EMPTY;
+        for &start in bundle.start_states() {
+            let root = self.preimage_state(
+                bundle,
+                start,
+                target_root,
+                &mut positive_memo,
+                &mut negative_memo,
+            )?;
+            result = self.union(result, root);
+        }
+        Some(result)
+    }
+
+    pub fn to_nwa(&self, root: u32) -> NWA {
+        let mut reachable = FxHashSet::<u32>::default();
+        let mut stack = vec![root];
+        while let Some(node) = stack.pop() {
+            if !reachable.insert(node) {
+                continue;
+            }
+            match self.nodes[node as usize] {
+                LazyBooleanDomainExpr::Empty | LazyBooleanDomainExpr::Universal => {}
+                LazyBooleanDomainExpr::Read { child, .. } => stack.push(child),
+                LazyBooleanDomainExpr::Union { left, right } => {
+                    stack.push(left);
+                    stack.push(right);
+                }
+            }
+        }
+        let mut ordered = reachable.into_iter().collect::<Vec<_>>();
+        ordered.sort_unstable();
+        let mut remap = FxHashMap::<u32, u32>::default();
+        let mut nwa = NWA::new(0, 0);
+        for node in &ordered {
+            remap.insert(*node, nwa.add_state());
+        }
+        nwa.set_start_states(vec![remap[&root]]);
+        for node in ordered {
+            let from = remap[&node];
+            match self.nodes[node as usize] {
+                LazyBooleanDomainExpr::Empty => {}
+                LazyBooleanDomainExpr::Universal => nwa.set_final_weight(from, Weight::all()),
+                LazyBooleanDomainExpr::Read { label, child } => {
+                    nwa.add_transition(from, label, remap[&child], Weight::all());
+                }
+                LazyBooleanDomainExpr::Union { left, right } => {
+                    nwa.add_epsilon(from, remap[&left], Weight::all());
+                    nwa.add_epsilon(from, remap[&right], Weight::all());
+                }
+            }
+        }
+        nwa
+    }
+}
+
+#[derive(Clone)]
+struct SharedBooleanDomainNode {
+    explicit: BTreeMap<i32, u32>,
+    default: Option<u32>,
+    accepting: bool,
+}
+
+/// Canonical shared DAG for boolean parser-stack prefix predicates.
+///
+/// Node 0 is the empty language and node 1 is the universal/already-accepted
+/// prefix language. All other nodes are hash-consed deterministic rows over
+/// parser-state labels plus DEFAULT fallback. This is intentionally a compile-
+/// time representation: exported parser DWAs remain ordinary runtime DWAs.
+pub struct SharedBooleanParserDomains {
+    nodes: Vec<SharedBooleanDomainNode>,
+    interner: BTreeMap<(bool, Vec<(i32, u32)>, Option<u32>), u32>,
+    union_memo: FxHashMap<(u32, u32), u32>,
+}
+
+impl Default for SharedBooleanParserDomains {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SharedBooleanParserDomains {
+    pub const EMPTY: u32 = 0;
+    pub const UNIVERSAL: u32 = 1;
+
+    pub fn new() -> Self {
+        let empty = SharedBooleanDomainNode {
+            explicit: BTreeMap::new(),
+            default: None,
+            accepting: false,
+        };
+        let universal = SharedBooleanDomainNode {
+            explicit: BTreeMap::new(),
+            default: None,
+            accepting: true,
+        };
+        let mut interner = BTreeMap::new();
+        interner.insert((false, Vec::new(), None), Self::EMPTY);
+        interner.insert((true, Vec::new(), None), Self::UNIVERSAL);
+        Self {
+            nodes: vec![empty, universal],
+            interner,
+            union_memo: FxHashMap::default(),
+        }
+    }
+
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    fn make_node(&mut self, mut explicit: BTreeMap<i32, u32>, default: Option<u32>) -> u32 {
+        let default = default.filter(|&target| target != Self::EMPTY);
+        // DEFAULT remains an additive wildcard branch in this compile-time
+        // representation, matching the positive NWA before parser fallback
+        // normalization.  Prefix finality still projects backward through a
+        // DEFAULT edge.
+        if default == Some(Self::UNIVERSAL) {
+            return Self::UNIVERSAL;
+        }
+        explicit.retain(|_, target| {
+            if *target == Self::EMPTY {
+                return false;
+            }
+            if Some(*target) == default {
+                return false;
+            }
+            true
+        });
+        if explicit.is_empty() && default.is_none() {
+            return Self::EMPTY;
+        }
+        let row = explicit.iter().map(|(&label, &target)| (label, target)).collect::<Vec<_>>();
+        let key = (false, row, default);
+        if let Some(&existing) = self.interner.get(&key) {
+            return existing;
+        }
+        let id = self.nodes.len() as u32;
+        self.nodes.push(SharedBooleanDomainNode {
+            explicit,
+            default,
+            accepting: false,
+        });
+        self.interner.insert(key, id);
+        id
+    }
+
+    pub fn union(&mut self, left: u32, right: u32) -> u32 {
+        if left == right || right == Self::EMPTY {
+            return left;
+        }
+        if left == Self::EMPTY {
+            return right;
+        }
+        if left == Self::UNIVERSAL || right == Self::UNIVERSAL {
+            return Self::UNIVERSAL;
+        }
+        let key = if left < right { (left, right) } else { (right, left) };
+        if let Some(&cached) = self.union_memo.get(&key) {
+            return cached;
+        }
+        let left_node = self.nodes[left as usize].clone();
+        let right_node = self.nodes[right as usize].clone();
+        debug_assert!(!left_node.accepting && !right_node.accepting);
+
+        let default = match (left_node.default, right_node.default) {
+            (Some(left), Some(right)) => Some(self.union(left, right)),
+            (Some(left), None) => Some(left),
+            (None, Some(right)) => Some(right),
+            (None, None) => None,
+        };
+        let mut labels = BTreeSet::new();
+        labels.extend(left_node.explicit.keys().copied());
+        labels.extend(right_node.explicit.keys().copied());
+        let mut explicit = BTreeMap::new();
+        for label in labels {
+            // Do not fold DEFAULT into explicit labels here.  DEFAULT is a
+            // symbolic wildcard NWA branch, so a concrete derivative unions
+            // the matching explicit branch with the wildcard branch later.
+            let left_child = left_node.explicit.get(&label).copied();
+            let right_child = right_node.explicit.get(&label).copied();
+            let child = match (left_child, right_child) {
+                (Some(left), Some(right)) => self.union(left, right),
+                (Some(left), None) => left,
+                (None, Some(right)) => right,
+                (None, None) => Self::EMPTY,
+            };
+            explicit.insert(label, child);
+        }
+        let result = self.make_node(explicit, default);
+        self.union_memo.insert(key, result);
+        result
+    }
+
+    pub fn union_all(&mut self, roots: impl IntoIterator<Item = u32>) -> u32 {
+        roots
+            .into_iter()
+            .fold(Self::EMPTY, |combined, root| self.union(combined, root))
+    }
+
+    pub fn advance(&mut self, root: u32, parser_state: u32) -> u32 {
+        if root == Self::EMPTY || root == Self::UNIVERSAL {
+            return root;
+        }
+        let node = self.nodes[root as usize].clone();
+        let explicit = node.explicit
+            .get(&(parser_state as i32))
+            .copied()
+            .unwrap_or(Self::EMPTY);
+        let wildcard = node.default.unwrap_or(Self::EMPTY);
+        self.union(explicit, wildcard)
+    }
+
+    fn prepend(&mut self, label: i32, child: u32) -> u32 {
+        if child == Self::EMPTY {
+            return Self::EMPTY;
+        }
+        if label == DEFAULT_LABEL {
+            return self.make_node(BTreeMap::new(), Some(child));
+        }
+        let mut explicit = BTreeMap::new();
+        explicit.insert(label, child);
+        self.make_node(explicit, None)
+    }
+
+    fn negative_suffix_root(
+        &mut self,
+        bundle: &NWA,
+        bundle_state: u32,
+        target_root: u32,
+        memo: &mut FxHashMap<(u32, u32), Option<u32>>,
+    ) -> Option<u32> {
+        if let Some(cached) = memo.get(&(bundle_state, target_root)) {
+            return *cached;
+        }
+        let node = bundle.states().get(bundle_state as usize)?;
+        let mut result = if node
+            .final_weight
+            .as_ref()
+            .is_some_and(|weight| !weight.is_empty())
+        {
+            target_root
+        } else {
+            Self::EMPTY
+        };
+        for (&label, targets) in &node.transitions {
+            if !is_negative_label(label) {
+                memo.insert((bundle_state, target_root), None);
+                return None;
+            }
+            let parser_state = negative_to_positive_label(label) as u32;
+            for (target, weight) in targets {
+                debug_assert!(weight.is_full() || weight.is_empty());
+                if weight.is_empty() {
+                    continue;
+                }
+                let Some(child) = self.negative_suffix_root(
+                    bundle,
+                    *target,
+                    target_root,
+                    memo,
+                ) else {
+                    memo.insert((bundle_state, target_root), None);
+                    return None;
+                };
+                let residual = self.advance(child, parser_state);
+                result = self.union(result, residual);
+            }
+        }
+        for (target, weight) in &node.epsilons {
+            debug_assert!(weight.is_full() || weight.is_empty());
+            if weight.is_empty() {
+                continue;
+            }
+            let Some(child) = self.negative_suffix_root(bundle, *target, target_root, memo) else {
+                memo.insert((bundle_state, target_root), None);
+                return None;
+            };
+            result = self.union(result, child);
+        }
+        memo.insert((bundle_state, target_root), Some(result));
+        Some(result)
+    }
+
+    fn preimage_state(
+        &mut self,
+        bundle: &NWA,
+        bundle_state: u32,
+        target_root: u32,
+        positive_memo: &mut FxHashMap<(u32, u32), Option<u32>>,
+        negative_memo: &mut FxHashMap<(u32, u32), Option<u32>>,
+    ) -> Option<u32> {
+        if let Some(cached) = positive_memo.get(&(bundle_state, target_root)) {
+            return *cached;
+        }
+        let node = bundle.states().get(bundle_state as usize)?;
+        let mut result = if node
+            .final_weight
+            .as_ref()
+            .is_some_and(|weight| !weight.is_empty())
+        {
+            target_root
+        } else {
+            Self::EMPTY
+        };
+        for (&label, targets) in &node.transitions {
+            for (target, weight) in targets {
+                debug_assert!(weight.is_full() || weight.is_empty());
+                if weight.is_empty() {
+                    continue;
+                }
+                let branch = if is_negative_label(label) {
+                    let parser_state = negative_to_positive_label(label) as u32;
+                    let Some(child) = self.negative_suffix_root(
+                        bundle,
+                        *target,
+                        target_root,
+                        negative_memo,
+                    ) else {
+                        positive_memo.insert((bundle_state, target_root), None);
+                        return None;
+                    };
+                    self.advance(child, parser_state)
+                } else {
+                    let Some(child) = self.preimage_state(
+                        bundle,
+                        *target,
+                        target_root,
+                        positive_memo,
+                        negative_memo,
+                    ) else {
+                        positive_memo.insert((bundle_state, target_root), None);
+                        return None;
+                    };
+                    self.prepend(label, child)
+                };
+                result = self.union(result, branch);
+            }
+        }
+        for (target, weight) in &node.epsilons {
+            debug_assert!(weight.is_full() || weight.is_empty());
+            if weight.is_empty() {
+                continue;
+            }
+            let Some(child) = self.preimage_state(
+                bundle,
+                *target,
+                target_root,
+                positive_memo,
+                negative_memo,
+            ) else {
+                positive_memo.insert((bundle_state, target_root), None);
+                return None;
+            };
+            result = self.union(result, child);
+        }
+        positive_memo.insert((bundle_state, target_root), Some(result));
+        Some(result)
+    }
+
+    pub fn preimage_bundle(&mut self, bundle: &NWA, target_root: u32) -> Option<u32> {
+        let mut positive_memo = FxHashMap::default();
+        let mut negative_memo = FxHashMap::default();
+        let mut result = Self::EMPTY;
+        for &start in bundle.start_states() {
+            let root = self.preimage_state(
+                bundle,
+                start,
+                target_root,
+                &mut positive_memo,
+                &mut negative_memo,
+            )?;
+            result = self.union(result, root);
+        }
+        Some(result)
+    }
+
+    pub fn to_dwa(&self, root: u32) -> DWA {
+        let mut output = DWA::new(0, 0);
+        let mut remap = FxHashMap::<u32, u32>::default();
+        remap.insert(root, output.start_state());
+        let mut queue = VecDeque::from([root]);
+        while let Some(source) = queue.pop_front() {
+            let output_source = remap[&source];
+            let node = &self.nodes[source as usize];
+            if node.accepting {
+                output.set_final_weight(output_source, Weight::all());
+            }
+            for (&label, &target) in &node.explicit {
+                let output_target = if let Some(&existing) = remap.get(&target) {
+                    existing
+                } else {
+                    let created = output.add_state();
+                    remap.insert(target, created);
+                    queue.push_back(target);
+                    created
+                };
+                output.add_transition(output_source, label, output_target, Weight::all());
+            }
+            if let Some(target) = node.default {
+                let output_target = if let Some(&existing) = remap.get(&target) {
+                    existing
+                } else {
+                    let created = output.add_state();
+                    remap.insert(target, created);
+                    queue.push_back(target);
+                    created
+                };
+                output.add_transition(
+                    output_source,
+                    DEFAULT_LABEL,
+                    output_target,
+                    Weight::all(),
+                );
+            }
+        }
+        output
+    }
+
+    /// Export the shared compile-time row DAG without interpreting DEFAULT as
+    /// deterministic fallback.  In this representation DEFAULT is an additive
+    /// wildcard NWA branch; parser-specific support/fallback normalization is
+    /// deliberately deferred until after the complete graph is assembled.
+    pub fn to_nwa(&self, root: u32) -> NWA {
+        let mut output = NWA::new(0, 0);
+        let start = output.add_state();
+        output.set_start_states(vec![start]);
+        let mut remap = FxHashMap::<u32, u32>::default();
+        remap.insert(root, start);
+        let mut queue = VecDeque::from([root]);
+        while let Some(source) = queue.pop_front() {
+            let output_source = remap[&source];
+            let node = &self.nodes[source as usize];
+            if node.accepting {
+                output.set_final_weight(output_source, Weight::all());
+            }
+            for (&label, &target) in &node.explicit {
+                let output_target = if let Some(&existing) = remap.get(&target) {
+                    existing
+                } else {
+                    let created = output.add_state();
+                    remap.insert(target, created);
+                    queue.push_back(target);
+                    created
+                };
+                output.add_transition(output_source, label, output_target, Weight::all());
+            }
+            if let Some(target) = node.default {
+                let output_target = if let Some(&existing) = remap.get(&target) {
+                    existing
+                } else {
+                    let created = output.add_state();
+                    remap.insert(target, created);
+                    queue.push_back(target);
+                    created
+                };
+                output.add_transition(
+                    output_source,
+                    DEFAULT_LABEL,
+                    output_target,
+                    Weight::all(),
+                );
+            }
+        }
+        output
+    }
+}
+
+pub fn build_prebuilt_terminal_bundle_preimage_domain_dwa_direct_profiled(
+    table: &GLRTable,
+    bundle: &NWA,
+    target_domain: &DWA,
+) -> (Option<DWA>, ParserStackPreimageProfile) {
+    let total_started_at = Instant::now();
+    let mut profile = ParserStackPreimageProfile {
+        bundle_states: bundle.states().len(),
+        ..ParserStackPreimageProfile::default()
+    };
+    if bundle.start_states().is_empty() || target_domain.states().is_empty() {
+        profile.total_ms = elapsed_ms(total_started_at);
+        return (None, profile);
+    }
+
+    let build_started_at = Instant::now();
+    let target_nwa = target_domain.to_nwa();
+    let mut result = NWA::new(0, 0);
+    let bundle_offset = 0u32;
+    let bundle_body = result.append_with_body(bundle);
+    debug_assert_eq!(bundle_offset, 0);
+    let target_offset = result.states().len() as u32;
+    let target_body = result.append_with_body(&target_nwa);
+    debug_assert_eq!(target_body.start_states.len(), 1);
+
+    let target_start = target_domain.start_state();
+    let mut memo = FxHashMap::<(u32, u32), Option<Vec<u32>>>::default();
+    let bundle_len = bundle.states().len();
+    for source in 0..bundle_len {
+        let original = &bundle.states()[source];
+        let mut positive_transitions = BTreeMap::new();
+        let mut epsilons = Vec::<(u32, Weight)>::new();
+
+        if original
+            .final_weight
+            .as_ref()
+            .is_some_and(|weight| !weight.is_empty())
+        {
+            epsilons.push((target_offset + target_start, Weight::all()));
+        }
+        for (&label, targets) in &original.transitions {
+            if is_negative_label(label) {
+                let parser_state = negative_to_positive_label(label) as u32;
+                for (target, weight) in targets {
+                    debug_assert!(weight.is_full() || weight.is_empty());
+                    if weight.is_empty() {
+                        continue;
+                    }
+                    let Some(residuals) = direct_negative_suffix_residuals(
+                        bundle,
+                        *target,
+                        target_domain,
+                        target_start,
+                        &mut memo,
+                    ) else {
+                        profile.total_ms = elapsed_ms(total_started_at);
+                        return (None, profile);
+                    };
+                    epsilons.extend(residuals.into_iter().filter_map(|state| {
+                        advance_boolean_parser_domain_state(
+                            target_domain,
+                            state,
+                            parser_state,
+                        )
+                        .map(|residual| (target_offset + residual, Weight::all()))
+                    }));
+                }
+            } else {
+                positive_transitions.insert(label, targets.clone());
+            }
+        }
+        // Bundle epsilons belong to the still-reading prefix unless their
+        // target immediately enters a negative suffix. Keeping them is exact;
+        // any negative transitions at the target are processed when that state
+        // is reached by epsilon closure during determinization.
+        epsilons.extend(original.epsilons.iter().cloned());
+        epsilons.sort_unstable_by_key(|(target, _)| *target);
+        epsilons.dedup_by(|left, right| left.0 == right.0 && left.1 == right.1);
+        let state = &mut result.states_mut()[source];
+        state.transitions = positive_transitions;
+        state.epsilons = epsilons;
+        state.final_weight = None;
+    }
+    result.set_start_states(bundle_body.start_states);
+    // Negative cancellation is now algebraic, but parser stack languages also
+    // project finality backward through DEFAULT/epsilon edges. Preserve that
+    // exact stack-prefix semantics before ordinary boolean determinization.
+    apply_finality_fixpoint(&mut result);
+    profile.concatenate_ms = elapsed_ms(build_started_at);
+    profile.concatenated_states = result.states().len();
+
+    let normalize_started_at = Instant::now();
+    let domain = normalize_parser_stack_domain_nwa(table, &result);
+    profile.normalize_ms = elapsed_ms(normalize_started_at);
+    profile.result_states = domain.states().len();
+    profile.total_ms = elapsed_ms(total_started_at);
+
+    (Some(domain), profile)
+}
+
+pub fn build_prebuilt_terminal_bundle_preimage_domain_dwa_profiled(
+    table: &GLRTable,
+    bundle: &NWA,
+    target_domain: &DWA,
+) -> (Option<DWA>, ParserStackPreimageProfile) {
+    let total_started_at = Instant::now();
+    let mut profile = ParserStackPreimageProfile {
+        bundle_states: bundle.states().len(),
+        ..ParserStackPreimageProfile::default()
+    };
+    let concatenate_started_at = Instant::now();
+    let target_nwa = target_domain.to_nwa();
+    let mut arena = NWA::new(0, 0);
+    let bundle_offset = arena.states().len() as u32;
+    let bundle_body = arena.append_with_body(bundle);
+    let bundle_finals = bundle
+        .states()
+        .iter()
+        .enumerate()
+        .filter_map(|(local, state)| {
+            state
+                .final_weight
+                .as_ref()
+                .is_some_and(|weight| !weight.is_empty())
+                .then_some(bundle_offset + local as u32)
+        })
+        .collect::<Vec<_>>();
+    if bundle_finals.is_empty() {
+        profile.total_ms = elapsed_ms(total_started_at);
+        return (None, profile);
+    }
+    let target_body = arena.append_with_body(&target_nwa);
+    for source in bundle_finals {
+        let Some(final_weight) = arena.states_mut()[source as usize].final_weight.take() else {
+            continue;
+        };
+        if final_weight.is_empty() {
+            continue;
+        }
+        for &target_start in &target_body.start_states {
+            arena.add_epsilon(source, target_start, final_weight.clone());
+        }
+    }
+    arena.set_start_states(bundle_body.start_states);
+    profile.concatenate_ms = elapsed_ms(concatenate_started_at);
+    profile.concatenated_states = arena.states().len();
+    let resolve_started_at = Instant::now();
+    resolve_negative_codes_in_nwa(
+        &mut arena,
+        table.construction == GlrTableConstruction::ExperimentalCoreMerged,
+    );
+    profile.resolve_ms = elapsed_ms(resolve_started_at);
+    let normalize_started_at = Instant::now();
+    let result = normalize_parser_stack_domain_nwa(table, &arena);
+    profile.normalize_ms = elapsed_ms(normalize_started_at);
+    profile.result_states = result.states().len();
+    profile.total_ms = elapsed_ms(total_started_at);
+    (Some(result), profile)
+}
+
+pub fn build_terminal_bundle_preimage_domain_dwa_profiled(
+    table: &GLRTable,
+    templates: &Templates,
+    terminals: &[TerminalID],
+    target_domain: &DWA,
+) -> (Option<DWA>, ParserStackPreimageProfile) {
+    let total_started_at = Instant::now();
+    let bundle_started_at = Instant::now();
+    let Some(bundle) = build_boolean_terminal_bundle_nwa(templates, terminals) else {
+        return (None, ParserStackPreimageProfile {
+            total_ms: elapsed_ms(total_started_at),
+            ..ParserStackPreimageProfile::default()
+        });
+    };
+    let bundle_ms = elapsed_ms(bundle_started_at);
+    let (result, mut profile) =
+        build_prebuilt_terminal_bundle_preimage_domain_dwa_profiled(table, &bundle, target_domain);
+    profile.bundle_ms = bundle_ms;
+    profile.total_ms = elapsed_ms(total_started_at);
+    (result, profile)
+}
+
+pub fn build_terminal_bundle_preimage_domain_dwa(
+    table: &GLRTable,
+    templates: &Templates,
+    terminals: &[TerminalID],
+    target_domain: &DWA,
+) -> Option<DWA> {
+    build_terminal_bundle_preimage_domain_dwa_profiled(table, templates, terminals, target_domain).0
+}
+
+/// Boolean union of already-normalized parser-stack domains. Default parser
+/// labels retain fallback semantics because the union is normalized through
+/// the same parser-specific support/fallback pipeline as ordinary parser-DWA
+/// construction.
+pub fn union_parser_stack_domain_dwas(
+    table: &GLRTable,
+    domains: &[&DWA],
+) -> DWA {
+    if domains.is_empty() {
+        return DWA::new(0, 0);
+    }
+    if domains.len() == 1 {
+        return domains[0].clone();
+    }
+    let mut arena = NWA::new(0, 0);
+    let mut starts = Vec::new();
+    for domain in domains {
+        let body = arena.append_with_body(&domain.to_nwa());
+        starts.extend(body.start_states);
+    }
+    starts.sort_unstable();
+    starts.dedup();
+    arena.set_start_states(starts);
+    normalize_positive_domain_nwa(table, &arena)
+}
+
+/// Compile only the input-stack domain of one finite terminal word.
+///
+/// A template recognizes the normalized stack effect of one grammar terminal:
+/// positive labels read states from the pre-token stack and negative labels
+/// describe states pushed by that terminal.  Concatenating the templates and
+/// running the ordinary negative-code cancellation computes relational
+/// composition; finality then existentially projects the remaining pushed
+/// suffix.  The result is therefore exactly the set of parser stacks from which
+/// `terminals` can be consumed, without carrying any token coordinate.
+///
+/// This helper is intentionally small and exact.  Composition uses it for the
+/// finite cross-boundary token language and validates the resulting weighted
+/// union against the general terminal-automaton parser compiler.
+pub fn build_finite_terminal_word_domain_dwa(
+    table: &GLRTable,
+    templates: &Templates,
+    terminals: &[TerminalID],
+) -> Option<DWA> {
+    if terminals.is_empty() {
+        let mut result = DWA::new(0, 1);
+        result.set_final_weight(0, Weight::all());
+        return Some(result);
+    }
+
+    let mut arena = NWA::new(0, 0);
+    let mut first_starts = Vec::<u32>::new();
+    let mut previous_finals = Vec::<u32>::new();
+    for (index, &terminal) in terminals.iter().enumerate() {
+        let template = templates.by_terminal_nwa.get(&terminal)?;
+        let materialized = materialize_template_skeleton(template);
+        let offset = arena.states().len() as u32;
+        let body = arena.append_with_body(&materialized);
+        let final_states = materialized
+            .states()
+            .iter()
+            .enumerate()
+            .filter_map(|(local, state)| {
+                state
+                    .final_weight
+                    .as_ref()
+                    .is_some_and(|weight| !weight.is_empty())
+                    .then_some(offset + local as u32)
+            })
+            .collect::<Vec<_>>();
+        if final_states.is_empty() {
+            return None;
+        }
+        if index == 0 {
+            first_starts = body.start_states.clone();
+        } else {
+            for previous in previous_finals.drain(..) {
+                let Some(final_weight) = arena.states_mut()[previous as usize].final_weight.take()
+                else {
+                    continue;
+                };
+                if final_weight.is_empty() {
+                    continue;
+                }
+                for &start in &body.start_states {
+                    arena.add_epsilon(previous, start, final_weight.clone());
+                }
+            }
+        }
+        previous_finals = final_states;
+    }
+    arena.set_start_states(first_starts);
+
+    resolve_negative_codes_in_nwa(
+        &mut arena,
+        table.construction == GlrTableConstruction::ExperimentalCoreMerged,
+    );
+    Some(normalize_positive_domain_nwa(table, &arena))
+}
+
 pub fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     table: &GLRTable,
     grammar: &AnalyzedGrammar,
@@ -3437,11 +4966,13 @@ pub fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     let possible_outgoing_ms = elapsed_ms(possible_outgoing_started_at);
 
     let default_opt_started_at = Instant::now();
-    optimize_parser_dwa_defaults(
-        &mut parser_dwa_pre_minimize,
-        &possible_by_state,
-        num_parser_states,
-    );
+    if std::env::var_os("GLRMASK_EXPERIMENT_DISABLE_GENERIC_PARSER_DEFAULT_OPT").is_none() {
+        optimize_parser_dwa_defaults(
+            &mut parser_dwa_pre_minimize,
+            &possible_by_state,
+            num_parser_states,
+        );
+    }
     let default_opt_ms = elapsed_ms(default_opt_started_at);
 
     let subtract_final_started_at = Instant::now();
