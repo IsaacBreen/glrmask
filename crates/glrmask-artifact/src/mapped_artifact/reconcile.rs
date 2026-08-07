@@ -672,12 +672,87 @@ struct DisjointRunLocalMap {
     /// destination interval.  These prefix/suffix lookups make that mapping
     /// constant-time.
     contiguous_interval_lookup: Option<ContiguousIntervalLookup>,
+    /// Same certificate with one disjoint run excluded. This covers maps that
+    /// are contiguous except for one sparse alias without hard-coding what the
+    /// alias means. An interval then maps to at most the primary span plus the
+    /// one exceptional run.
+    sparse_contiguous_interval_lookup: Option<SparseContiguousIntervalLookup>,
 }
 
 #[derive(Debug)]
 struct ContiguousIntervalLookup {
     first_destination_at_or_after: Vec<u32>,
     last_destination_at_or_before: Vec<u32>,
+}
+
+#[derive(Debug)]
+struct SparseContiguousIntervalLookup {
+    primary: ContiguousIntervalLookup,
+    extra_local: u32,
+    extra_run: (u32, u32),
+}
+
+impl SparseContiguousIntervalLookup {
+    fn remap(&self, local_start: u32, local_end: u32) -> Vec<(u32, u32)> {
+        let mut runs = Vec::with_capacity(2);
+        if let Some(primary) = self.primary.remap(local_start, local_end) {
+            runs.push(primary);
+        }
+        if local_start <= self.extra_local && self.extra_local <= local_end {
+            runs.push(self.extra_run);
+        }
+        runs.sort_unstable_by_key(|(start, _)| *start);
+        runs
+    }
+}
+
+fn contiguous_interval_lookup_excluding(
+    runs_by_local: &[Vec<(u32, u32)>],
+    excluded: Option<(usize, usize)>,
+) -> Option<ContiguousIntervalLookup> {
+    let mut selected = Vec::<Option<(u32, u32)>>::with_capacity(runs_by_local.len());
+    let mut expected_next = None;
+    for (local, runs) in runs_by_local.iter().enumerate() {
+        let mut primary = None;
+        for (run_index, &run) in runs.iter().enumerate() {
+            if excluded == Some((local, run_index)) {
+                continue;
+            }
+            if primary.replace(run).is_some() {
+                return None;
+            }
+        }
+        if let Some((start, end)) = primary {
+            if let Some(expected) = expected_next
+                && start != expected
+            {
+                return None;
+            }
+            expected_next = end.checked_add(1);
+        }
+        selected.push(primary);
+    }
+
+    let mut first_destination_at_or_after = vec![u32::MAX; selected.len()];
+    let mut next = u32::MAX;
+    for (local, run) in selected.iter().enumerate().rev() {
+        if let Some((start, _)) = run {
+            next = *start;
+        }
+        first_destination_at_or_after[local] = next;
+    }
+    let mut last_destination_at_or_before = vec![u32::MAX; selected.len()];
+    let mut previous = u32::MAX;
+    for (local, run) in selected.iter().enumerate() {
+        if let Some((_, end)) = run {
+            previous = *end;
+        }
+        last_destination_at_or_before[local] = previous;
+    }
+    Some(ContiguousIntervalLookup {
+        first_destination_at_or_after,
+        last_destination_at_or_before,
+    })
 }
 
 impl ContiguousIntervalLookup {
@@ -737,45 +812,30 @@ impl DisjointRunLocalMap {
             runs_by_local.push(runs);
         }
 
-        let contiguous_interval_lookup = if destination_order_is_monotone
-            && runs_by_local.iter().all(|runs| runs.len() <= 1)
-        {
-            let mut expected_next = None;
-            let mut adjacent = true;
-            for runs in &runs_by_local {
-                let Some(&(start, end)) = runs.first() else {
-                    continue;
-                };
-                if let Some(expected) = expected_next
-                    && start != expected
-                {
-                    adjacent = false;
-                    break;
-                }
-                expected_next = end.checked_add(1);
+        let contiguous_interval_lookup = contiguous_interval_lookup_excluding(&runs_by_local, None);
+        let sparse_contiguous_interval_lookup = if contiguous_interval_lookup.is_none() {
+            let multi = runs_by_local
+                .iter()
+                .enumerate()
+                .filter(|(_, runs)| runs.len() > 1)
+                .collect::<Vec<_>>();
+            if let [(local, runs)] = multi.as_slice()
+                && runs.len() == 2
+            {
+                (0..2).find_map(|run_index| {
+                    contiguous_interval_lookup_excluding(
+                        &runs_by_local,
+                        Some((*local, run_index)),
+                    )
+                    .map(|primary| SparseContiguousIntervalLookup {
+                        primary,
+                        extra_local: *local as u32,
+                        extra_run: runs[run_index],
+                    })
+                })
+            } else {
+                None
             }
-            adjacent.then(|| {
-                let mut first_destination_at_or_after = vec![u32::MAX; runs_by_local.len()];
-                let mut next = u32::MAX;
-                for (local, runs) in runs_by_local.iter().enumerate().rev() {
-                    if let Some(&(start, _)) = runs.first() {
-                        next = start;
-                    }
-                    first_destination_at_or_after[local] = next;
-                }
-                let mut last_destination_at_or_before = vec![u32::MAX; runs_by_local.len()];
-                let mut previous = u32::MAX;
-                for (local, runs) in runs_by_local.iter().enumerate() {
-                    if let Some(&(_, end)) = runs.first() {
-                        previous = end;
-                    }
-                    last_destination_at_or_before[local] = previous;
-                }
-                ContiguousIntervalLookup {
-                    first_destination_at_or_after,
-                    last_destination_at_or_before,
-                }
-            })
         } else {
             None
         };
@@ -784,6 +844,7 @@ impl DisjointRunLocalMap {
             runs_by_local,
             destination_order_is_monotone,
             contiguous_interval_lookup,
+            sparse_contiguous_interval_lookup,
         })
     }
 }
@@ -1009,6 +1070,35 @@ fn remap_weight_with_injective_maps(
     finalize_weight_map(map)
 }
 
+type PrecomputedTsidIntervalRuns = FxHashMap<(u32, u32), Option<Box<[(u32, u32)]>>>;
+
+fn remap_tsid_interval_with_disjoint_runs(
+    local_start: u32,
+    local_end: u32,
+    tsid_map: &DisjointRunLocalMap,
+) -> Option<Box<[(u32, u32)]>> {
+    if let Some(lookup) = tsid_map.contiguous_interval_lookup.as_ref() {
+        return Some(
+            lookup
+                .remap(local_start, local_end)
+                .into_iter()
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+    }
+    if let Some(lookup) = tsid_map.sparse_contiguous_interval_lookup.as_ref() {
+        return Some(lookup.remap(local_start, local_end).into_boxed_slice());
+    }
+    let mut runs = Vec::new();
+    for local_tsid in local_start..=local_end {
+        runs.extend_from_slice(tsid_map.runs_by_local.get(local_tsid as usize)?);
+    }
+    if !tsid_map.destination_order_is_monotone {
+        runs.sort_unstable_by_key(|(start, _)| *start);
+    }
+    Some(runs.into_boxed_slice())
+}
+
 fn remap_weight_with_disjoint_tsid_runs(
     weight: &Weight,
     tsid_map: &DisjointRunLocalMap,
@@ -1016,6 +1106,7 @@ fn remap_weight_with_disjoint_tsid_runs(
     token_run_map: Option<&DisjointRunLocalMap>,
     precomputed_token_sets: Option<&FxHashMap<usize, SharedTokenSet>>,
     local_to_common_tokens: &[Vec<u32>],
+    precomputed_tsid_intervals: Option<&PrecomputedTsidIntervalRuns>,
     token_cache: &mut HashMap<usize, SharedTokenSet>,
 ) -> Option<Weight> {
     if weight.is_empty() {
@@ -1025,9 +1116,8 @@ fn remap_weight_with_disjoint_tsid_runs(
         return None;
     }
 
-    let mut entries = Vec::new();
-    for (local_start, local_end, tokens) in weight.range_entries() {
-        let mapped_tokens = if let Some(token_map) = token_map {
+    let mut map_tokens = |tokens: &SharedTokenSet| {
+        if let Some(token_map) = token_map {
             remap_token_set_with_injective_map(tokens, token_map, token_cache)
         } else if let Some(precomputed_token_sets) = precomputed_token_sets {
             let key = Arc::as_ptr(tokens) as usize;
@@ -1039,20 +1129,77 @@ fn remap_weight_with_disjoint_tsid_runs(
             remap_token_set_with_disjoint_runs(tokens, token_run_map, token_cache)
         } else {
             remap_token_set_with_general_map(tokens, local_to_common_tokens, token_cache)
-        };
+        }
+    };
+
+    if let Some(lookup) = tsid_map.contiguous_interval_lookup.as_ref() {
+        let mut entries = Vec::new();
+        for (local_start, local_end, tokens) in weight.range_entries() {
+            let mapped_tokens = map_tokens(tokens);
+            if mapped_tokens.is_empty() {
+                continue;
+            }
+            if let Some((start, end)) = lookup.remap(local_start, local_end) {
+                entries.push((start, end, mapped_tokens));
+            }
+        }
+        return Some(Weight::from_sorted_disjoint_tsid_runs_shared(entries));
+    }
+
+    if let Some(lookup) = tsid_map.sparse_contiguous_interval_lookup.as_ref() {
+        let mut entries = Vec::new();
+        let mut extra_tokens = None::<SharedTokenSet>;
+        for (local_start, local_end, tokens) in weight.range_entries() {
+            let mapped_tokens = map_tokens(tokens);
+            if mapped_tokens.is_empty() {
+                continue;
+            }
+            if local_start <= lookup.extra_local && lookup.extra_local <= local_end {
+                extra_tokens = Some(Arc::clone(&mapped_tokens));
+            }
+            if let Some((start, end)) = lookup.primary.remap(local_start, local_end) {
+                entries.push((start, end, mapped_tokens));
+            }
+        }
+        if let Some(tokens) = extra_tokens {
+            let (extra_start, extra_end) = lookup.extra_run;
+            let index = entries.partition_point(|(start, _, _)| *start < extra_start);
+            debug_assert!(
+                index == 0 || entries[index - 1].1 < extra_start,
+                "sparse TSID alias overlaps the primary coordinate",
+            );
+            debug_assert!(
+                index == entries.len() || extra_end < entries[index].0,
+                "sparse TSID alias overlaps the primary coordinate",
+            );
+            entries.insert(index, (extra_start, extra_end, tokens));
+        }
+        return Some(Weight::from_sorted_disjoint_tsid_runs_shared(entries));
+    }
+
+    let mut entries = Vec::new();
+    for (local_start, local_end, tokens) in weight.range_entries() {
+        let mapped_tokens = map_tokens(tokens);
         if mapped_tokens.is_empty() {
             continue;
         }
-        for local_tsid in local_start..=local_end {
-            for &(start, end) in tsid_map.runs_by_local.get(local_tsid as usize)? {
+        if let Some(precomputed) = precomputed_tsid_intervals {
+            let runs = precomputed.get(&(local_start, local_end))?;
+            let runs = runs.as_deref()?;
+            for &(start, end) in runs {
                 entries.push((start, end, Arc::clone(&mapped_tokens)));
             }
+            continue;
+        }
+        let runs = remap_tsid_interval_with_disjoint_runs(local_start, local_end, tsid_map)?;
+        for &(start, end) in runs.iter() {
+            entries.push((start, end, Arc::clone(&mapped_tokens)));
         }
     }
     if !tsid_map.destination_order_is_monotone {
         entries.sort_unstable_by_key(|(start, _, _)| *start);
     }
-    Some(Weight::from_tsid_ranges_shared(entries))
+    Some(Weight::from_sorted_disjoint_tsid_runs_shared(entries))
 }
 
 fn local_to_common_is_identity(map: &[Vec<u32>], common_count: usize) -> bool {
@@ -1312,6 +1459,42 @@ fn remap_weights_with_maps_impl(
         )
     });
 
+    let precomputed_tsid_intervals = tsid_run_map.as_ref().and_then(|tsid_run_map| {
+        // The contiguous lookup already makes each interval O(1). For the
+        // remaining disjoint-run maps, parser artifacts reuse the same source
+        // TSID intervals across hundreds of otherwise-distinct weights. Expand
+        // each interval once instead of walking every local TSID for every
+        // weight that carries it.
+        if tsid_run_map.contiguous_interval_lookup.is_some()
+            || tsid_run_map.sparse_contiguous_interval_lookup.is_some()
+        {
+            return None;
+        }
+        let mut intervals = FxHashSet::<(u32, u32)>::default();
+        for weight in &unique_weights {
+            intervals.extend(
+                weight
+                    .range_entries()
+                    .map(|(local_start, local_end, _)| (local_start, local_end)),
+            );
+        }
+        Some(
+            intervals
+                .into_iter()
+                .map(|(local_start, local_end)| {
+                    (
+                        (local_start, local_end),
+                        remap_tsid_interval_with_disjoint_runs(
+                            local_start,
+                            local_end,
+                            tsid_run_map,
+                        ),
+                    )
+                })
+                .collect::<PrecomputedTsidIntervalRuns>(),
+        )
+    });
+
     let remap_one =
         |weight: &Weight,
          precomputed_token_sets: Option<&FxHashMap<usize, SharedTokenSet>>| {
@@ -1341,6 +1524,7 @@ fn remap_weights_with_maps_impl(
                         token_run_map.as_ref(),
                         precomputed_token_sets,
                         local_to_common_tokens,
+                        precomputed_tsid_intervals.as_ref(),
                         &mut token_cache,
                     )
                 })
@@ -1764,6 +1948,121 @@ mod tests {
             vec![(0, 2), (5, 9)],
             "identity TSID remapping must preserve source ranges",
         );
+    }
+
+    #[test]
+    fn sparse_exception_contiguous_tsid_remap_matches_general() {
+        let weight = Weight::from_tsid_ranges_shared([(
+            1,
+            3,
+            Arc::new(RangeSetBlaze::from_iter([0..=2])),
+        )]);
+        let tsid_map = vec![vec![10], vec![11], vec![0, 12], vec![13], vec![14]];
+        let token_map = vec![vec![0], vec![1], vec![2]];
+        let tsid_run_map =
+            DisjointRunLocalMap::from_local_to_common(&tsid_map, 15).expect("disjoint tsid runs");
+        assert!(tsid_run_map.contiguous_interval_lookup.is_none());
+        assert!(tsid_run_map.sparse_contiguous_interval_lookup.is_some());
+        let token_injective =
+            InjectiveLocalMap::from_local_to_common(&token_map, 3).expect("injective tokens");
+
+        let general = remap_weight_general(&weight, &tsid_map, &token_map, 15);
+        let fast = remap_weight_with_disjoint_tsid_runs(
+            &weight,
+            &tsid_run_map,
+            Some(&token_injective),
+            None,
+            None,
+            &token_map,
+            None,
+            &mut HashMap::new(),
+        )
+        .expect("sparse contiguous remap");
+
+        assert_eq!(entries_key(&fast), entries_key(&general));
+    }
+
+    #[test]
+    fn cached_noncontiguous_tsid_intervals_match_uncached_and_general_remap() {
+        let weight = Weight::from_tsid_ranges_shared([
+            (0, 2, Arc::new(RangeSetBlaze::from_iter([0..=1]))),
+            (1, 3, Arc::new(RangeSetBlaze::from_iter([2..=2]))),
+        ]);
+        let tsid_map = vec![vec![4, 5], vec![0, 1], vec![6], vec![2, 3]];
+        let token_map = vec![vec![0], vec![1], vec![2]];
+        let tsid_run_map =
+            DisjointRunLocalMap::from_local_to_common(&tsid_map, 7).expect("disjoint tsid runs");
+        assert!(!tsid_run_map.destination_order_is_monotone);
+        assert!(tsid_run_map.contiguous_interval_lookup.is_none());
+        let token_injective =
+            InjectiveLocalMap::from_local_to_common(&token_map, 3).expect("injective tokens");
+        let intervals = weight
+            .range_entries()
+            .map(|(start, end, _)| (start, end))
+            .map(|(start, end)| {
+                (
+                    (start, end),
+                    remap_tsid_interval_with_disjoint_runs(start, end, &tsid_run_map),
+                )
+            })
+            .collect::<PrecomputedTsidIntervalRuns>();
+
+        let general = remap_weight_general(&weight, &tsid_map, &token_map, 7);
+        let uncached = remap_weight_with_disjoint_tsid_runs(
+            &weight,
+            &tsid_run_map,
+            Some(&token_injective),
+            None,
+            None,
+            &token_map,
+            None,
+            &mut HashMap::new(),
+        )
+        .expect("uncached disjoint run remap");
+        let cached = remap_weight_with_disjoint_tsid_runs(
+            &weight,
+            &tsid_run_map,
+            Some(&token_injective),
+            None,
+            None,
+            &token_map,
+            Some(&intervals),
+            &mut HashMap::new(),
+        )
+        .expect("cached disjoint run remap");
+
+        assert_eq!(entries_key(&uncached), entries_key(&general));
+        assert_eq!(entries_key(&cached), entries_key(&general));
+    }
+
+    #[test]
+    fn contiguous_disjoint_tsid_interval_remap_matches_general_with_empty_local_classes() {
+        let weight = Weight::from_tsid_ranges_shared([
+            (0, 3, Arc::new(RangeSetBlaze::from_iter([0..=1]))),
+            (1, 2, Arc::new(RangeSetBlaze::from_iter([2..=2]))),
+        ]);
+        let tsid_map = vec![vec![10, 11], vec![], vec![12, 13, 14], vec![15]];
+        let token_map = vec![vec![0], vec![1], vec![2]];
+        let tsid_run_map =
+            DisjointRunLocalMap::from_local_to_common(&tsid_map, 16).expect("disjoint tsid runs");
+        assert!(tsid_run_map.contiguous_interval_lookup.is_some());
+        let token_injective =
+            InjectiveLocalMap::from_local_to_common(&token_map, 3).expect("injective tokens");
+
+        let general = remap_weight_general(&weight, &tsid_map, &token_map, 16);
+        let fast = remap_weight_with_disjoint_tsid_runs(
+            &weight,
+            &tsid_run_map,
+            Some(&token_injective),
+            None,
+            None,
+            &token_map,
+            None,
+            &mut HashMap::new(),
+        )
+        .expect("disjoint run remap");
+
+        assert_eq!(entries_key(&fast), entries_key(&general));
     }
 
     #[test]

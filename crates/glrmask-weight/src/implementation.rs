@@ -2294,6 +2294,47 @@ impl Weight {
         builder.finish()
     }
 
+    /// Build from already sorted, pairwise-disjoint inclusive TSID runs in one
+    /// linear RangeMap construction. This is the strict hot-path counterpart of
+    /// `from_tsid_runs_shared`: callers must provide ascending, non-overlapping
+    /// runs. Adjacent equal token sets are coalesced before interning.
+    #[cfg(feature = "internal-api")]
+    #[doc(hidden)]
+    pub fn from_sorted_disjoint_tsid_runs_shared(
+        runs: impl IntoIterator<Item = (u32, u32, SharedTokenSet)>,
+    ) -> Self {
+        let mut ranges = Vec::<(std::ops::RangeInclusive<u32>, SharedTokenSet)>::new();
+        for (start, end, tokens) in runs {
+            if tokens.is_empty() {
+                continue;
+            }
+            debug_assert!(start <= end, "sorted TSID run has inverted bounds");
+            if let Some((previous_range, previous_tokens)) = ranges.last_mut() {
+                debug_assert!(
+                    *previous_range.end() < start,
+                    "sorted TSID runs must be pairwise disjoint and ascending",
+                );
+                if previous_range.end().checked_add(1) == Some(start)
+                    && same_shared_token_set(previous_tokens, &tokens)
+                {
+                    let previous_start = *previous_range.start();
+                    *previous_range = previous_start..=end;
+                    continue;
+                }
+            }
+            ranges.push((start..=end, tokens));
+        }
+        if ranges.is_empty() {
+            return Self::empty();
+        }
+        let map = WeightMap::from_sorted_disjoint_map(CheckSortedDisjointMap::new(
+            ranges
+                .iter()
+                .map(|(range, tokens)| (range.clone(), tokens)),
+        ));
+        finalize_weight_map(map)
+    }
+
     /// Lift a set of final-TSID runs whose `coordinate` field is sorted
     /// ascending. Byte-identical to
     /// `from_tsid_runs_shared(runs.map(|(s, e, c)| (s, e, self.shared_tokens_for_tsid(c))))`

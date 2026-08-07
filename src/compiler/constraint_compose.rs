@@ -5186,7 +5186,7 @@ fn build_transported_composition_templates(
     }
 
     let local_started_all = Instant::now();
-    let local_results = components
+    let mut local_results = components
         .iter()
         .enumerate()
         .filter_map(|(component_index, component)| {
@@ -5348,21 +5348,16 @@ fn build_transported_composition_templates(
     let local_collect_ms = local_started_all.elapsed().as_secs_f64() * 1000.0;
 
     // Table composition preserves each component's parser rows under the exact
-    // state/nonterminal rebasing relation. Only terminals whose columns were
-    // rewritten by control elimination, or whose surrounding goto context
-    // changed, require fresh composed-table characterization.
-    let characterization_started_at = Instant::now();
-    let context_started_at = Instant::now();
-    let mut fallback_selected = characterization_context_fallbacks(
-        composed_table,
-        components,
-        &nonterminal_offsets,
-        active,
-    );
-    let context_ms = context_started_at.elapsed().as_secs_f64() * 1000.0;
+    // state/nonterminal rebasing relation. Control-rewritten columns are known
+    // fallbacks immediately. Context certification, cached-template transport,
+    // and compilation of those known fallbacks are otherwise independent, so
+    // run all three lanes together. If context certification discovers any
+    // additional fallback terminals, discard their speculative transports and
+    // compile only that incremental set afterward.
+    let mut known_fallback_selected = vec![false; active.len()];
     for &terminal in control_changed_terminals {
         if active.get(terminal as usize).copied().unwrap_or(false) {
-            fallback_selected[terminal as usize] = true;
+            known_fallback_selected[terminal as usize] = true;
         }
     }
     for local in &local_results {
@@ -5374,19 +5369,223 @@ fn build_transported_composition_templates(
             })
         {
             for &local_terminal in &local.selected_terminals {
-                fallback_selected[(local.terminal_offset + local_terminal) as usize] = true;
+                known_fallback_selected[(local.terminal_offset + local_terminal) as usize] = true;
             }
         }
     }
-    let fresh_started_at = Instant::now();
-    let (mut fallback_characterizations, fresh_profile) =
+
+    struct TemplateTransportResult {
+        templates: Templates,
+        late_fallback_selected: Vec<bool>,
+        transported_count: usize,
+        cached_components: usize,
+        local_wall_ms: f64,
+        dfa_transport_ms: f64,
+        nwa_transport_ms: f64,
+        template_transport_ms: f64,
+    }
+    struct FreshFallbackResult {
+        characterizations: BTreeMap<u32, TerminalCharacterization>,
+        templates: Templates,
+        characterize_ms: f64,
+        compile_ms: f64,
+    }
+
+    let parallel_core_started_at = Instant::now();
+    let ((context_fallback_selected, context_ms), (transported, mut known_fallback)) =
+        rayon::join(
+            || {
+                let context_started_at = Instant::now();
+                let fallback = characterization_context_fallbacks(
+                    composed_table,
+                    components,
+                    &nonterminal_offsets,
+                    active,
+                );
+                (
+                    fallback,
+                    context_started_at.elapsed().as_secs_f64() * 1000.0,
+                )
+            },
+            || {
+                rayon::join(
+                    || {
+                        let template_transport_started_at = Instant::now();
+                        let mut templates = Templates::default();
+                        let mut transported_count = 0usize;
+                        let mut cached_components = 0usize;
+                        let mut local_wall_ms = 0.0f64;
+                        let mut dfa_transport_ms = 0.0f64;
+                        let mut nwa_transport_ms = 0.0f64;
+                        let mut late_fallback_selected = vec![false; active.len()];
+                        for local in &mut local_results {
+                            cached_components += usize::from(local.cached);
+                            local_wall_ms = local_wall_ms.max(local.wall_ms);
+                            let relation =
+                                &composed_table.state_relations[local.state_relation_index];
+                            let component = components[local.state_relation_index];
+                            for &local_terminal in &local.selected_terminals {
+                                let global_terminal = local.terminal_offset + local_terminal;
+                                if known_fallback_selected[global_terminal as usize] {
+                                    continue;
+                                }
+                                let dfa = if let Some(local_templates) =
+                                    local.owned_templates.as_mut()
+                                {
+                                    local_templates.by_terminal.remove(&local_terminal)
+                                } else {
+                                    component
+                                        .composition_templates
+                                        .by_terminal
+                                        .get(&local_terminal)
+                                        .cloned()
+                                };
+                                let Some(dfa) = dfa else {
+                                    late_fallback_selected[global_terminal as usize] = true;
+                                    continue;
+                                };
+                                let nwa = if let Some(local_templates) =
+                                    local.owned_templates.as_mut()
+                                {
+                                    local_templates.by_terminal_nwa.remove(&local_terminal)
+                                } else {
+                                    component
+                                        .composition_templates
+                                        .by_terminal_nwa
+                                        .get(&local_terminal)
+                                        .cloned()
+                                };
+                                let Some(nwa) = nwa else {
+                                    late_fallback_selected[global_terminal as usize] = true;
+                                    continue;
+                                };
+                                let dfa_started_at = Instant::now();
+                                let transported_dfa = transport_template_dfa(dfa, relation);
+                                dfa_transport_ms +=
+                                    dfa_started_at.elapsed().as_secs_f64() * 1000.0;
+                                let nwa_started_at = Instant::now();
+                                let transported_nwa = transport_template_nwa(nwa, relation);
+                                nwa_transport_ms +=
+                                    nwa_started_at.elapsed().as_secs_f64() * 1000.0;
+                                let (Some(dfa), Some(nwa)) =
+                                    (transported_dfa, transported_nwa)
+                                else {
+                                    late_fallback_selected[global_terminal as usize] = true;
+                                    continue;
+                                };
+                                templates.by_terminal.insert(global_terminal, dfa);
+                                templates.by_terminal_nwa.insert(global_terminal, nwa);
+                                transported_count += 1;
+                            }
+                        }
+                        TemplateTransportResult {
+                            templates,
+                            late_fallback_selected,
+                            transported_count,
+                            cached_components,
+                            local_wall_ms,
+                            dfa_transport_ms,
+                            nwa_transport_ms,
+                            template_transport_ms: template_transport_started_at
+                                .elapsed()
+                                .as_secs_f64()
+                                * 1000.0,
+                        }
+                    },
+                    || {
+                        let fresh_started_at = Instant::now();
+                        let (characterizations, _) = characterize_selected_terminals_profiled(
+                            &composed_table.table,
+                            analyzed,
+                            &known_fallback_selected,
+                        );
+                        let characterize_ms =
+                            fresh_started_at.elapsed().as_secs_f64() * 1000.0;
+                        let compile_started_at = Instant::now();
+                        let (templates, _) =
+                            Templates::from_characterizations_profiled(&characterizations);
+                        FreshFallbackResult {
+                            characterizations,
+                            templates,
+                            characterize_ms,
+                            compile_ms: compile_started_at.elapsed().as_secs_f64() * 1000.0,
+                        }
+                    },
+                )
+            },
+        );
+    let parallel_core_ms = parallel_core_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let TemplateTransportResult {
+        mut templates,
+        late_fallback_selected,
+        transported_count,
+        cached_components,
+        local_wall_ms,
+        dfa_transport_ms,
+        nwa_transport_ms,
+        template_transport_ms,
+    } = transported;
+
+    let mut fallback_selected = known_fallback_selected;
+    let mut additional_fallback_selected = vec![false; active.len()];
+    for terminal in 0..active.len() {
+        if (context_fallback_selected[terminal] || late_fallback_selected[terminal])
+            && !fallback_selected[terminal]
+        {
+            additional_fallback_selected[terminal] = true;
+            fallback_selected[terminal] = true;
+            templates.by_terminal.remove(&(terminal as u32));
+            templates.by_terminal_nwa.remove(&(terminal as u32));
+        }
+    }
+
+    let additional_fresh_started_at = Instant::now();
+    let additional_characterizations = if additional_fallback_selected
+        .iter()
+        .any(|&selected| selected)
+    {
         characterize_selected_terminals_profiled(
             &composed_table.table,
             analyzed,
-            &fallback_selected,
-        );
-    let fresh_ms = fresh_started_at.elapsed().as_secs_f64() * 1000.0;
-    let composed_characterize_ms = characterization_started_at.elapsed().as_secs_f64() * 1000.0;
+            &additional_fallback_selected,
+        )
+        .0
+    } else {
+        BTreeMap::new()
+    };
+    let additional_fresh_ms = additional_fresh_started_at.elapsed().as_secs_f64() * 1000.0;
+    let additional_compile_started_at = Instant::now();
+    let additional_templates = if additional_characterizations.is_empty() {
+        Templates::default()
+    } else {
+        Templates::from_characterizations_profiled(&additional_characterizations).0
+    };
+    let additional_compile_ms = additional_compile_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    known_fallback
+        .characterizations
+        .extend(additional_characterizations);
+    known_fallback
+        .templates
+        .by_terminal
+        .extend(additional_templates.by_terminal);
+    known_fallback
+        .templates
+        .by_terminal_nwa
+        .extend(additional_templates.by_terminal_nwa);
+    let fallback_characterizations = known_fallback.characterizations;
+    let fallback_count = fallback_characterizations.len();
+    templates
+        .by_terminal
+        .extend(known_fallback.templates.by_terminal);
+    templates
+        .by_terminal_nwa
+        .extend(known_fallback.templates.by_terminal_nwa);
+    let fresh_ms = known_fallback.characterize_ms + additional_fresh_ms;
+    let fallback_ms = known_fallback.compile_ms + additional_compile_ms;
+    let composed_characterize_ms = context_ms + fresh_ms;
+    let characterization_compare_ms = 0.0f64;
     let mut characterization_transport_ms = 0.0f64;
 
     if std::env::var_os("GLRMASK_VALIDATE_COMPOSE_CHARACTERIZATION_TRANSPORT").is_some() {
@@ -5442,100 +5641,10 @@ fn build_transported_composition_templates(
         assert_eq!(candidate, reference);
         eprintln!(
             "[glrmask/validate][compose_characterization_transport] transported={} fresh={} exact=true",
-            candidate.len().saturating_sub(fresh_profile.terminals),
-            fresh_profile.terminals,
+            candidate.len().saturating_sub(fallback_count),
+            fallback_count,
         );
     }
-
-    let mut templates = Templates::default();
-    let mut transported_count = 0usize;
-    let mut cached_components = 0usize;
-    let mut local_wall_ms = 0.0f64;
-    let template_transport_started_at = Instant::now();
-    let mut dfa_transport_ms = 0.0f64;
-    let mut nwa_transport_ms = 0.0f64;
-    let characterization_compare_ms = 0.0f64;
-    let mut late_fallback_selected = vec![false; active.len()];
-    for local in local_results {
-        let LocalTemplatePlan {
-            terminal_offset,
-            state_relation_index,
-            nonterminal_offset,
-            selected_terminals,
-            owned_characterizations,
-            mut owned_templates,
-            cached,
-            wall_ms,
-        } = local;
-        cached_components += usize::from(cached);
-        local_wall_ms = local_wall_ms.max(wall_ms);
-        let relation = &composed_table.state_relations[state_relation_index];
-        let component = components[state_relation_index];
-        for local_terminal in selected_terminals {
-            let global_terminal = terminal_offset + local_terminal;
-            if fallback_selected[global_terminal as usize] {
-                continue;
-            }
-            let dfa = if let Some(local_templates) = owned_templates.as_mut() {
-                local_templates.by_terminal.remove(&local_terminal)
-            } else {
-                component
-                    .composition_templates
-                    .by_terminal
-                    .get(&local_terminal)
-                    .cloned()
-            };
-            let Some(dfa) = dfa else {
-                late_fallback_selected[global_terminal as usize] = true;
-                continue;
-            };
-            let nwa = if let Some(local_templates) = owned_templates.as_mut() {
-                local_templates.by_terminal_nwa.remove(&local_terminal)
-            } else {
-                component
-                    .composition_templates
-                    .by_terminal_nwa
-                    .get(&local_terminal)
-                    .cloned()
-            };
-            let Some(nwa) = nwa else {
-                late_fallback_selected[global_terminal as usize] = true;
-                continue;
-            };
-            let dfa_started_at = Instant::now();
-            let transported_dfa = transport_template_dfa(dfa, relation);
-            dfa_transport_ms += dfa_started_at.elapsed().as_secs_f64() * 1000.0;
-            let nwa_started_at = Instant::now();
-            let transported_nwa = transport_template_nwa(nwa, relation);
-            nwa_transport_ms += nwa_started_at.elapsed().as_secs_f64() * 1000.0;
-            let (Some(dfa), Some(nwa)) = (transported_dfa, transported_nwa) else {
-                late_fallback_selected[global_terminal as usize] = true;
-                continue;
-            };
-            templates.by_terminal.insert(global_terminal, dfa);
-            templates.by_terminal_nwa.insert(global_terminal, nwa);
-            transported_count += 1;
-        }
-    }
-    let template_transport_ms = template_transport_started_at.elapsed().as_secs_f64() * 1000.0;
-    if late_fallback_selected.iter().any(|&selected| selected) {
-        let late = characterize_selected_terminals_profiled(
-            &composed_table.table,
-            analyzed,
-            &late_fallback_selected,
-        )
-        .0;
-        fallback_characterizations.extend(late);
-    }
-    let fallback_count = fallback_characterizations.len();
-    let fallback_started_at = Instant::now();
-    let (fallback_templates, _) =
-        Templates::from_characterizations_profiled(&fallback_characterizations);
-    let fallback_ms = fallback_started_at.elapsed().as_secs_f64() * 1000.0;
-    templates.by_terminal.extend(fallback_templates.by_terminal);
-    templates
-        .by_terminal_nwa
-        .extend(fallback_templates.by_terminal_nwa);
 
     if std::env::var_os("GLRMASK_VALIDATE_COMPOSE_TEMPLATE_TRANSPORT").is_some() {
         let reference_characterizations = characterize_selected_terminals_profiled(
@@ -5564,7 +5673,7 @@ fn build_transported_composition_templates(
     let wall_ms = started_at.elapsed().as_secs_f64() * 1000.0;
     if compose_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][constraint_boundary_template_transport] transported={} fallback={} cached_components={} local_collect_ms={local_collect_ms:.3} local_ms={local_wall_ms:.3} context_ms={context_ms:.3} characterization_transport_ms={characterization_transport_ms:.3} fresh_ms={fresh_ms:.3} composed_characterize_ms={composed_characterize_ms:.3} characterization_compare_ms={characterization_compare_ms:.3} dfa_transport_ms={dfa_transport_ms:.3} nwa_transport_ms={nwa_transport_ms:.3} template_transport_ms={template_transport_ms:.3} fallback_ms={fallback_ms:.3} total_ms={wall_ms:.3}",
+            "[glrmask/profile][constraint_boundary_template_transport] transported={} fallback={} cached_components={} local_collect_ms={local_collect_ms:.3} local_ms={local_wall_ms:.3} context_ms={context_ms:.3} parallel_core_ms={parallel_core_ms:.3} characterization_transport_ms={characterization_transport_ms:.3} fresh_ms={fresh_ms:.3} composed_characterize_ms={composed_characterize_ms:.3} characterization_compare_ms={characterization_compare_ms:.3} dfa_transport_ms={dfa_transport_ms:.3} nwa_transport_ms={nwa_transport_ms:.3} template_transport_ms={template_transport_ms:.3} fallback_ms={fallback_ms:.3} total_ms={wall_ms:.3}",
             transported_count,
             fallback_count,
             cached_components,
@@ -7562,47 +7671,134 @@ pub(crate) fn compose_constraints_owned_parent(
     let boundary_terminal_offsets = composed_table.terminal_offsets.clone();
     let selected_boundary_tokens_cell =
         OnceLock::<Result<Option<Vec<u32>>, String>>::new();
-    let control_overlap_started_at = Instant::now();
-    let (control_elimination_result, lexical_result) = {
-        let table = &mut composed_table.table;
-        let controls = &mut composed_table.control_terminals;
-        if std::env::var_os("GLRMASK_COMPOSE_SERIAL_CONTROL_LEXICAL").is_some() {
-            let control = eliminate_runtime_controls_parts(table, controls);
-            let lexical = prepare_boundary_lexical_prepass(
-                &boundary_analyzed,
-                &boundary_nonterminals,
-                &boundary_terminal_offsets,
-                None,
-                merged_reset_state,
-                &merged_ignores,
-                vocab,
-                &special_token_terminals,
-                &component_constraints,
-                &expected_tokenizer_state_offsets,
-                Some(&selected_boundary_tokens_cell),
-            );
-            (control, lexical)
-        } else {
-            rayon::join(
-                || eliminate_runtime_controls_parts(table, controls),
-                || {
-                    prepare_boundary_lexical_prepass(
-                        &boundary_analyzed,
-                        &boundary_nonterminals,
-                        &boundary_terminal_offsets,
-                        None,
-                        merged_reset_state,
-                        &merged_ignores,
-                        vocab,
-                        &special_token_terminals,
-                        &component_constraints,
-                        &expected_tokenizer_state_offsets,
-                        Some(&selected_boundary_tokens_cell),
-                    )
-                },
-            )
-        }
+    let state_map_cell = OnceLock::<Result<ManyToOneIdMap, String>>::new();
+    let transport_top_accept_directly =
+        std::env::var_os("GLRMASK_COMPOSE_LEGACY_TOP_ACCEPT_BRANCH").is_none();
+
+    struct PreparedComponentBase {
+        component_id_map: InternalIdMap,
+        component_maps: Vec<DirectComponentCoordinateMaps>,
+        unmapped: Vec<UnmappedComponentParserArtifact>,
+        coordinate_ms: f64,
+        parser_extract_ms: f64,
+    }
+
+    let component_terminal_offsets = composed_table.terminal_offsets.clone();
+    let prepare_component_base = || -> Result<PreparedComponentBase, String> {
+        let state_started_at = Instant::now();
+        let state_result = build_direct_component_state_coordinates(
+            &parser_components,
+            merged_tokenizer_state_count,
+            merged_reset_state,
+        );
+        let component_state_ms = state_started_at.elapsed().as_secs_f64() * 1000.0;
+        let published_state_map = state_result
+            .as_ref()
+            .map(|coordinates| coordinates.tokenizer_states.clone())
+            .map_err(Clone::clone);
+        assert!(
+            state_map_cell.set(published_state_map).is_ok(),
+            "component state map published twice",
+        );
+        let state_coordinates = state_result?;
+        let (
+            (token_coordinate_result, token_coordinate_ms),
+            (unmapped_result, parser_extract_ms),
+        ) = rayon::join(
+            || {
+                let started_at = Instant::now();
+                let result = build_direct_component_token_coordinates(
+                    &parser_components,
+                    &original_token_ids,
+                );
+                (result, started_at.elapsed().as_secs_f64() * 1000.0)
+            },
+            || {
+                let started_at = Instant::now();
+                let result = prepare_unmapped_component_parser_artifacts(
+                    &parser_components,
+                    &component_terminal_offsets,
+                    !global_ignores,
+                    transport_top_accept_directly,
+                );
+                (result, started_at.elapsed().as_secs_f64() * 1000.0)
+            },
+        );
+        let (vocab_tokens, local_to_global_tokens) = token_coordinate_result?;
+        let component_maps = state_coordinates
+            .local_to_global_tsids
+            .into_iter()
+            .zip(local_to_global_tokens)
+            .map(|(local_to_global_tsids, local_to_global_tokens)| {
+                DirectComponentCoordinateMaps {
+                    local_to_global_tsids,
+                    local_to_global_tokens,
+                }
+            })
+            .collect::<Vec<_>>();
+        Ok(PreparedComponentBase {
+            component_id_map: InternalIdMap {
+                tokenizer_states: state_coordinates.tokenizer_states,
+                vocab_tokens,
+                deferred_vocab_singleton_original_ids: None,
+            },
+            component_maps,
+            unmapped: unmapped_result?,
+            coordinate_ms: component_state_ms + token_coordinate_ms,
+            parser_extract_ms,
+        })
     };
+
+    // Component parser extraction depends only on immutable component artifacts
+    // and the already-linked state relations. It does not depend on either
+    // control elimination or boundary-token discovery, so start it in the same
+    // Rayon phase. This hides the ~50 ms parser-artifact extraction lane behind
+    // lexical boundary discovery instead of serializing the two.
+    let preparation_started_at = Instant::now();
+    let control_overlap_started_at = Instant::now();
+    let ((control_elimination_result, lexical_result), component_base_result) = rayon::join(
+        || {
+            let table = &mut composed_table.table;
+            let controls = &mut composed_table.control_terminals;
+            if std::env::var_os("GLRMASK_COMPOSE_SERIAL_CONTROL_LEXICAL").is_some() {
+                let control = eliminate_runtime_controls_parts(table, controls);
+                let lexical = prepare_boundary_lexical_prepass(
+                    &boundary_analyzed,
+                    &boundary_nonterminals,
+                    &boundary_terminal_offsets,
+                    None,
+                    merged_reset_state,
+                    &merged_ignores,
+                    vocab,
+                    &special_token_terminals,
+                    &component_constraints,
+                    &expected_tokenizer_state_offsets,
+                    Some(&selected_boundary_tokens_cell),
+                );
+                (control, lexical)
+            } else {
+                rayon::join(
+                    || eliminate_runtime_controls_parts(table, controls),
+                    || {
+                        prepare_boundary_lexical_prepass(
+                            &boundary_analyzed,
+                            &boundary_nonterminals,
+                            &boundary_terminal_offsets,
+                            None,
+                            merged_reset_state,
+                            &merged_ignores,
+                            vocab,
+                            &special_token_terminals,
+                            &component_constraints,
+                            &expected_tokenizer_state_offsets,
+                            Some(&selected_boundary_tokens_cell),
+                        )
+                    },
+                )
+            }
+        },
+        prepare_component_base,
+    );
     let control_elimination_report = control_elimination_result?;
     let control_elimination_ms = control_elimination_report
         .as_ref()
@@ -7617,221 +7813,109 @@ pub(crate) fn compose_constraints_owned_parent(
         .as_ref()
         .map(|prepass| prepass.discovery_ms.max(prepass.one_byte_ms))
         .unwrap_or(0.0);
+    let component_base = component_base_result?;
+    let coordinate_ms = component_base.coordinate_ms;
+    let parser_extract_ms = component_base.parser_extract_ms;
     let control_overlap_ms = control_overlap_started_at.elapsed().as_secs_f64() * 1000.0;
     if compose_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][constraint_control_lexical_overlap] control_ms={control_elimination_ms:.3} lexical_ms={lexical_discovery_ms:.3} changed_terminals={} wall_ms={control_overlap_ms:.3}",
+            "[glrmask/profile][constraint_control_lexical_overlap] control_ms={control_elimination_ms:.3} lexical_ms={lexical_discovery_ms:.3} changed_terminals={} coordinate_ms={coordinate_ms:.3} parser_extract_ms={parser_extract_ms:.3} wall_ms={control_overlap_ms:.3}",
             control_changed_terminals.len(),
         );
     }
 
-    let state_map_cell = OnceLock::<Result<ManyToOneIdMap, String>>::new();
-    let transport_top_accept_directly =
-        std::env::var_os("GLRMASK_COMPOSE_LEGACY_TOP_ACCEPT_BRANCH").is_none();
-    let preparation_started_at = Instant::now();
-    let prepare_components = || {
-            let state_started_at = Instant::now();
-            let state_result = build_direct_component_state_coordinates(
-                &parser_components,
-                merged_tokenizer_state_count,
-                merged_reset_state,
-            );
-            let component_state_ms = state_started_at.elapsed().as_secs_f64() * 1000.0;
-            let published_state_map = state_result
-                .as_ref()
-                .map(|coordinates| coordinates.tokenizer_states.clone())
-                .map_err(Clone::clone);
-            assert!(
-                state_map_cell.set(published_state_map).is_ok(),
-                "component state map published twice",
-            );
-            let state_coordinates = state_result?;
-            let (
-                (token_coordinate_result, token_coordinate_ms),
-                (unmapped_result, parser_extract_ms),
-            ) = rayon::join(
-                || {
-                    let started_at = Instant::now();
-                    let result = build_direct_component_token_coordinates(
-                        &parser_components,
-                        &original_token_ids,
-                    );
-                    (result, started_at.elapsed().as_secs_f64() * 1000.0)
-                },
-                || {
-                    let started_at = Instant::now();
-                    let result = prepare_unmapped_component_parser_artifacts(
-                        &parser_components,
-                        &composed_table.terminal_offsets,
-                        !global_ignores,
-                        transport_top_accept_directly,
-                    );
-                    (result, started_at.elapsed().as_secs_f64() * 1000.0)
-                },
-            );
-            let (vocab_tokens, local_to_global_tokens) = token_coordinate_result?;
-            let component_maps = state_coordinates
-                .local_to_global_tsids
-                .into_iter()
-                .zip(local_to_global_tokens)
-                .map(|(local_to_global_tsids, local_to_global_tokens)| {
-                    DirectComponentCoordinateMaps {
-                        local_to_global_tsids,
-                        local_to_global_tokens,
-                    }
-                })
-                .collect::<Vec<_>>();
-            let component_id_map = InternalIdMap {
-                tokenizer_states: state_coordinates.tokenizer_states,
-                vocab_tokens,
-                deferred_vocab_singleton_original_ids: None,
-            };
-            let selected_boundary_tokens = selected_boundary_tokens_cell
-                .get()
-                .expect("boundary lexical prepass must publish selected tokens")
-                .as_ref()
-                .map_err(Clone::clone)?
-                .clone();
-            let prepared = if let Some(selected_boundary_tokens) = selected_boundary_tokens {
-                let boundary_id_map = boundary_id_map_for_selected_tokens(
-                    &component_id_map.tokenizer_states,
-                    &selected_boundary_tokens,
+    let remap_components = || -> Result<PreparedOwnedComponentArtifacts, String> {
+        let PreparedComponentBase {
+            component_id_map,
+            component_maps,
+            unmapped,
+            ..
+        } = component_base;
+        let selected_boundary_tokens = selected_boundary_tokens_cell
+            .get()
+            .expect("boundary lexical prepass must publish selected tokens")
+            .as_ref()
+            .map_err(Clone::clone)?
+            .clone();
+        if let Some(selected_boundary_tokens) = selected_boundary_tokens {
+            let boundary_id_map = boundary_id_map_for_selected_tokens(
+                &component_id_map.tokenizer_states,
+                &selected_boundary_tokens,
+            )?;
+            let plan = build_boundary_refinement_plan(component_id_map, &boundary_id_map)
+                .ok_or_else(|| {
+                    "component coordinate map does not cover boundary repair".to_string()
+                })?;
+            let (automata, possible_matches, top_accept_parts, remap_ms) =
+                remap_unmapped_component_artifacts(
+                    unmapped,
+                    component_maps,
+                    Some(&plan.component_token_map),
+                    plan.common_map.num_tsids() as usize,
                 )?;
-                let plan = build_boundary_refinement_plan(component_id_map, &boundary_id_map)
-                    .ok_or_else(|| {
-                        "component coordinate map does not cover boundary repair".to_string()
-                    })?;
-                let (automata, possible_matches, top_accept_parts, remap_ms) =
-                    remap_unmapped_component_artifacts(
-                        unmapped_result?,
-                        component_maps,
-                        Some(&plan.component_token_map),
-                        plan.common_map.num_tsids() as usize,
-                    )?;
-                PreparedOwnedComponentArtifacts {
-                    automata,
-                    possible_matches,
-                    top_accept_parts,
-                    id_map: plan.common_map,
-                    boundary_tsid_map: Some(plan.boundary_tsid_map),
-                    boundary_token_map: Some(plan.boundary_token_map),
-                    remap_ms,
-                }
-            } else {
-                let (automata, possible_matches, top_accept_parts, remap_ms) =
-                    remap_unmapped_component_artifacts(
-                        unmapped_result?,
-                        component_maps,
-                        None,
-                        component_id_map.num_tsids() as usize,
-                    )?;
-                PreparedOwnedComponentArtifacts {
-                    automata,
-                    possible_matches,
-                    top_accept_parts,
-                    id_map: component_id_map,
-                    boundary_tsid_map: None,
-                    boundary_token_map: None,
-                    remap_ms,
-                }
-            };
-            Ok::<_, String>((
-                prepared,
-                component_state_ms + token_coordinate_ms,
-                parser_extract_ms,
-            ))
+            Ok(PreparedOwnedComponentArtifacts {
+                automata,
+                possible_matches,
+                top_accept_parts,
+                id_map: plan.common_map,
+                boundary_tsid_map: Some(plan.boundary_tsid_map),
+                boundary_token_map: Some(plan.boundary_token_map),
+                remap_ms,
+            })
+        } else {
+            let common_tsids = component_id_map.num_tsids() as usize;
+            let (automata, possible_matches, top_accept_parts, remap_ms) =
+                remap_unmapped_component_artifacts(
+                    unmapped,
+                    component_maps,
+                    None,
+                    common_tsids,
+                )?;
+            Ok(PreparedOwnedComponentArtifacts {
+                automata,
+                possible_matches,
+                top_accept_parts,
+                id_map: component_id_map,
+                boundary_tsid_map: None,
+                boundary_token_map: None,
+                remap_ms,
+            })
+        }
     };
     let finish_boundary = || {
         let started_at = Instant::now();
-            let result = match lexical_prepass {
-                Some(lexical_prepass) => build_boundary_repair(
-                    &composed_table,
-                    None,
-                    merged_tokenizer_state_count,
-                    merged_reset_state,
-                    terminal_display_names.clone(),
-                    &merged_ignores,
-                    vocab,
-                    &special_token_terminals,
-                    &component_constraints,
-                    &control_changed_terminals,
-                    &expected_tokenizer_state_offsets,
-                    None,
-                    Some(&state_map_cell),
-                    Some(&selected_boundary_tokens_cell),
-                    Some(lexical_prepass),
-                    Some(boundary_analyzed),
-                ),
-                None => Ok(None),
-            };
-            (result, started_at.elapsed().as_secs_f64() * 1000.0)
+        let result = match lexical_prepass {
+            Some(lexical_prepass) => build_boundary_repair(
+                &composed_table,
+                None,
+                merged_tokenizer_state_count,
+                merged_reset_state,
+                terminal_display_names.clone(),
+                &merged_ignores,
+                vocab,
+                &special_token_terminals,
+                &component_constraints,
+                &control_changed_terminals,
+                &expected_tokenizer_state_offsets,
+                None,
+                Some(&state_map_cell),
+                Some(&selected_boundary_tokens_cell),
+                Some(lexical_prepass),
+                Some(boundary_analyzed),
+            ),
+            None => Ok(None),
+        };
+        (result, started_at.elapsed().as_secs_f64() * 1000.0)
     };
     let (prepared_components_result, (boundary_result, boundary_ms)) =
         if std::env::var_os("GLRMASK_COMPOSE_SERIAL_COMPONENT_BOUNDARY").is_none() {
-            rayon::join(prepare_components, finish_boundary)
+            rayon::join(remap_components, finish_boundary)
         } else {
-            (prepare_components(), finish_boundary())
+            (remap_components(), finish_boundary())
         };
-    let (prepared_components, coordinate_ms, parser_extract_ms) = prepared_components_result?;
+    let prepared_components = prepared_components_result?;
     let boundary_repair = boundary_result?;
     let preparation_ms = preparation_started_at.elapsed().as_secs_f64() * 1000.0;
-
-    let terminal_live_started_at = Instant::now();
-    let mut terminal_live_states = merged_terminal_live_states_owned_parent(
-        &mut parent,
-        children,
-        &composed_table.terminal_offsets,
-        &expected_tokenizer_state_offsets,
-        composed_table.table.num_terminals as usize,
-    );
-    canonicalize_terminal_live_states(
-        &mut terminal_live_states,
-        merged_ignores.canonical,
-        &merged_ignores.aliases,
-    );
-    let terminal_live_ms = terminal_live_started_at.elapsed().as_secs_f64() * 1000.0;
-
-    let child_tokenizers = children
-        .iter()
-        .enumerate()
-        .map(|(index, child)| {
-            (&child.constraint.tokenizer, composed_table.terminal_offsets[index + 1])
-        })
-        .collect::<Vec<_>>();
-    let tokenizer_started_at = Instant::now();
-    let parent_fast_transitions = std::mem::take(&mut parent.tokenizer_fast_transitions);
-    let child_fast_transitions = children
-        .iter()
-        .enumerate()
-        .map(|(index, child)| {
-            (
-                &child.constraint.tokenizer_fast_transitions,
-                expected_tokenizer_state_offsets[index + 1],
-            )
-        })
-        .collect::<Vec<_>>();
-    let tokenizer_fast_transitions = parent_fast_transitions
-        .append_rebased_children(&child_fast_transitions)
-        .unwrap_or_default();
-    let parent_tokenizer = std::mem::replace(
-        &mut parent.tokenizer,
-        Tokenizer::disjoint_union_with_terminal_offsets(&[]).0,
-    );
-    let (mut tokenizer, tokenizer_state_offsets) =
-        Tokenizer::disjoint_union_with_owned_parent(
-            parent_tokenizer,
-            composed_table.terminal_offsets[0],
-            &child_tokenizers,
-        );
-    if let Some(canonical) = merged_ignores.canonical {
-        tokenizer.canonicalize_terminal_aliases(canonical, &merged_ignores.aliases);
-    }
-    let tokenizer_ms = tokenizer_started_at.elapsed().as_secs_f64() * 1000.0;
-    assert_eq!(
-        tokenizer_state_offsets, expected_tokenizer_state_offsets,
-        "owned-parent tokenizer state offsets differ from predicted layout",
-    );
-
 
     let num_parser_states = composed_table.table.num_states;
     let num_terminals = composed_table.table.num_terminals as usize;
@@ -7871,34 +7955,18 @@ pub(crate) fn compose_constraints_owned_parent(
         }
     };
 
-    let mut result = build_composed_constraint_unfinalized(
-        composed_table,
-        tokenizer,
-        tokenizer_state_offsets,
-        DWA::new(id_num_tsids, id_max_internal_token),
-        possible_matches,
-        id_map,
-        template_dfas_by_terminal,
-        special_token_terminals,
-        embedded_end_token_ids,
-        terminal_display_names,
-        ignore_terminal,
-        merged_ignores.canonical_expr.clone(),
-        terminal_live_states,
-        tokenizer_fast_transitions,
-        true,
-        vocab,
-    );
-    let (parser_top_accept, parser_top_accept_token_sets) =
-        collapse_transported_top_accept_parts(top_accept_parts, num_parser_states);
-    result.constraint.parser_top_accept = parser_top_accept;
-
-    let union_started_at = Instant::now();
-    let (parser_union_result, token_cache_prebuild_ms) = rayon::join(
-        || -> Result<(DWA, PrebuiltParserWeightTokenSets), String> {
+    // Parser-DWA union is independent of tokenizer materialization, terminal-live
+    // assembly, and token-mask prebuilding. The old owned-parent path serialized
+    // those stages even though both sides consume disjoint artifacts produced by
+    // preparation. Run them together so the ~30-40 ms parser union hides the
+    // ~20 ms tokenizer/result side instead of paying both on the critical path.
+    let post_prepare_overlap_started_at = Instant::now();
+    let (parser_union_result, result_side) = rayon::join(
+        || -> Result<(DWA, PrebuiltParserWeightTokenSets, f64), String> {
+            let union_started_at = Instant::now();
             let final_build_started_at = Instant::now();
             let mut automata = automata;
-            match boundary_work {
+            let (parser_dwa, weight_token_sets) = match boundary_work {
                 Some((mut boundary_dwa, boundary_id_map)) => {
                     let boundary_tsid_map = boundary_tsid_map.ok_or_else(|| {
                         "prepared component artifacts omitted boundary TSID mapping".to_string()
@@ -7942,8 +8010,7 @@ pub(crate) fn compose_constraints_owned_parent(
                     let union_path = "overlap_local";
                     let direct_ms = direct_started_at.elapsed().as_secs_f64() * 1000.0;
                     if let Some(automata) = validation_automata {
-                        let mut reference =
-                            NWA::new(id_num_tsids, id_max_internal_token);
+                        let mut reference = NWA::new(id_num_tsids, id_max_internal_token);
                         let mut starts = Vec::new();
                         for (index, automaton) in automata.iter().enumerate() {
                             let explicit = if index + 1 == automata.len() {
@@ -7973,7 +8040,7 @@ pub(crate) fn compose_constraints_owned_parent(
                             final_build_started_at.elapsed().as_secs_f64() * 1000.0,
                         );
                     }
-                    Ok((parser_dwa, weight_token_sets))
+                    (parser_dwa, weight_token_sets)
                 }
                 None => {
                     let automata_len = automata.len();
@@ -7996,21 +8063,121 @@ pub(crate) fn compose_constraints_owned_parent(
                             final_build_started_at.elapsed().as_secs_f64() * 1000.0,
                         );
                     }
-                    Ok((parser_dwa, weight_token_sets))
+                    (parser_dwa, weight_token_sets)
                 }
-            }
+            };
+            Ok((
+                parser_dwa,
+                weight_token_sets,
+                union_started_at.elapsed().as_secs_f64() * 1000.0,
+            ))
         },
         || {
-            let started_at = Instant::now();
+            let terminal_live_started_at = Instant::now();
+            let mut terminal_live_states = merged_terminal_live_states_owned_parent(
+                &mut parent,
+                children,
+                &composed_table.terminal_offsets,
+                &expected_tokenizer_state_offsets,
+                num_terminals,
+            );
+            canonicalize_terminal_live_states(
+                &mut terminal_live_states,
+                merged_ignores.canonical,
+                &merged_ignores.aliases,
+            );
+            let terminal_live_ms = terminal_live_started_at.elapsed().as_secs_f64() * 1000.0;
+
+            let child_tokenizers = children
+                .iter()
+                .enumerate()
+                .map(|(index, child)| {
+                    (&child.constraint.tokenizer, composed_table.terminal_offsets[index + 1])
+                })
+                .collect::<Vec<_>>();
+            let tokenizer_started_at = Instant::now();
+            let parent_fast_transitions = std::mem::take(&mut parent.tokenizer_fast_transitions);
+            let child_fast_transitions = children
+                .iter()
+                .enumerate()
+                .map(|(index, child)| {
+                    (
+                        &child.constraint.tokenizer_fast_transitions,
+                        expected_tokenizer_state_offsets[index + 1],
+                    )
+                })
+                .collect::<Vec<_>>();
+            let tokenizer_fast_transitions = parent_fast_transitions
+                .append_rebased_children(&child_fast_transitions)
+                .unwrap_or_default();
+            let parent_tokenizer = std::mem::replace(
+                &mut parent.tokenizer,
+                Tokenizer::disjoint_union_with_terminal_offsets(&[]).0,
+            );
+            let (mut tokenizer, tokenizer_state_offsets) =
+                Tokenizer::disjoint_union_with_owned_parent(
+                    parent_tokenizer,
+                    composed_table.terminal_offsets[0],
+                    &child_tokenizers,
+                );
+            if let Some(canonical) = merged_ignores.canonical {
+                tokenizer.canonicalize_terminal_aliases(canonical, &merged_ignores.aliases);
+            }
+            let tokenizer_ms = tokenizer_started_at.elapsed().as_secs_f64() * 1000.0;
+            assert_eq!(
+                tokenizer_state_offsets, expected_tokenizer_state_offsets,
+                "owned-parent tokenizer state offsets differ from predicted layout",
+            );
+
+            let mut result = build_composed_constraint_unfinalized(
+                composed_table,
+                tokenizer,
+                tokenizer_state_offsets,
+                DWA::new(id_num_tsids, id_max_internal_token),
+                possible_matches,
+                id_map,
+                template_dfas_by_terminal,
+                special_token_terminals,
+                embedded_end_token_ids,
+                terminal_display_names,
+                ignore_terminal,
+                merged_ignores.canonical_expr.clone(),
+                terminal_live_states,
+                tokenizer_fast_transitions,
+                true,
+                vocab,
+            );
+            let (parser_top_accept, parser_top_accept_token_sets) =
+                collapse_transported_top_accept_parts(top_accept_parts, num_parser_states);
+            result.constraint.parser_top_accept = parser_top_accept;
+
+            let token_cache_started_at = Instant::now();
             result.constraint.internal_token_bytes = build_internal_token_bytes_from_groups(
                 vocab,
                 &result.constraint.internal_token_to_tokens,
             );
             result.constraint.prebuild_token_mask_caches();
-            started_at.elapsed().as_secs_f64() * 1000.0
+            let token_cache_prebuild_ms =
+                token_cache_started_at.elapsed().as_secs_f64() * 1000.0;
+            (
+                result,
+                parser_top_accept_token_sets,
+                terminal_live_ms,
+                tokenizer_ms,
+                token_cache_prebuild_ms,
+            )
         },
     );
-    let (parser_dwa, mut prebuilt_parser_weight_token_sets) = parser_union_result?;
+    let post_prepare_overlap_ms =
+        post_prepare_overlap_started_at.elapsed().as_secs_f64() * 1000.0;
+    let (parser_dwa, mut prebuilt_parser_weight_token_sets, union_ms) = parser_union_result?;
+    let (
+        mut result,
+        parser_top_accept_token_sets,
+        terminal_live_ms,
+        tokenizer_ms,
+        token_cache_prebuild_ms,
+    ) = result_side;
     result.constraint.parser_dwa = parser_dwa;
     if std::env::var_os("GLRMASK_COMPOSE_DISABLE_PREBUILT_WEIGHT_INVENTORY").is_none() {
         let mut final_sets = prebuilt_parser_weight_token_sets
@@ -8028,14 +8195,12 @@ pub(crate) fn compose_constraints_owned_parent(
         result.constraint.prebuilt_parser_weight_token_sets =
             Some(prebuilt_parser_weight_token_sets);
     }
-    let union_ms = union_started_at.elapsed().as_secs_f64() * 1000.0;
-
     let finalize_started_at = Instant::now();
     result.constraint.rebuild_runtime_caches();
     let finalize_ms = finalize_started_at.elapsed().as_secs_f64() * 1000.0;
     if compose_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][constraint_composition_owned_parent] components={} table_ms={table_ms:.3} control_elimination_ms={control_elimination_ms:.3} tokenizer_ms={tokenizer_ms:.3} coordinate_ms={coordinate_ms:.3} parser_extract_ms={parser_extract_ms:.3} boundary_ms={boundary_ms:.3} preparation_ms={preparation_ms:.3} terminal_live_ms={terminal_live_ms:.3} union_ms={union_ms:.3} token_cache_prebuild_ms={token_cache_prebuild_ms:.3} finalize_ms={finalize_ms:.3} total_ms={:.3}",
+            "[glrmask/profile][constraint_composition_owned_parent] components={} table_ms={table_ms:.3} control_elimination_ms={control_elimination_ms:.3} tokenizer_ms={tokenizer_ms:.3} coordinate_ms={coordinate_ms:.3} parser_extract_ms={parser_extract_ms:.3} boundary_ms={boundary_ms:.3} preparation_ms={preparation_ms:.3} terminal_live_ms={terminal_live_ms:.3} union_ms={union_ms:.3} token_cache_prebuild_ms={token_cache_prebuild_ms:.3} post_prepare_overlap_ms={post_prepare_overlap_ms:.3} finalize_ms={finalize_ms:.3} total_ms={:.3}",
             children.len() + 1,
             total_started_at.elapsed().as_secs_f64() * 1000.0,
         );
