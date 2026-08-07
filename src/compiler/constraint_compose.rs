@@ -1703,116 +1703,16 @@ fn expr_byte_summary(expr: &Expr) -> ExprByteSummary {
     }
 }
 
-fn boundary_token_prefilter(
+fn extend_seed_possible_match_candidates(
+    candidates: &mut BTreeSet<u32>,
     vocab: &Vocab,
     components: &[&Constraint],
     terminal_offsets: &[u32],
     seed_terminals: &[bool],
-) -> BTreeSet<u32> {
-    let num_terminals = terminal_offsets
-        .iter()
-        .copied()
-        .zip(components)
-        .map(|(offset, component)| offset + component.tokenizer.num_terminals())
-        .max()
-        .unwrap_or(0) as usize;
-    let mut summaries = vec![None::<ExprByteSummary>; num_terminals];
-    for (component_index, component) in components.iter().enumerate() {
-        let terminal_offset = terminal_offsets[component_index] as usize;
-        for local_terminal in 0..component.tokenizer.num_terminals() as usize {
-            summaries[terminal_offset + local_terminal] = Some(
-                component
-                    .tokenizer
-                    .terminal_expr(local_terminal as u32)
-                    .map(expr_byte_summary)
-                    .unwrap_or(ExprByteSummary {
-                        nullable: false,
-                        first: U8Set::all(),
-                        last: U8Set::all(),
-                        reachable: U8Set::all(),
-                    }),
-            );
-        }
-    }
-
-    // Boundary repair is needed when a token begins a segment-entry terminal at
-    // any byte offset, including offset zero. Compile each seed exactly and scan
-    // token suffixes for a completed seed prefix or an unfinished seed at token
-    // end. Exact parser discovery below still rejects lexically possible suffixes
-    // whose preceding bytes cannot reach the boundary in the grammar.
-    let mut endpoint_dfas = Vec::new();
-    let mut endpoint_dfas_by_first = (0..256)
-        .map(|_| Vec::<usize>::new())
-        .collect::<Vec<_>>();
-    let mut conservative_first = U8Set::empty();
-    for (component_index, component) in components.iter().enumerate() {
-        let terminal_offset = terminal_offsets[component_index] as usize;
-        for local_terminal in 0..component.tokenizer.num_terminals() as usize {
-            let global_terminal = terminal_offset + local_terminal;
-            if !seed_terminals
-                .get(global_terminal)
-                .copied()
-                .unwrap_or(false)
-            {
-                continue;
-            }
-            let Some(expr) = component.tokenizer.terminal_expr(local_terminal as u32) else {
-                // Missing retained source is rare and cannot justify an unsafe
-                // exclusion. Fall back to the conservative first-byte summary.
-                conservative_first |= summaries[global_terminal]
-                    .map(|summary| summary.first)
-                    .unwrap_or(U8Set::all());
-                continue;
-            };
-            let dfa_index = endpoint_dfas.len();
-            let dfa = compile_terminal_expr_dfa(expr);
-            for byte in 0u8..=u8::MAX {
-                if dfa.step(0, byte).is_some() {
-                    endpoint_dfas_by_first[byte as usize].push(dfa_index);
-                }
-            }
-            endpoint_dfas.push(dfa);
-        }
-    }
-    let mut candidates = BTreeSet::new();
-    for (&token, bytes) in vocab.entries_map().iter() {
-        if bytes.len() < 2 {
-            continue;
-        }
-        'suffixes: for offset in 0..bytes.len() {
-            let first = bytes[offset];
-            if conservative_first.contains(first) {
-                candidates.insert(token);
-                break 'suffixes;
-            }
-            for &dfa_index in &endpoint_dfas_by_first[first as usize] {
-                let dfa = &endpoint_dfas[dfa_index];
-                let mut state = 0u32;
-                let mut reached_token_end = true;
-                for &byte in &bytes[offset..] {
-                    let Some(next) = dfa.step(state, byte) else {
-                        reached_token_end = false;
-                        break;
-                    };
-                    state = next;
-                    if dfa.finalizers(state).contains(0) {
-                        candidates.insert(token);
-                        break 'suffixes;
-                    }
-                }
-                if reached_token_end && dfa.possible_future_group_ids(state).contains(0) {
-                    candidates.insert(token);
-                    break 'suffixes;
-                }
-            }
-        }
-    }
-    let seed_dfa_candidates = candidates.len();
-
-    // The first terminal of the entered segment can occupy an entire token.
-    // Component possible-matches is exact for that endpoint case. A terminal
-    // immediately *before* the boundary needs no repair unless the same token
-    // also begins the new segment; the byte-pair candidates cover that case.
+) {
+    // A segment-entry terminal can occupy an entire model token. Component
+    // possible-matches is already exact for that endpoint case, including
+    // terminals whose source expression was not retained.
     for (component_index, component) in components.iter().enumerate() {
         let terminal_offset = terminal_offsets[component_index] as usize;
         for local_terminal in 0..component.tokenizer.num_terminals() as usize {
@@ -1850,20 +1750,6 @@ fn boundary_token_prefilter(
             }
         }
     }
-    if compose_profile_enabled() {
-        eprintln!(
-            "[glrmask/profile][constraint_boundary_prefilter_sources] adjacent_pairs={} after_seed_dfas={} after_seed_possible_matches={} seed_terminals={:?}",
-            seed_dfa_candidates,
-            seed_dfa_candidates,
-            candidates.len(),
-            seed_terminals
-                .iter()
-                .enumerate()
-                .filter_map(|(terminal, &seed)| seed.then_some(terminal))
-                .collect::<Vec<_>>(),
-        );
-    }
-    candidates
 }
 
 fn discover_boundary_token_paths(
@@ -1934,45 +1820,37 @@ fn discover_boundary_token_paths(
         let seed_dfas = seed_dfas.into_iter().collect::<Vec<_>>();
         let seed_compile_ms = seed_compile_started_at.elapsed().as_secs_f64() * 1000.0;
 
-        let coarse_started_at = Instant::now();
-        let coarse = boundary_token_prefilter(vocab, components, terminal_offsets, seed_terminals);
-        let coarse_ms = coarse_started_at.elapsed().as_secs_f64() * 1000.0;
-
         let suffix_index_started_at = Instant::now();
         let suffix_index = crate::compiler::vocab_suffix_index::get(vocab);
         let suffix_count = suffix_index.entries().len();
         let suffix_index_ms = suffix_index_started_at.elapsed().as_secs_f64() * 1000.0;
         let exact_started_at = Instant::now();
-        let exact = suffix_index
+        let mut exact = suffix_index
             .entries()
             .par_iter()
             .filter_map(|entry| {
-                let has_coarse_owner = entry
-                    .token_ids()
+                seed_dfas
                     .iter()
-                    .any(|token_id| coarse.contains(token_id));
-                (has_coarse_owner
-                    && seed_dfas
-                        .iter()
-                        .any(|dfa| seed_dfa_reaches_match_or_future(dfa, entry.suffix())))
-                .then(|| {
-                    entry
-                        .token_ids()
-                        .iter()
-                        .copied()
-                        .filter(|token_id| coarse.contains(token_id))
-                        .collect::<SmallVec<[u32; 2]>>()
-                })
+                    .any(|dfa| seed_dfa_reaches_match_or_future(dfa, entry.suffix()))
+                    .then(|| entry.token_ids().iter().copied().collect::<SmallVec<[u32; 2]>>())
             })
             .flatten_iter()
             .collect::<BTreeSet<_>>();
+        let suffix_language_tokens = exact.len();
+        extend_seed_possible_match_candidates(
+            &mut exact,
+            vocab,
+            components,
+            terminal_offsets,
+            seed_terminals,
+        );
         if compose_profile_enabled() {
             eprintln!(
-                "[glrmask/profile][constraint_boundary_seed_suffix_filter] unique_seed_dfas={} projected_seed_dfas={} coarse_tokens={} suffixes={} exact_tokens={} seed_compile_ms={seed_compile_ms:.3} coarse_ms={coarse_ms:.3} suffix_index_ms={suffix_index_ms:.3} exact_ms={:.3}",
+                "[glrmask/profile][constraint_boundary_seed_suffix_filter] unique_seed_dfas={} projected_seed_dfas={} suffixes={} suffix_language_tokens={} exact_tokens={} seed_compile_ms={seed_compile_ms:.3} suffix_index_ms={suffix_index_ms:.3} exact_ms={:.3}",
                 seed_dfas.len(),
                 projected_seed_dfa_count,
-                coarse.len(),
                 suffix_count,
+                suffix_language_tokens,
                 exact.len(),
                 exact_started_at.elapsed().as_secs_f64() * 1000.0,
             );
