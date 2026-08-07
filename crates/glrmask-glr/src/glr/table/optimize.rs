@@ -1833,6 +1833,11 @@ impl GLRTable {
         let predecessor_free = control_elimination_has_known_tops(&source, &controls);
         let predecessors = if predecessor_free {
             Vec::new()
+        } else if std::env::var_os("GLRMASK_DISABLE_CONTROL_PREDECESSOR_DEMAND").is_none() {
+            let origins = (0..source.num_states)
+                .filter(|&state| controls.iter().any(|control| source.action[state as usize].contains_key(control)))
+                .collect::<Vec<_>>();
+            build_control_elimination_predecessors_demand(&source, &origins)?
         } else {
             build_control_elimination_predecessors(&source)?
         };
@@ -4633,6 +4638,280 @@ fn dense_predecessor_states_at_depth(
     current
 }
 
+
+/// Demand-driven exact predecessor support for control elimination.
+///
+/// Control closure starts only in rows containing a control action. Rather than
+/// solve and materialize the predecessor relation for every parser state, this
+/// solver starts from those origins and monotonically discovers exactly the
+/// rows needed by copy and deep-pop equations encountered on their predecessor
+/// chains. Empty rows outside that demand closure are never observed by control
+/// elimination.
+fn build_control_elimination_predecessors_demand(
+    table: &GLRTable,
+    origins: &[u32],
+) -> Result<RuntimePredecessors, String> {
+    let started_at = std::time::Instant::now();
+    let state_count = table.num_states as usize;
+    let mut direct = vec![PredecessorSet::new(); state_count];
+    let mut copy_sources = vec![PredecessorSet::new(); state_count];
+    let mut deep_sources = vec![Vec::<(u32, u32)>::new(); state_count];
+    let mut rewrite_count = 0usize;
+
+    for source in 0..table.num_states {
+        let mut record_rewrite = |pop: u32, pushes: &[u32]| {
+            rewrite_count += 1;
+            if pushes.is_empty() {
+                return;
+            }
+            for pair in pushes.windows(2) {
+                direct[pair[1] as usize].push(pair[0]);
+            }
+            let destination = pushes[0] as usize;
+            match pop {
+                0 => direct[destination].push(source),
+                1 => copy_sources[destination].push(source),
+                _ => deep_sources[destination].push((source, pop)),
+            }
+        };
+        for action in table.action[source as usize].values() {
+            for_each_action_stack_rewrite(action, &mut record_rewrite);
+        }
+        for &(target, replace) in table.goto[source as usize].values() {
+            record_rewrite(u32::from(replace), std::slice::from_ref(&target));
+        }
+    }
+    for row in &mut direct {
+        row.sort_unstable();
+        row.dedup();
+    }
+    for row in &mut copy_sources {
+        row.sort_unstable();
+        row.dedup();
+    }
+    for row in &mut deep_sources {
+        row.sort_unstable();
+        row.dedup();
+    }
+    let extraction_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let mut rows = vec![None::<BitSet>; state_count];
+    let mut needed = vec![false; state_count];
+    let mut dependency_queue = VecDeque::<u32>::new();
+    let mut needed_states = Vec::<u32>::new();
+    let mark_needed = |state: u32,
+                       rows: &mut [Option<BitSet>],
+                       needed: &mut [bool],
+                       dependency_queue: &mut VecDeque<u32>,
+                       needed_states: &mut Vec<u32>| {
+        let index = state as usize;
+        if index >= state_count || needed[index] {
+            return false;
+        }
+        needed[index] = true;
+        let mut row = BitSet::new(state_count);
+        for &predecessor in &direct[index] {
+            row.set(predecessor as usize);
+        }
+        rows[index] = Some(row);
+        dependency_queue.push_back(state);
+        needed_states.push(state);
+        true
+    };
+    for &origin in origins {
+        mark_needed(
+            origin,
+            &mut rows,
+            &mut needed,
+            &mut dependency_queue,
+            &mut needed_states,
+        );
+    }
+
+    fn union_optional_row(rows: &mut [Option<BitSet>], source: u32, destination: u32) -> bool {
+        if source == destination {
+            return false;
+        }
+        let source = source as usize;
+        let destination = destination as usize;
+        if source < destination {
+            let (left, right) = rows.split_at_mut(destination);
+            let Some(source_row) = left[source].as_ref() else {
+                return false;
+            };
+            right[0]
+                .as_mut()
+                .expect("needed destination row exists")
+                .union_with_changed(source_row)
+        } else {
+            let (left, right) = rows.split_at_mut(source);
+            let Some(source_row) = right[0].as_ref() else {
+                return false;
+            };
+            left[destination]
+                .as_mut()
+                .expect("needed destination row exists")
+                .union_with_changed(source_row)
+        }
+    }
+
+    let pass_limit = state_count.saturating_mul(state_count).saturating_add(2);
+    let mut rounds = 0usize;
+    let mut dynamic_dependencies = 0usize;
+    let mut changed_unions = 0usize;
+    for _ in 0..pass_limit {
+        rounds += 1;
+        while let Some(destination) = dependency_queue.pop_front() {
+            for &source in &copy_sources[destination as usize] {
+                dynamic_dependencies += usize::from(mark_needed(
+                    source,
+                    &mut rows,
+                    &mut needed,
+                    &mut dependency_queue,
+                    &mut needed_states,
+                ));
+            }
+            for &(source, _) in &deep_sources[destination as usize] {
+                dynamic_dependencies += usize::from(mark_needed(
+                    source,
+                    &mut rows,
+                    &mut needed,
+                    &mut dependency_queue,
+                    &mut needed_states,
+                ));
+            }
+        }
+
+        let mut changed = false;
+        let round_states = needed_states.clone();
+        for destination in round_states {
+            for &source in &copy_sources[destination as usize] {
+                if union_optional_row(&mut rows, source, destination) {
+                    changed = true;
+                    changed_unions += 1;
+                }
+            }
+            for &(source, pop) in &deep_sources[destination as usize] {
+                let Some(mut current) = rows[source as usize].clone() else {
+                    continue;
+                };
+                for _ in 1..pop {
+                    let current_states = current.iter_ones().map(|state| state as u32).collect::<Vec<_>>();
+                    let mut next = BitSet::new(state_count);
+                    for state in current_states {
+                        dynamic_dependencies += usize::from(mark_needed(
+                            state,
+                            &mut rows,
+                            &mut needed,
+                            &mut dependency_queue,
+                            &mut needed_states,
+                        ));
+                        if let Some(row) = rows[state as usize].as_ref() {
+                            next.union_with(row);
+                        }
+                    }
+                    current = next;
+                    if current.is_zero() {
+                        break;
+                    }
+                }
+                let destination_row = rows[destination as usize]
+                    .as_mut()
+                    .expect("needed destination row exists");
+                if destination_row.union_with_changed(&current) {
+                    changed = true;
+                    changed_unions += 1;
+                }
+            }
+        }
+
+        if !changed && dependency_queue.is_empty() {
+            // Control traversal may pop deeper than any one predecessor
+            // equation used while solving the origin rows. Close the demand
+            // set under the completed predecessor relation so every state that
+            // can appear below a control origin has its exact row available.
+            let closure_states = needed_states.clone();
+            let mut closure_added = false;
+            for state in closure_states {
+                let predecessors = rows[state as usize]
+                    .as_ref()
+                    .expect("needed predecessor row exists")
+                    .iter_ones()
+                    .map(|predecessor| predecessor as u32)
+                    .collect::<Vec<_>>();
+                for predecessor in predecessors {
+                    if mark_needed(
+                        predecessor,
+                        &mut rows,
+                        &mut needed,
+                        &mut dependency_queue,
+                        &mut needed_states,
+                    ) {
+                        dynamic_dependencies += 1;
+                        closure_added = true;
+                    }
+                }
+            }
+            if closure_added {
+                continue;
+            }
+            let materialize_started_at = std::time::Instant::now();
+            let mut result = vec![PredecessorSet::new(); state_count];
+            let mut predecessor_edges = 0usize;
+            let mut max_predecessors = 0usize;
+            for &state in &needed_states {
+                let row = rows[state as usize]
+                    .as_ref()
+                    .expect("needed predecessor row exists");
+                for predecessor in row.iter_ones() {
+                    result[state as usize].push(predecessor as u32);
+                }
+                predecessor_edges += result[state as usize].len();
+                max_predecessors = max_predecessors.max(result[state as usize].len());
+            }
+            let materialize_ms = materialize_started_at.elapsed().as_secs_f64() * 1000.0;
+
+            if std::env::var_os("GLRMASK_VALIDATE_CONTROL_PREDECESSOR_DEMAND").is_some() {
+                let reference = build_control_elimination_predecessors(table)?;
+                for &state in &needed_states {
+                    assert_eq!(
+                        result[state as usize],
+                        reference[state as usize],
+                        "demand predecessor row differs for state {state}",
+                    );
+                }
+                eprintln!(
+                    "[glrmask/validate][control_predecessor_demand] origins={} needed_states={} exact=true",
+                    origins.len(),
+                    needed_states.len(),
+                );
+            }
+            if std::env::var_os("GLRMASK_PROFILE_CONTROL_ELIMINATION").is_some() {
+                eprintln!(
+                    "[glrmask/profile][control_predecessors_demand] states={} origins={} needed_states={} rewrites={} rounds={} dynamic_dependencies={} changed_unions={} predecessor_edges={} max_predecessors={} extraction_ms={extraction_ms:.3} materialize_ms={materialize_ms:.3} total_ms={:.3}",
+                    state_count,
+                    origins.len(),
+                    needed_states.len(),
+                    rewrite_count,
+                    rounds,
+                    dynamic_dependencies,
+                    changed_unions,
+                    predecessor_edges,
+                    max_predecessors,
+                    started_at.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
+            return Ok(result);
+        }
+    }
+
+    Err(format!(
+        "demand control-elimination predecessor propagation did not converge: states={} origins={}",
+        state_count,
+        origins.len(),
+    ))
+}
+
 /// Conservative-exact predecessor support for arbitrary stack rewrites.
 /// Extra predecessor candidates are harmless because generated guarded effects
 /// test the concrete stack state before applying; missing candidates would be
@@ -6568,6 +6847,33 @@ mod tests {
             let actual = build_control_elimination_predecessors(&table)
                 .unwrap_or_else(|error| panic!("optimized failed for case {case}: {error}"));
             assert_eq!(actual, expected, "case {case}");
+
+            let mut origins = (0..nstates as u32)
+                .filter(|_| next(&mut seed) & 3 == 0)
+                .collect::<Vec<_>>();
+            if origins.is_empty() {
+                origins.push((next(&mut seed) % nstates as u64) as u32);
+            }
+            origins.sort_unstable();
+            origins.dedup();
+            let demand = build_control_elimination_predecessors_demand(&table, &origins)
+                .unwrap_or_else(|error| panic!("demand solver failed for case {case}: {error}"));
+            let mut required = vec![false; nstates];
+            let mut queue = VecDeque::from(origins.clone());
+            while let Some(state) = queue.pop_front() {
+                if std::mem::replace(&mut required[state as usize], true) {
+                    continue;
+                }
+                queue.extend(expected[state as usize].iter().copied());
+            }
+            for state in 0..nstates {
+                if required[state] || !demand[state].is_empty() {
+                    assert_eq!(
+                        demand[state], expected[state],
+                        "materialized demand row differs for case {case}, state {state}, origins {origins:?}",
+                    );
+                }
+            }
         }
     }
 
