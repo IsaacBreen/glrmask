@@ -5119,6 +5119,164 @@ fn transport_terminal_characterization(
     })
 }
 
+
+fn action_reduced_nonterminals(action: &Action, output: &mut BTreeSet<u32>) {
+    match action {
+        Action::Reduce(nonterminal, _) => {
+            output.insert(*nonterminal);
+        }
+        Action::Split { reduces, .. } => {
+            output.extend(reduces.iter().map(|(nonterminal, _)| *nonterminal));
+        }
+        _ => {}
+    }
+}
+
+/// Conservative exact invalidation for rebased terminal characterizations.
+///
+/// A terminal characterization depends on its action column, on every goto
+/// predecessor of a state where that terminal acts, and on goto entries used
+/// by its nonconsuming reductions. Table composition preserves component rows
+/// under the state/nonterminal rebasing relation, except where linker/control
+/// construction adds one of those contexts. Mark every terminal that can
+/// observe such an addition; all others may reuse the rebased component
+/// characterization exactly.
+fn characterization_context_fallbacks(
+    composed_table: &ComposedTable,
+    components: &[&Constraint],
+    nonterminal_offsets: &[u32],
+    active: &[bool],
+) -> Vec<bool> {
+    let table = &composed_table.table;
+    let mut composed_predecessors = vec![Vec::<(u32, u32, bool)>::new(); table.num_states as usize];
+    for (revealed_state, row) in table.goto.iter().enumerate() {
+        for (&nonterminal, &(target, replace)) in row {
+            if let Some(predecessors) = composed_predecessors.get_mut(target as usize) {
+                predecessors.push((revealed_state as u32, nonterminal, replace));
+            }
+        }
+    }
+    for predecessors in &mut composed_predecessors {
+        predecessors.sort_unstable();
+        predecessors.dedup();
+    }
+
+    let mut changed_targets = BTreeSet::<u32>::new();
+    let mut changed_nonterminals = BTreeSet::<u32>::new();
+    let mut fallback = vec![false; active.len()];
+
+    for (component_index, component) in components.iter().enumerate() {
+        let relation = &composed_table.state_relations[component_index];
+        let terminal_offset = composed_table.terminal_offsets[component_index];
+        let nonterminal_offset = nonterminal_offsets[component_index];
+        let singleton_states = relation
+            .iter()
+            .map(|states| (states.len() == 1).then_some(states[0]))
+            .collect::<Option<Vec<_>>>();
+        let Some(singleton_states) = singleton_states else {
+            for local_terminal in 0..component.table.num_terminals {
+                let global = terminal_offset + local_terminal;
+                if active.get(global as usize).copied().unwrap_or(false) {
+                    fallback[global as usize] = true;
+                }
+            }
+            continue;
+        };
+
+        let mut expected_predecessors =
+            vec![Vec::<(u32, u32, bool)>::new(); component.table.num_states as usize];
+        for (revealed_state, row) in component.table.goto.iter().enumerate() {
+            for (&local_nonterminal, &(local_target, replace)) in row {
+                let Some(&global_revealed) = singleton_states.get(revealed_state) else {
+                    continue;
+                };
+                let Some(&global_target) = singleton_states.get(local_target as usize) else {
+                    continue;
+                };
+                expected_predecessors[local_target as usize].push((
+                    global_revealed,
+                    nonterminal_offset + local_nonterminal,
+                    replace,
+                ));
+                let expected = (global_target, replace);
+                let global_nonterminal = nonterminal_offset + local_nonterminal;
+                let actual = table
+                    .goto
+                    .get(global_revealed as usize)
+                    .and_then(|global_row| global_row.get(&global_nonterminal))
+                    .copied();
+                if actual != Some(expected) {
+                    changed_nonterminals.insert(global_nonterminal);
+                }
+            }
+        }
+        for predecessors in &mut expected_predecessors {
+            predecessors.sort_unstable();
+            predecessors.dedup();
+        }
+        for (local_target, expected) in expected_predecessors.iter().enumerate() {
+            let global_target = singleton_states[local_target];
+            let actual = composed_predecessors
+                .get(global_target as usize)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            if actual != expected.as_slice() {
+                changed_targets.insert(global_target);
+            }
+        }
+
+        // Detect additional composed goto entries absent from the component row.
+        for (local_revealed, &global_revealed) in singleton_states.iter().enumerate() {
+            let local_row = component.table.goto.get(local_revealed);
+            if let Some(global_row) = table.goto.get(global_revealed as usize) {
+                for &global_nonterminal in global_row.keys() {
+                    let local_nonterminal = global_nonterminal.checked_sub(nonterminal_offset);
+                    let represented = local_nonterminal.is_some_and(|local_nonterminal| {
+                        local_nonterminal < component.table.nonterminal_display_names.len() as u32
+                            && local_row
+                                .is_some_and(|row| row.contains_key(&local_nonterminal))
+                    });
+                    if !represented {
+                        changed_nonterminals.insert(global_nonterminal);
+                    }
+                }
+            }
+        }
+    }
+
+    for &state in &changed_targets {
+        if let Some(row) = table.action.get(state as usize) {
+            for (terminal, _) in row.iter() {
+                if active.get(terminal as usize).copied().unwrap_or(false) {
+                    fallback[terminal as usize] = true;
+                }
+            }
+        }
+    }
+    for row in &table.action {
+        for (terminal, action) in row.iter() {
+            if !active.get(terminal as usize).copied().unwrap_or(false) {
+                continue;
+            }
+            let mut reduced = BTreeSet::new();
+            action_reduced_nonterminals(action, &mut reduced);
+            if reduced.iter().any(|nonterminal| changed_nonterminals.contains(nonterminal)) {
+                fallback[terminal as usize] = true;
+            }
+        }
+    }
+
+    if compose_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][constraint_characterization_context] changed_targets={} changed_nonterminals={} fallback_terminals={}",
+            changed_targets.len(),
+            changed_nonterminals.len(),
+            fallback.iter().filter(|&&selected| selected).count(),
+        );
+    }
+    fallback
+}
+
 fn build_transported_composition_templates(
     composed_table: &ComposedTable,
     analyzed: &AnalyzedGrammar,
@@ -5148,146 +5306,255 @@ fn build_transported_composition_templates(
         wall_ms: f64,
     }
 
-    let ((composed_characterizations, composed_profile), local_results) = rayon::join(
-        || characterize_selected_terminals_profiled(&composed_table.table, analyzed, active),
-        || {
-            components
-                .par_iter()
+    let local_results = components
+        .par_iter()
+        .enumerate()
+        .filter_map(|(component_index, component)| {
+            let terminal_offset = composed_table.terminal_offsets[component_index];
+            let mut selected = vec![false; component.table.num_terminals as usize];
+            for (local_terminal, slot) in selected.iter_mut().enumerate() {
+                let global = terminal_offset + local_terminal as u32;
+                *slot = active.get(global as usize).copied().unwrap_or(false)
+                    && !changed.contains(&global);
+            }
+            if !selected.iter().any(|&value| value) {
+                return None;
+            }
+            let local_started_at = Instant::now();
+            let selected_terminals = selected
+                .iter()
                 .enumerate()
-                .filter_map(|(component_index, component)| {
-                    let terminal_offset = composed_table.terminal_offsets[component_index];
-                    let mut selected = vec![false; component.table.num_terminals as usize];
-                    for (local_terminal, slot) in selected.iter_mut().enumerate() {
-                        let global = terminal_offset + local_terminal as u32;
-                        *slot = active.get(global as usize).copied().unwrap_or(false)
-                            && !changed.contains(&global);
-                    }
-                    if !selected.iter().any(|&value| value) {
-                        return None;
-                    }
-                    let local_started_at = Instant::now();
-                    let selected_terminals = selected
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(terminal, &selected)| selected.then_some(terminal as u32))
-                        .collect::<Vec<_>>();
-                    let cached_characterizations =
-                        !component.composition_terminal_characterizations.is_empty()
-                            && selected_terminals.iter().all(|terminal| {
-                                component
-                                    .composition_terminal_characterizations
-                                    .contains_key(terminal)
-                            });
-                    let cached_templates = selected_terminals.iter().all(|terminal| {
-                        component.composition_templates.by_terminal.contains_key(terminal)
-                            && component
-                                .composition_templates
-                                .by_terminal_nwa
-                                .contains_key(terminal)
+                .filter_map(|(terminal, &selected)| selected.then_some(terminal as u32))
+                .collect::<Vec<_>>();
+            let cached_characterizations =
+                !component.composition_terminal_characterizations.is_empty()
+                    && selected_terminals.iter().all(|terminal| {
+                        component
+                            .composition_terminal_characterizations
+                            .contains_key(terminal)
                     });
-                    let cached = cached_characterizations && cached_templates;
-                    let characterizations = if cached_characterizations {
-                        selected_terminals
-                            .iter()
-                            .map(|terminal| {
-                                (
-                                    *terminal,
-                                    component.composition_terminal_characterizations[terminal].clone(),
-                                )
-                            })
-                            .collect::<BTreeMap<_, _>>()
-                    } else {
-                        let augmented_start = component.table.rules.first()?.lhs;
-                        let local_analyzed = AnalyzedGrammar::from_composed_rules(
-                            component.table.rules.clone(),
-                            component.table.num_terminals,
-                            component.terminal_display_names.clone(),
-                            component.table.nonterminal_display_names.clone(),
-                            augmented_start,
-                        );
-                        characterize_selected_terminals_profiled(
-                            &component.table,
-                            &local_analyzed,
-                            &selected,
+            let cached_templates = selected_terminals.iter().all(|terminal| {
+                component.composition_templates.by_terminal.contains_key(terminal)
+                    && component
+                        .composition_templates
+                        .by_terminal_nwa
+                        .contains_key(terminal)
+            });
+            let cached = cached_characterizations && cached_templates;
+            let characterizations = if cached_characterizations {
+                selected_terminals
+                    .iter()
+                    .map(|terminal| {
+                        (
+                            *terminal,
+                            component.composition_terminal_characterizations[terminal].clone(),
                         )
-                        .0
-                    };
-                    if cached_characterizations
-                        && std::env::var_os(
-                            "GLRMASK_VALIDATE_COMPOSE_CACHED_CHARACTERIZATIONS",
-                        )
-                        .is_some()
-                    {
-                        let augmented_start = component.table.rules.first()?.lhs;
-                        let local_analyzed = AnalyzedGrammar::from_composed_rules(
-                            component.table.rules.clone(),
-                            component.table.num_terminals,
-                            component.terminal_display_names.clone(),
-                            component.table.nonterminal_display_names.clone(),
-                            augmented_start,
-                        );
-                        let reference = characterize_selected_terminals_profiled(
-                            &component.table,
-                            &local_analyzed,
-                            &selected,
-                        )
-                        .0;
-                        assert_eq!(characterizations, reference);
-                    }
-                    let templates = if cached_templates {
-                        Templates {
-                            by_terminal: selected_terminals
-                                .iter()
-                                .map(|terminal| {
-                                    (
-                                        *terminal,
-                                        component.composition_templates.by_terminal[terminal].clone(),
-                                    )
-                                })
-                                .collect(),
-                            by_terminal_nwa: selected_terminals
-                                .iter()
-                                .map(|terminal| {
-                                    (
-                                        *terminal,
-                                        component.composition_templates.by_terminal_nwa[terminal]
-                                            .clone(),
-                                    )
-                                })
-                                .collect(),
-                        }
-                    } else {
-                        Templates::from_characterizations_profiled(&characterizations).0
-                    };
-                    if cached_templates
-                        && std::env::var_os("GLRMASK_VALIDATE_COMPOSE_CACHED_TEMPLATES")
-                            .is_some()
-                    {
-                        let reference = Templates::from_characterizations_profiled(&characterizations).0;
-                        assert_eq!(templates.by_terminal, reference.by_terminal);
-                        assert_eq!(
-                            templates.by_terminal_nwa.keys().collect::<Vec<_>>(),
-                            reference.by_terminal_nwa.keys().collect::<Vec<_>>(),
-                        );
-                        for (terminal, candidate) in &templates.by_terminal_nwa {
-                            let expected = &reference.by_terminal_nwa[terminal];
-                            assert_eq!(candidate.states(), expected.states());
-                            assert_eq!(candidate.start_states(), expected.start_states());
-                        }
-                    }
-                    Some(LocalTemplateResult {
-                        terminal_offset,
-                        state_relation_index: component_index,
-                        nonterminal_offset: nonterminal_offsets[component_index],
-                        characterizations,
-                        templates,
-                        cached,
-                        wall_ms: local_started_at.elapsed().as_secs_f64() * 1000.0,
                     })
-                })
-                .collect::<Vec<_>>()
-        },
+                    .collect::<BTreeMap<_, _>>()
+            } else {
+                let augmented_start = component.table.rules.first()?.lhs;
+                let local_analyzed = AnalyzedGrammar::from_composed_rules(
+                    component.table.rules.clone(),
+                    component.table.num_terminals,
+                    component.terminal_display_names.clone(),
+                    component.table.nonterminal_display_names.clone(),
+                    augmented_start,
+                );
+                characterize_selected_terminals_profiled(
+                    &component.table,
+                    &local_analyzed,
+                    &selected,
+                )
+                .0
+            };
+            if cached_characterizations
+                && std::env::var_os(
+                    "GLRMASK_VALIDATE_COMPOSE_CACHED_CHARACTERIZATIONS",
+                )
+                .is_some()
+            {
+                let augmented_start = component.table.rules.first()?.lhs;
+                let local_analyzed = AnalyzedGrammar::from_composed_rules(
+                    component.table.rules.clone(),
+                    component.table.num_terminals,
+                    component.terminal_display_names.clone(),
+                    component.table.nonterminal_display_names.clone(),
+                    augmented_start,
+                );
+                let reference = characterize_selected_terminals_profiled(
+                    &component.table,
+                    &local_analyzed,
+                    &selected,
+                )
+                .0;
+                assert_eq!(characterizations, reference);
+            }
+            let templates = if cached_templates {
+                Templates {
+                    by_terminal: selected_terminals
+                        .iter()
+                        .map(|terminal| {
+                            (
+                                *terminal,
+                                component.composition_templates.by_terminal[terminal].clone(),
+                            )
+                        })
+                        .collect(),
+                    by_terminal_nwa: selected_terminals
+                        .iter()
+                        .map(|terminal| {
+                            (
+                                *terminal,
+                                component.composition_templates.by_terminal_nwa[terminal]
+                                    .clone(),
+                            )
+                        })
+                        .collect(),
+                }
+            } else {
+                Templates::from_characterizations_profiled(&characterizations).0
+            };
+            if cached_templates
+                && std::env::var_os("GLRMASK_VALIDATE_COMPOSE_CACHED_TEMPLATES")
+                    .is_some()
+            {
+                let reference = Templates::from_characterizations_profiled(&characterizations).0;
+                assert_eq!(templates.by_terminal, reference.by_terminal);
+                assert_eq!(
+                    templates.by_terminal_nwa.keys().collect::<Vec<_>>(),
+                    reference.by_terminal_nwa.keys().collect::<Vec<_>>(),
+                );
+                for (terminal, candidate) in &templates.by_terminal_nwa {
+                    let expected = &reference.by_terminal_nwa[terminal];
+                    assert_eq!(candidate.states(), expected.states());
+                    assert_eq!(candidate.start_states(), expected.start_states());
+                }
+            }
+            Some(LocalTemplateResult {
+                terminal_offset,
+                state_relation_index: component_index,
+                nonterminal_offset: nonterminal_offsets[component_index],
+                characterizations,
+                templates,
+                cached,
+                wall_ms: local_started_at.elapsed().as_secs_f64() * 1000.0,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    // Table composition preserves each component's parser rows under the exact
+    // state/nonterminal rebasing relation. Only terminals whose columns were
+    // rewritten by control elimination, or whose relation cannot be represented
+    // by a singleton rebasing, require fresh composed-table characterization.
+    let characterization_started_at = Instant::now();
+    let mut composed_characterizations = BTreeMap::<u32, TerminalCharacterization>::new();
+    let mut fallback_selected = characterization_context_fallbacks(
+        composed_table,
+        components,
+        &nonterminal_offsets,
+        active,
     );
+    for &terminal in control_changed_terminals {
+        if active.get(terminal as usize).copied().unwrap_or(false) {
+            fallback_selected[terminal as usize] = true;
+        }
+    }
+    for local in &local_results {
+        let relation = &composed_table.state_relations[local.state_relation_index];
+        for (&local_terminal, local_characterization) in &local.characterizations {
+            let global_terminal = local.terminal_offset + local_terminal;
+            match transport_terminal_characterization(
+                local_characterization,
+                relation,
+                local.nonterminal_offset,
+            ) {
+                Some(transported) => {
+                    composed_characterizations.insert(global_terminal, transported);
+                }
+                None => fallback_selected[global_terminal as usize] = true,
+            }
+        }
+    }
+    for (terminal, &is_active) in active.iter().enumerate() {
+        if is_active && !composed_characterizations.contains_key(&(terminal as u32)) {
+            fallback_selected[terminal] = true;
+        }
+    }
+    let (fresh_characterizations, fresh_profile) =
+        characterize_selected_terminals_profiled(
+            &composed_table.table,
+            analyzed,
+            &fallback_selected,
+        );
+    composed_characterizations.extend(fresh_characterizations);
+    let composed_characterize_ms = characterization_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    if std::env::var_os("GLRMASK_VALIDATE_COMPOSE_CHARACTERIZATION_TRANSPORT").is_some() {
+        let reference = characterize_selected_terminals_profiled(
+            &composed_table.table,
+            analyzed,
+            active,
+        )
+        .0;
+        if composed_characterizations != reference {
+            for (&terminal, expected) in &reference {
+                let actual = composed_characterizations.get(&terminal);
+                if actual != Some(expected) {
+                    eprintln!(
+                        "[glrmask/validate][compose_characterization_transport_mismatch] terminal={} fallback={} actual={:?} expected={:?}",
+                        terminal,
+                        fallback_selected.get(terminal as usize).copied().unwrap_or(false),
+                        actual,
+                        expected,
+                    );
+                    for (state, row) in composed_table.table.action.iter().enumerate() {
+                        if row.contains_key(&terminal) {
+                            let predecessors = composed_table.table.goto.iter().enumerate().flat_map(|(revealed, goto_row)| {
+                                goto_row.iter().filter_map(move |(&nonterminal, &(target, replace))| {
+                                    (target == state as u32).then_some((revealed as u32, nonterminal, replace))
+                                })
+                            }).collect::<Vec<_>>();
+                            eprintln!(
+                                "[glrmask/validate][compose_characterization_action_state] terminal={} state={} action={:?} predecessors={:?}",
+                                terminal, state, row.get(&terminal), predecessors,
+                            );
+                        }
+                    }
+                    for (component_index, component) in components.iter().enumerate() {
+                        let offset = composed_table.terminal_offsets[component_index];
+                        if terminal < offset || terminal >= offset + component.table.num_terminals {
+                            continue;
+                        }
+                        let local_terminal = terminal - offset;
+                        eprintln!(
+                            "[glrmask/validate][compose_characterization_component] component={} local_terminal={} relation={:?}",
+                            component_index, local_terminal, composed_table.state_relations[component_index],
+                        );
+                        for (state, row) in component.table.action.iter().enumerate() {
+                            if row.contains_key(&local_terminal) {
+                                let predecessors = component.table.goto.iter().enumerate().flat_map(|(revealed, goto_row)| {
+                                    goto_row.iter().filter_map(move |(&nonterminal, &(target, replace))| {
+                                        (target == state as u32).then_some((revealed as u32, nonterminal, replace))
+                                    })
+                                }).collect::<Vec<_>>();
+                                eprintln!(
+                                    "[glrmask/validate][compose_characterization_local_action_state] component={} terminal={} state={} action={:?} predecessors={:?}",
+                                    component_index, local_terminal, state, row.get(&local_terminal), predecessors,
+                                );
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        assert_eq!(composed_characterizations, reference);
+        eprintln!(
+            "[glrmask/validate][compose_characterization_transport] transported={} fresh={} exact=true",
+            composed_characterizations.len().saturating_sub(fresh_profile.terminals),
+            fresh_profile.terminals,
+        );
+    }
 
     let mut templates = Templates::default();
     let mut fallback_characterizations = BTreeMap::<u32, TerminalCharacterization>::new();
@@ -5391,7 +5658,7 @@ fn build_transported_composition_templates(
             transported_count,
             fallback_count,
             cached_components,
-            composed_profile.total_ms,
+            composed_characterize_ms,
         );
     }
     (templates, wall_ms)
