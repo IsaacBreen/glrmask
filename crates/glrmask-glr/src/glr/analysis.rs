@@ -181,6 +181,32 @@ impl AnalyzedGrammar {
             &first,
             &nullable,
         );
+        if std::env::var_os("GLRMASK_VALIDATE_GRAMMAR_ANALYSIS_WORKLIST").is_some() {
+            let reference_nullable = compute_nullable_reference(&rules, num_nonterminals);
+            let reference_first = compute_first_reference(
+                &rules,
+                num_nonterminals,
+                num_terminals,
+                &reference_nullable,
+            );
+            let reference_follow = compute_follow_reference(
+                &rules,
+                num_nonterminals,
+                num_terminals,
+                augmented_start,
+                &reference_first,
+                &reference_nullable,
+            );
+            assert_eq!(nullable, reference_nullable);
+            assert_eq!(first, reference_first);
+            assert_eq!(follow, reference_follow);
+            eprintln!(
+                "[glrmask/validate][grammar_analysis_worklist] rules={} nonterminals={} terminals={} exact=true",
+                rules.len(),
+                num_nonterminals,
+                num_terminals,
+            );
+        }
         let mut rules_by_lhs = vec![Vec::new(); num_nonterminals as usize];
         for (index, rule) in rules.iter().enumerate() {
             if let Some(bucket) = rules_by_lhs.get_mut(rule.lhs as usize) {
@@ -2914,6 +2940,213 @@ fn resync_next_nonterminal(rules: &[Rule], next_nt: &std::cell::Cell<u32>) {
 }
 
 fn compute_nullable(rules: &[Rule], num_nt: u32) -> BTreeSet<NonterminalID> {
+    let num_nt = num_nt as usize;
+    let mut remaining = vec![usize::MAX; rules.len()];
+    let mut dependent_rules = vec![Vec::<usize>::new(); num_nt];
+    let mut ready_rules = VecDeque::<usize>::new();
+
+    for (rule_index, rule) in rules.iter().enumerate() {
+        if rule.lhs as usize >= num_nt {
+            continue;
+        }
+        let mut count = 0usize;
+        let mut possible = true;
+        for symbol in &rule.rhs {
+            match symbol {
+                Symbol::Terminal(_) => {
+                    possible = false;
+                    break;
+                }
+                Symbol::Nonterminal(nonterminal) => {
+                    let nonterminal = *nonterminal as usize;
+                    if nonterminal >= num_nt {
+                        possible = false;
+                        break;
+                    }
+                    count += 1;
+                    dependent_rules[nonterminal].push(rule_index);
+                }
+            }
+        }
+        if possible {
+            remaining[rule_index] = count;
+            if count == 0 {
+                ready_rules.push_back(rule_index);
+            }
+        }
+    }
+
+    let mut nullable_mask = vec![false; num_nt];
+    while let Some(rule_index) = ready_rules.pop_front() {
+        let lhs = rules[rule_index].lhs as usize;
+        if nullable_mask[lhs] {
+            continue;
+        }
+        nullable_mask[lhs] = true;
+        for &dependent in &dependent_rules[lhs] {
+            let slot = &mut remaining[dependent];
+            if *slot == usize::MAX || *slot == 0 {
+                continue;
+            }
+            *slot -= 1;
+            if *slot == 0 {
+                ready_rules.push_back(dependent);
+            }
+        }
+    }
+
+    nullable_mask
+        .into_iter()
+        .enumerate()
+        .filter_map(|(nonterminal, nullable)| nullable.then_some(nonterminal as NonterminalID))
+        .collect()
+}
+
+fn propagate_bitset_dependencies(
+    sets: &mut [BitSet],
+    dependents: &[Vec<usize>],
+    initially_changed: impl IntoIterator<Item = usize>,
+) {
+    let mut queue = VecDeque::<usize>::new();
+    let mut queued = vec![false; sets.len()];
+    for source in initially_changed {
+        if source < sets.len() && !sets[source].is_zero() && !queued[source] {
+            queued[source] = true;
+            queue.push_back(source);
+        }
+    }
+    while let Some(source) = queue.pop_front() {
+        queued[source] = false;
+        for &target in &dependents[source] {
+            let changed = if source < target {
+                let (left, right) = sets.split_at_mut(target);
+                right[0].union_with_changed(&left[source])
+            } else if source > target {
+                let (left, right) = sets.split_at_mut(source);
+                left[target].union_with_changed(&right[0])
+            } else {
+                false
+            };
+            if changed && !queued[target] {
+                queued[target] = true;
+                queue.push_back(target);
+            }
+        }
+    }
+}
+
+fn compute_first(
+    rules: &[Rule],
+    num_nt: u32,
+    num_terminals: u32,
+    nullable: &BTreeSet<NonterminalID>,
+) -> Vec<BitSet> {
+    let num_nt = num_nt as usize;
+    let set_len = num_terminals as usize + 1;
+    let mut first = vec![BitSet::new(set_len); num_nt];
+    let mut dependents = vec![Vec::<usize>::new(); num_nt];
+    let mut initially_changed = Vec::<usize>::new();
+
+    for rule in rules {
+        let lhs = rule.lhs as usize;
+        if lhs >= num_nt {
+            continue;
+        }
+        for symbol in &rule.rhs {
+            match symbol {
+                Symbol::Terminal(terminal) => {
+                    let bit = terminal_bit(*terminal, num_terminals);
+                    if !first[lhs].contains(bit) {
+                        first[lhs].set(bit);
+                        initially_changed.push(lhs);
+                    }
+                    break;
+                }
+                Symbol::Nonterminal(nonterminal) => {
+                    let source = *nonterminal as usize;
+                    if source >= num_nt {
+                        break;
+                    }
+                    dependents[source].push(lhs);
+                    if !nullable.contains(nonterminal) {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    for targets in &mut dependents {
+        targets.sort_unstable();
+        targets.dedup();
+    }
+    propagate_bitset_dependencies(&mut first, &dependents, initially_changed);
+    first
+}
+
+fn compute_follow(
+    rules: &[Rule],
+    num_nt: u32,
+    num_terminals: u32,
+    start: NonterminalID,
+    first: &[BitSet],
+    nullable: &BTreeSet<NonterminalID>,
+) -> Vec<BitSet> {
+    let num_nt = num_nt as usize;
+    let set_len = num_terminals as usize + 1;
+    let mut follow = vec![BitSet::new(set_len); num_nt];
+    let mut dependents = vec![Vec::<usize>::new(); num_nt];
+    let mut initially_changed = Vec::<usize>::new();
+    if let Some(start_follow) = follow.get_mut(start as usize) {
+        start_follow.set(terminal_bit(EOF, num_terminals));
+        initially_changed.push(start as usize);
+    }
+
+    for rule in rules {
+        let lhs = rule.lhs as usize;
+        if lhs >= num_nt {
+            continue;
+        }
+        let mut suffix_first = BitSet::new(set_len);
+        let mut suffix_nullable = true;
+        for symbol in rule.rhs.iter().rev() {
+            match symbol {
+                Symbol::Terminal(terminal) => {
+                    suffix_first.clear_all();
+                    suffix_first.set(terminal_bit(*terminal, num_terminals));
+                    suffix_nullable = false;
+                }
+                Symbol::Nonterminal(nonterminal) => {
+                    let target = *nonterminal as usize;
+                    if target >= num_nt {
+                        suffix_first.clear_all();
+                        suffix_nullable = false;
+                        continue;
+                    }
+                    if follow[target].union_with_changed(&suffix_first) {
+                        initially_changed.push(target);
+                    }
+                    if suffix_nullable {
+                        dependents[lhs].push(target);
+                    }
+                    if nullable.contains(nonterminal) {
+                        suffix_first.union_with(&first[target]);
+                    } else {
+                        suffix_first = first[target].clone();
+                        suffix_nullable = false;
+                    }
+                }
+            }
+        }
+    }
+    for targets in &mut dependents {
+        targets.sort_unstable();
+        targets.dedup();
+    }
+    propagate_bitset_dependencies(&mut follow, &dependents, initially_changed);
+    follow
+}
+
+fn compute_nullable_reference(rules: &[Rule], num_nt: u32) -> BTreeSet<NonterminalID> {
     let mut nullable = BTreeSet::new();
     let mut changed = true;
     while changed {
@@ -2935,7 +3168,7 @@ fn compute_nullable(rules: &[Rule], num_nt: u32) -> BTreeSet<NonterminalID> {
     nullable
 }
 
-fn compute_first(
+fn compute_first_reference(
     rules: &[Rule],
     num_nt: u32,
     num_terminals: u32,
@@ -2975,7 +3208,7 @@ fn compute_first(
     first
 }
 
-fn compute_follow(
+fn compute_follow_reference(
     rules: &[Rule],
     num_nt: u32,
     num_terminals: u32,
@@ -2988,7 +3221,6 @@ fn compute_follow(
     if let Some(start_follow) = follow.get_mut(start as usize) {
         start_follow.set(terminal_bit(EOF, num_terminals));
     }
-
     let mut changed = true;
     while changed {
         changed = false;
@@ -2998,7 +3230,6 @@ fn compute_follow(
                 let Symbol::Nonterminal(nonterminal) = symbol else {
                     continue;
                 };
-
                 let suffix = &rule.rhs[index + 1..];
                 let mut additions = BitSet::new(set_len);
                 let mut suffix_nullable = true;
@@ -3023,17 +3254,12 @@ fn compute_follow(
                         .get_or_insert_with(|| follow[rule.lhs as usize].clone());
                     additions.union_with(lhs_follow);
                 }
-
-                let target = &mut follow[*nonterminal as usize];
-                let delta = additions.difference(target);
-                if !delta.is_empty() {
-                    target.union_with(&delta);
+                if follow[*nonterminal as usize].union_with_changed(&additions) {
                     changed = true;
                 }
             }
         }
     }
-
     follow
 }
 
@@ -3136,6 +3362,75 @@ mod tests {
             }
         }
         languages[start as usize].clone()
+    }
+
+    #[test]
+    fn worklist_analysis_matches_reference_on_nullable_and_recursive_dependencies() {
+        let rules = vec![
+            Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Nonterminal(1), Symbol::Nonterminal(2)],
+            },
+            Rule {
+                lhs: 0,
+                rhs: vec![Symbol::Nonterminal(4), Symbol::Terminal(2)],
+            },
+            Rule { lhs: 1, rhs: vec![] },
+            Rule {
+                lhs: 1,
+                rhs: vec![Symbol::Terminal(0)],
+            },
+            Rule {
+                lhs: 2,
+                rhs: vec![Symbol::Nonterminal(3)],
+            },
+            Rule {
+                lhs: 3,
+                rhs: vec![Symbol::Nonterminal(2)],
+            },
+            Rule {
+                lhs: 3,
+                rhs: vec![Symbol::Terminal(1)],
+            },
+            Rule {
+                lhs: 4,
+                rhs: vec![Symbol::Nonterminal(1), Symbol::Nonterminal(1)],
+            },
+        ];
+        let num_nonterminals = 5;
+        let num_terminals = 3;
+        let start = 0;
+
+        let nullable = compute_nullable(&rules, num_nonterminals);
+        let reference_nullable = compute_nullable_reference(&rules, num_nonterminals);
+        assert_eq!(nullable, reference_nullable);
+        assert_eq!(nullable, BTreeSet::from([1, 4]));
+
+        let first = compute_first(&rules, num_nonterminals, num_terminals, &nullable);
+        let reference_first =
+            compute_first_reference(&rules, num_nonterminals, num_terminals, &nullable);
+        assert_eq!(first, reference_first);
+        assert_eq!(first[0].iter_ones().collect::<Vec<_>>(), vec![0, 1, 2]);
+
+        let follow = compute_follow(
+            &rules,
+            num_nonterminals,
+            num_terminals,
+            start,
+            &first,
+            &nullable,
+        );
+        let reference_follow = compute_follow_reference(
+            &rules,
+            num_nonterminals,
+            num_terminals,
+            start,
+            &first,
+            &nullable,
+        );
+        assert_eq!(follow, reference_follow);
+        assert!(follow[2].contains(num_terminals as usize));
+        assert!(follow[3].contains(num_terminals as usize));
     }
 
     #[test]
