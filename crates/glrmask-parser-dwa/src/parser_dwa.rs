@@ -25,7 +25,9 @@ use crate::compiler::stages::resolve_negatives::{
     resolve_negative_codes_in_nwa,
 };
 use crate::compiler::stages::templates::Templates;
-use crate::templates::compile_bundle::{WeightedPrepushBundle, WeightedPrepushTarget};
+use crate::templates::compile_bundle::{
+    LazyWeightedPrepushBundleSet, WeightedPrepushBundle, WeightedPrepushTarget,
+};
 use crate::ds::bitset::BitSet;
 use crate::ds::weight::{ScopedWeightOpCache, Weight};
 
@@ -5874,6 +5876,791 @@ fn direct_compact_config_key(config: DirectCompactConfig) -> u128 {
         | ((bundle_or_tag as u128) << 96)
 }
 
+#[derive(Clone)]
+struct DirectCompactRawEdge {
+    label: Option<i32>,
+    target: DirectCompactConfig,
+    weight: Weight,
+}
+
+struct DirectCompactRawBody {
+    final_weight: Option<Weight>,
+    edges: Vec<DirectCompactRawEdge>,
+}
+
+#[derive(Clone)]
+struct DirectFlatConfigEdge {
+    label: Option<i32>,
+    target: u32,
+    weight: Weight,
+}
+
+#[derive(Clone)]
+struct DirectFlatConfigNode {
+    final_weight: Option<Weight>,
+    edge_start: u32,
+    edge_len: u32,
+}
+
+#[derive(Clone)]
+struct DirectProjectedConfigSummary {
+    final_weight: Option<Weight>,
+    exits: SmallVec<[(DirectCompactConfig, Weight); 4]>,
+}
+
+struct DirectProjectedConfigBuilder<'a> {
+    summaries: &'a StateSummaries,
+    productive: &'a [bool],
+    templates: &'a Templates,
+    lazy_bundles: LazyWeightedPrepushBundleSet,
+    pending: PendingStackInterner,
+    forced_starts: FxHashSet<DirectCompactConfig>,
+    summary_memo: FxHashMap<DirectCompactConfig, Option<Arc<DirectProjectedConfigSummary>>>,
+    projected_by_config: FxHashMap<DirectCompactConfig, u32>,
+    projected_configs: Vec<DirectCompactConfig>,
+    queue: VecDeque<u32>,
+    weight_ops: ScopedWeightOpCache,
+    nwa: NWA,
+    final_sink: u32,
+    raw_configs_summarized: usize,
+    summary_hits: usize,
+    raw_edges_examined: usize,
+    detail_profile: bool,
+    raw_body_calls: usize,
+    raw_body_ms: f64,
+    continuation_body_calls: usize,
+    continuation_body_ms: f64,
+    core_body_calls: usize,
+    core_body_ms: f64,
+}
+
+impl<'a> DirectProjectedConfigBuilder<'a> {
+    fn new(
+        summaries: &'a StateSummaries,
+        productive: &'a [bool],
+        templates: &'a Templates,
+        lazy_bundles: LazyWeightedPrepushBundleSet,
+    ) -> Self {
+        let mut nwa = NWA::new(0, 0);
+        let final_sink = nwa.add_state();
+        nwa.set_final_weight(final_sink, Weight::all());
+        Self {
+            summaries,
+            productive,
+            templates,
+            lazy_bundles,
+            pending: PendingStackInterner::new(),
+            forced_starts: FxHashSet::default(),
+            summary_memo: FxHashMap::default(),
+            projected_by_config: FxHashMap::default(),
+            projected_configs: Vec::new(),
+            queue: VecDeque::new(),
+            weight_ops: ScopedWeightOpCache::default(),
+            nwa,
+            final_sink,
+            raw_configs_summarized: 0,
+            summary_hits: 0,
+            raw_edges_examined: 0,
+            detail_profile: std::env::var_os(
+                "GLRMASK_PROFILE_DIRECT_PREPUSH_PROJECTED_CONFIG_DETAIL",
+            )
+            .is_some(),
+            raw_body_calls: 0,
+            raw_body_ms: 0.0,
+            continuation_body_calls: 0,
+            continuation_body_ms: 0.0,
+            core_body_calls: 0,
+            core_body_ms: 0.0,
+        }
+    }
+
+    #[inline]
+    fn retained(&self, config: DirectCompactConfig) -> bool {
+        self.forced_starts.contains(&config)
+            || matches!(
+                config,
+                DirectCompactConfig {
+                    node: DirectPrepushNode::BundleCore { .. },
+                    pending: 0,
+                }
+            )
+    }
+
+    fn ensure_retained(&mut self, config: DirectCompactConfig) -> u32 {
+        debug_assert!(self.retained(config));
+        if let Some(&existing) = self.projected_by_config.get(&config) {
+            return existing;
+        }
+        let state_id = self.nwa.add_state();
+        self.projected_by_config.insert(config, state_id);
+        self.projected_configs.push(config);
+        self.queue.push_back(state_id);
+        state_id
+    }
+
+    fn raw_body(&mut self, config: DirectCompactConfig) -> Option<DirectCompactRawBody> {
+        let mut body = DirectCompactRawBody {
+            final_weight: None,
+            edges: Vec::new(),
+        };
+        match config.node {
+            DirectPrepushNode::Continuation(state_id) => {
+                let state = self.summaries.states.get(state_id as usize)?;
+                body.final_weight = state
+                    .final_weight
+                    .as_ref()
+                    .filter(|weight| !weight.is_empty())
+                    .cloned();
+                for (target, weight) in &state.epsilon_branches {
+                    if weight.is_empty()
+                        || !self.productive.get(*target as usize).copied().unwrap_or(false)
+                    {
+                        continue;
+                    }
+                    body.edges.push(DirectCompactRawEdge {
+                        label: None,
+                        target: DirectCompactConfig {
+                            node: DirectPrepushNode::Continuation(*target),
+                            pending: config.pending,
+                        },
+                        weight: weight.clone(),
+                    });
+                }
+                for branch in &state.branches {
+                    if !self
+                        .productive
+                        .get(branch.target as usize)
+                        .copied()
+                        .unwrap_or(false)
+                        || !self
+                            .summaries
+                            .bundle_accepts
+                            .get(branch.bundle_id)
+                            .copied()
+                            .unwrap_or(false)
+                        || self.templates.lazy_weighted_prepush_bundle_is_empty(
+                            &self.lazy_bundles,
+                            branch.bundle_id,
+                        )
+                    {
+                        continue;
+                    }
+                    body.edges.push(DirectCompactRawEdge {
+                        label: None,
+                        target: DirectCompactConfig {
+                            node: DirectPrepushNode::BundleCore {
+                                bundle_id: branch.bundle_id,
+                                target: branch.target,
+                                core_state: 0,
+                            },
+                            pending: config.pending,
+                        },
+                        weight: branch.entry_weight.clone(),
+                    });
+                }
+            }
+            DirectPrepushNode::BundleCore {
+                bundle_id,
+                target,
+                core_state,
+            } => {
+                let state = self.templates.lazy_weighted_prepush_state(
+                    &mut self.lazy_bundles,
+                    bundle_id,
+                    core_state,
+                )?;
+                if !state.final_weight.is_empty() {
+                    body.edges.push(DirectCompactRawEdge {
+                        label: None,
+                        target: DirectCompactConfig {
+                            node: DirectPrepushNode::Continuation(target),
+                            pending: config.pending,
+                        },
+                        weight: state.final_weight.clone(),
+                    });
+                }
+                for output in &state.outputs {
+                    if output.weight.is_empty() {
+                        continue;
+                    }
+                    let next_pending = self.pending.push_many(config.pending, &output.pushes);
+                    body.edges.push(DirectCompactRawEdge {
+                        label: None,
+                        target: DirectCompactConfig {
+                            node: DirectPrepushNode::Continuation(target),
+                            pending: next_pending,
+                        },
+                        weight: output.weight.clone(),
+                    });
+                }
+
+                let mut process_transition =
+                    |label: i32, transition: &WeightedPrepushTarget, pending: &mut PendingStackInterner| {
+                        debug_assert!(!is_negative_label(label));
+                        match transition {
+                            WeightedPrepushTarget::Core {
+                                target: core_target,
+                                weight,
+                            } => {
+                                if weight.is_empty() {
+                                    return;
+                                }
+                                if config.pending == 0 {
+                                    body.edges.push(DirectCompactRawEdge {
+                                        label: Some(label),
+                                        target: DirectCompactConfig {
+                                            node: DirectPrepushNode::BundleCore {
+                                                bundle_id,
+                                                target,
+                                                core_state: *core_target,
+                                            },
+                                            pending: 0,
+                                        },
+                                        weight: weight.clone(),
+                                    });
+                                } else if let Some(next_pending) =
+                                    pending.pop_matching(config.pending, label)
+                                {
+                                    body.edges.push(DirectCompactRawEdge {
+                                        label: None,
+                                        target: DirectCompactConfig {
+                                            node: DirectPrepushNode::BundleCore {
+                                                bundle_id,
+                                                target,
+                                                core_state: *core_target,
+                                            },
+                                            pending: next_pending,
+                                        },
+                                        weight: weight.clone(),
+                                    });
+                                }
+                            }
+                            WeightedPrepushTarget::Outputs(outputs) => {
+                                for output in outputs {
+                                    if output.weight.is_empty() {
+                                        continue;
+                                    }
+                                    if config.pending == 0 {
+                                        let next_pending = pending.push_many(0, &output.pushes);
+                                        body.edges.push(DirectCompactRawEdge {
+                                            label: Some(label),
+                                            target: DirectCompactConfig {
+                                                node: DirectPrepushNode::Continuation(target),
+                                                pending: next_pending,
+                                            },
+                                            weight: output.weight.clone(),
+                                        });
+                                    } else if let Some(base_pending) =
+                                        pending.pop_matching(config.pending, label)
+                                    {
+                                        let next_pending =
+                                            pending.push_many(base_pending, &output.pushes);
+                                        body.edges.push(DirectCompactRawEdge {
+                                            label: None,
+                                            target: DirectCompactConfig {
+                                                node: DirectPrepushNode::Continuation(target),
+                                                pending: next_pending,
+                                            },
+                                            weight: output.weight.clone(),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    };
+
+                if config.pending == 0 {
+                    for (&label, transition) in &state.transitions {
+                        process_transition(label, transition, &mut self.pending);
+                    }
+                } else {
+                    let top_label = self
+                        .pending
+                        .top(config.pending)
+                        .expect("nonempty pending stack has a top")
+                        as i32;
+                    if let Some(transition) = state.transitions.get(&top_label) {
+                        process_transition(top_label, transition, &mut self.pending);
+                    }
+                    if let Some(transition) = state.transitions.get(&DEFAULT_LABEL) {
+                        process_transition(DEFAULT_LABEL, transition, &mut self.pending);
+                    }
+                }
+            }
+        }
+        self.raw_edges_examined += body.edges.len();
+        Some(body)
+    }
+
+    fn profiled_raw_body(
+        &mut self,
+        config: DirectCompactConfig,
+    ) -> Option<DirectCompactRawBody> {
+        let started = self.detail_profile.then(Instant::now);
+        let result = self.raw_body(config);
+        if let Some(started) = started {
+            let ms = elapsed_ms(started);
+            self.raw_body_calls += 1;
+            self.raw_body_ms += ms;
+            match config.node {
+                DirectPrepushNode::Continuation(_) => {
+                    self.continuation_body_calls += 1;
+                    self.continuation_body_ms += ms;
+                }
+                DirectPrepushNode::BundleCore { .. } => {
+                    self.core_body_calls += 1;
+                    self.core_body_ms += ms;
+                }
+            }
+        }
+        result
+    }
+
+    fn merge_summary_exit(
+        &mut self,
+        exits: &mut SmallVec<[(DirectCompactConfig, Weight); 4]>,
+        target: DirectCompactConfig,
+        weight: Weight,
+    ) {
+        if weight.is_empty() {
+            return;
+        }
+        if let Some((_, existing)) = exits
+            .iter_mut()
+            .find(|(existing_target, _)| *existing_target == target)
+        {
+            *existing = self.weight_ops.union(existing, &weight);
+        } else {
+            exits.push((target, weight));
+        }
+    }
+
+    fn compute_summary(
+        &mut self,
+        config: DirectCompactConfig,
+    ) -> Option<Arc<DirectProjectedConfigSummary>> {
+        let body = self.profiled_raw_body(config)?;
+        let mut final_weight = body.final_weight;
+        let mut exits = SmallVec::<[(DirectCompactConfig, Weight); 4]>::new();
+        for edge in body.edges {
+            if edge.label.is_some() {
+                return None;
+            }
+            if self.retained(edge.target) {
+                self.merge_summary_exit(&mut exits, edge.target, edge.weight);
+                continue;
+            }
+            let child = self.summary_for(edge.target)?;
+            if let Some(child_final) = child.final_weight.as_ref() {
+                let contribution = self.weight_ops.intersection(&edge.weight, child_final);
+                if !contribution.is_empty() {
+                    final_weight = Some(match final_weight {
+                        Some(existing) => self.weight_ops.union(&existing, &contribution),
+                        None => contribution,
+                    });
+                }
+            }
+            for (exit, suffix_weight) in &child.exits {
+                let contribution = self.weight_ops.intersection(&edge.weight, suffix_weight);
+                self.merge_summary_exit(&mut exits, *exit, contribution);
+            }
+        }
+        exits.sort_unstable_by_key(|(config, _)| direct_compact_config_key(*config));
+        Some(Arc::new(DirectProjectedConfigSummary {
+            final_weight,
+            exits,
+        }))
+    }
+
+    fn summary_for(
+        &mut self,
+        config: DirectCompactConfig,
+    ) -> Option<Arc<DirectProjectedConfigSummary>> {
+        debug_assert!(!self.retained(config));
+        if let Some(existing) = self.summary_memo.get(&config) {
+            let existing = existing.as_ref()?;
+            self.summary_hits += 1;
+            return Some(Arc::clone(existing));
+        }
+        self.summary_memo.insert(config, None);
+        self.raw_configs_summarized += 1;
+        let result = self.compute_summary(config);
+        if let Some(summary) = result.as_ref() {
+            let slot = self
+                .summary_memo
+                .get_mut(&config)
+                .expect("direct projected summary placeholder disappeared");
+            *slot = Some(Arc::clone(summary));
+        } else {
+            self.summary_memo.remove(&config);
+        }
+        result
+    }
+
+    fn build_flat_projected(
+        mut self,
+        starts: &[DirectCompactConfig],
+    ) -> Option<(NWA, usize, usize, usize, usize)> {
+        for &config in starts {
+            self.forced_starts.insert(config);
+        }
+
+        let mut config_to_id = FxHashMap::<DirectCompactConfig, u32>::default();
+        let mut configs = Vec::<DirectCompactConfig>::new();
+        let mut nodes = Vec::<DirectFlatConfigNode>::new();
+        let mut edges = Vec::<DirectFlatConfigEdge>::new();
+        let mut queue = VecDeque::<u32>::new();
+        let ensure = |config: DirectCompactConfig,
+                      config_to_id: &mut FxHashMap<DirectCompactConfig, u32>,
+                      configs: &mut Vec<DirectCompactConfig>,
+                      nodes: &mut Vec<DirectFlatConfigNode>,
+                      queue: &mut VecDeque<u32>| {
+            if let Some(&existing) = config_to_id.get(&config) {
+                return existing;
+            }
+            let id = configs.len() as u32;
+            config_to_id.insert(config, id);
+            configs.push(config);
+            nodes.push(DirectFlatConfigNode {
+                final_weight: None,
+                edge_start: 0,
+                edge_len: 0,
+            });
+            queue.push_back(id);
+            id
+        };
+
+        let start_ids = starts
+            .iter()
+            .copied()
+            .map(|config| {
+                ensure(
+                    config,
+                    &mut config_to_id,
+                    &mut configs,
+                    &mut nodes,
+                    &mut queue,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        while let Some(state_id) = queue.pop_front() {
+            let config = configs[state_id as usize];
+            let body = self.profiled_raw_body(config)?;
+            let edge_start = edges.len() as u32;
+            for edge in body.edges {
+                let target = ensure(
+                    edge.target,
+                    &mut config_to_id,
+                    &mut configs,
+                    &mut nodes,
+                    &mut queue,
+                );
+                edges.push(DirectFlatConfigEdge {
+                    label: edge.label,
+                    target,
+                    weight: edge.weight,
+                });
+            }
+            nodes[state_id as usize] = DirectFlatConfigNode {
+                final_weight: body.final_weight,
+                edge_start,
+                edge_len: edges.len() as u32 - edge_start,
+            };
+        }
+
+        let retained = configs
+            .iter()
+            .copied()
+            .map(|config| self.retained(config))
+            .collect::<Vec<_>>();
+        let removed_count = retained.iter().filter(|&&keep| !keep).count();
+
+        let mut removed_outdegree = vec![0usize; configs.len()];
+        let mut removed_predecessors = vec![Vec::<u32>::new(); configs.len()];
+        for (source, node) in nodes.iter().enumerate() {
+            if retained[source] {
+                continue;
+            }
+            for edge in &edges[node.edge_start as usize..(node.edge_start + node.edge_len) as usize] {
+                debug_assert!(edge.label.is_none());
+                let target = edge.target as usize;
+                if edge.weight.is_empty() || retained[target] {
+                    continue;
+                }
+                removed_outdegree[source] += 1;
+                removed_predecessors[target].push(source as u32);
+            }
+        }
+
+        let mut summary_final = vec![None::<Weight>; configs.len()];
+        let mut summary_exits = vec![Vec::<(u32, Weight)>::new(); configs.len()];
+        let mut summary_queue = VecDeque::<u32>::new();
+        for (state_id, &outdegree) in removed_outdegree.iter().enumerate() {
+            if !retained[state_id] && outdegree == 0 {
+                summary_queue.push_back(state_id as u32);
+            }
+        }
+        let mut processed = 0usize;
+        while let Some(state_id) = summary_queue.pop_front() {
+            let node = &nodes[state_id as usize];
+            let mut final_weight = node
+                .final_weight
+                .as_ref()
+                .filter(|weight| !weight.is_empty())
+                .cloned();
+            let mut exits = SmallVec::<[(u32, Weight); 4]>::new();
+            for edge in &edges[node.edge_start as usize..(node.edge_start + node.edge_len) as usize] {
+                debug_assert!(edge.label.is_none());
+                if edge.weight.is_empty() {
+                    continue;
+                }
+                let target = edge.target as usize;
+                if retained[target] {
+                    if let Some((_, existing)) =
+                        exits.iter_mut().find(|(exit, _)| *exit == edge.target)
+                    {
+                        *existing = self.weight_ops.union(existing, &edge.weight);
+                    } else {
+                        exits.push((edge.target, edge.weight.clone()));
+                    }
+                    continue;
+                }
+                if let Some(target_final) = summary_final[target].as_ref() {
+                    let contribution = self.weight_ops.intersection(&edge.weight, target_final);
+                    if !contribution.is_empty() {
+                        final_weight = Some(match final_weight {
+                            Some(existing) => self.weight_ops.union(&existing, &contribution),
+                            None => contribution,
+                        });
+                    }
+                }
+                for (exit, suffix_weight) in &summary_exits[target] {
+                    let contribution = self.weight_ops.intersection(&edge.weight, suffix_weight);
+                    if contribution.is_empty() {
+                        continue;
+                    }
+                    if let Some((_, existing)) =
+                        exits.iter_mut().find(|(existing_exit, _)| *existing_exit == *exit)
+                    {
+                        *existing = self.weight_ops.union(existing, &contribution);
+                    } else {
+                        exits.push((*exit, contribution));
+                    }
+                }
+            }
+            exits.sort_unstable_by_key(|(exit, _)| *exit);
+            summary_final[state_id as usize] = final_weight;
+            summary_exits[state_id as usize] = exits.into_vec();
+            processed += 1;
+            for &predecessor in &removed_predecessors[state_id as usize] {
+                let degree = &mut removed_outdegree[predecessor as usize];
+                *degree -= 1;
+                if *degree == 0 {
+                    summary_queue.push_back(predecessor);
+                }
+            }
+        }
+        if processed != removed_count {
+            return None;
+        }
+
+        let mut nwa = NWA::new(0, 0);
+        let mut new_by_old = vec![u32::MAX; configs.len()];
+        for (old_state, &keep) in retained.iter().enumerate() {
+            if keep {
+                new_by_old[old_state] = nwa.add_state();
+            }
+        }
+        let final_sink = nwa.add_state();
+        nwa.set_final_weight(final_sink, Weight::all());
+
+        for (source, node) in nodes.iter().enumerate() {
+            if !retained[source] {
+                continue;
+            }
+            let new_source = new_by_old[source];
+            let mut source_final = node
+                .final_weight
+                .as_ref()
+                .filter(|weight| !weight.is_empty())
+                .cloned();
+            for edge in &edges[node.edge_start as usize..(node.edge_start + node.edge_len) as usize] {
+                if edge.weight.is_empty() {
+                    continue;
+                }
+                let target = edge.target as usize;
+                if retained[target] {
+                    let new_target = new_by_old[target];
+                    if let Some(label) = edge.label {
+                        nwa.add_transition(new_source, label, new_target, edge.weight.clone());
+                    } else {
+                        nwa.add_epsilon(new_source, new_target, edge.weight.clone());
+                    }
+                    continue;
+                }
+
+                if let Some(target_final) = summary_final[target].as_ref() {
+                    let contribution = self.weight_ops.intersection(&edge.weight, target_final);
+                    if !contribution.is_empty() {
+                        if let Some(label) = edge.label {
+                            nwa.add_transition(new_source, label, final_sink, contribution);
+                        } else {
+                            source_final = Some(match source_final {
+                                Some(existing) => self.weight_ops.union(&existing, &contribution),
+                                None => contribution,
+                            });
+                        }
+                    }
+                }
+                for (exit, suffix_weight) in &summary_exits[target] {
+                    let contribution = self.weight_ops.intersection(&edge.weight, suffix_weight);
+                    if contribution.is_empty() {
+                        continue;
+                    }
+                    let new_target = new_by_old[*exit as usize];
+                    if let Some(label) = edge.label {
+                        nwa.add_transition(new_source, label, new_target, contribution);
+                    } else {
+                        nwa.add_epsilon(new_source, new_target, contribution);
+                    }
+                }
+            }
+            if let Some(final_weight) = source_final {
+                nwa.set_final_weight(new_source, final_weight);
+            }
+        }
+        let projected_starts = start_ids
+            .iter()
+            .map(|&state_id| new_by_old[state_id as usize])
+            .collect::<Vec<_>>();
+        nwa.set_start_states(projected_starts);
+        let (transition_merges, epsilon_merges) =
+            coalesce_parallel_nwa_edges(&mut nwa, &mut self.weight_ops);
+        if self.detail_profile {
+            eprintln!(
+                "[glrmask/profile][parser_direct_prepush_projected_config_flat_detail] raw_configs={} raw_edges={} retained={} removed={} transition_merges={} epsilon_merges={} raw_body_ms={:.3}",
+                configs.len(),
+                edges.len(),
+                retained.iter().filter(|&&keep| keep).count(),
+                removed_count,
+                transition_merges,
+                epsilon_merges,
+                self.raw_body_ms,
+            );
+        }
+        self.templates.emit_lazy_weighted_prepush_profile(&self.lazy_bundles);
+        Some((nwa, configs.len(), edges.len(), removed_count, self.raw_body_calls))
+    }
+
+    fn build(
+        mut self,
+        starts: &[DirectCompactConfig],
+    ) -> Option<(NWA, usize, usize, usize, usize)> {
+        for &config in starts {
+            self.forced_starts.insert(config);
+        }
+        let start_states = starts
+            .iter()
+            .copied()
+            .map(|config| self.ensure_retained(config))
+            .collect::<Vec<_>>();
+        self.nwa.set_start_states(start_states);
+
+        while let Some(state_id) = self.queue.pop_front() {
+            let config = self.projected_configs[(state_id - 1) as usize];
+            let body = self.profiled_raw_body(config)?;
+            let mut final_weight = body.final_weight;
+            let mut edge_map = BTreeMap::<(u8, i32, u32), Weight>::new();
+            for edge in body.edges {
+                let (kind, label) = match edge.label {
+                    Some(label) => (0u8, label),
+                    None => (1u8, 0),
+                };
+                if self.retained(edge.target) {
+                    let target = self.ensure_retained(edge.target);
+                    edge_map
+                        .entry((kind, label, target))
+                        .and_modify(|existing| {
+                            *existing = self.weight_ops.union(existing, &edge.weight)
+                        })
+                        .or_insert(edge.weight);
+                    continue;
+                }
+
+                let summary = self.summary_for(edge.target)?;
+                if let Some(summary_final) = summary.final_weight.as_ref() {
+                    let contribution = self.weight_ops.intersection(&edge.weight, summary_final);
+                    if !contribution.is_empty() {
+                        if kind == 1 {
+                            final_weight = Some(match final_weight {
+                                Some(existing) => self.weight_ops.union(&existing, &contribution),
+                                None => contribution,
+                            });
+                        } else {
+                            edge_map
+                                .entry((0, label, self.final_sink))
+                                .and_modify(|existing| {
+                                    *existing = self.weight_ops.union(existing, &contribution)
+                                })
+                                .or_insert(contribution);
+                        }
+                    }
+                }
+                for (exit_config, suffix_weight) in &summary.exits {
+                    let contribution = self.weight_ops.intersection(&edge.weight, suffix_weight);
+                    if contribution.is_empty() {
+                        continue;
+                    }
+                    let target = self.ensure_retained(*exit_config);
+                    edge_map
+                        .entry((kind, label, target))
+                        .and_modify(|existing| {
+                            *existing = self.weight_ops.union(existing, &contribution)
+                        })
+                        .or_insert(contribution);
+                }
+            }
+            if let Some(final_weight) = final_weight.filter(|weight| !weight.is_empty()) {
+                self.nwa.set_final_weight(state_id, final_weight);
+            }
+            for ((kind, label, target), weight) in edge_map {
+                if weight.is_empty() {
+                    continue;
+                }
+                if kind == 0 {
+                    self.nwa.add_transition(state_id, label, target, weight);
+                } else {
+                    self.nwa.add_epsilon(state_id, target, weight);
+                }
+            }
+        }
+        self.templates.emit_lazy_weighted_prepush_profile(&self.lazy_bundles);
+        if self.detail_profile {
+            eprintln!(
+                "[glrmask/profile][parser_direct_prepush_projected_config_detail] raw_body_calls={} raw_body_ms={:.3} continuation_calls={} continuation_ms={:.3} core_calls={} core_ms={:.3} summarized_configs={} summary_hits={} projected_states={} raw_edges_examined={}",
+                self.raw_body_calls,
+                self.raw_body_ms,
+                self.continuation_body_calls,
+                self.continuation_body_ms,
+                self.core_body_calls,
+                self.core_body_ms,
+                self.raw_configs_summarized,
+                self.summary_hits,
+                self.nwa.states().len(),
+                self.raw_edges_examined,
+            );
+        }
+        Some((
+            self.nwa,
+            self.raw_configs_summarized,
+            self.summary_memo.values().filter(|summary| summary.is_some()).count(),
+            self.summary_hits,
+            self.raw_edges_examined,
+        ))
+    }
+}
+
 struct DirectCompactCanonicalBuilder<'a> {
     summaries: &'a StateSummaries,
     productive: &'a [bool],
@@ -6902,6 +7689,136 @@ fn profile_direct_prepush_pending_compact(
     );
 }
 
+fn build_direct_prepush_projected_config_nwa(
+    summaries: &StateSummaries,
+    productive: &[bool],
+    templates: &Templates,
+) -> Option<(NWA, usize, usize, usize, usize, f64)> {
+    if summaries
+        .states
+        .iter()
+        .flat_map(|state| state.branches.iter())
+        .any(|branch| branch.cross_target_group_id.is_some())
+    {
+        return None;
+    }
+    let started = Instant::now();
+    let mut used_bundles = vec![false; summaries.unique_bundles.len()];
+    for (state_id, state) in summaries.states.iter().enumerate() {
+        if !productive[state_id] {
+            continue;
+        }
+        for branch in &state.branches {
+            if productive
+                .get(branch.target as usize)
+                .copied()
+                .unwrap_or(false)
+                && summaries
+                    .bundle_accepts
+                    .get(branch.bundle_id)
+                    .copied()
+                    .unwrap_or(false)
+            {
+                used_bundles[branch.bundle_id] = true;
+            }
+        }
+    }
+    let lazy_bundles = templates.build_lazy_weighted_prepush_bundles_cached(
+        &summaries.unique_bundles,
+        &used_bundles,
+    );
+    let bundle_ms = elapsed_ms(started);
+    let starts = summaries
+        .start_states
+        .iter()
+        .copied()
+        .filter(|&start| productive.get(start as usize).copied().unwrap_or(false))
+        .map(|start| DirectCompactConfig {
+            node: DirectPrepushNode::Continuation(start),
+            pending: 0,
+        })
+        .collect::<Vec<_>>();
+    let builder = DirectProjectedConfigBuilder::new(summaries, productive, templates, lazy_bundles);
+    if std::env::var_os("GLRMASK_DIRECT_PREPUSH_PROJECTED_CONFIG_FLAT").is_some() {
+        let (nwa, raw_configs, raw_edges, removed_configs, _raw_body_calls) =
+            builder.build_flat_projected(&starts)?;
+        return Some((
+            nwa,
+            removed_configs,
+            removed_configs,
+            raw_configs.saturating_sub(removed_configs),
+            raw_edges,
+            bundle_ms,
+        ));
+    }
+    let (nwa, summarized_configs, summary_entries, summary_hits, raw_edges_examined) =
+        builder.build(&starts)?;
+    Some((
+        nwa,
+        summarized_configs,
+        summary_entries,
+        summary_hits,
+        raw_edges_examined,
+        bundle_ms,
+    ))
+}
+
+fn profile_direct_prepush_projected_config(
+    summaries: &StateSummaries,
+    productive: &[bool],
+    templates: &Templates,
+) {
+    if std::env::var_os("GLRMASK_PROFILE_DIRECT_PREPUSH_PROJECTED_CONFIG").is_none() {
+        return;
+    }
+    let started = Instant::now();
+    let Some((
+        nwa,
+        summarized_configs,
+        summary_entries,
+        summary_hits,
+        raw_edges_examined,
+        bundle_ms,
+    )) = build_direct_prepush_projected_config_nwa(summaries, productive, templates)
+    else {
+        eprintln!("[glrmask/profile][parser_direct_prepush_projected_config] skipped=cross_target_or_cycle");
+        return;
+    };
+    if std::env::var_os("GLRMASK_VALIDATE_DIRECT_PREPUSH_PROJECTED_CONFIG_SUPPORT").is_some() {
+        let (raw, ..) = build_direct_prepush_pending_compact_nwa(summaries, productive, templates)
+            .expect("direct projected config validation requires raw compact builder");
+        let generic = eliminate_epsilon_only_states(&raw)
+            .expect("direct projected config validation requires acyclic epsilon-only projection");
+        let direct_dwa = determinize_with_supports(&nwa, None).dwa;
+        let generic_dwa = determinize_with_supports(&generic, None).dwa;
+        let difference = find_difference(&direct_dwa, &generic_dwa)
+            .expect("direct projected config support validation requires acyclic DWAs");
+        assert!(
+            difference.is_none(),
+            "direct config projection changed weighted read language on labels {:?}",
+            difference,
+        );
+        eprintln!(
+            "[glrmask/profile][parser_direct_prepush_projected_config_validation] result=equivalent direct_states={} direct_transitions={} generic_states={} generic_transitions={}",
+            nwa.states().len(),
+            NWA::num_transitions(&nwa),
+            generic.states().len(),
+            NWA::num_transitions(&generic),
+        );
+    }
+    eprintln!(
+        "[glrmask/profile][parser_direct_prepush_projected_config] states={} transitions={} summarized_configs={} summary_entries={} summary_hits={} raw_edges_examined={} bundle_ms={:.3} total_ms={:.3}",
+        nwa.states().len(),
+        NWA::num_transitions(&nwa),
+        summarized_configs,
+        summary_entries,
+        summary_hits,
+        raw_edges_examined,
+        bundle_ms,
+        elapsed_ms(started),
+    );
+}
+
 fn build_direct_prepush_compact_hashcons_nwa(
     summaries: &StateSummaries,
     productive: &[bool],
@@ -7178,7 +8095,7 @@ fn eliminate_epsilon_only_states_with_origins(
         }
     }
     let mut summary_final = vec![None::<Weight>; n];
-    let mut summary_exits = vec![SmallVec::<[(u32, Weight); 4]>::new(); n];
+    let mut summary_exits = vec![Vec::<(u32, Weight)>::new(); n];
     let mut weight_ops = ScopedWeightOpCache::default();
     let mut queue = VecDeque::<usize>::new();
     for state_id in 0..n {
@@ -7235,6 +8152,7 @@ fn eliminate_epsilon_only_states_with_origins(
             }
         }
         exits.sort_unstable_by_key(|(exit, _)| *exit);
+        let exits = exits.into_vec();
         total_exit_refs += exits.len();
         max_exits = max_exits.max(exits.len());
         summary_final[state_id] = final_weight;
@@ -8020,6 +8938,7 @@ fn build_parser_nwa_from_terminal_dwa(
     profile_direct_prepush_hashcons(&summaries, &productive, templates);
     profile_direct_prepush_compact_hashcons(&summaries, &productive, templates);
     profile_direct_prepush_pending_compact(&summaries, &productive, templates);
+    profile_direct_prepush_projected_config(&summaries, &productive, templates);
     profile_direct_prepush_pending_census_only(&summaries, &productive, templates);
     let state_prep_ms = elapsed_ms(state_prep_started_at);
     let states = &summaries.states;
