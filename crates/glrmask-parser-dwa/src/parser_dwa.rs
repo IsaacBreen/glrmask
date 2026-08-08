@@ -291,6 +291,35 @@ fn merge_sorted_target_contributions(
     contribs.truncate(write);
 }
 
+fn merge_target_contributions_dense(
+    contribs: &mut TargetContribs,
+    weight_by_target: &mut [Option<Weight>],
+    touched_targets: &mut Vec<u32>,
+    weight_ops: &mut ScopedWeightOpCache,
+    mut detail: Option<&mut ParserDwaDeterminizeDetail>,
+) {
+    touched_targets.clear();
+    for (target, weight) in contribs.drain(..) {
+        let slot = &mut weight_by_target[target as usize];
+        if let Some(existing) = slot.as_ref() {
+            *slot = Some(weight_ops.union(existing, &weight));
+            if let Some(detail) = detail.as_mut() {
+                detail.target_contribution_merges += 1;
+            }
+        } else {
+            *slot = Some(weight);
+            touched_targets.push(target);
+        }
+    }
+    touched_targets.sort_unstable();
+    for &target in touched_targets.iter() {
+        let weight = weight_by_target[target as usize]
+            .take()
+            .expect("dense target contribution slot disappeared");
+        contribs.push((target, weight));
+    }
+}
+
 fn extend_target_contribs(dst: &mut TargetContribs, src: &TargetContribs) {
     for (target, weight) in src {
         add_target_contribution(dst, *target, weight.clone());
@@ -3088,6 +3117,14 @@ fn determinize_with_supports_impl(
     let mut dense_label_touched: Vec<bool> = vec![false; dense_label_limit];
     let mut default_touched = false;
     let mut intersection_cache = ScopedWeightOpCache::default();
+    let use_dense_target_accumulator =
+        std::env::var_os("GLRMASK_DIRECT_PREPUSH_SUPPORT_DENSE_TARGET_ACCUM").is_some();
+    let dense_target_min_len = std::env::var("GLRMASK_DIRECT_PREPUSH_SUPPORT_DENSE_TARGET_MIN_LEN")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(2);
+    let mut dense_target_weights = vec![None::<Weight>; num_nwa_states];
+    let mut dense_target_touched = Vec::<u32>::new();
     // Memoize local epsilon-closure outputs keyed by pre-closure weighted subsets.
     let mut closure_cache: FxHashMap<Vec<(u32, usize)>, CachedClosure> = FxHashMap::default();
     let mut key_buf: Vec<(u32, usize)> = Vec::new();
@@ -3198,12 +3235,22 @@ fn determinize_with_supports_impl(
                 detail.label_contribs_max = detail.label_contribs_max.max(contribs.len());
             }
             let sort_started = detail.as_ref().map(|_| Instant::now());
-            contribs.sort_unstable_by_key(|(state_id, _)| *state_id);
-            merge_sorted_target_contributions(
-                &mut contribs,
-                &mut intersection_cache,
-                detail.as_mut(),
-            );
+            if use_dense_target_accumulator && contribs.len() >= dense_target_min_len {
+                merge_target_contributions_dense(
+                    &mut contribs,
+                    &mut dense_target_weights,
+                    &mut dense_target_touched,
+                    &mut intersection_cache,
+                    detail.as_mut(),
+                );
+            } else {
+                contribs.sort_unstable_by_key(|(state_id, _)| *state_id);
+                merge_sorted_target_contributions(
+                    &mut contribs,
+                    &mut intersection_cache,
+                    detail.as_mut(),
+                );
+            }
             if let (Some(detail), Some(started_at)) = (detail.as_mut(), sort_started) {
                 detail.contribution_sort_ms += elapsed_ms(started_at);
             }
