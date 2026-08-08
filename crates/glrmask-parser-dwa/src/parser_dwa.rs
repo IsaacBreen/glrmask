@@ -6328,11 +6328,19 @@ fn build_direct_prepush_pending_compact_nwa(
     let mut pending = PendingStackInterner::new();
     let mut nwa = NWA::new(0, 0);
     let use_packed_config_key =
-        std::env::var_os("GLRMASK_DIRECT_PREPUSH_WIDE_CONFIG_KEY").is_none();
+        std::env::var_os("GLRMASK_DIRECT_PREPUSH_PACKED_CONFIG_KEY").is_some();
+    let config_reserve = std::env::var("GLRMASK_DIRECT_PREPUSH_CONFIG_RESERVE")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
     let mut packed_config_to_state = FxHashMap::<u128, u32>::default();
     let mut wide_config_to_state = FxHashMap::<DirectCompactConfig, u32>::default();
-    let mut configs = Vec::<DirectCompactConfig>::new();
-    let mut queue = VecDeque::<u32>::new();
+    if config_reserve > 0 {
+        packed_config_to_state.reserve(config_reserve);
+        wide_config_to_state.reserve(config_reserve);
+    }
+    let mut configs = Vec::<DirectCompactConfig>::with_capacity(config_reserve);
+    let mut queue = VecDeque::<u32>::with_capacity(config_reserve);
     let ensure = |config: DirectCompactConfig,
                   nwa: &mut NWA,
                   packed_config_to_state: &mut FxHashMap<u128, u32>,
