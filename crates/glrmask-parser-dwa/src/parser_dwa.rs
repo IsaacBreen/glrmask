@@ -4111,11 +4111,20 @@ fn optimize_parser_dwa_defaults(
     optimize_parser_dwa_defaults_impl(dwa, possible_by_state, num_parser_states, None);
 }
 
+trait RawTargetIdentityOracle {
+    fn labels_share_raw_target(
+        &mut self,
+        projected_dwa_state: u32,
+        possible_ids: &PossibleOutgoingIds,
+        num_parser_states: u32,
+    ) -> bool;
+}
+
 fn optimize_parser_dwa_defaults_with_raw_identity(
     dwa: &mut DWA,
     possible_by_state: &[PossibleOutgoingIds],
     num_parser_states: u32,
-    raw_identity: &mut RawSupportIdentityOracle<'_>,
+    raw_identity: &mut dyn RawTargetIdentityOracle,
 ) {
     optimize_parser_dwa_defaults_impl(
         dwa,
@@ -4129,7 +4138,7 @@ fn optimize_parser_dwa_defaults_impl(
     dwa: &mut DWA,
     possible_by_state: &[PossibleOutgoingIds],
     num_parser_states: u32,
-    mut raw_identity: Option<&mut RawSupportIdentityOracle<'_>>,
+    mut raw_identity: Option<&mut dyn RawTargetIdentityOracle>,
 ) {
     let profile_candidates = std::env::var_os("GLRMASK_PROFILE_DEFAULT_SYNTHESIS_CANDIDATES").is_some();
     let mut profile_multi_possible = 0usize;
@@ -5902,6 +5911,12 @@ struct DirectFlatConfigNode {
     edge_len: u32,
 }
 
+struct DirectFlatConfigGraph {
+    nodes: Vec<DirectFlatConfigNode>,
+    edges: Vec<DirectFlatConfigEdge>,
+    raw_by_projected: Vec<Option<u32>>,
+}
+
 #[derive(Clone)]
 struct DirectProjectedConfigSummary {
     final_weight: Option<Weight>,
@@ -6300,7 +6315,7 @@ impl<'a> DirectProjectedConfigBuilder<'a> {
     fn build_flat_projected(
         mut self,
         starts: &[DirectCompactConfig],
-    ) -> Option<(NWA, usize, usize, usize, usize)> {
+    ) -> Option<(NWA, DirectFlatConfigGraph, usize, usize, usize, usize)> {
         for &config in starts {
             self.forced_starts.insert(config);
         }
@@ -6467,12 +6482,15 @@ impl<'a> DirectProjectedConfigBuilder<'a> {
 
         let mut nwa = NWA::new(0, 0);
         let mut new_by_old = vec![u32::MAX; configs.len()];
+        let mut raw_by_projected = Vec::<Option<u32>>::new();
         for (old_state, &keep) in retained.iter().enumerate() {
             if keep {
                 new_by_old[old_state] = nwa.add_state();
+                raw_by_projected.push(Some(old_state as u32));
             }
         }
         let final_sink = nwa.add_state();
+        raw_by_projected.push(None);
         nwa.set_final_weight(final_sink, Weight::all());
 
         for (source, node) in nodes.iter().enumerate() {
@@ -6550,7 +6568,19 @@ impl<'a> DirectProjectedConfigBuilder<'a> {
             );
         }
         self.templates.emit_lazy_weighted_prepush_profile(&self.lazy_bundles);
-        Some((nwa, configs.len(), edges.len(), removed_count, self.raw_body_calls))
+        let raw_edge_count = edges.len();
+        Some((
+            nwa,
+            DirectFlatConfigGraph {
+                nodes,
+                edges,
+                raw_by_projected,
+            },
+            configs.len(),
+            raw_edge_count,
+            removed_count,
+            self.raw_body_calls,
+        ))
     }
 
     fn build(
@@ -7740,7 +7770,7 @@ fn build_direct_prepush_projected_config_nwa(
         .collect::<Vec<_>>();
     let builder = DirectProjectedConfigBuilder::new(summaries, productive, templates, lazy_bundles);
     if std::env::var_os("GLRMASK_DIRECT_PREPUSH_PROJECTED_CONFIG_FLAT").is_some() {
-        let (nwa, raw_configs, raw_edges, removed_configs, _raw_body_calls) =
+        let (nwa, _raw_graph, raw_configs, raw_edges, removed_configs, _raw_body_calls) =
             builder.build_flat_projected(&starts)?;
         return Some((
             nwa,
@@ -7761,6 +7791,58 @@ fn build_direct_prepush_projected_config_nwa(
         raw_edges_examined,
         bundle_ms,
     ))
+}
+
+fn build_direct_prepush_projected_config_flat_with_graph(
+    summaries: &StateSummaries,
+    productive: &[bool],
+    templates: &Templates,
+) -> Option<(NWA, DirectFlatConfigGraph)> {
+    if summaries
+        .states
+        .iter()
+        .flat_map(|state| state.branches.iter())
+        .any(|branch| branch.cross_target_group_id.is_some())
+    {
+        return None;
+    }
+    let mut used_bundles = vec![false; summaries.unique_bundles.len()];
+    for (state_id, state) in summaries.states.iter().enumerate() {
+        if !productive[state_id] {
+            continue;
+        }
+        for branch in &state.branches {
+            if productive
+                .get(branch.target as usize)
+                .copied()
+                .unwrap_or(false)
+                && summaries
+                    .bundle_accepts
+                    .get(branch.bundle_id)
+                    .copied()
+                    .unwrap_or(false)
+            {
+                used_bundles[branch.bundle_id] = true;
+            }
+        }
+    }
+    let lazy_bundles = templates.build_lazy_weighted_prepush_bundles_cached(
+        &summaries.unique_bundles,
+        &used_bundles,
+    );
+    let starts = summaries
+        .start_states
+        .iter()
+        .copied()
+        .filter(|&start| productive.get(start as usize).copied().unwrap_or(false))
+        .map(|start| DirectCompactConfig {
+            node: DirectPrepushNode::Continuation(start),
+            pending: 0,
+        })
+        .collect::<Vec<_>>();
+    let builder = DirectProjectedConfigBuilder::new(summaries, productive, templates, lazy_bundles);
+    let (nwa, raw_graph, ..) = builder.build_flat_projected(&starts)?;
+    Some((nwa, raw_graph))
 }
 
 fn profile_direct_prepush_projected_config(
@@ -8410,6 +8492,213 @@ impl<'a> RawSupportIdentityOracle<'a> {
             self.raw_target_support(projected_dwa_state, *label as i32) == first_target.as_slice()
         })
     }
+}
+
+impl RawTargetIdentityOracle for RawSupportIdentityOracle<'_> {
+    fn labels_share_raw_target(
+        &mut self,
+        projected_dwa_state: u32,
+        possible_ids: &PossibleOutgoingIds,
+        num_parser_states: u32,
+    ) -> bool {
+        RawSupportIdentityOracle::labels_share_raw_target(
+            self,
+            projected_dwa_state,
+            possible_ids,
+            num_parser_states,
+        )
+    }
+}
+
+fn local_direct_config_epsilon_closure_canonical(
+    graph: &DirectFlatConfigGraph,
+    weight_by_state: &mut [Option<Weight>],
+    closure_queue: &mut VecDeque<u32>,
+    seeds: &[(u32, Weight)],
+    touched_states: &mut Vec<u32>,
+    canonical: &mut Vec<(u32, Weight)>,
+    weight_ops: &mut ScopedWeightOpCache,
+) {
+    debug_assert!(closure_queue.is_empty());
+    touched_states.clear();
+    canonical.clear();
+
+    for (state_id, weight) in seeds {
+        let slot = &mut weight_by_state[*state_id as usize];
+        debug_assert!(slot.is_none());
+        *slot = Some(weight.clone());
+        closure_queue.push_back(*state_id);
+        touched_states.push(*state_id);
+    }
+
+    while let Some(state_id) = closure_queue.pop_front() {
+        let Some(current_weight) = weight_by_state[state_id as usize].clone() else {
+            continue;
+        };
+        let Some(node) = graph.nodes.get(state_id as usize) else {
+            continue;
+        };
+        let edge_end = node.edge_start + node.edge_len;
+        for edge in &graph.edges[node.edge_start as usize..edge_end as usize] {
+            if edge.label.is_some() || edge.weight.is_empty() {
+                continue;
+            }
+            let contribution = weight_ops.intersection(&current_weight, &edge.weight);
+            if contribution.is_empty() {
+                continue;
+            }
+            let target_idx = edge.target as usize;
+            if let Some(existing) = &weight_by_state[target_idx] {
+                if !contribution.is_subset(existing) {
+                    weight_by_state[target_idx] = Some(weight_ops.union(existing, &contribution));
+                    closure_queue.push_back(edge.target);
+                }
+            } else {
+                weight_by_state[target_idx] = Some(contribution);
+                closure_queue.push_back(edge.target);
+                touched_states.push(edge.target);
+            }
+        }
+    }
+
+    touched_states.sort_unstable();
+    for &state_id in touched_states.iter() {
+        if let Some(weight) = weight_by_state[state_id as usize].take()
+            && !weight.is_empty()
+        {
+            canonical.push((state_id, weight));
+        }
+    }
+}
+
+struct DirectConfigSupportIdentityOracle<'a> {
+    raw_graph: &'a DirectFlatConfigGraph,
+    projected_weighted_supports: &'a [Vec<(u32, Weight)>],
+    source_cache: FxHashMap<u32, Vec<(u32, Weight)>>,
+    target_cache: FxHashMap<(u32, i32), Vec<(u32, Weight)>>,
+    weight_by_state: Vec<Option<Weight>>,
+    closure_queue: VecDeque<u32>,
+    touched: Vec<u32>,
+    canon: Vec<(u32, Weight)>,
+    weight_ops: ScopedWeightOpCache,
+}
+
+impl<'a> DirectConfigSupportIdentityOracle<'a> {
+    fn new(
+        raw_graph: &'a DirectFlatConfigGraph,
+        projected_weighted_supports: &'a [Vec<(u32, Weight)>],
+    ) -> Self {
+        Self {
+            raw_graph,
+            projected_weighted_supports,
+            source_cache: FxHashMap::default(),
+            target_cache: FxHashMap::default(),
+            weight_by_state: vec![None; raw_graph.nodes.len()],
+            closure_queue: VecDeque::new(),
+            touched: Vec::new(),
+            canon: Vec::new(),
+            weight_ops: ScopedWeightOpCache::default(),
+        }
+    }
+
+    fn raw_source_support(&mut self, projected_dwa_state: u32) -> &[(u32, Weight)] {
+        if !self.source_cache.contains_key(&projected_dwa_state) {
+            let mut seeds = Vec::new();
+            for (projected_nwa_state, weight) in
+                &self.projected_weighted_supports[projected_dwa_state as usize]
+            {
+                let Some(raw_state) = self
+                    .raw_graph
+                    .raw_by_projected
+                    .get(*projected_nwa_state as usize)
+                    .copied()
+                    .flatten()
+                else {
+                    continue;
+                };
+                seeds.push((raw_state, weight.clone()));
+            }
+            seeds.sort_unstable_by_key(|(state_id, _)| *state_id);
+            local_direct_config_epsilon_closure_canonical(
+                self.raw_graph,
+                &mut self.weight_by_state,
+                &mut self.closure_queue,
+                &seeds,
+                &mut self.touched,
+                &mut self.canon,
+                &mut self.weight_ops,
+            );
+            self.source_cache
+                .insert(projected_dwa_state, self.canon.clone());
+        }
+        &self.source_cache[&projected_dwa_state]
+    }
+
+    fn raw_target_support(&mut self, projected_dwa_state: u32, label: i32) -> &[(u32, Weight)] {
+        let cache_key = (projected_dwa_state, label);
+        if !self.target_cache.contains_key(&cache_key) {
+            let source = self.raw_source_support(projected_dwa_state).to_vec();
+            let mut contributions = TargetContribs::new();
+            for (raw_state, path_weight) in source {
+                let node = &self.raw_graph.nodes[raw_state as usize];
+                let edge_end = node.edge_start + node.edge_len;
+                for edge in &self.raw_graph.edges[node.edge_start as usize..edge_end as usize] {
+                    if edge.label != Some(label) || edge.weight.is_empty() {
+                        continue;
+                    }
+                    let contribution = self.weight_ops.intersection(&path_weight, &edge.weight);
+                    if !contribution.is_empty() {
+                        contributions.push((edge.target, contribution));
+                    }
+                }
+            }
+            contributions.sort_unstable_by_key(|(state_id, _)| *state_id);
+            merge_sorted_target_contributions(&mut contributions, &mut self.weight_ops, None);
+            local_direct_config_epsilon_closure_canonical(
+                self.raw_graph,
+                &mut self.weight_by_state,
+                &mut self.closure_queue,
+                &contributions,
+                &mut self.touched,
+                &mut self.canon,
+                &mut self.weight_ops,
+            );
+            self.target_cache.insert(cache_key, self.canon.clone());
+        }
+        &self.target_cache[&cache_key]
+    }
+}
+
+impl RawTargetIdentityOracle for DirectConfigSupportIdentityOracle<'_> {
+    fn labels_share_raw_target(
+        &mut self,
+        projected_dwa_state: u32,
+        possible_ids: &PossibleOutgoingIds,
+        num_parser_states: u32,
+    ) -> bool {
+        let labels = match possible_ids {
+            PossibleOutgoingIds::Empty => return false,
+            PossibleOutgoingIds::All => (0..num_parser_states).collect::<Vec<_>>(),
+            PossibleOutgoingIds::Some(ids) => ids.iter_ones().map(|id| id as u32).collect(),
+        };
+        let Some((&first, rest)) = labels.split_first() else {
+            return false;
+        };
+        let first_target = self
+            .raw_target_support(projected_dwa_state, first as i32)
+            .to_vec();
+        rest.iter().all(|label| {
+            self.raw_target_support(projected_dwa_state, *label as i32) == first_target.as_slice()
+        })
+    }
+}
+
+enum DirectRawIdentitySource {
+    Nwa {
+        raw_nwa: NWA,
+        raw_by_projected: Vec<Option<u32>>,
+    },
+    FlatConfig(DirectFlatConfigGraph),
 }
 
 fn hashcons_acyclic_weighted_nwa(nwa: &NWA) -> Option<NWA> {
@@ -9817,6 +10106,18 @@ fn build_direct_prepush_raw_projection_with_origins(
     Some((projected, raw, raw_by_projected))
 }
 
+fn build_direct_prepush_flat_projection_with_graph_from_terminal_dwa(
+    terminal_dwa: &TerminalAutomaton,
+    grammar: &AnalyzedGrammar,
+    templates: &Templates,
+) -> Option<(NWA, DirectFlatConfigGraph)> {
+    let mut summaries = build_state_summaries(terminal_dwa, grammar, templates);
+    factor_parser_bundle_entry_gates(&mut summaries, templates);
+    factor_parser_bundle_cross_target_gates(&mut summaries, templates);
+    let productive = compute_productive_terminal_states(&summaries);
+    build_direct_prepush_projected_config_flat_with_graph(&summaries, &productive, templates)
+}
+
 
 
 fn possible_outgoing_signature(value: &PossibleOutgoingIds) -> Vec<i32> {
@@ -10449,7 +10750,7 @@ fn finish_read_only_parser_nwa_for_validation(
     grammar: &AnalyzedGrammar,
     table: &GLRTable,
     collapse_immediate_acceptance: bool,
-    mut raw_identity_source: Option<(NWA, Vec<Option<u32>>)>,
+    mut raw_identity_source: Option<DirectRawIdentitySource>,
 ) -> DWA {
     let num_parser_states = table.num_states;
     let profile = std::env::var_os("GLRMASK_PROFILE_DIRECT_PREPUSH_FINISH").is_some();
@@ -10500,7 +10801,7 @@ fn finish_read_only_parser_nwa_for_validation(
     let finality_ms = elapsed_ms(finality_started);
     let prune_started = Instant::now();
     remove_redundant_default_transitions(&mut parser_nwa);
-    if let Some((raw_nwa, _)) = raw_identity_source.as_mut() {
+    if let Some(DirectRawIdentitySource::Nwa { raw_nwa, .. }) = raw_identity_source.as_mut() {
         apply_finality_fixpoint(raw_nwa);
         remove_redundant_default_transitions(raw_nwa);
     }
@@ -10575,22 +10876,39 @@ fn finish_read_only_parser_nwa_for_validation(
     let possible_ms = elapsed_ms(possible_started);
     let default_started = Instant::now();
     if std::env::var_os("GLRMASK_DIRECT_PREPUSH_SKIP_DEFAULT_OPT").is_none() {
-        if let Some((raw_nwa, raw_by_projected)) = raw_identity_source.as_ref() {
+        if let Some(raw_identity_source) = raw_identity_source.as_ref() {
             let weighted_supports = determinized
                 .weighted_supports
                 .as_ref()
                 .expect("raw-identity direct finish requires weighted projected supports");
-            let mut oracle = RawSupportIdentityOracle::new(
-                raw_nwa,
-                raw_by_projected,
-                weighted_supports,
-            );
-            optimize_parser_dwa_defaults_with_raw_identity(
-                &mut parser_dwa,
-                &possible_by_state,
-                num_parser_states,
-                &mut oracle,
-            );
+            match raw_identity_source {
+                DirectRawIdentitySource::Nwa {
+                    raw_nwa,
+                    raw_by_projected,
+                } => {
+                    let mut oracle = RawSupportIdentityOracle::new(
+                        raw_nwa,
+                        raw_by_projected,
+                        weighted_supports,
+                    );
+                    optimize_parser_dwa_defaults_with_raw_identity(
+                        &mut parser_dwa,
+                        &possible_by_state,
+                        num_parser_states,
+                        &mut oracle,
+                    );
+                }
+                DirectRawIdentitySource::FlatConfig(raw_graph) => {
+                    let mut oracle =
+                        DirectConfigSupportIdentityOracle::new(raw_graph, weighted_supports);
+                    optimize_parser_dwa_defaults_with_raw_identity(
+                        &mut parser_dwa,
+                        &possible_by_state,
+                        num_parser_states,
+                        &mut oracle,
+                    );
+                }
+            }
         } else {
             optimize_parser_dwa_defaults(&mut parser_dwa, &possible_by_state, num_parser_states);
         }
@@ -10887,19 +11205,46 @@ pub fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
 
     if std::env::var_os("GLRMASK_VALIDATE_DIRECT_PREPUSH_PARSER").is_some() {
         let direct_started_at = Instant::now();
-        let use_projected_raw_identity =
-            std::env::var_os("GLRMASK_VALIDATE_DIRECT_PREPUSH_PROJECTED_RAW_IDENTITY").is_some();
+        let use_flat_config_raw_identity = std::env::var_os(
+            "GLRMASK_VALIDATE_DIRECT_PREPUSH_PROJECTED_CONFIG_RAW_IDENTITY",
+        )
+        .is_some();
+        let use_projected_raw_identity = use_flat_config_raw_identity
+            || std::env::var_os("GLRMASK_VALIDATE_DIRECT_PREPUSH_PROJECTED_RAW_IDENTITY")
+                .is_some();
         let (direct_nwa, raw_identity_source) = if use_projected_raw_identity {
-            let (projected, raw, raw_by_projected) =
-                build_direct_prepush_raw_projection_with_origins(
-                    terminal_dwa,
-                    grammar,
-                    templates,
+            if use_flat_config_raw_identity {
+                let (projected, raw_graph) =
+                    build_direct_prepush_flat_projection_with_graph_from_terminal_dwa(
+                        terminal_dwa,
+                        grammar,
+                        templates,
+                    )
+                    .expect(
+                        "flat projected raw-identity parser validation requires acyclic non-cross-target composition",
+                    );
+                (
+                    projected,
+                    Some(DirectRawIdentitySource::FlatConfig(raw_graph)),
                 )
-                .expect(
-                    "projected raw-identity parser validation requires acyclic non-cross-target composition",
-                );
-            (projected, Some((raw, raw_by_projected)))
+            } else {
+                let (projected, raw, raw_by_projected) =
+                    build_direct_prepush_raw_projection_with_origins(
+                        terminal_dwa,
+                        grammar,
+                        templates,
+                    )
+                    .expect(
+                        "projected raw-identity parser validation requires acyclic non-cross-target composition",
+                    );
+                (
+                    projected,
+                    Some(DirectRawIdentitySource::Nwa {
+                        raw_nwa: raw,
+                        raw_by_projected,
+                    }),
+                )
+            }
         } else {
             (
                 build_direct_prepush_hashcons_from_terminal_dwa(
