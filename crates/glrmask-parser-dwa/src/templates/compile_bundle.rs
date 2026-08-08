@@ -150,6 +150,54 @@ impl BundleGroupDfa<'_> {
     }
 }
 
+trait PrepushGroupAccess {
+    fn len(&self) -> usize;
+    fn weight(&self, group: u32) -> &Weight;
+    fn dfa(&self, group: u32) -> &UnweightedDfa;
+}
+
+impl<'a> PrepushGroupAccess for [(&'a Weight, BundleGroupDfa<'a>)] {
+    #[inline]
+    fn len(&self) -> usize {
+        <[(&Weight, BundleGroupDfa<'_>)]>::len(self)
+    }
+
+    #[inline]
+    fn weight(&self, group: u32) -> &Weight {
+        self[group as usize].0
+    }
+
+    #[inline]
+    fn dfa(&self, group: u32) -> &UnweightedDfa {
+        self[group as usize].1.dfa()
+    }
+}
+
+struct LazyPrepushGroupView<'a> {
+    by_terminal: &'a BTreeMap<TerminalID, UnweightedDfa>,
+    terminals: &'a [TerminalID],
+    weights: &'a [Weight],
+}
+
+impl PrepushGroupAccess for LazyPrepushGroupView<'_> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.terminals.len()
+    }
+
+    #[inline]
+    fn weight(&self, group: u32) -> &Weight {
+        &self.weights[group as usize]
+    }
+
+    #[inline]
+    fn dfa(&self, group: u32) -> &UnweightedDfa {
+        self.by_terminal
+            .get(&self.terminals[group as usize])
+            .expect("lazy pre-push group terminal must have a template DFA")
+    }
+}
+
 fn checked_usize_to_u32(value: usize, what: &str) -> u32 {
     u32::try_from(value).unwrap_or_else(|_| panic!("{what} exceeds u32::MAX"))
 }
@@ -829,24 +877,17 @@ impl Templates {
             group_weight_cache,
         } = plan;
         let group_view_started = set.profile.then(Instant::now);
-        let group_dfas = terminals
-            .iter()
-            .zip(weights.iter())
-            .filter_map(|(terminal, weight)| {
-                self.by_terminal
-                    .get(terminal)
-                    .map(|dfa| (weight, BundleGroupDfa::Borrowed(dfa)))
-            })
-            .collect::<Vec<_>>();
+        let group_view = LazyPrepushGroupView {
+            by_terminal: &self.by_terminal,
+            terminals,
+            weights,
+        };
         if let Some(started) = group_view_started {
             set.decorate_group_view_ms += elapsed_ms(started);
         }
-        if group_dfas.len() != weights.len() {
-            return None;
-        }
         let skeleton_state = skeleton.states.get(state_id as usize)?;
         let memo_started = set.profile.then(Instant::now);
-        let mut sequence_memos = (0..group_dfas.len())
+        let mut sequence_memos = (0..group_view.len())
             .map(|_| FxHashMap::<u32, Arc<[PushSequence]>>::default())
             .collect::<Vec<_>>();
         if let Some(started) = memo_started {
@@ -856,7 +897,7 @@ impl Templates {
         let instantiate_started = set.profile.then(Instant::now);
         let state = instantiate_weighted_prepush_state_profiled(
             skeleton_state,
-            &group_dfas,
+            &group_view,
             &mut sequence_memos,
             shared_sequences,
             Some(group_weight_cache),
@@ -1693,9 +1734,9 @@ fn residual_push_sequences(
     out
 }
 
-fn weighted_outputs_for_programs(
+fn weighted_outputs_for_programs<G: PrepushGroupAccess + ?Sized>(
     programs: &[(u32, u32)],
-    groups: &[(&Weight, BundleGroupDfa<'_>)],
+    groups: &G,
     sequence_memos: &mut [FxHashMap<u32, Arc<[PushSequence]>>],
     shared_sequences: &mut SharedResidualSequenceCache,
     prefix_push: Option<u32>,
@@ -1705,7 +1746,7 @@ fn weighted_outputs_for_programs(
     detail.output_program_refs += programs.len();
     if let [(group, residual)] = programs {
         let sequences = residual_push_sequences(
-            groups[*group as usize].1.dfa(),
+            groups.dfa(*group),
             *residual,
             &mut sequence_memos[*group as usize],
             shared_sequences,
@@ -1713,7 +1754,7 @@ fn weighted_outputs_for_programs(
         );
         detail.output_sequence_refs += sequences.len();
         detail.output_unique_sequences += sequences.len();
-        let weight = groups[*group as usize].0;
+        let weight = groups.weight(*group);
         let outputs = sequences
             .iter()
             .map(|suffix| {
@@ -1735,14 +1776,14 @@ fn weighted_outputs_for_programs(
     let mut outputs = Vec::<PrepushOutput>::new();
     for &(group, residual) in programs {
         let sequences = residual_push_sequences(
-            groups[group as usize].1.dfa(),
+            groups.dfa(group),
             residual,
             &mut sequence_memos[group as usize],
             shared_sequences,
             detail,
         );
         detail.output_sequence_refs += sequences.len();
-        let weight = groups[group as usize].0;
+        let weight = groups.weight(group);
         for suffix in sequences.iter() {
             let mut pushes = PushSequence::with_capacity(prefix_push.is_some() as usize + suffix.len());
             if let Some(push) = prefix_push {
@@ -1775,42 +1816,34 @@ fn weighted_outputs_for_programs(
     merged
 }
 
-fn concrete_weight_for_groups(
+fn concrete_weight_for_groups<G: PrepushGroupAccess + ?Sized>(
     group_ids: &SmallVec<[u32; 8]>,
-    groups: &[(&Weight, BundleGroupDfa<'_>)],
+    groups: &G,
     detail: &mut PrepushInstantiateDetail,
     cache: Option<&mut FxHashMap<SmallVec<[u32; 8]>, Weight>>,
 ) -> Weight {
     match group_ids.as_slice() {
         [] => Weight::empty(),
-        [group] => groups[*group as usize].0.clone(),
+        [group] => groups.weight(*group).clone(),
         _ => {
             detail.core_weight_unions += 1;
             if let Some(cache) = cache {
                 if let Some(weight) = cache.get(group_ids) {
                     return weight.clone();
                 }
-                let weight = Weight::union_all(
-                    group_ids
-                        .iter()
-                        .map(|&group| groups[group as usize].0),
-                );
+                let weight = Weight::union_all(group_ids.iter().map(|&group| groups.weight(group)));
                 cache.insert(group_ids.clone(), weight.clone());
                 weight
             } else {
-                Weight::union_all(
-                    group_ids
-                        .iter()
-                        .map(|&group| groups[group as usize].0),
-                )
+                Weight::union_all(group_ids.iter().map(|&group| groups.weight(group)))
             }
         }
     }
 }
 
-fn instantiate_weighted_prepush_state_profiled(
+fn instantiate_weighted_prepush_state_profiled<G: PrepushGroupAccess + ?Sized>(
     state: &PrepushBundleState,
-    groups: &[(&Weight, BundleGroupDfa<'_>)],
+    groups: &G,
     sequence_memos: &mut [FxHashMap<u32, Arc<[PushSequence]>>],
     shared_sequences: &mut SharedResidualSequenceCache,
     mut group_weight_cache: Option<&mut FxHashMap<SmallVec<[u32; 8]>, Weight>>,
