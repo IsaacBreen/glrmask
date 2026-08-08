@@ -6327,20 +6327,32 @@ fn build_direct_prepush_pending_compact_nwa(
 
     let mut pending = PendingStackInterner::new();
     let mut nwa = NWA::new(0, 0);
-    let mut config_to_state = FxHashMap::<u128, u32>::default();
+    let use_packed_config_key =
+        std::env::var_os("GLRMASK_DIRECT_PREPUSH_WIDE_CONFIG_KEY").is_none();
+    let mut packed_config_to_state = FxHashMap::<u128, u32>::default();
+    let mut wide_config_to_state = FxHashMap::<DirectCompactConfig, u32>::default();
     let mut configs = Vec::<DirectCompactConfig>::new();
     let mut queue = VecDeque::<u32>::new();
     let ensure = |config: DirectCompactConfig,
                   nwa: &mut NWA,
-                  config_to_state: &mut FxHashMap<u128, u32>,
+                  packed_config_to_state: &mut FxHashMap<u128, u32>,
+                  wide_config_to_state: &mut FxHashMap<DirectCompactConfig, u32>,
                   configs: &mut Vec<DirectCompactConfig>,
                   queue: &mut VecDeque<u32>| {
-        let key = direct_compact_config_key(config);
-        if let Some(&existing) = config_to_state.get(&key) {
+        if use_packed_config_key {
+            let key = direct_compact_config_key(config);
+            if let Some(&existing) = packed_config_to_state.get(&key) {
+                return existing;
+            }
+        } else if let Some(&existing) = wide_config_to_state.get(&config) {
             return existing;
         }
         let state = nwa.add_state();
-        config_to_state.insert(key, state);
+        if use_packed_config_key {
+            packed_config_to_state.insert(direct_compact_config_key(config), state);
+        } else {
+            wide_config_to_state.insert(config, state);
+        }
         configs.push(config);
         queue.push_back(state);
         state
@@ -6356,7 +6368,8 @@ fn build_direct_prepush_pending_compact_nwa(
                 pending: 0,
             },
             &mut nwa,
-            &mut config_to_state,
+            &mut packed_config_to_state,
+            &mut wide_config_to_state,
             &mut configs,
             &mut queue,
         ));
@@ -6391,7 +6404,8 @@ fn build_direct_prepush_pending_compact_nwa(
                             pending: config.pending,
                         },
                         &mut nwa,
-                        &mut config_to_state,
+                        &mut packed_config_to_state,
+            &mut wide_config_to_state,
                         &mut configs,
                         &mut queue,
                     );
@@ -6433,7 +6447,8 @@ fn build_direct_prepush_pending_compact_nwa(
                             pending: config.pending,
                         },
                         &mut nwa,
-                        &mut config_to_state,
+                        &mut packed_config_to_state,
+            &mut wide_config_to_state,
                         &mut configs,
                         &mut queue,
                     );
@@ -6475,7 +6490,8 @@ fn build_direct_prepush_pending_compact_nwa(
                             pending: config.pending,
                         },
                         &mut nwa,
-                        &mut config_to_state,
+                        &mut packed_config_to_state,
+            &mut wide_config_to_state,
                         &mut configs,
                         &mut queue,
                     );
@@ -6493,7 +6509,8 @@ fn build_direct_prepush_pending_compact_nwa(
                             pending: next_pending,
                         },
                         &mut nwa,
-                        &mut config_to_state,
+                        &mut packed_config_to_state,
+            &mut wide_config_to_state,
                         &mut configs,
                         &mut queue,
                     );
@@ -6504,7 +6521,8 @@ fn build_direct_prepush_pending_compact_nwa(
                                           transition: &WeightedPrepushTarget,
                                           pending: &mut PendingStackInterner,
                                           nwa: &mut NWA,
-                                          config_to_state: &mut FxHashMap<u128, u32>,
+                                          packed_config_to_state: &mut FxHashMap<u128, u32>,
+                                          wide_config_to_state: &mut FxHashMap<DirectCompactConfig, u32>,
                                           configs: &mut Vec<DirectCompactConfig>,
                                           queue: &mut VecDeque<u32>,
                                           edge_count: &mut usize| {
@@ -6528,7 +6546,8 @@ fn build_direct_prepush_pending_compact_nwa(
                                         pending: 0,
                                     },
                                     nwa,
-                                    config_to_state,
+                                    packed_config_to_state,
+                                    wide_config_to_state,
                                     configs,
                                     queue,
                                 );
@@ -6545,7 +6564,8 @@ fn build_direct_prepush_pending_compact_nwa(
                                         pending: next_pending,
                                     },
                                     nwa,
-                                    config_to_state,
+                                    packed_config_to_state,
+                                    wide_config_to_state,
                                     configs,
                                     queue,
                                 );
@@ -6566,7 +6586,8 @@ fn build_direct_prepush_pending_compact_nwa(
                                             pending: next_pending,
                                         },
                                         nwa,
-                                        config_to_state,
+                                        packed_config_to_state,
+                                        wide_config_to_state,
                                         configs,
                                         queue,
                                     );
@@ -6588,7 +6609,8 @@ fn build_direct_prepush_pending_compact_nwa(
                                             pending: next_pending,
                                         },
                                         nwa,
-                                        config_to_state,
+                                        packed_config_to_state,
+                                        wide_config_to_state,
                                         configs,
                                         queue,
                                     );
@@ -6610,7 +6632,8 @@ fn build_direct_prepush_pending_compact_nwa(
                             transition,
                             &mut pending,
                             &mut nwa,
-                            &mut config_to_state,
+                            &mut packed_config_to_state,
+            &mut wide_config_to_state,
                             &mut configs,
                             &mut queue,
                             &mut edge_count,
@@ -6626,7 +6649,8 @@ fn build_direct_prepush_pending_compact_nwa(
                             transition,
                             &mut pending,
                             &mut nwa,
-                            &mut config_to_state,
+                            &mut packed_config_to_state,
+            &mut wide_config_to_state,
                             &mut configs,
                             &mut queue,
                             &mut edge_count,
@@ -6638,7 +6662,8 @@ fn build_direct_prepush_pending_compact_nwa(
                             transition,
                             &mut pending,
                             &mut nwa,
-                            &mut config_to_state,
+                            &mut packed_config_to_state,
+            &mut wide_config_to_state,
                             &mut configs,
                             &mut queue,
                             &mut edge_count,
