@@ -1142,6 +1142,96 @@ fn write_final_weights(nwa: &mut NWA, reachable_final_weights: Vec<Option<Guarde
     }
 }
 
+fn apply_finality_fixpoint_acyclic_hashed(
+    nwa: &NWA,
+    reverse_topo_order: &[usize],
+    weight_ops: &mut ScopedWeightOpCache,
+) -> (Vec<Option<GuardedFinalWeight>>, usize) {
+    type FinalitySignature = (Option<usize>, Vec<(u32, usize)>);
+
+    let state_count = nwa.states().len();
+    let mut class_by_signature = FxHashMap::<FinalitySignature, u32>::default();
+    let mut class_by_state = vec![u32::MAX; state_count];
+    let mut final_by_class = Vec::<Option<Weight>>::new();
+    let mut signature_edges = Vec::<(u32, usize)>::new();
+    let mut actual_edges = Vec::<(u32, Weight)>::new();
+
+    for &state_id in reverse_topo_order {
+        let state = &nwa.states()[state_id];
+        signature_edges.clear();
+        actual_edges.clear();
+
+        let mut collect_edge = |target: u32, weight: &Weight| {
+            if !is_live_finality_edge(target, weight, state_count) {
+                return;
+            }
+            let target_class = class_by_state[target as usize];
+            debug_assert_ne!(target_class, u32::MAX);
+            signature_edges.push((target_class, weight.ptr_key()));
+            actual_edges.push((target_class, weight.clone()));
+        };
+        for (target, weight) in &state.epsilons {
+            collect_edge(*target, weight);
+        }
+        for (&label, targets) in &state.transitions {
+            if label != DEFAULT_LABEL && !is_negative_label(label) {
+                continue;
+            }
+            for (target, weight) in targets {
+                collect_edge(*target, weight);
+            }
+        }
+
+        signature_edges.sort_unstable();
+        signature_edges.dedup();
+        actual_edges.sort_unstable_by_key(|(target_class, weight)| (*target_class, weight.ptr_key()));
+        actual_edges.dedup_by_key(|(target_class, weight)| (*target_class, weight.ptr_key()));
+
+        let signature = (
+            state.final_weight.as_ref().map(Weight::ptr_key),
+            signature_edges.clone(),
+        );
+        if let Some(&class_id) = class_by_signature.get(&signature) {
+            class_by_state[state_id] = class_id;
+            continue;
+        }
+
+        let mut final_weight = state
+            .final_weight
+            .as_ref()
+            .filter(|weight| !weight.is_empty())
+            .cloned();
+        for (target_class, edge_weight) in &actual_edges {
+            let Some(target_final) = final_by_class[*target_class as usize].as_ref() else {
+                continue;
+            };
+            let contribution = weight_ops.intersection(target_final, edge_weight);
+            if contribution.is_empty() {
+                continue;
+            }
+            final_weight = Some(match final_weight.take() {
+                Some(existing) => weight_ops.union(&existing, &contribution),
+                None => contribution,
+            });
+        }
+
+        let class_id = final_by_class.len() as u32;
+        class_by_signature.insert(signature, class_id);
+        class_by_state[state_id] = class_id;
+        final_by_class.push(final_weight);
+    }
+
+    let result = class_by_state
+        .into_iter()
+        .map(|class_id| {
+            final_by_class[class_id as usize]
+                .clone()
+                .and_then(GuardedFinalWeight::initial)
+        })
+        .collect();
+    (result, final_by_class.len())
+}
+
 fn propagate_final_weights_to_predecessors(
     preds: &[Vec<PredEdge<'_>>],
     reachable_final_weights: &mut [Option<GuardedFinalWeight>],
@@ -1512,9 +1602,41 @@ pub fn apply_finality_fixpoint(nwa: &mut NWA) {
         && !direct_acyclic_finality_disabled
         && (n >= DIRECT_ACYCLIC_FINALITY_MIN_STATES
             || std::env::var_os("GLRMASK_FORCE_DIRECT_ACYCLIC_FINALITY").is_some());
+    let use_hashed_acyclic_finality = reverse_topo_order.is_some()
+        && std::env::var_os("GLRMASK_HASHED_ACYCLIC_FINALITY").is_some();
 
     let solve_started_at = profile_enabled.then(std::time::Instant::now);
-    if let Some(reverse_topo_order) = reverse_topo_order.as_deref() {
+    let mut hashed_classes = 0usize;
+    if use_hashed_acyclic_finality {
+        let reverse_topo_order = reverse_topo_order
+            .as_deref()
+            .expect("hashed acyclic finality requires a topological order");
+        let (hashed, class_count) =
+            apply_finality_fixpoint_acyclic_hashed(nwa, reverse_topo_order, &mut weight_ops);
+        if std::env::var_os("GLRMASK_VALIDATE_HASHED_ACYCLIC_FINALITY").is_some() {
+            let mut reference = collect_initial_final_weights(nwa);
+            let mut reference_ops = ScopedWeightOpCache::default();
+            apply_finality_fixpoint_acyclic_direct(
+                &preds,
+                &mut reference,
+                reverse_topo_order,
+                &mut reference_ops,
+            );
+            assert_eq!(
+                hashed
+                    .iter()
+                    .map(|entry| entry.as_ref().map(|entry| &entry.weight))
+                    .collect::<Vec<_>>(),
+                reference
+                    .iter()
+                    .map(|entry| entry.as_ref().map(|entry| &entry.weight))
+                    .collect::<Vec<_>>(),
+                "hashed acyclic finality changed per-state final weights",
+            );
+        }
+        reachable_final_weights = hashed;
+        hashed_classes = class_count;
+    } else if let Some(reverse_topo_order) = reverse_topo_order.as_deref() {
         if use_chunked_parallel_waves {
             apply_finality_fixpoint_acyclic_parallel_waves_chunked(
                 &preds,
@@ -1573,7 +1695,7 @@ pub fn apply_finality_fixpoint(nwa: &mut NWA) {
     )
     {
         eprintln!(
-            "[glrmask/profile][finality_fixpoint] states={} edges={} unique_edge_weights={} full_weights={} single_entry_weights={} total_weight_ranges={} wide_edges={} unique_wide_edge_weights={} acyclic={} rayon_workers={} chunked_parallel_waves={} direct_acyclic={} preds_ms={:.3} topo_ms={:.3} initial_ms={:.3} solve_ms={:.3} write_ms={:.3}",
+            "[glrmask/profile][finality_fixpoint] states={} edges={} unique_edge_weights={} full_weights={} single_entry_weights={} total_weight_ranges={} wide_edges={} unique_wide_edge_weights={} acyclic={} rayon_workers={} chunked_parallel_waves={} direct_acyclic={} hashed_acyclic={} hashed_classes={} preds_ms={:.3} topo_ms={:.3} initial_ms={:.3} solve_ms={:.3} write_ms={:.3}",
             n,
             edge_count,
             unique_edge_weights,
@@ -1586,6 +1708,8 @@ pub fn apply_finality_fixpoint(nwa: &mut NWA) {
             rayon_workers,
             use_chunked_parallel_waves,
             use_direct_acyclic_finality,
+            use_hashed_acyclic_finality,
+            hashed_classes,
             preds_ms,
             topo_ms,
             initial_ms,
