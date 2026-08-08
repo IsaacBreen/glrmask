@@ -2,7 +2,7 @@ use std::collections::{hash_map::Entry, BTreeMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
 use crate::Vocab;
@@ -25,6 +25,7 @@ use crate::compiler::stages::resolve_negatives::{
     resolve_negative_codes_in_nwa,
 };
 use crate::compiler::stages::templates::Templates;
+use crate::templates::compile_bundle::{WeightedPrepushBundle, WeightedPrepushTarget};
 use crate::ds::bitset::BitSet;
 use crate::ds::weight::{ScopedWeightOpCache, Weight};
 
@@ -235,27 +236,57 @@ fn push_target_contribution_profiled(
 #[inline]
 fn merge_sorted_target_contributions(
     contribs: &mut TargetContribs,
+    weight_ops: &mut ScopedWeightOpCache,
     mut detail: Option<&mut ParserDwaDeterminizeDetail>,
 ) {
     if contribs.len() < 2 {
         return;
     }
-    let mut write = 0usize;
-    for read in 1..contribs.len() {
-        if contribs[write].0 == contribs[read].0 {
-            let merged = contribs[write].1.union(&contribs[read].1);
-            contribs[write].1 = merged;
-            if let Some(detail) = detail.as_mut() {
-                detail.target_contribution_merges += 1;
-            }
-        } else {
-            write += 1;
-            if write != read {
-                contribs[write] = contribs[read].clone();
+    static BULK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let bulk = *BULK.get_or_init(|| {
+        std::env::var_os("GLRMASK_BULK_MERGE_TARGET_CONTRIBS").is_some()
+    });
+    if !bulk {
+        let mut write = 0usize;
+        for read in 1..contribs.len() {
+            if contribs[write].0 == contribs[read].0 {
+                let merged = weight_ops.union(&contribs[write].1, &contribs[read].1);
+                contribs[write].1 = merged;
+                if let Some(detail) = detail.as_mut() {
+                    detail.target_contribution_merges += 1;
+                }
+            } else {
+                write += 1;
+                if write != read {
+                    contribs[write] = contribs[read].clone();
+                }
             }
         }
+        contribs.truncate(write + 1);
+        return;
     }
-    contribs.truncate(write + 1);
+
+    let mut write = 0usize;
+    let mut run_start = 0usize;
+    while run_start < contribs.len() {
+        let target = contribs[run_start].0;
+        let mut run_end = run_start + 1;
+        while run_end < contribs.len() && contribs[run_end].0 == target {
+            run_end += 1;
+        }
+        let weight = if run_end == run_start + 1 {
+            contribs[run_start].1.clone()
+        } else {
+            if let Some(detail) = detail.as_mut() {
+                detail.target_contribution_merges += run_end - run_start - 1;
+            }
+            Weight::union_all(contribs[run_start..run_end].iter().map(|(_, weight)| weight))
+        };
+        contribs[write] = (target, weight);
+        write += 1;
+        run_start = run_end;
+    }
+    contribs.truncate(write);
 }
 
 fn extend_target_contribs(dst: &mut TargetContribs, src: &TargetContribs) {
@@ -264,10 +295,18 @@ fn extend_target_contribs(dst: &mut TargetContribs, src: &TargetContribs) {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Branch {
     target: u32,
     bundle_id: usize,
+    entry_weight: Weight,
+    cross_target_group_id: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct CrossTargetBundleGroup {
+    bundle_id: usize,
+    target_gates: Vec<(u32, Weight)>,
 }
 
 #[derive(Debug, Clone)]
@@ -283,6 +322,7 @@ struct StateSummaries {
     start_states: Vec<u32>,
     unique_bundles: Vec<TerminalBundle>,
     bundle_accepts: Vec<bool>,
+    cross_target_groups: Vec<CrossTargetBundleGroup>,
 }
 
 #[derive(Debug, Clone)]
@@ -366,6 +406,760 @@ fn parser_dwa_compose_detail_enabled() -> bool {
     std::env::var("GLRMASK_PROFILE_PARSER_DWA_COMPOSE_DETAIL")
         .map(|value| value == "1")
         .unwrap_or(false)
+}
+
+fn parser_bundle_gate_factor_profile_enabled() -> bool {
+    std::env::var("GLRMASK_PROFILE_PARSER_BUNDLE_GATE_FACTOR")
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
+}
+
+fn parser_bundle_gate_factor_enabled() -> bool {
+    match std::env::var("GLRMASK_PARSER_BUNDLE_GATE_FACTOR") {
+        Ok(value) => {
+            let normalized = value.trim().to_ascii_lowercase();
+            !matches!(normalized.as_str(), "0" | "false" | "no" | "off")
+        }
+        Err(_) => true,
+    }
+}
+
+fn parser_bundle_gate_factor_min_estimated_template_states() -> usize {
+    std::env::var("GLRMASK_PARSER_BUNDLE_GATE_FACTOR_MIN_ESTIMATED_TEMPLATE_STATES")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(10_000)
+}
+
+fn parser_bundle_cross_target_gate_factor_enabled() -> bool {
+    std::env::var("GLRMASK_PARSER_BUNDLE_CROSS_TARGET_GATE_FACTOR")
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
+}
+
+fn parser_bundle_cross_target_gate_factor_min_estimated_template_states() -> usize {
+    std::env::var("GLRMASK_PARSER_BUNDLE_CROSS_TARGET_GATE_FACTOR_MIN_ESTIMATED_TEMPLATE_STATES")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(10_000)
+}
+
+fn validate_parser_bundle_gate_factor_enabled() -> bool {
+    std::env::var("GLRMASK_VALIDATE_PARSER_BUNDLE_GATE_FACTOR")
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
+}
+
+fn intersect_all_nwa_weights(nwa: &mut NWA, gate: &Weight) {
+    for state in nwa.states_mut() {
+        if let Some(final_weight) = state.final_weight.as_mut() {
+            *final_weight = final_weight.intersection(gate);
+        }
+        for targets in state.transitions.values_mut() {
+            for (_, weight) in targets {
+                *weight = weight.intersection(gate);
+            }
+        }
+        for (_, weight) in &mut state.epsilons {
+            *weight = weight.intersection(gate);
+        }
+    }
+}
+
+/// Replace exact same-target bundle variants by one canonical bundle plus a
+/// row gate on the branch entry edge.
+///
+/// For a fixed continuation target and terminal set, this rewrite is admitted
+/// only when every concrete terminal weight satisfies
+/// `w[i,t] = G[i] ∩ T[t]`, with `G[i] = union_t w[i,t]` and
+/// `T[t] = union_i w[i,t]`. Weighted path composition is intersection and
+/// alternatives combine by union, so distributivity makes the row language
+/// exactly `G[i] ∩ canonical_bundle_language`. The fixed target is essential:
+/// one shared canonical fragment may redirect its finals to only that target.
+fn factor_parser_bundle_entry_gates(summaries: &mut StateSummaries, templates: &Templates) {
+    if !parser_bundle_gate_factor_enabled() {
+        return;
+    }
+
+    let started_at = Instant::now();
+    let mut ids_by_target_and_terminals =
+        FxHashMap::<(u32, Vec<TerminalID>), Vec<usize>>::default();
+    for state in &summaries.states {
+        for branch in &state.branches {
+            let terminals = summaries.unique_bundles[branch.bundle_id]
+                .keys()
+                .copied()
+                .collect::<Vec<_>>();
+            let ids = ids_by_target_and_terminals
+                .entry((branch.target, terminals))
+                .or_default();
+            if !ids.contains(&branch.bundle_id) {
+                ids.push(branch.bundle_id);
+            }
+        }
+    }
+
+
+    // Cheap upper bound before touching any Weight algebra. If every candidate
+    // group factored perfectly, sharing one variant would avoid at most the sum
+    // of its terminal-template states for each additional row. Small parsers
+    // cannot amortize even the exact factorization census, so decline them here.
+    let max_estimated_removable_template_states = ids_by_target_and_terminals
+        .iter()
+        .filter(|(_, bundle_ids)| bundle_ids.len() >= 2)
+        .map(|((_, terminals), bundle_ids)| {
+            let states_per_variant = terminals
+                .iter()
+                .filter_map(|terminal| templates.by_terminal_nwa.get(terminal))
+                .map(|template| template.states().len())
+                .sum::<usize>();
+            states_per_variant.saturating_mul(bundle_ids.len().saturating_sub(1))
+        })
+        .sum::<usize>();
+    let min_estimated = parser_bundle_gate_factor_min_estimated_template_states();
+    if max_estimated_removable_template_states < min_estimated {
+        if compile_profile_enabled() || parser_bundle_gate_factor_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][parser_bundle_gate_factor_apply] skipped=small estimated_upper_bound_template_states={} min_estimated_template_states={} total_ms={:.3}",
+                max_estimated_removable_template_states,
+                min_estimated,
+                elapsed_ms(started_at),
+            );
+        }
+        return;
+    }
+
+    let mut bundle_ids_by_signature = summaries
+        .unique_bundles
+        .iter()
+        .enumerate()
+        .map(|(bundle_id, bundle)| (bundle_signature(bundle), bundle_id))
+        .collect::<FxHashMap<_, _>>();
+    let mut rewrite = FxHashMap::<(u32, usize), (usize, Weight)>::default();
+    let mut factored_groups = 0usize;
+    let mut factored_variants = 0usize;
+    let mut canonical_bundles_added = 0usize;
+    let mut estimated_removable_template_states = 0usize;
+    let mut largest_estimated_group_saving = 0usize;
+
+    for ((target, terminals), bundle_ids) in ids_by_target_and_terminals {
+        if bundle_ids.len() < 2 || terminals.is_empty() {
+            continue;
+        }
+
+        let row_gates = bundle_ids
+            .iter()
+            .map(|&bundle_id| Weight::union_all(summaries.unique_bundles[bundle_id].values()))
+            .collect::<Vec<_>>();
+        let column_weights = terminals
+            .iter()
+            .map(|terminal| {
+                Weight::union_all(bundle_ids.iter().map(|&bundle_id| {
+                    summaries.unique_bundles[bundle_id]
+                        .get(terminal)
+                        .expect("same-terminal-set bundle group lost a terminal")
+                }))
+            })
+            .collect::<Vec<_>>();
+
+        let exact = bundle_ids.iter().enumerate().all(|(row, &bundle_id)| {
+            terminals.iter().enumerate().all(|(column, terminal)| {
+                row_gates[row].intersection(&column_weights[column])
+                    == *summaries.unique_bundles[bundle_id]
+                        .get(terminal)
+                        .expect("same-terminal-set bundle group lost a terminal")
+            })
+        });
+        if !exact {
+            continue;
+        }
+
+        let template_states_per_variant = terminals
+            .iter()
+            .filter_map(|terminal| templates.by_terminal_nwa.get(terminal))
+            .map(|template| template.states().len())
+            .sum::<usize>();
+        let estimated_group_saving =
+            template_states_per_variant.saturating_mul(bundle_ids.len().saturating_sub(1));
+        estimated_removable_template_states =
+            estimated_removable_template_states.saturating_add(estimated_group_saving);
+        largest_estimated_group_saving =
+            largest_estimated_group_saving.max(estimated_group_saving);
+
+        let canonical_bundle = terminals
+            .iter()
+            .copied()
+            .zip(column_weights.into_iter())
+            .collect::<TerminalBundle>();
+        let signature = bundle_signature(&canonical_bundle);
+        let canonical_id = if let Some(&bundle_id) = bundle_ids_by_signature.get(&signature) {
+            bundle_id
+        } else {
+            let bundle_id = summaries.unique_bundles.len();
+            let accepts = terminal_bundle_has_acceptance(&canonical_bundle, templates);
+            summaries.unique_bundles.push(canonical_bundle);
+            summaries.bundle_accepts.push(accepts);
+            bundle_ids_by_signature.insert(signature, bundle_id);
+            canonical_bundles_added += 1;
+            bundle_id
+        };
+
+        if validate_parser_bundle_gate_factor_enabled() {
+            let canonical_nwa = templates.build_bundle(&summaries.unique_bundles[canonical_id]);
+            for (&old_bundle_id, gate) in bundle_ids.iter().zip(row_gates.iter()) {
+                let original_nwa = templates.build_bundle(&summaries.unique_bundles[old_bundle_id]);
+                let original_dwa = determinize_with_supports(&original_nwa, None).dwa;
+                let mut gated_canonical_nwa = canonical_nwa.clone();
+                intersect_all_nwa_weights(&mut gated_canonical_nwa, gate);
+                let gated_canonical_dwa =
+                    determinize_with_supports(&gated_canonical_nwa, None).dwa;
+                assert!(
+                    find_difference(&original_dwa, &gated_canonical_dwa)
+                        .expect("parser bundle gate-factor validation requires finite acyclic bundles")
+                        .is_none(),
+                    "parser bundle gate factorization changed weighted bundle language: target={target} old_bundle={old_bundle_id} canonical_bundle={canonical_id}",
+                );
+            }
+        }
+
+        for (&old_bundle_id, gate) in bundle_ids.iter().zip(row_gates.into_iter()) {
+            debug_assert!(!gate.is_empty(), "factored parser bundle row gate must be live");
+            rewrite.insert((target, old_bundle_id), (canonical_id, gate));
+        }
+        factored_groups += 1;
+        factored_variants += bundle_ids.len();
+    }
+
+    let mut rewritten_branches = 0usize;
+    for state in &mut summaries.states {
+        for branch in &mut state.branches {
+            let Some((canonical_id, gate)) = rewrite.get(&(branch.target, branch.bundle_id)) else {
+                continue;
+            };
+            branch.bundle_id = *canonical_id;
+            branch.entry_weight = gate.clone();
+            rewritten_branches += 1;
+        }
+    }
+
+    if compile_profile_enabled() || parser_bundle_gate_factor_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][parser_bundle_gate_factor_apply] factored_groups={} factored_variants={} rewritten_branches={} canonical_bundles_added={} estimated_removable_template_states={} largest_estimated_group_saving={} total_bundles_after={} total_ms={:.3}",
+            factored_groups,
+            factored_variants,
+            rewritten_branches,
+            canonical_bundles_added,
+            estimated_removable_template_states,
+            largest_estimated_group_saving,
+            summaries.unique_bundles.len(),
+            elapsed_ms(started_at),
+        );
+    }
+}
+
+/// Share one already-factorized canonical bundle across distinct continuation
+/// targets when their target domains are pairwise disjoint.
+///
+/// This pass deliberately runs after same-target factorization. It only accepts
+/// terminal sets for which every target now has exactly one bundle row. If
+/// `C[j,t] = H[j] ∩ T[t]` for target row `j`, and the `H[j]` are pairwise
+/// disjoint, one global canonical bundle `T` can feed every continuation using
+/// final epsilon edges weighted by `H[j]`. A source branch retains its narrower
+/// same-target entry gate, so it can reach only the continuation whose target
+/// gate contains that row domain.
+fn factor_parser_bundle_cross_target_gates(
+    summaries: &mut StateSummaries,
+    templates: &Templates,
+) {
+    if !parser_bundle_cross_target_gate_factor_enabled() {
+        return;
+    }
+
+    let started_at = Instant::now();
+    let mut rows_by_terminals =
+        FxHashMap::<Vec<TerminalID>, BTreeMap<u32, Vec<usize>>>::default();
+    for state in &summaries.states {
+        for branch in &state.branches {
+            let terminals = summaries.unique_bundles[branch.bundle_id]
+                .keys()
+                .copied()
+                .collect::<Vec<_>>();
+            let ids = rows_by_terminals
+                .entry(terminals)
+                .or_default()
+                .entry(branch.target)
+                .or_default();
+            if !ids.contains(&branch.bundle_id) {
+                ids.push(branch.bundle_id);
+            }
+        }
+    }
+
+    // Cheap upper bound before any Weight unions/intersections. For each
+    // terminal set, even a perfect cross-target factorization can remove at
+    // most one template copy per additional continuation target. Small parsers
+    // cannot amortize the exact rectangular/disjointness census.
+    let max_estimated_incremental_template_states = rows_by_terminals
+        .iter()
+        .filter_map(|(terminals, by_target)| {
+            let target_count = by_target.len();
+            (target_count >= 2).then(|| {
+                let states_per_copy = terminals
+                    .iter()
+                    .filter_map(|terminal| templates.by_terminal_nwa.get(terminal))
+                    .map(|template| template.states().len())
+                    .sum::<usize>();
+                states_per_copy.saturating_mul(target_count.saturating_sub(1))
+            })
+        })
+        .sum::<usize>();
+    let min_estimated = parser_bundle_cross_target_gate_factor_min_estimated_template_states();
+    if max_estimated_incremental_template_states < min_estimated {
+        if compile_profile_enabled() || parser_bundle_gate_factor_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][parser_bundle_cross_target_gate_factor_apply] skipped=small estimated_upper_bound_template_states={} min_estimated_template_states={} total_ms={:.3}",
+                max_estimated_incremental_template_states,
+                min_estimated,
+                elapsed_ms(started_at),
+            );
+        }
+        return;
+    }
+
+    struct PendingCrossTargetGroup {
+        canonical_bundle: TerminalBundle,
+        target_rows: Vec<(u32, usize)>,
+        target_gates: Vec<Weight>,
+        estimated_saving: usize,
+    }
+
+    let mut pending_groups = Vec::<PendingCrossTargetGroup>::new();
+    let mut estimated_incremental_template_states = 0usize;
+
+    for (terminals, by_target) in rows_by_terminals {
+        if terminals.is_empty() || by_target.len() < 2 {
+            continue;
+        }
+        if by_target.values().any(|bundle_ids| bundle_ids.len() != 1) {
+            continue;
+        }
+        let target_rows = by_target
+            .iter()
+            .map(|(&target, bundle_ids)| (target, bundle_ids[0]))
+            .collect::<Vec<_>>();
+        let target_gates = target_rows
+            .iter()
+            .map(|(_, bundle_id)| Weight::union_all(summaries.unique_bundles[*bundle_id].values()))
+            .collect::<Vec<_>>();
+        let column_weights = terminals
+            .iter()
+            .map(|terminal| {
+                Weight::union_all(target_rows.iter().map(|(_, bundle_id)| {
+                    summaries.unique_bundles[*bundle_id]
+                        .get(terminal)
+                        .expect("cross-target canonical row lost a terminal")
+                }))
+            })
+            .collect::<Vec<_>>();
+        let exact = target_rows
+            .iter()
+            .enumerate()
+            .all(|(row, (_, bundle_id))| {
+                terminals.iter().enumerate().all(|(column, terminal)| {
+                    target_gates[row].intersection(&column_weights[column])
+                        == *summaries.unique_bundles[*bundle_id]
+                            .get(terminal)
+                            .expect("cross-target canonical row lost a terminal")
+                })
+            });
+        if !exact {
+            continue;
+        }
+        let disjoint = (0..target_gates.len()).all(|left| {
+            (left + 1..target_gates.len())
+                .all(|right| target_gates[left].is_disjoint(&target_gates[right]))
+        });
+        if !disjoint {
+            continue;
+        }
+
+        let template_states_per_copy = terminals
+            .iter()
+            .filter_map(|terminal| templates.by_terminal_nwa.get(terminal))
+            .map(|template| template.states().len())
+            .sum::<usize>();
+        let estimated_saving =
+            template_states_per_copy.saturating_mul(target_rows.len().saturating_sub(1));
+        estimated_incremental_template_states =
+            estimated_incremental_template_states.saturating_add(estimated_saving);
+        pending_groups.push(PendingCrossTargetGroup {
+            canonical_bundle: terminals
+                .iter()
+                .copied()
+                .zip(column_weights.into_iter())
+                .collect(),
+            target_rows,
+            target_gates,
+            estimated_saving,
+        });
+    }
+
+    if estimated_incremental_template_states < min_estimated {
+        if compile_profile_enabled() || parser_bundle_gate_factor_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][parser_bundle_cross_target_gate_factor_apply] skipped=exact_small estimated_upper_bound_template_states={} exact_estimated_template_states={} min_estimated_template_states={} exact_groups={} total_ms={:.3}",
+                max_estimated_incremental_template_states,
+                estimated_incremental_template_states,
+                min_estimated,
+                pending_groups.len(),
+                elapsed_ms(started_at),
+            );
+        }
+        return;
+    }
+
+    let mut bundle_ids_by_signature = summaries
+        .unique_bundles
+        .iter()
+        .enumerate()
+        .map(|(bundle_id, bundle)| (bundle_signature(bundle), bundle_id))
+        .collect::<FxHashMap<_, _>>();
+    let mut rewrite = FxHashMap::<(u32, usize), (usize, usize, Weight)>::default();
+    let mut factored_groups = 0usize;
+    let mut factored_targets = 0usize;
+    let mut canonical_bundles_added = 0usize;
+
+    for pending in pending_groups {
+        let signature = bundle_signature(&pending.canonical_bundle);
+        let canonical_id = if let Some(&bundle_id) = bundle_ids_by_signature.get(&signature) {
+            bundle_id
+        } else {
+            let bundle_id = summaries.unique_bundles.len();
+            let accepts = terminal_bundle_has_acceptance(&pending.canonical_bundle, templates);
+            summaries.unique_bundles.push(pending.canonical_bundle);
+            summaries.bundle_accepts.push(accepts);
+            bundle_ids_by_signature.insert(signature, bundle_id);
+            canonical_bundles_added += 1;
+            bundle_id
+        };
+
+        if validate_parser_bundle_gate_factor_enabled() {
+            let canonical_nwa = templates.build_bundle(&summaries.unique_bundles[canonical_id]);
+            for ((target, old_bundle_id), gate) in
+                pending.target_rows.iter().zip(pending.target_gates.iter())
+            {
+                let original_nwa = templates.build_bundle(&summaries.unique_bundles[*old_bundle_id]);
+                let original_dwa = determinize_with_supports(&original_nwa, None).dwa;
+                let mut gated_canonical_nwa = canonical_nwa.clone();
+                intersect_all_nwa_weights(&mut gated_canonical_nwa, gate);
+                let gated_canonical_dwa =
+                    determinize_with_supports(&gated_canonical_nwa, None).dwa;
+                assert!(
+                    find_difference(&original_dwa, &gated_canonical_dwa)
+                        .expect("cross-target gate-factor validation requires finite acyclic bundles")
+                        .is_none(),
+                    "cross-target parser bundle factorization changed weighted bundle language: target={target} old_bundle={old_bundle_id} canonical_bundle={canonical_id}",
+                );
+            }
+        }
+
+        let group_id = summaries.cross_target_groups.len();
+        summaries.cross_target_groups.push(CrossTargetBundleGroup {
+            bundle_id: canonical_id,
+            target_gates: pending
+                .target_rows
+                .iter()
+                .zip(pending.target_gates.iter())
+                .map(|((target, _), gate)| (*target, gate.clone()))
+                .collect(),
+        });
+        for ((target, old_bundle_id), gate) in
+            pending.target_rows.iter().zip(pending.target_gates.iter())
+        {
+            rewrite.insert(
+                (*target, *old_bundle_id),
+                (canonical_id, group_id, gate.clone()),
+            );
+        }
+        factored_groups += 1;
+        factored_targets += pending.target_rows.len();
+        debug_assert!(pending.estimated_saving > 0);
+    }
+
+    let mut rewritten_branches = 0usize;
+    for state in &mut summaries.states {
+        for branch in &mut state.branches {
+            let Some((canonical_id, group_id, target_gate)) =
+                rewrite.get(&(branch.target, branch.bundle_id))
+            else {
+                continue;
+            };
+            // The old target-specific bundle is independently certified as
+            // `target_gate ∩ global_bundle`. Therefore an existing source gate
+            // `E` may be moved across the replacement by distributivity:
+            // `E ∩ old = E ∩ target_gate ∩ global_bundle`.
+            branch.bundle_id = *canonical_id;
+            branch.entry_weight = branch.entry_weight.intersection(target_gate);
+            branch.cross_target_group_id = Some(*group_id);
+            rewritten_branches += 1;
+        }
+    }
+
+    if compile_profile_enabled() || parser_bundle_gate_factor_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][parser_bundle_cross_target_gate_factor_apply] factored_groups={} factored_targets={} rewritten_branches={} canonical_bundles_added={} estimated_incremental_template_states={} cross_target_groups={} total_ms={:.3}",
+            factored_groups,
+            factored_targets,
+            rewritten_branches,
+            canonical_bundles_added,
+            estimated_incremental_template_states,
+            summaries.cross_target_groups.len(),
+            elapsed_ms(started_at),
+        );
+    }
+}
+
+/// Profile an exact rectangular factorization of bundle weights.
+///
+/// For a fixed continuation target and terminal set, let `w[i,t]` be the
+/// token-domain weight on terminal `t` in bundle `i`, let `G[i]` be the union
+/// of row `i`, and let `T[t]` be the union of column `t`.  If
+///
+///     w[i,t] == G[i] ∩ T[t]
+///
+/// for every row/column, then all bundles in the group are restrictions of one
+/// canonical per-terminal bundle by a single row gate.  This function only
+/// measures how often that identity holds; it does not change construction.
+fn profile_parser_bundle_gate_factorability(summaries: &StateSummaries) {
+    if !parser_bundle_gate_factor_profile_enabled() {
+        return;
+    }
+
+    let started_at = Instant::now();
+    let mut ids_by_target_and_terminals =
+        FxHashMap::<(u32, Vec<TerminalID>), Vec<usize>>::default();
+    for state in &summaries.states {
+        for branch in &state.branches {
+            let bundle = &summaries.unique_bundles[branch.bundle_id];
+            let terminals = bundle.keys().copied().collect::<Vec<_>>();
+            let ids = ids_by_target_and_terminals
+                .entry((branch.target, terminals))
+                .or_default();
+            if !ids.contains(&branch.bundle_id) {
+                ids.push(branch.bundle_id);
+            }
+        }
+    }
+
+    let mut candidate_groups = 0usize;
+    let mut candidate_bundles = 0usize;
+    let mut exact_groups = 0usize;
+    let mut exact_bundles = 0usize;
+    let mut exact_removable_bundles = 0usize;
+    let mut exact_group_size_histogram = BTreeMap::<usize, usize>::new();
+    let mut largest_exact_group = 0usize;
+
+    for ((_target, terminals), bundle_ids) in ids_by_target_and_terminals {
+        if bundle_ids.len() < 2 || terminals.is_empty() {
+            continue;
+        }
+        candidate_groups += 1;
+        candidate_bundles += bundle_ids.len();
+
+        let row_gates = bundle_ids
+            .iter()
+            .map(|&bundle_id| {
+                Weight::union_all(summaries.unique_bundles[bundle_id].values())
+            })
+            .collect::<Vec<_>>();
+        let column_weights = terminals
+            .iter()
+            .map(|terminal| {
+                Weight::union_all(bundle_ids.iter().map(|&bundle_id| {
+                    summaries.unique_bundles[bundle_id]
+                        .get(terminal)
+                        .expect("same-terminal-set bundle group lost a terminal")
+                }))
+            })
+            .collect::<Vec<_>>();
+
+        let exact = bundle_ids.iter().enumerate().all(|(row, &bundle_id)| {
+            let bundle = &summaries.unique_bundles[bundle_id];
+            terminals.iter().enumerate().all(|(column, terminal)| {
+                row_gates[row].intersection(&column_weights[column])
+                    == *bundle
+                        .get(terminal)
+                        .expect("same-terminal-set bundle group lost a terminal")
+            })
+        });
+        if !exact {
+            continue;
+        }
+
+        exact_groups += 1;
+        exact_bundles += bundle_ids.len();
+        exact_removable_bundles += bundle_ids.len() - 1;
+        largest_exact_group = largest_exact_group.max(bundle_ids.len());
+        *exact_group_size_histogram.entry(bundle_ids.len()).or_default() += 1;
+        eprintln!(
+            "[glrmask/profile][parser_bundle_gate_factor_group] target={} terminals={} bundles={:?}",
+            _target,
+            terminals.len(),
+            bundle_ids,
+        );
+    }
+
+    eprintln!(
+        "[glrmask/profile][parser_bundle_gate_factor] unique_bundles={} candidate_groups={} candidate_bundles={} exact_groups={} exact_bundles={} exact_removable_bundles={} largest_exact_group={} exact_group_size_histogram={:?} total_ms={:.3}",
+        summaries.unique_bundles.len(),
+        candidate_groups,
+        candidate_bundles,
+        exact_groups,
+        exact_bundles,
+        exact_removable_bundles,
+        largest_exact_group,
+        exact_group_size_histogram,
+        elapsed_ms(started_at),
+    );
+}
+
+/// Measure the additional exact sharing available across continuation targets.
+///
+/// Same-target factorization above needs no separation between row gates. For
+/// different targets, a shared canonical interior is still exact when the
+/// unioned gate for each target is pairwise disjoint from every other target's
+/// gate. Then canonical final states may have one epsilon edge per target,
+/// weighted by that target gate: the source-row gate intersects away every
+/// foreign continuation.
+fn profile_parser_bundle_cross_target_gate_factorability(
+    summaries: &StateSummaries,
+    templates: &Templates,
+) {
+    if !parser_bundle_gate_factor_profile_enabled() {
+        return;
+    }
+
+    let started_at = Instant::now();
+    let mut rows_by_terminals = FxHashMap::<Vec<TerminalID>, Vec<(u32, usize)>>::default();
+    for state in &summaries.states {
+        for branch in &state.branches {
+            let terminals = summaries.unique_bundles[branch.bundle_id]
+                .keys()
+                .copied()
+                .collect::<Vec<_>>();
+            let rows = rows_by_terminals.entry(terminals).or_default();
+            let row = (branch.target, branch.bundle_id);
+            if !rows.contains(&row) {
+                rows.push(row);
+            }
+        }
+    }
+
+    let mut exact_cross_target_groups = 0usize;
+    let mut exact_cross_target_rows = 0usize;
+    let mut distinct_targets_total = 0usize;
+    let mut incremental_removable_target_copies = 0usize;
+    let mut estimated_incremental_template_states = 0usize;
+    let mut largest_incremental_group_saving = 0usize;
+
+    for (terminals, rows) in rows_by_terminals {
+        if rows.len() < 2 || terminals.is_empty() {
+            continue;
+        }
+        let distinct_targets = rows
+            .iter()
+            .map(|(target, _)| *target)
+            .collect::<rustc_hash::FxHashSet<_>>();
+        if distinct_targets.len() < 2 {
+            continue;
+        }
+
+        let row_gates = rows
+            .iter()
+            .map(|(_, bundle_id)| Weight::union_all(summaries.unique_bundles[*bundle_id].values()))
+            .collect::<Vec<_>>();
+        let column_weights = terminals
+            .iter()
+            .map(|terminal| {
+                Weight::union_all(rows.iter().map(|(_, bundle_id)| {
+                    summaries.unique_bundles[*bundle_id]
+                        .get(terminal)
+                        .expect("cross-target same-terminal-set group lost a terminal")
+                }))
+            })
+            .collect::<Vec<_>>();
+        let rectangular = rows.iter().enumerate().all(|(row, (_, bundle_id))| {
+            terminals.iter().enumerate().all(|(column, terminal)| {
+                row_gates[row].intersection(&column_weights[column])
+                    == *summaries.unique_bundles[*bundle_id]
+                        .get(terminal)
+                        .expect("cross-target same-terminal-set group lost a terminal")
+            })
+        });
+        if !rectangular {
+            continue;
+        }
+
+        let mut gate_by_target = BTreeMap::<u32, Weight>::new();
+        for ((target, _), gate) in rows.iter().zip(row_gates.iter()) {
+            gate_by_target
+                .entry(*target)
+                .and_modify(|existing| *existing = existing.union(gate))
+                .or_insert_with(|| gate.clone());
+        }
+        let target_gates = gate_by_target.values().collect::<Vec<_>>();
+        let target_disjoint = (0..target_gates.len()).all(|left| {
+            (left + 1..target_gates.len())
+                .all(|right| target_gates[left].is_disjoint(target_gates[right]))
+        });
+        if !target_disjoint {
+            continue;
+        }
+
+        let target_count = gate_by_target.len();
+        let template_states_per_copy = terminals
+            .iter()
+            .filter_map(|terminal| templates.by_terminal_nwa.get(terminal))
+            .map(|template| template.states().len())
+            .sum::<usize>();
+        let estimated_saving =
+            template_states_per_copy.saturating_mul(target_count.saturating_sub(1));
+        estimated_incremental_template_states =
+            estimated_incremental_template_states.saturating_add(estimated_saving);
+        largest_incremental_group_saving =
+            largest_incremental_group_saving.max(estimated_saving);
+        exact_cross_target_groups += 1;
+        exact_cross_target_rows += rows.len();
+        distinct_targets_total += target_count;
+        incremental_removable_target_copies += target_count - 1;
+        eprintln!(
+            "[glrmask/profile][parser_bundle_cross_target_gate_factor_group] terminals={} rows={} targets={} estimated_incremental_template_states={}",
+            terminals.len(),
+            rows.len(),
+            target_count,
+            estimated_saving,
+        );
+    }
+
+    eprintln!(
+        "[glrmask/profile][parser_bundle_cross_target_gate_factor] exact_groups={} rows={} distinct_targets={} incremental_removable_target_copies={} estimated_incremental_template_states={} largest_incremental_group_saving={} total_ms={:.3}",
+        exact_cross_target_groups,
+        exact_cross_target_rows,
+        distinct_targets_total,
+        incremental_removable_target_copies,
+        estimated_incremental_template_states,
+        largest_incremental_group_saving,
+        elapsed_ms(started_at),
+    );
 }
 
 fn parser_bundle_topology_reuse_enabled() -> bool {
@@ -784,7 +1578,12 @@ fn build_state_summaries(
                 unique_bundles.push(bundle);
                 bundle_id
             };
-            branches.push(Branch { target, bundle_id });
+            branches.push(Branch {
+                target,
+                bundle_id,
+                entry_weight: Weight::all(),
+                cross_target_group_id: None,
+            });
         }
         branches_by_state.push(branches);
     }
@@ -807,6 +1606,7 @@ fn build_state_summaries(
         start_states: terminal_automaton.start_states(),
         unique_bundles,
         bundle_accepts,
+        cross_target_groups: Vec::new(),
     }
 }
 
@@ -1529,13 +2329,19 @@ fn trim_unreachable_nwa(nwa: NWA) -> NWA {
     NWA::from_parts(new_states, starts)
 }
 
-fn trim_resolved_parser_nwa_enabled() -> bool {
+fn trim_resolved_parser_nwa_enabled(state_count: usize) -> bool {
     std::env::var("GLRMASK_TRIM_RESOLVED_PARSER_NWA")
+        .ok()
         .map(|value| {
             let normalized = value.trim().to_ascii_lowercase();
             matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
         })
         .unwrap_or(false)
+        && state_count
+            >= std::env::var("GLRMASK_TRIM_RESOLVED_PARSER_NWA_MIN_STATES")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(65_536)
 }
 
 fn direct_parser_read_projection_enabled() -> bool {
@@ -2281,7 +3087,11 @@ fn determinize_with_supports(
             }
             let sort_started = detail.as_ref().map(|_| Instant::now());
             contribs.sort_unstable_by_key(|(state_id, _)| *state_id);
-            merge_sorted_target_contributions(&mut contribs, detail.as_mut());
+            merge_sorted_target_contributions(
+                &mut contribs,
+                &mut intersection_cache,
+                detail.as_mut(),
+            );
             if let (Some(detail), Some(started_at)) = (detail.as_mut(), sort_started) {
                 detail.contribution_sort_ms += elapsed_ms(started_at);
             }
@@ -2651,6 +3461,25 @@ fn determinize_with_supports(
                 dwa.set_final_weight(state_id, weight.clone());
             }
         }
+    }
+
+    if compile_profile_enabled() {
+        let mut support_counts = FxHashMap::<Vec<u32>, usize>::default();
+        for support in &supports {
+            *support_counts.entry(support.clone()).or_default() += 1;
+        }
+        let distinct = support_counts.len();
+        let repeated_states = supports.len().saturating_sub(distinct);
+        let max_multiplicity = support_counts.values().copied().max().unwrap_or(0);
+        let repeated_signatures = support_counts.values().filter(|&&count| count > 1).count();
+        eprintln!(
+            "[glrmask/profile][parser_support_signatures] states={} distinct={} repeated_states={} repeated_signatures={} max_multiplicity={}",
+            supports.len(),
+            distinct,
+            repeated_states,
+            repeated_signatures,
+            max_multiplicity,
+        );
     }
 
     if let Some(detail) = detail.as_mut() {
@@ -3510,6 +4339,133 @@ fn append_bundle_redirecting_finals(
     body
 }
 
+fn append_bundle_redirecting_finals_to_targets(
+    arena: &mut NWA,
+    bundle: &NWA,
+    target_continuations: &[(u32, Weight)],
+) -> NwaBody {
+    let offset = arena.states().len() as u32;
+    let body = arena.append_with_body(bundle);
+    let appended_len = bundle.states().len();
+
+    for state_id in offset as usize..offset as usize + appended_len {
+        let Some(final_weight) = arena.states_mut()[state_id].final_weight.take() else {
+            continue;
+        };
+        if final_weight.is_empty() {
+            continue;
+        }
+        for (continuation_state, target_gate) in target_continuations {
+            let routed = final_weight.intersection(target_gate);
+            if !routed.is_empty() {
+                arena.add_epsilon(state_id as u32, *continuation_state, routed);
+            }
+        }
+    }
+
+    body
+}
+
+
+fn use_prepush_reconstructed_for_bundle(
+    enabled: bool,
+    bundle: &TerminalBundle,
+    templates: &Templates,
+) -> bool {
+    if !enabled || bundle.len() <= 1 {
+        return false;
+    }
+    let threshold = std::env::var("GLRMASK_PREPUSH_RECONSTRUCT_MIN_TEMPLATE_SUM")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    if threshold == 0 {
+        return true;
+    }
+    let sizes = bundle
+        .keys()
+        .filter_map(|terminal| templates.by_terminal_nwa.get(terminal))
+        .map(|template| template.states().len())
+        .collect::<Vec<_>>();
+    let metric = std::env::var("GLRMASK_PREPUSH_RECONSTRUCT_METRIC")
+        .ok()
+        .unwrap_or_else(|| "sum".to_string());
+    let value = if metric.eq_ignore_ascii_case("max") {
+        sizes.into_iter().max().unwrap_or(0)
+    } else {
+        sizes.into_iter().sum::<usize>()
+    };
+    value >= threshold
+}
+
+fn append_cross_target_branch_fragment(
+    arena: &mut NWA,
+    summaries: &StateSummaries,
+    templates: &Templates,
+    built_bundle_cache: &mut [Option<Arc<NWA>>],
+    group_id: usize,
+    continuation_states: &[u32],
+    productive: &[bool],
+    use_prepush_reconstructed_bundles: bool,
+    compose_detail: Option<&mut ParserDwaComposeDetailProfile>,
+) -> Option<NwaBody> {
+    let group = summaries.cross_target_groups.get(group_id)?;
+    let bundle_id = group.bundle_id;
+    let bundle = summaries.unique_bundles.get(bundle_id)?;
+    if !summaries.bundle_accepts.get(bundle_id).copied().unwrap_or(false) {
+        return None;
+    }
+
+    if built_bundle_cache[bundle_id].is_none() {
+        if use_prepush_reconstructed_for_bundle(
+            use_prepush_reconstructed_bundles,
+            bundle,
+            templates,
+        ) {
+            built_bundle_cache[bundle_id] =
+                Some(Arc::new(templates.build_prepush_reconstructed_bundle(bundle)));
+        } else if let Some(detail) = compose_detail {
+            let (bundle_nwa, bundle_profile) = templates.build_bundle_profiled(bundle);
+            detail.bundle_profile_total_ms += bundle_profile.total_ms;
+            detail.bundle_profile_build_group_dfas_ms += bundle_profile.build_group_dfas_ms;
+            detail.bundle_profile_union_groups_ms += bundle_profile.union_groups_ms;
+            detail.bundle_profile_determinize_ms += bundle_profile.determinize_bundle_ms;
+            detail.bundle_profile_minimize_ms += bundle_profile.minimize_ms;
+            detail.bundle_profile_dwa_to_nwa_ms += bundle_profile.dwa_to_nwa_ms;
+            detail.bundle_profile_result_dwa_states += bundle_profile.result_dwa_states;
+            detail.bundle_profile_result_dwa_transitions += bundle_profile.result_dwa_transitions;
+            detail.bundle_profile_result_nwa_states += bundle_profile.result_nwa_states;
+            detail.bundle_profile_result_nwa_transitions += bundle_profile.result_nwa_transitions;
+            built_bundle_cache[bundle_id] = Some(Arc::new(bundle_nwa));
+        } else {
+            built_bundle_cache[bundle_id] = Some(Arc::new(templates.build_bundle(bundle)));
+        }
+    }
+    let bundle_nwa = built_bundle_cache[bundle_id]
+        .as_ref()
+        .expect("cross-target canonical bundle cache entry just initialized");
+    let target_continuations = group
+        .target_gates
+        .iter()
+        .filter_map(|(target, gate)| {
+            productive
+                .get(*target as usize)
+                .copied()
+                .unwrap_or(false)
+                .then(|| (continuation_states[*target as usize], gate.clone()))
+        })
+        .filter(|(continuation, _)| *continuation != u32::MAX)
+        .collect::<Vec<_>>();
+    if target_continuations.is_empty() {
+        return None;
+    }
+    Some(append_bundle_redirecting_finals_to_targets(
+        arena,
+        bundle_nwa.as_ref(),
+        &target_continuations,
+    ))
+}
+
 fn append_branch_fragment(
     arena: &mut NWA,
     summaries: &StateSummaries,
@@ -3517,6 +4473,7 @@ fn append_branch_fragment(
     built_bundle_cache: &mut [Option<Arc<NWA>>],
     bundle_id: usize,
     continuation_state: u32,
+    use_prepush_reconstructed_bundles: bool,
     compose_detail: Option<&mut ParserDwaComposeDetailProfile>,
 ) -> Option<NwaBody> {
     let bundle = summaries.unique_bundles.get(bundle_id)?;
@@ -3556,7 +4513,14 @@ fn append_branch_fragment(
     // bundle/grammar/compiler state space, not to pass a nondeterministic bundle
     // downstream.
     if built_bundle_cache[bundle_id].is_none() {
-        if let Some(detail) = compose_detail {
+        if use_prepush_reconstructed_for_bundle(
+            use_prepush_reconstructed_bundles,
+            bundle,
+            templates,
+        ) {
+            built_bundle_cache[bundle_id] =
+                Some(Arc::new(templates.build_prepush_reconstructed_bundle(bundle)));
+        } else if let Some(detail) = compose_detail {
             let (bundle_nwa, bundle_profile) = templates.build_bundle_profiled(bundle);
             detail.bundle_profile_total_ms += bundle_profile.total_ms;
             detail.bundle_profile_build_group_dfas_ms += bundle_profile.build_group_dfas_ms;
@@ -3569,7 +4533,7 @@ fn append_branch_fragment(
             detail.bundle_profile_result_nwa_states += bundle_profile.result_nwa_states;
             detail.bundle_profile_result_nwa_transitions += bundle_profile.result_nwa_transitions;
             eprintln!(
-                "[glrmask/profile][parser_bundle] bundle_id={} terminals={} weight_groups={} overlap_components={} largest_overlap_component={} single_entry_weights={} single_tsid_weights={} total_weight_outer_ranges={} build_group_dfas_ms={:.3} union_groups_ms={:.3} determinize_bundle_ms={:.3} det_pop_ms={:.3} det_alive_ms={:.3} det_final_ms={:.3} det_collect_labels_ms={:.3} det_next_state_ms={:.3} det_edge_weight_ms={:.3} det_lookup_ms={:.3} det_add_transition_ms={:.3} det_states={} det_labels={} det_transitions={} det_edge_subset_total={} det_edge_subset_max={} det_edge_cache_hits={} det_edge_cache_misses={} minimize_ms={:.3} minimize_skipped={} dwa_to_nwa_ms={:.3} total_ms={:.3} result_dwa_states={} result_dwa_transitions={} result_nwa_states={} result_nwa_transitions={}",
+                "[glrmask/profile][parser_bundle] bundle_id={} terminals={} weight_groups={} overlap_components={} largest_overlap_component={} single_entry_weights={} single_tsid_weights={} total_weight_outer_ranges={} build_group_dfas_ms={:.3} union_groups_ms={:.3} determinize_bundle_ms={:.3} det_pop_ms={:.3} det_alive_ms={:.3} det_final_ms={:.3} det_collect_labels_ms={:.3} det_next_state_ms={:.3} det_edge_weight_ms={:.3} det_lookup_ms={:.3} det_add_transition_ms={:.3} det_states={} det_labels={} det_transitions={} det_edge_subset_total={} det_edge_subset_max={} det_edge_cache_hits={} det_edge_cache_misses={} minimize_ms={:.3} minimize_skipped={} dwa_to_nwa_ms={:.3} total_ms={:.3} result_dwa_states={} result_dwa_transitions={} result_nwa_states={} result_nwa_transitions={} negative_only_states={} positive_only_states={} mixed_label_states={} unlabeled_states={} negative_transitions={} positive_transitions={} truncated_reachable_states={} truncated_push_frontier_states={} truncated_edges_traversed={} prepush_states={} prepush_input_transitions={} prepush_output_edges={} prepush_output_sites={} prepush_output_programs={} prepush_core_states={} prepush_frontier_payloads={} prepush_frontier_final_payloads={} prepush_frontier_push_edges={} prepush_census_ms={:.3} prepush_program_sequences={} prepush_programs_multisequence={} prepush_max_sequences_per_program={} prepush_max_push_depth={}",
                 bundle_id,
                 bundle_profile.input_terminals,
                 bundle_profile.weight_groups,
@@ -3604,6 +4568,29 @@ fn append_branch_fragment(
                 bundle_profile.result_dwa_transitions,
                 bundle_profile.result_nwa_states,
                 bundle_profile.result_nwa_transitions,
+                bundle_profile.result_negative_only_states,
+                bundle_profile.result_positive_only_states,
+                bundle_profile.result_mixed_label_states,
+                bundle_profile.result_unlabeled_states,
+                bundle_profile.result_negative_transitions,
+                bundle_profile.result_positive_transitions,
+                bundle_profile.truncated_reachable_states,
+                bundle_profile.truncated_push_frontier_states,
+                bundle_profile.truncated_edges_traversed,
+                bundle_profile.prepush_states,
+                bundle_profile.prepush_input_transitions,
+                bundle_profile.prepush_output_edges,
+                bundle_profile.prepush_output_sites,
+                bundle_profile.prepush_output_programs,
+                bundle_profile.prepush_core_states,
+                bundle_profile.prepush_frontier_payloads,
+                bundle_profile.prepush_frontier_final_payloads,
+                bundle_profile.prepush_frontier_push_edges,
+                bundle_profile.prepush_census_ms,
+                bundle_profile.prepush_program_sequences,
+                bundle_profile.prepush_programs_multisequence,
+                bundle_profile.prepush_max_sequences_per_program,
+                bundle_profile.prepush_max_push_depth,
             );
             built_bundle_cache[bundle_id] = Some(Arc::new(bundle_nwa));
         } else {
@@ -3620,15 +4607,2924 @@ fn append_branch_fragment(
     ))
 }
 
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum DirectPrepushNode {
+    Continuation(u32),
+    BundleCore {
+        bundle_id: usize,
+        target: u32,
+        core_state: u32,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct DirectPrepushConfig {
+    node: DirectPrepushNode,
+    pending: SmallVec<[u32; 8]>,
+}
+
+fn append_pending(
+    pending: &SmallVec<[u32; 8]>,
+    pushes: &[u32],
+) -> SmallVec<[u32; 8]> {
+    let mut next = pending.clone();
+    next.extend_from_slice(pushes);
+    next
+}
+
+fn consume_pending(
+    pending: &SmallVec<[u32; 8]>,
+    label: i32,
+) -> Option<SmallVec<[u32; 8]>> {
+    let Some(&top) = pending.last() else {
+        return Some(pending.clone());
+    };
+    if label != DEFAULT_LABEL && (label < 0 || label as u32 != top) {
+        return None;
+    }
+    let mut next = pending.clone();
+    next.pop();
+    Some(next)
+}
+
+
+fn direct_prepush_pending_demand(
+    node: &DirectPrepushNode,
+    summaries: &StateSummaries,
+    productive: &[bool],
+    bundles: &[Option<Arc<WeightedPrepushBundle>>],
+    memo: &mut FxHashMap<DirectPrepushNode, usize>,
+    visiting: &mut rustc_hash::FxHashSet<DirectPrepushNode>,
+) -> Option<usize> {
+    if let Some(&cached) = memo.get(node) {
+        return Some(cached);
+    }
+    if !visiting.insert(node.clone()) {
+        // A genuine cycle would permit an unbounded number of future terminal
+        // effects in one model token. The current finite-vocabulary terminal
+        // automata should be acyclic; decline the quotient if that invariant is
+        // ever violated rather than silently truncating pending writes.
+        return None;
+    }
+    let mut best = 0usize;
+    match *node {
+        DirectPrepushNode::Continuation(state_id) => {
+            let state = summaries.states.get(state_id as usize)?;
+            // Token acceptance itself observes no pending writes. Other live
+            // suffixes may, so take the maximum over all productive branches.
+            for (target, weight) in &state.epsilon_branches {
+                if weight.is_empty()
+                    || !productive.get(*target as usize).copied().unwrap_or(false)
+                {
+                    continue;
+                }
+                best = best.max(direct_prepush_pending_demand(
+                    &DirectPrepushNode::Continuation(*target),
+                    summaries,
+                    productive,
+                    bundles,
+                    memo,
+                    visiting,
+                )?);
+            }
+            for branch in &state.branches {
+                if !productive
+                    .get(branch.target as usize)
+                    .copied()
+                    .unwrap_or(false)
+                    || !summaries
+                        .bundle_accepts
+                        .get(branch.bundle_id)
+                        .copied()
+                        .unwrap_or(false)
+                {
+                    continue;
+                }
+                let Some(bundle) = bundles.get(branch.bundle_id).and_then(Option::as_ref) else {
+                    continue;
+                };
+                if bundle.states.is_empty() {
+                    continue;
+                }
+                best = best.max(direct_prepush_pending_demand(
+                    &DirectPrepushNode::BundleCore {
+                        bundle_id: branch.bundle_id,
+                        target: branch.target,
+                        core_state: 0,
+                    },
+                    summaries,
+                    productive,
+                    bundles,
+                    memo,
+                    visiting,
+                )?);
+            }
+        }
+        DirectPrepushNode::BundleCore {
+            bundle_id,
+            target,
+            core_state,
+        } => {
+            let bundle = bundles.get(bundle_id).and_then(Option::as_ref)?;
+            let state = bundle.states.get(core_state as usize)?;
+            let continuation = DirectPrepushNode::Continuation(target);
+            let continuation_demand = if !state.final_weight.is_empty() || !state.outputs.is_empty() {
+                Some(direct_prepush_pending_demand(
+                    &continuation,
+                    summaries,
+                    productive,
+                    bundles,
+                    memo,
+                    visiting,
+                )?)
+            } else {
+                None
+            };
+            if !state.final_weight.is_empty() {
+                best = best.max(continuation_demand.unwrap_or(0));
+            }
+            for output in &state.outputs {
+                if output.weight.is_empty() {
+                    continue;
+                }
+                let suffix = continuation_demand.unwrap_or(0);
+                best = best.max(suffix.saturating_sub(output.pushes.len()));
+            }
+            for (&label, transition) in &state.transitions {
+                debug_assert!(!is_negative_label(label));
+                match transition {
+                    WeightedPrepushTarget::Core {
+                        target: core_target,
+                        weight,
+                    } => {
+                        if weight.is_empty() {
+                            continue;
+                        }
+                        let suffix = direct_prepush_pending_demand(
+                            &DirectPrepushNode::BundleCore {
+                                bundle_id,
+                                target,
+                                core_state: *core_target,
+                            },
+                            summaries,
+                            productive,
+                            bundles,
+                            memo,
+                            visiting,
+                        )?;
+                        best = best.max(1usize.saturating_add(suffix));
+                    }
+                    WeightedPrepushTarget::Outputs(outputs) => {
+                        let suffix = direct_prepush_pending_demand(
+                            &continuation,
+                            summaries,
+                            productive,
+                            bundles,
+                            memo,
+                            visiting,
+                        )?;
+                        for output in outputs {
+                            if output.weight.is_empty() {
+                                continue;
+                            }
+                            best = best.max(
+                                1usize.saturating_add(suffix.saturating_sub(output.pushes.len())),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    visiting.remove(node);
+    memo.insert(node.clone(), best);
+    Some(best)
+}
+
+fn build_direct_prepush_pending_nwa(
+    summaries: &StateSummaries,
+    productive: &[bool],
+    templates: &Templates,
+) -> Option<(NWA, usize, usize, usize)> {
+    if summaries
+        .states
+        .iter()
+        .flat_map(|state| state.branches.iter())
+        .any(|branch| branch.cross_target_group_id.is_some())
+    {
+        return None;
+    }
+
+    let mut used_bundles = vec![false; summaries.unique_bundles.len()];
+    for (state_id, state) in summaries.states.iter().enumerate() {
+        if !productive[state_id] {
+            continue;
+        }
+        for branch in &state.branches {
+            if productive
+                .get(branch.target as usize)
+                .copied()
+                .unwrap_or(false)
+                && summaries
+                    .bundle_accepts
+                    .get(branch.bundle_id)
+                    .copied()
+                    .unwrap_or(false)
+            {
+                used_bundles[branch.bundle_id] = true;
+            }
+        }
+    }
+    let build_started_at = Instant::now();
+    let bundles = templates.build_weighted_prepush_bundles_cached(
+        &summaries.unique_bundles,
+        &used_bundles,
+    );
+    let bundle_build_ms = elapsed_ms(build_started_at) as usize;
+
+    let mut nwa = NWA::new(0, 0);
+    let mut config_to_state = FxHashMap::<DirectPrepushConfig, u32>::default();
+    let mut configs = Vec::<DirectPrepushConfig>::new();
+    let mut queue = VecDeque::<u32>::new();
+    let ensure = |config: DirectPrepushConfig,
+                  nwa: &mut NWA,
+                  config_to_state: &mut FxHashMap<DirectPrepushConfig, u32>,
+                  configs: &mut Vec<DirectPrepushConfig>,
+                  queue: &mut VecDeque<u32>| {
+        if let Some(&existing) = config_to_state.get(&config) {
+            return existing;
+        }
+        let state = nwa.add_state();
+        config_to_state.insert(config.clone(), state);
+        configs.push(config);
+        queue.push_back(state);
+        state
+    };
+
+    let mut start_states = Vec::<u32>::new();
+    for &start in &summaries.start_states {
+        if !productive.get(start as usize).copied().unwrap_or(false) {
+            continue;
+        }
+        let state = ensure(
+            DirectPrepushConfig {
+                node: DirectPrepushNode::Continuation(start),
+                pending: SmallVec::new(),
+            },
+            &mut nwa,
+            &mut config_to_state,
+            &mut configs,
+            &mut queue,
+        );
+        start_states.push(state);
+    }
+    start_states.sort_unstable();
+    start_states.dedup();
+    nwa.set_start_states(start_states);
+
+    let mut max_pending = 0usize;
+    let mut pending_configs = 0usize;
+    let mut edge_count = 0usize;
+    while let Some(nwa_state) = queue.pop_front() {
+        let config = configs[nwa_state as usize].clone();
+        max_pending = max_pending.max(config.pending.len());
+        pending_configs += usize::from(!config.pending.is_empty());
+        match config.node {
+            DirectPrepushNode::Continuation(state_id) => {
+                let state = &summaries.states[state_id as usize];
+                if let Some(final_weight) = state.final_weight.as_ref().filter(|w| !w.is_empty()) {
+                    // Leftover writes do not constrain whether this model-token
+                    // path is valid; commit applies them after mask selection.
+                    nwa.set_final_weight(nwa_state, final_weight.clone());
+                }
+                for (target, weight) in &state.epsilon_branches {
+                    if weight.is_empty()
+                        || !productive.get(*target as usize).copied().unwrap_or(false)
+                    {
+                        continue;
+                    }
+                    let target_state = ensure(
+                        DirectPrepushConfig {
+                            node: DirectPrepushNode::Continuation(*target),
+                            pending: config.pending.clone(),
+                        },
+                        &mut nwa,
+                        &mut config_to_state,
+                        &mut configs,
+                        &mut queue,
+                    );
+                    nwa.add_epsilon(nwa_state, target_state, weight.clone());
+                    edge_count += 1;
+                }
+                for branch in &state.branches {
+                    if !productive
+                        .get(branch.target as usize)
+                        .copied()
+                        .unwrap_or(false)
+                        || !summaries
+                            .bundle_accepts
+                            .get(branch.bundle_id)
+                            .copied()
+                            .unwrap_or(false)
+                    {
+                        continue;
+                    }
+                    let Some(bundle) = bundles[branch.bundle_id].as_ref() else {
+                        continue;
+                    };
+                    if bundle.states.is_empty() {
+                        continue;
+                    }
+                    let target_state = ensure(
+                        DirectPrepushConfig {
+                            node: DirectPrepushNode::BundleCore {
+                                bundle_id: branch.bundle_id,
+                                target: branch.target,
+                                core_state: 0,
+                            },
+                            pending: config.pending.clone(),
+                        },
+                        &mut nwa,
+                        &mut config_to_state,
+                        &mut configs,
+                        &mut queue,
+                    );
+                    nwa.add_epsilon(nwa_state, target_state, branch.entry_weight.clone());
+                    edge_count += 1;
+                }
+            }
+            DirectPrepushNode::BundleCore {
+                bundle_id,
+                target,
+                core_state,
+            } => {
+                let bundle = bundles[bundle_id]
+                    .as_ref()
+                    .expect("direct pre-push core requires a built bundle");
+                let state = &bundle.states[core_state as usize];
+                if !state.final_weight.is_empty() {
+                    let target_state = ensure(
+                        DirectPrepushConfig {
+                            node: DirectPrepushNode::Continuation(target),
+                            pending: config.pending.clone(),
+                        },
+                        &mut nwa,
+                        &mut config_to_state,
+                        &mut configs,
+                        &mut queue,
+                    );
+                    nwa.add_epsilon(nwa_state, target_state, state.final_weight.clone());
+                    edge_count += 1;
+                }
+                for output in &state.outputs {
+                    if output.weight.is_empty() {
+                        continue;
+                    }
+                    let target_state = ensure(
+                        DirectPrepushConfig {
+                            node: DirectPrepushNode::Continuation(target),
+                            pending: append_pending(&config.pending, &output.pushes),
+                        },
+                        &mut nwa,
+                        &mut config_to_state,
+                        &mut configs,
+                        &mut queue,
+                    );
+                    nwa.add_epsilon(nwa_state, target_state, output.weight.clone());
+                    edge_count += 1;
+                }
+                for (&label, transition) in &state.transitions {
+                    debug_assert!(!is_negative_label(label));
+                    match transition {
+                        WeightedPrepushTarget::Core {
+                            target: core_target,
+                            weight,
+                        } => {
+                            if weight.is_empty() {
+                                continue;
+                            }
+                            if config.pending.is_empty() {
+                                let target_state = ensure(
+                                    DirectPrepushConfig {
+                                        node: DirectPrepushNode::BundleCore {
+                                            bundle_id,
+                                            target,
+                                            core_state: *core_target,
+                                        },
+                                        pending: SmallVec::new(),
+                                    },
+                                    &mut nwa,
+                                    &mut config_to_state,
+                                    &mut configs,
+                                    &mut queue,
+                                );
+                                nwa.add_transition(nwa_state, label, target_state, weight.clone());
+                                edge_count += 1;
+                            } else if let Some(pending) = consume_pending(&config.pending, label) {
+                                let target_state = ensure(
+                                    DirectPrepushConfig {
+                                        node: DirectPrepushNode::BundleCore {
+                                            bundle_id,
+                                            target,
+                                            core_state: *core_target,
+                                        },
+                                        pending,
+                                    },
+                                    &mut nwa,
+                                    &mut config_to_state,
+                                    &mut configs,
+                                    &mut queue,
+                                );
+                                nwa.add_epsilon(nwa_state, target_state, weight.clone());
+                                edge_count += 1;
+                            }
+                        }
+                        WeightedPrepushTarget::Outputs(outputs) => {
+                            for output in outputs {
+                                if output.weight.is_empty() {
+                                    continue;
+                                }
+                                if config.pending.is_empty() {
+                                    let target_state = ensure(
+                                        DirectPrepushConfig {
+                                            node: DirectPrepushNode::Continuation(target),
+                                            pending: append_pending(&SmallVec::new(), &output.pushes),
+                                        },
+                                        &mut nwa,
+                                        &mut config_to_state,
+                                        &mut configs,
+                                        &mut queue,
+                                    );
+                                    nwa.add_transition(
+                                        nwa_state,
+                                        label,
+                                        target_state,
+                                        output.weight.clone(),
+                                    );
+                                    edge_count += 1;
+                                } else if let Some(pending) = consume_pending(&config.pending, label) {
+                                    let target_state = ensure(
+                                        DirectPrepushConfig {
+                                            node: DirectPrepushNode::Continuation(target),
+                                            pending: append_pending(&pending, &output.pushes),
+                                        },
+                                        &mut nwa,
+                                        &mut config_to_state,
+                                        &mut configs,
+                                        &mut queue,
+                                    );
+                                    nwa.add_epsilon(
+                                        nwa_state,
+                                        target_state,
+                                        output.weight.clone(),
+                                    );
+                                    edge_count += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let unique_pending = configs
+        .iter()
+        .map(|config| config.pending.clone())
+        .collect::<rustc_hash::FxHashSet<_>>()
+        .len();
+    if std::env::var_os("GLRMASK_PROFILE_DIRECT_PREPUSH_PENDING_DETAIL").is_some() {
+        let mut depth_hist = BTreeMap::<usize, usize>::new();
+        let mut node_depth_hist = BTreeMap::<(&'static str, usize), usize>::new();
+        for config in &configs {
+            *depth_hist.entry(config.pending.len()).or_default() += 1;
+            let kind = match config.node {
+                DirectPrepushNode::Continuation(_) => "continuation",
+                DirectPrepushNode::BundleCore { .. } => "core",
+            };
+            *node_depth_hist.entry((kind, config.pending.len())).or_default() += 1;
+        }
+        let quotient_counts = (0usize..=max_pending)
+            .map(|keep| {
+                let count = configs
+                    .iter()
+                    .map(|config| {
+                        let start = config.pending.len().saturating_sub(keep);
+                        (config.node.clone(), config.pending[start..].to_vec())
+                    })
+                    .collect::<rustc_hash::FxHashSet<_>>()
+                    .len();
+                (keep, count)
+            })
+            .collect::<Vec<_>>();
+        let unique_suffixes = (0usize..=max_pending)
+            .map(|keep| {
+                let count = configs
+                    .iter()
+                    .map(|config| {
+                        let start = config.pending.len().saturating_sub(keep);
+                        config.pending[start..].to_vec()
+                    })
+                    .collect::<rustc_hash::FxHashSet<_>>()
+                    .len();
+                (keep, count)
+            })
+            .collect::<Vec<_>>();
+        let mut demand_memo = FxHashMap::<DirectPrepushNode, usize>::default();
+        let mut visiting = rustc_hash::FxHashSet::<DirectPrepushNode>::default();
+        let mut demand_failed = false;
+        for config in &configs {
+            if direct_prepush_pending_demand(
+                &config.node,
+                summaries,
+                productive,
+                &bundles,
+                &mut demand_memo,
+                &mut visiting,
+            )
+            .is_none()
+            {
+                demand_failed = true;
+                break;
+            }
+        }
+        let mut demand_hist = BTreeMap::<usize, usize>::new();
+        for &demand in demand_memo.values() {
+            *demand_hist.entry(demand).or_default() += 1;
+        }
+        let demand_quotient_count = if demand_failed {
+            0
+        } else {
+            configs
+                .iter()
+                .map(|config| {
+                    let demand = demand_memo[&config.node];
+                    let start = config.pending.len().saturating_sub(demand);
+                    (config.node.clone(), config.pending[start..].to_vec())
+                })
+                .collect::<rustc_hash::FxHashSet<_>>()
+                .len()
+        };
+        eprintln!(
+            "[glrmask/profile][parser_direct_prepush_pending_detail] depth_hist={:?} node_depth_hist={:?} quotient_counts={:?} unique_suffixes={:?} demand_failed={} demand_hist={:?} demand_quotient_count={}",
+            depth_hist,
+            node_depth_hist,
+            quotient_counts,
+            unique_suffixes,
+            demand_failed,
+            demand_hist,
+            demand_quotient_count,
+        );
+    }
+    Some((nwa, max_pending, pending_configs, unique_pending + bundle_build_ms.saturating_mul(0)))
+}
+
+
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct DirectCanonicalEdge {
+    kind: u8,
+    label: i32,
+    target: u32,
+    weight: Weight,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct DirectCanonicalSignature {
+    final_weight: Option<Weight>,
+    edges: Vec<DirectCanonicalEdge>,
+}
+
+struct DirectCanonicalBuilder<'a> {
+    summaries: &'a StateSummaries,
+    productive: &'a [bool],
+    bundles: &'a [Option<Arc<WeightedPrepushBundle>>],
+    config_memo: FxHashMap<DirectPrepushConfig, u32>,
+    visiting: rustc_hash::FxHashSet<DirectPrepushConfig>,
+    class_by_signature: FxHashMap<DirectCanonicalSignature, u32>,
+    nwa: NWA,
+    raw_configs: usize,
+    raw_edges: usize,
+    max_pending: usize,
+}
+
+impl<'a> DirectCanonicalBuilder<'a> {
+    fn new(
+        summaries: &'a StateSummaries,
+        productive: &'a [bool],
+        bundles: &'a [Option<Arc<WeightedPrepushBundle>>],
+    ) -> Self {
+        Self {
+            summaries,
+            productive,
+            bundles,
+            config_memo: FxHashMap::default(),
+            visiting: rustc_hash::FxHashSet::default(),
+            class_by_signature: FxHashMap::default(),
+            nwa: NWA::new(0, 0),
+            raw_configs: 0,
+            raw_edges: 0,
+            max_pending: 0,
+        }
+    }
+
+    fn class_for(&mut self, config: DirectPrepushConfig) -> Option<u32> {
+        if let Some(&cached) = self.config_memo.get(&config) {
+            return Some(cached);
+        }
+        if !self.visiting.insert(config.clone()) {
+            return None;
+        }
+        self.raw_configs += 1;
+        self.max_pending = self.max_pending.max(config.pending.len());
+
+        let mut final_weight = None::<Weight>;
+        let mut edge_map = BTreeMap::<(u8, i32, u32), Weight>::new();
+        let mut add_edge = |this: &mut Self,
+                            kind: u8,
+                            label: i32,
+                            target_config: DirectPrepushConfig,
+                            weight: &Weight|
+         -> Option<()> {
+            if weight.is_empty() {
+                return Some(());
+            }
+            let target = this.class_for(target_config)?;
+            this.raw_edges += 1;
+            edge_map
+                .entry((kind, label, target))
+                .and_modify(|existing| *existing = existing.union(weight))
+                .or_insert_with(|| weight.clone());
+            Some(())
+        };
+
+        match config.node {
+            DirectPrepushNode::Continuation(state_id) => {
+                let state = self.summaries.states.get(state_id as usize)?;
+                final_weight = state
+                    .final_weight
+                    .as_ref()
+                    .filter(|weight| !weight.is_empty())
+                    .cloned();
+                for (target, weight) in &state.epsilon_branches {
+                    if weight.is_empty()
+                        || !self.productive.get(*target as usize).copied().unwrap_or(false)
+                    {
+                        continue;
+                    }
+                    add_edge(
+                        self,
+                        1,
+                        0,
+                        DirectPrepushConfig {
+                            node: DirectPrepushNode::Continuation(*target),
+                            pending: config.pending.clone(),
+                        },
+                        weight,
+                    )?;
+                }
+                for branch in &state.branches {
+                    if !self
+                        .productive
+                        .get(branch.target as usize)
+                        .copied()
+                        .unwrap_or(false)
+                        || !self
+                            .summaries
+                            .bundle_accepts
+                            .get(branch.bundle_id)
+                            .copied()
+                            .unwrap_or(false)
+                    {
+                        continue;
+                    }
+                    let Some(bundle) = self.bundles.get(branch.bundle_id).and_then(Option::as_ref)
+                    else {
+                        continue;
+                    };
+                    if bundle.states.is_empty() {
+                        continue;
+                    }
+                    add_edge(
+                        self,
+                        1,
+                        0,
+                        DirectPrepushConfig {
+                            node: DirectPrepushNode::BundleCore {
+                                bundle_id: branch.bundle_id,
+                                target: branch.target,
+                                core_state: 0,
+                            },
+                            pending: config.pending.clone(),
+                        },
+                        &branch.entry_weight,
+                    )?;
+                }
+            }
+            DirectPrepushNode::BundleCore {
+                bundle_id,
+                target,
+                core_state,
+            } => {
+                let bundle = self.bundles.get(bundle_id).and_then(Option::as_ref)?;
+                let state = bundle.states.get(core_state as usize)?;
+                if !state.final_weight.is_empty() {
+                    add_edge(
+                        self,
+                        1,
+                        0,
+                        DirectPrepushConfig {
+                            node: DirectPrepushNode::Continuation(target),
+                            pending: config.pending.clone(),
+                        },
+                        &state.final_weight,
+                    )?;
+                }
+                for output in &state.outputs {
+                    if output.weight.is_empty() {
+                        continue;
+                    }
+                    add_edge(
+                        self,
+                        1,
+                        0,
+                        DirectPrepushConfig {
+                            node: DirectPrepushNode::Continuation(target),
+                            pending: append_pending(&config.pending, &output.pushes),
+                        },
+                        &output.weight,
+                    )?;
+                }
+                for (&label, transition) in &state.transitions {
+                    debug_assert!(!is_negative_label(label));
+                    match transition {
+                        WeightedPrepushTarget::Core {
+                            target: core_target,
+                            weight,
+                        } => {
+                            if weight.is_empty() {
+                                continue;
+                            }
+                            if config.pending.is_empty() {
+                                add_edge(
+                                    self,
+                                    0,
+                                    label,
+                                    DirectPrepushConfig {
+                                        node: DirectPrepushNode::BundleCore {
+                                            bundle_id,
+                                            target,
+                                            core_state: *core_target,
+                                        },
+                                        pending: SmallVec::new(),
+                                    },
+                                    weight,
+                                )?;
+                            } else if let Some(pending) = consume_pending(&config.pending, label) {
+                                add_edge(
+                                    self,
+                                    1,
+                                    0,
+                                    DirectPrepushConfig {
+                                        node: DirectPrepushNode::BundleCore {
+                                            bundle_id,
+                                            target,
+                                            core_state: *core_target,
+                                        },
+                                        pending,
+                                    },
+                                    weight,
+                                )?;
+                            }
+                        }
+                        WeightedPrepushTarget::Outputs(outputs) => {
+                            for output in outputs {
+                                if output.weight.is_empty() {
+                                    continue;
+                                }
+                                if config.pending.is_empty() {
+                                    add_edge(
+                                        self,
+                                        0,
+                                        label,
+                                        DirectPrepushConfig {
+                                            node: DirectPrepushNode::Continuation(target),
+                                            pending: append_pending(
+                                                &SmallVec::new(),
+                                                &output.pushes,
+                                            ),
+                                        },
+                                        &output.weight,
+                                    )?;
+                                } else if let Some(pending) =
+                                    consume_pending(&config.pending, label)
+                                {
+                                    add_edge(
+                                        self,
+                                        1,
+                                        0,
+                                        DirectPrepushConfig {
+                                            node: DirectPrepushNode::Continuation(target),
+                                            pending: append_pending(&pending, &output.pushes),
+                                        },
+                                        &output.weight,
+                                    )?;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let edges = edge_map
+            .into_iter()
+            .filter(|(_, weight)| !weight.is_empty())
+            .map(|((kind, label, target), weight)| DirectCanonicalEdge {
+                kind,
+                label,
+                target,
+                weight,
+            })
+            .collect::<Vec<_>>();
+        let signature = DirectCanonicalSignature {
+            final_weight,
+            edges,
+        };
+        let class = if let Some(&existing) = self.class_by_signature.get(&signature) {
+            existing
+        } else {
+            let state_id = self.nwa.add_state();
+            if let Some(weight) = signature.final_weight.as_ref() {
+                self.nwa.set_final_weight(state_id, weight.clone());
+            }
+            for edge in &signature.edges {
+                if edge.kind == 0 {
+                    self.nwa
+                        .add_transition(state_id, edge.label, edge.target, edge.weight.clone());
+                } else {
+                    self.nwa
+                        .add_epsilon(state_id, edge.target, edge.weight.clone());
+                }
+            }
+            self.class_by_signature.insert(signature, state_id);
+            state_id
+        };
+        self.visiting.remove(&config);
+        self.config_memo.insert(config, class);
+        Some(class)
+    }
+}
+
+
+#[derive(Clone, Copy, Debug)]
+struct PendingStackEntry {
+    parent: u32,
+    top: u32,
+    depth: u16,
+}
+
+struct PendingStackInterner {
+    entries: Vec<PendingStackEntry>,
+    by_parent_top: FxHashMap<(u32, u32), u32>,
+}
+
+impl PendingStackInterner {
+    fn new() -> Self {
+        Self {
+            entries: vec![PendingStackEntry {
+                parent: 0,
+                top: 0,
+                depth: 0,
+            }],
+            by_parent_top: FxHashMap::default(),
+        }
+    }
+
+    #[inline]
+    fn depth(&self, id: u32) -> usize {
+        self.entries[id as usize].depth as usize
+    }
+
+    #[inline]
+    fn push(&mut self, parent: u32, top: u32) -> u32 {
+        if let Some(&existing) = self.by_parent_top.get(&(parent, top)) {
+            return existing;
+        }
+        let depth = self.entries[parent as usize]
+            .depth
+            .checked_add(1)
+            .expect("pending write stack depth exceeds u16");
+        let id = self.entries.len() as u32;
+        self.entries.push(PendingStackEntry { parent, top, depth });
+        self.by_parent_top.insert((parent, top), id);
+        id
+    }
+
+    fn push_many(&mut self, mut pending: u32, pushes: &[u32]) -> u32 {
+        for &push in pushes {
+            pending = self.push(pending, push);
+        }
+        pending
+    }
+
+    #[inline]
+    fn top(&self, pending: u32) -> Option<u32> {
+        (pending != 0).then(|| self.entries[pending as usize].top)
+    }
+
+    #[inline]
+    fn pop_matching(&self, pending: u32, label: i32) -> Option<u32> {
+        if pending == 0 {
+            return Some(0);
+        }
+        let entry = self.entries[pending as usize];
+        if label != DEFAULT_LABEL && (label < 0 || label as u32 != entry.top) {
+            return None;
+        }
+        Some(entry.parent)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct DirectCompactConfig {
+    node: DirectPrepushNode,
+    pending: u32,
+}
+
+struct DirectCompactCanonicalBuilder<'a> {
+    summaries: &'a StateSummaries,
+    productive: &'a [bool],
+    bundles: &'a [Option<Arc<WeightedPrepushBundle>>],
+    pending: PendingStackInterner,
+    config_memo: FxHashMap<DirectCompactConfig, u32>,
+    visiting: rustc_hash::FxHashSet<DirectCompactConfig>,
+    class_by_signature: FxHashMap<DirectCanonicalSignature, u32>,
+    nwa: NWA,
+    raw_configs: usize,
+    raw_edges: usize,
+    max_pending: usize,
+}
+
+impl<'a> DirectCompactCanonicalBuilder<'a> {
+    fn new(
+        summaries: &'a StateSummaries,
+        productive: &'a [bool],
+        bundles: &'a [Option<Arc<WeightedPrepushBundle>>],
+    ) -> Self {
+        Self {
+            summaries,
+            productive,
+            bundles,
+            pending: PendingStackInterner::new(),
+            config_memo: FxHashMap::default(),
+            visiting: rustc_hash::FxHashSet::default(),
+            class_by_signature: FxHashMap::default(),
+            nwa: NWA::new(0, 0),
+            raw_configs: 0,
+            raw_edges: 0,
+            max_pending: 0,
+        }
+    }
+
+    fn class_for(&mut self, config: DirectCompactConfig) -> Option<u32> {
+        if let Some(&cached) = self.config_memo.get(&config) {
+            return Some(cached);
+        }
+        if !self.visiting.insert(config.clone()) {
+            return None;
+        }
+        self.raw_configs += 1;
+        self.max_pending = self.max_pending.max(self.pending.depth(config.pending));
+        let mut final_weight = None::<Weight>;
+        let mut edge_map = BTreeMap::<(u8, i32, u32), Weight>::new();
+
+        match config.node {
+            DirectPrepushNode::Continuation(state_id) => {
+                let state = self.summaries.states.get(state_id as usize)?;
+                final_weight = state
+                    .final_weight
+                    .as_ref()
+                    .filter(|weight| !weight.is_empty())
+                    .cloned();
+                let epsilon_branches = state.epsilon_branches.clone();
+                let branches = state.branches.clone();
+                for (target, weight) in epsilon_branches {
+                    if weight.is_empty()
+                        || !self.productive.get(target as usize).copied().unwrap_or(false)
+                    {
+                        continue;
+                    }
+                    let child = self.class_for(DirectCompactConfig {
+                        node: DirectPrepushNode::Continuation(target),
+                        pending: config.pending,
+                    })?;
+                    self.raw_edges += 1;
+                    edge_map
+                        .entry((1, 0, child))
+                        .and_modify(|existing| *existing = existing.union(&weight))
+                        .or_insert(weight);
+                }
+                for branch in branches {
+                    if !self
+                        .productive
+                        .get(branch.target as usize)
+                        .copied()
+                        .unwrap_or(false)
+                        || !self
+                            .summaries
+                            .bundle_accepts
+                            .get(branch.bundle_id)
+                            .copied()
+                            .unwrap_or(false)
+                    {
+                        continue;
+                    }
+                    let Some(bundle) = self.bundles.get(branch.bundle_id).and_then(Option::as_ref)
+                    else {
+                        continue;
+                    };
+                    if bundle.states.is_empty() {
+                        continue;
+                    }
+                    let child = self.class_for(DirectCompactConfig {
+                        node: DirectPrepushNode::BundleCore {
+                            bundle_id: branch.bundle_id,
+                            target: branch.target,
+                            core_state: 0,
+                        },
+                        pending: config.pending,
+                    })?;
+                    self.raw_edges += 1;
+                    edge_map
+                        .entry((1, 0, child))
+                        .and_modify(|existing| *existing = existing.union(&branch.entry_weight))
+                        .or_insert(branch.entry_weight);
+                }
+            }
+            DirectPrepushNode::BundleCore {
+                bundle_id,
+                target,
+                core_state,
+            } => {
+                let bundle = self.bundles.get(bundle_id).and_then(Option::as_ref)?;
+                let state = bundle.states.get(core_state as usize)?.clone();
+                if !state.final_weight.is_empty() {
+                    let child = self.class_for(DirectCompactConfig {
+                        node: DirectPrepushNode::Continuation(target),
+                        pending: config.pending,
+                    })?;
+                    self.raw_edges += 1;
+                    edge_map
+                        .entry((1, 0, child))
+                        .and_modify(|existing| *existing = existing.union(&state.final_weight))
+                        .or_insert(state.final_weight.clone());
+                }
+                for output in &state.outputs {
+                    if output.weight.is_empty() {
+                        continue;
+                    }
+                    let next_pending = self.pending.push_many(config.pending, &output.pushes);
+                    let child = self.class_for(DirectCompactConfig {
+                        node: DirectPrepushNode::Continuation(target),
+                        pending: next_pending,
+                    })?;
+                    self.raw_edges += 1;
+                    edge_map
+                        .entry((1, 0, child))
+                        .and_modify(|existing| *existing = existing.union(&output.weight))
+                        .or_insert(output.weight.clone());
+                }
+                for (label, transition) in state.transitions {
+                    debug_assert!(!is_negative_label(label));
+                    match transition {
+                        WeightedPrepushTarget::Core {
+                            target: core_target,
+                            weight,
+                        } => {
+                            if weight.is_empty() {
+                                continue;
+                            }
+                            let (kind, edge_label, next_pending) = if config.pending == 0 {
+                                (0, label, 0)
+                            } else {
+                                let Some(next) = self.pending.pop_matching(config.pending, label)
+                                else {
+                                    continue;
+                                };
+                                (1, 0, next)
+                            };
+                            let child = self.class_for(DirectCompactConfig {
+                                node: DirectPrepushNode::BundleCore {
+                                    bundle_id,
+                                    target,
+                                    core_state: core_target,
+                                },
+                                pending: next_pending,
+                            })?;
+                            self.raw_edges += 1;
+                            edge_map
+                                .entry((kind, edge_label, child))
+                                .and_modify(|existing| *existing = existing.union(&weight))
+                                .or_insert(weight);
+                        }
+                        WeightedPrepushTarget::Outputs(outputs) => {
+                            for output in outputs {
+                                if output.weight.is_empty() {
+                                    continue;
+                                }
+                                let (kind, edge_label, base_pending) = if config.pending == 0 {
+                                    (0, label, 0)
+                                } else {
+                                    let Some(next) =
+                                        self.pending.pop_matching(config.pending, label)
+                                    else {
+                                        continue;
+                                    };
+                                    (1, 0, next)
+                                };
+                                let next_pending =
+                                    self.pending.push_many(base_pending, &output.pushes);
+                                let child = self.class_for(DirectCompactConfig {
+                                    node: DirectPrepushNode::Continuation(target),
+                                    pending: next_pending,
+                                })?;
+                                self.raw_edges += 1;
+                                edge_map
+                                    .entry((kind, edge_label, child))
+                                    .and_modify(|existing| {
+                                        *existing = existing.union(&output.weight)
+                                    })
+                                    .or_insert(output.weight);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let edges = edge_map
+            .into_iter()
+            .filter(|(_, weight)| !weight.is_empty())
+            .map(|((kind, label, target), weight)| DirectCanonicalEdge {
+                kind,
+                label,
+                target,
+                weight,
+            })
+            .collect::<Vec<_>>();
+        let signature = DirectCanonicalSignature {
+            final_weight,
+            edges,
+        };
+        let class = if let Some(&existing) = self.class_by_signature.get(&signature) {
+            existing
+        } else {
+            let state_id = self.nwa.add_state();
+            if let Some(weight) = signature.final_weight.as_ref() {
+                self.nwa.set_final_weight(state_id, weight.clone());
+            }
+            for edge in &signature.edges {
+                if edge.kind == 0 {
+                    self.nwa
+                        .add_transition(state_id, edge.label, edge.target, edge.weight.clone());
+                } else {
+                    self.nwa
+                        .add_epsilon(state_id, edge.target, edge.weight.clone());
+                }
+            }
+            self.class_by_signature.insert(signature, state_id);
+            state_id
+        };
+        self.visiting.remove(&config);
+        self.config_memo.insert(config, class);
+        Some(class)
+    }
+}
+
+
+
+fn census_direct_prepush_pending_compact(
+    summaries: &StateSummaries,
+    productive: &[bool],
+    templates: &Templates,
+) -> Option<(usize, usize, usize, usize, f64)> {
+    if summaries
+        .states
+        .iter()
+        .flat_map(|state| state.branches.iter())
+        .any(|branch| branch.cross_target_group_id.is_some())
+    {
+        return None;
+    }
+    let bundle_started_at = Instant::now();
+    let mut used_bundles = vec![false; summaries.unique_bundles.len()];
+    for (state_id, state) in summaries.states.iter().enumerate() {
+        if !productive[state_id] {
+            continue;
+        }
+        for branch in &state.branches {
+            if productive
+                .get(branch.target as usize)
+                .copied()
+                .unwrap_or(false)
+                && summaries
+                    .bundle_accepts
+                    .get(branch.bundle_id)
+                    .copied()
+                    .unwrap_or(false)
+            {
+                used_bundles[branch.bundle_id] = true;
+            }
+        }
+    }
+    let bundles = templates.build_weighted_prepush_bundles_cached(
+        &summaries.unique_bundles,
+        &used_bundles,
+    );
+    let bundle_ms = elapsed_ms(bundle_started_at);
+
+    let mut pending = PendingStackInterner::new();
+    let mut config_to_id = FxHashMap::<DirectCompactConfig, u32>::default();
+    let mut configs = Vec::<DirectCompactConfig>::new();
+    let ensure = |config: DirectCompactConfig,
+                  config_to_id: &mut FxHashMap<DirectCompactConfig, u32>,
+                  configs: &mut Vec<DirectCompactConfig>| {
+        if let Some(&existing) = config_to_id.get(&config) {
+            return existing;
+        }
+        let id = configs.len() as u32;
+        config_to_id.insert(config.clone(), id);
+        configs.push(config);
+        id
+    };
+    for &start in &summaries.start_states {
+        if productive.get(start as usize).copied().unwrap_or(false) {
+            ensure(
+                DirectCompactConfig {
+                    node: DirectPrepushNode::Continuation(start),
+                    pending: 0,
+                },
+                &mut config_to_id,
+                &mut configs,
+            );
+        }
+    }
+    let mut cursor = 0usize;
+    let mut edges = 0usize;
+    let mut max_pending = 0usize;
+    while cursor < configs.len() {
+        let config = configs[cursor].clone();
+        cursor += 1;
+        max_pending = max_pending.max(pending.depth(config.pending));
+        match config.node {
+            DirectPrepushNode::Continuation(state_id) => {
+                let state = &summaries.states[state_id as usize];
+                for (target, weight) in &state.epsilon_branches {
+                    if weight.is_empty()
+                        || !productive.get(*target as usize).copied().unwrap_or(false)
+                    {
+                        continue;
+                    }
+                    ensure(
+                        DirectCompactConfig {
+                            node: DirectPrepushNode::Continuation(*target),
+                            pending: config.pending,
+                        },
+                        &mut config_to_id,
+                        &mut configs,
+                    );
+                    edges += 1;
+                }
+                for branch in &state.branches {
+                    if !productive
+                        .get(branch.target as usize)
+                        .copied()
+                        .unwrap_or(false)
+                        || !summaries
+                            .bundle_accepts
+                            .get(branch.bundle_id)
+                            .copied()
+                            .unwrap_or(false)
+                    {
+                        continue;
+                    }
+                    let Some(bundle) = bundles[branch.bundle_id].as_ref() else {
+                        continue;
+                    };
+                    if bundle.states.is_empty() || branch.entry_weight.is_empty() {
+                        continue;
+                    }
+                    ensure(
+                        DirectCompactConfig {
+                            node: DirectPrepushNode::BundleCore {
+                                bundle_id: branch.bundle_id,
+                                target: branch.target,
+                                core_state: 0,
+                            },
+                            pending: config.pending,
+                        },
+                        &mut config_to_id,
+                        &mut configs,
+                    );
+                    edges += 1;
+                }
+            }
+            DirectPrepushNode::BundleCore {
+                bundle_id,
+                target,
+                core_state,
+            } => {
+                let state = &bundles[bundle_id]
+                    .as_ref()
+                    .expect("compact census requires built bundle")
+                    .states[core_state as usize];
+                if !state.final_weight.is_empty() {
+                    ensure(
+                        DirectCompactConfig {
+                            node: DirectPrepushNode::Continuation(target),
+                            pending: config.pending,
+                        },
+                        &mut config_to_id,
+                        &mut configs,
+                    );
+                    edges += 1;
+                }
+                for output in &state.outputs {
+                    if output.weight.is_empty() {
+                        continue;
+                    }
+                    let next_pending = pending.push_many(config.pending, &output.pushes);
+                    ensure(
+                        DirectCompactConfig {
+                            node: DirectPrepushNode::Continuation(target),
+                            pending: next_pending,
+                        },
+                        &mut config_to_id,
+                        &mut configs,
+                    );
+                    edges += 1;
+                }
+                let process_transition = |label: i32,
+                                              transition: &WeightedPrepushTarget,
+                                              pending: &mut PendingStackInterner,
+                                              config_to_id: &mut FxHashMap<DirectCompactConfig, u32>,
+                                              configs: &mut Vec<DirectCompactConfig>,
+                                              edges: &mut usize| {
+                    match transition {
+                        WeightedPrepushTarget::Core {
+                            target: core_target,
+                            weight,
+                        } => {
+                            if weight.is_empty() {
+                                return;
+                            }
+                            let next_pending = if config.pending == 0 {
+                                Some(0)
+                            } else {
+                                pending.pop_matching(config.pending, label)
+                            };
+                            let Some(next_pending) = next_pending else { return };
+                            ensure(
+                                DirectCompactConfig {
+                                    node: DirectPrepushNode::BundleCore {
+                                        bundle_id,
+                                        target,
+                                        core_state: *core_target,
+                                    },
+                                    pending: next_pending,
+                                },
+                                config_to_id,
+                                configs,
+                            );
+                            *edges += 1;
+                        }
+                        WeightedPrepushTarget::Outputs(outputs) => {
+                            for output in outputs {
+                                if output.weight.is_empty() {
+                                    continue;
+                                }
+                                let base_pending = if config.pending == 0 {
+                                    Some(0)
+                                } else {
+                                    pending.pop_matching(config.pending, label)
+                                };
+                                let Some(base_pending) = base_pending else { continue };
+                                let next_pending = pending.push_many(base_pending, &output.pushes);
+                                ensure(
+                                    DirectCompactConfig {
+                                        node: DirectPrepushNode::Continuation(target),
+                                        pending: next_pending,
+                                    },
+                                    config_to_id,
+                                    configs,
+                                );
+                                *edges += 1;
+                            }
+                        }
+                    }
+                };
+                if config.pending == 0 {
+                    for (&label, transition) in &state.transitions {
+                        process_transition(
+                            label,
+                            transition,
+                            &mut pending,
+                            &mut config_to_id,
+                            &mut configs,
+                            &mut edges,
+                        );
+                    }
+                } else {
+                    let top_label = pending
+                        .top(config.pending)
+                        .expect("nonempty pending stack has a top") as i32;
+                    if let Some(transition) = state.transitions.get(&top_label) {
+                        process_transition(
+                            top_label,
+                            transition,
+                            &mut pending,
+                            &mut config_to_id,
+                            &mut configs,
+                            &mut edges,
+                        );
+                    }
+                    if let Some(transition) = state.transitions.get(&DEFAULT_LABEL) {
+                        process_transition(
+                            DEFAULT_LABEL,
+                            transition,
+                            &mut pending,
+                            &mut config_to_id,
+                            &mut configs,
+                            &mut edges,
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Some((configs.len(), edges, pending.entries.len(), max_pending, bundle_ms))
+}
+
+fn profile_direct_prepush_pending_census_only(
+    summaries: &StateSummaries,
+    productive: &[bool],
+    templates: &Templates,
+) {
+    if std::env::var_os("GLRMASK_PROFILE_DIRECT_PREPUSH_PENDING_CENSUS_ONLY").is_none() {
+        return;
+    }
+    let started_at = Instant::now();
+    let Some((configs, edges, pending_nodes, max_pending, bundle_ms)) =
+        census_direct_prepush_pending_compact(summaries, productive, templates)
+    else {
+        eprintln!("[glrmask/profile][parser_direct_prepush_pending_census_only] skipped=cross_target");
+        return;
+    };
+    eprintln!(
+        "[glrmask/profile][parser_direct_prepush_pending_census_only] configs={} edges={} pending_nodes={} max_pending_depth={} bundle_ms={:.3} total_ms={:.3}",
+        configs,
+        edges,
+        pending_nodes,
+        max_pending,
+        bundle_ms,
+        elapsed_ms(started_at),
+    );
+}
+
+fn build_direct_prepush_pending_compact_nwa(
+    summaries: &StateSummaries,
+    productive: &[bool],
+    templates: &Templates,
+) -> Option<(NWA, usize, usize, usize, usize, f64, usize, usize, usize, Vec<u64>)> {
+    if summaries
+        .states
+        .iter()
+        .flat_map(|state| state.branches.iter())
+        .any(|branch| branch.cross_target_group_id.is_some())
+    {
+        return None;
+    }
+    let bundle_started_at = Instant::now();
+    let mut used_bundles = vec![false; summaries.unique_bundles.len()];
+    for (state_id, state) in summaries.states.iter().enumerate() {
+        if !productive[state_id] {
+            continue;
+        }
+        for branch in &state.branches {
+            if productive
+                .get(branch.target as usize)
+                .copied()
+                .unwrap_or(false)
+                && summaries
+                    .bundle_accepts
+                    .get(branch.bundle_id)
+                    .copied()
+                    .unwrap_or(false)
+            {
+                used_bundles[branch.bundle_id] = true;
+            }
+        }
+    }
+    let lazy_decoration = std::env::var_os("GLRMASK_PREPUSH_LAZY_DECORATION").is_some();
+    let mut lazy_bundles = lazy_decoration.then(|| {
+        templates.build_lazy_weighted_prepush_bundles_cached(
+            &summaries.unique_bundles,
+            &used_bundles,
+        )
+    });
+    let bundles = if lazy_decoration {
+        Vec::new()
+    } else {
+        templates.build_weighted_prepush_bundles_cached(
+            &summaries.unique_bundles,
+            &used_bundles,
+        )
+    };
+    let bundle_ms = elapsed_ms(bundle_started_at);
+
+    let mut pending = PendingStackInterner::new();
+    let mut nwa = NWA::new(0, 0);
+    let mut config_to_state = FxHashMap::<DirectCompactConfig, u32>::default();
+    let mut configs = Vec::<DirectCompactConfig>::new();
+    let mut queue = VecDeque::<u32>::new();
+    let ensure = |config: DirectCompactConfig,
+                  nwa: &mut NWA,
+                  config_to_state: &mut FxHashMap<DirectCompactConfig, u32>,
+                  configs: &mut Vec<DirectCompactConfig>,
+                  queue: &mut VecDeque<u32>| {
+        if let Some(&existing) = config_to_state.get(&config) {
+            return existing;
+        }
+        let state = nwa.add_state();
+        config_to_state.insert(config.clone(), state);
+        configs.push(config);
+        queue.push_back(state);
+        state
+    };
+    let mut starts = Vec::<u32>::new();
+    for &start in &summaries.start_states {
+        if !productive.get(start as usize).copied().unwrap_or(false) {
+            continue;
+        }
+        starts.push(ensure(
+            DirectCompactConfig {
+                node: DirectPrepushNode::Continuation(start),
+                pending: 0,
+            },
+            &mut nwa,
+            &mut config_to_state,
+            &mut configs,
+            &mut queue,
+        ));
+    }
+    starts.sort_unstable();
+    starts.dedup();
+    nwa.set_start_states(starts);
+
+    let mut max_pending = 0usize;
+    let mut edge_count = 0usize;
+    let mut unique_core_states = rustc_hash::FxHashSet::<(usize, u32)>::default();
+    let mut unique_core_transitions = 0usize;
+    let mut unique_core_outputs = 0usize;
+    while let Some(nwa_state) = queue.pop_front() {
+        let config = configs[nwa_state as usize].clone();
+        max_pending = max_pending.max(pending.depth(config.pending));
+        match config.node {
+            DirectPrepushNode::Continuation(state_id) => {
+                let state = &summaries.states[state_id as usize];
+                if let Some(final_weight) = state.final_weight.as_ref().filter(|w| !w.is_empty()) {
+                    nwa.set_final_weight(nwa_state, final_weight.clone());
+                }
+                for (target, weight) in &state.epsilon_branches {
+                    if weight.is_empty()
+                        || !productive.get(*target as usize).copied().unwrap_or(false)
+                    {
+                        continue;
+                    }
+                    let target_state = ensure(
+                        DirectCompactConfig {
+                            node: DirectPrepushNode::Continuation(*target),
+                            pending: config.pending,
+                        },
+                        &mut nwa,
+                        &mut config_to_state,
+                        &mut configs,
+                        &mut queue,
+                    );
+                    nwa.add_epsilon(nwa_state, target_state, weight.clone());
+                    edge_count += 1;
+                }
+                for branch in &state.branches {
+                    if !productive
+                        .get(branch.target as usize)
+                        .copied()
+                        .unwrap_or(false)
+                        || !summaries
+                            .bundle_accepts
+                            .get(branch.bundle_id)
+                            .copied()
+                            .unwrap_or(false)
+                    {
+                        continue;
+                    }
+                    if let Some(set) = lazy_bundles.as_ref() {
+                        if templates.lazy_weighted_prepush_bundle_is_empty(set, branch.bundle_id) {
+                            continue;
+                        }
+                    } else {
+                        let Some(bundle) = bundles[branch.bundle_id].as_ref() else {
+                            continue;
+                        };
+                        if bundle.states.is_empty() {
+                            continue;
+                        }
+                    }
+                    let target_state = ensure(
+                        DirectCompactConfig {
+                            node: DirectPrepushNode::BundleCore {
+                                bundle_id: branch.bundle_id,
+                                target: branch.target,
+                                core_state: 0,
+                            },
+                            pending: config.pending,
+                        },
+                        &mut nwa,
+                        &mut config_to_state,
+                        &mut configs,
+                        &mut queue,
+                    );
+                    nwa.add_epsilon(nwa_state, target_state, branch.entry_weight.clone());
+                    edge_count += 1;
+                }
+            }
+            DirectPrepushNode::BundleCore {
+                bundle_id,
+                target,
+                core_state,
+            } => {
+                let lazy_state = if let Some(set) = lazy_bundles.as_mut() {
+                    templates.lazy_weighted_prepush_state(set, bundle_id, core_state)
+                } else {
+                    None
+                };
+                let state = if let Some(state) = lazy_state.as_ref() {
+                    state.as_ref()
+                } else {
+                    let bundle = bundles[bundle_id]
+                        .as_ref()
+                        .expect("compact direct pre-push core requires built bundle");
+                    &bundle.states[core_state as usize]
+                };
+                if unique_core_states.insert((bundle_id, core_state)) {
+                    unique_core_transitions += state.transitions.len();
+                    unique_core_outputs += state.outputs.len();
+                    for transition in state.transitions.values() {
+                        if let WeightedPrepushTarget::Outputs(outputs) = transition {
+                            unique_core_outputs += outputs.len();
+                        }
+                    }
+                }
+                if !state.final_weight.is_empty() {
+                    let target_state = ensure(
+                        DirectCompactConfig {
+                            node: DirectPrepushNode::Continuation(target),
+                            pending: config.pending,
+                        },
+                        &mut nwa,
+                        &mut config_to_state,
+                        &mut configs,
+                        &mut queue,
+                    );
+                    nwa.add_epsilon(nwa_state, target_state, state.final_weight.clone());
+                    edge_count += 1;
+                }
+                for output in &state.outputs {
+                    if output.weight.is_empty() {
+                        continue;
+                    }
+                    let next_pending = pending.push_many(config.pending, &output.pushes);
+                    let target_state = ensure(
+                        DirectCompactConfig {
+                            node: DirectPrepushNode::Continuation(target),
+                            pending: next_pending,
+                        },
+                        &mut nwa,
+                        &mut config_to_state,
+                        &mut configs,
+                        &mut queue,
+                    );
+                    nwa.add_epsilon(nwa_state, target_state, output.weight.clone());
+                    edge_count += 1;
+                }
+                let process_transition = |label: i32,
+                                          transition: &WeightedPrepushTarget,
+                                          pending: &mut PendingStackInterner,
+                                          nwa: &mut NWA,
+                                          config_to_state: &mut FxHashMap<DirectCompactConfig, u32>,
+                                          configs: &mut Vec<DirectCompactConfig>,
+                                          queue: &mut VecDeque<u32>,
+                                          edge_count: &mut usize| {
+                    debug_assert!(!is_negative_label(label));
+                    match transition {
+                        WeightedPrepushTarget::Core {
+                            target: core_target,
+                            weight,
+                        } => {
+                            if weight.is_empty() {
+                                return;
+                            }
+                            if config.pending == 0 {
+                                let target_state = ensure(
+                                    DirectCompactConfig {
+                                        node: DirectPrepushNode::BundleCore {
+                                            bundle_id,
+                                            target,
+                                            core_state: *core_target,
+                                        },
+                                        pending: 0,
+                                    },
+                                    nwa,
+                                    config_to_state,
+                                    configs,
+                                    queue,
+                                );
+                                nwa.add_transition(nwa_state, label, target_state, weight.clone());
+                                *edge_count += 1;
+                            } else if let Some(next_pending) = pending.pop_matching(config.pending, label) {
+                                let target_state = ensure(
+                                    DirectCompactConfig {
+                                        node: DirectPrepushNode::BundleCore {
+                                            bundle_id,
+                                            target,
+                                            core_state: *core_target,
+                                        },
+                                        pending: next_pending,
+                                    },
+                                    nwa,
+                                    config_to_state,
+                                    configs,
+                                    queue,
+                                );
+                                nwa.add_epsilon(nwa_state, target_state, weight.clone());
+                                *edge_count += 1;
+                            }
+                        }
+                        WeightedPrepushTarget::Outputs(outputs) => {
+                            for output in outputs {
+                                if output.weight.is_empty() {
+                                    continue;
+                                }
+                                if config.pending == 0 {
+                                    let next_pending = pending.push_many(0, &output.pushes);
+                                    let target_state = ensure(
+                                        DirectCompactConfig {
+                                            node: DirectPrepushNode::Continuation(target),
+                                            pending: next_pending,
+                                        },
+                                        nwa,
+                                        config_to_state,
+                                        configs,
+                                        queue,
+                                    );
+                                    nwa.add_transition(
+                                        nwa_state,
+                                        label,
+                                        target_state,
+                                        output.weight.clone(),
+                                    );
+                                    *edge_count += 1;
+                                } else if let Some(base_pending) =
+                                    pending.pop_matching(config.pending, label)
+                                {
+                                    let next_pending =
+                                        pending.push_many(base_pending, &output.pushes);
+                                    let target_state = ensure(
+                                        DirectCompactConfig {
+                                            node: DirectPrepushNode::Continuation(target),
+                                            pending: next_pending,
+                                        },
+                                        nwa,
+                                        config_to_state,
+                                        configs,
+                                        queue,
+                                    );
+                                    nwa.add_epsilon(
+                                        nwa_state,
+                                        target_state,
+                                        output.weight.clone(),
+                                    );
+                                    *edge_count += 1;
+                                }
+                            }
+                        }
+                    }
+                };
+                if config.pending == 0 {
+                    for (&label, transition) in &state.transitions {
+                        process_transition(
+                            label,
+                            transition,
+                            &mut pending,
+                            &mut nwa,
+                            &mut config_to_state,
+                            &mut configs,
+                            &mut queue,
+                            &mut edge_count,
+                        );
+                    }
+                } else {
+                    let top_label = pending
+                        .top(config.pending)
+                        .expect("nonempty pending stack has a top") as i32;
+                    if let Some(transition) = state.transitions.get(&top_label) {
+                        process_transition(
+                            top_label,
+                            transition,
+                            &mut pending,
+                            &mut nwa,
+                            &mut config_to_state,
+                            &mut configs,
+                            &mut queue,
+                            &mut edge_count,
+                        );
+                    }
+                    if let Some(transition) = state.transitions.get(&DEFAULT_LABEL) {
+                        process_transition(
+                            DEFAULT_LABEL,
+                            transition,
+                            &mut pending,
+                            &mut nwa,
+                            &mut config_to_state,
+                            &mut configs,
+                            &mut queue,
+                            &mut edge_count,
+                        );
+                    }
+                }
+            }
+        }
+    }
+    if let Some(set) = lazy_bundles.as_ref() {
+        templates.emit_lazy_weighted_prepush_profile(set);
+    }
+    let color_depth = std::env::var("GLRMASK_PREPUSH_COLOR_PENDING_DEPTH")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(1);
+    let mut color_by_node =
+        FxHashMap::<(DirectPrepushNode, SmallVec<[u32; 8]>), u64>::default();
+    let mut context_colors = Vec::with_capacity(configs.len());
+    for config in &configs {
+        let mut suffix = SmallVec::<[u32; 8]>::new();
+        let mut pending_id = config.pending;
+        for _ in 0..color_depth {
+            if pending_id == 0 {
+                break;
+            }
+            let entry = pending.entries[pending_id as usize];
+            suffix.push(entry.top);
+            pending_id = entry.parent;
+        }
+        let key = (config.node.clone(), suffix);
+        let next = color_by_node.len() as u64;
+        let color = *color_by_node.entry(key).or_insert(next);
+        context_colors.push(color);
+    }
+    Some((
+        nwa,
+        configs.len(),
+        edge_count,
+        pending.entries.len(),
+        max_pending,
+        bundle_ms,
+        unique_core_states.len(),
+        unique_core_transitions,
+        unique_core_outputs,
+        context_colors,
+    ))
+}
+
+fn profile_direct_prepush_pending_compact(
+    summaries: &StateSummaries,
+    productive: &[bool],
+    templates: &Templates,
+) {
+    if std::env::var_os("GLRMASK_PROFILE_DIRECT_PREPUSH_PENDING_COMPACT").is_none() {
+        return;
+    }
+    let started_at = Instant::now();
+    let Some((
+        nwa,
+        configs,
+        edges,
+        pending_nodes,
+        max_pending,
+        bundle_ms,
+        unique_core_states,
+        unique_core_transitions,
+        unique_core_outputs,
+        _context_colors,
+    )) = build_direct_prepush_pending_compact_nwa(summaries, productive, templates)
+    else {
+        eprintln!("[glrmask/profile][parser_direct_prepush_pending_compact] skipped=cross_target");
+        return;
+    };
+    eprintln!(
+        "[glrmask/profile][parser_direct_prepush_pending_compact] states={} transitions={} configs={} raw_edges={} pending_nodes={} max_pending_depth={} unique_core_states={} unique_core_transitions={} unique_core_outputs={} bundle_ms={:.3} total_ms={:.3}",
+        nwa.states().len(),
+        NWA::num_transitions(&nwa),
+        configs,
+        edges,
+        pending_nodes,
+        max_pending,
+        unique_core_states,
+        unique_core_transitions,
+        unique_core_outputs,
+        bundle_ms,
+        elapsed_ms(started_at),
+    );
+}
+
+fn build_direct_prepush_compact_hashcons_nwa(
+    summaries: &StateSummaries,
+    productive: &[bool],
+    templates: &Templates,
+) -> Option<(NWA, usize, usize, usize, usize, f64)> {
+    if summaries
+        .states
+        .iter()
+        .flat_map(|state| state.branches.iter())
+        .any(|branch| branch.cross_target_group_id.is_some())
+    {
+        return None;
+    }
+    let bundle_started_at = Instant::now();
+    let mut used_bundles = vec![false; summaries.unique_bundles.len()];
+    for (state_id, state) in summaries.states.iter().enumerate() {
+        if !productive[state_id] {
+            continue;
+        }
+        for branch in &state.branches {
+            if productive
+                .get(branch.target as usize)
+                .copied()
+                .unwrap_or(false)
+                && summaries
+                    .bundle_accepts
+                    .get(branch.bundle_id)
+                    .copied()
+                    .unwrap_or(false)
+            {
+                used_bundles[branch.bundle_id] = true;
+            }
+        }
+    }
+    let bundles = templates.build_weighted_prepush_bundles_cached(
+        &summaries.unique_bundles,
+        &used_bundles,
+    );
+    let bundle_ms = elapsed_ms(bundle_started_at);
+    let mut builder = DirectCompactCanonicalBuilder::new(summaries, productive, &bundles);
+    let mut starts = Vec::<u32>::new();
+    for &start in &summaries.start_states {
+        if !productive.get(start as usize).copied().unwrap_or(false) {
+            continue;
+        }
+        starts.push(builder.class_for(DirectCompactConfig {
+            node: DirectPrepushNode::Continuation(start),
+            pending: 0,
+        })?);
+    }
+    starts.sort_unstable();
+    starts.dedup();
+    builder.nwa.set_start_states(starts);
+    Some((
+        builder.nwa,
+        builder.raw_configs,
+        builder.raw_edges,
+        builder.max_pending,
+        builder.pending.entries.len(),
+        bundle_ms,
+    ))
+}
+
+fn profile_direct_prepush_compact_hashcons(
+    summaries: &StateSummaries,
+    productive: &[bool],
+    templates: &Templates,
+) {
+    if std::env::var_os("GLRMASK_PROFILE_DIRECT_PREPUSH_COMPACT_HASHCONS").is_none() {
+        return;
+    }
+    let started_at = Instant::now();
+    let Some((nwa, raw_configs, raw_edges, max_pending, pending_nodes, bundle_ms)) =
+        build_direct_prepush_compact_hashcons_nwa(summaries, productive, templates)
+    else {
+        eprintln!("[glrmask/profile][parser_direct_prepush_compact_hashcons] skipped=cross_target");
+        return;
+    };
+    eprintln!(
+        "[glrmask/profile][parser_direct_prepush_compact_hashcons] states={} transitions={} raw_configs={} raw_edges={} pending_nodes={} max_pending_depth={} bundle_ms={:.3} total_ms={:.3}",
+        nwa.states().len(),
+        NWA::num_transitions(&nwa),
+        raw_configs,
+        raw_edges,
+        pending_nodes,
+        max_pending,
+        bundle_ms,
+        elapsed_ms(started_at),
+    );
+}
+
+fn build_direct_prepush_hashcons_nwa(
+    summaries: &StateSummaries,
+    productive: &[bool],
+    templates: &Templates,
+) -> Option<(NWA, usize, usize, usize, f64)> {
+    if summaries
+        .states
+        .iter()
+        .flat_map(|state| state.branches.iter())
+        .any(|branch| branch.cross_target_group_id.is_some())
+    {
+        return None;
+    }
+    let bundle_started_at = Instant::now();
+    let mut used_bundles = vec![false; summaries.unique_bundles.len()];
+    for (state_id, state) in summaries.states.iter().enumerate() {
+        if !productive[state_id] {
+            continue;
+        }
+        for branch in &state.branches {
+            if productive
+                .get(branch.target as usize)
+                .copied()
+                .unwrap_or(false)
+                && summaries
+                    .bundle_accepts
+                    .get(branch.bundle_id)
+                    .copied()
+                    .unwrap_or(false)
+            {
+                used_bundles[branch.bundle_id] = true;
+            }
+        }
+    }
+    let bundles = templates.build_weighted_prepush_bundles_cached(
+        &summaries.unique_bundles,
+        &used_bundles,
+    );
+    let bundle_ms = elapsed_ms(bundle_started_at);
+    let mut builder = DirectCanonicalBuilder::new(summaries, productive, &bundles);
+    let mut starts = Vec::<u32>::new();
+    for &start in &summaries.start_states {
+        if !productive.get(start as usize).copied().unwrap_or(false) {
+            continue;
+        }
+        starts.push(builder.class_for(DirectPrepushConfig {
+            node: DirectPrepushNode::Continuation(start),
+            pending: SmallVec::new(),
+        })?);
+    }
+    starts.sort_unstable();
+    starts.dedup();
+    builder.nwa.set_start_states(starts);
+    Some((
+        builder.nwa,
+        builder.raw_configs,
+        builder.raw_edges,
+        builder.max_pending,
+        bundle_ms,
+    ))
+}
+
+fn profile_direct_prepush_hashcons(
+    summaries: &StateSummaries,
+    productive: &[bool],
+    templates: &Templates,
+) {
+    if std::env::var_os("GLRMASK_PROFILE_DIRECT_PREPUSH_HASHCONS").is_none() {
+        return;
+    }
+    let started_at = Instant::now();
+    let Some((nwa, raw_configs, raw_edges, max_pending, bundle_ms)) =
+        build_direct_prepush_hashcons_nwa(summaries, productive, templates)
+    else {
+        eprintln!("[glrmask/profile][parser_direct_prepush_hashcons] skipped=cross_target");
+        return;
+    };
+    let transitions = NWA::num_transitions(&nwa);
+    eprintln!(
+        "[glrmask/profile][parser_direct_prepush_hashcons] states={} transitions={} raw_configs={} raw_edges={} max_pending_depth={} bundle_ms={:.3} total_ms={:.3}",
+        nwa.states().len(),
+        transitions,
+        raw_configs,
+        raw_edges,
+        max_pending,
+        bundle_ms,
+        elapsed_ms(started_at),
+    );
+}
+
+
+
+
+fn coalesce_parallel_nwa_edges(nwa: &mut NWA) -> (usize, usize) {
+    let mut transition_merges = 0usize;
+    let mut epsilon_merges = 0usize;
+    for state in nwa.states_mut() {
+        for targets in state.transitions.values_mut() {
+            if targets.len() < 2 {
+                continue;
+            }
+            targets.sort_unstable_by_key(|(target, _)| *target);
+            let mut write = 0usize;
+            for read in 1..targets.len() {
+                if targets[write].0 == targets[read].0 {
+                    targets[write].1 = targets[write].1.union(&targets[read].1);
+                    transition_merges += 1;
+                } else {
+                    write += 1;
+                    if write != read {
+                        targets[write] = targets[read].clone();
+                    }
+                }
+            }
+            targets.truncate(write + 1);
+            targets.retain(|(_, weight)| !weight.is_empty());
+        }
+        if state.epsilons.len() >= 2 {
+            state.epsilons.sort_unstable_by_key(|(target, _)| *target);
+            let mut write = 0usize;
+            for read in 1..state.epsilons.len() {
+                if state.epsilons[write].0 == state.epsilons[read].0 {
+                    state.epsilons[write].1 = state.epsilons[write].1.union(&state.epsilons[read].1);
+                    epsilon_merges += 1;
+                } else {
+                    write += 1;
+                    if write != read {
+                        state.epsilons[write] = state.epsilons[read].clone();
+                    }
+                }
+            }
+            state.epsilons.truncate(write + 1);
+            state.epsilons.retain(|(_, weight)| !weight.is_empty());
+        }
+    }
+    (transition_merges, epsilon_merges)
+}
+
+fn eliminate_epsilon_only_states(nwa: &NWA) -> Option<NWA> {
+    let n = nwa.states().len();
+    if n == 0 {
+        return Some(NWA::new(0, 0));
+    }
+    let mut is_start = vec![false; n];
+    for &start in nwa.start_states() {
+        if (start as usize) < n {
+            is_start[start as usize] = true;
+        }
+    }
+    let retained = nwa
+        .states()
+        .iter()
+        .enumerate()
+        .map(|(state_id, state)| is_start[state_id] || !state.transitions.is_empty())
+        .collect::<Vec<_>>();
+    let removed_count = retained.iter().filter(|&&keep| !keep).count();
+    if removed_count == 0 {
+        return Some(nwa.clone());
+    }
+
+    let mut removed_outdegree = vec![0usize; n];
+    let mut removed_predecessors = vec![Vec::<usize>::new(); n];
+    for (source, state) in nwa.states().iter().enumerate() {
+        if retained[source] {
+            continue;
+        }
+        debug_assert!(state.transitions.is_empty());
+        for (target, weight) in &state.epsilons {
+            let target = *target as usize;
+            if weight.is_empty() || target >= n || retained[target] {
+                continue;
+            }
+            removed_outdegree[source] += 1;
+            removed_predecessors[target].push(source);
+        }
+    }
+
+    let mut summary_final = vec![None::<Weight>; n];
+    let mut summary_exits = vec![Vec::<(u32, Weight)>::new(); n];
+    let mut queue = VecDeque::<usize>::new();
+    for state_id in 0..n {
+        if !retained[state_id] && removed_outdegree[state_id] == 0 {
+            queue.push_back(state_id);
+        }
+    }
+    let mut processed = 0usize;
+    let mut total_exit_refs = 0usize;
+    let mut max_exits = 0usize;
+    while let Some(state_id) = queue.pop_front() {
+        let state = &nwa.states()[state_id];
+        let mut final_weight = state
+            .final_weight
+            .as_ref()
+            .filter(|weight| !weight.is_empty())
+            .cloned();
+        let mut exits = BTreeMap::<u32, Weight>::new();
+        for (target, edge_weight) in &state.epsilons {
+            if edge_weight.is_empty() || (*target as usize) >= n {
+                continue;
+            }
+            let target_idx = *target as usize;
+            if retained[target_idx] {
+                exits
+                    .entry(*target)
+                    .and_modify(|existing| *existing = existing.union(edge_weight))
+                    .or_insert_with(|| edge_weight.clone());
+                continue;
+            }
+            if let Some(target_final) = summary_final[target_idx].as_ref() {
+                let contribution = edge_weight.intersection(target_final);
+                if !contribution.is_empty() {
+                    final_weight = Some(match final_weight {
+                        Some(existing) => existing.union(&contribution),
+                        None => contribution,
+                    });
+                }
+            }
+            for (exit, suffix_weight) in &summary_exits[target_idx] {
+                let contribution = edge_weight.intersection(suffix_weight);
+                if contribution.is_empty() {
+                    continue;
+                }
+                exits
+                    .entry(*exit)
+                    .and_modify(|existing| *existing = existing.union(&contribution))
+                    .or_insert(contribution);
+            }
+        }
+        let exits = exits.into_iter().collect::<Vec<_>>();
+        total_exit_refs += exits.len();
+        max_exits = max_exits.max(exits.len());
+        summary_final[state_id] = final_weight;
+        summary_exits[state_id] = exits;
+        processed += 1;
+        for &pred in &removed_predecessors[state_id] {
+            removed_outdegree[pred] -= 1;
+            if removed_outdegree[pred] == 0 {
+                queue.push_back(pred);
+            }
+        }
+    }
+    if processed != removed_count {
+        return None;
+    }
+
+    let mut result = NWA::new(0, 0);
+    let mut new_by_old = vec![u32::MAX; n];
+    for (state_id, &keep) in retained.iter().enumerate() {
+        if keep {
+            new_by_old[state_id] = result.add_state();
+        }
+    }
+    let final_sink = result.add_state();
+    result.set_final_weight(final_sink, Weight::all());
+
+    for (source, state) in nwa.states().iter().enumerate() {
+        if !retained[source] {
+            continue;
+        }
+        let new_source = new_by_old[source];
+        let mut source_final = state
+            .final_weight
+            .as_ref()
+            .filter(|weight| !weight.is_empty())
+            .cloned();
+        for (target, edge_weight) in &state.epsilons {
+            if edge_weight.is_empty() || (*target as usize) >= n {
+                continue;
+            }
+            let target_idx = *target as usize;
+            if retained[target_idx] {
+                result.add_epsilon(new_source, new_by_old[target_idx], edge_weight.clone());
+                continue;
+            }
+            if let Some(target_final) = summary_final[target_idx].as_ref() {
+                let contribution = edge_weight.intersection(target_final);
+                if !contribution.is_empty() {
+                    source_final = Some(match source_final {
+                        Some(existing) => existing.union(&contribution),
+                        None => contribution,
+                    });
+                }
+            }
+            for (exit, suffix_weight) in &summary_exits[target_idx] {
+                let contribution = edge_weight.intersection(suffix_weight);
+                if !contribution.is_empty() {
+                    result.add_epsilon(
+                        new_source,
+                        new_by_old[*exit as usize],
+                        contribution,
+                    );
+                }
+            }
+        }
+        if let Some(weight) = source_final {
+            result.set_final_weight(new_source, weight);
+        }
+        for (&label, targets) in &state.transitions {
+            for (target, edge_weight) in targets {
+                if edge_weight.is_empty() || (*target as usize) >= n {
+                    continue;
+                }
+                let target_idx = *target as usize;
+                if retained[target_idx] {
+                    result.add_transition(
+                        new_source,
+                        label,
+                        new_by_old[target_idx],
+                        edge_weight.clone(),
+                    );
+                    continue;
+                }
+                if let Some(target_final) = summary_final[target_idx].as_ref() {
+                    let contribution = edge_weight.intersection(target_final);
+                    if !contribution.is_empty() {
+                        result.add_transition(new_source, label, final_sink, contribution);
+                    }
+                }
+                for (exit, suffix_weight) in &summary_exits[target_idx] {
+                    let contribution = edge_weight.intersection(suffix_weight);
+                    if !contribution.is_empty() {
+                        result.add_transition(
+                            new_source,
+                            label,
+                            new_by_old[*exit as usize],
+                            contribution,
+                        );
+                    }
+                }
+            }
+        }
+    }
+    let starts = nwa
+        .start_states()
+        .iter()
+        .filter_map(|&state| {
+            let state = state as usize;
+            (state < n && retained[state]).then_some(new_by_old[state])
+        })
+        .collect::<Vec<_>>();
+    result.set_start_states(starts);
+    let coalesce_started = Instant::now();
+    let (transition_merges, epsilon_merges) = coalesce_parallel_nwa_edges(&mut result);
+    let coalesce_ms = elapsed_ms(coalesce_started);
+    eprintln!(
+        "[glrmask/profile][parser_direct_epsilon_only_elimination] input_states={} retained_states={} removed_states={} output_states={} output_transitions={} summary_exit_refs={} summary_max_exits={} transition_merges={} epsilon_merges={} coalesce_ms={:.3}",
+        n,
+        retained.iter().filter(|&&keep| keep).count(),
+        removed_count,
+        result.states().len(),
+        NWA::num_transitions(&result),
+        total_exit_refs,
+        max_exits,
+        transition_merges,
+        epsilon_merges,
+        coalesce_ms,
+    );
+    Some(result)
+}
+
+fn hashcons_acyclic_weighted_nwa(nwa: &NWA) -> Option<NWA> {
+    let n = nwa.states().len();
+    let mut outdegree = vec![0usize; n];
+    let mut predecessors = vec![Vec::<usize>::new(); n];
+    for (source, state) in nwa.states().iter().enumerate() {
+        for targets in state.transitions.values() {
+            for (target, weight) in targets {
+                if weight.is_empty() || (*target as usize) >= n {
+                    continue;
+                }
+                outdegree[source] += 1;
+                predecessors[*target as usize].push(source);
+            }
+        }
+        for (target, weight) in &state.epsilons {
+            if weight.is_empty() || (*target as usize) >= n {
+                continue;
+            }
+            outdegree[source] += 1;
+            predecessors[*target as usize].push(source);
+        }
+    }
+    let mut queue = VecDeque::<usize>::new();
+    for (state, &degree) in outdegree.iter().enumerate() {
+        if degree == 0 {
+            queue.push_back(state);
+        }
+    }
+    let mut class_by_state = vec![u32::MAX; n];
+    let mut class_by_signature =
+        FxHashMap::<(Option<Weight>, Vec<(u8, i32, u32, Weight)>), u32>::default();
+    let mut result = NWA::new(0, 0);
+    let mut processed = 0usize;
+    while let Some(state_id) = queue.pop_front() {
+        let state = &nwa.states()[state_id];
+        let mut edge_map = BTreeMap::<(u8, i32, u32), Weight>::new();
+        for (&label, targets) in &state.transitions {
+            for (target, weight) in targets {
+                if weight.is_empty() || (*target as usize) >= n {
+                    continue;
+                }
+                let target_class = class_by_state[*target as usize];
+                if target_class == u32::MAX {
+                    return None;
+                }
+                edge_map
+                    .entry((0, label, target_class))
+                    .and_modify(|existing| *existing = existing.union(weight))
+                    .or_insert_with(|| weight.clone());
+            }
+        }
+        for (target, weight) in &state.epsilons {
+            if weight.is_empty() || (*target as usize) >= n {
+                continue;
+            }
+            let target_class = class_by_state[*target as usize];
+            if target_class == u32::MAX {
+                return None;
+            }
+            edge_map
+                .entry((1, 0, target_class))
+                .and_modify(|existing| *existing = existing.union(weight))
+                .or_insert_with(|| weight.clone());
+        }
+        let edges = edge_map
+            .into_iter()
+            .filter(|(_, weight)| !weight.is_empty())
+            .map(|((kind, label, target), weight)| (kind, label, target, weight))
+            .collect::<Vec<_>>();
+        let final_weight = state
+            .final_weight
+            .as_ref()
+            .filter(|weight| !weight.is_empty())
+            .cloned();
+        let signature = (final_weight.clone(), edges.clone());
+        let class = if let Some(&existing) = class_by_signature.get(&signature) {
+            existing
+        } else {
+            let new_state = result.add_state();
+            if let Some(weight) = final_weight {
+                result.set_final_weight(new_state, weight);
+            }
+            for (kind, label, target, weight) in &edges {
+                if *kind == 0 {
+                    result.add_transition(new_state, *label, *target, weight.clone());
+                } else {
+                    result.add_epsilon(new_state, *target, weight.clone());
+                }
+            }
+            class_by_signature.insert(signature, new_state);
+            new_state
+        };
+        class_by_state[state_id] = class;
+        processed += 1;
+        for &pred in &predecessors[state_id] {
+            outdegree[pred] -= 1;
+            if outdegree[pred] == 0 {
+                queue.push_back(pred);
+            }
+        }
+    }
+    if processed != n {
+        return None;
+    }
+    let mut starts = nwa
+        .start_states()
+        .iter()
+        .filter_map(|&state| class_by_state.get(state as usize).copied())
+        .collect::<Vec<_>>();
+    starts.sort_unstable();
+    starts.dedup();
+    result.set_start_states(starts);
+    Some(result)
+}
+
+
+fn hashcons_acyclic_weighted_nwa_with_origins(nwa: &NWA) -> Option<(NWA, Vec<Vec<u32>>)> {
+    let n = nwa.states().len();
+    let mut outdegree = vec![0usize; n];
+    let mut predecessors = vec![Vec::<usize>::new(); n];
+    for (source, state) in nwa.states().iter().enumerate() {
+        for targets in state.transitions.values() {
+            for (target, weight) in targets {
+                if weight.is_empty() || (*target as usize) >= n {
+                    continue;
+                }
+                outdegree[source] += 1;
+                predecessors[*target as usize].push(source);
+            }
+        }
+        for (target, weight) in &state.epsilons {
+            if weight.is_empty() || (*target as usize) >= n {
+                continue;
+            }
+            outdegree[source] += 1;
+            predecessors[*target as usize].push(source);
+        }
+    }
+    let mut queue = VecDeque::<usize>::new();
+    for (state, &degree) in outdegree.iter().enumerate() {
+        if degree == 0 {
+            queue.push_back(state);
+        }
+    }
+    let mut class_by_state = vec![u32::MAX; n];
+    let mut class_by_signature =
+        FxHashMap::<(Option<Weight>, Vec<(u8, i32, u32, Weight)>), u32>::default();
+    let mut result = NWA::new(0, 0);
+    let mut origins = Vec::<Vec<u32>>::new();
+    let mut processed = 0usize;
+    while let Some(state_id) = queue.pop_front() {
+        let state = &nwa.states()[state_id];
+        let mut edge_map = BTreeMap::<(u8, i32, u32), Weight>::new();
+        for (&label, targets) in &state.transitions {
+            for (target, weight) in targets {
+                if weight.is_empty() || (*target as usize) >= n {
+                    continue;
+                }
+                let target_class = class_by_state[*target as usize];
+                if target_class == u32::MAX {
+                    return None;
+                }
+                edge_map
+                    .entry((0, label, target_class))
+                    .and_modify(|existing| *existing = existing.union(weight))
+                    .or_insert_with(|| weight.clone());
+            }
+        }
+        for (target, weight) in &state.epsilons {
+            if weight.is_empty() || (*target as usize) >= n {
+                continue;
+            }
+            let target_class = class_by_state[*target as usize];
+            if target_class == u32::MAX {
+                return None;
+            }
+            edge_map
+                .entry((1, 0, target_class))
+                .and_modify(|existing| *existing = existing.union(weight))
+                .or_insert_with(|| weight.clone());
+        }
+        let edges = edge_map
+            .into_iter()
+            .filter(|(_, weight)| !weight.is_empty())
+            .map(|((kind, label, target), weight)| (kind, label, target, weight))
+            .collect::<Vec<_>>();
+        let final_weight = state
+            .final_weight
+            .as_ref()
+            .filter(|weight| !weight.is_empty())
+            .cloned();
+        let signature = (final_weight.clone(), edges.clone());
+        let class = if let Some(&existing) = class_by_signature.get(&signature) {
+            origins[existing as usize].push(state_id as u32);
+            existing
+        } else {
+            let new_state = result.add_state();
+            if let Some(weight) = final_weight {
+                result.set_final_weight(new_state, weight);
+            }
+            for (kind, label, target, weight) in &edges {
+                if *kind == 0 {
+                    result.add_transition(new_state, *label, *target, weight.clone());
+                } else {
+                    result.add_epsilon(new_state, *target, weight.clone());
+                }
+            }
+            class_by_signature.insert(signature, new_state);
+            origins.push(vec![state_id as u32]);
+            new_state
+        };
+        class_by_state[state_id] = class;
+        processed += 1;
+        for &pred in &predecessors[state_id] {
+            outdegree[pred] -= 1;
+            if outdegree[pred] == 0 {
+                queue.push_back(pred);
+            }
+        }
+    }
+    if processed != n {
+        return None;
+    }
+    let mut starts = nwa
+        .start_states()
+        .iter()
+        .filter_map(|&state| class_by_state.get(state as usize).copied())
+        .collect::<Vec<_>>();
+    starts.sort_unstable();
+    starts.dedup();
+    result.set_start_states(starts);
+    Some((result, origins))
+}
+
+fn build_possible_outgoing_ids_by_quotient_origins(
+    raw_nwa: &NWA,
+    quotient_supports: &[Vec<u32>],
+    origins_by_quotient_state: &[Vec<u32>],
+    num_parser_states: u32,
+) -> Vec<PossibleOutgoingIds> {
+    let expanded_supports = quotient_supports
+        .iter()
+        .map(|support| {
+            let mut raw = Vec::<u32>::new();
+            for &quotient_state in support {
+                if let Some(origins) = origins_by_quotient_state.get(quotient_state as usize) {
+                    raw.extend_from_slice(origins);
+                }
+            }
+            raw.sort_unstable();
+            raw.dedup();
+            raw
+        })
+        .collect::<Vec<_>>();
+    build_possible_outgoing_ids_by_state(raw_nwa, &expanded_supports, num_parser_states)
+}
+
+
+fn hashcons_acyclic_weighted_nwa_colored(nwa: &NWA, colors: &[u64]) -> Option<NWA> {
+    let n = nwa.states().len();
+    if colors.len() != n {
+        return None;
+    }
+    let mut outdegree = vec![0usize; n];
+    let mut predecessors = vec![Vec::<usize>::new(); n];
+    for (source, state) in nwa.states().iter().enumerate() {
+        for targets in state.transitions.values() {
+            for (target, weight) in targets {
+                if weight.is_empty() || (*target as usize) >= n {
+                    continue;
+                }
+                outdegree[source] += 1;
+                predecessors[*target as usize].push(source);
+            }
+        }
+        for (target, weight) in &state.epsilons {
+            if weight.is_empty() || (*target as usize) >= n {
+                continue;
+            }
+            outdegree[source] += 1;
+            predecessors[*target as usize].push(source);
+        }
+    }
+    let mut queue = VecDeque::<usize>::new();
+    for (state, &degree) in outdegree.iter().enumerate() {
+        if degree == 0 {
+            queue.push_back(state);
+        }
+    }
+    let mut class_by_state = vec![u32::MAX; n];
+    let mut class_by_signature = FxHashMap::<
+        (u64, Option<Weight>, Vec<(u8, i32, u32, Weight)>),
+        u32,
+    >::default();
+    let mut result = NWA::new(0, 0);
+    let mut processed = 0usize;
+    while let Some(state_id) = queue.pop_front() {
+        let state = &nwa.states()[state_id];
+        let mut edge_map = BTreeMap::<(u8, i32, u32), Weight>::new();
+        for (&label, targets) in &state.transitions {
+            for (target, weight) in targets {
+                if weight.is_empty() || (*target as usize) >= n {
+                    continue;
+                }
+                let target_class = class_by_state[*target as usize];
+                if target_class == u32::MAX {
+                    return None;
+                }
+                edge_map
+                    .entry((0, label, target_class))
+                    .and_modify(|existing| *existing = existing.union(weight))
+                    .or_insert_with(|| weight.clone());
+            }
+        }
+        for (target, weight) in &state.epsilons {
+            if weight.is_empty() || (*target as usize) >= n {
+                continue;
+            }
+            let target_class = class_by_state[*target as usize];
+            if target_class == u32::MAX {
+                return None;
+            }
+            edge_map
+                .entry((1, 0, target_class))
+                .and_modify(|existing| *existing = existing.union(weight))
+                .or_insert_with(|| weight.clone());
+        }
+        let edges = edge_map
+            .into_iter()
+            .filter(|(_, weight)| !weight.is_empty())
+            .map(|((kind, label, target), weight)| (kind, label, target, weight))
+            .collect::<Vec<_>>();
+        let final_weight = state
+            .final_weight
+            .as_ref()
+            .filter(|weight| !weight.is_empty())
+            .cloned();
+        let signature = (colors[state_id], final_weight.clone(), edges.clone());
+        let class = if let Some(&existing) = class_by_signature.get(&signature) {
+            existing
+        } else {
+            let new_state = result.add_state();
+            if let Some(weight) = final_weight {
+                result.set_final_weight(new_state, weight);
+            }
+            for (kind, label, target, weight) in &edges {
+                if *kind == 0 {
+                    result.add_transition(new_state, *label, *target, weight.clone());
+                } else {
+                    result.add_epsilon(new_state, *target, weight.clone());
+                }
+            }
+            class_by_signature.insert(signature, new_state);
+            new_state
+        };
+        class_by_state[state_id] = class;
+        processed += 1;
+        for &pred in &predecessors[state_id] {
+            outdegree[pred] -= 1;
+            if outdegree[pred] == 0 {
+                queue.push_back(pred);
+            }
+        }
+    }
+    if processed != n {
+        return None;
+    }
+    let mut starts = nwa
+        .start_states()
+        .iter()
+        .filter_map(|&state| class_by_state.get(state as usize).copied())
+        .collect::<Vec<_>>();
+    starts.sort_unstable();
+    starts.dedup();
+    result.set_start_states(starts);
+    Some(result)
+}
+
+fn exact_acyclic_weighted_structural_classes(nwa: &NWA) -> Option<(usize, usize)> {
+    let n = nwa.states().len();
+    let mut outdegree = vec![0usize; n];
+    let mut predecessors = vec![Vec::<usize>::new(); n];
+    for (source, state) in nwa.states().iter().enumerate() {
+        for targets in state.transitions.values() {
+            for (target, weight) in targets {
+                if weight.is_empty() || (*target as usize) >= n {
+                    continue;
+                }
+                outdegree[source] += 1;
+                predecessors[*target as usize].push(source);
+            }
+        }
+        for (target, weight) in &state.epsilons {
+            if weight.is_empty() || (*target as usize) >= n {
+                continue;
+            }
+            outdegree[source] += 1;
+            predecessors[*target as usize].push(source);
+        }
+    }
+    let mut queue = VecDeque::<usize>::new();
+    for (state, &degree) in outdegree.iter().enumerate() {
+        if degree == 0 {
+            queue.push_back(state);
+        }
+    }
+    let mut class_by_state = vec![u32::MAX; n];
+    let mut classes = FxHashMap::<(Option<Weight>, Vec<(u8, i32, u32, Weight)>), u32>::default();
+    let mut processed = 0usize;
+    while let Some(state_id) = queue.pop_front() {
+        let state = &nwa.states()[state_id];
+        let mut edge_map = BTreeMap::<(u8, i32, u32), Weight>::new();
+        let mut add_edge = |kind: u8, label: i32, target: u32, weight: &Weight| -> Option<()> {
+            if weight.is_empty() || (target as usize) >= n {
+                return Some(());
+            }
+            let target_class = class_by_state[target as usize];
+            if target_class == u32::MAX {
+                return None;
+            }
+            edge_map
+                .entry((kind, label, target_class))
+                .and_modify(|existing| *existing = existing.union(weight))
+                .or_insert_with(|| weight.clone());
+            Some(())
+        };
+        for (&label, targets) in &state.transitions {
+            for (target, weight) in targets {
+                add_edge(0, label, *target, weight)?;
+            }
+        }
+        for (target, weight) in &state.epsilons {
+            add_edge(1, 0, *target, weight)?;
+        }
+        let edges = edge_map
+            .into_iter()
+            .filter(|(_, weight)| !weight.is_empty())
+            .map(|((kind, label, target_class), weight)| (kind, label, target_class, weight))
+            .collect::<Vec<_>>();
+        let final_weight = state
+            .final_weight
+            .as_ref()
+            .filter(|weight| !weight.is_empty())
+            .cloned();
+        let next = classes.len() as u32;
+        let class = *classes.entry((final_weight, edges)).or_insert(next);
+        class_by_state[state_id] = class;
+        processed += 1;
+        for &pred in &predecessors[state_id] {
+            outdegree[pred] -= 1;
+            if outdegree[pred] == 0 {
+                queue.push_back(pred);
+            }
+        }
+    }
+    (processed == n).then_some((classes.len(), processed))
+}
+
+fn profile_direct_prepush_pending(
+    summaries: &StateSummaries,
+    productive: &[bool],
+    templates: &Templates,
+) {
+    if std::env::var_os("GLRMASK_PROFILE_DIRECT_PREPUSH_PENDING").is_none() {
+        return;
+    }
+    let started_at = Instant::now();
+    let Some((nwa, max_pending, pending_configs, unique_pending)) =
+        build_direct_prepush_pending_nwa(summaries, productive, templates)
+    else {
+        eprintln!("[glrmask/profile][parser_direct_prepush_pending] skipped=cross_target");
+        return;
+    };
+    let transitions = nwa
+        .states()
+        .iter()
+        .map(|state| {
+            state.epsilons.len()
+                + state
+                    .transitions
+                    .values()
+                    .map(Vec::len)
+                    .sum::<usize>()
+        })
+        .sum::<usize>();
+    let finals = nwa
+        .states()
+        .iter()
+        .filter(|state| state.final_weight.as_ref().is_some_and(|w| !w.is_empty()))
+        .count();
+    let structural_started_at = Instant::now();
+    let structural = exact_acyclic_weighted_structural_classes(&nwa);
+    let structural_ms = elapsed_ms(structural_started_at);
+    eprintln!(
+        "[glrmask/profile][parser_direct_prepush_pending] states={} transitions={} finals={} pending_configs={} unique_pending_stacks={} max_pending_depth={} structural_classes={} structural_acyclic={} structural_ms={:.3} build_ms={:.3}",
+        nwa.states().len(),
+        transitions,
+        finals,
+        pending_configs,
+        unique_pending,
+        max_pending,
+        structural.map(|value| value.0).unwrap_or(0),
+        structural.is_some(),
+        structural_ms,
+        elapsed_ms(started_at),
+    );
+}
+
 fn build_parser_nwa_from_terminal_dwa(
     terminal_dwa: &TerminalAutomaton,
     grammar: &AnalyzedGrammar,
     templates: &Templates,
+    use_prepush_reconstructed_bundles: bool,
 ) -> Option<(NWA, ParserNwaBuildProfile)> {
     let total_started_at = Instant::now();
     let state_prep_started_at = Instant::now();
-    let summaries = build_state_summaries(terminal_dwa, grammar, templates);
+    let mut summaries = build_state_summaries(terminal_dwa, grammar, templates);
+    profile_parser_bundle_gate_factorability(&summaries);
+    profile_parser_bundle_cross_target_gate_factorability(&summaries, templates);
+    factor_parser_bundle_entry_gates(&mut summaries, templates);
+    factor_parser_bundle_cross_target_gates(&mut summaries, templates);
     let productive = compute_productive_terminal_states(&summaries);
+    profile_direct_prepush_pending(&summaries, &productive, templates);
+    profile_direct_prepush_hashcons(&summaries, &productive, templates);
+    profile_direct_prepush_compact_hashcons(&summaries, &productive, templates);
+    profile_direct_prepush_pending_compact(&summaries, &productive, templates);
+    profile_direct_prepush_pending_census_only(&summaries, &productive, templates);
     let state_prep_ms = elapsed_ms(state_prep_started_at);
     let states = &summaries.states;
     let compose_detail_enabled = parser_dwa_compose_detail_enabled();
@@ -3697,6 +7593,7 @@ fn build_parser_nwa_from_terminal_dwa(
     compose_detail.state_init_ms = elapsed_ms(state_init_started_at);
 
     let mut branch_fragment_memo: FxHashMap<(usize, u32), NwaBody> = FxHashMap::default();
+    let mut cross_target_fragment_memo: FxHashMap<usize, NwaBody> = FxHashMap::default();
     let mut used_multi_bundle = vec![false; summaries.unique_bundles.len()];
     for (state_id, state) in states.iter().enumerate() {
         if !productive[state_id] {
@@ -3717,11 +7614,123 @@ fn build_parser_nwa_from_terminal_dwa(
         }
     }
 
+    if std::env::var_os("GLRMASK_PROFILE_PREPUSH_RECONSTRUCTED_BATCH").is_some() {
+        let started = Instant::now();
+        let mut bundles_built = 0usize;
+        let mut states = 0usize;
+        let mut transitions = 0usize;
+        for (bundle_id, bundle) in summaries.unique_bundles.iter().enumerate() {
+            if !used_multi_bundle[bundle_id] {
+                continue;
+            }
+            let reconstructed = templates.build_prepush_reconstructed_bundle(bundle);
+            bundles_built += 1;
+            states += reconstructed.states().len();
+            transitions += NWA::num_transitions(&reconstructed);
+        }
+        eprintln!(
+            "[glrmask/profile][prepush_reconstructed_batch] bundles={} states={} transitions={} total_ms={:.3}",
+            bundles_built,
+            states,
+            transitions,
+            elapsed_ms(started),
+        );
+    }
+
+    if std::env::var_os("GLRMASK_PROFILE_PREPUSH_COMPACT_WRITE_TRIE_BATCH").is_some() {
+        let started = Instant::now();
+        let mut bundles_built = 0usize;
+        let mut states = 0usize;
+        let mut transitions = 0usize;
+        for (bundle_id, bundle) in summaries.unique_bundles.iter().enumerate() {
+            if !used_multi_bundle[bundle_id] {
+                continue;
+            }
+            let compact = templates.build_prepush_compact_write_trie_bundle(bundle);
+            bundles_built += 1;
+            states += compact.states().len();
+            transitions += NWA::num_transitions(&compact);
+        }
+        eprintln!(
+            "[glrmask/profile][prepush_compact_write_trie_batch] bundles={} states={} transitions={} total_ms={:.3}",
+            bundles_built,
+            states,
+            transitions,
+            elapsed_ms(started),
+        );
+    }
+
+    if std::env::var_os("GLRMASK_PROFILE_PREPUSH_FRONTIER_WRITE_TRIE_BATCH").is_some() {
+        let started = Instant::now();
+        let mut bundles_built = 0usize;
+        let mut states = 0usize;
+        let mut transitions = 0usize;
+        for (bundle_id, bundle) in summaries.unique_bundles.iter().enumerate() {
+            if !used_multi_bundle[bundle_id] {
+                continue;
+            }
+            let compact = templates.build_prepush_frontier_write_trie_bundle(bundle);
+            bundles_built += 1;
+            states += compact.states().len();
+            transitions += NWA::num_transitions(&compact);
+        }
+        eprintln!(
+            "[glrmask/profile][prepush_frontier_write_trie_batch] bundles={} states={} transitions={} total_ms={:.3}",
+            bundles_built,
+            states,
+            transitions,
+            elapsed_ms(started),
+        );
+    }
+
     use rayon::prelude::*;
 
     let mut built_bundle_cache: Vec<Option<Arc<NWA>>> = vec![None; summaries.unique_bundles.len()];
     if !compose_detail_enabled {
-        if parser_bundle_topology_reuse_enabled() {
+        if use_prepush_reconstructed_bundles {
+            let profile_selection =
+                std::env::var_os("GLRMASK_PROFILE_PREPUSH_SELECTION").is_some();
+            let selected = std::sync::atomic::AtomicUsize::new(0);
+            built_bundle_cache = summaries
+                .unique_bundles
+                .par_iter()
+                .enumerate()
+                .map(|(bundle_id, bundle)| {
+                    if !used_multi_bundle[bundle_id] {
+                        return None;
+                    }
+                    if use_prepush_reconstructed_for_bundle(true, bundle, templates) {
+                        selected.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if std::env::var_os("GLRMASK_PROFILE_PREPUSH_SELECTION_DETAIL").is_some() {
+                            let sizes = bundle
+                                .keys()
+                                .filter_map(|terminal| templates.by_terminal_nwa.get(terminal))
+                                .map(|template| template.states().len())
+                                .collect::<Vec<_>>();
+                            let max_template = sizes.iter().copied().max().unwrap_or(0);
+                            let sum_template = sizes.iter().sum::<usize>();
+                            eprintln!(
+                                "[glrmask/profile][prepush_selection_bundle] bundle_id={} terminals={} max_template={} sum_template={}",
+                                bundle_id, bundle.len(), max_template, sum_template,
+                            );
+                        }
+                        Some(Arc::new(templates.build_prepush_reconstructed_bundle(bundle)))
+                    } else {
+                        Some(Arc::new(templates.build_bundle(bundle)))
+                    }
+                })
+                .collect();
+            if profile_selection {
+                eprintln!(
+                    "[glrmask/profile][prepush_selection] used_multi={} selected={} threshold={}",
+                    used_multi_bundle.iter().filter(|&&used| used).count(),
+                    selected.load(std::sync::atomic::Ordering::Relaxed),
+                    std::env::var("GLRMASK_PREPUSH_RECONSTRUCT_MIN_TEMPLATE_SUM")
+                        .ok()
+                        .unwrap_or_else(|| "0".to_string()),
+                );
+            }
+        } else if parser_bundle_topology_reuse_enabled() {
             let mut bundle_ids_by_topology =
                 FxHashMap::<Vec<Vec<TerminalID>>, Vec<usize>>::default();
             for (bundle_id, bundle) in summaries.unique_bundles.iter().enumerate() {
@@ -3833,8 +7842,42 @@ fn build_parser_nwa_from_terminal_dwa(
                 u32::MAX,
                 "missing parser-DWA target continuation state",
             );
-            let fragment_key = (branch.bundle_id, branch.target);
-            let fragment = if let Some(existing) = branch_fragment_memo.get(&fragment_key) {
+            let fragment = if let Some(group_id) = branch.cross_target_group_id {
+                if let Some(existing) = cross_target_fragment_memo.get(&group_id) {
+                    if compose_detail_enabled {
+                        compose_detail.memo_hits += 1;
+                    }
+                    existing.clone()
+                } else {
+                    if compose_detail_enabled {
+                        compose_detail.memo_misses += 1;
+                        if built_bundle_cache[branch.bundle_id].is_none()
+                            && summaries.unique_bundles[branch.bundle_id].len() > 1
+                        {
+                            compose_detail.bundle_cache_builds += 1;
+                        }
+                    }
+                    let fragment_build_started_at = Instant::now();
+                    let Some(body) = append_cross_target_branch_fragment(
+                        &mut arena,
+                        &summaries,
+                        &templates,
+                        &mut built_bundle_cache,
+                        group_id,
+                        &continuation_states,
+                        &productive,
+                        use_prepush_reconstructed_bundles,
+                        compose_detail_enabled.then_some(&mut compose_detail),
+                    ) else {
+                        continue;
+                    };
+                    compose_detail.fragment_build_ms += elapsed_ms(fragment_build_started_at);
+                    cross_target_fragment_memo.insert(group_id, body.clone());
+                    body
+                }
+            } else {
+                let fragment_key = (branch.bundle_id, branch.target);
+                if let Some(existing) = branch_fragment_memo.get(&fragment_key) {
                 if compose_detail_enabled {
                     let memo_hit_started_at = Instant::now();
                     compose_detail.memo_hits += 1;
@@ -3844,36 +7887,38 @@ fn build_parser_nwa_from_terminal_dwa(
                 } else {
                     existing.clone()
                 }
-            } else {
-                if compose_detail_enabled {
-                    compose_detail.memo_misses += 1;
-                    if built_bundle_cache[branch.bundle_id].is_none()
-                        && summaries.unique_bundles[branch.bundle_id].len() > 1
-                    {
-                        compose_detail.bundle_cache_builds += 1;
+                } else {
+                    if compose_detail_enabled {
+                        compose_detail.memo_misses += 1;
+                        if built_bundle_cache[branch.bundle_id].is_none()
+                            && summaries.unique_bundles[branch.bundle_id].len() > 1
+                        {
+                            compose_detail.bundle_cache_builds += 1;
+                        }
                     }
+                    let fragment_build_started_at = Instant::now();
+                    let Some(body) = append_branch_fragment(
+                        &mut arena,
+                        &summaries,
+                        &templates,
+                        &mut built_bundle_cache,
+                        branch.bundle_id,
+                        target_continuation,
+                        use_prepush_reconstructed_bundles,
+                        compose_detail_enabled.then_some(&mut compose_detail),
+                    ) else {
+                        continue;
+                    };
+                    compose_detail.fragment_build_ms += elapsed_ms(fragment_build_started_at);
+                    branch_fragment_memo.insert(fragment_key, body.clone());
+                    body
                 }
-                let fragment_build_started_at = Instant::now();
-                let Some(body) = append_branch_fragment(
-                    &mut arena,
-                    &summaries,
-                    &templates,
-                    &mut built_bundle_cache,
-                    branch.bundle_id,
-                    target_continuation,
-                    compose_detail_enabled.then_some(&mut compose_detail),
-                ) else {
-                    continue;
-                };
-                compose_detail.fragment_build_ms += elapsed_ms(fragment_build_started_at);
-                branch_fragment_memo.insert(fragment_key, body.clone());
-                body
             };
 
             let epsilon_link_started_at = Instant::now();
             let fragment_start_states_len = fragment.start_states.len();
             for start in fragment.start_states {
-                arena.add_epsilon(from, start, Weight::all());
+                arena.add_epsilon(from, start, branch.entry_weight.clone());
                 compose_detail.epsilon_edges_added += 1;
             }
             compose_detail.fragment_start_states_total += fragment_start_states_len;
@@ -3892,6 +7937,214 @@ fn build_parser_nwa_from_terminal_dwa(
     );
     arena.set_start_states(parser_start_states);
     let compose_state_ms = elapsed_ms(graph_started_at);
+
+    if std::env::var_os("GLRMASK_PROFILE_PARSER_DWA_ATTRIBUTION").is_some() {
+        let mut bundle_occurrences = vec![0usize; summaries.unique_bundles.len()];
+        let mut bundle_sources = vec![std::collections::BTreeSet::<usize>::new(); summaries.unique_bundles.len()];
+        let mut bundle_targets = vec![std::collections::BTreeSet::<u32>::new(); summaries.unique_bundles.len()];
+        for (state_id, state) in states.iter().enumerate() {
+            if !productive[state_id] {
+                continue;
+            }
+            for branch in &state.branches {
+                if !productive.get(branch.target as usize).copied().unwrap_or(false)
+                    || !summaries.bundle_accepts.get(branch.bundle_id).copied().unwrap_or(false)
+                {
+                    continue;
+                }
+                bundle_occurrences[branch.bundle_id] += 1;
+                bundle_sources[branch.bundle_id].insert(state_id);
+                bundle_targets[branch.bundle_id].insert(branch.target);
+            }
+        }
+
+        let mut ranked = Vec::new();
+        for (bundle_id, bundle) in summaries.unique_bundles.iter().enumerate() {
+            if bundle_occurrences[bundle_id] == 0 {
+                continue;
+            }
+            let fragment_states = if bundle.len() == 1 {
+                bundle.keys().next()
+                    .and_then(|terminal| templates.by_terminal_nwa.get(terminal))
+                    .map(|template| template.states().len())
+                    .unwrap_or(0)
+            } else {
+                built_bundle_cache[bundle_id]
+                    .as_ref()
+                    .map(|bundle_nwa| bundle_nwa.states().len())
+                    .unwrap_or(0)
+            };
+            let distinct_targets = bundle_targets[bundle_id].len();
+            let appended_states = fragment_states.saturating_mul(distinct_targets);
+            ranked.push((appended_states, bundle_id, fragment_states, distinct_targets));
+        }
+        ranked.sort_unstable_by(|left, right| right.cmp(left));
+
+        eprintln!(
+            "[glrmask/profile][parser_attribution_summary] terminal_dwa_states={} productive_terminal_dwa_states={} unique_bundles={} productive_bundle_ids={} unique_bundle_target_fragments={} parser_nwa_states={}",
+            states.len(),
+            productive.iter().filter(|&&x| x).count(),
+            summaries.unique_bundles.len(),
+            ranked.len(),
+            ranked.iter().map(|(_, _, _, targets)| *targets).sum::<usize>(),
+            arena.states().len(),
+        );
+
+        for (rank, &(appended_states, bundle_id, fragment_states, distinct_targets)) in ranked.iter().take(30).enumerate() {
+            let bundle = &summaries.unique_bundles[bundle_id];
+            let mut top_terminals = bundle.keys().copied().map(|terminal| {
+                let template_states = templates.by_terminal_nwa.get(&terminal).map(|t| t.states().len()).unwrap_or(0);
+                (template_states, terminal, grammar.terminal_display_name(terminal).to_string())
+            }).collect::<Vec<_>>();
+            top_terminals.sort_unstable_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+            top_terminals.truncate(16);
+            let sources = bundle_sources[bundle_id].iter().copied().collect::<Vec<_>>();
+            let targets = bundle_targets[bundle_id].iter().copied().collect::<Vec<_>>();
+            eprintln!(
+                "[glrmask/profile][parser_attribution_bundle] rank={} bundle_id={} terminals={} occurrences={} source_states={:?} targets={:?} distinct_targets={} fragment_states={} appended_states={} top_terminals={:?}",
+                rank + 1, bundle_id, bundle.len(), bundle_occurrences[bundle_id], sources, targets, distinct_targets, fragment_states, appended_states, top_terminals
+            );
+        }
+
+        let mut terminal_stats = Vec::new();
+        for (&terminal, template) in &templates.by_terminal_nwa {
+            let mut bundles = 0usize;
+            let mut occurrences = 0usize;
+            let mut heavy_bundle_memberships = 0usize;
+            for &(_, bundle_id, _, _) in &ranked {
+                if summaries.unique_bundles[bundle_id].contains_key(&terminal) {
+                    bundles += 1;
+                    occurrences += bundle_occurrences[bundle_id];
+                }
+            }
+            for &(_, bundle_id, _, _) in ranked.iter().take(20) {
+                heavy_bundle_memberships += usize::from(summaries.unique_bundles[bundle_id].contains_key(&terminal));
+            }
+            if bundles > 0 {
+                terminal_stats.push((
+                    heavy_bundle_memberships,
+                    template.states().len(),
+                    bundles,
+                    occurrences,
+                    terminal,
+                    grammar.terminal_display_name(terminal).to_string(),
+                ));
+            }
+        }
+        terminal_stats.sort_unstable_by(|left, right| {
+            right.0.cmp(&left.0)
+                .then_with(|| right.1.cmp(&left.1))
+                .then_with(|| right.2.cmp(&left.2))
+        });
+        for (rank, (heavy_memberships, template_states, bundles, occurrences, terminal, name)) in terminal_stats.iter().take(40).enumerate() {
+            eprintln!(
+                "[glrmask/profile][parser_attribution_terminal] rank={} terminal={} name={:?} template_states={} bundles={} branch_occurrences={} top20_bundle_memberships={}",
+                rank + 1, terminal, name, template_states, bundles, occurrences, heavy_memberships
+            );
+        }
+        for (state_id, state) in states.iter().enumerate() {
+            if !productive[state_id] {
+                continue;
+            }
+            let mut branch_rows = Vec::new();
+            for branch in &state.branches {
+                if !productive.get(branch.target as usize).copied().unwrap_or(false)
+                    || !summaries.bundle_accepts.get(branch.bundle_id).copied().unwrap_or(false)
+                {
+                    continue;
+                }
+                let bundle = &summaries.unique_bundles[branch.bundle_id];
+                let fragment_states = if bundle.len() == 1 {
+                    bundle.keys().next()
+                        .and_then(|terminal| templates.by_terminal_nwa.get(terminal))
+                        .map(|template| template.states().len())
+                        .unwrap_or(0)
+                } else {
+                    built_bundle_cache[branch.bundle_id]
+                        .as_ref()
+                        .map(|bundle_nwa| bundle_nwa.states().len())
+                        .unwrap_or(0)
+                };
+                branch_rows.push((branch.bundle_id, branch.target, bundle.len(), fragment_states));
+            }
+            branch_rows.sort_unstable();
+            eprintln!(
+                "[glrmask/profile][parser_attribution_state] state={} final={} epsilon_branches={} branches={:?}",
+                state_id,
+                state.final_weight.as_ref().is_some_and(|weight| !weight.is_empty()),
+                state.epsilon_branches.len(),
+                branch_rows
+            );
+        }
+
+        if std::env::var_os("GLRMASK_PROFILE_PARSER_DWA_ABLATION").is_some() {
+            let mut global_candidates = templates.by_terminal_nwa.iter()
+                .filter(|(terminal, _)| ranked.iter().any(|(_, bundle_id, _, _)| summaries.unique_bundles[*bundle_id].contains_key(terminal)))
+                .map(|(&terminal, template)| (template.states().len(), terminal))
+                .collect::<Vec<_>>();
+            global_candidates.sort_unstable_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+            global_candidates.truncate(8);
+            for (template_states, terminal) in global_candidates {
+                let mut containing_bundles = 0usize;
+                let mut baseline_appended_states = 0usize;
+                let mut marginal_appended_states = 0isize;
+                for &(appended_states, bundle_id, fragment_states, distinct_targets) in &ranked {
+                    let bundle = &summaries.unique_bundles[bundle_id];
+                    if !bundle.contains_key(&terminal) {
+                        continue;
+                    }
+                    containing_bundles += 1;
+                    baseline_appended_states += appended_states;
+                    let mut reduced = bundle.clone();
+                    reduced.remove(&terminal);
+                    let reduced_states = if reduced.is_empty() {
+                        0
+                    } else if reduced.len() == 1 {
+                        reduced.keys().next()
+                            .and_then(|remaining| templates.by_terminal_nwa.get(remaining))
+                            .map(|template| template.states().len())
+                            .unwrap_or(0)
+                    } else {
+                        templates.build_bundle(&reduced).states().len()
+                    };
+                    marginal_appended_states += (fragment_states as isize - reduced_states as isize) * distinct_targets as isize;
+                }
+                eprintln!(
+                    "[glrmask/profile][parser_attribution_terminal_ablation_total] terminal={} name={:?} terminal_template_states={} containing_bundles={} baseline_appended_states={} marginal_appended_states={} parser_nwa_states={}",
+                    terminal, grammar.terminal_display_name(terminal), template_states, containing_bundles, baseline_appended_states, marginal_appended_states, arena.states().len()
+                );
+            }
+
+            for &(appended_states, bundle_id, fragment_states, distinct_targets) in ranked.iter().take(12) {
+                let bundle = &summaries.unique_bundles[bundle_id];
+                let mut candidates = bundle.keys().copied().map(|terminal| {
+                    let template_states = templates.by_terminal_nwa.get(&terminal).map(|t| t.states().len()).unwrap_or(0);
+                    (template_states, terminal)
+                }).collect::<Vec<_>>();
+                candidates.sort_unstable_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+                candidates.truncate(4);
+                for (template_states, terminal) in candidates {
+                    let mut reduced = bundle.clone();
+                    reduced.remove(&terminal);
+                    let reduced_states = if reduced.is_empty() {
+                        0
+                    } else if reduced.len() == 1 {
+                        reduced.keys().next()
+                            .and_then(|remaining| templates.by_terminal_nwa.get(remaining))
+                            .map(|template| template.states().len())
+                            .unwrap_or(0)
+                    } else {
+                        templates.build_bundle(&reduced).states().len()
+                    };
+                    let delta = fragment_states as isize - reduced_states as isize;
+                    eprintln!(
+                        "[glrmask/profile][parser_attribution_ablation] bundle_id={} terminals={} distinct_targets={} baseline_fragment_states={} baseline_appended_states={} remove_terminal={} name={:?} terminal_template_states={} reduced_fragment_states={} delta_fragment_states={}",
+                        bundle_id, bundle.len(), distinct_targets, fragment_states, appended_states, terminal, grammar.terminal_display_name(terminal), template_states, reduced_states, delta
+                    );
+                }
+            }
+        }
+    }
 
     if compose_detail_enabled {
         eprintln!(
@@ -3939,6 +8192,637 @@ fn build_parser_nwa_from_terminal_dwa(
     ))
 }
 
+
+fn profile_split_template_census(templates: &Templates) {
+    if !compile_profile_enabled() {
+        return;
+    }
+    use crate::templates::compile_dfa::{
+        specialize_template_dfa_defaults_for_commit_split_input,
+        try_split_commit_template_dfas,
+    };
+
+    let started_at = Instant::now();
+    let mut built = 0usize;
+    let mut skipped = 0usize;
+    let mut pop_states = 0usize;
+    let mut read_states = 0usize;
+    let mut push_states = 0usize;
+    let mut pop_transitions = 0usize;
+    let mut read_transitions = 0usize;
+    let mut push_transitions = 0usize;
+    let mut phase_links = 0usize;
+    let mut max_total_states = 0usize;
+    let mut max_push_states = 0usize;
+
+    for dfa in templates.by_terminal.values() {
+        let commit = specialize_template_dfa_defaults_for_commit_split_input(dfa);
+        let Some(split) = try_split_commit_template_dfas(&commit) else {
+            skipped += 1;
+            continue;
+        };
+        built += 1;
+        let p = split.pop.states.len();
+        let r = split.read.states.len();
+        let w = split.push.states.len();
+        pop_states += p;
+        read_states += r;
+        push_states += w;
+        max_total_states = max_total_states.max(p + r + w);
+        max_push_states = max_push_states.max(w);
+        pop_transitions += split
+            .pop
+            .states
+            .iter()
+            .map(|state| state.transitions.len())
+            .sum::<usize>();
+        read_transitions += split
+            .read
+            .states
+            .iter()
+            .map(|state| state.transitions.len())
+            .sum::<usize>();
+        push_transitions += split
+            .push
+            .states
+            .iter()
+            .map(|state| state.transitions.len())
+            .sum::<usize>();
+        phase_links += split.pop_to_read.iter().filter(|x| x.is_some()).count();
+        phase_links += split.pop_to_push.iter().filter(|x| x.is_some()).count();
+        phase_links += split.read_to_push.iter().filter(|x| x.is_some()).count();
+    }
+
+    eprintln!(
+        "[glrmask/profile][parser_split_template_census] templates={} built={} skipped={} pop_states={} read_states={} push_states={} total_states={} pop_transitions={} read_transitions={} push_transitions={} total_transitions={} phase_links={} max_total_states={} max_push_states={} total_ms={:.3}",
+        templates.by_terminal.len(),
+        built,
+        skipped,
+        pop_states,
+        read_states,
+        push_states,
+        pop_states + read_states + push_states,
+        pop_transitions,
+        read_transitions,
+        push_transitions,
+        pop_transitions + read_transitions + push_transitions,
+        phase_links,
+        max_total_states,
+        max_push_states,
+        elapsed_ms(started_at),
+    );
+}
+
+
+fn build_direct_prepush_hashcons_from_terminal_dwa(
+    terminal_dwa: &TerminalAutomaton,
+    grammar: &AnalyzedGrammar,
+    templates: &Templates,
+) -> Option<NWA> {
+    let mut summaries = build_state_summaries(terminal_dwa, grammar, templates);
+    factor_parser_bundle_entry_gates(&mut summaries, templates);
+    factor_parser_bundle_cross_target_gates(&mut summaries, templates);
+    let productive = compute_productive_terminal_states(&summaries);
+    if std::env::var_os("GLRMASK_VALIDATE_DIRECT_PREPUSH_EPSILON_PROJECTED_PARSER").is_some() {
+        let (raw, _, _, _, _, _, _, _, _, _) =
+            build_direct_prepush_pending_compact_nwa(&summaries, &productive, templates)?;
+        return eliminate_epsilon_only_states(&raw);
+    }
+    if std::env::var_os("GLRMASK_VALIDATE_DIRECT_PREPUSH_COLORED_HASHCONS_PARSER").is_some() {
+        let (raw, _, _, _, _, _, _, _, _, colors) =
+            build_direct_prepush_pending_compact_nwa(&summaries, &productive, templates)?;
+        let quotient = hashcons_acyclic_weighted_nwa_colored(&raw, &colors)?;
+        eprintln!(
+            "[glrmask/profile][parser_direct_prepush_colored_hashcons] raw_states={} quotient_states={} quotient_transitions={}",
+            raw.states().len(),
+            quotient.states().len(),
+            NWA::num_transitions(&quotient),
+        );
+        return Some(quotient);
+    }
+    if std::env::var_os("GLRMASK_VALIDATE_DIRECT_PREPUSH_RAW_COMPACT_PARSER").is_some() {
+        return build_direct_prepush_pending_compact_nwa(&summaries, &productive, templates)
+            .map(|value| value.0);
+    }
+    if std::env::var_os("GLRMASK_VALIDATE_DIRECT_PREPUSH_RAW_PARSER").is_some() {
+        let raw = build_direct_prepush_pending_nwa(&summaries, &productive, templates)?.0;
+        if std::env::var_os("GLRMASK_VALIDATE_DIRECT_PREPUSH_POSTFINAL_HASHCONS_PARSER").is_some() {
+            let mut resolved = raw;
+            apply_finality_fixpoint(&mut resolved);
+            remove_redundant_default_transitions(&mut resolved);
+            let quotient = hashcons_acyclic_weighted_nwa(&resolved)?;
+            eprintln!(
+                "[glrmask/profile][parser_direct_prepush_postfinal_hashcons] resolved_states={} quotient_states={} quotient_transitions={}",
+                resolved.states().len(),
+                quotient.states().len(),
+                NWA::num_transitions(&quotient),
+            );
+            return Some(quotient);
+        }
+        if std::env::var_os("GLRMASK_VALIDATE_DIRECT_PREPUSH_RAW_HASHCONS_PARSER").is_some() {
+            let quotient = hashcons_acyclic_weighted_nwa(&raw)?;
+            if std::env::var_os("GLRMASK_DIAG_DIRECT_PREPUSH_HASHCONS_LANGUAGE").is_some() {
+                let mut raw_read = raw.clone();
+                let mut quotient_read = quotient.clone();
+                apply_finality_fixpoint(&mut raw_read);
+                remove_redundant_default_transitions(&mut raw_read);
+                apply_finality_fixpoint(&mut quotient_read);
+                remove_redundant_default_transitions(&mut quotient_read);
+                let raw_det = determinize_with_supports(&raw_read, None).dwa;
+                let quotient_det = determinize_with_supports(&quotient_read, None).dwa;
+                let difference = find_difference(&raw_det, &quotient_det)
+                    .expect("direct pre-push hashcons read-language diagnostic requires acyclic DWAs");
+                eprintln!(
+                    "[glrmask/profile][parser_direct_prepush_hashcons_language] raw_states={} quotient_states={} raw_det_states={} quotient_det_states={} difference={:?}",
+                    raw.states().len(),
+                    quotient.states().len(),
+                    raw_det.states().len(),
+                    quotient_det.states().len(),
+                    difference,
+                );
+            }
+            return Some(quotient);
+        }
+        return Some(raw);
+    }
+    build_direct_prepush_hashcons_nwa(&summaries, &productive, templates).map(|value| value.0)
+}
+
+
+
+fn possible_outgoing_signature(value: &PossibleOutgoingIds) -> Vec<i32> {
+    match value {
+        PossibleOutgoingIds::Empty => vec![-2],
+        PossibleOutgoingIds::All => vec![-1],
+        PossibleOutgoingIds::Some(ids) => ids.iter_ones().map(|id| id as i32).collect(),
+    }
+}
+
+fn diagnose_quotient_possible_correspondence(
+    raw_dwa: &DWA,
+    raw_possible: &[PossibleOutgoingIds],
+    quotient_dwa: &DWA,
+    quotient_possible: &[PossibleOutgoingIds],
+) {
+    let mut queue = VecDeque::<(u32, u32)>::from([(raw_dwa.start_state(), quotient_dwa.start_state())]);
+    let mut seen = FxHashSet::<(u32, u32)>::default();
+    let mut raw_signatures_by_quotient = FxHashMap::<u32, FxHashSet<Vec<i32>>>::default();
+    while let Some((raw_state, quotient_state)) = queue.pop_front() {
+        if !seen.insert((raw_state, quotient_state)) {
+            continue;
+        }
+        if let Some(raw_signature) = raw_possible
+            .get(raw_state as usize)
+            .map(possible_outgoing_signature)
+        {
+            raw_signatures_by_quotient
+                .entry(quotient_state)
+                .or_default()
+                .insert(raw_signature);
+        }
+        let Some(raw_row) = raw_dwa.states().get(raw_state as usize) else {
+            continue;
+        };
+        let Some(quotient_row) = quotient_dwa.states().get(quotient_state as usize) else {
+            continue;
+        };
+        for (&label, (raw_target, raw_weight)) in &raw_row.transitions {
+            let Some((quotient_target, quotient_weight)) = quotient_row.transitions.get(&label) else {
+                continue;
+            };
+            if raw_weight.intersection(quotient_weight).is_empty() {
+                continue;
+            }
+            queue.push_back((*raw_target, *quotient_target));
+        }
+    }
+    let ambiguous = raw_signatures_by_quotient
+        .values()
+        .filter(|signatures| signatures.len() > 1)
+        .count();
+    let max_signatures = raw_signatures_by_quotient
+        .values()
+        .map(FxHashSet::len)
+        .max()
+        .unwrap_or(0);
+    let mismatched_single = raw_signatures_by_quotient
+        .iter()
+        .filter(|(quotient_state, signatures)| {
+            if signatures.len() != 1 {
+                return false;
+            }
+            let Some(actual) = quotient_possible.get(**quotient_state as usize) else {
+                return false;
+            };
+            let expected = signatures.iter().next().expect("singleton signature");
+            *expected != possible_outgoing_signature(actual)
+        })
+        .count();
+    let raw_start = raw_possible
+        .get(raw_dwa.start_state() as usize)
+        .map(possible_outgoing_signature)
+        .unwrap_or_default();
+    let quotient_start = quotient_possible
+        .get(quotient_dwa.start_state() as usize)
+        .map(possible_outgoing_signature)
+        .unwrap_or_default();
+    eprintln!(
+        "[glrmask/profile][parser_direct_prepush_possible_correspondence] pair_states={} quotient_states_seen={} ambiguous_quotient_states={} max_raw_signatures_per_quotient={} mismatched_single_signature_states={} raw_start_kind={} raw_start_count={} quotient_start_kind={} quotient_start_count={}",
+        seen.len(),
+        raw_signatures_by_quotient.len(),
+        ambiguous,
+        max_signatures,
+        mismatched_single,
+        raw_start.first().copied().unwrap_or(-3),
+        raw_start.len(),
+        quotient_start.first().copied().unwrap_or(-3),
+        quotient_start.len(),
+    );
+}
+
+
+
+fn raw_states_corresponding_to_quotient_state(
+    raw_dwa: &DWA,
+    quotient_dwa: &DWA,
+    wanted_quotient: u32,
+) -> Vec<u32> {
+    let mut queue = VecDeque::<(u32, u32)>::from([(raw_dwa.start_state(), quotient_dwa.start_state())]);
+    let mut seen = FxHashSet::<(u32, u32)>::default();
+    let mut raw_states = FxHashSet::<u32>::default();
+    while let Some((raw_state, quotient_state)) = queue.pop_front() {
+        if !seen.insert((raw_state, quotient_state)) {
+            continue;
+        }
+        if quotient_state == wanted_quotient {
+            raw_states.insert(raw_state);
+        }
+        let Some(raw_row) = raw_dwa.states().get(raw_state as usize) else {
+            continue;
+        };
+        let Some(quotient_row) = quotient_dwa.states().get(quotient_state as usize) else {
+            continue;
+        };
+        for (&label, (raw_target, raw_weight)) in &raw_row.transitions {
+            let Some((quotient_target, quotient_weight)) = quotient_row.transitions.get(&label) else {
+                continue;
+            };
+            if raw_weight.intersection(quotient_weight).is_empty() {
+                continue;
+            }
+            queue.push_back((*raw_target, *quotient_target));
+        }
+    }
+    let mut raw_states = raw_states.into_iter().collect::<Vec<_>>();
+    raw_states.sort_unstable();
+    raw_states
+}
+
+fn emit_default_witness_state(tag: &str, dwa: &DWA, state_id: u32, label: i32) {
+    let Some(state) = dwa.states().get(state_id as usize) else {
+        return;
+    };
+    let explicit = state.transitions.get(&label);
+    let default = state.transitions.get(&DEFAULT_LABEL);
+    let explicit_target_final = explicit
+        .and_then(|(target, _)| dwa.states().get(*target as usize))
+        .and_then(|state| state.final_weight.as_ref());
+    let default_target_final = default
+        .and_then(|(target, _)| dwa.states().get(*target as usize))
+        .and_then(|state| state.final_weight.as_ref());
+    eprintln!(
+        "[glrmask/profile][parser_default_witness] tag={} state={} transitions={} final={:?} label={} explicit_target={:?} explicit_weight={:?} explicit_target_final={:?} default_target={:?} default_weight={:?} default_target_final={:?}",
+        tag,
+        state_id,
+        state.transitions.len(),
+        state.final_weight.as_ref().map(Weight::ptr_key),
+        label,
+        explicit.map(|(target, _)| *target),
+        explicit.map(|(_, weight)| weight.ptr_key()),
+        explicit_target_final.map(Weight::ptr_key),
+        default.map(|(target, _)| *target),
+        default.map(|(_, weight)| weight.ptr_key()),
+        default_target_final.map(Weight::ptr_key),
+    );
+}
+
+fn diagnose_direct_prepush_hashcons_tail(
+    terminal_dwa: &TerminalAutomaton,
+    grammar: &AnalyzedGrammar,
+    table: &GLRTable,
+    templates: &Templates,
+    collapse_immediate_acceptance: bool,
+) {
+    let mut summaries = build_state_summaries(terminal_dwa, grammar, templates);
+    factor_parser_bundle_entry_gates(&mut summaries, templates);
+    factor_parser_bundle_cross_target_gates(&mut summaries, templates);
+    let productive = compute_productive_terminal_states(&summaries);
+    let Some((mut raw, _, _, _)) = build_direct_prepush_pending_nwa(&summaries, &productive, templates) else {
+        eprintln!("[glrmask/profile][parser_direct_prepush_tail_diag] skipped=raw_build");
+        return;
+    };
+    apply_finality_fixpoint(&mut raw);
+    remove_redundant_default_transitions(&mut raw);
+    let Some((mut quotient, quotient_origins)) = hashcons_acyclic_weighted_nwa_with_origins(&raw) else {
+        eprintln!("[glrmask/profile][parser_direct_prepush_tail_diag] skipped=hashcons");
+        return;
+    };
+    // Re-running these is idempotent; keep both paths structurally aligned with
+    // the ordinary finish routine.
+    apply_finality_fixpoint(&mut quotient);
+    remove_redundant_default_transitions(&mut quotient);
+
+    let raw_det = determinize_with_supports(&raw, Some(table.num_states));
+    let quotient_det = determinize_with_supports(&quotient, Some(table.num_states));
+    let diff_support = find_difference(&raw_det.dwa, &quotient_det.dwa)
+        .expect("direct pre-push tail diagnostic requires finite acyclic DWAs");
+
+    let mut raw_dwa = raw_det.dwa;
+    let mut quotient_dwa = quotient_det.dwa;
+    if collapse_immediate_acceptance {
+        collapse_immediate_acceptance_certificates(&mut raw_dwa, terminal_dwa, grammar, table);
+        collapse_immediate_acceptance_certificates(&mut quotient_dwa, terminal_dwa, grammar, table);
+    }
+    let diff_collapse = find_difference(&raw_dwa, &quotient_dwa)
+        .expect("direct pre-push tail diagnostic requires finite acyclic DWAs");
+
+    let raw_possible = build_possible_outgoing_ids_by_state(&raw, &raw_det.supports, table.num_states);
+    let quotient_possible =
+        build_possible_outgoing_ids_by_state(&quotient, &quotient_det.supports, table.num_states);
+    let quotient_origin_possible = build_possible_outgoing_ids_by_quotient_origins(
+        &raw,
+        &quotient_det.supports,
+        &quotient_origins,
+        table.num_states,
+    );
+    diagnose_quotient_possible_correspondence(
+        &raw_dwa,
+        &raw_possible,
+        &quotient_dwa,
+        &quotient_possible,
+    );
+
+    let mut raw_noopt = raw_dwa.clone();
+    let mut quotient_noopt = quotient_dwa.clone();
+    subtract_final_weights_from_outgoing_dwa(&mut raw_noopt);
+    subtract_final_weights_from_outgoing_dwa(&mut quotient_noopt);
+    let diff_noopt_subtract = find_difference(&raw_noopt, &quotient_noopt)
+        .expect("direct pre-push tail diagnostic requires finite acyclic DWAs");
+    let raw_noopt_fallback =
+        determinize_parser_dwa_with_fallbacks(&raw_noopt, &raw_possible, table.num_states);
+    let quotient_noopt_fallback =
+        determinize_parser_dwa_with_fallbacks(&quotient_noopt, &quotient_possible, table.num_states);
+    let diff_noopt_fallback = find_difference(&raw_noopt_fallback, &quotient_noopt_fallback)
+        .expect("direct pre-push tail diagnostic requires finite acyclic DWAs");
+
+    let raw_before_defaults = raw_dwa.clone();
+    let quotient_before_defaults = quotient_dwa.clone();
+    emit_default_witness_state("raw_before", &raw_dwa, raw_dwa.start_state(), 371);
+    emit_default_witness_state(
+        "quotient_before",
+        &quotient_dwa,
+        quotient_dwa.start_state(),
+        371,
+    );
+    optimize_parser_dwa_defaults(&mut raw_dwa, &raw_possible, table.num_states);
+    optimize_parser_dwa_defaults(&mut quotient_dwa, &quotient_possible, table.num_states);
+    emit_default_witness_state("raw_after", &raw_dwa, raw_dwa.start_state(), 371);
+    emit_default_witness_state(
+        "quotient_after",
+        &quotient_dwa,
+        quotient_dwa.start_state(),
+        371,
+    );
+    if let Some((quotient_target, _)) = quotient_before_defaults
+        .states()
+        .get(quotient_before_defaults.start_state() as usize)
+        .and_then(|state| state.transitions.get(&371))
+    {
+        let raw_states = raw_states_corresponding_to_quotient_state(
+            &raw_before_defaults,
+            &quotient_before_defaults,
+            *quotient_target,
+        );
+        let mut changed_final = 0usize;
+        let mut unchanged_final = 0usize;
+        let mut final_pairs = FxHashSet::<(Option<usize>, Option<usize>)>::default();
+        for &raw_state in &raw_states {
+            let before = raw_before_defaults.states()[raw_state as usize]
+                .final_weight
+                .as_ref()
+                .map(Weight::ptr_key);
+            let after = raw_dwa.states()[raw_state as usize]
+                .final_weight
+                .as_ref()
+                .map(Weight::ptr_key);
+            changed_final += usize::from(before != after);
+            unchanged_final += usize::from(before == after);
+            final_pairs.insert((before, after));
+        }
+        eprintln!(
+            "[glrmask/profile][parser_default_witness_correspondence] quotient_target={} raw_states={} changed_final={} unchanged_final={} distinct_final_pairs={}",
+            quotient_target,
+            raw_states.len(),
+            changed_final,
+            unchanged_final,
+            final_pairs.len(),
+        );
+    }
+    let diff_raw_defaults = find_difference(&raw_before_defaults, &raw_dwa)
+        .expect("direct pre-push tail diagnostic requires finite acyclic DWAs");
+    let diff_quotient_defaults = find_difference(&quotient_before_defaults, &quotient_dwa)
+        .expect("direct pre-push tail diagnostic requires finite acyclic DWAs");
+    let diff_defaults = find_difference(&raw_dwa, &quotient_dwa)
+        .expect("direct pre-push tail diagnostic requires finite acyclic DWAs");
+
+    let mut quotient_origin_dwa = quotient_before_defaults.clone();
+    optimize_parser_dwa_defaults(
+        &mut quotient_origin_dwa,
+        &quotient_origin_possible,
+        table.num_states,
+    );
+    let diff_origin_defaults = find_difference(&raw_dwa, &quotient_origin_dwa)
+        .expect("direct pre-push tail diagnostic requires finite acyclic DWAs");
+    subtract_final_weights_from_outgoing_dwa(&mut quotient_origin_dwa);
+    let quotient_origin_fallback = determinize_parser_dwa_with_fallbacks(
+        &quotient_origin_dwa,
+        &quotient_origin_possible,
+        table.num_states,
+    );
+
+    subtract_final_weights_from_outgoing_dwa(&mut raw_dwa);
+    subtract_final_weights_from_outgoing_dwa(&mut quotient_dwa);
+    let diff_subtract = find_difference(&raw_dwa, &quotient_dwa)
+        .expect("direct pre-push tail diagnostic requires finite acyclic DWAs");
+
+    let mut raw_fallback =
+        determinize_parser_dwa_with_fallbacks(&raw_dwa, &raw_possible, table.num_states);
+    let mut quotient_fallback =
+        determinize_parser_dwa_with_fallbacks(&quotient_dwa, &quotient_possible, table.num_states);
+    let diff_fallback = find_difference(&raw_fallback, &quotient_fallback)
+        .expect("direct pre-push tail diagnostic requires finite acyclic DWAs");
+    let diff_origin_fallback = find_difference(&raw_fallback, &quotient_origin_fallback)
+        .expect("direct pre-push tail diagnostic requires finite acyclic DWAs");
+    if collapse_immediate_acceptance {
+        raw_fallback = collapse_final_leaf_targets(raw_fallback);
+        quotient_fallback = collapse_final_leaf_targets(quotient_fallback);
+    }
+    let diff_leaf = find_difference(&raw_fallback, &quotient_fallback)
+        .expect("direct pre-push tail diagnostic requires finite acyclic DWAs");
+
+    eprintln!(
+        "[glrmask/profile][parser_direct_prepush_tail_diag] raw_nwa_states={} quotient_nwa_states={} raw_support_dwa_states={} quotient_support_dwa_states={} diff_support={:?} diff_collapse={:?} diff_noopt_subtract={:?} diff_noopt_fallback={:?} diff_raw_defaults={:?} diff_quotient_defaults={:?} diff_defaults={:?} diff_origin_defaults={:?} diff_subtract={:?} diff_fallback={:?} diff_origin_fallback={:?} diff_leaf={:?}",
+        raw.states().len(),
+        quotient.states().len(),
+        raw_dwa.states().len(),
+        quotient_dwa.states().len(),
+        diff_support,
+        diff_collapse,
+        diff_noopt_subtract,
+        diff_noopt_fallback,
+        diff_raw_defaults,
+        diff_quotient_defaults,
+        diff_defaults,
+        diff_origin_defaults,
+        diff_subtract,
+        diff_fallback,
+        diff_origin_fallback,
+        diff_leaf,
+    );
+}
+
+
+fn finish_full_parser_nwa_for_validation(
+    mut parser_nwa: NWA,
+    terminal_dwa: &TerminalAutomaton,
+    grammar: &AnalyzedGrammar,
+    table: &GLRTable,
+    collapse_immediate_acceptance: bool,
+) -> DWA {
+    let num_parser_states = table.num_states;
+    resolve_negative_codes_in_nwa(
+        &mut parser_nwa,
+        table.construction == GlrTableConstruction::ExperimentalCoreMerged,
+    );
+    if trim_resolved_parser_nwa_enabled(parser_nwa.states().len()) {
+        parser_nwa = trim_unreachable_nwa(parser_nwa);
+    }
+    let determinized = determinize_with_supports(&parser_nwa, Some(num_parser_states));
+    let mut parser_dwa = determinized.dwa;
+    if collapse_immediate_acceptance {
+        collapse_immediate_acceptance_certificates(
+            &mut parser_dwa,
+            terminal_dwa,
+            grammar,
+            table,
+        );
+    }
+    let possible_by_state = build_possible_outgoing_ids_by_state(
+        &parser_nwa,
+        &determinized.supports,
+        num_parser_states,
+    );
+    optimize_parser_dwa_defaults(&mut parser_dwa, &possible_by_state, num_parser_states);
+    subtract_final_weights_from_outgoing_dwa(&mut parser_dwa);
+    let mut parser_dwa =
+        determinize_parser_dwa_with_fallbacks(&parser_dwa, &possible_by_state, num_parser_states);
+    if collapse_immediate_acceptance {
+        parser_dwa = collapse_final_leaf_targets(parser_dwa);
+    }
+    let skip = should_skip_parser_dwa_minimization(parser_dwa.states().len(), parser_dwa.num_transitions());
+    if skip { parser_dwa } else { minimize(&parser_dwa) }
+}
+
+fn finish_read_only_parser_nwa_for_validation(
+    mut parser_nwa: NWA,
+    terminal_dwa: &TerminalAutomaton,
+    grammar: &AnalyzedGrammar,
+    table: &GLRTable,
+    collapse_immediate_acceptance: bool,
+) -> DWA {
+    let num_parser_states = table.num_states;
+    let profile = std::env::var_os("GLRMASK_PROFILE_DIRECT_PREPUSH_FINISH").is_some();
+    let total_started = Instant::now();
+    let finality_started = Instant::now();
+    apply_finality_fixpoint(&mut parser_nwa);
+    let finality_ms = elapsed_ms(finality_started);
+    let prune_started = Instant::now();
+    remove_redundant_default_transitions(&mut parser_nwa);
+    let prune_ms = elapsed_ms(prune_started);
+    let support_started = Instant::now();
+    let determinized = determinize_with_supports(&parser_nwa, Some(num_parser_states));
+    let support_ms = elapsed_ms(support_started);
+    if profile {
+        let support_entries = determinized.supports.iter().map(Vec::len).sum::<usize>();
+        let support_max = determinized.supports.iter().map(Vec::len).max().unwrap_or(0);
+        let support_nontrivial = determinized.supports.iter().filter(|support| support.len() > 1).count();
+        eprintln!(
+            "[glrmask/profile][parser_direct_prepush_support_shape] states={} entries={} avg={:.2} max={} nontrivial={}",
+            determinized.supports.len(),
+            support_entries,
+            support_entries as f64 / determinized.supports.len().max(1) as f64,
+            support_max,
+            support_nontrivial,
+        );
+    }
+    let mut parser_dwa = determinized.dwa;
+    let collapse_started = Instant::now();
+    if collapse_immediate_acceptance {
+        collapse_immediate_acceptance_certificates(
+            &mut parser_dwa,
+            terminal_dwa,
+            grammar,
+            table,
+        );
+    }
+    let collapse_ms = elapsed_ms(collapse_started);
+    let possible_started = Instant::now();
+    let possible_by_state = build_possible_outgoing_ids_by_state(
+        &parser_nwa,
+        &determinized.supports,
+        num_parser_states,
+    );
+    let possible_ms = elapsed_ms(possible_started);
+    let default_started = Instant::now();
+    if std::env::var_os("GLRMASK_DIRECT_PREPUSH_SKIP_DEFAULT_OPT").is_none() {
+        optimize_parser_dwa_defaults(&mut parser_dwa, &possible_by_state, num_parser_states);
+    }
+    let default_ms = elapsed_ms(default_started);
+    let subtract_started = Instant::now();
+    subtract_final_weights_from_outgoing_dwa(&mut parser_dwa);
+    let subtract_ms = elapsed_ms(subtract_started);
+    let fallback_started = Instant::now();
+    let mut parser_dwa =
+        determinize_parser_dwa_with_fallbacks(&parser_dwa, &possible_by_state, num_parser_states);
+    let fallback_ms = elapsed_ms(fallback_started);
+    let leaf_started = Instant::now();
+    if collapse_immediate_acceptance {
+        parser_dwa = collapse_final_leaf_targets(parser_dwa);
+    }
+    let leaf_ms = elapsed_ms(leaf_started);
+    if profile {
+        eprintln!(
+            "[glrmask/profile][parser_direct_prepush_finish] nwa_states={} nwa_transitions={} support_states={} final_states={} final_transitions={} finality_ms={:.3} prune_ms={:.3} support_ms={:.3} collapse_ms={:.3} possible_ms={:.3} default_ms={:.3} subtract_ms={:.3} fallback_ms={:.3} leaf_ms={:.3} total_ms={:.3}",
+            parser_nwa.states().len(),
+            NWA::num_transitions(&parser_nwa),
+            determinized.supports.len(),
+            parser_dwa.states().len(),
+            parser_dwa.num_transitions(),
+            finality_ms,
+            prune_ms,
+            support_ms,
+            collapse_ms,
+            possible_ms,
+            default_ms,
+            subtract_ms,
+            fallback_ms,
+            leaf_ms,
+            elapsed_ms(total_started),
+        );
+    }
+    parser_dwa
+}
+
 pub fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     table: &GLRTable,
     grammar: &AnalyzedGrammar,
@@ -3953,13 +8837,23 @@ pub fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     let minimize_skipped = false;
     let profiling_enabled = compile_profile_enabled();
     profile_template_stack_effect_normal_form(templates);
+    if std::env::var_os("GLRMASK_PROFILE_SPLIT_TEMPLATE_CENSUS").is_some() {
+        profile_split_template_census(templates);
+    }
     let (terminal_dwa_transition_count, terminal_dwa_interned_ranges) = if profiling_enabled {
         let stats = terminal_dwa.stats();
         (stats.transitions, stats.interned_ranges)
     } else {
         (0, 0)
     };
-    let Some((mut parser_nwa, parser_nwa_profile)) = build_parser_nwa_from_terminal_dwa(terminal_dwa, grammar, templates) else {
+    let use_prepush_reconstructed_bundles =
+        std::env::var_os("GLRMASK_USE_PREPUSH_RECONSTRUCTED_BUNDLES").is_some();
+    let Some((mut parser_nwa, parser_nwa_profile)) = build_parser_nwa_from_terminal_dwa(
+        terminal_dwa,
+        grammar,
+        templates,
+        use_prepush_reconstructed_bundles,
+    ) else {
         if profiling_enabled {
             eprintln!(
                 "[glrmask/profile][parser_dwa_detail] terminal_dwa_states={} terminal_dwa_transitions={} terminal_dwa_interned_ranges={} parser_nwa_built=false pre_minimize_states=0 pre_minimize_transitions=0 post_minimize_states=0 post_minimize_transitions=0 minimize_skipped={} state_prep_ms=0.000 compose_state_ms=0.000 parser_nwa_build_ms=0.000 resolve_negative_ms=0.000 support_determinize_ms=0.000 possible_outgoing_ms=0.000 default_opt_ms=0.000 subtract_final_ms=0.000 fallback_determinize_ms=0.000 minimize_ms=0.000 total_ms={:.3}",
@@ -4004,13 +8898,27 @@ pub fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     }
     let resolve_negative_ms = elapsed_ms(resolve_negative_started_at);
     profile_parser_nwa_reachability(&parser_nwa, "post_negative_resolution");
+    if std::env::var_os("GLRMASK_PROFILE_POSTNEG_HASHCONS_POTENTIAL").is_some() {
+        let started = Instant::now();
+        if let Some(quotient) = hashcons_acyclic_weighted_nwa(&parser_nwa) {
+            eprintln!(
+                "[glrmask/profile][parser_postneg_hashcons_potential] input_states={} input_transitions={} quotient_states={} quotient_transitions={} removed={} total_ms={:.3}",
+                parser_nwa.states().len(),
+                NWA::num_transitions(&parser_nwa),
+                quotient.states().len(),
+                NWA::num_transitions(&quotient),
+                parser_nwa.states().len().saturating_sub(quotient.states().len()),
+                elapsed_ms(started),
+            );
+        }
+    }
     let trim_resolved_nwa_started_at = Instant::now();
     let parser_nwa_states_before_trim = parser_nwa.states().len();
-    if trim_resolved_parser_nwa_enabled() {
+    if trim_resolved_parser_nwa_enabled(parser_nwa_states_before_trim) {
         parser_nwa = trim_unreachable_nwa(parser_nwa);
     }
     let trim_resolved_nwa_ms = elapsed_ms(trim_resolved_nwa_started_at);
-    if profiling_enabled && trim_resolved_parser_nwa_enabled() {
+    if profiling_enabled && trim_resolved_parser_nwa_enabled(parser_nwa_states_before_trim) {
         eprintln!(
             "[glrmask/profile][parser_resolved_nwa_trim] before_states={} after_states={} removed={} trim_ms={:.3}",
             parser_nwa_states_before_trim,
@@ -4159,6 +9067,148 @@ pub fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
                 post_minimize_transition_count,
             )
         };
+
+    if std::env::var_os("GLRMASK_DIAG_DIRECT_PREPUSH_HASHCONS_TAIL").is_some() {
+        diagnose_direct_prepush_hashcons_tail(
+            terminal_dwa,
+            grammar,
+            table,
+            templates,
+            collapse_immediate_acceptance,
+        );
+    }
+
+    if std::env::var_os("GLRMASK_VALIDATE_DIRECT_PREPUSH_PARSER").is_some() {
+        let direct_started_at = Instant::now();
+        let direct_nwa = build_direct_prepush_hashcons_from_terminal_dwa(
+            terminal_dwa,
+            grammar,
+            templates,
+        )
+        .expect("direct pre-push parser validation requires acyclic non-cross-target composition");
+        let direct_nwa_states = direct_nwa.states().len();
+        let direct_nwa_transitions = NWA::num_transitions(&direct_nwa);
+        let direct_build_ms = elapsed_ms(direct_started_at);
+        let finish_started_at = Instant::now();
+        let direct = finish_read_only_parser_nwa_for_validation(
+            direct_nwa,
+            terminal_dwa,
+            grammar,
+            table,
+            collapse_immediate_acceptance,
+        );
+        let finish_ms = elapsed_ms(finish_started_at);
+        let compare_started_at = Instant::now();
+        let difference = find_difference(&direct, &minimized)
+            .expect("direct pre-push parser validation requires finite acyclic parser DWAs");
+        let compare_ms = elapsed_ms(compare_started_at);
+        assert!(
+            difference.is_none(),
+            "direct pre-push parser changed weighted parser language on labels {:?}",
+            difference,
+        );
+        eprintln!(
+            "[glrmask/profile][parser_direct_prepush_validation] result=equivalent direct_nwa_states={} direct_nwa_transitions={} direct_dwa_states={} direct_dwa_transitions={} reference_states={} reference_transitions={} build_ms={:.3} finish_ms={:.3} compare_ms={:.3} total_ms={:.3}",
+            direct_nwa_states,
+            direct_nwa_transitions,
+            direct.states().len(),
+            direct.num_transitions(),
+            minimized.states().len(),
+            minimized.num_transitions(),
+            direct_build_ms,
+            finish_ms,
+            compare_ms,
+            elapsed_ms(direct_started_at),
+        );
+    }
+
+
+    if std::env::var_os("GLRMASK_VALIDATE_POSTNEG_HASHCONS_PARSER").is_some() {
+        let started = Instant::now();
+        let quotient = hashcons_acyclic_weighted_nwa(&parser_nwa)
+            .expect("post-negative hashcons validation requires an acyclic parser NWA");
+        let quotient_states = quotient.states().len();
+        let quotient_transitions = NWA::num_transitions(&quotient);
+        let hashcons_ms = elapsed_ms(started);
+        let finish_started = Instant::now();
+        let alt = finish_read_only_parser_nwa_for_validation(
+            quotient,
+            terminal_dwa,
+            grammar,
+            table,
+            collapse_immediate_acceptance,
+        );
+        let finish_ms = elapsed_ms(finish_started);
+        let compare_started = Instant::now();
+        let difference = find_difference(&alt, &minimized)
+            .expect("post-negative hashcons validation requires finite acyclic DWAs");
+        let compare_ms = elapsed_ms(compare_started);
+        assert!(
+            difference.is_none(),
+            "post-negative structural hashcons changed weighted parser language on labels {:?}",
+            difference,
+        );
+        eprintln!(
+            "[glrmask/profile][parser_postneg_hashcons_validation] result=equivalent input_states={} quotient_states={} quotient_transitions={} alt_states={} alt_transitions={} reference_states={} reference_transitions={} hashcons_ms={:.3} finish_ms={:.3} compare_ms={:.3} total_ms={:.3}",
+            parser_nwa.states().len(),
+            quotient_states,
+            quotient_transitions,
+            alt.states().len(),
+            alt.num_transitions(),
+            minimized.states().len(),
+            minimized.num_transitions(),
+            hashcons_ms,
+            finish_ms,
+            compare_ms,
+            elapsed_ms(started),
+        );
+    }
+
+    if std::env::var_os("GLRMASK_VALIDATE_PREPUSH_RECONSTRUCTED_PARSER").is_some() {
+        let started = Instant::now();
+        let (alt_nwa, alt_profile) = build_parser_nwa_from_terminal_dwa(
+            terminal_dwa,
+            grammar,
+            templates,
+            true,
+        )
+        .expect("reconstructed pre-push parser validation requires a productive parser NWA");
+        let build_ms = elapsed_ms(started);
+        let alt_nwa_states = alt_nwa.states().len();
+        let alt_nwa_transitions = NWA::num_transitions(&alt_nwa);
+        let finish_started = Instant::now();
+        let alt = finish_full_parser_nwa_for_validation(
+            alt_nwa,
+            terminal_dwa,
+            grammar,
+            table,
+            collapse_immediate_acceptance,
+        );
+        let finish_ms = elapsed_ms(finish_started);
+        let compare_started = Instant::now();
+        let difference = find_difference(&alt, &minimized)
+            .expect("reconstructed pre-push parser validation requires finite acyclic DWAs");
+        let compare_ms = elapsed_ms(compare_started);
+        assert!(
+            difference.is_none(),
+            "reconstructed pre-push bundles changed weighted parser language on labels {:?}",
+            difference,
+        );
+        eprintln!(
+            "[glrmask/profile][prepush_reconstructed_parser_validation] result=equivalent alt_nwa_states={} alt_nwa_transitions={} alt_dwa_states={} alt_dwa_transitions={} reference_states={} reference_transitions={} build_ms={:.3} compose_ms={:.3} finish_ms={:.3} compare_ms={:.3} total_ms={:.3}",
+            alt_nwa_states,
+            alt_nwa_transitions,
+            alt.states().len(),
+            alt.num_transitions(),
+            minimized.states().len(),
+            minimized.num_transitions(),
+            build_ms,
+            alt_profile.compose_state_ms,
+            finish_ms,
+            compare_ms,
+            elapsed_ms(started),
+        );
+    }
 
     if profiling_enabled {
         eprintln!(
@@ -4490,6 +9540,7 @@ mod tests {
             &terminal_automaton,
             &grammar,
             &templates,
+            false,
         )
         .expect("generic parser NWA should build for direct templates");
         resolve_negative_codes_in_nwa(&mut generic_nwa, false);

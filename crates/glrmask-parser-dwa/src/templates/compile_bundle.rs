@@ -15,6 +15,7 @@ use crate::automata::weighted::minimize::minimize;
 use crate::automata::weighted::nwa::{NWA, NWAState};
 use crate::grammar::flat::TerminalID;
 use crate::compiler::stages::templates::compile_dfa::Templates;
+use crate::compiler::glr::labels::{encode_negative_label, is_negative_label, negative_to_positive_label};
 use crate::ds::weight::{SharedTokenSet, Weight};
 
 type SubsetKey = SmallVec<[u64; 4]>;
@@ -33,6 +34,82 @@ struct BundleSkeletonState {
 pub(crate) struct BundleSkeleton {
     states: Vec<BundleSkeletonState>,
     group_count: usize,
+}
+
+
+#[derive(Clone, Debug)]
+enum PrepushBundleTarget {
+    Core(u32),
+    /// Weighted-union alternatives after the input-reading phase has ended.
+    /// Each pair is `(weight_group, residual_group_dfa_state)`.
+    Outputs(SmallVec<[(u32, u32); 8]>),
+}
+
+#[derive(Clone, Debug)]
+struct PrepushBundleTransition {
+    /// Groups contributing to this label while the deterministic input core is
+    /// still live. Used only for `Core`; output alternatives carry their own
+    /// group weight individually.
+    groups: SmallVec<[u32; 8]>,
+    target: PrepushBundleTarget,
+}
+
+#[derive(Clone, Debug)]
+struct PrepushBundleState {
+    final_groups: SmallVec<[u32; 8]>,
+    transitions: BTreeMap<i32, PrepushBundleTransition>,
+}
+
+#[derive(Clone, Debug)]
+struct PrepushBundleSkeleton {
+    states: Vec<PrepushBundleState>,
+    group_count: usize,
+}
+
+
+pub(crate) type PushSequence = SmallVec<[u32; 4]>;
+
+#[derive(Clone, Debug)]
+pub(crate) struct PrepushOutput {
+    pub pushes: PushSequence,
+    pub weight: Weight,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum WeightedPrepushTarget {
+    Core { target: u32, weight: Weight },
+    Outputs(Vec<PrepushOutput>),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct WeightedPrepushState {
+    pub final_weight: Weight,
+    pub outputs: Vec<PrepushOutput>,
+    pub transitions: BTreeMap<i32, WeightedPrepushTarget>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct WeightedPrepushBundle {
+    pub states: Vec<WeightedPrepushState>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct LazyWeightedPrepushBundle {
+    skeleton: Arc<PrepushBundleSkeleton>,
+    terminals: Vec<TerminalID>,
+    weights: Vec<Weight>,
+}
+
+#[derive(Debug)]
+pub(crate) struct LazyWeightedPrepushBundleSet {
+    bundles: Vec<Option<LazyWeightedPrepushBundle>>,
+    decorated: Vec<Vec<Option<Arc<WeightedPrepushState>>>>,
+    shared_sequences: FxHashMap<(usize, u32), Arc<[PushSequence]>>,
+    profile: bool,
+    decorate_calls: usize,
+    decorate_hits: usize,
+    decorate_misses: usize,
+    decorate_ms: f64,
 }
 
 /// A per-weight terminal group either reuses an immutable template DFA or owns
@@ -321,6 +398,29 @@ pub struct BundleBuildProfile {
     pub result_dwa_transitions: usize,
     pub result_nwa_states: usize,
     pub result_nwa_transitions: usize,
+    pub result_negative_only_states: usize,
+    pub result_positive_only_states: usize,
+    pub result_mixed_label_states: usize,
+    pub result_unlabeled_states: usize,
+    pub result_negative_transitions: usize,
+    pub result_positive_transitions: usize,
+    pub truncated_reachable_states: usize,
+    pub truncated_push_frontier_states: usize,
+    pub truncated_edges_traversed: usize,
+    pub prepush_states: usize,
+    pub prepush_input_transitions: usize,
+    pub prepush_output_edges: usize,
+    pub prepush_output_sites: usize,
+    pub prepush_output_programs: usize,
+    pub prepush_core_states: usize,
+    pub prepush_frontier_payloads: usize,
+    pub prepush_frontier_final_payloads: usize,
+    pub prepush_frontier_push_edges: usize,
+    pub prepush_census_ms: f64,
+    pub prepush_program_sequences: usize,
+    pub prepush_programs_multisequence: usize,
+    pub prepush_max_sequences_per_program: usize,
+    pub prepush_max_push_depth: usize,
     pub total_ms: f64,
     pub used_single_terminal_fast_path: bool,
     pub minimize_skipped: bool,
@@ -586,6 +686,440 @@ impl Templates {
         Some(union)
     }
 
+    pub(crate) fn build_lazy_weighted_prepush_bundles_cached(
+        &self,
+        bundles: &[BTreeMap<TerminalID, Weight>],
+        used: &[bool],
+    ) -> LazyWeightedPrepushBundleSet {
+        assert_eq!(bundles.len(), used.len());
+        let profile = std::env::var_os("GLRMASK_PROFILE_PREPUSH_LAZY_DECORATION").is_some();
+        let started = Instant::now();
+        let mut skeletons = FxHashMap::<Vec<TerminalID>, Arc<PrepushBundleSkeleton>>::default();
+        let mut plans = Vec::with_capacity(bundles.len());
+        let mut decorated = Vec::with_capacity(bundles.len());
+        let mut skeleton_hits = 0usize;
+        let mut skeleton_misses = 0usize;
+        for (bundle, used) in bundles.iter().zip(used.iter().copied()) {
+            if !used {
+                plans.push(None);
+                decorated.push(Vec::new());
+                continue;
+            }
+            let entries = bundle
+                .iter()
+                .filter(|(_, weight)| !weight.is_empty())
+                .map(|(&terminal, weight)| (terminal, weight.clone()))
+                .collect::<Vec<_>>();
+            let key = entries.iter().map(|(terminal, _)| *terminal).collect::<Vec<_>>();
+            let skeleton = if let Some(existing) = skeletons.get(&key) {
+                skeleton_hits += 1;
+                Arc::clone(existing)
+            } else {
+                skeleton_misses += 1;
+                let group_dfas = entries
+                    .iter()
+                    .filter_map(|(terminal, weight)| {
+                        self.by_terminal
+                            .get(terminal)
+                            .map(|dfa| (weight, BundleGroupDfa::Borrowed(dfa)))
+                    })
+                    .collect::<Vec<_>>();
+                let built = Arc::new(build_prepush_bundle_skeleton(&group_dfas));
+                skeletons.insert(key, Arc::clone(&built));
+                built
+            };
+            decorated.push(vec![None; skeleton.states.len()]);
+            plans.push(Some(LazyWeightedPrepushBundle {
+                skeleton,
+                terminals: entries.iter().map(|(terminal, _)| *terminal).collect(),
+                weights: entries.into_iter().map(|(_, weight)| weight).collect(),
+            }));
+        }
+        if profile {
+            eprintln!(
+                "[glrmask/profile][prepush_lazy_plan] used={} unique_skeletons={} skeleton_hits={} skeleton_misses={} plan_ms={:.3}",
+                used.iter().filter(|&&value| value).count(),
+                skeletons.len(),
+                skeleton_hits,
+                skeleton_misses,
+                elapsed_ms(started),
+            );
+        }
+        LazyWeightedPrepushBundleSet {
+            bundles: plans,
+            decorated,
+            shared_sequences: FxHashMap::default(),
+            profile,
+            decorate_calls: 0,
+            decorate_hits: 0,
+            decorate_misses: 0,
+            decorate_ms: 0.0,
+        }
+    }
+
+    pub(crate) fn lazy_weighted_prepush_bundle_is_empty(
+        &self,
+        set: &LazyWeightedPrepushBundleSet,
+        bundle_id: usize,
+    ) -> bool {
+        set.bundles
+            .get(bundle_id)
+            .and_then(Option::as_ref)
+            .is_none_or(|bundle| bundle.skeleton.states.is_empty())
+    }
+
+    pub(crate) fn lazy_weighted_prepush_state(
+        &self,
+        set: &mut LazyWeightedPrepushBundleSet,
+        bundle_id: usize,
+        state_id: u32,
+    ) -> Option<Arc<WeightedPrepushState>> {
+        set.decorate_calls += 1;
+        let slot = set.decorated.get(bundle_id)?.get(state_id as usize)?;
+        if let Some(existing) = slot {
+            set.decorate_hits += 1;
+            return Some(Arc::clone(existing));
+        }
+        set.decorate_misses += 1;
+        let started = set.profile.then(Instant::now);
+        let plan = set.bundles.get(bundle_id)?.as_ref()?;
+        let group_dfas = plan
+            .terminals
+            .iter()
+            .zip(plan.weights.iter())
+            .filter_map(|(terminal, weight)| {
+                self.by_terminal
+                    .get(terminal)
+                    .map(|dfa| (weight, BundleGroupDfa::Borrowed(dfa)))
+            })
+            .collect::<Vec<_>>();
+        if group_dfas.len() != plan.weights.len() {
+            return None;
+        }
+        let skeleton_state = plan.skeleton.states.get(state_id as usize)?;
+        let mut sequence_memos = (0..group_dfas.len())
+            .map(|_| FxHashMap::<u32, Arc<[PushSequence]>>::default())
+            .collect::<Vec<_>>();
+        let mut detail = PrepushInstantiateDetail::default();
+        let state = instantiate_weighted_prepush_state_profiled(
+            skeleton_state,
+            &group_dfas,
+            &mut sequence_memos,
+            &mut set.shared_sequences,
+            &mut detail,
+        );
+        let state = Arc::new(state);
+        set.decorated[bundle_id][state_id as usize] = Some(Arc::clone(&state));
+        if let Some(started) = started {
+            set.decorate_ms += elapsed_ms(started);
+        }
+        Some(state)
+    }
+
+    pub(crate) fn emit_lazy_weighted_prepush_profile(
+        &self,
+        set: &LazyWeightedPrepushBundleSet,
+    ) {
+        if !set.profile {
+            return;
+        }
+        let cached_states = set
+            .decorated
+            .iter()
+            .map(|states| states.iter().filter(|state| state.is_some()).count())
+            .sum::<usize>();
+        eprintln!(
+            "[glrmask/profile][prepush_lazy_decorate] calls={} hits={} misses={} cached_states={} shared_sequence_entries={} decorate_ms={:.3}",
+            set.decorate_calls,
+            set.decorate_hits,
+            set.decorate_misses,
+            cached_states,
+            set.shared_sequences.len(),
+            set.decorate_ms,
+        );
+    }
+
+    pub(crate) fn build_weighted_prepush_bundles_cached(
+        &self,
+        bundles: &[BTreeMap<TerminalID, Weight>],
+        used: &[bool],
+    ) -> Vec<Option<Arc<WeightedPrepushBundle>>> {
+        assert_eq!(bundles.len(), used.len());
+        if std::env::var_os("GLRMASK_PREPUSH_NO_WEIGHT_GROUP_UNION").is_none() {
+            return bundles
+                .iter()
+                .zip(used.iter().copied())
+                .map(|(bundle, used)| used.then(|| Arc::new(self.build_weighted_prepush_bundle(bundle))))
+                .collect();
+        }
+        let profile = std::env::var_os("GLRMASK_PROFILE_PREPUSH_BUNDLE_BATCH").is_some();
+        let total_started = Instant::now();
+        let mut skeleton_ms = 0.0;
+        let mut instantiate_ms = 0.0;
+        let mut skeleton_hits = 0usize;
+        let mut skeleton_misses = 0usize;
+        let mut output_states = 0usize;
+        let mut output_transitions = 0usize;
+        let mut output_programs = 0usize;
+        let mut detail_final_weight_ms = 0.0;
+        let mut detail_core_weight_ms = 0.0;
+        let mut detail_output_expand_ms = 0.0;
+        let mut detail_output_sequence_ms = 0.0;
+        let mut detail_output_group_ms = 0.0;
+        let mut detail_output_weight_ms = 0.0;
+        let mut detail_transition_insert_ms = 0.0;
+        let mut detail_output_sort_ms = 0.0;
+        let mut detail_residual_calls = 0usize;
+        let mut detail_residual_hits = 0usize;
+        let mut detail_residual_misses = 0usize;
+        let mut detail_output_program_refs = 0usize;
+        let mut detail_output_sequence_refs = 0usize;
+        let mut detail_output_unique_sequences = 0usize;
+        let mut detail_core_weight_unions = 0usize;
+        let mut detail_output_weight_unions = 0usize;
+        let mut skeletons = FxHashMap::<Vec<TerminalID>, Arc<PrepushBundleSkeleton>>::default();
+        let mut shared_sequences = SharedResidualSequenceCache::default();
+        let mut result = Vec::with_capacity(bundles.len());
+        for (bundle, used) in bundles.iter().zip(used.iter().copied()) {
+            if !used {
+                result.push(None);
+                continue;
+            }
+            let group_dfas = bundle
+                .iter()
+                .filter_map(|(&terminal, weight)| {
+                    if weight.is_empty() {
+                        return None;
+                    }
+                    self.by_terminal
+                        .get(&terminal)
+                        .map(|dfa| (weight, BundleGroupDfa::Borrowed(dfa)))
+                })
+                .collect::<Vec<_>>();
+            let key = bundle
+                .iter()
+                .filter_map(|(&terminal, weight)| (!weight.is_empty()).then_some(terminal))
+                .collect::<Vec<_>>();
+            let skeleton_started = profile.then(Instant::now);
+            let skeleton = if let Some(existing) = skeletons.get(&key) {
+                skeleton_hits += 1;
+                Arc::clone(existing)
+            } else {
+                skeleton_misses += 1;
+                let built = Arc::new(build_prepush_bundle_skeleton(&group_dfas));
+                skeletons.insert(key, Arc::clone(&built));
+                built
+            };
+            if let Some(started) = skeleton_started {
+                skeleton_ms += elapsed_ms(started);
+            }
+            let instantiate_started = profile.then(Instant::now);
+            let (weighted, inst_detail) = if profile {
+                instantiate_weighted_prepush_bundle_profiled(
+                    skeleton.as_ref(),
+                    &group_dfas,
+                    &mut shared_sequences,
+                )
+            } else {
+                (
+                    instantiate_weighted_prepush_bundle_profiled(
+                        skeleton.as_ref(),
+                        &group_dfas,
+                        &mut shared_sequences,
+                    )
+                    .0,
+                    PrepushInstantiateDetail::default(),
+                )
+            };
+            if let Some(started) = instantiate_started {
+                instantiate_ms += elapsed_ms(started);
+            }
+            if profile {
+                detail_final_weight_ms += inst_detail.final_weight_ms;
+                detail_core_weight_ms += inst_detail.core_weight_ms;
+                detail_output_expand_ms += inst_detail.output_expand_ms;
+                detail_output_sequence_ms += inst_detail.output_sequence_ms;
+                detail_output_group_ms += inst_detail.output_group_ms;
+                detail_output_weight_ms += inst_detail.output_weight_ms;
+                detail_transition_insert_ms += inst_detail.transition_insert_ms;
+                detail_output_sort_ms += inst_detail.output_sort_ms;
+                detail_residual_calls += inst_detail.residual_calls;
+                detail_residual_hits += inst_detail.residual_cache_hits;
+                detail_residual_misses += inst_detail.residual_cache_misses;
+                detail_output_program_refs += inst_detail.output_program_refs;
+                detail_output_sequence_refs += inst_detail.output_sequence_refs;
+                detail_output_unique_sequences += inst_detail.output_unique_sequences;
+                detail_core_weight_unions += inst_detail.core_weight_unions;
+                detail_output_weight_unions += inst_detail.output_weight_unions;
+            }
+            if profile {
+                output_states += weighted.states.len();
+                for state in &weighted.states {
+                    output_transitions += state.transitions.len();
+                    output_programs += state.outputs.len();
+                    for transition in state.transitions.values() {
+                        if let WeightedPrepushTarget::Outputs(outputs) = transition {
+                            output_programs += outputs.len();
+                        }
+                    }
+                }
+            }
+            result.push(Some(Arc::new(weighted)));
+        }
+        if profile {
+            eprintln!(
+                "[glrmask/profile][prepush_bundle_batch] used={} unique_skeletons={} skeleton_hits={} skeleton_misses={} output_states={} output_transitions={} output_programs={} skeleton_ms={:.3} instantiate_ms={:.3} final_weight_ms={:.3} core_weight_ms={:.3} output_expand_ms={:.3} output_sequence_ms={:.3} output_group_ms={:.3} output_weight_ms={:.3} transition_insert_ms={:.3} output_sort_ms={:.3} residual_calls={} residual_hits={} residual_misses={} output_program_refs={} output_sequence_refs={} output_unique_sequences={} core_weight_unions={} output_weight_unions={} total_ms={:.3}",
+                used.iter().filter(|&&value| value).count(),
+                skeletons.len(),
+                skeleton_hits,
+                skeleton_misses,
+                output_states,
+                output_transitions,
+                output_programs,
+                skeleton_ms,
+                instantiate_ms,
+                detail_final_weight_ms,
+                detail_core_weight_ms,
+                detail_output_expand_ms,
+                detail_output_sequence_ms,
+                detail_output_group_ms,
+                detail_output_weight_ms,
+                detail_transition_insert_ms,
+                detail_output_sort_ms,
+                detail_residual_calls,
+                detail_residual_hits,
+                detail_residual_misses,
+                detail_output_program_refs,
+                detail_output_sequence_refs,
+                detail_output_unique_sequences,
+                detail_core_weight_unions,
+                detail_output_weight_unions,
+                elapsed_ms(total_started),
+            );
+        }
+        result
+    }
+
+    pub(crate) fn build_prepush_frontier_write_trie_bundle(
+        &self,
+        bundle: &BTreeMap<TerminalID, Weight>,
+    ) -> NWA {
+        if bundle.is_empty() {
+            return empty_bundle_nwa();
+        }
+        if std::env::var_os("GLRMASK_PREPUSH_NO_WEIGHT_GROUP_UNION").is_some() {
+            let group_dfas = bundle
+                .iter()
+                .filter_map(|(&terminal, weight)| {
+                    if weight.is_empty() {
+                        return None;
+                    }
+                    self.by_terminal
+                        .get(&terminal)
+                        .map(|dfa| (weight, BundleGroupDfa::Borrowed(dfa)))
+                })
+                .collect::<Vec<_>>();
+            let skeleton = build_prepush_bundle_skeleton(&group_dfas);
+            let weighted = instantiate_weighted_prepush_bundle(&skeleton, &group_dfas);
+            return instantiate_weighted_prepush_frontier_write_trie_nwa(&weighted);
+        }
+        let weight_groups = self.group_terminals_by_weight(bundle);
+        let mut profile = BundleBuildProfile::default();
+        let group_dfas = self.build_group_dfas_profiled(&weight_groups, &mut profile);
+        let skeleton = build_prepush_bundle_skeleton(&group_dfas);
+        let weighted = instantiate_weighted_prepush_bundle(&skeleton, &group_dfas);
+        instantiate_weighted_prepush_frontier_write_trie_nwa(&weighted)
+    }
+
+    pub(crate) fn build_prepush_compact_write_trie_bundle(
+        &self,
+        bundle: &BTreeMap<TerminalID, Weight>,
+    ) -> NWA {
+        if bundle.is_empty() {
+            return empty_bundle_nwa();
+        }
+        if std::env::var_os("GLRMASK_PREPUSH_NO_WEIGHT_GROUP_UNION").is_some() {
+            let group_dfas = bundle
+                .iter()
+                .filter_map(|(&terminal, weight)| {
+                    if weight.is_empty() {
+                        return None;
+                    }
+                    self.by_terminal
+                        .get(&terminal)
+                        .map(|dfa| (weight, BundleGroupDfa::Borrowed(dfa)))
+                })
+                .collect::<Vec<_>>();
+            let skeleton = build_prepush_bundle_skeleton(&group_dfas);
+            let weighted = instantiate_weighted_prepush_bundle(&skeleton, &group_dfas);
+            return instantiate_weighted_prepush_compact_write_trie_nwa(&weighted);
+        }
+        let weight_groups = self.group_terminals_by_weight(bundle);
+        let mut profile = BundleBuildProfile::default();
+        let group_dfas = self.build_group_dfas_profiled(&weight_groups, &mut profile);
+        let skeleton = build_prepush_bundle_skeleton(&group_dfas);
+        let weighted = instantiate_weighted_prepush_bundle(&skeleton, &group_dfas);
+        instantiate_weighted_prepush_compact_write_trie_nwa(&weighted)
+    }
+
+    pub(crate) fn build_prepush_reconstructed_bundle(
+        &self,
+        bundle: &BTreeMap<TerminalID, Weight>,
+    ) -> NWA {
+        if bundle.is_empty() {
+            return empty_bundle_nwa();
+        }
+        if std::env::var_os("GLRMASK_PREPUSH_NO_WEIGHT_GROUP_UNION").is_some() {
+            let group_dfas = bundle
+                .iter()
+                .filter_map(|(&terminal, weight)| {
+                    if weight.is_empty() {
+                        return None;
+                    }
+                    self.by_terminal
+                        .get(&terminal)
+                        .map(|dfa| (weight, BundleGroupDfa::Borrowed(dfa)))
+                })
+                .collect::<Vec<_>>();
+            let skeleton = build_prepush_bundle_skeleton(&group_dfas);
+            return instantiate_prepush_bundle_nwa(&skeleton, &group_dfas);
+        }
+        let weight_groups = self.group_terminals_by_weight(bundle);
+        let mut profile = BundleBuildProfile::default();
+        let group_dfas = self.build_group_dfas_profiled(&weight_groups, &mut profile);
+        let skeleton = build_prepush_bundle_skeleton(&group_dfas);
+        instantiate_prepush_bundle_nwa(&skeleton, &group_dfas)
+    }
+
+    pub(crate) fn build_weighted_prepush_bundle(
+        &self,
+        bundle: &BTreeMap<TerminalID, Weight>,
+    ) -> WeightedPrepushBundle {
+        if bundle.is_empty() {
+            return WeightedPrepushBundle { states: Vec::new() };
+        }
+        if std::env::var_os("GLRMASK_PREPUSH_NO_WEIGHT_GROUP_UNION").is_some() {
+            let group_dfas = bundle
+                .iter()
+                .filter_map(|(&terminal, weight)| {
+                    if weight.is_empty() {
+                        return None;
+                    }
+                    self.by_terminal
+                        .get(&terminal)
+                        .map(|dfa| (weight, BundleGroupDfa::Borrowed(dfa)))
+                })
+                .collect::<Vec<_>>();
+            let skeleton = build_prepush_bundle_skeleton(&group_dfas);
+            return instantiate_weighted_prepush_bundle(&skeleton, &group_dfas);
+        }
+        let weight_groups = self.group_terminals_by_weight(bundle);
+        let mut profile = BundleBuildProfile::default();
+        let group_dfas = self.build_group_dfas_profiled(&weight_groups, &mut profile);
+        let skeleton = build_prepush_bundle_skeleton(&group_dfas);
+        instantiate_weighted_prepush_bundle(&skeleton, &group_dfas)
+    }
+
     pub fn build_bundle_profiled(
         &self,
         terminal_weights: &BTreeMap<TerminalID, Weight>,
@@ -620,6 +1154,24 @@ impl Templates {
             }
         }
         let group_dfas = self.build_group_dfas_profiled(&weight_groups, &mut profile);
+        if std::env::var_os("GLRMASK_PROFILE_PREPUSH_BUNDLE_CENSUS").is_some() {
+            let census_started_at = Instant::now();
+            let census = census_prepush_bundle_groups(&group_dfas);
+            profile.prepush_census_ms = elapsed_ms(census_started_at);
+            profile.prepush_states = census.states;
+            profile.prepush_input_transitions = census.input_transitions;
+            profile.prepush_output_edges = census.output_edges;
+            profile.prepush_output_sites = census.output_sites;
+            profile.prepush_output_programs = census.output_programs;
+            profile.prepush_core_states = census.core_states;
+            profile.prepush_frontier_payloads = census.frontier_payloads;
+            profile.prepush_frontier_final_payloads = census.frontier_final_payloads;
+            profile.prepush_frontier_push_edges = census.frontier_push_edges;
+            profile.prepush_program_sequences = census.program_sequences;
+            profile.prepush_programs_multisequence = census.programs_multisequence;
+            profile.prepush_max_sequences_per_program = census.max_sequences_per_program;
+            profile.prepush_max_push_depth = census.max_push_depth;
+        }
 
         // STICKY NOTE: NEVER REMOVE THIS NOTE.
         // These parser bundles must be determinized before they are converted
@@ -655,6 +1207,69 @@ impl Templates {
         profile.determinize_edge_cache_miss_subset_total = determinize_profile.edge_cache_miss_subset_total;
         profile.result_dwa_states = bundle_dwa.states().len();
         profile.result_dwa_transitions = DWA::num_transitions(&bundle_dwa);
+        if std::env::var_os("GLRMASK_VALIDATE_PREPUSH_BUNDLE").is_some() {
+            use crate::automata::weighted::equivalence::find_difference;
+            use crate::automata::weighted_u32::determinize::determinize as weighted_determinize;
+            let prepush = build_prepush_bundle_skeleton(&group_dfas);
+            let reconstructed = instantiate_prepush_bundle_nwa(&prepush, &group_dfas);
+            let reconstructed = weighted_determinize(&reconstructed)
+                .expect("pre-push bundle reconstruction must be finite and acyclic");
+            assert!(
+                find_difference(&bundle_dwa, &reconstructed)
+                    .expect("pre-push bundle validation requires finite acyclic bundles")
+                    .is_none(),
+                "pre-push bundle transducer boundary changed weighted bundle language",
+            );
+        }
+        for state in bundle_dwa.states() {
+            let mut has_negative = false;
+            let mut has_positive = false;
+            for (&label, targets) in &state.transitions {
+                if crate::compiler::glr::labels::is_negative_label(label) {
+                    has_negative = true;
+                    profile.result_negative_transitions += 1;
+                } else {
+                    has_positive = true;
+                    profile.result_positive_transitions += 1;
+                }
+            }
+            match (has_negative, has_positive) {
+                (true, false) => profile.result_negative_only_states += 1,
+                (false, true) => profile.result_positive_only_states += 1,
+                (true, true) => profile.result_mixed_label_states += 1,
+                (false, false) => profile.result_unlabeled_states += 1,
+            }
+        }
+
+        {
+            let mut seen = vec![false; bundle_dwa.states().len()];
+            let mut queue = VecDeque::from([0u32]);
+            while let Some(state_id) = queue.pop_front() {
+                let state_index = state_id as usize;
+                if seen[state_index] {
+                    continue;
+                }
+                seen[state_index] = true;
+                profile.truncated_reachable_states += 1;
+                let state = &bundle_dwa.states()[state_index];
+                let has_negative = state
+                    .transitions
+                    .keys()
+                    .any(|&label| crate::compiler::glr::labels::is_negative_label(label));
+                let has_positive = state
+                    .transitions
+                    .keys()
+                    .any(|&label| !crate::compiler::glr::labels::is_negative_label(label));
+                if has_negative && !has_positive {
+                    profile.truncated_push_frontier_states += 1;
+                    continue;
+                }
+                for (_, (target, _)) in &state.transitions {
+                    profile.truncated_edges_traversed += 1;
+                    queue.push_back(*target);
+                }
+            }
+        }
 
         let minimize_started_at = Instant::now();
         profile.minimize_skipped = !minimize_template_bundles_enabled();
@@ -734,6 +1349,864 @@ struct DeterminizeBundleProfile {
     edge_cache_hit_subset_total: usize,
     edge_cache_misses: usize,
     edge_cache_miss_subset_total: usize,
+}
+
+
+
+fn build_prepush_bundle_skeleton(
+    groups: &[(&Weight, BundleGroupDfa<'_>)],
+) -> PrepushBundleSkeleton {
+    let n = groups.len();
+    if n == 0 {
+        return PrepushBundleSkeleton {
+            states: Vec::new(),
+            group_count: 0,
+        };
+    }
+
+    let start_key = groups
+        .iter()
+        .enumerate()
+        .map(|(group_id, (_, dfa))| (group_id as u32, dfa.dfa().start_state))
+        .collect::<Vec<_>>();
+    let mut states = vec![PrepushBundleState {
+        final_groups: SmallVec::new(),
+        transitions: BTreeMap::new(),
+    }];
+    let mut state_map = FxHashMap::<Vec<(u32, u32)>, u32>::default();
+    let mut singleton_state_map = FxHashMap::<(u32, u32), u32>::default();
+    let mut worklist = VecDeque::<(u32, Vec<(u32, u32)>)>::new();
+    if let [single] = start_key.as_slice() {
+        singleton_state_map.insert(*single, 0);
+    } else {
+        state_map.insert(start_key.clone(), 0);
+    }
+    worklist.push_back((0, start_key));
+    let mut label_targets = LabelTargets::new();
+
+    while let Some((state_id, product_state)) = worklist.pop_front() {
+        let mut final_groups = SmallVec::<[u32; 8]>::new();
+        for &(group_id, dfa_state) in &product_state {
+            if groups[group_id as usize].1.dfa().states[dfa_state as usize].is_accepting {
+                final_groups.push(group_id);
+            }
+        }
+        states[state_id as usize].final_groups = final_groups;
+
+        collect_label_targets(groups, &product_state, &mut label_targets);
+        let mut label_start = 0usize;
+        while label_start < label_targets.len() {
+            let label = label_targets[label_start].0;
+            let mut label_end = label_start + 1;
+            while label_end < label_targets.len() && label_targets[label_end].0 == label {
+                label_end += 1;
+            }
+            let slice = &label_targets[label_start..label_end];
+            let mut edge_groups = SmallVec::<[u32; 8]>::new();
+            for &(_, group_id, _) in slice {
+                edge_groups.push(group_id);
+            }
+
+            let output_now = crate::compiler::glr::labels::is_negative_label(label);
+            let target = if output_now {
+                PrepushBundleTarget::Outputs(
+                    slice
+                        .iter()
+                        .map(|&(_, group_id, target)| (group_id, target))
+                        .collect(),
+                )
+            } else {
+                let next_state = slice
+                    .iter()
+                    .map(|&(_, group_id, target)| (group_id, target))
+                    .collect::<Vec<_>>();
+                if product_state_has_input_labels(groups, &next_state) {
+                    let target_id = if let [single] = next_state.as_slice() {
+                        if let Some(&existing) = singleton_state_map.get(single) {
+                            existing
+                        } else {
+                            let id = states.len() as u32;
+                            states.push(PrepushBundleState {
+                                final_groups: SmallVec::new(),
+                                transitions: BTreeMap::new(),
+                            });
+                            singleton_state_map.insert(*single, id);
+                            worklist.push_back((id, next_state));
+                            id
+                        }
+                    } else if let Some(&existing) = state_map.get(&next_state) {
+                        existing
+                    } else {
+                        let id = states.len() as u32;
+                        states.push(PrepushBundleState {
+                            final_groups: SmallVec::new(),
+                            transitions: BTreeMap::new(),
+                        });
+                        state_map.insert(next_state.clone(), id);
+                        worklist.push_back((id, next_state));
+                        id
+                    };
+                    PrepushBundleTarget::Core(target_id)
+                } else {
+                    PrepushBundleTarget::Outputs(
+                        slice
+                            .iter()
+                            .map(|&(_, group_id, target)| (group_id, target))
+                            .collect(),
+                    )
+                }
+            };
+
+            states[state_id as usize].transitions.insert(
+                label,
+                PrepushBundleTransition {
+                    groups: edge_groups,
+                    target,
+                },
+            );
+            label_start = label_end;
+        }
+    }
+
+    PrepushBundleSkeleton {
+        states,
+        group_count: n,
+    }
+}
+
+#[derive(Default)]
+struct PrepushInstantiateDetail {
+    final_weight_ms: f64,
+    core_weight_ms: f64,
+    output_expand_ms: f64,
+    output_sequence_ms: f64,
+    output_group_ms: f64,
+    output_weight_ms: f64,
+    transition_insert_ms: f64,
+    output_sort_ms: f64,
+    residual_calls: usize,
+    residual_cache_hits: usize,
+    residual_cache_misses: usize,
+    output_program_refs: usize,
+    output_sequence_refs: usize,
+    output_unique_sequences: usize,
+    core_weight_unions: usize,
+    output_weight_unions: usize,
+}
+type SharedResidualSequenceCache = FxHashMap<(usize, u32), Arc<[PushSequence]>>;
+
+
+fn residual_push_sequences(
+    dfa: &UnweightedDfa,
+    state: u32,
+    memo: &mut FxHashMap<u32, Arc<[PushSequence]>>,
+    shared: &mut SharedResidualSequenceCache,
+    detail: &mut PrepushInstantiateDetail,
+) -> Arc<[PushSequence]> {
+    detail.residual_calls += 1;
+    if let Some(cached) = memo.get(&state) {
+        detail.residual_cache_hits += 1;
+        return Arc::clone(cached);
+    }
+    let shared_key = (dfa as *const UnweightedDfa as usize, state);
+    if let Some(cached) = shared.get(&shared_key) {
+        detail.residual_cache_hits += 1;
+        memo.insert(state, Arc::clone(cached));
+        return Arc::clone(cached);
+    }
+    detail.residual_cache_misses += 1;
+    let current = &dfa.states[state as usize];
+    let mut out = Vec::<PushSequence>::new();
+    if current.is_accepting {
+        out.push(PushSequence::new());
+    }
+    for (&label, &target) in &current.transitions {
+        assert!(
+            is_negative_label(label),
+            "pre-push residual program returned to input label"
+        );
+        let pushed = negative_to_positive_label(label) as u32;
+        for suffix in residual_push_sequences(dfa, target, memo, shared, detail).iter() {
+            let mut sequence = PushSequence::with_capacity(1 + suffix.len());
+            sequence.push(pushed);
+            sequence.extend_from_slice(suffix);
+            out.push(sequence);
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    let out: Arc<[PushSequence]> = Arc::from(out.into_boxed_slice());
+    memo.insert(state, Arc::clone(&out));
+    shared.insert(shared_key, Arc::clone(&out));
+    out
+}
+
+fn weighted_outputs_for_programs(
+    programs: &[(u32, u32)],
+    groups: &[(&Weight, BundleGroupDfa<'_>)],
+    sequence_memos: &mut [FxHashMap<u32, Arc<[PushSequence]>>],
+    shared_sequences: &mut SharedResidualSequenceCache,
+    prefix_push: Option<u32>,
+    detail: &mut PrepushInstantiateDetail,
+) -> Vec<PrepushOutput> {
+    let sequence_started = Instant::now();
+    detail.output_program_refs += programs.len();
+    let mut outputs = Vec::<PrepushOutput>::new();
+    for &(group, residual) in programs {
+        let sequences = residual_push_sequences(
+            groups[group as usize].1.dfa(),
+            residual,
+            &mut sequence_memos[group as usize],
+            shared_sequences,
+            detail,
+        );
+        detail.output_sequence_refs += sequences.len();
+        let weight = groups[group as usize].0;
+        for suffix in sequences.iter() {
+            let mut pushes = PushSequence::with_capacity(prefix_push.is_some() as usize + suffix.len());
+            if let Some(push) = prefix_push {
+                pushes.push(push);
+            }
+            pushes.extend_from_slice(suffix);
+            outputs.push(PrepushOutput {
+                pushes,
+                weight: weight.clone(),
+            });
+        }
+    }
+    detail.output_sequence_ms += elapsed_ms(sequence_started);
+
+    let group_started = Instant::now();
+    outputs.sort_unstable_by(|left, right| left.pushes.cmp(&right.pushes));
+    let mut merged = Vec::<PrepushOutput>::with_capacity(outputs.len());
+    for output in outputs {
+        if let Some(previous) = merged.last_mut()
+            && previous.pushes == output.pushes
+        {
+            detail.output_weight_unions += 1;
+            previous.weight = previous.weight.union(&output.weight);
+        } else {
+            merged.push(output);
+        }
+    }
+    detail.output_unique_sequences += merged.len();
+    detail.output_group_ms += elapsed_ms(group_started);
+    merged
+}
+
+fn instantiate_weighted_prepush_state_profiled(
+    state: &PrepushBundleState,
+    groups: &[(&Weight, BundleGroupDfa<'_>)],
+    sequence_memos: &mut [FxHashMap<u32, Arc<[PushSequence]>>],
+    shared_sequences: &mut SharedResidualSequenceCache,
+    detail: &mut PrepushInstantiateDetail,
+) -> WeightedPrepushState {
+    let final_started = Instant::now();
+    let final_weight = match state.final_groups.as_slice() {
+        [] => Weight::empty(),
+        [group] => groups[*group as usize].0.clone(),
+        _ => {
+            detail.core_weight_unions += 1;
+            Weight::union_all(
+                state
+                    .final_groups
+                    .iter()
+                    .map(|&group| groups[group as usize].0),
+            )
+        }
+    };
+    detail.final_weight_ms += elapsed_ms(final_started);
+    let mut outputs = Vec::<PrepushOutput>::new();
+    let mut transitions = BTreeMap::<i32, WeightedPrepushTarget>::new();
+    for (&label, transition) in &state.transitions {
+        match &transition.target {
+            PrepushBundleTarget::Core(target) => {
+                debug_assert!(!is_negative_label(label));
+                let weight_started = Instant::now();
+                let weight = match transition.groups.as_slice() {
+                    [] => Weight::empty(),
+                    [group] => groups[*group as usize].0.clone(),
+                    _ => {
+                        detail.core_weight_unions += 1;
+                        Weight::union_all(
+                            transition
+                                .groups
+                                .iter()
+                                .map(|&group| groups[group as usize].0),
+                        )
+                    }
+                };
+                detail.core_weight_ms += elapsed_ms(weight_started);
+                if !weight.is_empty() {
+                    let insert_started = Instant::now();
+                    transitions.insert(
+                        label,
+                        WeightedPrepushTarget::Core {
+                            target: *target,
+                            weight,
+                        },
+                    );
+                    detail.transition_insert_ms += elapsed_ms(insert_started);
+                }
+            }
+            PrepushBundleTarget::Outputs(programs) => {
+                let expand_started = Instant::now();
+                let prefix_push =
+                    is_negative_label(label).then(|| negative_to_positive_label(label) as u32);
+                let weighted = weighted_outputs_for_programs(
+                    programs,
+                    groups,
+                    sequence_memos,
+                    shared_sequences,
+                    prefix_push,
+                    detail,
+                );
+                detail.output_expand_ms += elapsed_ms(expand_started);
+                if prefix_push.is_some() {
+                    outputs.extend(weighted);
+                } else if !weighted.is_empty() {
+                    let insert_started = Instant::now();
+                    transitions.insert(label, WeightedPrepushTarget::Outputs(weighted));
+                    detail.transition_insert_ms += elapsed_ms(insert_started);
+                }
+            }
+        }
+    }
+    let sort_started = Instant::now();
+    outputs.sort_by(|left, right| left.pushes.cmp(&right.pushes));
+    detail.output_sort_ms += elapsed_ms(sort_started);
+    WeightedPrepushState {
+        final_weight,
+        outputs,
+        transitions,
+    }
+}
+
+fn instantiate_weighted_prepush_bundle_profiled(
+    skeleton: &PrepushBundleSkeleton,
+    groups: &[(&Weight, BundleGroupDfa<'_>)],
+    shared_sequences: &mut SharedResidualSequenceCache,
+) -> (WeightedPrepushBundle, PrepushInstantiateDetail) {
+    assert_eq!(skeleton.group_count, groups.len());
+    let mut detail = PrepushInstantiateDetail::default();
+    let mut sequence_memos = (0..groups.len())
+        .map(|_| FxHashMap::<u32, Arc<[PushSequence]>>::default())
+        .collect::<Vec<_>>();
+    let mut states = Vec::with_capacity(skeleton.states.len());
+    for state in &skeleton.states {
+        states.push(instantiate_weighted_prepush_state_profiled(
+            state,
+            groups,
+            &mut sequence_memos,
+            shared_sequences,
+            &mut detail,
+        ));
+    }
+    (WeightedPrepushBundle { states }, detail)
+}
+
+fn instantiate_weighted_prepush_bundle(
+    skeleton: &PrepushBundleSkeleton,
+    groups: &[(&Weight, BundleGroupDfa<'_>)],
+) -> WeightedPrepushBundle {
+    let mut shared_sequences = SharedResidualSequenceCache::default();
+    instantiate_weighted_prepush_bundle_profiled(skeleton, groups, &mut shared_sequences).0
+}
+
+
+
+#[derive(Default)]
+struct WeightedWriteTrieNode {
+    final_weight: Option<Weight>,
+    children: BTreeMap<u32, (usize, Weight)>,
+}
+
+fn instantiate_weighted_prepush_frontier_write_trie_nwa(
+    bundle: &WeightedPrepushBundle,
+) -> NWA {
+    if bundle.states.is_empty() {
+        return empty_bundle_nwa();
+    }
+    let mut nwa = NWA::new(0, 0);
+    for _ in 0..bundle.states.len() {
+        nwa.add_state();
+    }
+    nwa.start_states_mut().push(0);
+
+    let mut root_by_signature = FxHashMap::<Vec<(PushSequence, usize)>, u32>::default();
+    let get_root = |outputs: &[PrepushOutput],
+                    nwa: &mut NWA,
+                    root_by_signature: &mut FxHashMap<Vec<(PushSequence, usize)>, u32>| {
+        let mut signature = outputs
+            .iter()
+            .filter(|output| !output.weight.is_empty())
+            .map(|output| (output.pushes.clone(), output.weight.ptr_key()))
+            .collect::<Vec<_>>();
+        signature.sort_unstable_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+        if let Some(&root) = root_by_signature.get(&signature) {
+            return root;
+        }
+        let mut nodes = vec![WeightedWriteTrieNode::default()];
+        for output in outputs {
+            if output.weight.is_empty() {
+                continue;
+            }
+            let mut node = 0usize;
+            for &push in &output.pushes {
+                let child = if let Some((child, edge_weight)) = nodes[node].children.get_mut(&push) {
+                    *edge_weight = edge_weight.union(&output.weight);
+                    *child
+                } else {
+                    let child = nodes.len();
+                    nodes.push(WeightedWriteTrieNode::default());
+                    nodes[node].children.insert(push, (child, output.weight.clone()));
+                    child
+                };
+                node = child;
+            }
+            nodes[node].final_weight = Some(match nodes[node].final_weight.take() {
+                Some(existing) => existing.union(&output.weight),
+                None => output.weight.clone(),
+            });
+        }
+        let offset = nwa.states().len() as u32;
+        for _ in 0..nodes.len() {
+            nwa.add_state();
+        }
+        for (node_id, node) in nodes.into_iter().enumerate() {
+            let source = offset + node_id as u32;
+            if let Some(final_weight) = node.final_weight.filter(|weight| !weight.is_empty()) {
+                nwa.set_final_weight(source, final_weight);
+            }
+            for (push, (child, weight)) in node.children {
+                if !weight.is_empty() {
+                    nwa.add_transition(
+                        source,
+                        encode_negative_label(push),
+                        offset + child as u32,
+                        weight,
+                    );
+                }
+            }
+        }
+        root_by_signature.insert(signature, offset);
+        offset
+    };
+
+    for (state_id, state) in bundle.states.iter().enumerate() {
+        let source = state_id as u32;
+        if !state.final_weight.is_empty() {
+            nwa.set_final_weight(source, state.final_weight.clone());
+        }
+        if !state.outputs.is_empty() {
+            let root = get_root(&state.outputs, &mut nwa, &mut root_by_signature);
+            nwa.add_epsilon(source, root, Weight::all());
+        }
+        for (&label, transition) in &state.transitions {
+            match transition {
+                WeightedPrepushTarget::Core { target, weight } => {
+                    if !weight.is_empty() {
+                        nwa.add_transition(source, label, *target, weight.clone());
+                    }
+                }
+                WeightedPrepushTarget::Outputs(outputs) => {
+                    if outputs.is_empty() {
+                        continue;
+                    }
+                    let root = get_root(outputs, &mut nwa, &mut root_by_signature);
+                    nwa.add_transition(source, label, root, Weight::all());
+                }
+            }
+        }
+    }
+    nwa
+}
+
+fn instantiate_weighted_prepush_compact_write_trie_nwa(
+    bundle: &WeightedPrepushBundle,
+) -> NWA {
+    if bundle.states.is_empty() {
+        return empty_bundle_nwa();
+    }
+    let mut nwa = NWA::new(0, 0);
+    for _ in 0..bundle.states.len() {
+        nwa.add_state();
+    }
+    nwa.start_states_mut().push(0);
+    let accept = nwa.add_state();
+    nwa.set_final_weight(accept, Weight::all());
+    let mut suffix_state = FxHashMap::<(u32, u32), u32>::default();
+    let mut root_by_sequence = FxHashMap::<PushSequence, u32>::default();
+    root_by_sequence.insert(PushSequence::new(), accept);
+
+    let get_root = |pushes: &PushSequence,
+                    nwa: &mut NWA,
+                    suffix_state: &mut FxHashMap<(u32, u32), u32>,
+                    root_by_sequence: &mut FxHashMap<PushSequence, u32>| {
+        if let Some(&root) = root_by_sequence.get(pushes) {
+            return root;
+        }
+        let mut cur = accept;
+        for &push in pushes.iter().rev() {
+            let key = (cur, push);
+            cur = if let Some(&existing) = suffix_state.get(&key) {
+                existing
+            } else {
+                let state = nwa.add_state();
+                nwa.add_transition(
+                    state,
+                    encode_negative_label(push),
+                    cur,
+                    Weight::all(),
+                );
+                suffix_state.insert(key, state);
+                state
+            };
+        }
+        root_by_sequence.insert(pushes.clone(), cur);
+        cur
+    };
+
+    for (state_id, state) in bundle.states.iter().enumerate() {
+        let source = state_id as u32;
+        if !state.final_weight.is_empty() {
+            nwa.set_final_weight(source, state.final_weight.clone());
+        }
+        for output in &state.outputs {
+            if output.weight.is_empty() {
+                continue;
+            }
+            let root = get_root(
+                &output.pushes,
+                &mut nwa,
+                &mut suffix_state,
+                &mut root_by_sequence,
+            );
+            nwa.add_epsilon(source, root, output.weight.clone());
+        }
+        for (&label, transition) in &state.transitions {
+            match transition {
+                WeightedPrepushTarget::Core { target, weight } => {
+                    if !weight.is_empty() {
+                        nwa.add_transition(source, label, *target, weight.clone());
+                    }
+                }
+                WeightedPrepushTarget::Outputs(outputs) => {
+                    for output in outputs {
+                        if output.weight.is_empty() {
+                            continue;
+                        }
+                        let root = get_root(
+                            &output.pushes,
+                            &mut nwa,
+                            &mut suffix_state,
+                            &mut root_by_sequence,
+                        );
+                        nwa.add_transition(source, label, root, output.weight.clone());
+                    }
+                }
+            }
+        }
+    }
+    nwa
+}
+
+fn instantiate_prepush_bundle_nwa(
+    skeleton: &PrepushBundleSkeleton,
+    groups: &[(&Weight, BundleGroupDfa<'_>)],
+) -> NWA {
+    assert_eq!(skeleton.group_count, groups.len());
+    if skeleton.states.is_empty() {
+        return empty_bundle_nwa();
+    }
+    let group_weights = groups
+        .iter()
+        .map(|(weight, _)| (*weight).clone())
+        .collect::<Vec<_>>();
+    let mut subset_cache = FxHashMap::<SmallVec<[u32; 8]>, Weight>::default();
+    let mut union_groups = |ids: &SmallVec<[u32; 8]>| -> Weight {
+        match ids.as_slice() {
+            [] => Weight::empty(),
+            [group] => group_weights[*group as usize].clone(),
+            _ => {
+                if let Some(existing) = subset_cache.get(ids) {
+                    return existing.clone();
+                }
+                let result = Weight::union_all(
+                    ids.iter().map(|&group| &group_weights[group as usize]),
+                );
+                subset_cache.insert(ids.clone(), result.clone());
+                result
+            }
+        }
+    };
+
+    let mut nwa = NWA::new(0, 0);
+    for _ in 0..skeleton.states.len() {
+        nwa.add_state();
+    }
+    nwa.start_states_mut().push(0);
+
+    // Allocate residual push-program states lazily and then fill them after all
+    // core transitions have registered their roots.
+    let mut residual_states = FxHashMap::<(u32, u32), u32>::default();
+    let mut residual_queue = VecDeque::<(u32, u32)>::new();
+    let get_residual_state = |key: (u32, u32),
+                              nwa: &mut NWA,
+                              residual_states: &mut FxHashMap<(u32, u32), u32>,
+                              residual_queue: &mut VecDeque<(u32, u32)>| {
+        if let Some(&existing) = residual_states.get(&key) {
+            return existing;
+        }
+        let state = nwa.add_state();
+        residual_states.insert(key, state);
+        residual_queue.push_back(key);
+        state
+    };
+
+    for (state_id, state) in skeleton.states.iter().enumerate() {
+        let final_weight = union_groups(&state.final_groups);
+        if !final_weight.is_empty() {
+            nwa.set_final_weight(state_id as u32, final_weight);
+        }
+        for (&label, transition) in &state.transitions {
+            match &transition.target {
+                PrepushBundleTarget::Core(target) => {
+                    let weight = union_groups(&transition.groups);
+                    if !weight.is_empty() {
+                        nwa.add_transition(state_id as u32, label, *target, weight);
+                    }
+                }
+                PrepushBundleTarget::Outputs(outputs) => {
+                    for &(group, residual) in outputs {
+                        let target = get_residual_state(
+                            (group, residual),
+                            &mut nwa,
+                            &mut residual_states,
+                            &mut residual_queue,
+                        );
+                        nwa.add_transition(
+                            state_id as u32,
+                            label,
+                            target,
+                            group_weights[group as usize].clone(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    while let Some((group, dfa_state)) = residual_queue.pop_front() {
+        let nwa_state = residual_states[&(group, dfa_state)];
+        let dfa_state_ref = &groups[group as usize].1.dfa().states[dfa_state as usize];
+        let group_weight = &group_weights[group as usize];
+        if dfa_state_ref.is_accepting {
+            nwa.set_final_weight(nwa_state, group_weight.clone());
+        }
+        for (&label, &target) in &dfa_state_ref.transitions {
+            assert!(
+                crate::compiler::glr::labels::is_negative_label(label),
+                "pre-push residual program unexpectedly returned to an input label: group={group} state={dfa_state} label={label}",
+            );
+            let target_state = get_residual_state(
+                (group, target),
+                &mut nwa,
+                &mut residual_states,
+                &mut residual_queue,
+            );
+            nwa.add_transition(nwa_state, label, target_state, group_weight.clone());
+        }
+    }
+
+    nwa
+}
+
+#[derive(Default)]
+struct PrepushBundleCensus {
+    states: usize,
+    input_transitions: usize,
+    output_edges: usize,
+    output_sites: usize,
+    output_programs: usize,
+    core_states: usize,
+    frontier_payloads: usize,
+    frontier_final_payloads: usize,
+    frontier_push_edges: usize,
+    program_sequences: usize,
+    programs_multisequence: usize,
+    max_sequences_per_program: usize,
+    max_push_depth: usize,
+}
+
+/// Determinize only the stack-reading prefix of a weighted template bundle.
+/// Negative labels are stack *writes*, not further input. At the first write,
+/// record the residual group-DFA state as an output program and stop traversing
+/// that alternative. This is an exact census of the finite-state transducer
+/// boundary we would use instead of materializing push tails as input-NWA states.
+fn product_state_has_input_labels(
+    groups: &[(&Weight, BundleGroupDfa<'_>)],
+    product_state: &[(u32, u32)],
+) -> bool {
+    product_state.iter().any(|&(group_id, state_id)| {
+        groups[group_id as usize].1.dfa().states[state_id as usize]
+            .transitions
+            .keys()
+            .any(|&label| !crate::compiler::glr::labels::is_negative_label(label))
+    })
+}
+
+fn observe_frontier_payload(
+    groups: &[(&Weight, BundleGroupDfa<'_>)],
+    product_state: &[(u32, u32)],
+    census: &mut PrepushBundleCensus,
+    output_programs: &mut FxHashMap<(u32, u32), ()>,
+) {
+    census.frontier_payloads += 1;
+    let mut accepting = false;
+    for &(group_id, state_id) in product_state {
+        let state = &groups[group_id as usize].1.dfa().states[state_id as usize];
+        accepting |= state.is_accepting;
+        for (&label, &target) in &state.transitions {
+            if crate::compiler::glr::labels::is_negative_label(label) {
+                census.frontier_push_edges += 1;
+                output_programs.insert((group_id, target), ());
+            }
+        }
+    }
+    census.frontier_final_payloads += usize::from(accepting);
+}
+
+fn residual_push_path_stats(
+    dfa: &UnweightedDfa,
+    state: u32,
+    memo: &mut FxHashMap<u32, (usize, usize)>,
+) -> (usize, usize) {
+    if let Some(&cached) = memo.get(&state) {
+        return cached;
+    }
+    let current = &dfa.states[state as usize];
+    let mut paths = usize::from(current.is_accepting);
+    let mut max_depth = 0usize;
+    for (&label, &target) in &current.transitions {
+        assert!(
+            crate::compiler::glr::labels::is_negative_label(label),
+            "residual push program returned to input label while profiling",
+        );
+        let (child_paths, child_depth) = residual_push_path_stats(dfa, target, memo);
+        paths = paths.saturating_add(child_paths);
+        max_depth = max_depth.max(1 + child_depth);
+    }
+    memo.insert(state, (paths, max_depth));
+    (paths, max_depth)
+}
+
+fn census_prepush_bundle_groups(groups: &[(&Weight, BundleGroupDfa<'_>)]) -> PrepushBundleCensus {
+    let n = groups.len();
+    if n == 0 {
+        return PrepushBundleCensus::default();
+    }
+    let start_key = groups
+        .iter()
+        .enumerate()
+        .map(|(group_id, (_, dfa))| (group_id as u32, dfa.dfa().start_state))
+        .collect::<Vec<_>>();
+    let mut state_map = FxHashMap::<Vec<(u32, u32)>, u32>::default();
+    let mut singleton_state_map = FxHashMap::<(u32, u32), u32>::default();
+    let mut worklist = VecDeque::<Vec<(u32, u32)>>::new();
+    if let [single] = start_key.as_slice() {
+        singleton_state_map.insert(*single, 0);
+    } else {
+        state_map.insert(start_key.clone(), 0);
+    }
+    worklist.push_back(start_key);
+    let mut census = PrepushBundleCensus::default();
+    let mut label_targets = LabelTargets::new();
+    let mut output_programs = FxHashMap::<(u32, u32), ()>::default();
+
+    while let Some(product_state) = worklist.pop_front() {
+        census.states += 1;
+        census.core_states += 1;
+        collect_label_targets(groups, &product_state, &mut label_targets);
+        let mut label_start = 0usize;
+        let mut site_has_output = false;
+        while label_start < label_targets.len() {
+            let label = label_targets[label_start].0;
+            let mut label_end = label_start + 1;
+            while label_end < label_targets.len() && label_targets[label_end].0 == label {
+                label_end += 1;
+            }
+            if crate::compiler::glr::labels::is_negative_label(label) {
+                site_has_output = true;
+                census.output_edges += label_end - label_start;
+                for &(_, group_id, target) in &label_targets[label_start..label_end] {
+                    output_programs.insert((group_id, target), ());
+                }
+                label_start = label_end;
+                continue;
+            }
+
+            census.input_transitions += 1;
+            let singleton_target = (label_end == label_start + 1).then(|| {
+                let (_, group_id, target) = label_targets[label_start];
+                (group_id, target)
+            });
+            if let Some(singleton_target) = singleton_target {
+                let next_state = [singleton_target];
+                if product_state_has_input_labels(groups, &next_state) {
+                    if !singleton_state_map.contains_key(&singleton_target) {
+                        let id = (state_map.len() + singleton_state_map.len()) as u32;
+                        singleton_state_map.insert(singleton_target, id);
+                        worklist.push_back(vec![singleton_target]);
+                    }
+                } else {
+                    observe_frontier_payload(
+                        groups,
+                        &next_state,
+                        &mut census,
+                        &mut output_programs,
+                    );
+                }
+            } else {
+                let next_state = label_targets[label_start..label_end]
+                    .iter()
+                    .map(|&(_, group_id, target)| (group_id, target))
+                    .collect::<Vec<_>>();
+                if product_state_has_input_labels(groups, &next_state) {
+                    if !state_map.contains_key(&next_state) {
+                        let id = (state_map.len() + singleton_state_map.len()) as u32;
+                        state_map.insert(next_state.clone(), id);
+                        worklist.push_back(next_state);
+                    }
+                } else {
+                    observe_frontier_payload(
+                        groups,
+                        &next_state,
+                        &mut census,
+                        &mut output_programs,
+                    );
+                }
+            }
+            label_start = label_end;
+        }
+        census.output_sites += usize::from(site_has_output);
+    }
+    census.output_programs = output_programs.len();
+    let mut memos = (0..groups.len())
+        .map(|_| FxHashMap::<u32, (usize, usize)>::default())
+        .collect::<Vec<_>>();
+    for &(group, state) in output_programs.keys() {
+        let (paths, depth) = residual_push_path_stats(
+            groups[group as usize].1.dfa(),
+            state,
+            &mut memos[group as usize],
+        );
+        census.program_sequences = census.program_sequences.saturating_add(paths);
+        census.programs_multisequence += usize::from(paths > 1);
+        census.max_sequences_per_program = census.max_sequences_per_program.max(paths);
+        census.max_push_depth = census.max_push_depth.max(depth);
+    }
+    census
 }
 
 fn determinize_bundle_groups_profiled(
