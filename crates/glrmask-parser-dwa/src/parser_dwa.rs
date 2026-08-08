@@ -4710,7 +4710,7 @@ fn append_branch_fragment(
 }
 
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum DirectPrepushNode {
     Continuation(u32),
     BundleCore {
@@ -5708,10 +5708,30 @@ impl PendingStackInterner {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct DirectCompactConfig {
     node: DirectPrepushNode,
     pending: u32,
+}
+
+#[inline]
+fn direct_compact_config_key(config: DirectCompactConfig) -> u128 {
+    let (bundle_or_tag, target_or_state, core_state) = match config.node {
+        DirectPrepushNode::Continuation(state) => (u32::MAX, state, 0),
+        DirectPrepushNode::BundleCore {
+            bundle_id,
+            target,
+            core_state,
+        } => (
+            u32::try_from(bundle_id).expect("direct pre-push bundle id exceeds u32"),
+            target,
+            core_state,
+        ),
+    };
+    (config.pending as u128)
+        | ((core_state as u128) << 32)
+        | ((target_or_state as u128) << 64)
+        | ((bundle_or_tag as u128) << 96)
 }
 
 struct DirectCompactCanonicalBuilder<'a> {
@@ -6307,19 +6327,20 @@ fn build_direct_prepush_pending_compact_nwa(
 
     let mut pending = PendingStackInterner::new();
     let mut nwa = NWA::new(0, 0);
-    let mut config_to_state = FxHashMap::<DirectCompactConfig, u32>::default();
+    let mut config_to_state = FxHashMap::<u128, u32>::default();
     let mut configs = Vec::<DirectCompactConfig>::new();
     let mut queue = VecDeque::<u32>::new();
     let ensure = |config: DirectCompactConfig,
                   nwa: &mut NWA,
-                  config_to_state: &mut FxHashMap<DirectCompactConfig, u32>,
+                  config_to_state: &mut FxHashMap<u128, u32>,
                   configs: &mut Vec<DirectCompactConfig>,
                   queue: &mut VecDeque<u32>| {
-        if let Some(&existing) = config_to_state.get(&config) {
+        let key = direct_compact_config_key(config);
+        if let Some(&existing) = config_to_state.get(&key) {
             return existing;
         }
         let state = nwa.add_state();
-        config_to_state.insert(config.clone(), state);
+        config_to_state.insert(key, state);
         configs.push(config);
         queue.push_back(state);
         state
@@ -6350,7 +6371,7 @@ fn build_direct_prepush_pending_compact_nwa(
     let mut unique_core_transitions = 0usize;
     let mut unique_core_outputs = 0usize;
     while let Some(nwa_state) = queue.pop_front() {
-        let config = configs[nwa_state as usize].clone();
+        let config = configs[nwa_state as usize];
         max_pending = max_pending.max(pending.depth(config.pending));
         match config.node {
             DirectPrepushNode::Continuation(state_id) => {
@@ -6483,7 +6504,7 @@ fn build_direct_prepush_pending_compact_nwa(
                                           transition: &WeightedPrepushTarget,
                                           pending: &mut PendingStackInterner,
                                           nwa: &mut NWA,
-                                          config_to_state: &mut FxHashMap<DirectCompactConfig, u32>,
+                                          config_to_state: &mut FxHashMap<u128, u32>,
                                           configs: &mut Vec<DirectCompactConfig>,
                                           queue: &mut VecDeque<u32>,
                                           edge_count: &mut usize| {
