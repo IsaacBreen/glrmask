@@ -90,11 +90,33 @@ use std::sync::{Arc, Weak};
 #[derive(Debug, Clone)]
 pub struct Weight(Arc<WeightMap>);
 
+#[derive(Clone)]
+struct ScopedWeightOpEntry {
+    // Pointer keys are only valid while they still identify the same operands.
+    // Weak refs let us validate that identity without retaining every temporary
+    // operand for the full determinization pass.
+    left_operand: Weak<WeightMap>,
+    right_operand: Weak<WeightMap>,
+    result: Weight,
+}
+
+impl ScopedWeightOpEntry {
+    fn matches(&self, left: &Weight, right: &Weight) -> bool {
+        let Some(cached_left) = self.left_operand.upgrade() else {
+            return false;
+        };
+        let Some(cached_right) = self.right_operand.upgrade() else {
+            return false;
+        };
+        Arc::ptr_eq(&cached_left, &left.0) && Arc::ptr_eq(&cached_right, &right.0)
+    }
+}
+
 #[derive(Default)]
 pub struct ScopedWeightOpCache {
-    union_entries: FxHashMap<(usize, usize), Weight>,
-    intersection_entries: FxHashMap<(usize, usize), Weight>,
-    difference_entries: FxHashMap<(usize, usize), Weight>,
+    union_entries: FxHashMap<(usize, usize), ScopedWeightOpEntry>,
+    intersection_entries: FxHashMap<(usize, usize), ScopedWeightOpEntry>,
+    difference_entries: FxHashMap<(usize, usize), ScopedWeightOpEntry>,
 }
 
 impl ScopedWeightOpCache {
@@ -112,13 +134,23 @@ impl ScopedWeightOpCache {
             return left.clone();
         }
 
-        let key = scoped_commutative_weight_pair_key(left, right);
+        let (key, ordered_left, ordered_right) = ordered_commutative_weight_pair(left, right);
         if let Some(existing) = self.union_entries.get(&key) {
-            return existing.clone();
+            if existing.matches(ordered_left, ordered_right) {
+                return existing.result.clone();
+            }
+            self.union_entries.remove(&key);
         }
 
         let value = left.union_uncached(right);
-        self.union_entries.insert(key, value.clone());
+        self.union_entries.insert(
+            key,
+            ScopedWeightOpEntry {
+                left_operand: Arc::downgrade(&ordered_left.0),
+                right_operand: Arc::downgrade(&ordered_right.0),
+                result: value.clone(),
+            },
+        );
         value
     }
 
@@ -136,13 +168,23 @@ impl ScopedWeightOpCache {
             return left.clone();
         }
 
-        let key = scoped_commutative_weight_pair_key(left, right);
+        let (key, ordered_left, ordered_right) = ordered_commutative_weight_pair(left, right);
         if let Some(existing) = self.intersection_entries.get(&key) {
-            return existing.clone();
+            if existing.matches(ordered_left, ordered_right) {
+                return existing.result.clone();
+            }
+            self.intersection_entries.remove(&key);
         }
 
         let value = left.intersection_uncached_impl(right);
-        self.intersection_entries.insert(key, value.clone());
+        self.intersection_entries.insert(
+            key,
+            ScopedWeightOpEntry {
+                left_operand: Arc::downgrade(&ordered_left.0),
+                right_operand: Arc::downgrade(&ordered_right.0),
+                result: value.clone(),
+            },
+        );
         value
     }
 
@@ -166,11 +208,21 @@ impl ScopedWeightOpCache {
 
         let key = (left.ptr_key(), right.ptr_key());
         if let Some(existing) = self.difference_entries.get(&key) {
-            return existing.clone();
+            if existing.matches(left, right) {
+                return existing.result.clone();
+            }
+            self.difference_entries.remove(&key);
         }
 
         let value = left.difference_uncached(right);
-        self.difference_entries.insert(key, value.clone());
+        self.difference_entries.insert(
+            key,
+            ScopedWeightOpEntry {
+                left_operand: Arc::downgrade(&left.0),
+                right_operand: Arc::downgrade(&right.0),
+                result: value.clone(),
+            },
+        );
         value
     }
 
@@ -3269,6 +3321,32 @@ mod tests {
         assert!(left_weak.upgrade().is_none());
         assert!(right_weak.upgrade().is_none());
         assert!(result_weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn scoped_weight_op_cache_weakly_validates_pointer_key_operands() {
+        let mut cache = ScopedWeightOpCache::default();
+        let left = weight_for_tsid(1, &[(1, 3)]);
+        let right = weight_for_tsid(1, &[(7, 9)]);
+        let key = scoped_commutative_weight_pair_key(&left, &right);
+        let left_weak = Arc::downgrade(&left.0);
+        let right_weak = Arc::downgrade(&right.0);
+        let result = cache.union(&left, &right);
+        assert!(!Arc::ptr_eq(&result.0, &left.0));
+        assert!(!Arc::ptr_eq(&result.0, &right.0));
+
+        drop(result);
+        drop(right);
+        drop(left);
+
+        // The scoped cache must not keep temporary operands alive, but it must
+        // retain weak identity guards so a recycled pointer cannot become a
+        // false cache hit (ABA).
+        assert!(left_weak.upgrade().is_none());
+        assert!(right_weak.upgrade().is_none());
+        let entry = cache.union_entries.get(&key).unwrap();
+        assert!(entry.left_operand.upgrade().is_none());
+        assert!(entry.right_operand.upgrade().is_none());
     }
 
     #[test]
