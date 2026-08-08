@@ -7178,7 +7178,7 @@ fn eliminate_epsilon_only_states_with_origins(
         }
     }
     let mut summary_final = vec![None::<Weight>; n];
-    let mut summary_exits = vec![SmallVec::<[(u32, Weight); 4]>::new(); n];
+    let mut summary_exits = vec![Vec::<(u32, Weight)>::new(); n];
     let mut weight_ops = ScopedWeightOpCache::default();
     let mut queue = VecDeque::<usize>::new();
     for state_id in 0..n {
@@ -7235,6 +7235,7 @@ fn eliminate_epsilon_only_states_with_origins(
             }
         }
         exits.sort_unstable_by_key(|(exit, _)| *exit);
+        let exits = exits.into_vec();
         total_exit_refs += exits.len();
         max_exits = max_exits.max(exits.len());
         summary_final[state_id] = final_weight;
