@@ -2839,6 +2839,22 @@ fn determinize_with_supports(
     nwa: &NWA,
     dense_positive_label_limit: Option<u32>,
 ) -> DeterminizedDwaWithSupports {
+    determinize_with_supports_impl(nwa, dense_positive_label_limit, None)
+}
+
+fn determinize_with_supports_canonical_wide(
+    nwa: &NWA,
+    dense_positive_label_limit: Option<u32>,
+    canonical_min_len: usize,
+) -> DeterminizedDwaWithSupports {
+    determinize_with_supports_impl(nwa, dense_positive_label_limit, Some(canonical_min_len))
+}
+
+fn determinize_with_supports_impl(
+    nwa: &NWA,
+    dense_positive_label_limit: Option<u32>,
+    canonical_min_len_override: Option<usize>,
+) -> DeterminizedDwaWithSupports {
     fn subset_key(entries: &[(u32, Weight)]) -> Vec<(u32, usize)> {
         entries.iter().map(|(sid, w)| (*sid, w.ptr_key())).collect()
     }
@@ -3048,16 +3064,18 @@ fn determinize_with_supports(
         .unwrap_or(true);
     let mut detail =
         ParserDwaDeterminizeDetail::enabled().then(ParserDwaDeterminizeDetail::default);
-    let canonical_union_min_len = std::env::var("GLRMASK_UNION_CACHE_CANONICAL_MIN_LEN")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or_else(|| {
-            if std::env::var_os("GLRMASK_DISABLE_ORDERED_UNION_CACHE_KEY").is_some() {
-                0
-            } else {
-                usize::MAX
-            }
-        });
+    let canonical_union_min_len = canonical_min_len_override.unwrap_or_else(|| {
+        std::env::var("GLRMASK_UNION_CACHE_CANONICAL_MIN_LEN")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or_else(|| {
+                if std::env::var_os("GLRMASK_DISABLE_ORDERED_UNION_CACHE_KEY").is_some() {
+                    0
+                } else {
+                    usize::MAX
+                }
+            })
+    });
     let mut union_cache = UnionAllCache {
         canonical_min_len: canonical_union_min_len,
         profile_enabled: detail.is_some(),
@@ -9306,7 +9324,8 @@ fn finish_read_only_parser_nwa_for_validation(
         raw_possible_snapshot = Some(raw_possible);
     }
     let support_started = Instant::now();
-    let determinized = determinize_with_supports(&parser_nwa, Some(num_parser_states));
+    let determinized =
+        determinize_with_supports_canonical_wide(&parser_nwa, Some(num_parser_states), 16);
     let support_ms = elapsed_ms(support_started);
     if profile {
         let support_entries = determinized.supports.iter().map(Vec::len).sum::<usize>();
