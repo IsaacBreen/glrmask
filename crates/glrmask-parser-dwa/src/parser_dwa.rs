@@ -7086,7 +7086,10 @@ fn profile_direct_prepush_hashcons(
 
 
 
-fn coalesce_parallel_nwa_edges(nwa: &mut NWA) -> (usize, usize) {
+fn coalesce_parallel_nwa_edges(
+    nwa: &mut NWA,
+    weight_ops: &mut ScopedWeightOpCache,
+) -> (usize, usize) {
     let mut transition_merges = 0usize;
     let mut epsilon_merges = 0usize;
     for state in nwa.states_mut() {
@@ -7098,7 +7101,7 @@ fn coalesce_parallel_nwa_edges(nwa: &mut NWA) -> (usize, usize) {
             let mut write = 0usize;
             for read in 1..targets.len() {
                 if targets[write].0 == targets[read].0 {
-                    targets[write].1 = targets[write].1.union(&targets[read].1);
+                    targets[write].1 = weight_ops.union(&targets[write].1, &targets[read].1);
                     transition_merges += 1;
                 } else {
                     write += 1;
@@ -7115,7 +7118,8 @@ fn coalesce_parallel_nwa_edges(nwa: &mut NWA) -> (usize, usize) {
             let mut write = 0usize;
             for read in 1..state.epsilons.len() {
                 if state.epsilons[write].0 == state.epsilons[read].0 {
-                    state.epsilons[write].1 = state.epsilons[write].1.union(&state.epsilons[read].1);
+                    state.epsilons[write].1 =
+                        weight_ops.union(&state.epsilons[write].1, &state.epsilons[read].1);
                     epsilon_merges += 1;
                 } else {
                     write += 1;
@@ -7157,7 +7161,6 @@ fn eliminate_epsilon_only_states_with_origins(
             (0..n).map(|state_id| Some(state_id as u32)).collect(),
         ));
     }
-
     let mut removed_outdegree = vec![0usize; n];
     let mut removed_predecessors = vec![Vec::<usize>::new(); n];
     for (source, state) in nwa.states().iter().enumerate() {
@@ -7174,9 +7177,8 @@ fn eliminate_epsilon_only_states_with_origins(
             removed_predecessors[target].push(source);
         }
     }
-
     let mut summary_final = vec![None::<Weight>; n];
-    let mut summary_exits = vec![Vec::<(u32, Weight)>::new(); n];
+    let mut summary_exits = vec![SmallVec::<[(u32, Weight); 4]>::new(); n];
     let mut weight_ops = ScopedWeightOpCache::default();
     let mut queue = VecDeque::<usize>::new();
     for state_id in 0..n {
@@ -7233,7 +7235,6 @@ fn eliminate_epsilon_only_states_with_origins(
             }
         }
         exits.sort_unstable_by_key(|(exit, _)| *exit);
-        let exits = exits.into_vec();
         total_exit_refs += exits.len();
         max_exits = max_exits.max(exits.len());
         summary_final[state_id] = final_weight;
@@ -7249,7 +7250,6 @@ fn eliminate_epsilon_only_states_with_origins(
     if processed != removed_count {
         return None;
     }
-
     let mut result = NWA::new(0, 0);
     let mut new_by_old = vec![u32::MAX; n];
     let mut raw_by_new = Vec::<Option<u32>>::new();
@@ -7350,7 +7350,8 @@ fn eliminate_epsilon_only_states_with_origins(
         .collect::<Vec<_>>();
     result.set_start_states(starts);
     let coalesce_started = Instant::now();
-    let (transition_merges, epsilon_merges) = coalesce_parallel_nwa_edges(&mut result);
+    let (transition_merges, epsilon_merges) =
+        coalesce_parallel_nwa_edges(&mut result, &mut weight_ops);
     let coalesce_ms = elapsed_ms(coalesce_started);
     eprintln!(
         "[glrmask/profile][parser_direct_epsilon_only_elimination] input_states={} retained_states={} removed_states={} output_states={} output_transitions={} summary_exit_refs={} summary_max_exits={} transition_merges={} epsilon_merges={} coalesce_ms={:.3}",
