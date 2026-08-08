@@ -9037,15 +9037,29 @@ fn finish_read_only_parser_nwa_for_validation(
     let num_parser_states = table.num_states;
     let profile = std::env::var_os("GLRMASK_PROFILE_DIRECT_PREPUSH_FINISH").is_some();
     let total_started = Instant::now();
+    let drop_dead_leaves =
+        std::env::var_os("GLRMASK_DIRECT_PREPUSH_DROP_DEAD_LEAVES").is_some();
+    let early_drop_dead_leaves = drop_dead_leaves
+        && std::env::var_os("GLRMASK_DIRECT_PREPUSH_EARLY_DROP_DEAD_LEAVES").is_some();
+    let mut raw_possible_snapshot = None;
+    if early_drop_dead_leaves {
+        let (raw_possible, dead_count, removed) =
+            drop_dead_leaf_targets_preserving_possible(&mut parser_nwa, num_parser_states);
+        if profile {
+            eprintln!(
+                "[glrmask/profile][parser_direct_prepush_early_dead_leaf_drop] dead_leaves={} removed_edges={}",
+                dead_count, removed,
+            );
+        }
+        raw_possible_snapshot = Some(raw_possible);
+    }
     let finality_started = Instant::now();
     apply_finality_fixpoint(&mut parser_nwa);
     let finality_ms = elapsed_ms(finality_started);
     let prune_started = Instant::now();
     remove_redundant_default_transitions(&mut parser_nwa);
     let prune_ms = elapsed_ms(prune_started);
-    let drop_dead_leaves =
-        std::env::var_os("GLRMASK_DIRECT_PREPUSH_DROP_DEAD_LEAVES").is_some();
-    let raw_possible_snapshot = if drop_dead_leaves {
+    if drop_dead_leaves && !early_drop_dead_leaves {
         let (raw_possible, dead_count, removed) =
             drop_dead_leaf_targets_preserving_possible(&mut parser_nwa, num_parser_states);
         if profile {
@@ -9054,10 +9068,8 @@ fn finish_read_only_parser_nwa_for_validation(
                 dead_count, removed,
             );
         }
-        Some(raw_possible)
-    } else {
-        None
-    };
+        raw_possible_snapshot = Some(raw_possible);
+    }
     let support_started = Instant::now();
     let determinized = determinize_with_supports(&parser_nwa, Some(num_parser_states));
     let support_ms = elapsed_ms(support_started);
