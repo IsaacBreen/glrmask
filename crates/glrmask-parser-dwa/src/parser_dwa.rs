@@ -2846,7 +2846,7 @@ fn determinize_with_supports(
       #[derive(Default)]
       struct UnionAllCache {
         entries: FxHashMap<SmallVec<[usize; 16]>, Weight>,
-        ordered_keys: bool,
+        canonical_min_len: usize,
         profile_enabled: bool,
         hits: usize,
         misses: usize,
@@ -2887,11 +2887,10 @@ fn determinize_with_supports(
             let mut key: SmallVec<[usize; 16]> =
                 meaningful.iter().map(|weight| weight.ptr_key()).collect();
             // Contributions are already in deterministic target-state order.
-            // Using that exact sequence as the cache key preserves correctness:
-            // a different order merely misses the cache and recomputes the exact
-            // union. Canonical sorting only increases sharing, while costing more
-            // than the rare extra miss on parser-DWA workloads.
-            if !self.ordered_keys {
+            // Preserve that cheap ordered key for normal rows. Canonicalize only
+            // sufficiently wide rows, where permutation reuse can amortize the
+            // extra sort/dedup work.
+            if key.len() >= self.canonical_min_len {
                 key.sort_unstable();
                 key.dedup();
             }
@@ -3049,8 +3048,18 @@ fn determinize_with_supports(
         .unwrap_or(true);
     let mut detail =
         ParserDwaDeterminizeDetail::enabled().then(ParserDwaDeterminizeDetail::default);
+    let canonical_union_min_len = std::env::var("GLRMASK_UNION_CACHE_CANONICAL_MIN_LEN")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or_else(|| {
+            if std::env::var_os("GLRMASK_DISABLE_ORDERED_UNION_CACHE_KEY").is_some() {
+                0
+            } else {
+                usize::MAX
+            }
+        });
     let mut union_cache = UnionAllCache {
-        ordered_keys: std::env::var_os("GLRMASK_DISABLE_ORDERED_UNION_CACHE_KEY").is_none(),
+        canonical_min_len: canonical_union_min_len,
         profile_enabled: detail.is_some(),
         ..UnionAllCache::default()
     };
