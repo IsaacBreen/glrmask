@@ -329,6 +329,7 @@ struct StateSummaries {
 struct DeterminizedDwaWithSupports {
     dwa: DWA,
     supports: Vec<Vec<u32>>,
+    weighted_supports: Option<Vec<Vec<(u32, Weight)>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -2839,7 +2840,7 @@ fn determinize_with_supports(
     nwa: &NWA,
     dense_positive_label_limit: Option<u32>,
 ) -> DeterminizedDwaWithSupports {
-    determinize_with_supports_impl(nwa, dense_positive_label_limit, None)
+    determinize_with_supports_impl(nwa, dense_positive_label_limit, None, false)
 }
 
 fn determinize_with_supports_canonical_wide(
@@ -2847,13 +2848,39 @@ fn determinize_with_supports_canonical_wide(
     dense_positive_label_limit: Option<u32>,
     canonical_min_len: usize,
 ) -> DeterminizedDwaWithSupports {
-    determinize_with_supports_impl(nwa, dense_positive_label_limit, Some(canonical_min_len))
+    determinize_with_supports_impl(
+        nwa,
+        dense_positive_label_limit,
+        Some(canonical_min_len),
+        false,
+    )
+}
+
+fn determinize_with_weighted_supports(
+    nwa: &NWA,
+    dense_positive_label_limit: Option<u32>,
+) -> DeterminizedDwaWithSupports {
+    determinize_with_supports_impl(nwa, dense_positive_label_limit, None, true)
+}
+
+fn determinize_with_weighted_supports_canonical_wide(
+    nwa: &NWA,
+    dense_positive_label_limit: Option<u32>,
+    canonical_min_len: usize,
+) -> DeterminizedDwaWithSupports {
+    determinize_with_supports_impl(
+        nwa,
+        dense_positive_label_limit,
+        Some(canonical_min_len),
+        true,
+    )
 }
 
 fn determinize_with_supports_impl(
     nwa: &NWA,
     dense_positive_label_limit: Option<u32>,
     canonical_min_len_override: Option<usize>,
+    retain_weighted_supports: bool,
 ) -> DeterminizedDwaWithSupports {
     fn subset_key(entries: &[(u32, Weight)]) -> Vec<(u32, usize)> {
         entries.iter().map(|(sid, w)| (*sid, w.ptr_key())).collect()
@@ -3018,6 +3045,7 @@ fn determinize_with_supports_impl(
 
     let mut dwa = DWA::new(0, 0);
     let mut supports = vec![Vec::new()];
+    let mut weighted_supports = retain_weighted_supports.then(|| vec![Vec::new()]);
 
     let mut start_subset = FxHashMap::default();
     for &state_id in nwa.start_states() {
@@ -3026,11 +3054,18 @@ fn determinize_with_supports_impl(
     }
     epsilon_closure(&mut weight_by_state, &mut closure_queue, &mut start_subset);
     if start_subset.is_empty() {
-        return DeterminizedDwaWithSupports { dwa, supports };
+        return DeterminizedDwaWithSupports {
+            dwa,
+            supports,
+            weighted_supports,
+        };
     }
 
     canonicalize_into(&start_subset, &mut canon_buf);
     supports[0] = canon_buf.iter().map(|(state_id, _)| *state_id).collect();
+    if let Some(weighted_supports) = weighted_supports.as_mut() {
+        weighted_supports[0] = canon_buf.clone();
+    }
 
     let mut subset_map: FxHashMap<Vec<(u32, usize)>, u32> = FxHashMap::default();
     let mut singleton_subsets: FxHashMap<(u32, usize), u32> = FxHashMap::default();
@@ -3188,8 +3223,12 @@ fn determinize_with_supports_impl(
                         let new_state = dwa.add_state();
                         subset_map.insert(vec![singleton_key], new_state);
                         singleton_subsets.insert(singleton_key, new_state);
-                        worklist.push_back((new_state, vec![(*only_state, only_weight.clone())]));
+                        let weighted_subset = vec![(*only_state, only_weight.clone())];
+                        worklist.push_back((new_state, weighted_subset.clone()));
                         supports.push(vec![*only_state]);
+                        if let Some(weighted_supports) = weighted_supports.as_mut() {
+                            weighted_supports.push(weighted_subset);
+                        }
                         new_state
                     };
                     if let (Some(detail), Some(started_at)) =
@@ -3305,8 +3344,12 @@ fn determinize_with_supports_impl(
                     let new_state = dwa.add_state();
                     subset_map.insert(vec![singleton_key], new_state);
                     singleton_subsets.insert(singleton_key, new_state);
-                    worklist.push_back((new_state, canon.to_vec()));
+                    let weighted_subset = canon.to_vec();
+                    worklist.push_back((new_state, weighted_subset.clone()));
                     supports.push(vec![*only_state]);
+                    if let Some(weighted_supports) = weighted_supports.as_mut() {
+                        weighted_supports.push(weighted_subset);
+                    }
                     new_state
                 }
             } else {
@@ -3330,8 +3373,12 @@ fn determinize_with_supports_impl(
                     }
                     let new_state = dwa.add_state();
                     subset_map.insert(key_buf.clone(), new_state);
-                    worklist.push_back((new_state, canon.to_vec()));
+                    let weighted_subset = canon.to_vec();
+                    worklist.push_back((new_state, weighted_subset.clone()));
                     supports.push(canon.iter().map(|(sid, _)| *sid).collect());
+                    if let Some(weighted_supports) = weighted_supports.as_mut() {
+                        weighted_supports.push(weighted_subset);
+                    }
                     new_state
                 }
             };
@@ -3569,7 +3616,11 @@ fn determinize_with_supports_impl(
     if let Some(detail) = detail {
         detail.emit("support");
     }
-    DeterminizedDwaWithSupports { dwa, supports }
+    DeterminizedDwaWithSupports {
+        dwa,
+        supports,
+        weighted_supports,
+    }
 }
 
 fn determinize_parser_dwa_with_fallbacks_impl(
@@ -4055,6 +4106,34 @@ fn optimize_parser_dwa_defaults(
     possible_by_state: &[PossibleOutgoingIds],
     num_parser_states: u32,
 ) {
+    optimize_parser_dwa_defaults_impl(dwa, possible_by_state, num_parser_states, None);
+}
+
+fn optimize_parser_dwa_defaults_with_raw_identity(
+    dwa: &mut DWA,
+    possible_by_state: &[PossibleOutgoingIds],
+    num_parser_states: u32,
+    raw_identity: &mut RawSupportIdentityOracle<'_>,
+) {
+    optimize_parser_dwa_defaults_impl(
+        dwa,
+        possible_by_state,
+        num_parser_states,
+        Some(raw_identity),
+    );
+}
+
+fn optimize_parser_dwa_defaults_impl(
+    dwa: &mut DWA,
+    possible_by_state: &[PossibleOutgoingIds],
+    num_parser_states: u32,
+    mut raw_identity: Option<&mut RawSupportIdentityOracle<'_>>,
+) {
+    let profile_candidates = std::env::var_os("GLRMASK_PROFILE_DEFAULT_SYNTHESIS_CANDIDATES").is_some();
+    let mut profile_multi_possible = 0usize;
+    let mut profile_complete_explicit = 0usize;
+    let mut profile_shared_target = 0usize;
+    let mut profile_insertions = 0usize;
     loop {
         let mut changed = false;
 
@@ -4066,6 +4145,9 @@ fn optimize_parser_dwa_defaults(
             };
             if possible_count < 2 {
                 continue;
+            }
+            if profile_candidates {
+                profile_multi_possible += 1;
             }
 
             let state = &dwa.states()[state_id];
@@ -4090,6 +4172,9 @@ fn optimize_parser_dwa_defaults(
                 }
             }
 
+            if profile_candidates {
+                profile_complete_explicit += 1;
+            }
             let mut shared_target: Option<u32> = None;
             let mut default_weight: Option<Weight> = None;
             let mut valid = true;
@@ -4145,6 +4230,18 @@ fn optimize_parser_dwa_defaults(
             if !valid || default_weight.is_empty() {
                 continue;
             }
+            if profile_candidates {
+                profile_shared_target += 1;
+            }
+            if let Some(raw_identity) = raw_identity.as_deref_mut()
+                && !raw_identity.labels_share_raw_target(
+                    state_id as u32,
+                    possible_ids,
+                    num_parser_states,
+                )
+            {
+                continue;
+            }
 
             let state = &mut dwa.states_mut()[state_id];
             let entry = state.transitions.entry(DEFAULT_LABEL);
@@ -4156,12 +4253,18 @@ fn optimize_parser_dwa_defaults(
                         if updated != *existing_weight {
                             *existing_weight = updated;
                             changed = true;
+                            if profile_candidates {
+                                profile_insertions += 1;
+                            }
                         }
                     }
                 }
                 std::collections::btree_map::Entry::Vacant(vac) => {
                     vac.insert((target, default_weight));
                     changed = true;
+                    if profile_candidates {
+                        profile_insertions += 1;
+                    }
                 }
             }
         }
@@ -4236,6 +4339,16 @@ fn optimize_parser_dwa_defaults(
         if !changed {
             break;
         }
+    }
+    if profile_candidates {
+        eprintln!(
+            "[glrmask/profile][parser_default_synthesis_candidates] states={} multi_possible_visits={} complete_explicit_visits={} shared_target_visits={} insertions={}",
+            dwa.states().len(),
+            profile_multi_possible,
+            profile_complete_explicit,
+            profile_shared_target,
+            profile_insertions,
+        );
     }
 }
 
@@ -7018,10 +7131,12 @@ fn coalesce_parallel_nwa_edges(nwa: &mut NWA) -> (usize, usize) {
     (transition_merges, epsilon_merges)
 }
 
-fn eliminate_epsilon_only_states(nwa: &NWA) -> Option<NWA> {
+fn eliminate_epsilon_only_states_with_origins(
+    nwa: &NWA,
+) -> Option<(NWA, Vec<Option<u32>>)> {
     let n = nwa.states().len();
     if n == 0 {
-        return Some(NWA::new(0, 0));
+        return Some((NWA::new(0, 0), Vec::new()));
     }
     let mut is_start = vec![false; n];
     for &start in nwa.start_states() {
@@ -7037,7 +7152,10 @@ fn eliminate_epsilon_only_states(nwa: &NWA) -> Option<NWA> {
         .collect::<Vec<_>>();
     let removed_count = retained.iter().filter(|&&keep| !keep).count();
     if removed_count == 0 {
-        return Some(nwa.clone());
+        return Some((
+            nwa.clone(),
+            (0..n).map(|state_id| Some(state_id as u32)).collect(),
+        ));
     }
 
     let mut removed_outdegree = vec![0usize; n];
@@ -7127,12 +7245,15 @@ fn eliminate_epsilon_only_states(nwa: &NWA) -> Option<NWA> {
 
     let mut result = NWA::new(0, 0);
     let mut new_by_old = vec![u32::MAX; n];
+    let mut raw_by_new = Vec::<Option<u32>>::new();
     for (state_id, &keep) in retained.iter().enumerate() {
         if keep {
             new_by_old[state_id] = result.add_state();
+            raw_by_new.push(Some(state_id as u32));
         }
     }
     let final_sink = result.add_state();
+    raw_by_new.push(None);
     result.set_final_weight(final_sink, Weight::all());
 
     for (source, state) in nwa.states().iter().enumerate() {
@@ -7237,7 +7358,132 @@ fn eliminate_epsilon_only_states(nwa: &NWA) -> Option<NWA> {
         epsilon_merges,
         coalesce_ms,
     );
-    Some(result)
+    Some((result, raw_by_new))
+}
+
+fn eliminate_epsilon_only_states(nwa: &NWA) -> Option<NWA> {
+    eliminate_epsilon_only_states_with_origins(nwa).map(|(projected, _)| projected)
+}
+
+struct RawSupportIdentityOracle<'a> {
+    raw_nwa: &'a NWA,
+    raw_by_projected: &'a [Option<u32>],
+    projected_weighted_supports: &'a [Vec<(u32, Weight)>],
+    source_cache: FxHashMap<u32, Vec<(u32, Weight)>>,
+    target_cache: FxHashMap<(u32, i32), Vec<(u32, Weight)>>,
+    weight_by_state: Vec<Option<Weight>>,
+    closure_queue: VecDeque<u32>,
+    touched: Vec<u32>,
+    canon: Vec<(u32, Weight)>,
+    weight_ops: ScopedWeightOpCache,
+}
+
+impl<'a> RawSupportIdentityOracle<'a> {
+    fn new(
+        raw_nwa: &'a NWA,
+        raw_by_projected: &'a [Option<u32>],
+        projected_weighted_supports: &'a [Vec<(u32, Weight)>],
+    ) -> Self {
+        Self {
+            raw_nwa,
+            raw_by_projected,
+            projected_weighted_supports,
+            source_cache: FxHashMap::default(),
+            target_cache: FxHashMap::default(),
+            weight_by_state: vec![None; raw_nwa.states().len()],
+            closure_queue: VecDeque::new(),
+            touched: Vec::new(),
+            canon: Vec::new(),
+            weight_ops: ScopedWeightOpCache::default(),
+        }
+    }
+
+    fn raw_source_support(&mut self, projected_dwa_state: u32) -> &[(u32, Weight)] {
+        if !self.source_cache.contains_key(&projected_dwa_state) {
+            let mut seeds = Vec::new();
+            for (projected_nwa_state, weight) in
+                &self.projected_weighted_supports[projected_dwa_state as usize]
+            {
+                let Some(raw_state) = self
+                    .raw_by_projected
+                    .get(*projected_nwa_state as usize)
+                    .copied()
+                    .flatten()
+                else {
+                    continue;
+                };
+                seeds.push((raw_state, weight.clone()));
+            }
+            seeds.sort_unstable_by_key(|(state_id, _)| *state_id);
+            local_epsilon_closure_canonical(
+                self.raw_nwa,
+                &mut self.weight_by_state,
+                &mut self.closure_queue,
+                &seeds,
+                &mut self.touched,
+                &mut self.canon,
+                &mut self.weight_ops,
+            );
+            self.source_cache
+                .insert(projected_dwa_state, self.canon.clone());
+        }
+        &self.source_cache[&projected_dwa_state]
+    }
+
+    fn raw_target_support(&mut self, projected_dwa_state: u32, label: i32) -> &[(u32, Weight)] {
+        let cache_key = (projected_dwa_state, label);
+        if !self.target_cache.contains_key(&cache_key) {
+            let source = self.raw_source_support(projected_dwa_state).to_vec();
+            let mut contributions = TargetContribs::new();
+            for (raw_state, path_weight) in source {
+                let Some(targets) = self.raw_nwa.states()[raw_state as usize].transitions.get(&label)
+                else {
+                    continue;
+                };
+                for (target, edge_weight) in targets {
+                    let contribution = self.weight_ops.intersection(&path_weight, edge_weight);
+                    if !contribution.is_empty() {
+                        contributions.push((*target, contribution));
+                    }
+                }
+            }
+            contributions.sort_unstable_by_key(|(state_id, _)| *state_id);
+            merge_sorted_target_contributions(&mut contributions, &mut self.weight_ops, None);
+            local_epsilon_closure_canonical(
+                self.raw_nwa,
+                &mut self.weight_by_state,
+                &mut self.closure_queue,
+                &contributions,
+                &mut self.touched,
+                &mut self.canon,
+                &mut self.weight_ops,
+            );
+            self.target_cache.insert(cache_key, self.canon.clone());
+        }
+        &self.target_cache[&cache_key]
+    }
+
+    fn labels_share_raw_target(
+        &mut self,
+        projected_dwa_state: u32,
+        possible_ids: &PossibleOutgoingIds,
+        num_parser_states: u32,
+    ) -> bool {
+        let labels = match possible_ids {
+            PossibleOutgoingIds::Empty => return false,
+            PossibleOutgoingIds::All => (0..num_parser_states).collect::<Vec<_>>(),
+            PossibleOutgoingIds::Some(ids) => ids.iter_ones().map(|id| id as u32).collect(),
+        };
+        let Some((&first, rest)) = labels.split_first() else {
+            return false;
+        };
+        let first_target = self
+            .raw_target_support(projected_dwa_state, first as i32)
+            .to_vec();
+        rest.iter().all(|label| {
+            self.raw_target_support(projected_dwa_state, *label as i32) == first_target.as_slice()
+        })
+    }
 }
 
 fn hashcons_acyclic_weighted_nwa(nwa: &NWA) -> Option<NWA> {
@@ -8629,6 +8875,21 @@ fn build_direct_prepush_hashcons_from_terminal_dwa(
     build_direct_prepush_hashcons_nwa(&summaries, &productive, templates).map(|value| value.0)
 }
 
+fn build_direct_prepush_raw_projection_with_origins(
+    terminal_dwa: &TerminalAutomaton,
+    grammar: &AnalyzedGrammar,
+    templates: &Templates,
+) -> Option<(NWA, NWA, Vec<Option<u32>>)> {
+    let mut summaries = build_state_summaries(terminal_dwa, grammar, templates);
+    factor_parser_bundle_entry_gates(&mut summaries, templates);
+    factor_parser_bundle_cross_target_gates(&mut summaries, templates);
+    let productive = compute_productive_terminal_states(&summaries);
+    let (raw, _, _, _, _, _, _, _, _, _) =
+        build_direct_prepush_pending_compact_nwa(&summaries, &productive, templates)?;
+    let (projected, raw_by_projected) = eliminate_epsilon_only_states_with_origins(&raw)?;
+    Some((projected, raw, raw_by_projected))
+}
+
 
 
 fn possible_outgoing_signature(value: &PossibleOutgoingIds) -> Vec<i32> {
@@ -9261,6 +9522,7 @@ fn finish_read_only_parser_nwa_for_validation(
     grammar: &AnalyzedGrammar,
     table: &GLRTable,
     collapse_immediate_acceptance: bool,
+    mut raw_identity_source: Option<(NWA, Vec<Option<u32>>)>,
 ) -> DWA {
     let num_parser_states = table.num_states;
     let profile = std::env::var_os("GLRMASK_PROFILE_DIRECT_PREPUSH_FINISH").is_some();
@@ -9311,6 +9573,10 @@ fn finish_read_only_parser_nwa_for_validation(
     let finality_ms = elapsed_ms(finality_started);
     let prune_started = Instant::now();
     remove_redundant_default_transitions(&mut parser_nwa);
+    if let Some((raw_nwa, _)) = raw_identity_source.as_mut() {
+        apply_finality_fixpoint(raw_nwa);
+        remove_redundant_default_transitions(raw_nwa);
+    }
     let prune_ms = elapsed_ms(prune_started);
     if drop_dead_leaves && !early_drop_dead_leaves {
         let (raw_possible, dead_count, removed) =
@@ -9324,8 +9590,15 @@ fn finish_read_only_parser_nwa_for_validation(
         raw_possible_snapshot = Some(raw_possible);
     }
     let support_started = Instant::now();
-    let determinized =
-        determinize_with_supports_canonical_wide(&parser_nwa, Some(num_parser_states), 16);
+    let determinized = if raw_identity_source.is_some() {
+        determinize_with_weighted_supports_canonical_wide(
+            &parser_nwa,
+            Some(num_parser_states),
+            16,
+        )
+    } else {
+        determinize_with_supports_canonical_wide(&parser_nwa, Some(num_parser_states), 16)
+    };
     let support_ms = elapsed_ms(support_started);
     if profile {
         let support_entries = determinized.supports.iter().map(Vec::len).sum::<usize>();
@@ -9375,7 +9648,25 @@ fn finish_read_only_parser_nwa_for_validation(
     let possible_ms = elapsed_ms(possible_started);
     let default_started = Instant::now();
     if std::env::var_os("GLRMASK_DIRECT_PREPUSH_SKIP_DEFAULT_OPT").is_none() {
-        optimize_parser_dwa_defaults(&mut parser_dwa, &possible_by_state, num_parser_states);
+        if let Some((raw_nwa, raw_by_projected)) = raw_identity_source.as_ref() {
+            let weighted_supports = determinized
+                .weighted_supports
+                .as_ref()
+                .expect("raw-identity direct finish requires weighted projected supports");
+            let mut oracle = RawSupportIdentityOracle::new(
+                raw_nwa,
+                raw_by_projected,
+                weighted_supports,
+            );
+            optimize_parser_dwa_defaults_with_raw_identity(
+                &mut parser_dwa,
+                &possible_by_state,
+                num_parser_states,
+                &mut oracle,
+            );
+        } else {
+            optimize_parser_dwa_defaults(&mut parser_dwa, &possible_by_state, num_parser_states);
+        }
     }
     let default_ms = elapsed_ms(default_started);
     let subtract_started = Instant::now();
@@ -9669,12 +9960,32 @@ pub fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
 
     if std::env::var_os("GLRMASK_VALIDATE_DIRECT_PREPUSH_PARSER").is_some() {
         let direct_started_at = Instant::now();
-        let direct_nwa = build_direct_prepush_hashcons_from_terminal_dwa(
-            terminal_dwa,
-            grammar,
-            templates,
-        )
-        .expect("direct pre-push parser validation requires acyclic non-cross-target composition");
+        let use_projected_raw_identity =
+            std::env::var_os("GLRMASK_VALIDATE_DIRECT_PREPUSH_PROJECTED_RAW_IDENTITY").is_some();
+        let (direct_nwa, raw_identity_source) = if use_projected_raw_identity {
+            let (projected, raw, raw_by_projected) =
+                build_direct_prepush_raw_projection_with_origins(
+                    terminal_dwa,
+                    grammar,
+                    templates,
+                )
+                .expect(
+                    "projected raw-identity parser validation requires acyclic non-cross-target composition",
+                );
+            (projected, Some((raw, raw_by_projected)))
+        } else {
+            (
+                build_direct_prepush_hashcons_from_terminal_dwa(
+                    terminal_dwa,
+                    grammar,
+                    templates,
+                )
+                .expect(
+                    "direct pre-push parser validation requires acyclic non-cross-target composition",
+                ),
+                None,
+            )
+        };
         let direct_nwa_states = direct_nwa.states().len();
         let direct_nwa_transitions = NWA::num_transitions(&direct_nwa);
         let direct_build_ms = elapsed_ms(direct_started_at);
@@ -9714,6 +10025,7 @@ pub fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
             grammar,
             table,
             collapse_immediate_acceptance,
+            raw_identity_source,
         );
         let finish_ms = elapsed_ms(finish_started_at);
         let compare_started_at = Instant::now();
@@ -9763,6 +10075,7 @@ pub fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
             grammar,
             table,
             collapse_immediate_acceptance,
+            None,
         );
         let finish_ms = elapsed_ms(finish_started);
         let compare_started = Instant::now();
