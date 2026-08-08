@@ -7177,6 +7177,7 @@ fn eliminate_epsilon_only_states_with_origins(
 
     let mut summary_final = vec![None::<Weight>; n];
     let mut summary_exits = vec![Vec::<(u32, Weight)>::new(); n];
+    let mut weight_ops = ScopedWeightOpCache::default();
     let mut queue = VecDeque::<usize>::new();
     for state_id in 0..n {
         if !retained[state_id] && removed_outdegree[state_id] == 0 {
@@ -7202,27 +7203,27 @@ fn eliminate_epsilon_only_states_with_origins(
             if retained[target_idx] {
                 exits
                     .entry(*target)
-                    .and_modify(|existing| *existing = existing.union(edge_weight))
+                    .and_modify(|existing| *existing = weight_ops.union(existing, edge_weight))
                     .or_insert_with(|| edge_weight.clone());
                 continue;
             }
             if let Some(target_final) = summary_final[target_idx].as_ref() {
-                let contribution = edge_weight.intersection(target_final);
+                let contribution = weight_ops.intersection(edge_weight, target_final);
                 if !contribution.is_empty() {
                     final_weight = Some(match final_weight {
-                        Some(existing) => existing.union(&contribution),
+                        Some(existing) => weight_ops.union(&existing, &contribution),
                         None => contribution,
                     });
                 }
             }
             for (exit, suffix_weight) in &summary_exits[target_idx] {
-                let contribution = edge_weight.intersection(suffix_weight);
+                let contribution = weight_ops.intersection(edge_weight, suffix_weight);
                 if contribution.is_empty() {
                     continue;
                 }
                 exits
                     .entry(*exit)
-                    .and_modify(|existing| *existing = existing.union(&contribution))
+                    .and_modify(|existing| *existing = weight_ops.union(existing, &contribution))
                     .or_insert(contribution);
             }
         }
@@ -7276,16 +7277,16 @@ fn eliminate_epsilon_only_states_with_origins(
                 continue;
             }
             if let Some(target_final) = summary_final[target_idx].as_ref() {
-                let contribution = edge_weight.intersection(target_final);
+                let contribution = weight_ops.intersection(edge_weight, target_final);
                 if !contribution.is_empty() {
                     source_final = Some(match source_final {
-                        Some(existing) => existing.union(&contribution),
+                        Some(existing) => weight_ops.union(&existing, &contribution),
                         None => contribution,
                     });
                 }
             }
             for (exit, suffix_weight) in &summary_exits[target_idx] {
-                let contribution = edge_weight.intersection(suffix_weight);
+                let contribution = weight_ops.intersection(edge_weight, suffix_weight);
                 if !contribution.is_empty() {
                     result.add_epsilon(
                         new_source,
@@ -7314,13 +7315,13 @@ fn eliminate_epsilon_only_states_with_origins(
                     continue;
                 }
                 if let Some(target_final) = summary_final[target_idx].as_ref() {
-                    let contribution = edge_weight.intersection(target_final);
+                    let contribution = weight_ops.intersection(edge_weight, target_final);
                     if !contribution.is_empty() {
                         result.add_transition(new_source, label, final_sink, contribution);
                     }
                 }
                 for (exit, suffix_weight) in &summary_exits[target_idx] {
-                    let contribution = edge_weight.intersection(suffix_weight);
+                    let contribution = weight_ops.intersection(edge_weight, suffix_weight);
                     if !contribution.is_empty() {
                         result.add_transition(
                             new_source,
