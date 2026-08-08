@@ -7194,17 +7194,18 @@ fn eliminate_epsilon_only_states_with_origins(
             .as_ref()
             .filter(|weight| !weight.is_empty())
             .cloned();
-        let mut exits = BTreeMap::<u32, Weight>::new();
+        let mut exits = SmallVec::<[(u32, Weight); 4]>::new();
         for (target, edge_weight) in &state.epsilons {
             if edge_weight.is_empty() || (*target as usize) >= n {
                 continue;
             }
             let target_idx = *target as usize;
             if retained[target_idx] {
-                exits
-                    .entry(*target)
-                    .and_modify(|existing| *existing = weight_ops.union(existing, edge_weight))
-                    .or_insert_with(|| edge_weight.clone());
+                if let Some((_, existing)) = exits.iter_mut().find(|(exit, _)| *exit == *target) {
+                    *existing = weight_ops.union(existing, edge_weight);
+                } else {
+                    exits.push((*target, edge_weight.clone()));
+                }
                 continue;
             }
             if let Some(target_final) = summary_final[target_idx].as_ref() {
@@ -7221,13 +7222,18 @@ fn eliminate_epsilon_only_states_with_origins(
                 if contribution.is_empty() {
                     continue;
                 }
-                exits
-                    .entry(*exit)
-                    .and_modify(|existing| *existing = weight_ops.union(existing, &contribution))
-                    .or_insert(contribution);
+                if let Some((_, existing)) = exits
+                    .iter_mut()
+                    .find(|(existing_exit, _)| *existing_exit == *exit)
+                {
+                    *existing = weight_ops.union(existing, &contribution);
+                } else {
+                    exits.push((*exit, contribution));
+                }
             }
         }
-        let exits = exits.into_iter().collect::<Vec<_>>();
+        exits.sort_unstable_by_key(|(exit, _)| *exit);
+        let exits = exits.into_vec();
         total_exit_refs += exits.len();
         max_exits = max_exits.max(exits.len());
         summary_final[state_id] = final_weight;
