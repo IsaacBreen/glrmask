@@ -90,11 +90,22 @@ use std::sync::{Arc, Weak};
 #[derive(Debug, Clone)]
 pub struct Weight(Arc<WeightMap>);
 
+#[derive(Clone)]
+struct ScopedWeightOpEntry {
+    // Retain both operands for the lifetime of the scoped cache. The cache key
+    // is pointer-based; without these strong references a temporary operand can
+    // be dropped and its allocation reused, turning a later unrelated operation
+    // into a false cache hit (ABA).
+    _left: Weight,
+    _right: Weight,
+    result: Weight,
+}
+
 #[derive(Default)]
 pub struct ScopedWeightOpCache {
-    union_entries: FxHashMap<(usize, usize), Weight>,
-    intersection_entries: FxHashMap<(usize, usize), Weight>,
-    difference_entries: FxHashMap<(usize, usize), Weight>,
+    union_entries: FxHashMap<(usize, usize), ScopedWeightOpEntry>,
+    intersection_entries: FxHashMap<(usize, usize), ScopedWeightOpEntry>,
+    difference_entries: FxHashMap<(usize, usize), ScopedWeightOpEntry>,
 }
 
 impl ScopedWeightOpCache {
@@ -114,11 +125,18 @@ impl ScopedWeightOpCache {
 
         let key = scoped_commutative_weight_pair_key(left, right);
         if let Some(existing) = self.union_entries.get(&key) {
-            return existing.clone();
+            return existing.result.clone();
         }
 
         let value = left.union_uncached(right);
-        self.union_entries.insert(key, value.clone());
+        self.union_entries.insert(
+            key,
+            ScopedWeightOpEntry {
+                _left: left.clone(),
+                _right: right.clone(),
+                result: value.clone(),
+            },
+        );
         value
     }
 
@@ -138,11 +156,18 @@ impl ScopedWeightOpCache {
 
         let key = scoped_commutative_weight_pair_key(left, right);
         if let Some(existing) = self.intersection_entries.get(&key) {
-            return existing.clone();
+            return existing.result.clone();
         }
 
         let value = left.intersection_uncached_impl(right);
-        self.intersection_entries.insert(key, value.clone());
+        self.intersection_entries.insert(
+            key,
+            ScopedWeightOpEntry {
+                _left: left.clone(),
+                _right: right.clone(),
+                result: value.clone(),
+            },
+        );
         value
     }
 
@@ -166,11 +191,18 @@ impl ScopedWeightOpCache {
 
         let key = (left.ptr_key(), right.ptr_key());
         if let Some(existing) = self.difference_entries.get(&key) {
-            return existing.clone();
+            return existing.result.clone();
         }
 
         let value = left.difference_uncached(right);
-        self.difference_entries.insert(key, value.clone());
+        self.difference_entries.insert(
+            key,
+            ScopedWeightOpEntry {
+                _left: left.clone(),
+                _right: right.clone(),
+                result: value.clone(),
+            },
+        );
         value
     }
 
@@ -3269,6 +3301,33 @@ mod tests {
         assert!(left_weak.upgrade().is_none());
         assert!(right_weak.upgrade().is_none());
         assert!(result_weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn scoped_weight_op_cache_retains_pointer_key_operands() {
+        let mut cache = ScopedWeightOpCache::default();
+        let left = weight_for_tsid(1, &[(1, 3)]);
+        let right = weight_for_tsid(1, &[(7, 9)]);
+        let left_weak = Arc::downgrade(&left.0);
+        let right_weak = Arc::downgrade(&right.0);
+        let result = cache.union(&left, &right);
+        assert!(!Arc::ptr_eq(&result.0, &left.0));
+        assert!(!Arc::ptr_eq(&result.0, &right.0));
+
+        drop(result);
+        drop(right);
+        drop(left);
+
+        // ScopedWeightOpCache keys operations by operand addresses. The cache
+        // must therefore keep those operand allocations alive for its entire
+        // lifetime, otherwise allocator reuse can turn an unrelated operation
+        // into a false cache hit.
+        assert!(left_weak.upgrade().is_some());
+        assert!(right_weak.upgrade().is_some());
+
+        drop(cache);
+        assert!(left_weak.upgrade().is_none());
+        assert!(right_weak.upgrade().is_none());
     }
 
     #[test]

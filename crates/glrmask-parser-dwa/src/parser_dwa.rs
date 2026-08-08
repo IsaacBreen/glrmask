@@ -2585,49 +2585,54 @@ enum PossibleOutgoingIds {
     Some(BitSet),
 }
 
-fn build_possible_outgoing_ids_by_state(
-    parser_nwa: &NWA,
-    state_supports: &[Vec<u32>],
-    num_parser_states: u32,
-) -> Vec<PossibleOutgoingIds> {
-    enum OutgoingIds {
-        Empty,
-        All,
-        Some(Vec<u32>),
-    }
+enum RawPossibleOutgoingIds {
+    Empty,
+    All,
+    Some(Vec<u32>),
+}
 
-    let num_parser_states = num_parser_states as usize;
-    let all_parser_states = BitSet::all(num_parser_states);
-    let state_outgoing_ids: Vec<OutgoingIds> = parser_nwa
+fn snapshot_raw_possible_outgoing_ids(
+    parser_nwa: &NWA,
+    num_parser_states: u32,
+) -> Vec<RawPossibleOutgoingIds> {
+    parser_nwa
         .states()
         .iter()
         .map(|state| {
             let mut ids = Vec::new();
             for &label in state.transitions.keys() {
                 if label == DEFAULT_LABEL {
-                    return OutgoingIds::All;
+                    return RawPossibleOutgoingIds::All;
                 }
-                if let Some(parser_state_id) = parser_state_label(label, num_parser_states as u32) {
+                if let Some(parser_state_id) = parser_state_label(label, num_parser_states) {
                     ids.push(parser_state_id);
                 }
             }
             if ids.is_empty() {
-                OutgoingIds::Empty
+                RawPossibleOutgoingIds::Empty
             } else {
-                OutgoingIds::Some(ids)
+                RawPossibleOutgoingIds::Some(ids)
             }
         })
-        .collect();
+        .collect()
+}
 
+fn build_possible_outgoing_ids_from_raw(
+    state_outgoing_ids: &[RawPossibleOutgoingIds],
+    state_supports: &[Vec<u32>],
+    num_parser_states: u32,
+) -> Vec<PossibleOutgoingIds> {
+    let num_parser_states = num_parser_states as usize;
+    let all_parser_states = BitSet::all(num_parser_states);
     state_supports
         .iter()
         .map(|support| {
             if support.len() == 1 {
                 let state_id = support[0] as usize;
                 return match state_outgoing_ids.get(state_id) {
-                    Some(OutgoingIds::Empty) => PossibleOutgoingIds::Empty,
-                    Some(OutgoingIds::All) => PossibleOutgoingIds::All,
-                    Some(OutgoingIds::Some(ids)) => {
+                    Some(RawPossibleOutgoingIds::Empty) => PossibleOutgoingIds::Empty,
+                    Some(RawPossibleOutgoingIds::All) => PossibleOutgoingIds::All,
+                    Some(RawPossibleOutgoingIds::Some(ids)) => {
                         let mut bitset = BitSet::new(num_parser_states);
                         for &parser_state_id in ids {
                             bitset.set(parser_state_id as usize);
@@ -2648,9 +2653,9 @@ fn build_possible_outgoing_ids_by_state(
                     continue;
                 };
                 match state_ids {
-                    OutgoingIds::Empty => {}
-                    OutgoingIds::All => return PossibleOutgoingIds::All,
-                    OutgoingIds::Some(state_ids) => {
+                    RawPossibleOutgoingIds::Empty => {}
+                    RawPossibleOutgoingIds::All => return PossibleOutgoingIds::All,
+                    RawPossibleOutgoingIds::Some(state_ids) => {
                         for &parser_state_id in state_ids {
                             ids.set(parser_state_id as usize);
                         }
@@ -2669,6 +2674,48 @@ fn build_possible_outgoing_ids_by_state(
             }
         })
         .collect()
+}
+
+fn drop_dead_leaf_targets_preserving_possible(
+    parser_nwa: &mut NWA,
+    num_parser_states: u32,
+) -> (Vec<RawPossibleOutgoingIds>, usize, usize) {
+    let raw_possible = snapshot_raw_possible_outgoing_ids(parser_nwa, num_parser_states);
+    let dead_leaf = parser_nwa
+        .states()
+        .iter()
+        .map(|state| {
+            state
+                .final_weight
+                .as_ref()
+                .is_none_or(Weight::is_empty)
+                && state.transitions.is_empty()
+                && state.epsilons.is_empty()
+        })
+        .collect::<Vec<_>>();
+    let dead_count = dead_leaf.iter().filter(|&&is_dead| is_dead).count();
+    let mut removed = 0usize;
+    for state in parser_nwa.states_mut() {
+        state.transitions.retain(|_, targets| {
+            let before = targets.len();
+            targets.retain(|(target, _)| !dead_leaf[*target as usize]);
+            removed += before - targets.len();
+            !targets.is_empty()
+        });
+        let before = state.epsilons.len();
+        state.epsilons.retain(|(target, _)| !dead_leaf[*target as usize]);
+        removed += before - state.epsilons.len();
+    }
+    (raw_possible, dead_count, removed)
+}
+
+fn build_possible_outgoing_ids_by_state(
+    parser_nwa: &NWA,
+    state_supports: &[Vec<u32>],
+    num_parser_states: u32,
+) -> Vec<PossibleOutgoingIds> {
+    let state_outgoing_ids = snapshot_raw_possible_outgoing_ids(parser_nwa, num_parser_states);
+    build_possible_outgoing_ids_from_raw(&state_outgoing_ids, state_supports, num_parser_states)
 }
 
 fn local_epsilon_closure(
@@ -2738,6 +2785,7 @@ fn local_epsilon_closure_canonical(
     seeds: &[(u32, Weight)],
     touched_states: &mut Vec<u32>,
     canonical: &mut Vec<(u32, Weight)>,
+    weight_ops: &mut ScopedWeightOpCache,
 ) {
     debug_assert!(closure_queue.is_empty());
     touched_states.clear();
@@ -2759,14 +2807,14 @@ fn local_epsilon_closure_canonical(
             continue;
         };
         for (target, edge_weight) in &state.epsilons {
-            let contribution = current_weight.intersection(edge_weight);
+            let contribution = weight_ops.intersection(&current_weight, edge_weight);
             if contribution.is_empty() {
                 continue;
             }
             let target_idx = *target as usize;
             if let Some(existing) = &weight_by_state[target_idx] {
                 if !contribution.is_subset(existing) {
-                    weight_by_state[target_idx] = Some(existing.union(&contribution));
+                    weight_by_state[target_idx] = Some(weight_ops.union(existing, &contribution));
                     closure_queue.push_back(*target);
                 }
             } else {
@@ -3183,6 +3231,7 @@ fn determinize_with_supports(
                     &contribs,
                     &mut closure_touched_states,
                     &mut closure_canon,
+                    &mut intersection_cache,
                 );
             } else {
                 let mut target_subset: FxHashMap<u32, Weight> = contribs
@@ -3493,7 +3542,6 @@ fn determinize_with_supports(
     if let Some(detail) = detail {
         detail.emit("support");
     }
-
     DeterminizedDwaWithSupports { dwa, supports }
 }
 
@@ -4367,35 +4415,89 @@ fn append_bundle_redirecting_finals_to_targets(
 }
 
 
-fn use_prepush_reconstructed_for_bundle(
+#[derive(Clone, Copy, Debug, Default)]
+struct PrepushReconstructDecision {
+    candidate: bool,
+    admitted: bool,
+    max_template: usize,
+    sum_template: usize,
+    predicted_reconstructed_states: usize,
+}
+
+fn prepush_reconstruct_decision(
     enabled: bool,
     bundle: &TerminalBundle,
     templates: &Templates,
-) -> bool {
+) -> PrepushReconstructDecision {
     if !enabled || bundle.len() <= 1 {
-        return false;
-    }
-    let threshold = std::env::var("GLRMASK_PREPUSH_RECONSTRUCT_MIN_TEMPLATE_SUM")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(0);
-    if threshold == 0 {
-        return true;
+        return PrepushReconstructDecision::default();
     }
     let sizes = bundle
         .keys()
         .filter_map(|terminal| templates.by_terminal_nwa.get(terminal))
         .map(|template| template.states().len())
         .collect::<Vec<_>>();
+    let max_template = sizes.iter().copied().max().unwrap_or(0);
+    let sum_template = sizes.iter().sum::<usize>();
+    let threshold = std::env::var("GLRMASK_PREPUSH_RECONSTRUCT_MIN_TEMPLATE_SUM")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
     let metric = std::env::var("GLRMASK_PREPUSH_RECONSTRUCT_METRIC")
         .ok()
         .unwrap_or_else(|| "sum".to_string());
     let value = if metric.eq_ignore_ascii_case("max") {
-        sizes.into_iter().max().unwrap_or(0)
+        max_template
     } else {
-        sizes.into_iter().sum::<usize>()
+        sum_template
     };
-    value >= threshold
+    let candidate = threshold == 0 || value >= threshold;
+    if !candidate {
+        return PrepushReconstructDecision {
+            candidate: false,
+            admitted: false,
+            max_template,
+            sum_template,
+            predicted_reconstructed_states: 0,
+        };
+    }
+
+    let reconstructed_state_cap = std::env::var("GLRMASK_PREPUSH_RECONSTRUCT_MAX_STATES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let unconditional_template_min =
+        std::env::var("GLRMASK_PREPUSH_RECONSTRUCT_UNCONDITIONAL_TEMPLATE_MIN")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+    let unconditional = unconditional_template_min != 0
+        && max_template >= unconditional_template_min;
+    let predicted_reconstructed_states = if reconstructed_state_cap != 0 && !unconditional {
+        templates
+            .census_prepush_reconstructed_bundle(bundle)
+            .reconstructed_states()
+    } else {
+        0
+    };
+    let admitted = reconstructed_state_cap == 0
+        || unconditional
+        || predicted_reconstructed_states <= reconstructed_state_cap;
+    PrepushReconstructDecision {
+        candidate,
+        admitted,
+        max_template,
+        sum_template,
+        predicted_reconstructed_states,
+    }
+}
+
+fn use_prepush_reconstructed_for_bundle(
+    enabled: bool,
+    bundle: &TerminalBundle,
+    templates: &Templates,
+) -> bool {
+    prepush_reconstruct_decision(enabled, bundle, templates).admitted
 }
 
 fn append_cross_target_branch_fragment(
@@ -4648,6 +4750,59 @@ fn consume_pending(
     Some(next)
 }
 
+fn weighted_prepush_bundles_fingerprint(
+    bundles: &[Option<Arc<WeightedPrepushBundle>>],
+) -> u64 {
+    #[inline]
+    fn mix(hash: u64, value: u64) -> u64 {
+        (hash ^ value)
+            .wrapping_mul(0x100000001b3)
+            .rotate_left(9)
+            .wrapping_add(0x9e3779b97f4a7c15)
+    }
+
+    let mut hash = 0xcbf29ce484222325u64;
+    for (bundle_id, bundle) in bundles.iter().enumerate() {
+        let Some(bundle) = bundle else { continue };
+        hash = mix(hash, bundle_id as u64);
+        hash = mix(hash, bundle.states.len() as u64);
+        for state in &bundle.states {
+            hash = mix(hash, state.final_weight.structural_hash_cached());
+            hash = mix(hash, state.outputs.len() as u64);
+            for output in &state.outputs {
+                hash = mix(hash, output.pushes.len() as u64);
+                for &push in &output.pushes {
+                    hash = mix(hash, push as u64);
+                }
+                hash = mix(hash, output.weight.structural_hash_cached());
+            }
+            hash = mix(hash, state.transitions.len() as u64);
+            for (&label, transition) in &state.transitions {
+                hash = mix(hash, label as u32 as u64);
+                match transition {
+                    WeightedPrepushTarget::Core { target, weight } => {
+                        hash = mix(hash, 0);
+                        hash = mix(hash, *target as u64);
+                        hash = mix(hash, weight.structural_hash_cached());
+                    }
+                    WeightedPrepushTarget::Outputs(outputs) => {
+                        hash = mix(hash, 1);
+                        hash = mix(hash, outputs.len() as u64);
+                        for output in outputs {
+                            hash = mix(hash, output.pushes.len() as u64);
+                            for &push in &output.pushes {
+                                hash = mix(hash, push as u64);
+                            }
+                            hash = mix(hash, output.weight.structural_hash_cached());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    hash
+}
+
 
 fn direct_prepush_pending_demand(
     node: &DirectPrepushNode,
@@ -4841,6 +4996,12 @@ fn build_direct_prepush_pending_nwa(
         &summaries.unique_bundles,
         &used_bundles,
     );
+    if std::env::var_os("GLRMASK_DIAG_DIRECT_PREPUSH_COMPONENT_FINGERPRINT").is_some() {
+        eprintln!(
+            "[glrmask/profile][parser_direct_prepush_bundle_fingerprint] value={:016x}",
+            weighted_prepush_bundles_fingerprint(&bundles),
+        );
+    }
     let bundle_build_ms = elapsed_ms(build_started_at) as usize;
 
     let mut nwa = NWA::new(0, 0);
@@ -7690,6 +7851,16 @@ fn build_parser_nwa_from_terminal_dwa(
         if use_prepush_reconstructed_bundles {
             let profile_selection =
                 std::env::var_os("GLRMASK_PROFILE_PREPUSH_SELECTION").is_some();
+            let reconstructed_state_cap = std::env::var("GLRMASK_PREPUSH_RECONSTRUCT_MAX_STATES")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(0);
+            let unconditional_template_min =
+                std::env::var("GLRMASK_PREPUSH_RECONSTRUCT_UNCONDITIONAL_TEMPLATE_MIN")
+                    .ok()
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(0);
+            let candidates = std::sync::atomic::AtomicUsize::new(0);
             let selected = std::sync::atomic::AtomicUsize::new(0);
             built_bundle_cache = summaries
                 .unique_bundles
@@ -7699,22 +7870,48 @@ fn build_parser_nwa_from_terminal_dwa(
                     if !used_multi_bundle[bundle_id] {
                         return None;
                     }
-                    if use_prepush_reconstructed_for_bundle(true, bundle, templates) {
-                        selected.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let decision = prepush_reconstruct_decision(true, bundle, templates);
+                    if decision.candidate {
+                        candidates.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let reconstructed = decision.admitted.then(|| {
+                            Arc::new(templates.build_prepush_reconstructed_bundle(bundle))
+                        });
+                        if let Some(reconstructed) = &reconstructed {
+                            if decision.predicted_reconstructed_states != 0 {
+                            debug_assert_eq!(
+                                decision.predicted_reconstructed_states,
+                                reconstructed.states().len(),
+                                "pre-push census must exactly predict reconstructed state count",
+                            );
+                            }
+                        }
                         if std::env::var_os("GLRMASK_PROFILE_PREPUSH_SELECTION_DETAIL").is_some() {
-                            let sizes = bundle
-                                .keys()
-                                .filter_map(|terminal| templates.by_terminal_nwa.get(terminal))
-                                .map(|template| template.states().len())
-                                .collect::<Vec<_>>();
-                            let max_template = sizes.iter().copied().max().unwrap_or(0);
-                            let sum_template = sizes.iter().sum::<usize>();
+                            let reconstructed_states = reconstructed
+                                .as_ref()
+                                .map(|bundle| bundle.states().len())
+                                .unwrap_or(0);
+                            let reconstructed_transitions = reconstructed
+                                .as_ref()
+                                .map(|bundle| NWA::num_transitions(bundle))
+                                .unwrap_or(0);
                             eprintln!(
-                                "[glrmask/profile][prepush_selection_bundle] bundle_id={} terminals={} max_template={} sum_template={}",
-                                bundle_id, bundle.len(), max_template, sum_template,
+                                "[glrmask/profile][prepush_selection_bundle] bundle_id={} terminals={} max_template={} sum_template={} predicted_reconstructed_states={} reconstructed_states={} reconstructed_transitions={} admitted={}",
+                                bundle_id,
+                                bundle.len(),
+                                decision.max_template,
+                                decision.sum_template,
+                                decision.predicted_reconstructed_states,
+                                reconstructed_states,
+                                reconstructed_transitions,
+                                decision.admitted,
                             );
                         }
-                        Some(Arc::new(templates.build_prepush_reconstructed_bundle(bundle)))
+                        if let Some(reconstructed) = reconstructed {
+                            selected.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            Some(reconstructed)
+                        } else {
+                            Some(Arc::new(templates.build_bundle(bundle)))
+                        }
                     } else {
                         Some(Arc::new(templates.build_bundle(bundle)))
                     }
@@ -7722,12 +7919,15 @@ fn build_parser_nwa_from_terminal_dwa(
                 .collect();
             if profile_selection {
                 eprintln!(
-                    "[glrmask/profile][prepush_selection] used_multi={} selected={} threshold={}",
+                    "[glrmask/profile][prepush_selection] used_multi={} candidates={} selected={} threshold={} state_cap={} unconditional_template_min={}",
                     used_multi_bundle.iter().filter(|&&used| used).count(),
+                    candidates.load(std::sync::atomic::Ordering::Relaxed),
                     selected.load(std::sync::atomic::Ordering::Relaxed),
                     std::env::var("GLRMASK_PREPUSH_RECONSTRUCT_MIN_TEMPLATE_SUM")
                         .ok()
                         .unwrap_or_else(|| "0".to_string()),
+                    reconstructed_state_cap,
+                    unconditional_template_min,
                 );
             }
         } else if parser_bundle_topology_reuse_enabled() {
@@ -8506,6 +8706,100 @@ fn emit_default_witness_state(tag: &str, dwa: &DWA, state_id: u32, label: i32) {
     );
 }
 
+fn emit_dwa_difference_trace(tag: &str, left: &DWA, right: &DWA, labels: &[i32]) {
+    let mut left_state = left.start_state();
+    let mut right_state = right.start_state();
+    for (step, &label) in labels.iter().enumerate() {
+        let left_row = &left.states()[left_state as usize];
+        let right_row = &right.states()[right_state as usize];
+        let left_explicit = left_row.transitions.get(&label);
+        let right_explicit = right_row.transitions.get(&label);
+        let left_effective = left_explicit.or_else(|| left_row.transitions.get(&DEFAULT_LABEL));
+        let right_effective = right_explicit.or_else(|| right_row.transitions.get(&DEFAULT_LABEL));
+        eprintln!(
+            "[glrmask/profile][parser_dwa_difference_trace] tag={} step={} label={} left_state={} right_state={} left_final={} right_final={} final_equal={} left_explicit={} right_explicit={} left_default={} right_default={} left_target={:?} right_target={:?} edge_equal={} left_edge_ranges={:?} right_edge_ranges={:?}",
+            tag,
+            step,
+            label,
+            left_state,
+            right_state,
+            left_row.final_weight.is_some(),
+            right_row.final_weight.is_some(),
+            left_row.final_weight == right_row.final_weight,
+            left_explicit.is_some(),
+            right_explicit.is_some(),
+            left_row.transitions.contains_key(&DEFAULT_LABEL),
+            right_row.transitions.contains_key(&DEFAULT_LABEL),
+            left_effective.map(|(target, _)| *target),
+            right_effective.map(|(target, _)| *target),
+            match (left_effective, right_effective) {
+                (Some((_, left_weight)), Some((_, right_weight))) => left_weight == right_weight,
+                (None, None) => true,
+                _ => false,
+            },
+            left_effective.map(|(_, weight)| weight.num_ranges()),
+            right_effective.map(|(_, weight)| weight.num_ranges()),
+        );
+        let (Some((next_left, _)), Some((next_right, _))) = (left_effective, right_effective) else {
+            return;
+        };
+        left_state = *next_left;
+        right_state = *next_right;
+    }
+    let left_row = &left.states()[left_state as usize];
+    let right_row = &right.states()[right_state as usize];
+    eprintln!(
+        "[glrmask/profile][parser_dwa_difference_trace] tag={} terminal left_state={} right_state={} left_final={} right_final={} final_equal={} left_final_ranges={:?} right_final_ranges={:?}",
+        tag,
+        left_state,
+        right_state,
+        left_row.final_weight.is_some(),
+        right_row.final_weight.is_some(),
+        left_row.final_weight == right_row.final_weight,
+        left_row.final_weight.as_ref().map(Weight::num_ranges),
+        right_row.final_weight.as_ref().map(Weight::num_ranges),
+    );
+}
+
+fn acyclic_dwa_root_fingerprint(dwa: &DWA) -> u64 {
+    fn mix(hash: u64, value: u64) -> u64 {
+        (hash ^ value)
+            .wrapping_mul(0x100000001b3)
+            .rotate_left(11)
+            .wrapping_add(0x9e3779b97f4a7c15)
+    }
+
+    fn visit(dwa: &DWA, state_id: u32, memo: &mut [Option<u64>], visiting: &mut [bool]) -> u64 {
+        if let Some(hash) = memo[state_id as usize] {
+            return hash;
+        }
+        assert!(!visiting[state_id as usize], "DWA fingerprint requires an acyclic input");
+        visiting[state_id as usize] = true;
+        let state = &dwa.states()[state_id as usize];
+        let mut hash = 0xcbf29ce484222325u64;
+        hash = mix(
+            hash,
+            state
+                .final_weight
+                .as_ref()
+                .map(Weight::structural_hash_cached)
+                .unwrap_or(0),
+        );
+        for (&label, (target, weight)) in &state.transitions {
+            hash = mix(hash, label as u32 as u64);
+            hash = mix(hash, weight.structural_hash_cached());
+            hash = mix(hash, visit(dwa, *target, memo, visiting));
+        }
+        visiting[state_id as usize] = false;
+        memo[state_id as usize] = Some(hash);
+        hash
+    }
+
+    let mut memo = vec![None; dwa.states().len()];
+    let mut visiting = vec![false; dwa.states().len()];
+    visit(dwa, dwa.start_state(), &mut memo, &mut visiting)
+}
+
 fn diagnose_direct_prepush_hashcons_tail(
     terminal_dwa: &TerminalAutomaton,
     grammar: &AnalyzedGrammar,
@@ -8749,6 +9043,21 @@ fn finish_read_only_parser_nwa_for_validation(
     let prune_started = Instant::now();
     remove_redundant_default_transitions(&mut parser_nwa);
     let prune_ms = elapsed_ms(prune_started);
+    let drop_dead_leaves =
+        std::env::var_os("GLRMASK_DIRECT_PREPUSH_DROP_DEAD_LEAVES").is_some();
+    let raw_possible_snapshot = if drop_dead_leaves {
+        let (raw_possible, dead_count, removed) =
+            drop_dead_leaf_targets_preserving_possible(&mut parser_nwa, num_parser_states);
+        if profile {
+            eprintln!(
+                "[glrmask/profile][parser_direct_prepush_dead_leaf_drop] dead_leaves={} removed_edges={}",
+                dead_count, removed,
+            );
+        }
+        Some(raw_possible)
+    } else {
+        None
+    };
     let support_started = Instant::now();
     let determinized = determinize_with_supports(&parser_nwa, Some(num_parser_states));
     let support_ms = elapsed_ms(support_started);
@@ -8756,13 +9065,20 @@ fn finish_read_only_parser_nwa_for_validation(
         let support_entries = determinized.supports.iter().map(Vec::len).sum::<usize>();
         let support_max = determinized.supports.iter().map(Vec::len).max().unwrap_or(0);
         let support_nontrivial = determinized.supports.iter().filter(|support| support.len() > 1).count();
+        let unique_support_members = determinized
+            .supports
+            .iter()
+            .flat_map(|support| support.iter().copied())
+            .collect::<FxHashSet<_>>()
+            .len();
         eprintln!(
-            "[glrmask/profile][parser_direct_prepush_support_shape] states={} entries={} avg={:.2} max={} nontrivial={}",
+            "[glrmask/profile][parser_direct_prepush_support_shape] states={} entries={} avg={:.2} max={} nontrivial={} unique_members={}",
             determinized.supports.len(),
             support_entries,
             support_entries as f64 / determinized.supports.len().max(1) as f64,
             support_max,
             support_nontrivial,
+            unique_support_members,
         );
     }
     let mut parser_dwa = determinized.dwa;
@@ -8777,11 +9093,19 @@ fn finish_read_only_parser_nwa_for_validation(
     }
     let collapse_ms = elapsed_ms(collapse_started);
     let possible_started = Instant::now();
-    let possible_by_state = build_possible_outgoing_ids_by_state(
-        &parser_nwa,
-        &determinized.supports,
-        num_parser_states,
-    );
+    let possible_by_state = if let Some(raw_possible_snapshot) = raw_possible_snapshot.as_ref() {
+        build_possible_outgoing_ids_from_raw(
+            raw_possible_snapshot,
+            &determinized.supports,
+            num_parser_states,
+        )
+    } else {
+        build_possible_outgoing_ids_by_state(
+            &parser_nwa,
+            &determinized.supports,
+            num_parser_states,
+        )
+    };
     let possible_ms = elapsed_ms(possible_started);
     let default_started = Instant::now();
     if std::env::var_os("GLRMASK_DIRECT_PREPUSH_SKIP_DEFAULT_OPT").is_none() {
@@ -8927,7 +9251,6 @@ pub fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
             trim_resolved_nwa_ms,
         );
     }
-
     let support_determinize_started_at = Instant::now();
     let determinized = determinize_with_supports(&parser_nwa, Some(num_parser_states));
     let support_determinize_ms = elapsed_ms(support_determinize_started_at);
@@ -9089,6 +9412,35 @@ pub fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
         let direct_nwa_states = direct_nwa.states().len();
         let direct_nwa_transitions = NWA::num_transitions(&direct_nwa);
         let direct_build_ms = elapsed_ms(direct_started_at);
+        if std::env::var_os("GLRMASK_DIAG_DIRECT_PREPUSH_VS_RESOLVED_SUPPORT").is_some() {
+            let diag_started_at = Instant::now();
+            let mut direct_read = direct_nwa.clone();
+            apply_finality_fixpoint(&mut direct_read);
+            remove_redundant_default_transitions(&mut direct_read);
+            let direct_support =
+                determinize_with_supports(&direct_read, Some(num_parser_states)).dwa;
+            let reference_support =
+                determinize_with_supports(&parser_nwa, Some(num_parser_states)).dwa;
+            let support_difference = find_difference(&direct_support, &reference_support)
+                .expect("direct pre-push support diagnostic requires finite acyclic DWAs");
+            if let Some(labels) = support_difference.as_deref() {
+                emit_dwa_difference_trace(
+                    "direct_vs_resolved_support",
+                    &direct_support,
+                    &reference_support,
+                    labels,
+                );
+            }
+            eprintln!(
+                "[glrmask/profile][parser_direct_prepush_vs_resolved_support] direct_states={} direct_transitions={} reference_states={} reference_transitions={} difference={:?} total_ms={:.3}",
+                direct_support.states().len(),
+                direct_support.num_transitions(),
+                reference_support.states().len(),
+                reference_support.num_transitions(),
+                support_difference,
+                elapsed_ms(diag_started_at),
+            );
+        }
         let finish_started_at = Instant::now();
         let direct = finish_read_only_parser_nwa_for_validation(
             direct_nwa,
@@ -9102,6 +9454,14 @@ pub fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
         let difference = find_difference(&direct, &minimized)
             .expect("direct pre-push parser validation requires finite acyclic parser DWAs");
         let compare_ms = elapsed_ms(compare_started_at);
+        if std::env::var_os("GLRMASK_DIAG_DIRECT_PREPUSH_FINGERPRINT").is_some() {
+            eprintln!(
+                "[glrmask/profile][parser_direct_prepush_fingerprint] direct={:016x} reference={:016x} difference={:?}",
+                acyclic_dwa_root_fingerprint(&direct),
+                acyclic_dwa_root_fingerprint(&minimized),
+                difference,
+            );
+        }
         assert!(
             difference.is_none(),
             "direct pre-push parser changed weighted parser language on labels {:?}",
@@ -9250,7 +9610,7 @@ mod tests {
     use rustc_hash::FxHashMap;
 
     use super::{
-        PossibleOutgoingIds, build_parser_nwa_from_terminal_dwa,
+        PossibleOutgoingIds, ScopedWeightOpCache, build_parser_nwa_from_terminal_dwa,
         collapse_final_leaf_targets, determinize_parser_dwa_with_fallbacks,
         determinize_with_supports, immediate_acceptance_certificates,
         local_epsilon_closure, local_epsilon_closure_canonical,
@@ -9360,6 +9720,7 @@ mod tests {
             let mut flat_queue = VecDeque::new();
             let mut touched = Vec::new();
             let mut flat_canonical = Vec::new();
+            let mut weight_ops = ScopedWeightOpCache::default();
             local_epsilon_closure_canonical(
                 &nwa,
                 &mut flat_weights,
@@ -9367,6 +9728,7 @@ mod tests {
                 &seed_canonical,
                 &mut touched,
                 &mut flat_canonical,
+                &mut weight_ops,
             );
 
             assert_eq!(

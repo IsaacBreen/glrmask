@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::Instant;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use std::sync::Arc;
 
@@ -98,6 +98,7 @@ pub(crate) struct LazyWeightedPrepushBundle {
     skeleton: Arc<PrepushBundleSkeleton>,
     terminals: Vec<TerminalID>,
     weights: Vec<Weight>,
+    group_weight_cache: FxHashMap<SmallVec<[u32; 8]>, Weight>,
 }
 
 #[derive(Debug)]
@@ -110,6 +111,24 @@ pub(crate) struct LazyWeightedPrepushBundleSet {
     decorate_hits: usize,
     decorate_misses: usize,
     decorate_ms: f64,
+    decorate_group_view_ms: f64,
+    decorate_sequence_memo_alloc_ms: f64,
+    decorate_instantiate_ms: f64,
+    decorate_final_weight_ms: f64,
+    decorate_core_weight_ms: f64,
+    decorate_output_expand_ms: f64,
+    decorate_output_sequence_ms: f64,
+    decorate_output_group_ms: f64,
+    decorate_transition_insert_ms: f64,
+    decorate_output_sort_ms: f64,
+    decorate_residual_calls: usize,
+    decorate_residual_hits: usize,
+    decorate_residual_misses: usize,
+    decorate_output_program_refs: usize,
+    decorate_output_sequence_refs: usize,
+    decorate_output_unique_sequences: usize,
+    decorate_core_weight_unions: usize,
+    decorate_output_weight_unions: usize,
 }
 
 /// A per-weight terminal group either reuses an immutable template DFA or owns
@@ -733,6 +752,7 @@ impl Templates {
                 skeleton,
                 terminals: entries.iter().map(|(terminal, _)| *terminal).collect(),
                 weights: entries.into_iter().map(|(_, weight)| weight).collect(),
+                group_weight_cache: FxHashMap::default(),
             }));
         }
         if profile {
@@ -754,6 +774,24 @@ impl Templates {
             decorate_hits: 0,
             decorate_misses: 0,
             decorate_ms: 0.0,
+            decorate_group_view_ms: 0.0,
+            decorate_sequence_memo_alloc_ms: 0.0,
+            decorate_instantiate_ms: 0.0,
+            decorate_final_weight_ms: 0.0,
+            decorate_core_weight_ms: 0.0,
+            decorate_output_expand_ms: 0.0,
+            decorate_output_sequence_ms: 0.0,
+            decorate_output_group_ms: 0.0,
+            decorate_transition_insert_ms: 0.0,
+            decorate_output_sort_ms: 0.0,
+            decorate_residual_calls: 0,
+            decorate_residual_hits: 0,
+            decorate_residual_misses: 0,
+            decorate_output_program_refs: 0,
+            decorate_output_sequence_refs: 0,
+            decorate_output_unique_sequences: 0,
+            decorate_core_weight_unions: 0,
+            decorate_output_weight_unions: 0,
         }
     }
 
@@ -782,32 +820,68 @@ impl Templates {
         }
         set.decorate_misses += 1;
         let started = set.profile.then(Instant::now);
-        let plan = set.bundles.get(bundle_id)?.as_ref()?;
-        let group_dfas = plan
-            .terminals
+        let (bundles, shared_sequences) = (&mut set.bundles, &mut set.shared_sequences);
+        let plan = bundles.get_mut(bundle_id)?.as_mut()?;
+        let LazyWeightedPrepushBundle {
+            skeleton,
+            terminals,
+            weights,
+            group_weight_cache,
+        } = plan;
+        let group_view_started = set.profile.then(Instant::now);
+        let group_dfas = terminals
             .iter()
-            .zip(plan.weights.iter())
+            .zip(weights.iter())
             .filter_map(|(terminal, weight)| {
                 self.by_terminal
                     .get(terminal)
                     .map(|dfa| (weight, BundleGroupDfa::Borrowed(dfa)))
             })
             .collect::<Vec<_>>();
-        if group_dfas.len() != plan.weights.len() {
+        if let Some(started) = group_view_started {
+            set.decorate_group_view_ms += elapsed_ms(started);
+        }
+        if group_dfas.len() != weights.len() {
             return None;
         }
-        let skeleton_state = plan.skeleton.states.get(state_id as usize)?;
+        let skeleton_state = skeleton.states.get(state_id as usize)?;
+        let memo_started = set.profile.then(Instant::now);
         let mut sequence_memos = (0..group_dfas.len())
             .map(|_| FxHashMap::<u32, Arc<[PushSequence]>>::default())
             .collect::<Vec<_>>();
+        if let Some(started) = memo_started {
+            set.decorate_sequence_memo_alloc_ms += elapsed_ms(started);
+        }
         let mut detail = PrepushInstantiateDetail::default();
+        let instantiate_started = set.profile.then(Instant::now);
         let state = instantiate_weighted_prepush_state_profiled(
             skeleton_state,
             &group_dfas,
             &mut sequence_memos,
-            &mut set.shared_sequences,
+            shared_sequences,
+            Some(group_weight_cache),
             &mut detail,
         );
+        if let Some(started) = instantiate_started {
+            set.decorate_instantiate_ms += elapsed_ms(started);
+        }
+        if set.profile {
+            set.decorate_final_weight_ms += detail.final_weight_ms;
+            set.decorate_core_weight_ms += detail.core_weight_ms;
+            set.decorate_output_expand_ms += detail.output_expand_ms;
+            set.decorate_output_sequence_ms += detail.output_sequence_ms;
+            set.decorate_output_group_ms += detail.output_group_ms;
+            set.decorate_transition_insert_ms += detail.transition_insert_ms;
+            set.decorate_output_sort_ms += detail.output_sort_ms;
+            set.decorate_residual_calls += detail.residual_calls;
+            set.decorate_residual_hits += detail.residual_cache_hits;
+            set.decorate_residual_misses += detail.residual_cache_misses;
+            set.decorate_output_program_refs += detail.output_program_refs;
+            set.decorate_output_sequence_refs += detail.output_sequence_refs;
+            set.decorate_output_unique_sequences += detail.output_unique_sequences;
+            set.decorate_core_weight_unions += detail.core_weight_unions;
+            set.decorate_output_weight_unions += detail.output_weight_unions;
+        }
         let state = Arc::new(state);
         set.decorated[bundle_id][state_id as usize] = Some(Arc::clone(&state));
         if let Some(started) = started {
@@ -828,14 +902,59 @@ impl Templates {
             .iter()
             .map(|states| states.iter().filter(|state| state.is_some()).count())
             .sum::<usize>();
+        let mut multi_group_union_sites = 0usize;
+        let mut distinct_multi_group_unions = 0usize;
+        for (plan, decorated) in set.bundles.iter().zip(&set.decorated) {
+            let Some(plan) = plan else { continue };
+            let mut signatures = FxHashSet::<SmallVec<[u32; 8]>>::default();
+            for (state_id, cached) in decorated.iter().enumerate() {
+                if cached.is_none() {
+                    continue;
+                }
+                let Some(state) = plan.skeleton.states.get(state_id) else { continue };
+                if state.final_groups.len() > 1 {
+                    multi_group_union_sites += 1;
+                    signatures.insert(state.final_groups.clone());
+                }
+                for transition in state.transitions.values() {
+                    if matches!(transition.target, PrepushBundleTarget::Core(_))
+                        && transition.groups.len() > 1
+                    {
+                        multi_group_union_sites += 1;
+                        signatures.insert(transition.groups.clone());
+                    }
+                }
+            }
+            distinct_multi_group_unions += signatures.len();
+        }
         eprintln!(
-            "[glrmask/profile][prepush_lazy_decorate] calls={} hits={} misses={} cached_states={} shared_sequence_entries={} decorate_ms={:.3}",
+            "[glrmask/profile][prepush_lazy_decorate] calls={} hits={} misses={} cached_states={} shared_sequence_entries={} decorate_ms={:.3} group_view_ms={:.3} sequence_memo_alloc_ms={:.3} instantiate_ms={:.3} final_weight_ms={:.3} core_weight_ms={:.3} output_expand_ms={:.3} output_sequence_ms={:.3} output_group_ms={:.3} transition_insert_ms={:.3} output_sort_ms={:.3} residual_calls={} residual_hits={} residual_misses={} output_program_refs={} output_sequence_refs={} output_unique_sequences={} core_weight_unions={} output_weight_unions={} multi_group_union_sites={} distinct_multi_group_unions={}",
             set.decorate_calls,
             set.decorate_hits,
             set.decorate_misses,
             cached_states,
             set.shared_sequences.len(),
             set.decorate_ms,
+            set.decorate_group_view_ms,
+            set.decorate_sequence_memo_alloc_ms,
+            set.decorate_instantiate_ms,
+            set.decorate_final_weight_ms,
+            set.decorate_core_weight_ms,
+            set.decorate_output_expand_ms,
+            set.decorate_output_sequence_ms,
+            set.decorate_output_group_ms,
+            set.decorate_transition_insert_ms,
+            set.decorate_output_sort_ms,
+            set.decorate_residual_calls,
+            set.decorate_residual_hits,
+            set.decorate_residual_misses,
+            set.decorate_output_program_refs,
+            set.decorate_output_sequence_refs,
+            set.decorate_output_unique_sequences,
+            set.decorate_core_weight_unions,
+            set.decorate_output_weight_unions,
+            multi_group_union_sites,
+            distinct_multi_group_unions,
         );
     }
 
@@ -878,7 +997,6 @@ impl Templates {
         let mut detail_core_weight_unions = 0usize;
         let mut detail_output_weight_unions = 0usize;
         let mut skeletons = FxHashMap::<Vec<TerminalID>, Arc<PrepushBundleSkeleton>>::default();
-        let mut shared_sequences = SharedResidualSequenceCache::default();
         let mut result = Vec::with_capacity(bundles.len());
         for (bundle, used) in bundles.iter().zip(used.iter().copied()) {
             if !used {
@@ -914,6 +1032,13 @@ impl Templates {
                 skeleton_ms += elapsed_ms(started);
             }
             let instantiate_started = profile.then(Instant::now);
+            // `group_dfas` may contain temporary `Owned` DFAs. Residual-sequence
+            // cache keys currently use the DFA address, so carrying this cache
+            // across bundle iterations is unsound: an allocator can reuse an
+            // owned DFA's address for a different DFA in a later bundle (ABA),
+            // causing us to reuse the wrong WRITE suffix language. Keep sharing
+            // within one bundle, where every referenced DFA remains alive.
+            let mut shared_sequences = SharedResidualSequenceCache::default();
             let (weighted, inst_detail) = if profile {
                 instantiate_weighted_prepush_bundle_profiled(
                     skeleton.as_ref(),
@@ -1089,6 +1214,33 @@ impl Templates {
         let group_dfas = self.build_group_dfas_profiled(&weight_groups, &mut profile);
         let skeleton = build_prepush_bundle_skeleton(&group_dfas);
         instantiate_prepush_bundle_nwa(&skeleton, &group_dfas)
+    }
+
+    pub(crate) fn census_prepush_reconstructed_bundle(
+        &self,
+        bundle: &BTreeMap<TerminalID, Weight>,
+    ) -> PrepushBundleCensus {
+        if bundle.is_empty() {
+            return PrepushBundleCensus::default();
+        }
+        if std::env::var_os("GLRMASK_PREPUSH_NO_WEIGHT_GROUP_UNION").is_some() {
+            let group_dfas = bundle
+                .iter()
+                .filter_map(|(&terminal, weight)| {
+                    if weight.is_empty() {
+                        return None;
+                    }
+                    self.by_terminal
+                        .get(&terminal)
+                        .map(|dfa| (weight, BundleGroupDfa::Borrowed(dfa)))
+                })
+                .collect::<Vec<_>>();
+            return census_prepush_bundle_groups(&group_dfas);
+        }
+        let weight_groups = self.group_terminals_by_weight(bundle);
+        let mut profile = BundleBuildProfile::default();
+        let group_dfas = self.build_group_dfas_profiled(&weight_groups, &mut profile);
+        census_prepush_bundle_groups(&group_dfas)
     }
 
     pub(crate) fn build_weighted_prepush_bundle(
@@ -1551,6 +1703,35 @@ fn weighted_outputs_for_programs(
 ) -> Vec<PrepushOutput> {
     let sequence_started = Instant::now();
     detail.output_program_refs += programs.len();
+    if let [(group, residual)] = programs {
+        let sequences = residual_push_sequences(
+            groups[*group as usize].1.dfa(),
+            *residual,
+            &mut sequence_memos[*group as usize],
+            shared_sequences,
+            detail,
+        );
+        detail.output_sequence_refs += sequences.len();
+        detail.output_unique_sequences += sequences.len();
+        let weight = groups[*group as usize].0;
+        let outputs = sequences
+            .iter()
+            .map(|suffix| {
+                let mut pushes =
+                    PushSequence::with_capacity(prefix_push.is_some() as usize + suffix.len());
+                if let Some(push) = prefix_push {
+                    pushes.push(push);
+                }
+                pushes.extend_from_slice(suffix);
+                PrepushOutput {
+                    pushes,
+                    weight: weight.clone(),
+                }
+            })
+            .collect();
+        detail.output_sequence_ms += elapsed_ms(sequence_started);
+        return outputs;
+    }
     let mut outputs = Vec::<PrepushOutput>::new();
     for &(group, residual) in programs {
         let sequences = residual_push_sequences(
@@ -1594,27 +1775,54 @@ fn weighted_outputs_for_programs(
     merged
 }
 
+fn concrete_weight_for_groups(
+    group_ids: &SmallVec<[u32; 8]>,
+    groups: &[(&Weight, BundleGroupDfa<'_>)],
+    detail: &mut PrepushInstantiateDetail,
+    cache: Option<&mut FxHashMap<SmallVec<[u32; 8]>, Weight>>,
+) -> Weight {
+    match group_ids.as_slice() {
+        [] => Weight::empty(),
+        [group] => groups[*group as usize].0.clone(),
+        _ => {
+            detail.core_weight_unions += 1;
+            if let Some(cache) = cache {
+                if let Some(weight) = cache.get(group_ids) {
+                    return weight.clone();
+                }
+                let weight = Weight::union_all(
+                    group_ids
+                        .iter()
+                        .map(|&group| groups[group as usize].0),
+                );
+                cache.insert(group_ids.clone(), weight.clone());
+                weight
+            } else {
+                Weight::union_all(
+                    group_ids
+                        .iter()
+                        .map(|&group| groups[group as usize].0),
+                )
+            }
+        }
+    }
+}
+
 fn instantiate_weighted_prepush_state_profiled(
     state: &PrepushBundleState,
     groups: &[(&Weight, BundleGroupDfa<'_>)],
     sequence_memos: &mut [FxHashMap<u32, Arc<[PushSequence]>>],
     shared_sequences: &mut SharedResidualSequenceCache,
+    mut group_weight_cache: Option<&mut FxHashMap<SmallVec<[u32; 8]>, Weight>>,
     detail: &mut PrepushInstantiateDetail,
 ) -> WeightedPrepushState {
     let final_started = Instant::now();
-    let final_weight = match state.final_groups.as_slice() {
-        [] => Weight::empty(),
-        [group] => groups[*group as usize].0.clone(),
-        _ => {
-            detail.core_weight_unions += 1;
-            Weight::union_all(
-                state
-                    .final_groups
-                    .iter()
-                    .map(|&group| groups[group as usize].0),
-            )
-        }
-    };
+    let final_weight = concrete_weight_for_groups(
+        &state.final_groups,
+        groups,
+        detail,
+        group_weight_cache.as_deref_mut(),
+    );
     detail.final_weight_ms += elapsed_ms(final_started);
     let mut outputs = Vec::<PrepushOutput>::new();
     let mut transitions = BTreeMap::<i32, WeightedPrepushTarget>::new();
@@ -1623,19 +1831,12 @@ fn instantiate_weighted_prepush_state_profiled(
             PrepushBundleTarget::Core(target) => {
                 debug_assert!(!is_negative_label(label));
                 let weight_started = Instant::now();
-                let weight = match transition.groups.as_slice() {
-                    [] => Weight::empty(),
-                    [group] => groups[*group as usize].0.clone(),
-                    _ => {
-                        detail.core_weight_unions += 1;
-                        Weight::union_all(
-                            transition
-                                .groups
-                                .iter()
-                                .map(|&group| groups[group as usize].0),
-                        )
-                    }
-                };
+                let weight = concrete_weight_for_groups(
+                    &transition.groups,
+                    groups,
+                    detail,
+                    group_weight_cache.as_deref_mut(),
+                );
                 detail.core_weight_ms += elapsed_ms(weight_started);
                 if !weight.is_empty() {
                     let insert_started = Instant::now();
@@ -1699,6 +1900,7 @@ fn instantiate_weighted_prepush_bundle_profiled(
             groups,
             &mut sequence_memos,
             shared_sequences,
+            None,
             &mut detail,
         ));
     }
@@ -2023,20 +2225,27 @@ fn instantiate_prepush_bundle_nwa(
 }
 
 #[derive(Default)]
-struct PrepushBundleCensus {
-    states: usize,
-    input_transitions: usize,
-    output_edges: usize,
-    output_sites: usize,
-    output_programs: usize,
-    core_states: usize,
-    frontier_payloads: usize,
-    frontier_final_payloads: usize,
-    frontier_push_edges: usize,
-    program_sequences: usize,
-    programs_multisequence: usize,
-    max_sequences_per_program: usize,
-    max_push_depth: usize,
+pub(crate) struct PrepushBundleCensus {
+    pub(crate) states: usize,
+    pub(crate) input_transitions: usize,
+    pub(crate) output_edges: usize,
+    pub(crate) output_sites: usize,
+    pub(crate) output_programs: usize,
+    pub(crate) core_states: usize,
+    pub(crate) residual_states: usize,
+    pub(crate) frontier_payloads: usize,
+    pub(crate) frontier_final_payloads: usize,
+    pub(crate) frontier_push_edges: usize,
+    pub(crate) program_sequences: usize,
+    pub(crate) programs_multisequence: usize,
+    pub(crate) max_sequences_per_program: usize,
+    pub(crate) max_push_depth: usize,
+}
+
+impl PrepushBundleCensus {
+    pub(crate) fn reconstructed_states(&self) -> usize {
+        self.core_states.saturating_add(self.residual_states)
+    }
 }
 
 /// Determinize only the stack-reading prefix of a weighted template bundle.
@@ -2061,10 +2270,15 @@ fn observe_frontier_payload(
     product_state: &[(u32, u32)],
     census: &mut PrepushBundleCensus,
     output_programs: &mut FxHashMap<(u32, u32), ()>,
+    residual_roots: &mut FxHashMap<(u32, u32), ()>,
 ) {
     census.frontier_payloads += 1;
     let mut accepting = false;
     for &(group_id, state_id) in product_state {
+        // Reconstruction enters this residual state directly on the last READ
+        // edge, before consuming any WRITE label. Count the whole negative-only
+        // suffix rooted here, not only the states after the first WRITE.
+        residual_roots.insert((group_id, state_id), ());
         let state = &groups[group_id as usize].1.dfa().states[state_id as usize];
         accepting |= state.is_accepting;
         for (&label, &target) in &state.transitions {
@@ -2123,6 +2337,7 @@ fn census_prepush_bundle_groups(groups: &[(&Weight, BundleGroupDfa<'_>)]) -> Pre
     let mut census = PrepushBundleCensus::default();
     let mut label_targets = LabelTargets::new();
     let mut output_programs = FxHashMap::<(u32, u32), ()>::default();
+    let mut residual_roots = FxHashMap::<(u32, u32), ()>::default();
 
     while let Some(product_state) = worklist.pop_front() {
         census.states += 1;
@@ -2141,6 +2356,7 @@ fn census_prepush_bundle_groups(groups: &[(&Weight, BundleGroupDfa<'_>)]) -> Pre
                 census.output_edges += label_end - label_start;
                 for &(_, group_id, target) in &label_targets[label_start..label_end] {
                     output_programs.insert((group_id, target), ());
+                    residual_roots.insert((group_id, target), ());
                 }
                 label_start = label_end;
                 continue;
@@ -2165,6 +2381,7 @@ fn census_prepush_bundle_groups(groups: &[(&Weight, BundleGroupDfa<'_>)]) -> Pre
                         &next_state,
                         &mut census,
                         &mut output_programs,
+                        &mut residual_roots,
                     );
                 }
             } else {
@@ -2184,6 +2401,7 @@ fn census_prepush_bundle_groups(groups: &[(&Weight, BundleGroupDfa<'_>)]) -> Pre
                         &next_state,
                         &mut census,
                         &mut output_programs,
+                        &mut residual_roots,
                     );
                 }
             }
@@ -2195,6 +2413,14 @@ fn census_prepush_bundle_groups(groups: &[(&Weight, BundleGroupDfa<'_>)]) -> Pre
     let mut memos = (0..groups.len())
         .map(|_| FxHashMap::<u32, (usize, usize)>::default())
         .collect::<Vec<_>>();
+    for &(group, state) in residual_roots.keys() {
+        residual_push_path_stats(
+            groups[group as usize].1.dfa(),
+            state,
+            &mut memos[group as usize],
+        );
+    }
+    census.residual_states = memos.iter().map(FxHashMap::len).sum();
     for &(group, state) in output_programs.keys() {
         let (paths, depth) = residual_push_path_stats(
             groups[group as usize].1.dfa(),
@@ -2942,6 +3168,57 @@ mod tests {
             find_difference(&full, &split).expect("acyclic bundle comparison"),
             None,
             "splitting pairwise support-disjoint weight components changed the weighted bundle language",
+        );
+    }
+
+    #[test]
+    fn prepush_census_exactly_predicts_reconstructed_state_count() {
+        fn read_then_write(read: i32, writes: &[i32]) -> UnweightedDfa {
+            let mut dfa = UnweightedDfa::new();
+            let mut state = dfa.add_state();
+            dfa.add_transition(dfa.start_state, read, state);
+            for &write in writes {
+                assert!(crate::compiler::glr::labels::is_negative_label(write));
+                let next = dfa.add_state();
+                dfa.add_transition(state, write, next);
+                state = next;
+            }
+            dfa.set_accepting(state, true);
+            dfa
+        }
+
+        fn write_only(writes: &[i32]) -> UnweightedDfa {
+            let mut dfa = UnweightedDfa::new();
+            let mut state = dfa.start_state;
+            for &write in writes {
+                assert!(crate::compiler::glr::labels::is_negative_label(write));
+                let next = dfa.add_state();
+                dfa.add_transition(state, write, next);
+                state = next;
+            }
+            dfa.set_accepting(state, true);
+            dfa
+        }
+
+        let mut templates = Templates::default();
+        templates.by_terminal.insert(0, read_then_write(1, &[-10, -11]));
+        templates.by_terminal.insert(1, read_then_write(1, &[-10]));
+        templates.by_terminal.insert(2, write_only(&[-20, -21]));
+
+        let mut bundle = BTreeMap::new();
+        bundle.insert(0, weight(0..=15));
+        bundle.insert(1, weight(16..=31));
+        bundle.insert(2, weight(32..=47));
+
+        let census = templates.census_prepush_reconstructed_bundle(&bundle);
+        let reconstructed = templates.build_prepush_reconstructed_bundle(&bundle);
+
+        assert!(census.core_states > 0);
+        assert!(census.residual_states > 0);
+        assert_eq!(
+            census.reconstructed_states(),
+            reconstructed.states().len(),
+            "the cheap census must count every READ-core and residual WRITE state materialized by reconstruction",
         );
     }
 
