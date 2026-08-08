@@ -9027,6 +9027,153 @@ fn finish_full_parser_nwa_for_validation(
     if skip { parser_dwa } else { minimize(&parser_dwa) }
 }
 
+fn apply_direct_hashed_finality(nwa: &mut NWA) -> bool {
+    let state_count = nwa.states().len();
+    if state_count == 0 {
+        return true;
+    }
+
+    let started = Instant::now();
+    let mut predecessors = vec![Vec::<u32>::new(); state_count];
+    let mut outdegree = vec![0usize; state_count];
+    for (source, state) in nwa.states().iter().enumerate() {
+        let mut record = |target: u32, weight: &Weight| {
+            if weight.is_empty() || target as usize >= state_count {
+                return;
+            }
+            predecessors[target as usize].push(source as u32);
+            outdegree[source] += 1;
+        };
+        for (target, weight) in &state.epsilons {
+            record(*target, weight);
+        }
+        for (&label, targets) in &state.transitions {
+            if label != DEFAULT_LABEL && !is_negative_label(label) {
+                continue;
+            }
+            for (target, weight) in targets {
+                record(*target, weight);
+            }
+        }
+    }
+
+    let mut queue = VecDeque::new();
+    for (state_id, &degree) in outdegree.iter().enumerate() {
+        if degree == 0 {
+            queue.push_back(state_id as u32);
+        }
+    }
+    let mut reverse_topo = Vec::with_capacity(state_count);
+    while let Some(state_id) = queue.pop_front() {
+        reverse_topo.push(state_id);
+        for &predecessor in &predecessors[state_id as usize] {
+            let degree = &mut outdegree[predecessor as usize];
+            *degree -= 1;
+            if *degree == 0 {
+                queue.push_back(predecessor);
+            }
+        }
+    }
+    if reverse_topo.len() != state_count {
+        return false;
+    }
+
+    type FinalitySignature = (Option<usize>, Vec<(u32, usize)>);
+    let mut class_by_signature = FxHashMap::<FinalitySignature, u32>::default();
+    let mut class_by_state = vec![u32::MAX; state_count];
+    let mut final_by_class = Vec::<Option<Weight>>::new();
+    let mut weight_ops = ScopedWeightOpCache::default();
+    let mut signature_edges = Vec::<(u32, usize)>::new();
+    let mut class_hits = 0usize;
+
+    for state_id in reverse_topo {
+        let state = &nwa.states()[state_id as usize];
+        signature_edges.clear();
+        let mut collect_edge = |target: u32, weight: &Weight| {
+            if weight.is_empty() || target as usize >= state_count {
+                return;
+            }
+            let target_class = class_by_state[target as usize];
+            debug_assert_ne!(target_class, u32::MAX);
+            signature_edges.push((target_class, weight.ptr_key()));
+        };
+        for (target, weight) in &state.epsilons {
+            collect_edge(*target, weight);
+        }
+        for (&label, targets) in &state.transitions {
+            if label != DEFAULT_LABEL && !is_negative_label(label) {
+                continue;
+            }
+            for (target, weight) in targets {
+                collect_edge(*target, weight);
+            }
+        }
+        signature_edges.sort_unstable();
+        let signature = (
+            state.final_weight.as_ref().map(Weight::ptr_key),
+            signature_edges.clone(),
+        );
+        if let Some(&class_id) = class_by_signature.get(&signature) {
+            class_by_state[state_id as usize] = class_id;
+            class_hits += 1;
+            continue;
+        }
+
+        let mut final_weight = state
+            .final_weight
+            .as_ref()
+            .filter(|weight| !weight.is_empty())
+            .cloned();
+        let mut merge_edge = |target: u32, edge_weight: &Weight| {
+            if edge_weight.is_empty() || target as usize >= state_count {
+                return;
+            }
+            let target_class = class_by_state[target as usize] as usize;
+            let Some(target_final) = final_by_class[target_class].as_ref() else {
+                return;
+            };
+            let contribution = weight_ops.intersection(target_final, edge_weight);
+            if contribution.is_empty() {
+                return;
+            }
+            final_weight = Some(match final_weight.take() {
+                Some(existing) => weight_ops.union(&existing, &contribution),
+                None => contribution,
+            });
+        };
+        for (target, weight) in &state.epsilons {
+            merge_edge(*target, weight);
+        }
+        for (&label, targets) in &state.transitions {
+            if label != DEFAULT_LABEL && !is_negative_label(label) {
+                continue;
+            }
+            for (target, weight) in targets {
+                merge_edge(*target, weight);
+            }
+        }
+
+        let class_id = final_by_class.len() as u32;
+        class_by_signature.insert(signature, class_id);
+        class_by_state[state_id as usize] = class_id;
+        final_by_class.push(final_weight);
+    }
+
+    for (state_id, &class_id) in class_by_state.iter().enumerate() {
+        nwa.states_mut()[state_id].final_weight = final_by_class[class_id as usize].clone();
+    }
+    if std::env::var_os("GLRMASK_PROFILE_DIRECT_PREPUSH_FINISH").is_some() {
+        eprintln!(
+            "[glrmask/profile][parser_direct_hashed_finality] states={} classes={} class_hits={} total_ms={:.3}",
+            state_count,
+            final_by_class.len(),
+            class_hits,
+            elapsed_ms(started),
+        );
+    }
+    true
+}
+
 fn finish_read_only_parser_nwa_for_validation(
     mut parser_nwa: NWA,
     terminal_dwa: &TerminalAutomaton,
@@ -9054,7 +9201,32 @@ fn finish_read_only_parser_nwa_for_validation(
         raw_possible_snapshot = Some(raw_possible);
     }
     let finality_started = Instant::now();
-    apply_finality_fixpoint(&mut parser_nwa);
+    if std::env::var_os("GLRMASK_DIRECT_PREPUSH_HASHED_FINALITY").is_some() {
+        let mut reference = std::env::var_os("GLRMASK_VALIDATE_DIRECT_PREPUSH_HASHED_FINALITY")
+            .is_some()
+            .then(|| parser_nwa.clone());
+        if !apply_direct_hashed_finality(&mut parser_nwa) {
+            apply_finality_fixpoint(&mut parser_nwa);
+        }
+        if let Some(reference) = reference.as_mut() {
+            apply_finality_fixpoint(reference);
+            assert_eq!(
+                parser_nwa
+                    .states()
+                    .iter()
+                    .map(|state| state.final_weight.as_ref())
+                    .collect::<Vec<_>>(),
+                reference
+                    .states()
+                    .iter()
+                    .map(|state| state.final_weight.as_ref())
+                    .collect::<Vec<_>>(),
+                "hashed direct finality changed per-state final weights",
+            );
+        }
+    } else {
+        apply_finality_fixpoint(&mut parser_nwa);
+    }
     let finality_ms = elapsed_ms(finality_started);
     let prune_started = Instant::now();
     remove_redundant_default_transitions(&mut parser_nwa);
