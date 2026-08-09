@@ -931,12 +931,20 @@ fn minimize_grouped_local(
             value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
         })
         .unwrap_or(true);
+    let projected_edge_count = transitions.iter().map(Vec::len).sum::<usize>();
     let use_scc = std::env::var("GLRMASK_L1_PROJECTED_SCC_MINIMIZE")
         .map(|value| {
             let value = value.trim();
             value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
         })
-        .unwrap_or(false);
+        .unwrap_or_else(|_| {
+            // Dense projected residual graphs are the regime where the local
+            // components are large DAGs feeding tiny SCC cores.  SCC-DAG
+            // reduction avoids repeated global refinement there; on sparse
+            // residual graphs ordinary grouped minimization has lower overhead.
+            transitions.len() >= 5_000
+                && projected_edge_count >= transitions.len().saturating_mul(10)
+        });
 
     for (group_id, states) in states_by_group
         .iter()
