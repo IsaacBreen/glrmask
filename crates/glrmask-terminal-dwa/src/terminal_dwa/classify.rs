@@ -1293,7 +1293,7 @@ fn exact_l2p_boundary_filter_work_limit() -> usize {
         std::env::var("GLRMASK_EXACT_L2P_BOUNDARY_FILTER_WORK_LIMIT")
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(20_000_000)
+            .unwrap_or(5_000_000)
     })
 }
 
@@ -2938,6 +2938,146 @@ fn exact_terminal_path_two_plus_candidate_dfa(
         }
         candidate_tokenizer.initial_state_id()
     };
+    // Before materializing suffix viability for every feasible split, try a
+    // small exact witness probe.  Terminal-path classification asks only whether
+    // each candidate has *some* two-terminal witness.  A witness found here is
+    // therefore a complete positive certificate; if every candidate is
+    // witnessed we can skip the full split table entirely.  Failure to cover
+    // every candidate simply falls through to the unchanged exhaustive proof.
+    let witness_probe_started_at = std::time::Instant::now();
+    let mut witness_probe_checks = 0usize;
+    let mut witness_probe_found = 0u64;
+    let witness_probe_limit = std::env::var("GLRMASK_CLASSIFY_WITNESS_PROBE_LIMIT")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(1024);
+    if words_per_mask == 1
+        && candidate_count < 64
+        && feasible_split_work >= 100_000
+        && witness_probe_limit > 0
+        && std::env::var_os("GLRMASK_DUMP_TERMINAL_PATH_WITNESSES").is_none()
+    {
+        let all_local = (1u64 << candidate_count) - 1;
+        if let Some(index) = adjacent_pair_index.as_ref() {
+            let vocab_entries = vocab.entries_map().iter().collect::<Vec<_>>();
+            'probe: for left in 0u8..=u8::MAX {
+                for right in feasible_follow_bytes_by_last_byte[left as usize].iter() {
+                    // Sampling a few occurrences of every semantically feasible
+                    // byte pair gives broad witness diversity without scanning
+                    // the potentially hundreds of thousands of occurrences.
+                    for &packed in index.occurrences_for_pair(left, right).iter().take(4) {
+                        let entry_index = (packed >> 32) as usize;
+                        let split_after = packed as u32 as usize;
+                        let (&_token_id, bytes) = vocab_entries[entry_index];
+                        let mut prefix_state = prefix_start;
+                        for &byte in &bytes[..=split_after] {
+                            prefix_state = prefix_scanner.step(prefix_state, byte);
+                            if prefix_state == PREFIX_DEAD_STATE {
+                                break;
+                            }
+                        }
+                        if prefix_state == PREFIX_DEAD_STATE {
+                            continue;
+                        }
+                        let prefix_matched = prefix_scanner.matched_mask(prefix_state)[0];
+                        if prefix_matched == 0 {
+                            continue;
+                        }
+
+                        let mut suffix_state = continuation_reset_state;
+                        let mut suffix_matched = 0u64;
+                        let mut consumed_suffix = true;
+                        for &byte in &bytes[split_after + 1..] {
+                            if uses_original_tokenizer {
+                                if prefix_scanner.future_mask(suffix_state)[0] == 0 {
+                                    consumed_suffix = false;
+                                    break;
+                                }
+                                suffix_state = prefix_scanner.step(suffix_state, byte);
+                                if suffix_state == PREFIX_DEAD_STATE {
+                                    consumed_suffix = false;
+                                    break;
+                                }
+                                suffix_matched |= prefix_scanner.matched_mask(suffix_state)[0];
+                            } else {
+                                if dense_future_masks[suffix_state as usize] == 0 {
+                                    consumed_suffix = false;
+                                    break;
+                                }
+                                suffix_state = dense_flat_trans
+                                    [suffix_state as usize * 256 + byte as usize];
+                                if suffix_state == u32::MAX {
+                                    consumed_suffix = false;
+                                    break;
+                                }
+                                suffix_matched |= dense_finalizer_masks[suffix_state as usize];
+                            }
+                        }
+                        if consumed_suffix {
+                            suffix_matched |= if uses_original_tokenizer {
+                                prefix_scanner.future_mask(suffix_state)[0]
+                            } else {
+                                dense_future_masks[suffix_state as usize]
+                            };
+                        }
+                        if suffix_matched == 0 {
+                            continue;
+                        }
+                        witness_probe_checks += 1;
+                        let mut pending = prefix_matched;
+                        while pending != 0 {
+                            let terminal_1 = pending.trailing_zeros() as usize;
+                            pending &= pending - 1;
+                            if terminal_1 >= candidate_count {
+                                continue;
+                            }
+                            let blocked = local_disallowed.get(&(terminal_1 as u32));
+                            let mut accepted = suffix_matched;
+                            if let Some(blocked) = blocked {
+                                accepted &= !blocked.words().first().copied().unwrap_or(0);
+                            }
+                            accepted &= all_local;
+                            if accepted != 0 {
+                                witness_probe_found |= (1u64 << terminal_1) | accepted;
+                            }
+                        }
+                        if witness_probe_found == all_local {
+                            if super::types::compile_profile_enabled() {
+                                eprintln!(
+                                    "[glrmask/profile][terminal_path_witness_probe] candidates={} checks={} found={} selected=true ms={:.3}",
+                                    candidate_count,
+                                    witness_probe_checks,
+                                    witness_probe_found.count_ones(),
+                                    witness_probe_started_at.elapsed().as_secs_f64() * 1000.0,
+                                );
+                            }
+                            let mut two_plus = BitSet::new(candidates.len());
+                            for local in 0..candidate_count {
+                                two_plus.set(candidate_ids[local]);
+                            }
+                            return ExactTerminalPathTwoPlus {
+                                two_plus,
+                                witnesses: vec![None; candidates.len()],
+                            };
+                        }
+                        if witness_probe_checks >= witness_probe_limit {
+                            break 'probe;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if super::types::compile_profile_enabled() && witness_probe_checks != 0 {
+        eprintln!(
+            "[glrmask/profile][terminal_path_witness_probe] candidates={} checks={} found={} selected=false ms={:.3}",
+            candidate_count,
+            witness_probe_checks,
+            witness_probe_found.count_ones(),
+            witness_probe_started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+
     let mut suffix_viable_masks = vec![0u64; total_splits * words_per_mask];
     let mut candidate_splits = 0usize;
     let mut any_viable_suffix = false;
