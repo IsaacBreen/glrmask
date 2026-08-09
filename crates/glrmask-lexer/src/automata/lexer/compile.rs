@@ -6845,6 +6845,193 @@ fn build_fixed_sequence_dfa(expr: &Expr) -> Option<DFA> {
     })
 }
 
+
+/// Exact union of already-deterministic single-group DFAs and fixed byte
+/// strings. General Choice compilation lowers every DFA arm back into an NFA
+/// and redeterminizes the union. Here the determinized state is simply the
+/// sparse tuple of still-live DFA states plus one literal-trie DFA state.
+/// The product stays on the global byte-class alphabet through minimization and
+/// expands classes back to bytes only for the final compact automaton.
+fn build_dfas_with_literal_choice(expr: &Expr) -> Option<DFA> {
+    let profile_timing = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
+    let total_started_at = profile_timing.then(Instant::now);
+    if std::env::var_os("GLRMASK_DISABLE_DFA_LITERAL_CHOICE_DIRECT").is_some() {
+        return None;
+    }
+    let Expr::Choice(options) = unwrap_shared(expr) else {
+        return None;
+    };
+    let mut dfas = Vec::<Arc<DFA>>::new();
+    let mut literals = Vec::<&[u8]>::new();
+    for option in options {
+        match unwrap_shared(option) {
+            Expr::Dfa(dfa) => dfas.push(Arc::clone(dfa)),
+            Expr::U8Seq(bytes) => literals.push(bytes.as_slice()),
+            Expr::Epsilon => literals.push(&[]),
+            _ => return None,
+        }
+    }
+    if dfas.is_empty() || literals.is_empty() {
+        return None;
+    }
+    if dfas
+        .iter()
+        .any(|dfa| dfa.num_groups() != 1 || dfa.has_epsilon_transitions())
+    {
+        return None;
+    }
+
+    #[derive(Default)]
+    struct LiteralTrieNode {
+        children: BTreeMap<u8, usize>,
+        accepting: bool,
+    }
+    let mut trie = vec![LiteralTrieNode::default()];
+    for literal in literals {
+        let mut node = 0usize;
+        for &byte in literal {
+            let next = if let Some(&next) = trie[node].children.get(&byte) {
+                next
+            } else {
+                let next = trie.len();
+                trie.push(LiteralTrieNode::default());
+                trie[node].children.insert(byte, next);
+                next
+            };
+            node = next;
+        }
+        trie[node].accepting = true;
+    }
+    let trie_nodes = trie.len();
+    let mut literal_dfa = DFA::new(trie.len());
+    literal_dfa.ensure_group_capacity(1);
+    literal_dfa.set_group_u8set(0, expr_u8set(expr));
+    for (node, trie_node) in trie.iter().enumerate() {
+        literal_dfa.set_transitions_from_sorted_entries(
+            node as u32,
+            trie_node
+                .children
+                .iter()
+                .map(|(&byte, &target)| (byte, target as u32))
+                .collect(),
+        );
+        let mut finalizers = BitSet::new(1);
+        if trie_node.accepting {
+            finalizers.set(0);
+        }
+        literal_dfa.overwrite_state_metadata(node as u32, finalizers, BitSet::new(1));
+    }
+
+    let mut components = dfas.iter().map(Arc::as_ref).collect::<Vec<_>>();
+    components.push(&literal_dfa);
+    let class_started_at = profile_timing.then(Instant::now);
+    let (_, class_members) = compute_dfa_byte_equivalence_classes(&components);
+    let class_ms = class_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    if class_members.len() > u8::MAX as usize + 1 {
+        return None;
+    }
+    let dead_states = components
+        .iter()
+        .map(|dfa| explicit_dead_sink_state(dfa))
+        .collect::<Vec<_>>();
+    let start = vec![0u32; components.len()];
+    let mut result = DFA::new(1);
+    result.ensure_group_capacity(1);
+    result.set_group_u8set(0, expr_u8set(expr));
+    let mut state_by_tuple = FxHashMap::<Vec<u32>, u32>::default();
+    state_by_tuple.insert(start.clone(), 0);
+    let mut queue = VecDeque::from([(0u32, start)]);
+    const MAX_DIRECT_CHOICE_STATES: usize = 32_768;
+    const MAX_DIRECT_CHOICE_CLASS_TRANSITIONS: usize = 2_000_000;
+    let mut transition_count = 0usize;
+    let construct_started_at = profile_timing.then(Instant::now);
+
+    while let Some((result_state, tuple)) = queue.pop_front() {
+        let accepting = components.iter().enumerate().any(|(index, dfa)| {
+            let state = tuple[index];
+            state != u32::MAX && dfa.finalizers(state).contains(0)
+        });
+        let mut finalizers = BitSet::new(1);
+        if accepting {
+            finalizers.set(0);
+        }
+        result.overwrite_state_metadata(result_state, finalizers, BitSet::new(1));
+
+        let mut transitions = Vec::<(u8, u32)>::new();
+        for (class, members) in class_members.iter().enumerate() {
+            let byte = members[0];
+            let mut next = vec![u32::MAX; components.len()];
+            let mut any_live = false;
+            for (index, dfa) in components.iter().enumerate() {
+                let state = tuple[index];
+                if state == u32::MAX {
+                    continue;
+                }
+                if let Some(target) = dfa.step(state, byte)
+                    && dead_states[index] != Some(target)
+                {
+                    next[index] = target;
+                    any_live = true;
+                }
+            }
+            if !any_live {
+                continue;
+            }
+            let target = if let Some(&target) = state_by_tuple.get(&next) {
+                target
+            } else {
+                if result.num_states() >= MAX_DIRECT_CHOICE_STATES {
+                    return None;
+                }
+                let target = result.add_state();
+                state_by_tuple.insert(next.clone(), target);
+                queue.push_back((target, next));
+                target
+            };
+            transitions.push((class as u8, target));
+        }
+        transition_count = transition_count.saturating_add(transitions.len());
+        if transition_count > MAX_DIRECT_CHOICE_CLASS_TRANSITIONS {
+            return None;
+        }
+        result.set_transitions_from_sorted_entries(result_state, transitions);
+    }
+    let construct_ms = construct_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+
+    let raw_states = result.num_states();
+    let raw_class_transitions = dfa_transition_count(&result);
+    let futures_started_at = profile_timing.then(Instant::now);
+    result.recompute_possible_futures();
+    let futures_ms = futures_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    let minimize_started_at = profile_timing.then(Instant::now);
+    let mut minimized = result.minimize_owned_reachable();
+    let minimize_ms = minimize_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    let final_class_transitions = dfa_transition_count(&minimized);
+    let expand_started_at = profile_timing.then(Instant::now);
+    expand_direct_expression_graph_classes(&mut minimized, &class_members);
+    let expand_ms = expand_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    if profile_timing {
+        eprintln!(
+            "[glrmask/profile][tokenizer] dfa_literal_choice_direct dfa_arms={} trie_nodes={} classes={} raw_states={} raw_class_transitions={} final_states={} final_class_transitions={} final_byte_transitions={} class_ms={:.3} construct_ms={:.3} futures_ms={:.3} minimize_ms={:.3} expand_ms={:.3} total_ms={:.3}",
+            dfas.len(),
+            trie_nodes,
+            class_members.len(),
+            raw_states,
+            raw_class_transitions,
+            minimized.num_states(),
+            final_class_transitions,
+            dfa_transition_count(&minimized),
+            class_ms,
+            construct_ms,
+            futures_ms,
+            minimize_ms,
+            expand_ms,
+            total_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
+        );
+    }
+    Some(minimized)
+}
+
 fn compile_product_component_dfa_direct_with_options_and_cache(
     expr: &Expr,
     preserve_coordinates: bool,
@@ -6891,6 +7078,9 @@ fn compile_product_component_dfa_direct_with_options_and_cache(
         }
         Expr::Dfa(dfa) => Some((dfa.as_ref().clone(), true)),
         Expr::Choice(_) => {
+            if let Some(dfa) = build_dfas_with_literal_choice(expr) {
+                return Some((dfa, false));
+            }
             let non_epsilon = optional_choice_non_epsilon(expr)?;
             let (mut dfa, needs_future_recompute) =
                 compile_product_component_dfa_direct_with_options_and_cache(
@@ -13058,6 +13248,37 @@ mod tests {
             "GLRM family exact repeat did not match at len 16: {:?}",
             exec.matches,
         );
+    }
+
+    #[test]
+    fn multi_dfa_literal_choice_direct_matches_generic_language() {
+        let arm_a = Arc::new(super::compile_expr_to_dfa(&Expr::Choice(vec![
+            Expr::U8Seq(b"alpha".to_vec()),
+            Expr::U8Seq(b"alpine".to_vec()),
+            Expr::U8Seq(b"amber".to_vec()),
+        ])));
+        let arm_b = Arc::new(super::compile_expr_to_dfa(&Expr::Choice(vec![
+            Expr::U8Seq(b"beta".to_vec()),
+            Expr::U8Seq(b"better".to_vec()),
+            Expr::U8Seq(b"binary".to_vec()),
+        ])));
+        let arm_c = Arc::new(super::compile_expr_to_dfa(&Expr::Repeat {
+            expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"xyz"))),
+            min: 2,
+            max: Some(5),
+        }));
+        let expression = Expr::Choice(vec![
+            Expr::Dfa(arm_a),
+            Expr::U8Seq(b"anchor".to_vec()),
+            Expr::U8Seq(b"alphabet".to_vec()),
+            Expr::Dfa(arm_b),
+            Expr::U8Seq(b"zebra".to_vec()),
+            Expr::Dfa(arm_c),
+        ]);
+        let direct = super::build_dfas_with_literal_choice(&expression)
+            .expect("multi-DFA plus literal choice should compile directly");
+        let generic = super::compile_expr_to_dfa(&expression);
+        assert_dfa_observation_equivalent(&direct, &generic);
     }
 
     #[test]
