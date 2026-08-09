@@ -1297,6 +1297,16 @@ fn exact_l2p_boundary_filter_work_limit() -> usize {
     })
 }
 
+fn exact_l2p_boundary_filter_min_candidates() -> usize {
+    static MIN: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *MIN.get_or_init(|| {
+        std::env::var("GLRMASK_EXACT_L2P_BOUNDARY_FILTER_MIN_CANDIDATES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(5_000)
+    })
+}
+
 fn suffix_has_allowed_l2p_follow_from_reset(
     tokenizer: &Tokenizer,
     suffix: &[u8],
@@ -2953,7 +2963,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
         .unwrap_or(1024);
     if words_per_mask == 1
         && candidate_count < 64
-        && feasible_split_work >= 100_000
+        && feasible_split_work >= 10_000
         && witness_probe_limit > 0
         && std::env::var_os("GLRMASK_DUMP_TERMINAL_PATH_WITNESSES").is_none()
     {
@@ -4273,7 +4283,8 @@ pub fn split_vocab_for_active_l2p_terminals(
     let use_exact_boundary_filter = match exact_l2p_boundary_filter_mode() {
             ExactL2pBoundaryFilterMode::Force(enabled) => enabled,
             ExactL2pBoundaryFilterMode::Auto => {
-                estimated_exact_work <= exact_l2p_boundary_filter_work_limit()
+                adjacent_candidate_count >= exact_l2p_boundary_filter_min_candidates()
+                    && estimated_exact_work <= exact_l2p_boundary_filter_work_limit()
             }
         };
 
