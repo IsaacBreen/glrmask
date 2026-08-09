@@ -1,3 +1,5 @@
+//! Established exact-quotient L1 compiler, retained as an explicit reference.
+
 use super::{BuildInput, LocalIdMapTerminalDwa};
 
 pub(super) fn build(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {

@@ -1,20 +1,21 @@
 //! Swappable L1 builders and exact cross-checking machinery.
 //!
 //! Controls:
-//! - `GLRMASK_L1_IMPLEMENTATION=single|production|scalar|trie|bulk|dense|frontier`
+//! - `GLRMASK_L1_IMPLEMENTATION=projected|quotient|auto|scalar|trie|bulk|dense|frontier`
 //! - `GLRMASK_L1_CHECK_AGAINST=none|single|production|scalar|trie|bulk|dense|frontier|other`
 //! - `GLRMASK_L1_EXPERIMENT_PARTITIONS=p2,p5` scopes both controls.
 //! - `GLRMASK_PROFILE_L1_IMPLEMENTATIONS=1` prints per-implementation timings.
 //!
-//! Defaults are single, no checker, all partitions.
+//! Defaults are projected, no checker, all partitions.
 
+mod auto;
 mod bulk;
 mod common;
 mod dense;
 mod frontier;
-mod production;
+mod projected;
+mod quotient;
 pub mod scalar;
-mod single;
 mod support;
 mod trie;
 mod verify;
@@ -34,33 +35,35 @@ use crate::{Vocab, compiler::glr::analysis::AnalyzedGrammar};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Implementation {
-    Production,
+    Projected,
+    Quotient,
+    Auto,
     Scalar,
     Trie,
     Bulk,
     Dense,
     Frontier,
-    Single,
 }
 
 impl Implementation {
     fn parse(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
-            "production" | "prod" | "existing" => Self::Production,
+            "projected" | "single" | "single-group" | "prefix-dfa" => Self::Projected,
+            "quotient" | "production" | "prod" | "existing" | "established" => Self::Quotient,
+            "auto" | "hybrid" => Self::Auto,
             "scalar" | "reference" | "ref" => Self::Scalar,
             "trie" | "optimized" | "opt" => Self::Trie,
             "bulk" | "dag" => Self::Bulk,
             "dense" | "chunked" => Self::Dense,
             "frontier" | "weighted" => Self::Frontier,
-            "single" | "single-group" | "prefix-dfa" => Self::Single,
-            other => panic!("unknown L1 implementation {other:?}; expected single, production, scalar, trie, bulk, dense, or frontier"),
+            other => panic!("unknown L1 implementation {other:?}; expected projected, quotient, auto, scalar, trie, bulk, dense, or frontier"),
         }
     }
 
     fn other(self) -> Self {
         match self {
-            Self::Production => Self::Single,
-            Self::Scalar | Self::Trie | Self::Bulk | Self::Dense | Self::Frontier | Self::Single => Self::Production,
+            Self::Quotient => Self::Projected,
+            Self::Projected | Self::Auto | Self::Scalar | Self::Trie | Self::Bulk | Self::Dense | Self::Frontier => Self::Quotient,
         }
     }
 }
@@ -73,7 +76,7 @@ pub struct Plan {
 
 impl Default for Plan {
     fn default() -> Self {
-        Self { use_implementation: Implementation::Single, check_against: None }
+        Self { use_implementation: Implementation::Projected, check_against: None }
     }
 }
 
@@ -86,7 +89,7 @@ impl Plan {
             }
         }
         let use_implementation = std::env::var("GLRMASK_L1_IMPLEMENTATION")
-            .ok().map_or(Implementation::Single, |value| Implementation::parse(&value));
+            .ok().map_or(Implementation::Projected, |value| Implementation::parse(&value));
         let check_against = std::env::var("GLRMASK_L1_CHECK_AGAINST").ok().and_then(|value| {
             match value.trim().to_ascii_lowercase().as_str() {
                 "" | "0" | "false" | "none" => None,
@@ -119,13 +122,14 @@ pub struct BuildInput<'a> {
 
 fn run(implementation: Implementation, input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
     match implementation {
-        Implementation::Production => production::build(input),
+        Implementation::Projected => projected::build(input),
+        Implementation::Quotient => quotient::build(input),
+        Implementation::Auto => auto::build(input),
         Implementation::Scalar => scalar::build(input),
         Implementation::Trie => trie::build(input),
         Implementation::Bulk => bulk::build(input),
         Implementation::Dense => dense::build(input),
         Implementation::Frontier => frontier::build(input),
-        Implementation::Single => single::build(input),
     }
 }
 
