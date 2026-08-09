@@ -2312,6 +2312,35 @@ fn projected_limit_exceeded(input: BuildInput<'_>, states: usize, limit: usize) 
     true
 }
 
+fn projected_root_membership_estimate(input: BuildInput<'_>) -> usize {
+    if let Some(state_map) = input.initial_state_map {
+        state_map
+            .representative_original_ids
+            .iter()
+            .filter(|&&state| state != u32::MAX)
+            .map(|&state| {
+                super::super::collect_active_terminal_signature(
+                    input.tokenizer,
+                    state,
+                    input.active_terminals,
+                )
+                .len()
+            })
+            .sum()
+    } else {
+        (0..input.tokenizer.num_states())
+            .map(|state| {
+                super::super::collect_active_terminal_signature(
+                    input.tokenizer,
+                    state,
+                    input.active_terminals,
+                )
+                .len()
+            })
+            .sum()
+    }
+}
+
 fn residual_finite_switch_states(input: BuildInput<'_>) -> usize {
     if input.subset_parent_order.is_some() || input.vocab.len() < 50_000 {
         return usize::MAX;
@@ -2327,6 +2356,31 @@ fn build_binary(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
         return None;
     }
     let total = Instant::now();
+    let finite_switch_states = residual_finite_switch_states(input);
+    let use_finite_precheck = std::env::var("GLRMASK_L1_RESIDUAL_FINITE_PRECHECK")
+        .map(|value| {
+            let value = value.trim();
+            value.is_empty() || value == "1" || value.eq_ignore_ascii_case("true")
+        })
+        .unwrap_or(true);
+    if use_finite_precheck && finite_switch_states != usize::MAX {
+        let precheck_started = Instant::now();
+        let memberships = projected_root_membership_estimate(input);
+        let precheck_ms = precheck_started.elapsed().as_secs_f64() * 1000.0;
+        if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
+            eprintln!(
+                "[glrmask/profile][l1_residual_finite_precheck] partition={} memberships={} threshold={} selected={} precheck_ms={:.3}",
+                input.partition_label,
+                memberships,
+                finite_switch_states,
+                memberships > finite_switch_states,
+                precheck_ms,
+            );
+        }
+        if memberships > finite_switch_states {
+            return build_finite_projected(input);
+        }
+    }
     let (aliases, tokens) = unique_vocab(input);
     if tokens.iter().all(|token| token.len() == 1) {
         return build_one_byte(input, &aliases, &tokens, total);
@@ -2382,7 +2436,6 @@ fn build_binary(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
             .map(|raw| projected.root_row(raw))
             .collect::<Vec<_>>()
     };
-    let finite_switch_states = residual_finite_switch_states(input);
     if projected.configs.len() > finite_switch_states {
         if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
             eprintln!(
