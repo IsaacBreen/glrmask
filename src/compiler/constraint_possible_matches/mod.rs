@@ -3247,16 +3247,20 @@ fn compute_constraint_possible_matches_with_artifacts(
             .collect::<Vec<_>>();
         view_entries.sort_unstable();
         view_entries.dedup();
+        // The batched collector computes the same exact delayed-terminal relation,
+        // but avoids replaying the vocabulary independently for every demanded
+        // terminal. It wins broadly on small deterministic powerset views around
+        // p90; larger views can regress, so keep a conservative structural cap.
         let powerset_batched_requested = std::env::var("GLRMASK_PM_POWERSET_BATCHED_DEMAND")
-            .ok()
-            .is_some_and(|value| {
+            .map(|value| {
                 let value = value.trim();
                 value.is_empty() || value == "1" || value.eq_ignore_ascii_case("true")
-            });
+            })
+            .unwrap_or(true);
         let powerset_batched_max_states = std::env::var("GLRMASK_PM_POWERSET_BATCHED_MAX_STATES")
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(usize::MAX);
+            .unwrap_or(512);
         let powerset_batched =
             powerset_batched_requested && view_entries.len() <= powerset_batched_max_states;
         let view_result = if powerset_batched {
