@@ -622,14 +622,55 @@ fn immediate_acceptance_certificates(
     table: &GLRTable,
 ) -> Vec<Weight> {
     let parts = immediate_acceptance_certificate_parts(terminal_automaton, grammar, table);
-    (0..table.num_states)
+    let use_signature_cache =
+        std::env::var_os("GLRMASK_DISABLE_IMMEDIATE_ACCEPT_SIGNATURE_CACHE").is_none();
+    if !use_signature_cache {
+        return (0..table.num_states)
+            .map(|parser_top| {
+                parts
+                    .get(&(parser_top as i32))
+                    .map(|weights| Weight::union_all(weights.iter()))
+                    .unwrap_or_else(Weight::empty)
+            })
+            .collect();
+    }
+
+    // Parser rows frequently repeat the same set of immediately-accepted
+    // terminals.  The old path recomputed the identical multi-way token-set
+    // union once per parser state.  Intern the exact pointer signature and
+    // materialize each union once; terminal completion weights remain alive for
+    // this whole scope, so pointer identity is stable and exact.
+    let mut union_by_signature = FxHashMap::<Vec<usize>, Weight>::default();
+    let mut nonempty_rows = 0usize;
+    let mut part_refs = 0usize;
+    let result = (0..table.num_states)
         .map(|parser_top| {
-            parts
-                .get(&(parser_top as i32))
-                .map(|weights| Weight::union_all(weights.iter()))
-                .unwrap_or_else(Weight::empty)
+            let Some(weights) = parts.get(&(parser_top as i32)) else {
+                return Weight::empty();
+            };
+            nonempty_rows += 1;
+            part_refs += weights.len();
+            let mut signature = weights.iter().map(Weight::ptr_key).collect::<Vec<_>>();
+            signature.sort_unstable();
+            signature.dedup();
+            if let Some(cached) = union_by_signature.get(&signature) {
+                return cached.clone();
+            }
+            let union = Weight::union_all(weights.iter());
+            union_by_signature.insert(signature, union.clone());
+            union
         })
-        .collect()
+        .collect();
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][immediate_accept_signature_cache] nonempty_rows={} part_refs={} distinct_signatures={} reused_rows={}",
+            nonempty_rows,
+            part_refs,
+            union_by_signature.len(),
+            nonempty_rows.saturating_sub(union_by_signature.len()),
+        );
+    }
+    result
 }
 
 pub fn try_build_immediate_parser_top_accept_parts(
@@ -1367,6 +1408,8 @@ fn local_epsilon_closure_canonical(
     seeds: &[(u32, Weight)],
     touched_states: &mut Vec<u32>,
     canonical: &mut Vec<(u32, Weight)>,
+    weight_ops: &mut ScopedWeightOpCache,
+    use_weight_cache: bool,
 ) {
     debug_assert!(closure_queue.is_empty());
     touched_states.clear();
@@ -1388,14 +1431,22 @@ fn local_epsilon_closure_canonical(
             continue;
         };
         for (target, edge_weight) in &state.epsilons {
-            let contribution = current_weight.intersection(edge_weight);
+            let contribution = if use_weight_cache {
+                weight_ops.intersection(&current_weight, edge_weight)
+            } else {
+                current_weight.intersection(edge_weight)
+            };
             if contribution.is_empty() {
                 continue;
             }
             let target_idx = *target as usize;
             if let Some(existing) = &weight_by_state[target_idx] {
                 if !contribution.is_subset(existing) {
-                    weight_by_state[target_idx] = Some(existing.union(&contribution));
+                    weight_by_state[target_idx] = Some(if use_weight_cache {
+                        weight_ops.union(existing, &contribution)
+                    } else {
+                        existing.union(&contribution)
+                    });
                     closure_queue.push_back(*target);
                 }
             } else {
@@ -1617,6 +1668,8 @@ fn determinize_with_supports(
     let mut dense_label_touched: Vec<bool> = vec![false; dense_label_limit];
     let mut default_touched = false;
     let mut intersection_cache = ScopedWeightOpCache::default();
+    let use_epsilon_closure_weight_cache =
+        std::env::var_os("GLRMASK_DISABLE_PARSER_EPSILON_CLOSURE_WEIGHT_CACHE").is_none();
     // Memoize local epsilon-closure outputs keyed by pre-closure weighted subsets.
     let mut closure_cache: FxHashMap<Vec<(u32, usize)>, CachedClosure> = FxHashMap::default();
     let mut key_buf: Vec<(u32, usize)> = Vec::new();
@@ -1808,6 +1861,8 @@ fn determinize_with_supports(
                     &contribs,
                     &mut closure_touched_states,
                     &mut closure_canon,
+                    &mut intersection_cache,
+                    use_epsilon_closure_weight_cache,
                 );
             } else {
                 let mut target_subset: FxHashMap<u32, Weight> = contribs
@@ -3547,6 +3602,8 @@ mod tests {
                 &seed_canonical,
                 &mut touched,
                 &mut flat_canonical,
+                &mut super::ScopedWeightOpCache::default(),
+                true,
             );
 
             assert_eq!(
