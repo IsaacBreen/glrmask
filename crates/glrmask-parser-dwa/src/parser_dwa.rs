@@ -3,6 +3,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use rustc_hash::FxHashMap;
+use glrmask_artifact::__private::mapped_artifact::WeightRefs;
+use range_set_blaze::RangeSetBlaze;
 use smallvec::SmallVec;
 
 use crate::Vocab;
@@ -3272,7 +3274,7 @@ pub fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     terminal_dwa: &TerminalAutomaton,
     templates: &Templates,
     _vocab: &Vocab,
-    _id_map: &InternalIdMap,
+    id_map: &InternalIdMap,
     collapse_immediate_acceptance: bool,
 ) -> DWA {
     let num_parser_states = table.num_states;
@@ -3285,7 +3287,80 @@ pub fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
     } else {
         (0, 0)
     };
-    let Some((mut parser_nwa, parser_nwa_profile)) = build_parser_nwa_from_terminal_dwa(terminal_dwa, grammar, templates) else {
+    let token_shards = std::env::var("GLRMASK_PARSER_TOKEN_SHARDS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&value| value > 1)
+        .unwrap_or(1);
+    let parser_nwa_build_started_at = Instant::now();
+    let parser_nwa_result = if token_shards == 1 || id_map.num_internal_tokens() <= 1 {
+        build_parser_nwa_from_terminal_dwa(terminal_dwa, grammar, templates).map(
+            |(mut nwa, profile)| {
+                let resolve_started_at = Instant::now();
+                resolve_negative_codes_in_nwa(
+                    &mut nwa,
+                    table.construction == GlrTableConstruction::ExperimentalCoreMerged,
+                );
+                (nwa, profile, elapsed_ms(resolve_started_at), 1usize)
+            },
+        )
+    } else {
+        use rayon::prelude::*;
+
+        let num_tokens = id_map.num_internal_tokens() as usize;
+        let num_tsids = id_map.num_tsids();
+        let shard_width = num_tokens.div_ceil(token_shards);
+        let shards = (0..token_shards)
+            .filter_map(|shard| {
+                let start = shard.saturating_mul(shard_width);
+                if start >= num_tokens {
+                    return None;
+                }
+                let end = ((shard + 1).saturating_mul(shard_width))
+                    .min(num_tokens)
+                    .saturating_sub(1);
+                let mut automaton = terminal_dwa.clone();
+                let tokens = RangeSetBlaze::from_iter([start as u32..=end as u32]);
+                let domain = Weight::from_uniform(0..=num_tsids.saturating_sub(1), tokens);
+                for weight in automaton.weight_refs_mut() {
+                    *weight = weight.intersection(&domain);
+                }
+                Some(automaton)
+            })
+            .collect::<Vec<_>>();
+
+        let resolved = shards
+            .par_iter()
+            .filter_map(|automaton| {
+                let (mut nwa, profile) =
+                    build_parser_nwa_from_terminal_dwa(automaton, grammar, templates)?;
+                let resolve_started_at = Instant::now();
+                resolve_negative_codes_in_nwa(
+                    &mut nwa,
+                    table.construction == GlrTableConstruction::ExperimentalCoreMerged,
+                );
+                Some((nwa, profile, elapsed_ms(resolve_started_at)))
+            })
+            .collect::<Vec<_>>();
+        if resolved.is_empty() {
+            None
+        } else {
+            let mut combined = NWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
+            let mut body = NwaBody::default();
+            let mut profile = ParserNwaBuildProfile::default();
+            let mut resolve_cpu_ms = 0.0;
+            for (nwa, shard_profile, shard_resolve_ms) in resolved {
+                body = combined.union_in_place(&nwa, &body);
+                profile.state_prep_ms += shard_profile.state_prep_ms;
+                profile.compose_state_ms += shard_profile.compose_state_ms;
+                profile.parser_nwa_build_ms += shard_profile.parser_nwa_build_ms;
+                resolve_cpu_ms += shard_resolve_ms;
+            }
+            combined.set_start_states(body.start_states);
+            Some((combined, profile, resolve_cpu_ms, shards.len()))
+        }
+    };
+    let Some((parser_nwa, parser_nwa_profile, resolve_negative_cpu_ms, parser_nwa_shards)) = parser_nwa_result else {
         if profiling_enabled {
             eprintln!(
                 "[glrmask/profile][parser_dwa_detail] terminal_dwa_states={} terminal_dwa_transitions={} terminal_dwa_interned_ranges={} parser_nwa_built=false pre_minimize_states=0 pre_minimize_transitions=0 post_minimize_states=0 post_minimize_transitions=0 minimize_skipped={} state_prep_ms=0.000 compose_state_ms=0.000 parser_nwa_build_ms=0.000 resolve_negative_ms=0.000 support_determinize_ms=0.000 possible_outgoing_ms=0.000 default_opt_ms=0.000 subtract_final_ms=0.000 fallback_determinize_ms=0.000 minimize_ms=0.000 total_ms={:.3}",
@@ -3299,12 +3374,12 @@ pub fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
         return DWA::new(0, 0);
     };
 
-    let resolve_negative_started_at = Instant::now();
-    resolve_negative_codes_in_nwa(
-        &mut parser_nwa,
-        table.construction == GlrTableConstruction::ExperimentalCoreMerged,
-    );
-    let resolve_negative_ms = elapsed_ms(resolve_negative_started_at);
+    let parser_nwa_build_resolve_wall_ms = elapsed_ms(parser_nwa_build_started_at);
+    let resolve_negative_ms = if parser_nwa_shards == 1 {
+        resolve_negative_cpu_ms
+    } else {
+        resolve_negative_cpu_ms
+    };
 
     let support_determinize_started_at = Instant::now();
     let determinized = determinize_with_supports(&parser_nwa, Some(num_parser_states));
@@ -3447,12 +3522,15 @@ pub fn build_parser_dwa_from_terminal_dwa_with_precomputed_templates(
 
     if profiling_enabled {
         eprintln!(
-            "[glrmask/profile][parser_dwa_detail] terminal_dwa_states={} terminal_dwa_transitions={} terminal_dwa_interned_ranges={} parser_nwa_states={} parser_nwa_start_states={} pre_minimize_states={} pre_minimize_transitions={} post_minimize_states={} post_minimize_transitions={} minimize_skipped={} state_prep_ms={:.3} compose_state_ms={:.3} parser_nwa_build_ms={:.3} resolve_negative_ms={:.3} support_determinize_ms={:.3} guaranteed_read_rewrites={} guaranteed_read_ms={:.3} possible_outgoing_ms={:.3} default_opt_ms={:.3} subtract_final_ms={:.3} fallback_determinize_ms={:.3} minimize_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][parser_dwa_detail] terminal_dwa_states={} terminal_dwa_transitions={} terminal_dwa_interned_ranges={} parser_nwa_states={} parser_nwa_start_states={} parser_nwa_shards={} parser_nwa_build_resolve_wall_ms={:.3} parser_nwa_resolve_cpu_ms={:.3} pre_minimize_states={} pre_minimize_transitions={} post_minimize_states={} post_minimize_transitions={} minimize_skipped={} state_prep_ms={:.3} compose_state_ms={:.3} parser_nwa_build_ms={:.3} resolve_negative_ms={:.3} support_determinize_ms={:.3} guaranteed_read_rewrites={} guaranteed_read_ms={:.3} possible_outgoing_ms={:.3} default_opt_ms={:.3} subtract_final_ms={:.3} fallback_determinize_ms={:.3} minimize_ms={:.3} total_ms={:.3}",
             terminal_dwa.num_states(),
             terminal_dwa_transition_count,
             terminal_dwa_interned_ranges,
             parser_nwa.states().len(),
             parser_nwa.start_states().len(),
+            parser_nwa_shards,
+            parser_nwa_build_resolve_wall_ms,
+            resolve_negative_cpu_ms,
             pre_minimize_state_count,
             pre_minimize_transition_count,
             post_minimize_state_count,
