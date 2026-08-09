@@ -5,7 +5,6 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 
 use super::BuildInput;
-use crate::automata::lexer::Lexer;
 use crate::automata::lexer::tokenizer::SingletonEpsilonClosures;
 use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 
@@ -86,17 +85,32 @@ impl<'a> Scanner<'a> {
         }
         let target = if self.configs[config as usize].len() == 1 {
             let state = self.configs[config as usize][0];
-            match self.input.tokenizer.step(state, byte) {
-                Some(raw_target) => self.intern(self.singleton_closures[raw_target as usize].to_vec()),
-                None => DEAD,
+            // L1 callers already carry the tokenizer's exact dense transition
+            // table.  The finite projected scanner used to rediscover the same
+            // edge through `Tokenizer::step` for every uncached singleton
+            // `(config, byte)` pair.  Large p2 vocabularies generate hundreds
+            // of thousands of these probes; use the O(1) dense row directly.
+            let raw_target = self.input.flat_trans[state as usize * 256 + byte as usize];
+            if raw_target == u32::MAX {
+                DEAD
+            } else {
+                self.intern(self.singleton_closures[raw_target as usize].to_vec())
             }
         } else {
-            self.intern(
-                self.input
-                    .tokenizer
-                    .step_all(&self.configs[config as usize], byte)
-                    .to_vec(),
-            )
+            // `configs` are already epsilon-closed.  Calling `Tokenizer::step_all`
+            // here closes the source set again, performs sparse transition
+            // lookup, then closes the targets.  Reuse the dense transition table
+            // and the precomputed singleton closures instead; unioning those
+            // closures is exactly the same target configuration.
+            let sources = &self.configs[config as usize];
+            let mut states = Vec::with_capacity(sources.len().saturating_mul(2));
+            for &state in sources.iter() {
+                let raw_target = self.input.flat_trans[state as usize * 256 + byte as usize];
+                if raw_target != u32::MAX {
+                    states.extend_from_slice(&self.singleton_closures[raw_target as usize]);
+                }
+            }
+            self.intern(states)
         };
         self.transitions[config as usize][byte as usize] = target;
         target
