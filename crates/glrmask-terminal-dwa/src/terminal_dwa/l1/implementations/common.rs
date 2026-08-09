@@ -178,3 +178,115 @@ pub(super) fn finish_compacted(
         token_classes: token_classes as usize,
     })
 }
+
+
+/// Finish an L1 artifact directly from its exact sparse terminal/token relation.
+///
+/// Each state row lists `(terminal, token_class)` memberships in terminal-major
+/// order. This is already precisely the information encoded by the dense
+/// signature matrix used by `finish_compacted`; rebuilding terminal-set
+/// signature IDs first would only materialize an unnecessary intermediate.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn finish_sparse_terminal_rows(
+    input: BuildInput<'_>,
+    aliases: &[Vec<u32>],
+    mut state_class: Vec<u32>,
+    mut sparse_rows: Vec<Vec<(u32, u32)>>,
+    token_class: Vec<u32>,
+    scan_ms: f64,
+    compact_ms: f64,
+    total_ms: impl FnOnce() -> f64,
+) -> Option<Finished> {
+    let initial = input.tokenizer.initial_state_id() as usize;
+    let initial_class = state_class[initial];
+    if state_class.iter().filter(|&&class| class == initial_class).count() > 1 {
+        sparse_rows.push(sparse_rows[initial_class as usize].clone());
+        state_class[initial] = (sparse_rows.len() - 1) as u32;
+    }
+
+    let mut state_reps = vec![u32::MAX; sparse_rows.len()];
+    for (raw, &class) in state_class.iter().enumerate() {
+        state_reps[class as usize] = state_reps[class as usize].min(raw as u32);
+    }
+    let tokenizer_states = ManyToOneIdMap::from_original_to_internal_with_representatives(
+        state_class,
+        sparse_rows.len() as u32,
+        state_reps,
+    );
+
+    let token_classes = token_class.iter().copied().max().map_or(0, |class| class + 1);
+    let mut original_to_internal = vec![u32::MAX; input.vocab.max_token_id() as usize + 1];
+    for (unique, originals) in aliases.iter().enumerate() {
+        for &original in originals {
+            original_to_internal[original as usize] = token_class[unique];
+        }
+    }
+    let vocab_tokens = ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+        original_to_internal,
+        token_classes,
+    );
+
+    let build_started = Instant::now();
+    let num_terminals = input.grammar.num_terminals as usize;
+    let mut by_terminal = vec![Vec::<(u32, Vec<u32>)>::new(); num_terminals];
+    for (state, row) in sparse_rows.iter().enumerate() {
+        let mut cursor = 0usize;
+        while cursor < row.len() {
+            let terminal = row[cursor].0 as usize;
+            debug_assert!(terminal < num_terminals);
+            let begin = cursor;
+            cursor += 1;
+            while cursor < row.len() && row[cursor].0 as usize == terminal {
+                cursor += 1;
+            }
+            let tokens = row[begin..cursor]
+                .iter()
+                .map(|&(_, token)| token)
+                .collect::<Vec<_>>();
+            by_terminal[terminal].push((state as u32, tokens));
+        }
+    }
+
+    let mut dwa = DWA::new(sparse_rows.len() as u32, token_classes.saturating_sub(1));
+    let final_state = dwa.add_state();
+    dwa.set_final_weight(final_state, Weight::all());
+    for (terminal, per_state) in by_terminal.into_iter().enumerate() {
+        if per_state.is_empty() {
+            continue;
+        }
+        let weight = Weight::from_per_tsid_token_sets(
+            per_state
+                .into_iter()
+                .map(|(state, tokens)| (state, tokens.into_iter().collect::<RangeSetBlaze<u32>>())),
+        );
+        if !weight.is_empty() {
+            dwa.add_transition(dwa.start_state(), terminal as i32, final_state, weight);
+        }
+    }
+    if dwa.num_transitions() == 0 {
+        return None;
+    }
+    let build_ms = build_started.elapsed().as_secs_f64() * 1000.0;
+    let state_classes = sparse_rows.len();
+    Some(Finished {
+        artifact: LocalIdMapTerminalDwa {
+            id_map: InternalIdMap {
+                tokenizer_states,
+                vocab_tokens,
+                deferred_vocab_singleton_original_ids: None,
+            },
+            dwa,
+            profile: TerminalDwaPhaseProfile {
+                id_map_ms: scan_ms,
+                terminal_dwa_ms: build_ms,
+                compact_ms,
+                split_terminal_dwa_total_ms: total_ms(),
+                global_merge_ms: 0.0,
+            },
+        },
+        compact_ms,
+        build_ms,
+        state_classes,
+        token_classes: token_classes as usize,
+    })
+}

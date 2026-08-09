@@ -936,7 +936,7 @@ fn minimize_grouped_local(
             let value = value.trim();
             value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
         })
-        .unwrap_or(true);
+        .unwrap_or(false);
 
     for (group_id, states) in states_by_group
         .iter()
@@ -1559,6 +1559,64 @@ fn projected_kernel(input: BuildInput<'_>) -> ProjectedKernel {
     projected_kernel_auto(input)
 }
 
+
+fn profile_vector_projection_shape(input: BuildInput<'_>) {
+    let Ok(scope) = std::env::var("GLRMASK_L1_PROJECTED_VECTOR_PROFILE") else {
+        return;
+    };
+    let scope = scope.trim();
+    if !scope.is_empty() && scope != "1" && scope != input.partition_label {
+        return;
+    }
+    let started = Instant::now();
+    let mut scanner = Scanner::new(input);
+    let mut raw_roots = Vec::with_capacity(input.tokenizer.num_states() as usize);
+    for raw in 0..input.tokenizer.num_states() {
+        raw_roots.push(scanner.start(raw));
+    }
+    let mut vocab_bytes = input.vocab.relevant_bytes().iter().copied().collect::<Vec<_>>();
+    vocab_bytes.sort_unstable();
+    let (bytes, _) = quotient_input_bytes(input, &vocab_bytes);
+    let mut transitions = Vec::<Vec<(u8, u32)>>::new();
+    let mut state = 0usize;
+    while state < scanner.configs.len() {
+        let mut row = Vec::new();
+        for (symbol, &byte) in bytes.iter().enumerate() {
+            let target = scanner.step(state as u32, byte);
+            if target != DEAD {
+                row.push((symbol as u8, target));
+            }
+        }
+        transitions.push(row);
+        state += 1;
+    }
+    let build_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let outputs = (0..scanner.configs.len())
+        .map(|state| scanner.signature(state as u32))
+        .collect::<Vec<_>>();
+    let minimize_started = Instant::now();
+    let minimized = minimize_seeded(&transitions, &bytes, Some(&outputs));
+    let minimize_ms = minimize_started.elapsed().as_secs_f64() * 1000.0;
+    let mut root_classes = raw_roots
+        .iter()
+        .map(|&root| minimized.classes[root as usize])
+        .collect::<Vec<_>>();
+    root_classes.sort_unstable();
+    root_classes.dedup();
+    eprintln!(
+        "[glrmask/profile][l1_projected_vector] partition={} configs={} edges={} output_signatures={} minimized_states={} raw_root_classes={} build_ms={:.3} minimize_ms={:.3} total_ms={:.3}",
+        input.partition_label,
+        transitions.len(),
+        transitions.iter().map(Vec::len).sum::<usize>(),
+        scanner.signatures.len(),
+        minimized.state_count,
+        root_classes.len(),
+        build_ms,
+        minimize_ms,
+        started.elapsed().as_secs_f64() * 1000.0,
+    );
+}
+
 fn projected_kernel_auto(input: BuildInput<'_>) -> ProjectedKernel {
     let active_terminals = input.active_terminals.iter().filter(|&&active| active).count();
     let vocab_tokens = input.vocab.len();
@@ -1584,6 +1642,7 @@ fn projected_kernel_auto(input: BuildInput<'_>) -> ProjectedKernel {
 /// Build L1 only through projected representations. `quotient` remains an
 /// explicit diagnostic/reference implementation but is never used here.
 pub(super) fn build(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
+    profile_vector_projection_shape(input);
     let kernel = projected_kernel(input);
     if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
         eprintln!(
@@ -2099,126 +2158,58 @@ fn build_binary(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
     let incidence_ms = incidence_started.elapsed().as_secs_f64() * 1000.0;
 
     let signature_started = Instant::now();
-    let mut signatures = vec![Vec::<u32>::new()];
-    let mut signature_extensions = vec![Vec::<u32>::new(); projected.terminals.len()];
-    let mut row_ids = FxHashMap::<Vec<u32>, u32>::default();
-    let mut rows = Vec::<Vec<u32>>::new();
+    // A root row is exactly the sparse relation
+    //     (terminal identity, residual-token class)
+    // induced by its residual states.  Canonicalize that relation *before*
+    // constructing dense token rows or interned terminal-set signatures.  This
+    // is an exact representation: two roots have equal L1 rows iff these pair
+    // lists are equal.  In the p90 p2 shapes the dense row can be 1k+ token
+    // classes while the sparse relation is typically only tens of pairs.
+    let mut sparse_row_ids = FxHashMap::<Vec<(u32, u32)>, u32>::default();
+    let mut sparse_rows = Vec::<Vec<(u32, u32)>>::new();
     let mut root_to_state_class = vec![0u32; root_vectors.len()];
-    let mut signature_updates = 0usize;
-    let behavior_key_preclass = std::env::var("GLRMASK_L1_SINGLE_BEHAVIOR_KEY_PRECLASS")
-        .ok()
-        .is_some_and(|value| {
-            let value = value.trim();
-            value.is_empty() || value == "1" || value.eq_ignore_ascii_case("true")
-        });
-
-    // The finite-vocabulary behavior of one minimized residual state is exactly
-    // the set of residual token classes it accepts. A raw root vector therefore
-    // has an exact short key consisting of one such behavior ID per terminal
-    // group. Equal keys imply identical terminal-signature rows for every token
-    // class, so we can classify roots before materializing those much wider rows.
-    let representative_root_classes = if behavior_key_preclass {
-        let mut behavior_ids = FxHashMap::<Vec<u32>, u32>::default();
-        let mut behavior_by_used = vec![0u32; live_token_classes.len()];
-        for (used, tokens) in live_token_classes.iter().enumerate() {
-            let next = behavior_ids.len() as u32;
-            behavior_by_used[used] = *behavior_ids.entry(tokens.clone()).or_insert(next);
-        }
-        let mut key_ids = FxHashMap::<Vec<u32>, u32>::default();
-        let mut representatives = Vec::<usize>::new();
-        for (root_class, root_row) in root_vectors.iter().enumerate() {
-            let key = root_row
-                .iter()
-                .map(|&state| {
-                    if state == DEAD {
-                        u32::MAX
-                    } else {
-                        behavior_by_used[used_index[state as usize]]
-                    }
-                })
-                .collect::<Vec<_>>();
-            let next = representatives.len() as u32;
-            let class = *key_ids.entry(key).or_insert_with(|| {
-                representatives.push(root_class);
-                next
-            });
-            root_to_state_class[root_class] = class;
-        }
-        representatives
-    } else {
-        (0..root_vectors.len()).collect()
-    };
-
-    let mut preclass_to_row_class =
-        behavior_key_preclass.then(|| vec![u32::MAX; representative_root_classes.len()]);
-    for &root_class in &representative_root_classes {
-        let root_row = &root_vectors[root_class];
-        let mut row = vec![0u32; class_subsets.len()];
-        for (terminal_index, (&terminal, &group)) in projected
-            .terminals
-            .iter()
-            .zip(&projected.terminal_groups)
-            .enumerate()
-        {
+    let mut sparse_pair_visits = 0usize;
+    for (root_class, root_row) in root_vectors.iter().enumerate() {
+        let mut sparse = Vec::<(u32, u32)>::new();
+        for (terminal_index, &group) in projected.terminal_groups.iter().enumerate() {
             let state = root_row[group];
             if state == DEAD {
                 continue;
             }
             for &token in &live_token_classes[used_index[state as usize]] {
-                let previous = row[token as usize];
-                let extensions = &mut signature_extensions[terminal_index];
-                if extensions.len() <= previous as usize {
-                    extensions.resize(previous as usize + 1, UNKNOWN);
-                }
-                let cached = extensions[previous as usize];
-                row[token as usize] = if cached != UNKNOWN {
-                    cached
-                } else {
-                    let next = signatures.len() as u32;
-                    let mut signature = signatures[previous as usize].clone();
-                    signature.push(terminal);
-                    signatures.push(signature);
-                    extensions[previous as usize] = next;
-                    next
-                };
-                signature_updates += 1;
+                // terminal_index-major, then token-major, is canonical because
+                // both source lists are stable and strictly ordered.
+                sparse.push((projected.terminals[terminal_index], token));
             }
         }
-        let next = rows.len() as u32;
-        let row_class = match row_ids.entry(row) {
+        sparse_pair_visits += sparse.len();
+        let next = sparse_rows.len() as u32;
+        root_to_state_class[root_class] = match sparse_row_ids.entry(sparse) {
             std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
             std::collections::hash_map::Entry::Vacant(entry) => {
-                rows.push(entry.key().clone());
+                sparse_rows.push(entry.key().clone());
                 entry.insert(next);
                 next
             }
         };
-        if let Some(preclass_to_row_class) = preclass_to_row_class.as_mut() {
-            let preclass = root_to_state_class[root_class] as usize;
-            debug_assert_eq!(preclass_to_row_class[preclass], u32::MAX);
-            preclass_to_row_class[preclass] = row_class;
-        } else {
-            root_to_state_class[root_class] = row_class;
-        }
     }
-    if let Some(preclass_to_row_class) = preclass_to_row_class {
-        debug_assert!(preclass_to_row_class.iter().all(|&class| class != u32::MAX));
-        for class in &mut root_to_state_class {
-            *class = preclass_to_row_class[*class as usize];
-        }
-    }
+
+    // The sparse relation is already the final semantic row. No dense
+    // token-class matrix or terminal-set signature interning is necessary.
+    let signature_updates = 0usize;
     let state_class = raw_root_class
         .into_iter()
         .map(|class| root_to_state_class[class as usize])
         .collect::<Vec<_>>();
+    let sparse_row_count = sparse_rows.len();
+    let signature_count = 0usize;
     let signature_ms = signature_started.elapsed().as_secs_f64() * 1000.0;
     let traverse_ms = traverse_started.elapsed().as_secs_f64() * 1000.0;
-    let finished = common::finish_compacted(
+    let finished = common::finish_sparse_terminal_rows(
         input,
         &aliases,
-        &signatures,
         state_class,
-        rows,
+        sparse_rows,
         token_class,
         projected_ms + minimize_ms + traverse_ms,
         0.0,
@@ -2244,7 +2235,7 @@ fn build_binary(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
             .max()
             .unwrap_or(0);
         eprintln!(
-            "[glrmask/profile][l1_single] partition={} raw_states={} terminals={} terminal_groups={} vocab_bytes={} input_byte_classes={} minimized_bytes={} minimize_rounds={} grouped_local_states={} grouped_local_rounds={} grouped_local_ms={:.3} grouped_global_ms={:.3} dag_groups={} dag_states={} hopcroft_groups={} hopcroft_states={} projected_states={} live_edges={} max_live_edges={} singleton_configs={} total_config_states={} max_config_states={} expanded={} minimized_states={} root_closure_states={} root_memberships={} root_classes={} root_vectors={} residual_token_classes={} signature_updates={} reverse_states={} reverse_transitions={} reverse_target_visits={} reverse_predecessor_visits={} token_bytes={} signatures={} state_classes={} token_classes={} project_ms={:.3} minimize_ms={:.3} root_vectors_ms={:.3} reverse_ms={:.3} incidence_ms={:.3} signature_ms={:.3} traverse_ms={:.3} compact_ms={:.3} build_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][l1_single] partition={} raw_states={} terminals={} terminal_groups={} vocab_bytes={} input_byte_classes={} minimized_bytes={} minimize_rounds={} grouped_local_states={} grouped_local_rounds={} grouped_local_ms={:.3} grouped_global_ms={:.3} dag_groups={} dag_states={} hopcroft_groups={} hopcroft_states={} projected_states={} live_edges={} max_live_edges={} singleton_configs={} total_config_states={} max_config_states={} expanded={} minimized_states={} root_closure_states={} root_memberships={} root_classes={} root_vectors={} residual_token_classes={} sparse_rows={} sparse_pairs={} signature_updates={} reverse_states={} reverse_transitions={} reverse_target_visits={} reverse_predecessor_visits={} token_bytes={} signatures={} state_classes={} token_classes={} project_ms={:.3} minimize_ms={:.3} root_vectors_ms={:.3} reverse_ms={:.3} incidence_ms={:.3} signature_ms={:.3} traverse_ms={:.3} compact_ms={:.3} build_ms={:.3} total_ms={:.3}",
             input.partition_label,
             input.tokenizer.num_states(),
             projected.terminals.len(),
@@ -2274,13 +2265,15 @@ fn build_binary(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
             used_classes.len(),
             root_vectors.len(),
             class_subsets.len(),
+            sparse_row_count,
+            sparse_pair_visits,
             signature_updates,
             reverse.sets.len(),
             reverse.computed_transitions,
             reverse.target_visits,
             reverse.predecessor_visits,
             token_bytes,
-            signatures.len(),
+            signature_count,
             finished.state_classes,
             finished.token_classes,
             projected_ms,
