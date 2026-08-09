@@ -2291,7 +2291,15 @@ fn compute_transfer_items(
     Some(transferred)
 }
 
-type LR1Successor = (Symbol, bool, bool, Arc<LR1ItemSet>, u64);
+struct LR1Successor {
+    symbol: Symbol,
+    is_replace: bool,
+    is_forwarded: bool,
+    target_items: Option<Arc<LR1ItemSet>>,
+    target_fingerprint: u64,
+    kernel_fingerprint: u64,
+    preclosed_target: Option<u32>,
+}
 
 /// Structural fingerprint of an LR(1) item set. Equal item sets always hash to
 /// the same value; the interner resolves the (rare) collisions with a full
@@ -2306,10 +2314,31 @@ fn lr1_item_set_fingerprint(set: &LR1ItemSet) -> u64 {
     hasher.finish()
 }
 
+/// Successor kernels contain only advanced (`dot > 0`) items. LR(1) closure
+/// only adds rule-entry (`dot == 0`) items, so the original kernel of a closed
+/// state is recoverable exactly without retaining a second copy of the map.
+/// This lets later transitions recognize an already-known raw kernel before
+/// paying to close it again.
+fn lr1_kernel_matches_closed_state(kernel: &LR1ItemSet, closed: &LR1ItemSet) -> bool {
+    let mut closed_kernel = closed.iter().filter(|(core, _)| core.dot > 0);
+    for (core, lookaheads) in kernel {
+        let Some((closed_core, closed_lookaheads)) = closed_kernel.next() else {
+            return false;
+        };
+        if core != closed_core || lookaheads != closed_lookaheads {
+            return false;
+        }
+    }
+    closed_kernel.next().is_none()
+}
+
 fn expand_lr1_state(
     source_items: &LR1ItemSet,
     grammar: &AnalyzedGrammar,
     suffix_first: &[RuleSuffixFirst],
+    item_sets: &[Arc<LR1ItemSet>],
+    kernel_fingerprint_to_ids: &FxHashMap<u64, Vec<u32>>,
+    preclosure_reuse_enabled: bool,
 ) -> Vec<LR1Successor> {
     let rules = &grammar.rules;
     // Accumulate by hash, then restore the existing canonical symbol order
@@ -2369,12 +2398,41 @@ fn expand_lr1_state(
             } else {
                 kernel
             };
+            let kernel_fingerprint = preclosure_reuse_enabled
+                .then(|| lr1_item_set_fingerprint(&adjusted_kernel));
+            if let Some(kernel_fingerprint) = kernel_fingerprint
+                && let Some(candidates) = kernel_fingerprint_to_ids.get(&kernel_fingerprint)
+                && let Some(target_id) = candidates.iter().copied().find(|&candidate| {
+                    lr1_kernel_matches_closed_state(
+                        &adjusted_kernel,
+                        &item_sets[candidate as usize],
+                    )
+                })
+            {
+                return Some(LR1Successor {
+                    symbol,
+                    is_replace,
+                    is_forwarded: false,
+                    target_items: None,
+                    target_fingerprint: 0,
+                    kernel_fingerprint,
+                    preclosed_target: Some(target_id),
+                });
+            }
             let target_items = Arc::new(lr1_closure(adjusted_kernel, grammar, suffix_first));
             if target_items.is_empty() {
                 None
             } else {
                 let fingerprint = lr1_item_set_fingerprint(&target_items);
-                Some((symbol, is_replace, false, target_items, fingerprint))
+                Some(LR1Successor {
+                    symbol,
+                    is_replace,
+                    is_forwarded: false,
+                    target_items: Some(target_items),
+                    target_fingerprint: fingerprint,
+                    kernel_fingerprint: kernel_fingerprint.unwrap_or(0),
+                    preclosed_target: None,
+                })
             }
         })
         .collect()
@@ -2382,6 +2440,15 @@ fn expand_lr1_state(
 
 fn build_lr1_item_sets(
     grammar: &AnalyzedGrammar,
+) -> (Vec<LR1ItemSet>, Vec<BTreeMap<Symbol, (u32, bool, bool)>>) {
+    let preclosure_reuse_enabled =
+        std::env::var_os("GLRMASK_DISABLE_LR1_PRECLOSURE_REUSE").is_none();
+    build_lr1_item_sets_with_preclosure_reuse(grammar, preclosure_reuse_enabled)
+}
+
+fn build_lr1_item_sets_with_preclosure_reuse(
+    grammar: &AnalyzedGrammar,
+    preclosure_reuse_enabled: bool,
 ) -> (Vec<LR1ItemSet>, Vec<BTreeMap<Symbol, (u32, bool, bool)>>) {
     let rules = &grammar.rules;
     let lookahead_len = grammar.num_terminals as usize + 1;
@@ -2408,6 +2475,7 @@ fn build_lr1_item_sets(
         .entry(lr1_item_set_fingerprint(&initial))
         .or_default()
         .push(0);
+    let mut kernel_fingerprint_to_ids: FxHashMap<u64, Vec<u32>> = FxHashMap::default();
     drop(initial);
 
     let mut frontier = vec![0u32];
@@ -2415,6 +2483,10 @@ fn build_lr1_item_sets(
         || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
     let mut expand_ms = 0.0f64;
     let mut intern_ms = 0.0f64;
+    let mut successor_count = 0usize;
+    let mut existing_successor_count = 0usize;
+    let mut new_successor_count = 0usize;
+    let mut preclosure_reuse_count = 0usize;
     while !frontier.is_empty() {
         // State expansion is independent within a BFS frontier. Interning
         // remains serial below in the old source/symbol order, preserving
@@ -2427,6 +2499,9 @@ fn build_lr1_item_sets(
                     &item_sets[state_id as usize],
                     grammar,
                     &suffix_first,
+                    &item_sets,
+                    &kernel_fingerprint_to_ids,
+                    preclosure_reuse_enabled,
                 );
                 (state_id, successors)
             })
@@ -2438,23 +2513,48 @@ fn build_lr1_item_sets(
         let intern_started_at = profile_enabled.then(std::time::Instant::now);
         let mut next_frontier = Vec::new();
         for (state_id, successors) in expanded {
-            for (symbol, is_replace, is_forwarded, target_items, fingerprint) in successors {
-                let candidates = fingerprint_to_ids.entry(fingerprint).or_default();
-                let existing = candidates
-                    .iter()
-                    .copied()
-                    .find(|&cand| *item_sets[cand as usize] == *target_items);
-                let target_id = if let Some(existing_id) = existing {
-                    existing_id
+            for successor in successors {
+                successor_count += 1;
+                let target_id = if let Some(target_id) = successor.preclosed_target {
+                    preclosure_reuse_count += 1;
+                    existing_successor_count += 1;
+                    target_id
                 } else {
-                    let new_id = item_sets.len() as u32;
-                    candidates.push(new_id);
-                    item_sets.push(target_items);
-                    transitions.push(BTreeMap::new());
-                    next_frontier.push(new_id);
-                    new_id
+                    let target_items = successor
+                        .target_items
+                        .expect("non-preclosed LR1 successor must retain closed items");
+                    let candidates = fingerprint_to_ids
+                        .entry(successor.target_fingerprint)
+                        .or_default();
+                    let existing = candidates
+                        .iter()
+                        .copied()
+                        .find(|&cand| *item_sets[cand as usize] == *target_items);
+                    if let Some(existing_id) = existing {
+                        existing_successor_count += 1;
+                        existing_id
+                    } else {
+                        new_successor_count += 1;
+                        let new_id = item_sets.len() as u32;
+                        candidates.push(new_id);
+                        item_sets.push(target_items);
+                        transitions.push(BTreeMap::new());
+                        next_frontier.push(new_id);
+                        new_id
+                    }
                 };
-                transitions[state_id as usize].insert(symbol, (target_id, is_replace, is_forwarded));
+                if preclosure_reuse_enabled {
+                    let kernel_candidates = kernel_fingerprint_to_ids
+                        .entry(successor.kernel_fingerprint)
+                        .or_default();
+                    if !kernel_candidates.contains(&target_id) {
+                        kernel_candidates.push(target_id);
+                    }
+                }
+                transitions[state_id as usize].insert(
+                    successor.symbol,
+                    (target_id, successor.is_replace, successor.is_forwarded),
+                );
             }
         }
         if let Some(started_at) = intern_started_at {
@@ -2464,8 +2564,12 @@ fn build_lr1_item_sets(
     }
     if profile_enabled {
         eprintln!(
-            "[glrmask/profile][lr1_item_sets] states={} expand_ms={:.3} intern_ms={:.3}",
+            "[glrmask/profile][lr1_item_sets] states={} successors={} preclosure_reuses={} existing_successors={} new_successors={} expand_ms={:.3} intern_ms={:.3}",
             item_sets.len(),
+            successor_count,
+            preclosure_reuse_count,
+            existing_successor_count,
+            new_successor_count,
             expand_ms,
             intern_ms,
         );
@@ -3141,7 +3245,8 @@ fn grouped_item_lookahead_counts(grammar: &AnalyzedGrammar) -> Vec<Vec<(u32, u32
 #[cfg(test)]
 mod tests {
     use super::{
-        build_experimental_core_merged_table, build_lalr_table, build_lr1_item_sets, build_table,
+        build_experimental_core_merged_table, build_lalr_table, build_lr1_item_sets,
+        build_lr1_item_sets_with_preclosure_reuse, build_table,
         build_table_with_default_construction, grouped_item_lookahead_counts,
         selected_glr_table_construction, try_build_direct_regular_table,
         try_build_direct_regular_table_reference,
@@ -3187,6 +3292,22 @@ mod tests {
             ..GrammarDef::default()
         };
         AnalyzedGrammar::from_grammar_def(&grammar)
+    }
+
+    #[test]
+    fn lr1_preclosure_kernel_reuse_preserves_canonical_item_sets_and_transitions() {
+        for grammar in [
+            multi_lookahead_grammar(),
+            recursive_ambiguous_grammar(),
+            template_like_grammar(),
+        ] {
+            let (reference_sets, reference_transitions) =
+                build_lr1_item_sets_with_preclosure_reuse(&grammar, false);
+            let (reused_sets, reused_transitions) =
+                build_lr1_item_sets_with_preclosure_reuse(&grammar, true);
+            assert_eq!(reused_sets, reference_sets);
+            assert_eq!(reused_transitions, reference_transitions);
+        }
     }
 
     fn direct_regular_grammar() -> AnalyzedGrammar {
